@@ -27,12 +27,11 @@ final graph is much larger than all guarded baselines.
   replacement jobs.
 - Replacement building uses SweepGA/seqwish in local contained-region mode.
 - For top-level mode, the code trusts SweepGA's own replacement-tier PAF filter
-  and disables the older seqwish-tail filter/rescue pass to avoid re-expanding
-  large filtered PAFs.
-- wfmash records shorter than 200 bp are withheld from the aligner input because
-  SweepGA's wfmash wrapper adapts `-s` from average input length and wfmash
-  rejects `-s < 100`. Those short traversals are still included in seqwish input
-  and path validation.
+  and disables the seqwish-tail filter to avoid applying a second wrapper-side
+  filtering decision after SweepGA has already made its documented decision.
+- wfmash replacement jobs no longer withhold short non-empty records in impg;
+  wfmash/MashMap own any minimum-length semantics and should fail explicitly if
+  an input record is unsupported.
 - Top-level replacement jobs are built sequentially from smaller to larger
   regions. This avoids concurrently running several large wfmash/seqwish jobs,
   which caused a 30 minute CPU-bound plateau with no completed regions.

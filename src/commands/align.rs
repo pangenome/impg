@@ -1082,12 +1082,10 @@ fn sweepga_align_pairwise_generic(
                 }
             }
             Err(e) => {
-                log::warn!(
-                    "sweepga: pairwise alignment failed for {} vs {}: {}",
-                    sequences[i].0,
-                    sequences[j].0,
-                    e
-                );
+                return Err(io::Error::other(format!(
+                    "sweepga pairwise alignment failed for {} vs {}: {}",
+                    sequences[i].0, sequences[j].0, e
+                )));
             }
         }
     }

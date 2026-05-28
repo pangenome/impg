@@ -840,7 +840,7 @@ pub fn sort_gfa_yg(gfa_content: &str, num_threads: usize) -> io::Result<String> 
 /// Searches for the `gfaffix` binary next to the current executable
 /// (so it works when both are built together in `target/release/`).
 /// The system PATH is intentionally NOT searched to avoid version mismatches.
-/// Returns an error if the binary is not found, allowing callers to fall back gracefully.
+/// Returns an error if the binary is not found or fails.
 pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String> {
     use std::process::Command;
 

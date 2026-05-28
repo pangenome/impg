@@ -216,7 +216,7 @@ pub enum ResolutionMethod {
     Auto,
     /// Direct SPOA replacement.
     Poa,
-    /// POASTA replacement, falling back to SPOA if graph export fails validation.
+    /// Direct POASTA replacement.
     Poasta,
     /// Debug/diagnostic resolver: align every traversal to one root with BiWFA
     /// and build a star-column graph. This is path-preserving but intentionally
@@ -4432,30 +4432,17 @@ fn finalize_pairwise_induced_replacement(
     let mut replacement = parse_gfa(&compacted)?;
     order_replacement_paths(&mut replacement, headers)?;
     if config.polish_iterations > 0 {
-        let unpolished = replacement.clone();
         match polish_replacement_gfa(&render_graph(&replacement), headers.len(), config) {
             Ok(polished) => {
-                let polished_result = (|| {
-                    let mut polished_replacement = parse_gfa(&polished)?;
-                    order_replacement_paths(&mut polished_replacement, headers)?;
-                    validate_replacement_paths(&polished_replacement, candidate, method)?;
-                    Ok::<Graph, io::Error>(polished_replacement)
-                })();
-                match polished_result {
-                    Ok(polished_replacement) => replacement = polished_replacement,
-                    Err(err) => {
-                        log::debug!(
-                            "crush {method}: dropping SPOA polish output because validation failed: {err}"
-                        );
-                        replacement = unpolished;
-                    }
-                }
+                let mut polished_replacement = parse_gfa(&polished)?;
+                order_replacement_paths(&mut polished_replacement, headers)?;
+                validate_replacement_paths(&polished_replacement, candidate, method)?;
+                replacement = polished_replacement;
             }
             Err(err) => {
-                log::debug!(
-                    "crush {method}: SPOA polish failed; keeping unpolished replacement: {err}"
-                );
-                replacement = unpolished;
+                return Err(io::Error::other(format!(
+                    "crush {method}: polish failed; refusing to substitute unpolished replacement: {err}"
+                )));
             }
         }
     }
@@ -4469,11 +4456,9 @@ fn build_chain_povu_smooth_poasta_replacement(
 ) -> io::Result<Graph> {
     let (headers, seqs) = candidate_named_sequences(candidate);
     if seqs.iter().any(|(_, seq)| seq.is_empty()) {
-        CHAIN_POVU_DIRECT_ON_EMPTY.fetch_add(1, Ordering::Relaxed);
-        log::debug!(
-            "crush chain-povu: empty traversal present; using direct POASTA validity path for this block"
-        );
-        return build_poasta_replacement(candidate, config);
+        return Err(io::Error::other(
+            "crush chain-povu: empty traversal present; refusing direct POASTA fallback",
+        ));
     }
 
     let smoothed_attempt = (|| {
@@ -4519,12 +4504,9 @@ fn build_chain_povu_smooth_poasta_replacement(
             Ok(smoothed_replacement)
         }
         Err(err) => {
-            CHAIN_POVU_DIRECT_ON_SMOOTH_FAILURE.fetch_add(1, Ordering::Relaxed);
-            log::debug!(
-                "crush chain-povu: smoothxg→POASTA block path failed validity/build ({}); using direct POASTA validity path",
-                err
-            );
-            build_poasta_replacement(candidate, config)
+            Err(io::Error::other(format!(
+                "crush chain-povu: smoothxg->POASTA block path failed validity/build; refusing direct POASTA fallback: {err}"
+            )))
         }
     }
 }
@@ -4575,12 +4557,11 @@ fn build_allwave_seqwish_replacement(
     let (headers, seqs) = candidate_named_sequences(candidate);
     let non_empty = seqs.iter().filter(|(_, seq)| !seq.is_empty()).count();
     if non_empty < 2 {
-        log::debug!(
-            "crush allwave: {} traversal(s), {} non-empty; falling back to SPOA",
+        return Err(io::Error::other(format!(
+            "crush allwave: {} traversal(s), {} non-empty; refusing direct SPOA fallback",
             seqs.len(),
             non_empty
-        );
-        return build_poa_replacement(candidate, config);
+        )));
     }
 
     let sequences: Vec<allwave::Sequence> = seqs
@@ -4603,11 +4584,10 @@ fn build_allwave_seqwish_replacement(
     };
     let pairs = allwave_pair_schedule(&sequences, config);
     if pairs.is_empty() {
-        log::debug!(
-            "crush allwave: selected zero pair alignments for {} traversal(s); falling back to SPOA",
+        return Err(io::Error::other(format!(
+            "crush allwave: selected zero pair alignments for {} traversal(s); refusing direct SPOA fallback",
             sequences.len()
-        );
-        return build_poa_replacement(candidate, config);
+        )));
     }
     let orientation_params = allwave::AlignmentParams::edit_distance();
     let mut lines: Vec<String> = pairs
@@ -4750,8 +4730,8 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         min_aln_length: config.sweepga_min_aln_length,
         // Normal per-bubble sweepga keeps the historical raw all-vs-all PAF
         // and lets the shared seqwish tail filter it. Top-flubble mode instead
-        // trusts SweepGA's own replacement-tier filter and disables the older
-        // tail filter below, avoiding a second expansion/rescue pass on large
+        // trusts SweepGA's own replacement-tier filter and disables the
+        // seqwish-tail filter below, avoiding a second filtering pass on large
         // contained regions.
         no_filter: align_no_filter,
         num_mappings: num_mappings.clone(),
@@ -4829,9 +4809,9 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     if tail_mode == SweepgaSeqwishTailMode::TrustSweepgaFilteredPaf && !config.sweepga_no_filter {
         // `sweepga_align` has already run SweepGA's plane-sweep/scaffold
         // filter. Top-level flubble regions can be much larger than the
-        // original per-bubble replacements; running the older seqwish-tail
-        // filter plus short-full-length rescue here can re-expand the PAF
-        // before induction and recreate the concatenation/explosion failure.
+        // original per-bubble replacements; running a second seqwish-tail
+        // filter here would apply hidden wrapper semantics after SweepGA has
+        // already made its documented filtering decision.
         graph_config.no_filter = true;
     }
     let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
@@ -4839,12 +4819,12 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")?;
     let replacement_shared_segments = replacement_shared_segment_count(&replacement);
     if !paf_lines.is_empty() && replacement_shared_segments == 0 {
-        return Err(io::Error::other(format!(
-            "SweepGA/seqwish replacement lost {} PAF alignment record(s): seqwish output has {} segment(s), {} bp, and no segment is used by more than one replacement path",
+        log::warn!(
+            "SweepGA/seqwish replacement produced no shared replacement path segments from {} PAF alignment record(s): seqwish output has {} segment(s), {} bp",
             paf_lines.len(),
             replacement.segments.len(),
             replacement_segment_bp(&replacement),
-        )));
+        );
     }
     let evidence = SweepgaReplacementEvidence {
         alignment_records: paf_lines.len(),
@@ -4860,12 +4840,10 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
 
 fn sweepga_backend_min_sequence_len(aligner: &str) -> usize {
     if aligner.eq_ignore_ascii_case("wfmash") {
-        // SweepGA's wfmash wrapper adapts wfmash `-s` as roughly half the
-        // average input length. Keep every submitted record >=200 bp so that
-        // adaptive `-s` never falls below wfmash/MashMap's 100 bp floor. Those
-        // shorter traversals still belong in the replacement graph and path
-        // validation; they just cannot be submitted to this backend safely.
-        200
+        // Do not impose an impg-side length floor. wfmash/MashMap owns any
+        // minimum-length semantics and should fail explicitly if an input
+        // record is unsupported.
+        1
     } else {
         // FastGA accepts short non-empty records, but empty FASTA records are
         // not alignable and can trip backend preparation.
@@ -6757,8 +6735,8 @@ P\tp1\t1+,3+,4+\t*
     }
 
     #[test]
-    fn wfmash_aligner_input_floor_keeps_adaptive_segment_length_valid() {
-        assert_eq!(sweepga_backend_min_sequence_len("wfmash"), 200);
+    fn wfmash_aligner_input_floor_does_not_hide_tool_length_semantics() {
+        assert_eq!(sweepga_backend_min_sequence_len("wfmash"), 1);
         assert_eq!(sweepga_backend_min_sequence_len("fastga"), 1);
     }
 

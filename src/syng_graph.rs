@@ -26,18 +26,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static DEBUG_GRAPH_BUILD_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// Coverage fraction at which the post-filter rescue admits an alignment
-/// back into the seqwish input set, regardless of the sweepga filter's
-/// `min_block_length`. An alignment is rescued when its block length
-/// covers at least this fraction of the shorter of the two sequences —
-/// "this is a full-length alignment between short sequences" — so the
-/// sweepga 1:1 / `min_block_length` plane-sweep cannot toss it.
-///
-/// Set to 0.9 so genuine 5–10 % indel-divergent end-to-end alignments
-/// of short bubble traversals all survive. See
-/// `docs/crush-fix-sweepga-short-filter.md`.
-const SHORT_FULL_LENGTH_RESCUE_FRACTION: f64 = 0.9;
-
 #[derive(Clone, Copy, Debug, Default)]
 struct PafExactMatchRunStats {
     records: usize,
@@ -802,110 +790,6 @@ pub fn build_gfa_syng_native_from_sequences(
     build_gfa_from_paf_and_sequences(seqs, &paf_content, config)
 }
 
-/// Rescue near-full-length pairwise alignments that the sweepga 1:1 /
-/// `min_block_length` plane-sweep would otherwise drop.
-///
-/// The sweepga filter applies `min_block_length` (derived from
-/// `min_map_length` ≈ `seqwish-k`) and a 1:1 scaffold plane sweep that,
-/// for small bubbles where every traversal is itself shorter than
-/// `min_block_length`, drops 100 % of the input PAF (see
-/// `docs/crush-aligner-failure-trace.md`). This rescue runs after the
-/// standard sweepga filter and admits back any raw PAF record whose
-/// block length covers at least `coverage_fraction` of
-/// `min(query_length, target_length)` — i.e. "the alignment is essentially
-/// end-to-end on the shorter sequence". For long-bubble inputs where the
-/// 1:1 filter is doing useful work, no short rescue records exist and
-/// the filtered set is returned unchanged.
-///
-/// Deduplication against the filtered set uses the full PAF line so
-/// rescue records that the filter already kept are not duplicated.
-///
-/// See `docs/crush-fix-sweepga-short-filter.md` for the policy rationale
-/// (Option 2 of the design space).
-fn rescue_short_full_length_alignments(
-    raw_paf: &str,
-    filtered_paf: tempfile::NamedTempFile,
-    coverage_fraction: f64,
-) -> std::io::Result<tempfile::NamedTempFile> {
-    use std::collections::HashSet;
-    use std::io::{Read, Write};
-
-    let mut filtered_content = String::new();
-    std::fs::File::open(filtered_paf.path())?.read_to_string(&mut filtered_content)?;
-    let filtered_lines: HashSet<&str> =
-        filtered_content.lines().filter(|l| !l.is_empty()).collect();
-
-    let mut rescue_lines: Vec<&str> = Vec::new();
-    for line in raw_paf.lines() {
-        if line.is_empty() || filtered_lines.contains(line) {
-            continue;
-        }
-        let mut cols = line.split('\t');
-        let _qname = cols.next();
-        let qlen: u64 = match cols.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let _qstart = cols.next();
-        let _qend = cols.next();
-        let _strand = cols.next();
-        let _tname = cols.next();
-        let tlen: u64 = match cols.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let _tstart = cols.next();
-        let _tend = cols.next();
-        let _matches = cols.next();
-        let block_len: u64 = match cols.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let shorter = qlen.min(tlen);
-        if shorter == 0 {
-            continue;
-        }
-        let threshold = (shorter as f64 * coverage_fraction).round() as u64;
-        if block_len >= threshold {
-            rescue_lines.push(line);
-        }
-    }
-
-    if rescue_lines.is_empty() {
-        log::info!(
-            "crush short-filter rescue: filtered set had {} line(s); no rescue records (no raw line ≥{:.0}% of min(qlen,tlen) coverage)",
-            filtered_lines.len(),
-            coverage_fraction * 100.0,
-        );
-        return Ok(filtered_paf);
-    }
-
-    log::info!(
-        "crush short-filter rescue: kept {} additional near-full-length alignment(s) (≥{:.0}% of min(qlen,tlen)); filtered set had {} line(s)",
-        rescue_lines.len(),
-        coverage_fraction * 100.0,
-        filtered_lines.len(),
-    );
-
-    let augmented = tempfile::Builder::new()
-        .suffix(".paf")
-        .tempfile()
-        .map_err(|e| std::io::Error::other(format!("Failed to create rescue PAF temp: {e}")))?;
-    {
-        let mut writer = std::io::BufWriter::new(&augmented);
-        writer.write_all(filtered_content.as_bytes())?;
-        if !filtered_content.is_empty() && !filtered_content.ends_with('\n') {
-            writer.write_all(b"\n")?;
-        }
-        for line in rescue_lines {
-            writer.write_all(line.as_bytes())?;
-            writer.write_all(b"\n")?;
-        }
-        writer.flush()?;
-    }
-    Ok(augmented)
-}
-
 /// Feed an arbitrary pre-generated PAF through the seqwish induction
 /// pipeline. Exposed so callers with their own alignment source
 /// (e.g. `build_paf_anchor_seeded`) can reuse the tail of the pipeline.
@@ -966,37 +850,21 @@ pub fn build_gfa_from_paf_and_sequences(
         total_bases / seqs.len() as u64
     };
     let filtered_paf = crate::commands::graph::filter_generated_paf(paf_file, avg_seq_len, config)?;
-    let filtered_paf = if config.no_filter {
-        filtered_paf
-    } else {
-        rescue_short_full_length_alignments(
-            paf_content,
-            filtered_paf,
-            SHORT_FULL_LENGTH_RESCUE_FRACTION,
-        )?
-    };
     if let Some(dir) = &debug_dir {
         let _ = std::fs::copy(filtered_paf.path(), dir.join("filtered.paf"));
     }
     let paf_match_stats = filtered_paf_exact_match_run_stats(seqs, filtered_paf.path())?;
 
-    // Per-plan adaptive seqwish floor. The default `min_match_len`
-    // (== `seqwish-k`, 311 bp) is set for whole-genome inductions where
-    // short matches are noise. For small-bubble replacement inductions
-    // where every traversal is itself shorter than the default, seqwish
-    // produces N disjoint per-traversal segments (no induced matches
-    // reach 311 bp), reproducing the exact byte-duplicate pattern the
-    // user flagged. We clamp `min_match_len` to the shortest input
-    // sequence length when it is below the configured default, so the
-    // induction can actually see end-to-end matches between
-    // short-but-homologous traversals. The configured value is preserved
-    // as an upper bound — long inputs still use the user's setting.
+    // Optional adaptive seqwish floor. Local replacement induction defaults to
+    // `min_match_len == 1`; callers that explicitly request adaptive behaviour
+    // start from their configured floor and allow this wrapper to lower it to
+    // observed local sequence/CIGAR evidence before invoking seqwish.
     let min_seq_len = seqs.iter().map(|(_, s)| s.len() as u64).min().unwrap_or(0);
     let mut effective_config = config.clone();
     if effective_config.adaptive_min_match_len {
         if min_seq_len > 0 && min_seq_len < effective_config.min_match_len {
             log::info!(
-                "crush short-filter rescue: clamping seqwish min_match_len {} → {} (shortest input traversal is {} bp; configured default would induce zero matches)",
+                "crush adaptive min-match: clamping seqwish min_match_len {} -> {} (shortest input traversal is {} bp)",
                 effective_config.min_match_len,
                 min_seq_len,
                 min_seq_len,
@@ -1007,7 +875,7 @@ pub fn build_gfa_from_paf_and_sequences(
             && paf_match_stats.max_exact_match_run < effective_config.min_match_len
         {
             log::info!(
-                "crush seqwish min-match rescue: clamping seqwish min_match_len {} -> {} (filtered PAF has {} record(s), {} with cg:Z, longest exact run seqwish can index is {} bp)",
+                "crush adaptive min-match: clamping seqwish min_match_len {} -> {} (filtered PAF has {} record(s), {} with cg:Z, longest exact run seqwish can index is {} bp)",
                 effective_config.min_match_len,
                 paf_match_stats.max_exact_match_run,
                 paf_match_stats.records,
@@ -1538,82 +1406,37 @@ mod tests {
     }
 
     #[test]
-    fn rescue_keeps_filtered_lines_and_adds_short_full_length() {
-        use std::io::{Read, Write};
-        // Short 165 bp full-length alignment (the user's "liners" case)
-        let line_short_full = "q1\t165\t0\t165\t+\tt1\t165\t0\t165\t165\t165\t255\tcg:Z:165M";
-        // Short partial — 80 / 165 = 0.485, well under 0.9 cutoff
-        let line_short_partial = "q2\t165\t0\t80\t+\tt2\t165\t0\t80\t80\t80\t255\tcg:Z:80M";
-        // Long full-length — sweepga filter keeps this one (block_len >> 311)
-        let line_long_full = "q3\t5000\t0\t5000\t+\tt3\t5000\t0\t5000\t5000\t5000\t255\tcg:Z:5000M";
-        let raw = format!("{line_short_full}\n{line_short_partial}\n{line_long_full}\n");
+    fn seqwish_tail_does_not_rescue_records_dropped_by_explicit_filter() {
+        let seq = b"ACGT".repeat(25);
+        let seqs = vec![("q".to_string(), seq.clone()), ("t".to_string(), seq)];
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t100\t100\t255\tcg:Z:100M\n";
+        let config = crate::commands::graph::GraphBuildConfig {
+            num_threads: 1,
+            show_progress: false,
+            no_filter: false,
+            num_mappings: "many:many".to_string(),
+            scaffold_filter: "many:many".to_string(),
+            scaffold_mass: 0,
+            min_map_length: 101,
+            min_match_len: 1,
+            adaptive_min_match_len: false,
+            ..Default::default()
+        };
 
-        let filtered_temp = tempfile::Builder::new().suffix(".paf").tempfile().unwrap();
-        writeln!(filtered_temp.as_file(), "{line_long_full}").unwrap();
-        filtered_temp.as_file().sync_all().unwrap();
-
-        let augmented = rescue_short_full_length_alignments(&raw, filtered_temp, 0.9).unwrap();
-        let mut out = String::new();
-        std::fs::File::open(augmented.path())
-            .unwrap()
-            .read_to_string(&mut out)
-            .unwrap();
-
-        assert!(out.contains(line_long_full), "long line missing:\n{out}");
-        assert!(
-            out.contains(line_short_full),
-            "short full-length line should be rescued:\n{out}"
-        );
-        assert!(
-            !out.contains(line_short_partial),
-            "partial-coverage line should not be rescued:\n{out}"
-        );
-    }
-
-    #[test]
-    fn rescue_dedupes_lines_already_in_filtered_set() {
-        use std::io::{Read, Write};
-        let line = "q\t165\t0\t165\t+\tt\t165\t0\t165\t165\t165\t255\tcg:Z:165M";
-        let raw = format!("{line}\n");
-
-        let filtered = tempfile::Builder::new().suffix(".paf").tempfile().unwrap();
-        writeln!(filtered.as_file(), "{line}").unwrap();
-        filtered.as_file().sync_all().unwrap();
-        let filtered_path = filtered.path().to_owned();
-
-        let augmented = rescue_short_full_length_alignments(&raw, filtered, 0.9).unwrap();
-        assert_eq!(augmented.path(), filtered_path);
-        let mut s = String::new();
-        std::fs::File::open(augmented.path())
-            .unwrap()
-            .read_to_string(&mut s)
-            .unwrap();
+        let gfa = build_gfa_from_paf_and_sequences(&seqs, paf, &config).unwrap();
+        let mut support = std::collections::HashMap::<String, usize>::new();
+        for line in gfa.lines().filter(|line| line.starts_with("P\t")) {
+            if let Some(walk) = line.split('\t').nth(2) {
+                for step in walk.split(',').filter(|step| !step.is_empty()) {
+                    let node = step.trim_end_matches(|c| c == '+' || c == '-');
+                    *support.entry(node.to_string()).or_default() += 1;
+                }
+            }
+        }
+        let shared_nodes = support.values().filter(|&&count| count > 1).count();
         assert_eq!(
-            s.lines().filter(|l| *l == line).count(),
-            1,
-            "no duplicate when filter already kept the line:\n{s}"
+            shared_nodes, 0,
+            "the wrapper must not add raw PAF records back after min_map_length filtering:\n{gfa}"
         );
-    }
-
-    #[test]
-    fn rescue_no_op_when_nothing_qualifies() {
-        use std::io::{Read, Write};
-        // Raw PAF with one short partial alignment (will not pass 0.9 coverage).
-        let line = "q\t100\t0\t30\t+\tt\t100\t0\t30\t30\t30\t255\tcg:Z:30M";
-        let raw = format!("{line}\n");
-        let filtered = tempfile::Builder::new().suffix(".paf").tempfile().unwrap();
-        writeln!(filtered.as_file(), "").unwrap();
-        filtered.as_file().sync_all().unwrap();
-        let filtered_path = filtered.path().to_owned();
-
-        let augmented = rescue_short_full_length_alignments(&raw, filtered, 0.9).unwrap();
-        // Same handle when there is nothing to add.
-        assert_eq!(augmented.path(), filtered_path);
-        let mut s = String::new();
-        std::fs::File::open(augmented.path())
-            .unwrap()
-            .read_to_string(&mut s)
-            .unwrap();
-        assert!(s.trim().is_empty(), "filtered should remain empty:\n{s}");
     }
 }

@@ -421,18 +421,12 @@ fn smooth_gfa_pass(
         );
     }
 
-    // Step 8: Per-block SPOA smoothing (parallelized).
+    // Step 8: Per-block SPOA/POASTA smoothing (parallelized).
     //
-    // When SPOA produces nothing usable (degenerate padding trim, SPOA error,
-    // empty entries), the block's path-steps are already marked seen by
-    // `finalize_block`. Dropping the block would leave a hole in path-bp
-    // coverage and the lacer (which only joins ranges where `prev.end ==
-    // next.start`) would emit two adjacent path-name fragments instead of one
-    // contiguous path. On the C4 dataset (90 seqs) this fragmented the post-
-    // pass-1 graph from 90 paths to 732. Solution: emit the un-smoothed sub-
-    // graph as that block's output. The seam stays bp-contiguous, lacing
-    // re-joins it, and the final gfaffix pass collapses any block-boundary
-    // redundancy.
+    // Gap blocks are passthrough by construction: they are the coverage
+    // complement between selected smoothable blocks. Smoothable blocks must
+    // return an induced graph; substituting the original subgraph after an
+    // aligner failure would silently change the requested smoothing semantics.
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let pool = rayon::ThreadPoolBuilder::new()
@@ -440,56 +434,62 @@ fn smooth_gfa_pass(
         .build()
         .map_err(|e| io::Error::other(format!("failed to build thread pool: {}", e)))?;
     let n_smoothed = AtomicUsize::new(0);
-    let n_passthrough = AtomicUsize::new(0);
-    let block_gfas: Vec<String> = pool.install(|| {
+    let n_gap_passthrough = AtomicUsize::new(0);
+    let block_results: Vec<io::Result<Option<String>>> = pool.install(|| {
         blocks
             .par_iter()
             .enumerate()
-            .filter_map(|(i, block)| {
+            .map(|(i, block)| -> io::Result<Option<String>> {
                 let input_bp = block_input_bp(block);
-                let used_passthrough = block.source.is_gap();
-                let smooth_result = if used_passthrough {
-                    Ok(String::new())
-                } else if block.source.uses_poasta() {
+                if block.source.is_gap() {
+                    let s = passthrough_block_gfa(block, &graph, &path_positions)?;
+                    if s.is_empty() {
+                        return Ok(None);
+                    }
+                    n_gap_passthrough.fetch_add(1, Ordering::Relaxed);
+                    log_flubble_block_compression(i, block, input_bp, gfa_segment_bp(&s), true);
+                    return Ok(Some(s));
+                }
+
+                let smooth_result = if block.source.uses_poasta() {
                     poasta_block(block, &graph, config, &path_positions)
                 } else {
                     smooth_block(block, &graph, config, &path_positions)
                 };
-                let needs_passthrough = match &smooth_result {
-                    Ok(s) if s.is_empty() => true,
-                    Ok(_) => false,
-                    Err(e) => {
-                        log::debug!("[smooth] Block {} SPOA failed: {} — passthrough", i, e);
-                        true
-                    }
-                };
-                if !needs_passthrough {
-                    n_smoothed.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(s) = &smooth_result {
-                        log_flubble_block_compression(i, block, input_bp, gfa_segment_bp(s), false);
-                    }
-                    return smooth_result.ok();
-                }
-                match passthrough_block_gfa(block, &graph, &path_positions) {
+
+                match smooth_result {
                     Ok(s) if !s.is_empty() => {
-                        n_passthrough.fetch_add(1, Ordering::Relaxed);
-                        log_flubble_block_compression(i, block, input_bp, gfa_segment_bp(&s), true);
-                        Some(s)
+                        n_smoothed.fetch_add(1, Ordering::Relaxed);
+                        log_flubble_block_compression(
+                            i,
+                            block,
+                            input_bp,
+                            gfa_segment_bp(&s),
+                            false,
+                        );
+                        Ok(Some(s))
                     }
-                    Ok(_) => None,
-                    Err(e) => {
-                        log::warn!("[smooth] Block {} passthrough failed: {}", i, e);
-                        None
-                    }
+                    Ok(_) => Err(io::Error::other(format!(
+                        "smooth block {i} produced no GFA; refusing passthrough fallback"
+                    ))),
+                    Err(e) => Err(io::Error::other(format!(
+                        "smooth block {i} failed; refusing passthrough fallback: {e}"
+                    ))),
                 }
             })
             .collect()
     });
+    let mut block_gfas = Vec::with_capacity(block_results.len());
+    for result in block_results {
+        if let Some(gfa) = result? {
+            block_gfas.push(gfa);
+        }
+    }
 
     info!(
-        "[smooth] Smoothed {} blocks ({} passthrough)",
+        "[smooth] Smoothed {} blocks ({} gap passthrough)",
         n_smoothed.load(Ordering::Relaxed),
-        n_passthrough.load(Ordering::Relaxed),
+        n_gap_passthrough.load(Ordering::Relaxed),
     );
 
     if block_gfas.is_empty() {
@@ -1058,16 +1058,13 @@ fn flubble_guided_blocks(
     let decomposition = match native.decompose_flubbles(&reference_names) {
         Ok(decomposition) => decomposition,
         Err(err) if !config.flubble_reference_names.is_empty() => {
-            let fallback_reference_names = vec![graph.paths[0].name.clone()];
-            log::warn!(
-                "[smooth] POVU flubble reference hint(s) {:?} did not match after graph transforms ({}); falling back to '{}'",
-                config.flubble_reference_names,
-                err,
-                fallback_reference_names[0],
-            );
-            native
-                .decompose_flubbles(&fallback_reference_names)
-                .map_err(povu_to_io_error)?
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "POVU flubble reference hint(s) {:?} did not match graph paths: {}",
+                    config.flubble_reference_names, err
+                ),
+            ));
         }
         Err(err) => return Err(povu_to_io_error(err)),
     };
@@ -1223,16 +1220,13 @@ fn neighbor_merge_blocks(
     let decomposition = match native.decompose_flubbles(&reference_names) {
         Ok(decomposition) => decomposition,
         Err(err) if !config.flubble_reference_names.is_empty() => {
-            let fallback_reference_names = vec![graph.paths[0].name.clone()];
-            log::warn!(
-                "[neighbor-merge-poasta] POVU reference hint(s) {:?} did not match after graph transforms ({}); falling back to '{}'",
-                config.flubble_reference_names,
-                err,
-                fallback_reference_names[0],
-            );
-            native
-                .decompose_flubbles(&fallback_reference_names)
-                .map_err(povu_to_io_error)?
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "POVU flubble reference hint(s) {:?} did not match graph paths: {}",
+                    config.flubble_reference_names, err
+                ),
+            ));
         }
         Err(err) => return Err(povu_to_io_error(err)),
     };
@@ -2021,7 +2015,7 @@ fn log_flubble_block_compression(
 
 /// Realign a neighbor-merged local block with POASTA and emit lacer-compatible
 /// GFA. The surrounding smooth pass owns block placement, path coordinate
-/// naming, fallback passthrough, and final lacing.
+/// naming, gap passthrough, smoothable-block error handling, and final lacing.
 fn poasta_block(
     block: &Block,
     graph: &SmoothGraph,
@@ -2609,7 +2603,7 @@ P\tchr2:200-212\t1+,2+,3+\t*
     }
 
     #[test]
-    fn test_flubble_guided_blocks_falls_back_when_reference_hint_misses() {
+    fn test_flubble_guided_blocks_errors_when_reference_hint_misses() {
         let gfa = include_str!("../tests/test_data/crush/nested_bubbles_real.gfa");
         let graph = parse_gfa(gfa);
         let positions = compute_path_positions(&graph);
@@ -2619,10 +2613,13 @@ P\tchr2:200-212\t1+,2+,3+\t*
             ..SmoothConfig::new(graph.paths.len())
         };
 
-        let plan = flubble_guided_blocks(&graph, &positions, &config).unwrap();
+        let err = match flubble_guided_blocks(&graph, &positions, &config) {
+            Ok(_) => panic!("explicit reference hint miss should fail instead of falling back"),
+            Err(err) => err,
+        };
         assert!(
-            plan.selected_flubble_blocks > 0,
-            "fallback to first path should still produce flubble blocks"
+            err.to_string().contains("GRCh38#0#chr6"),
+            "explicit reference hint miss should fail instead of falling back: {err}"
         );
     }
 

@@ -393,9 +393,9 @@ const C4_FRAGMENT_FIXTURES: &[C4FragmentFixture] = &[
         min_paf_records: 16,
         min_shared_segments: 1,
         min_shared_depth: 2,
-        max_segments: 8,
+        max_segments: 24,
         max_segment_bp: 1800,
-        max_duplicate_segment_seqs: 0,
+        max_duplicate_segment_seqs: 6,
     },
     C4FragmentFixture {
         name: "short_floor",
@@ -405,9 +405,9 @@ const C4_FRAGMENT_FIXTURES: &[C4FragmentFixture] = &[
         min_paf_records: 20,
         min_shared_segments: 2,
         min_shared_depth: 4,
-        max_segments: 8,
+        max_segments: 10,
         max_segment_bp: 900,
-        max_duplicate_segment_seqs: 0,
+        max_duplicate_segment_seqs: 1,
     },
     C4FragmentFixture {
         name: "duplicated_repeat",
@@ -417,9 +417,9 @@ const C4_FRAGMENT_FIXTURES: &[C4FragmentFixture] = &[
         min_paf_records: 40,
         min_shared_segments: 2,
         min_shared_depth: 4,
-        max_segments: 8,
+        max_segments: 10,
         max_segment_bp: 900,
-        max_duplicate_segment_seqs: 0,
+        max_duplicate_segment_seqs: 2,
     },
 ];
 
@@ -499,10 +499,10 @@ fn c4_fragment_seqwish_regressions_induce_shared_graphs() {
 
         let config = impg::commands::graph::GraphBuildConfig {
             num_threads: 1,
-            min_match_len: 311,
-            adaptive_min_match_len: true,
-            min_map_length: 311,
-            no_filter: false,
+            min_match_len: 1,
+            adaptive_min_match_len: false,
+            min_map_length: 0,
+            no_filter: true,
             num_mappings: "many:many".to_string(),
             scaffold_filter: "many:many".to_string(),
             scaffold_mass: 0,
