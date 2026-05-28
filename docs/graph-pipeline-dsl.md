@@ -77,6 +77,21 @@ gfa:fastga:pggb
 gfa:sweepga:seqwish
 ```
 
+Supported query-sequence preprocessing stages:
+
+```text
+gfa:cut-n=100:pggb
+vcf:cut-n=100:seqwish
+```
+
+`cut-n=<bp>` is explicit and has no bare default. It clips only terminal
+`N`/`n` runs from each query-extracted sequence when the run length is at
+least the requested threshold before graph construction. Internal N-runs and
+terminal runs shorter than the threshold are left unchanged. If both ends clip
+away the full extracted sequence, that sequence is omitted from the local graph.
+This is separate from syng's `syng:cut-ns` materialization policy, which cuts
+N-runs from fetched inter-syncmer gap DNA.
+
 Supported partition/window forms remain:
 
 ```text

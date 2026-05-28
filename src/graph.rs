@@ -52,6 +52,104 @@ impl SequenceMetadata {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalNRunClip {
+    pub min_run: usize,
+}
+
+fn is_n_base(base: u8) -> bool {
+    base == b'N' || base == b'n'
+}
+
+pub fn terminal_n_clip_span(seq: &[u8], min_run: usize) -> Option<(usize, usize)> {
+    if seq.is_empty() {
+        return None;
+    }
+    if min_run == 0 {
+        return Some((0, seq.len()));
+    }
+
+    let prefix = seq.iter().take_while(|&&base| is_n_base(base)).count();
+    let suffix = seq
+        .iter()
+        .rev()
+        .take_while(|&&base| is_n_base(base))
+        .count();
+    let start = if prefix >= min_run { prefix } else { 0 };
+    let end = if suffix >= min_run {
+        seq.len().saturating_sub(suffix)
+    } else {
+        seq.len()
+    };
+
+    (start < end).then_some((start, end))
+}
+
+pub fn clip_intervals_terminal_n_runs(
+    impg: &impl ImpgIndex,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    clip: TerminalNRunClip,
+) -> std::io::Result<Vec<Interval<u32>>> {
+    use rayon::prelude::*;
+
+    let clipped: Vec<Option<Interval<u32>>> = results
+        .par_iter()
+        .map(|interval| -> std::io::Result<Option<Interval<u32>>> {
+            let seq_name = impg
+                .seq_index()
+                .get_name(interval.metadata)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence name not found for ID {}", interval.metadata),
+                    )
+                })?;
+
+            let (start, end, is_reverse) = if interval.first <= interval.last {
+                (interval.first, interval.last, false)
+            } else {
+                (interval.last, interval.first, true)
+            };
+            if start >= end {
+                return Ok(None);
+            }
+
+            let seq_bytes = sequence_index.fetch_sequence(seq_name, start, end)?;
+            let Some((clip_start, clip_end)) = terminal_n_clip_span(&seq_bytes, clip.min_run)
+            else {
+                return Ok(None);
+            };
+            let left_clip = i32::try_from(clip_start).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "terminal N prefix clip exceeds i32 coordinate range",
+                )
+            })?;
+            let right_clip = i32::try_from(seq_bytes.len() - clip_end).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "terminal N suffix clip exceeds i32 coordinate range",
+                )
+            })?;
+            let clipped_start = start + left_clip;
+            let clipped_end = end - right_clip;
+            if clipped_start >= clipped_end {
+                return Ok(None);
+            }
+
+            let clipped_interval = if is_reverse {
+                Interval::new(clipped_end, clipped_start, interval.metadata)
+            } else {
+                Interval::new(clipped_start, clipped_end, interval.metadata)
+            };
+            Ok(Some(clipped_interval))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(clipped.into_iter().flatten().collect())
+}
+
 pub fn generate_gfa_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
@@ -1003,6 +1101,37 @@ P\tseq2:0-8\t1+,3+\t*
             global_score < local_score,
             "global alignment should penalize terminal sequence absent from the graph"
         );
+    }
+
+    #[test]
+    fn terminal_n_clip_span_keeps_sequence_unchanged_without_policy() {
+        let seq = b"NNNNACGTNNNN";
+        assert_eq!(terminal_n_clip_span(seq, usize::MAX), Some((0, seq.len())));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_clips_prefix_at_threshold() {
+        assert_eq!(terminal_n_clip_span(b"NNNACGT", 3), Some((3, 7)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_clips_suffix_at_threshold() {
+        assert_eq!(terminal_n_clip_span(b"ACGTNNN", 3), Some((0, 4)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_preserves_internal_n_run() {
+        assert_eq!(terminal_n_clip_span(b"ACNNNNGT", 3), Some((0, 8)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_preserves_short_terminal_runs() {
+        assert_eq!(terminal_n_clip_span(b"NNACGTNN", 3), Some((0, 8)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_clips_both_ends() {
+        assert_eq!(terminal_n_clip_span(b"NNNACGTNNNN", 3), Some((3, 7)));
     }
 
     #[test]

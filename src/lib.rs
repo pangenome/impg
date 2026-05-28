@@ -873,6 +873,27 @@ fn dispatch_gfa_engine_inner(
 ) -> std::io::Result<String> {
     let skip_normalize = engine_opts.partition_size.is_some();
     let num_threads = engine_opts.pipeline.num_threads;
+    let clipped_query_intervals;
+    let query_intervals = if let Some(clip) = engine_opts.pipeline.terminal_n_clip {
+        let before_bp = interval_bp(query_intervals);
+        clipped_query_intervals =
+            graph::clip_intervals_terminal_n_runs(impg, query_intervals, sequence_index, clip)?;
+        let after_bp = interval_bp(&clipped_query_intervals);
+        log::info!(
+            "terminal N clipping: min-run={} kept {} / {} interval(s), {} -> {} bp",
+            clip.min_run,
+            clipped_query_intervals.len(),
+            query_intervals.len(),
+            before_bp,
+            after_bp
+        );
+        clipped_query_intervals.as_slice()
+    } else {
+        query_intervals
+    };
+    if query_intervals.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
 
     match engine_opts.engine {
         GfaEngine::Poa => {
@@ -1059,6 +1080,13 @@ fn dispatch_gfa_engine_inner(
             }
         }
     }
+}
+
+fn interval_bp(intervals: &[coitrees::Interval<u32>]) -> u64 {
+    intervals
+        .iter()
+        .map(|iv| (iv.last - iv.first).unsigned_abs() as u64)
+        .sum()
 }
 
 /// Run the partitioned GFA pipeline: build per-partition GFA (sequentially,
@@ -1475,5 +1503,112 @@ P\talt\t1+,3+,4+\t*
         let after = resolution::path_sequences(&out).unwrap();
         assert_eq!(before, after);
         assert_ne!(gfa, out);
+    }
+
+    fn terminal_n_query_fixture() -> std::io::Result<(
+        tempfile::TempDir,
+        SeqIndexWrapper,
+        sequence_index::UnifiedSequenceIndex,
+        Vec<coitrees::Interval<u32>>,
+    )> {
+        let tempdir = tempfile::tempdir()?;
+        let fasta_path = tempdir.path().join("terminal_n.fa");
+        std::fs::write(
+            &fasta_path,
+            b">seq1\nNNNNNACGTNNNNN\n>seq2\nNNNNNACGANNNNN\n",
+        )?;
+        let fasta_files = vec![fasta_path.to_string_lossy().to_string()];
+        let sequence_index = sequence_index::UnifiedSequenceIndex::from_files(&fasta_files)?;
+
+        let mut seq_index = seqidx::SequenceIndex::new();
+        let seq1 = seq_index.get_or_insert_id("seq1", Some(14));
+        let seq2 = seq_index.get_or_insert_id("seq2", Some(14));
+        let intervals = vec![
+            coitrees::Interval::new(0, 14, seq1),
+            coitrees::Interval::new(0, 14, seq2),
+        ];
+
+        Ok((
+            tempdir,
+            SeqIndexWrapper { seq_index },
+            sequence_index,
+            intervals,
+        ))
+    }
+
+    fn poa_test_engine_opts(terminal_n_clip: Option<graph::TerminalNRunClip>) -> EngineOpts {
+        EngineOpts {
+            engine: GfaEngine::Poa,
+            syng_gfa_mode: None,
+            syng_params: None,
+            syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+            pipeline: commands::graph::GraphBuildConfig {
+                num_threads: 1,
+                show_progress: false,
+                terminal_n_clip,
+                ..commands::graph::GraphBuildConfig::default()
+            },
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            partition_size: Some(1),
+            crush_config: None,
+            smooth_after_crush: None,
+            graph_sort_pipeline: None,
+        }
+    }
+
+    #[test]
+    fn query_gfa_keeps_terminal_ns_by_default() {
+        let (_tempdir, impg, sequence_index, intervals) = terminal_n_query_fixture().unwrap();
+        let opts = poa_test_engine_opts(None);
+        let gfa = dispatch_gfa_engine(
+            &impg,
+            &intervals,
+            &sequence_index,
+            Some((1, 4, 6, 2, 26, 1)),
+            &opts,
+        )
+        .unwrap();
+
+        let paths = resolution::path_sequences(&gfa).unwrap();
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| { name == "seq1:0-14" && seq == "NNNNNACGTNNNNN" }));
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| { name == "seq2:0-14" && seq == "NNNNNACGANNNNN" }));
+    }
+
+    #[test]
+    fn query_gfa_cut_n_removes_terminal_n_tips_before_graph_build() {
+        let (_tempdir, impg, sequence_index, intervals) = terminal_n_query_fixture().unwrap();
+        let opts = poa_test_engine_opts(Some(graph::TerminalNRunClip { min_run: 5 }));
+        let gfa = dispatch_gfa_engine(
+            &impg,
+            &intervals,
+            &sequence_index,
+            Some((1, 4, 6, 2, 26, 1)),
+            &opts,
+        )
+        .unwrap();
+
+        assert!(
+            !gfa.lines().any(|line| {
+                line.starts_with("S\t")
+                    && line
+                        .split('\t')
+                        .nth(2)
+                        .is_some_and(|seq| seq.contains("NNNNN"))
+            }),
+            "terminal N-run reached graph segments:\n{gfa}"
+        );
+        let paths = resolution::path_sequences(&gfa).unwrap();
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| name == "seq1:5-9" && seq == "ACGT"));
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| name == "seq2:5-9" && seq == "ACGA"));
     }
 }

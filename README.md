@@ -468,12 +468,31 @@ global graph glue. Use
 Add `:cut-ns`, for example `-o gfa:syng:cut-ns:crush`, to drop assembly N-runs
 from fetched gap DNA and split graph paths at those breaks.
 
+For graph builds from query-extracted sequences, add an explicit terminal
+N-run clipping stage before the engine: `-o gfa:cut-n=100:pggb`. This clips
+only leading and trailing `N`/`n` runs whose length is at least the requested
+threshold before graph construction; internal N-runs and shorter terminal
+N-runs are preserved. There is no default clipping threshold, and omitting
+`cut-n=<bp>` leaves extracted sequences unchanged.
+
 The same shorthand works for the other engines: `-o gfa:pggb`,
 `-o gfa:seqwish`, `-o gfa:poa`, and `-o gfa:syng`. Alignment-backed graph
 builds may also include the aligner prefix, for example
 `-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
 `-o gfa:sweepga:seqwish`; this is equivalent to setting `--aligner` and
 `--gfa-engine` separately.
+
+For a C4/HPRCv2-style local render where terminal assembly N blocks would
+otherwise become noisy graph tips:
+
+```bash
+impg query -a ~/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
+  -r GRCh38#0#chr6:<C4-range> \
+  --sequence-files ~/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
+  -d 100000 \
+  -o gfa:cut-n=100:pggb \
+  -O c4.cutn100.pggb.gfa
+```
 
 VCF output uses the same graph engines and then converts the resulting local
 GFA through POVU. Use `-o vcf --gfa-engine <engine>` or the shorthand

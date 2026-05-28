@@ -15,7 +15,7 @@ use bitvec::prelude::*;
 use sweepga::knn_graph::SparsificationStrategy;
 
 // Import gfasort for graph sorting
-use crate::graph::{sort_gfa, unchop_gfa};
+use crate::graph::{sort_gfa, unchop_gfa, TerminalNRunClip};
 
 // Import from sweepga
 use sweepga::aligner::Aligner;
@@ -99,6 +99,8 @@ pub struct GraphBuildConfig {
     pub batch_bytes: Option<String>,
     /// wfmash mapping percent identity (e.g. "90", "ani50-2"). `None` lets wfmash auto-estimate.
     pub map_pct_identity: Option<String>,
+    /// Clip terminal N-runs at or above this threshold before query GFA graph construction.
+    pub terminal_n_clip: Option<TerminalNRunClip>,
 }
 
 impl Default for GraphBuildConfig {
@@ -134,6 +136,7 @@ impl Default for GraphBuildConfig {
             mash_params: sweepga::knn_graph::MashParams::default(),
             batch_bytes: None,
             map_pct_identity: Some("90".to_string()),
+            terminal_n_clip: None,
         }
     }
 }

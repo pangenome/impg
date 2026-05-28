@@ -2293,6 +2293,7 @@ struct ParsedGfaEngine {
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
     syng_gfa_frequency_mask: SyngGfaFrequencyMask,
+    terminal_n_clip: Option<impg::graph::TerminalNRunClip>,
     crush_config: Option<impg::resolution::ResolutionConfig>,
     smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
@@ -2446,6 +2447,65 @@ fn parse_f64_engine_param(raw: &str, key: &str, value: &str) -> io::Result<f64> 
             ),
         )
     })
+}
+
+fn terminal_n_clip_stage_assignment(name: &str) -> Option<(&str, &str)> {
+    let (key, value) = name.split_once('=')?;
+    if matches!(
+        key,
+        "cut-n" | "clip-n" | "terminal-n" | "terminal-n-clip" | "clip-terminal-n"
+    ) {
+        Some((key, value))
+    } else {
+        None
+    }
+}
+
+fn parse_terminal_n_clip_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<Option<impg::graph::TerminalNRunClip>> {
+    let Some((key, value)) = terminal_n_clip_stage_assignment(&stage.name) else {
+        return Ok(None);
+    };
+    if !stage.params.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': terminal N clipping stage '{}' uses cut-n=<threshold> and does not accept comma parameters",
+                raw, stage.name
+            ),
+        ));
+    }
+    let min_run = parse_usize_size_engine_param(raw, key, value)?;
+    if min_run == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': terminal N clipping threshold must be > 0",
+                raw
+            ),
+        ));
+    }
+    Ok(Some(impg::graph::TerminalNRunClip { min_run }))
+}
+
+fn set_terminal_n_clip(
+    raw: &str,
+    current: &mut Option<impg::graph::TerminalNRunClip>,
+    next: impg::graph::TerminalNRunClip,
+) -> io::Result<()> {
+    if current.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': duplicate terminal N clipping stage",
+                raw
+            ),
+        ));
+    }
+    *current = Some(next);
+    Ok(())
 }
 
 fn parse_syng_mask_stage(
@@ -3404,7 +3464,17 @@ impl EngineCliOpts {
                 format!("Invalid --gfa-engine '{}': {}", raw, e),
             )
         })?;
-        let engine_stage = pipeline.stages.first().ok_or_else(|| {
+        let mut terminal_n_clip = None;
+        let mut engine_idx = 0usize;
+        while let Some(stage) = pipeline.stages.get(engine_idx) {
+            let Some(clip) = parse_terminal_n_clip_stage(raw, stage)? else {
+                break;
+            };
+            set_terminal_n_clip(raw, &mut terminal_n_clip, clip)?;
+            engine_idx += 1;
+        }
+
+        let engine_stage = pipeline.stages.get(engine_idx).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("Invalid --gfa-engine '{}': missing graph engine", raw),
@@ -3488,7 +3558,11 @@ impl EngineCliOpts {
             &mut saw_syng_param,
         )?;
 
-        for stage in pipeline.stages.iter().skip(1) {
+        for stage in pipeline.stages.iter().skip(engine_idx + 1) {
+            if let Some(clip) = parse_terminal_n_clip_stage(raw, stage)? {
+                set_terminal_n_clip(raw, &mut terminal_n_clip, clip)?;
+                continue;
+            }
             match stage.name.as_str() {
                 "raw" | "blunt" | "bluntg" if is_syng => {
                     set_syng_gfa_mode(raw, &mut syng_gfa_mode, SyngGfaMode::parse(&stage.name)?)?;
@@ -3604,6 +3678,7 @@ impl EngineCliOpts {
             syng_gfa_mode,
             syng_params,
             syng_gfa_frequency_mask,
+            terminal_n_clip,
             crush_config,
             smooth_after_crush,
             graph_sort_pipeline,
@@ -3690,6 +3765,7 @@ impl EngineCliOpts {
             parsed.syng_gfa_mode,
             parsed.syng_params,
             parsed.syng_gfa_frequency_mask,
+            parsed.terminal_n_clip,
             parsed.crush_config,
             parsed.smooth_after_crush,
             parsed.graph_sort_pipeline,
@@ -4547,6 +4623,9 @@ GFA engine shorthand:
   name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
   exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
+  Add `cut-n=<bp>` before the engine, e.g. `-o gfa:cut-n=100:pggb`, to clip
+  terminal N-runs of at least that length from extracted query sequences before
+  graph construction; internal N-runs and shorter terminal runs are preserved.
   Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,
   hierarchical, chain-povu, top-flubble-sweepga; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
@@ -9397,6 +9476,7 @@ fn build_graph_config(
             .map_pct_identity
             .clone()
             .or_else(|| Some("90".to_string())),
+        terminal_n_clip: None,
     })
 }
 
@@ -9414,6 +9494,7 @@ fn build_engine_opts(
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
     syng_gfa_frequency_mask: SyngGfaFrequencyMask,
+    terminal_n_clip: Option<impg::graph::TerminalNRunClip>,
     crush_config: Option<impg::resolution::ResolutionConfig>,
     smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
@@ -9444,6 +9525,7 @@ fn build_engine_opts(
         disk_backed: seqwish.disk_backed,
         temp_dir,
         batch_bytes: aln.sw.batch_bytes.clone(),
+        terminal_n_clip,
         // The partitioned pipeline already logs its own progress
         show_progress: false,
         ..graph::GraphBuildConfig::default()
@@ -12749,6 +12831,9 @@ mod tests {
             "-o gfa:syng:crush:sort,pipeline=Ygs",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
+            "-o gfa:cut-n=100:pggb",
+            "terminal N-runs of at least that length",
+            "internal N-runs and shorter terminal runs are preserved",
             "Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,",
             "chain-povu",
             "top-flubble-sweepga",
@@ -12857,6 +12942,31 @@ mod tests {
                         w: 55,
                         seed: 7
                     })
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_terminal_n_clip_stage() {
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:cut-n=100:pggb"]).unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                assert_eq!(engine_cli.engine_raw, "cut-n=100:pggb");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::Pggb);
+                assert_eq!(
+                    parsed.terminal_n_clip,
+                    Some(impg::graph::TerminalNRunClip { min_run: 100 })
                 );
             }
             _ => panic!("expected query command"),
