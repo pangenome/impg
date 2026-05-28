@@ -10752,7 +10752,7 @@ fn perform_query(
                 sequence_index,
                 approximate_mode,
                 subset_filter,
-            )
+            )?
         } else {
             impg.query_transitive_bfs(
                 target_id,
@@ -10768,7 +10768,7 @@ fn perform_query(
                 sequence_index,
                 approximate_mode,
                 subset_filter,
-            )
+            )?
         }
     } else {
         let mut res = impg.query(
@@ -10779,7 +10779,7 @@ fn perform_query(
             min_result_identity,
             sequence_index,
             approximate_mode,
-        );
+        )?;
         // Filter by minimum output length for regular queries
         if let Some(min_len) = min_output_length {
             res.retain(|(query_interval, _, _)| {
@@ -10798,7 +10798,7 @@ fn perform_query(
 
     info!(
         "Collected {} results (excluding input range)",
-        results.len() - 1
+        results.len().saturating_sub(1)
     ); // Exclude the first element (the input range itself)
 
     Ok(results)

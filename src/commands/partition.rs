@@ -371,7 +371,7 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )
+                )?
             } else {
                 impg.query_transitive_bfs(
                     seq_id,
@@ -387,7 +387,7 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )
+                )?
             };
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());

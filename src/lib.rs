@@ -136,8 +136,8 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn query_with_cache(
@@ -149,8 +149,8 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn populate_cigar_cache(
@@ -179,8 +179,8 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn query_transitive_bfs(
@@ -198,8 +198,8 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn get_or_load_tree(
@@ -284,10 +284,10 @@ impl SyngImpgWrapper {
         target_id: u32,
         range_start: i32,
         range_end: i32,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         let name = match self.seq_index.get_name(target_id) {
             Some(n) => n,
-            None => return vec![],
+            None => return Ok(Vec::new()),
         };
         match self.min_chain_anchors {
             None => self.query_via_syng_raw(name, range_start, range_end),
@@ -306,33 +306,32 @@ impl SyngImpgWrapper {
         name: &str,
         range_start: i32,
         range_end: i32,
-    ) -> Vec<impg::AdjustedInterval> {
-        let intervals = match self.syng_index.query_region(
-            name,
-            range_start as u64,
-            range_end as u64,
-            self.syng_padding,
-        ) {
-            Ok(ivs) => ivs,
-            Err(e) => {
-                log::warn!(
-                    "syng query_region failed for {}:{}-{}: {}",
-                    name,
-                    range_start,
-                    range_end,
-                    e
-                );
-                return vec![];
-            }
-        };
-        intervals
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let intervals = self
+            .syng_index
+            .query_region(
+                name,
+                range_start as u64,
+                range_end as u64,
+                self.syng_padding,
+            )
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "syng query_region failed for {}:{}-{}: {}",
+                        name, range_start, range_end, e
+                    ),
+                )
+            })?;
+        Ok(intervals
             .into_iter()
             .filter_map(|iv| {
                 let id = self.seq_index.get_id(&iv.genome)?;
                 let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
                 Some((interval, vec![], interval))
             })
-            .collect()
+            .collect())
     }
 
     fn query_via_syng_filtered(
@@ -342,26 +341,25 @@ impl SyngImpgWrapper {
         range_end: i32,
         min_anchors: usize,
         min_fraction: f64,
-    ) -> Vec<impg::AdjustedInterval> {
-        let hits = match self.syng_index.query_region_with_anchors_ext(
-            name,
-            range_start as u64,
-            range_end as u64,
-            self.syng_padding,
-            0,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                log::warn!(
-                    "syng query_region_with_anchors failed for {}:{}-{}: {}",
-                    name,
-                    range_start,
-                    range_end,
-                    e
-                );
-                return vec![];
-            }
-        };
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let hits = self
+            .syng_index
+            .query_region_with_anchors_ext(
+                name,
+                range_start as u64,
+                range_end as u64,
+                self.syng_padding,
+                0,
+            )
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "syng query_region_with_anchors failed for {}:{}-{}: {}",
+                        name, range_start, range_end, e
+                    ),
+                )
+            })?;
         let syncmer_len = (self.syng_index.params.w + self.syng_index.params.k) as u64;
         let query_range_len = (range_end - range_start).max(0) as u64;
         let effective_min = syng_transitive::effective_min_chain_anchors_for_syncmer(
@@ -379,7 +377,7 @@ impl SyngImpgWrapper {
             (effective_min as u64).saturating_mul(syncmer_len),
         );
         let min_extent_bp = (query_range_len as f64 * min_fraction.max(0.0)) as u64;
-        chained
+        Ok(chained
             .into_iter()
             .filter(|c| {
                 if c.anchors.len() < effective_min {
@@ -405,7 +403,7 @@ impl SyngImpgWrapper {
                 let t_iv = coitrees::Interval::new(c.start as i32, c.end as i32, tid);
                 Some((t_iv, Vec::<impg::CigarOp>::new(), t_iv))
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -423,7 +421,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
@@ -440,7 +438,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
@@ -470,7 +468,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
@@ -489,7 +487,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
@@ -1250,6 +1248,29 @@ mod tests {
         (index, seq_index)
     }
 
+    fn build_test_syng_without_sampled_steps() -> (syng::SyngIndex, seqidx::SequenceIndex) {
+        let params = syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
+        let shared_len = 500;
+        let total_len = 1000;
+        let backbone = make_test_sequence(shared_len, 42);
+
+        let mut seq_a = backbone.clone();
+        seq_a.extend_from_slice(&make_test_sequence(total_len - shared_len, 1));
+
+        let mut seq_b = backbone;
+        seq_b.extend_from_slice(&make_test_sequence(total_len - shared_len, 2));
+
+        let mut index = syng::SyngIndex::new(params);
+        index.add_sequence("genome_a".to_string(), seq_a);
+        index.add_sequence("genome_b".to_string(), seq_b);
+        let seq_index = index.build_seq_index();
+        (index, seq_index)
+    }
+
     #[test]
     fn test_syng_impg_wrapper_seq_index() {
         let _guard = lock_syng();
@@ -1272,9 +1293,11 @@ mod tests {
         let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
 
         // Query the shared backbone region via the ImpgIndex trait
-        let results = wrapper.query_transitive_dfs(
-            target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
+        let results = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
 
         // Should find at least genome_a (self) and genome_b (shared backbone)
         let genomes_found: Vec<&str> = results
@@ -1313,12 +1336,16 @@ mod tests {
 
         let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
 
-        let dfs = wrapper.query_transitive_dfs(
-            target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
-        let bfs = wrapper.query_transitive_bfs(
-            target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
+        let dfs = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+        let bfs = wrapper
+            .query_transitive_bfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
 
         // Both should return the same results since they both call query_region
         assert_eq!(dfs.len(), bfs.len());
@@ -1336,9 +1363,47 @@ mod tests {
         let wrapper = SyngImpgWrapper::new(syng_index, seq_index, 0);
 
         // Query with an invalid target_id should return empty (not panic)
-        let results = wrapper.query_transitive_dfs(
-            999, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+        let results = wrapper
+            .query_transitive_dfs(
+                999, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_syng_impg_wrapper_query_failure_returns_error() {
+        let _guard = lock_syng();
+        let (syng_index, seq_index) = build_test_syng_without_sampled_steps();
+        let wrapper = SyngImpgWrapper::new(syng_index, seq_index, 0);
+        let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
+
+        let err = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("sampled path-step sidecar is missing"),
+            "unexpected syng query error: {err}"
         );
+    }
+
+    #[test]
+    fn test_syng_impg_wrapper_no_hit_query_returns_empty_ok() {
+        let _guard = lock_syng();
+        let (syng_index, seq_index) = build_test_syng();
+        let wrapper = SyngImpgWrapper::new(syng_index, seq_index, 0);
+        let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
+
+        let results = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 1, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+
         assert!(results.is_empty());
     }
 
@@ -1354,12 +1419,16 @@ mod tests {
 
         let target_a = no_pad.seq_index().get_id("genome_a").unwrap();
 
-        let results_no_pad = no_pad.query_transitive_dfs(
-            target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
-        let results_with_pad = with_pad.query_transitive_dfs(
-            target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
+        let results_no_pad = no_pad
+            .query_transitive_dfs(
+                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+        let results_with_pad = with_pad
+            .query_transitive_dfs(
+                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
 
         // With padding, intervals should be at least as wide
         for (no_p, with_p) in results_no_pad.iter().zip(results_with_pad.iter()) {

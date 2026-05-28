@@ -4207,6 +4207,138 @@ fn test_partition_syng_gfa_blunt_engine() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn test_partition_syng_gfa_reports_query_backend_error() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_partition_syng_gfa_query_error");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        let backbone = numeric_to_ascii(&make_sequence_numeric(1200, 42));
+        let tail1 = numeric_to_ascii(&make_sequence_numeric(400, 1));
+        let tail2 = numeric_to_ascii(&make_sequence_numeric(400, 2));
+
+        writeln!(f, ">sampleA#1#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail1).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#1#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail2).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let syng_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            syng_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("Failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed. stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let pstep_path = format!("{}.syng.pstep", syng_prefix.to_str().unwrap());
+    corrupt_syng_pstep_payload(&pstep_path);
+
+    let out_folder = dir.join("gfas");
+    std::fs::create_dir_all(&out_folder).unwrap();
+    let part = Command::new(&bin)
+        .args([
+            "partition",
+            "-d",
+            "100000",
+            "-a",
+            syng_prefix.to_str().unwrap(),
+            "-w",
+            "800",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng",
+            "--sequence-files",
+            fasta_path.to_str().unwrap(),
+            "--separate-files",
+            "--output-folder",
+            out_folder.to_str().unwrap(),
+            "--min-missing-size",
+            "100",
+            "--min-boundary-distance",
+            "0",
+            "-t",
+            "1",
+        ])
+        .output()
+        .expect("Failed to run impg partition -a syng prefix -o gfa");
+
+    assert!(
+        !part.status.success(),
+        "partition should fail when syng query sidecars are corrupted. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&part.stdout),
+        String::from_utf8_lossy(&part.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&part.stderr);
+    assert!(
+        stderr.contains("syng query_region")
+            && (stderr.contains("truncated varint") || stderr.contains("varint exceeds u64 width")),
+        "stderr should report the syng query backend failure, got: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn corrupt_syng_pstep_payload(path: &str) {
+    let mut data = std::fs::read(path).expect("failed to read syng pstep sidecar");
+    let mut offset = 0usize;
+    for _ in 0..4 {
+        read_le_u64(&data, &mut offset);
+    }
+    let n_offsets = read_le_u64(&data, &mut offset) as usize;
+    offset = offset
+        .checked_add(n_offsets * std::mem::size_of::<u64>())
+        .expect("pstep offset table size overflowed");
+    let n_data = read_le_u64(&data, &mut offset) as usize;
+    assert!(n_data > 0, "test pstep sidecar should have sampled data");
+    let end = offset
+        .checked_add(n_data)
+        .expect("pstep data size overflowed");
+    assert!(
+        end <= data.len(),
+        "pstep sidecar data segment extends past EOF"
+    );
+    for byte in &mut data[offset..end] {
+        *byte = 0x80;
+    }
+    std::fs::write(path, data).expect("failed to corrupt syng pstep sidecar");
+}
+
+fn read_le_u64(data: &[u8], offset: &mut usize) -> u64 {
+    let end = offset.checked_add(8).expect("u64 offset overflowed");
+    let bytes = data
+        .get(*offset..end)
+        .expect("truncated u64 in syng pstep sidecar");
+    *offset = end;
+    u64::from_le_bytes(bytes.try_into().unwrap())
+}
+
 /// Regression test: `impg query -a <syng-prefix> -o gfa --gfa-engine seqwish:X` must
 /// treat `X` as a sub-window size and split the query range into per-window
 /// partitions, not silently collapse into a flat single-engine run.
