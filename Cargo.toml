@@ -87,6 +87,11 @@ lib_wfa2 = { git = "https://github.com/ekg/lib_wfa2", rev = "2f9d9a48addee5185d8
 
 [dev-dependencies]
 ahash = "0.8"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "crush"
+harness = false
 
 [features]
 default = []
