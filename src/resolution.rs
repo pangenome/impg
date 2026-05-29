@@ -224,6 +224,14 @@ pub struct ResolutionConfig {
     /// Minimum positive local objective score required before a candidate can
     /// be considered for application by `method=iterative-multi-level`.
     pub multi_level_min_objective_delta: i128,
+    /// Objective used to rank and accept generated multi-bubble/window
+    /// candidates.
+    pub multi_level_objective: MultiLevelObjectiveMode,
+    /// When true, candidate generation treats tiny high-frequency,
+    /// low-complexity anchors as poor window boundaries. This is an explicit
+    /// selection-time decision and is reported in the round logs; alignments
+    /// for accepted windows are still passed through transparently.
+    pub multi_level_repeat_aware_boundaries: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -283,6 +291,11 @@ pub enum ResolutionMethod {
     /// boundaries, then apply only non-overlapping candidates that improve an
     /// explicit graph-size objective.
     IterativeMultiLevel,
+    /// Coverage-driven multi-bubble pass: use the iterative multi-level window
+    /// generator, include outward residual windows by default, run multi-site
+    /// windows through SweepGA/seqwish, and accept only windows that improve
+    /// bp-weighted node path coverage and/or reduce singleton bp.
+    CoverageMultiBubble,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -298,6 +311,15 @@ pub enum MultiLevelWindowMode {
     Combined,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MultiLevelObjectiveMode {
+    /// Historical iterative multi-level objective: reduce graph size.
+    #[default]
+    Size,
+    /// Prefer higher bp-weighted node path coverage and lower singleton bp.
+    Coverage,
+}
+
 impl MultiLevelWindowMode {
     pub fn parse_name(value: &str) -> Option<Self> {
         match value.replace('_', "-").to_ascii_lowercase().as_str() {
@@ -307,6 +329,23 @@ impl MultiLevelWindowMode {
             }
             "outward" | "outward-expanded" | "residual" | "residual-outward" => Some(Self::Outward),
             "combined" | "all" | "multi" | "multi-level" | "both" => Some(Self::Combined),
+            _ => None,
+        }
+    }
+}
+
+impl MultiLevelObjectiveMode {
+    pub fn parse_name(value: &str) -> Option<Self> {
+        match value.replace('_', "-").to_ascii_lowercase().as_str() {
+            "size" | "graph-size" | "segment-size" | "segment-bp" | "compression" => {
+                Some(Self::Size)
+            }
+            "coverage"
+            | "node-coverage"
+            | "path-coverage"
+            | "node-path-coverage"
+            | "bp-weighted-coverage"
+            | "bp-weighted-node-coverage" => Some(Self::Coverage),
             _ => None,
         }
     }
@@ -348,6 +387,7 @@ impl ResolutionMethod {
             Self::ChainPovu => "chain-povu smoothxg→POASTA",
             Self::TopFlubbleSweepga => "top-flubble-sweepga",
             Self::IterativeMultiLevel => "iterative-multi-level",
+            Self::CoverageMultiBubble => "coverage-multi-bubble",
         }
     }
 
@@ -381,6 +421,15 @@ impl ResolutionMethod {
             | "crush-to-size"
             | "aggressive-window"
             | "aggressive-windows" => Some(Self::IterativeMultiLevel),
+            "coverage-multi-bubble"
+            | "coverage-driven"
+            | "coverage-window"
+            | "coverage-windows"
+            | "coverage-crush"
+            | "node-coverage"
+            | "path-coverage"
+            | "coverage-repeat"
+            | "repeat-aware-coverage" => Some(Self::CoverageMultiBubble),
             _ => None,
         }
     }
@@ -446,6 +495,7 @@ pub const DEFAULT_CHAIN_GREEDY_TARGET_BP: usize = 10_000;
 pub const DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES: usize = 8;
 pub const DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT: usize = 192;
 pub const DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA: i128 = 1;
+pub const DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES: bool = false;
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
@@ -497,6 +547,8 @@ impl Default for ResolutionConfig {
             multi_level_max_window_sites: DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES,
             multi_level_candidate_limit: DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT,
             multi_level_min_objective_delta: DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA,
+            multi_level_objective: MultiLevelObjectiveMode::Size,
+            multi_level_repeat_aware_boundaries: DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES,
         }
     }
 }
@@ -796,7 +848,10 @@ fn resolve_graph_bubbles(
             initial_next_id,
         );
     }
-    if config.method == ResolutionMethod::IterativeMultiLevel {
+    if matches!(
+        config.method,
+        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble
+    ) {
         return resolve_graph_bubbles_iterative_multi_level(
             graph,
             original_gfa,
@@ -2076,7 +2131,7 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
     if emit_logs {
         for row in &evidence_rows {
             log::info!(
-                "crush top-flubble-sweepga region {}/{} evidence: input_traversals={}, input_bp={}, emitted_alignment_records={}, aligned_bp={}, paf_bytes={}, fastga_frequency={}, replacement_segments={}, replacement_shared_segments={}, replacement_bp={}, applied=true",
+                "crush top-flubble-sweepga region {}/{} evidence: input_traversals={}, input_bp={}, emitted_alignment_records={}, aligned_bp={}, paf_bytes={}, collinear_records={}, off_diagonal_records={}, dust_like_records={}, fastga_frequency={}, replacement_segments={}, replacement_shared_segments={}, replacement_bp={}, applied=true",
                 row.region_ordinal,
                 selected_count,
                 row.input_traversals,
@@ -2084,6 +2139,9 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
                 row.alignment_records,
                 row.aligned_bp,
                 row.paf_bytes,
+                row.collinear_records,
+                row.off_diagonal_records,
+                row.dust_like_records,
                 row.kmer_frequency,
                 row.replacement_segments,
                 row.replacement_shared_segments,
@@ -2134,16 +2192,21 @@ fn resolve_graph_bubbles_iterative_multi_level(
     let mut changed = false;
     let mut resolved_signatures: FxHashSet<String> = FxHashSet::default();
     let mut per_round_accepted = Vec::new();
+    let objective_mode = effective_multi_level_objective(config);
+    let repeat_aware_boundaries = effective_repeat_aware_boundaries(config);
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, min-objective-delta={}, replacement-routing=multi-site-sweepga/single-site-auto",
-            config.multi_level_window_mode,
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, objective={:?}, min-objective-delta={}, repeat-aware-boundaries={}, replacement-routing=multi-site-sweepga/single-site-auto",
+            config.method.method_name(),
+            effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
             config.multi_level_max_window_sites,
             config.multi_level_candidate_limit,
             multi_level_window_total_bp_cap(config),
-            config.multi_level_min_objective_delta
+            objective_mode,
+            config.multi_level_min_objective_delta,
+            repeat_aware_boundaries
         );
     }
 
@@ -2176,7 +2239,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-skipped={}; discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2184,6 +2247,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 generated.candidates.len(),
                 discovery_elapsed,
                 format_multi_level_source_counts(&generated.source_counts),
+                generated.repeat_boundary_rejected,
                 timings.render,
                 timings.povu_parse,
                 timings.povu_decompose,
@@ -2255,8 +2319,12 @@ fn resolve_graph_bubbles_iterative_multi_level(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(None);
                     }
-                    let objective =
-                        replacement_objective_delta(&graph, &window.candidate, &replacement);
+                    let objective = replacement_objective_delta(
+                        &graph,
+                        &window.candidate,
+                        &replacement,
+                        objective_mode,
+                    );
                     Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(
                         MultiLevelBuiltCandidate {
                             source,
@@ -2294,16 +2362,19 @@ fn resolve_graph_bubbles_iterative_multi_level(
                                 .map(format_sweepga_evidence)
                                 .unwrap_or_else(|| "alignment_evidence=not-applicable".to_string());
                             log::info!(
-                                "crush iterative-multi-level round {}: built candidate detail source={} sites={} method={:?} {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, segment_delta={}, segment_bp_delta={}",
+                                "crush iterative-multi-level round {}: built candidate detail source={} sites={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
                                 round + 1,
                                 candidate.source.as_str(),
                                 candidate.source_sites,
                                 method,
                                 format_candidate_boundary(&graph, &candidate.plan.candidate),
+                                format_candidate_repeat_summary(&graph, &candidate.plan.candidate),
                                 evidence,
                                 candidate.plan.replacement.segments.len(),
                                 replacement_segment_bp(&candidate.plan.replacement),
                                 candidate.objective.score_delta,
+                                candidate.objective.bp_weighted_coverage_delta_scaled,
+                                candidate.objective.singleton_bp_delta,
                                 candidate.objective.segment_delta,
                                 candidate.objective.segment_bp_delta
                             );
@@ -2434,7 +2505,8 @@ fn resolve_graph_bubbles_iterative_multi_level(
             "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {trial_next_id}"
         );
         let mut after_quality = graph_quality(&next_graph);
-        let mut graph_delta = graph_size_score_delta(before_quality, after_quality);
+        let mut graph_delta =
+            graph_objective_delta_for_mode(before_quality, after_quality, objective_mode);
         let mut fallback_trials = 0usize;
         let mut fallback_failed_trials = 0usize;
         let mut fallback_used = false;
@@ -2445,6 +2517,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 objective_floor,
                 next_id,
                 MULTI_LEVEL_GLOBAL_FALLBACK_TRIAL_LIMIT,
+                objective_mode,
             );
             fallback_trials = fallback.trials;
             fallback_failed_trials = fallback.failed_trials;
@@ -2461,7 +2534,8 @@ fn resolve_graph_bubbles_iterative_multi_level(
                     "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {trial_next_id}"
                 );
                 after_quality = graph_quality(&next_graph);
-                graph_delta = graph_size_score_delta(before_quality, after_quality);
+                graph_delta =
+                    graph_objective_delta_for_mode(before_quality, after_quality, objective_mode);
                 fallback_used = true;
             }
         }
@@ -2600,6 +2674,7 @@ struct MultiLevelGeneratedCandidates {
     candidates: Vec<MultiLevelWindowCandidate>,
     generated_total: usize,
     source_counts: FxHashMap<MultiLevelCandidateSource, usize>,
+    repeat_boundary_rejected: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2608,6 +2683,12 @@ struct ReplacementObjectiveDelta {
     input_segment_bp: usize,
     output_segments: usize,
     output_segment_bp: usize,
+    input_bp_weighted_coverage: f64,
+    output_bp_weighted_coverage: f64,
+    bp_weighted_coverage_delta_scaled: i128,
+    input_singleton_bp: usize,
+    output_singleton_bp: usize,
+    singleton_bp_delta: i128,
     segment_delta: i128,
     segment_bp_delta: i128,
     score_delta: i128,
@@ -2645,6 +2726,31 @@ fn multi_level_window_total_bp_cap(config: &ResolutionConfig) -> usize {
     }
 }
 
+fn effective_multi_level_objective(config: &ResolutionConfig) -> MultiLevelObjectiveMode {
+    if config.method == ResolutionMethod::CoverageMultiBubble {
+        MultiLevelObjectiveMode::Coverage
+    } else {
+        config.multi_level_objective
+    }
+}
+
+fn effective_repeat_aware_boundaries(config: &ResolutionConfig) -> bool {
+    config.multi_level_repeat_aware_boundaries
+        || config.method == ResolutionMethod::CoverageMultiBubble
+}
+
+fn effective_multi_level_window_mode(config: &ResolutionConfig) -> MultiLevelWindowMode {
+    config.multi_level_window_mode
+}
+
+fn coverage_mode_includes_outward(config: &ResolutionConfig) -> bool {
+    config.method == ResolutionMethod::CoverageMultiBubble
+        && matches!(
+            config.multi_level_window_mode,
+            MultiLevelWindowMode::Combined | MultiLevelWindowMode::Sliding
+        )
+}
+
 fn generate_multi_level_candidates(
     graph: &Graph,
     config: &ResolutionConfig,
@@ -2664,19 +2770,40 @@ fn generate_multi_level_candidates(
     let path_step_indexes: Vec<FxHashMap<Step, Vec<usize>>> =
         graph.paths.iter().map(path_step_index).collect();
     let mut emitted = FxHashSet::<String>::default();
+    let node_visits = if effective_repeat_aware_boundaries(config) {
+        Some(graph_node_visit_counts(graph))
+    } else {
+        None
+    };
+    let window_mode = effective_multi_level_window_mode(config);
 
     let use_sibling = matches!(
-        config.multi_level_window_mode,
+        window_mode,
         MultiLevelWindowMode::Sibling | MultiLevelWindowMode::Combined
     );
     let use_sliding = matches!(
-        config.multi_level_window_mode,
+        window_mode,
         MultiLevelWindowMode::Sliding | MultiLevelWindowMode::Combined
     );
-    let use_outward = matches!(
-        config.multi_level_window_mode,
-        MultiLevelWindowMode::Outward
-    );
+    let use_outward = matches!(window_mode, MultiLevelWindowMode::Outward)
+        || coverage_mode_includes_outward(config);
+    let add_outward_first = coverage_mode_includes_outward(config);
+
+    if use_outward && add_outward_first {
+        add_outward_residual_windows(
+            graph,
+            discovered,
+            target_bp,
+            max_sites,
+            &path_positions_by_path,
+            &path_step_indexes,
+            node_visits.as_deref(),
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
 
     if use_sibling || use_sliding {
         for d in discovered.iter().filter(|d| d.povu_level == 0) {
@@ -2700,6 +2827,7 @@ fn generate_multi_level_candidates(
             max_sites,
             &path_positions_by_path,
             &path_step_indexes,
+            node_visits.as_deref(),
             &mut generated,
             &mut emitted,
             resolved_signatures,
@@ -2723,6 +2851,7 @@ fn generate_multi_level_candidates(
             max_sites,
             &path_positions_by_path,
             &path_step_indexes,
+            node_visits.as_deref(),
             &mut generated,
             &mut emitted,
             resolved_signatures,
@@ -2735,6 +2864,7 @@ fn generate_multi_level_candidates(
             max_sites,
             &path_positions_by_path,
             &path_step_indexes,
+            node_visits.as_deref(),
             &mut generated,
             &mut emitted,
             resolved_signatures,
@@ -2742,7 +2872,7 @@ fn generate_multi_level_candidates(
         );
     }
 
-    if use_outward {
+    if use_outward && !add_outward_first {
         add_outward_residual_windows(
             graph,
             discovered,
@@ -2750,6 +2880,7 @@ fn generate_multi_level_candidates(
             max_sites,
             &path_positions_by_path,
             &path_step_indexes,
+            node_visits.as_deref(),
             &mut generated,
             &mut emitted,
             resolved_signatures,
@@ -2757,10 +2888,7 @@ fn generate_multi_level_candidates(
         );
     }
 
-    if matches!(
-        config.multi_level_window_mode,
-        MultiLevelWindowMode::Combined
-    ) {
+    if matches!(window_mode, MultiLevelWindowMode::Combined) {
         add_cross_level_windows(
             graph,
             discovered,
@@ -2768,6 +2896,7 @@ fn generate_multi_level_candidates(
             max_sites,
             &path_positions_by_path,
             &path_step_indexes,
+            node_visits.as_deref(),
             &mut generated,
             &mut emitted,
             resolved_signatures,
@@ -2865,6 +2994,7 @@ fn add_same_parent_sibling_windows(
     max_sites: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
     resolved_signatures: &FxHashSet<String>,
@@ -2898,6 +3028,7 @@ fn add_same_parent_sibling_windows(
             max_sites,
             path_positions_by_path,
             path_step_indexes,
+            node_visits,
             MultiLevelCandidateSource::SiblingRun,
             generated,
             emitted,
@@ -2950,6 +3081,7 @@ fn add_sliding_path_order_windows(
     max_sites: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
     resolved_signatures: &FxHashSet<String>,
@@ -2965,6 +3097,7 @@ fn add_sliding_path_order_windows(
         max_sites,
         path_positions_by_path,
         path_step_indexes,
+        node_visits,
         MultiLevelCandidateSource::SlidingWindow,
         generated,
         emitted,
@@ -2980,6 +3113,7 @@ fn add_cross_level_windows(
     max_sites: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
     resolved_signatures: &FxHashSet<String>,
@@ -3003,6 +3137,7 @@ fn add_cross_level_windows(
                 max_sites,
                 path_positions_by_path,
                 path_step_indexes,
+                node_visits,
                 MultiLevelCandidateSource::LevelWindow,
                 generated,
                 emitted,
@@ -3020,6 +3155,7 @@ fn add_stringy_neighborhood_windows(
     max_sites: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
     resolved_signatures: &FxHashSet<String>,
@@ -3048,6 +3184,7 @@ fn add_stringy_neighborhood_windows(
             target_bp,
             path_positions_by_path,
             path_step_indexes,
+            node_visits,
             MultiLevelCandidateSource::StringyNeighborhood,
             generated,
             emitted,
@@ -3064,6 +3201,7 @@ fn add_outward_residual_windows(
     max_sites: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
     resolved_signatures: &FxHashSet<String>,
@@ -3122,6 +3260,7 @@ fn add_outward_residual_windows(
                     target_bp,
                     path_positions_by_path,
                     path_step_indexes,
+                    node_visits,
                     MultiLevelCandidateSource::OutwardResidualWindow,
                     generated,
                     emitted,
@@ -3141,6 +3280,7 @@ fn add_index_windows(
     max_sites: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     source: MultiLevelCandidateSource,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
@@ -3160,6 +3300,7 @@ fn add_index_windows(
                 target_bp,
                 path_positions_by_path,
                 path_step_indexes,
+                node_visits,
                 source,
                 generated,
                 emitted,
@@ -3177,6 +3318,7 @@ fn add_specific_index_window(
     target_bp: usize,
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
     source: MultiLevelCandidateSource,
     generated: &mut MultiLevelGeneratedCandidates,
     emitted: &mut FxHashSet<String>,
@@ -3206,6 +3348,21 @@ fn add_specific_index_window(
     };
     if end_bp.saturating_sub(start_bp) > target_bp {
         return;
+    }
+    if let Some(visits) = node_visits {
+        let Some(root_path) = graph.paths.first() else {
+            return;
+        };
+        let Some(&entry) = root_path.steps.get(root_start) else {
+            return;
+        };
+        let Some(&exit) = root_path.steps.get(root_end) else {
+            return;
+        };
+        if repeat_boundary_should_reject(graph, entry, exit, visits) {
+            generated.repeat_boundary_rejected += 1;
+            return;
+        }
     }
     let Some(candidate) = candidate_from_root_interval(
         graph,
@@ -3304,6 +3461,95 @@ fn candidate_from_root_interval(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RepeatAnchorDiagnostic {
+    visits: usize,
+    len: usize,
+    low_complexity: bool,
+    repeat_like: bool,
+}
+
+fn graph_node_visit_counts(graph: &Graph) -> Vec<usize> {
+    let mut node_visits = vec![0usize; graph.segments.len()];
+    for path in &graph.paths {
+        for step in &path.steps {
+            if step.node < node_visits.len() {
+                node_visits[step.node] += 1;
+            }
+        }
+    }
+    node_visits
+}
+
+fn repeat_anchor_diagnostic(
+    graph: &Graph,
+    step: Step,
+    node_visits: &[usize],
+) -> RepeatAnchorDiagnostic {
+    let visits = node_visits.get(step.node).copied().unwrap_or(0);
+    let len = graph
+        .segments
+        .get(step.node)
+        .map(|segment| segment.seq.len())
+        .unwrap_or(0);
+    let low_complexity = graph
+        .segments
+        .get(step.node)
+        .map(|segment| is_low_complexity_dna(&segment.seq))
+        .unwrap_or(false);
+    let high_frequency = visits >= graph.paths.len().div_ceil(2).max(2);
+    let repeat_like = high_frequency && (len <= 64 || low_complexity);
+    RepeatAnchorDiagnostic {
+        visits,
+        len,
+        low_complexity,
+        repeat_like,
+    }
+}
+
+fn repeat_boundary_should_reject(
+    graph: &Graph,
+    entry: Step,
+    exit: Step,
+    node_visits: &[usize],
+) -> bool {
+    let entry_diag = repeat_anchor_diagnostic(graph, entry, node_visits);
+    let exit_diag = repeat_anchor_diagnostic(graph, exit, node_visits);
+    entry_diag.repeat_like && exit_diag.repeat_like
+}
+
+fn is_low_complexity_dna(seq: &[u8]) -> bool {
+    if seq.len() < 8 {
+        return false;
+    }
+    let mut counts = [0usize; 5];
+    for &base in seq {
+        match base.to_ascii_uppercase() {
+            b'A' => counts[0] += 1,
+            b'C' => counts[1] += 1,
+            b'G' => counts[2] += 1,
+            b'T' | b'U' => counts[3] += 1,
+            _ => counts[4] += 1,
+        }
+    }
+    let max_single = counts.iter().copied().max().unwrap_or(0);
+    if max_single.saturating_mul(100) >= seq.len().saturating_mul(80) {
+        return true;
+    }
+    let mut dinuc_counts = FxHashMap::<[u8; 2], usize>::default();
+    for pair in seq.windows(2) {
+        let key = [pair[0].to_ascii_uppercase(), pair[1].to_ascii_uppercase()];
+        *dinuc_counts.entry(key).or_insert(0) += 1;
+    }
+    dinuc_counts
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .saturating_mul(100)
+        >= seq.len().saturating_sub(1).saturating_mul(70)
+}
+
 fn reference_path_order_indexes(discovered: &[DiscoveredCandidate]) -> Vec<usize> {
     let mut indexes = (0..discovered.len()).collect::<Vec<_>>();
     indexes.sort_by(|&a, &b| {
@@ -3398,11 +3644,12 @@ fn select_multi_level_global_objective_fallback(
     objective_floor: i128,
     next_id: usize,
     max_trials: usize,
+    objective_mode: MultiLevelObjectiveMode,
 ) -> MultiLevelGlobalFallback {
     let mut fallback = MultiLevelGlobalFallback::default();
     let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
     let mut accepted_plans = Vec::<ReplacementPlan>::new();
-    let before_score = graph_size_objective(graph);
+    let before_quality = graph_quality(graph);
 
     for candidate in candidates {
         if fallback.trials >= max_trials {
@@ -3420,7 +3667,9 @@ fn select_multi_level_global_objective_fallback(
             fallback.failed_trials += 1;
             continue;
         };
-        let graph_delta = before_score - graph_size_objective(&trial_graph);
+        let trial_quality = graph_quality(&trial_graph);
+        let graph_delta =
+            graph_objective_delta_for_mode(before_quality, trial_quality, objective_mode);
         if graph_delta < objective_floor {
             continue;
         }
@@ -3436,10 +3685,13 @@ fn replacement_objective_delta(
     graph: &Graph,
     candidate: &BubbleCandidate,
     replacement: &Graph,
+    objective_mode: MultiLevelObjectiveMode,
 ) -> ReplacementObjectiveDelta {
     let (input_segments, input_segment_bp) = candidate_unique_segment_stats(graph, candidate);
     let output_segments = replacement.segments.len();
     let output_segment_bp = replacement_segment_bp(replacement);
+    let input_coverage = candidate_coverage_quality(graph, candidate);
+    let output_quality = graph_quality(replacement);
     let input_score = size_objective(input_segments, input_segment_bp, candidate.total_steps);
     let output_path_steps = replacement
         .paths
@@ -3447,14 +3699,36 @@ fn replacement_objective_delta(
         .map(|path| path.steps.len())
         .sum::<usize>();
     let output_score = size_objective(output_segments, output_segment_bp, output_path_steps);
+    let bp_weighted_coverage_delta_scaled = scaled_coverage_delta(
+        input_coverage.bp_weighted_mean,
+        output_quality.node_coverage_bp_weighted_mean,
+    );
+    let singleton_bp_delta =
+        input_coverage.singleton_bp as i128 - output_quality.singleton_bp as i128;
+    let size_delta = input_score - output_score;
+    let score_delta = match objective_mode {
+        MultiLevelObjectiveMode::Size => size_delta,
+        MultiLevelObjectiveMode::Coverage => coverage_acceptance_delta(
+            input_coverage.bp_weighted_mean,
+            input_coverage.singleton_bp,
+            output_quality.node_coverage_bp_weighted_mean,
+            output_quality.singleton_bp,
+        ),
+    };
     ReplacementObjectiveDelta {
         input_segments,
         input_segment_bp,
         output_segments,
         output_segment_bp,
+        input_bp_weighted_coverage: input_coverage.bp_weighted_mean,
+        output_bp_weighted_coverage: output_quality.node_coverage_bp_weighted_mean,
+        bp_weighted_coverage_delta_scaled,
+        input_singleton_bp: input_coverage.singleton_bp,
+        output_singleton_bp: output_quality.singleton_bp,
+        singleton_bp_delta,
         segment_delta: input_segments as i128 - output_segments as i128,
         segment_bp_delta: input_segment_bp as i128 - output_segment_bp as i128,
-        score_delta: input_score - output_score,
+        score_delta,
     }
 }
 
@@ -3482,23 +3756,93 @@ fn candidate_unique_segment_stats(graph: &Graph, candidate: &BubbleCandidate) ->
     (nodes.len(), bp)
 }
 
-fn graph_size_score_delta(before: GraphQuality, after: GraphQuality) -> i128 {
-    size_objective(before.segments, before.segment_bp, before.path_steps)
-        - size_objective(after.segments, after.segment_bp, after.path_steps)
+#[derive(Clone, Copy, Debug, Default)]
+struct CoverageQuality {
+    bp_weighted_mean: f64,
+    singleton_bp: usize,
 }
 
-fn graph_size_objective(graph: &Graph) -> i128 {
-    let segment_bp = graph
-        .segments
-        .iter()
-        .map(|segment| segment.seq.len())
-        .sum::<usize>();
-    let path_steps = graph
-        .paths
-        .iter()
-        .map(|path| path.steps.len())
-        .sum::<usize>();
-    size_objective(graph.segments.len(), segment_bp, path_steps)
+fn candidate_coverage_quality(graph: &Graph, candidate: &BubbleCandidate) -> CoverageQuality {
+    let mut visits = FxHashMap::<usize, usize>::default();
+    for range in &candidate.ranges {
+        if let Some(path) = graph.paths.get(range.path_idx) {
+            for step_idx in range.begin_step..range.end_step {
+                if let Some(step) = path.steps.get(step_idx) {
+                    *visits.entry(step.node).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let mut segment_bp = 0usize;
+    let mut weighted_visit_bp = 0u128;
+    let mut singleton_bp = 0usize;
+    for (node, count) in visits {
+        let len = graph
+            .segments
+            .get(node)
+            .map(|segment| segment.seq.len())
+            .unwrap_or(0);
+        segment_bp = segment_bp.saturating_add(len);
+        weighted_visit_bp =
+            weighted_visit_bp.saturating_add((count as u128).saturating_mul(len as u128));
+        if count == 1 {
+            singleton_bp = singleton_bp.saturating_add(len);
+        }
+    }
+    let bp_weighted_mean = if segment_bp == 0 {
+        0.0
+    } else {
+        weighted_visit_bp as f64 / segment_bp as f64
+    };
+    CoverageQuality {
+        bp_weighted_mean,
+        singleton_bp,
+    }
+}
+
+const COVERAGE_OBJECTIVE_SCALE: f64 = 1_000_000.0;
+const COVERAGE_SINGLETON_BP_WEIGHT: i128 = 1024;
+
+fn scaled_coverage_delta(before_bp_weighted: f64, after_bp_weighted: f64) -> i128 {
+    ((after_bp_weighted - before_bp_weighted) * COVERAGE_OBJECTIVE_SCALE).round() as i128
+}
+
+fn coverage_acceptance_delta(
+    before_bp_weighted: f64,
+    before_singleton_bp: usize,
+    after_bp_weighted: f64,
+    after_singleton_bp: usize,
+) -> i128 {
+    let coverage_delta = scaled_coverage_delta(before_bp_weighted, after_bp_weighted);
+    let singleton_delta = before_singleton_bp as i128 - after_singleton_bp as i128;
+    if coverage_delta > 0 || singleton_delta > 0 {
+        coverage_delta.max(0).saturating_add(
+            singleton_delta
+                .max(0)
+                .saturating_mul(COVERAGE_SINGLETON_BP_WEIGHT),
+        )
+    } else {
+        coverage_delta.saturating_add(singleton_delta.saturating_mul(COVERAGE_SINGLETON_BP_WEIGHT))
+    }
+}
+
+fn graph_objective_delta_for_mode(
+    before: GraphQuality,
+    after: GraphQuality,
+    objective_mode: MultiLevelObjectiveMode,
+) -> i128 {
+    match objective_mode {
+        MultiLevelObjectiveMode::Size => {
+            size_objective(before.segments, before.segment_bp, before.path_steps)
+                - size_objective(after.segments, after.segment_bp, after.path_steps)
+        }
+        MultiLevelObjectiveMode::Coverage => coverage_acceptance_delta(
+            before.node_coverage_bp_weighted_mean,
+            before.singleton_bp,
+            after.node_coverage_bp_weighted_mean,
+            after.singleton_bp,
+        ),
+    }
 }
 
 fn size_objective(segments: usize, segment_bp: usize, path_steps: usize) -> i128 {
@@ -3591,6 +3935,58 @@ fn format_candidate_boundary(graph: &Graph, candidate: &BubbleCandidate) -> Stri
     )
 }
 
+fn format_candidate_repeat_summary(graph: &Graph, candidate: &BubbleCandidate) -> String {
+    let node_visits = graph_node_visit_counts(graph);
+    let mut nodes = FxHashSet::<usize>::default();
+    for range in &candidate.ranges {
+        if let Some(path) = graph.paths.get(range.path_idx) {
+            for step_idx in range.begin_step..range.end_step {
+                if let Some(step) = path.steps.get(step_idx) {
+                    nodes.insert(step.node);
+                }
+            }
+        }
+    }
+    let mut repeat_like_nodes = 0usize;
+    let mut repeat_like_bp = 0usize;
+    let mut low_complexity_nodes = 0usize;
+    let mut low_complexity_bp = 0usize;
+    for &node in &nodes {
+        let step = Step { node, rev: false };
+        let diag = repeat_anchor_diagnostic(graph, step, &node_visits);
+        if diag.low_complexity {
+            low_complexity_nodes += 1;
+            low_complexity_bp = low_complexity_bp.saturating_add(diag.len);
+        }
+        if diag.repeat_like {
+            repeat_like_nodes += 1;
+            repeat_like_bp = repeat_like_bp.saturating_add(diag.len);
+        }
+    }
+
+    let mut seq_counts = FxHashMap::<Vec<u8>, usize>::default();
+    let mut low_complexity_traversals = 0usize;
+    for range in &candidate.ranges {
+        if is_low_complexity_dna(&range.sequence) {
+            low_complexity_traversals += 1;
+        }
+        *seq_counts.entry(range.sequence.clone()).or_insert(0) += 1;
+    }
+    let duplicate_sequence_classes = seq_counts.values().filter(|&&count| count > 1).count();
+    let top_duplicate_count = seq_counts.values().copied().max().unwrap_or(0);
+    format!(
+        "repeat_diag=unique_nodes={},repeat_like_nodes={}({}bp),low_complexity_nodes={}({}bp),duplicate_traversal_classes={},top_duplicate_count={},low_complexity_traversals={}",
+        nodes.len(),
+        repeat_like_nodes,
+        repeat_like_bp,
+        low_complexity_nodes,
+        low_complexity_bp,
+        duplicate_sequence_classes,
+        top_duplicate_count,
+        low_complexity_traversals
+    )
+}
+
 fn format_multi_level_candidate_details(
     graph: &Graph,
     candidates: &[MultiLevelWindowCandidate],
@@ -3675,6 +4071,14 @@ fn format_objective_delta_summary(candidates: &[MultiLevelBuiltCandidate]) -> St
         .iter()
         .map(|candidate| candidate.objective.segment_bp_delta)
         .collect::<Vec<_>>();
+    let coverage_deltas = candidates
+        .iter()
+        .map(|candidate| candidate.objective.bp_weighted_coverage_delta_scaled)
+        .collect::<Vec<_>>();
+    let singleton_deltas = candidates
+        .iter()
+        .map(|candidate| candidate.objective.singleton_bp_delta)
+        .collect::<Vec<_>>();
     let input_segments = candidates
         .iter()
         .map(|candidate| candidate.objective.input_segments)
@@ -3695,17 +4099,41 @@ fn format_objective_delta_summary(candidates: &[MultiLevelBuiltCandidate]) -> St
         .iter()
         .map(|candidate| candidate.source_sites)
         .collect::<Vec<_>>();
+    let input_singleton_bp = candidates
+        .iter()
+        .map(|candidate| candidate.objective.input_singleton_bp)
+        .sum::<usize>();
+    let output_singleton_bp = candidates
+        .iter()
+        .map(|candidate| candidate.objective.output_singleton_bp)
+        .sum::<usize>();
+    let mean_input_bp_weighted_coverage = candidates
+        .iter()
+        .map(|candidate| candidate.objective.input_bp_weighted_coverage)
+        .sum::<f64>()
+        / candidates.len() as f64;
+    let mean_output_bp_weighted_coverage = candidates
+        .iter()
+        .map(|candidate| candidate.objective.output_bp_weighted_coverage)
+        .sum::<f64>()
+        / candidates.len() as f64;
     format!(
-        "n={}, source-sites {}, score-delta {}, segment-delta {}, segment-bp-delta {}, input_segments={}, output_segments={}, input_bp={}, output_bp={}",
+        "n={}, source-sites {}, score-delta {}, coverage-delta-scaled {}, singleton-bp-delta {}, segment-delta {}, segment-bp-delta {}, mean_bp_weighted_coverage={:.4}->{:.4}, input_segments={}, output_segments={}, input_bp={}, output_bp={}, input_singleton_bp={}, output_singleton_bp={}",
         candidates.len(),
         format_bp_distribution("sites", &source_sites),
         format_i128_distribution(&score_deltas),
+        format_i128_distribution(&coverage_deltas),
+        format_i128_distribution(&singleton_deltas),
         format_i128_distribution(&segment_deltas),
         format_i128_distribution(&bp_deltas),
+        mean_input_bp_weighted_coverage,
+        mean_output_bp_weighted_coverage,
         input_segments,
         output_segments,
         input_bp,
-        output_bp
+        output_bp,
+        input_singleton_bp,
+        output_singleton_bp
     )
 }
 
@@ -3772,6 +4200,9 @@ struct TopFlubbleSweepgaEvidenceRow {
     alignment_records: usize,
     aligned_bp: u64,
     paf_bytes: usize,
+    collinear_records: usize,
+    off_diagonal_records: usize,
+    dust_like_records: usize,
     kmer_frequency: usize,
     replacement_segments: usize,
     replacement_shared_segments: usize,
@@ -3787,6 +4218,9 @@ impl TopFlubbleSweepgaEvidenceRow {
             alignment_records: build.evidence.alignment_records,
             aligned_bp: build.evidence.aligned_bp,
             paf_bytes: build.evidence.paf_bytes,
+            collinear_records: build.evidence.collinear_records,
+            off_diagonal_records: build.evidence.off_diagonal_records,
+            dust_like_records: build.evidence.dust_like_records,
             kmer_frequency: build.evidence.kmer_frequency,
             replacement_segments: build.evidence.replacement_segments,
             replacement_shared_segments: build.evidence.replacement_shared_segments,
@@ -3994,7 +4428,7 @@ fn candidate_selection_method(
     match config.method {
         ResolutionMethod::Auto => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
-        ResolutionMethod::IterativeMultiLevel => {
+        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
             auto_method_by_median(candidate.traversal_stats, config)
         }
         ResolutionMethod::ChainPovu => ResolutionMethod::Poasta,
@@ -4082,8 +4516,8 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         ResolutionMethod::TopFlubbleSweepga => {
             unreachable!("top-flubble-sweepga candidate method should be resolved")
         }
-        ResolutionMethod::IterativeMultiLevel => {
-            unreachable!("iterative multi-level candidate method should be resolved")
+        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
+            unreachable!("iterative/coverage multi-level candidate method should be resolved")
         }
     }
 }
@@ -5949,6 +6383,9 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::IterativeMultiLevel => {
             unreachable!("iterative multi-level is resolved before replacement dispatch")
         }
+        ResolutionMethod::CoverageMultiBubble => {
+            unreachable!("coverage multi-bubble is resolved before replacement dispatch")
+        }
         ResolutionMethod::ChainPovu => {
             build_chain_povu_smooth_poasta_replacement(candidate, config)
         }
@@ -5970,7 +6407,9 @@ fn candidate_replacement_method(
     match config.method {
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
-        ResolutionMethod::IterativeMultiLevel => auto_replacement_method(candidate, config),
+        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
+            auto_replacement_method(candidate, config)
+        }
         ResolutionMethod::ChainPovu => ResolutionMethod::ChainPovu,
         ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
@@ -6585,6 +7024,9 @@ struct SweepgaReplacementEvidence {
     alignment_records: usize,
     aligned_bp: u64,
     paf_bytes: usize,
+    collinear_records: usize,
+    off_diagonal_records: usize,
+    dust_like_records: usize,
     kmer_frequency: usize,
     replacement_segments: usize,
     replacement_shared_segments: usize,
@@ -6593,10 +7035,13 @@ struct SweepgaReplacementEvidence {
 
 fn format_sweepga_evidence(evidence: &SweepgaReplacementEvidence) -> String {
     format!(
-        "alignment_evidence=raw_paf_records={},aligned_bp={},paf_bytes={},fastga_frequency={},replacement_segments={},replacement_shared_segments={},replacement_bp={}",
+        "alignment_evidence=raw_paf_records={},aligned_bp={},paf_bytes={},collinear_records={},off_diagonal_records={},dust_like_records={},fastga_frequency={},replacement_segments={},replacement_shared_segments={},replacement_bp={}",
         evidence.alignment_records,
         evidence.aligned_bp,
         evidence.paf_bytes,
+        evidence.collinear_records,
+        evidence.off_diagonal_records,
+        evidence.dust_like_records,
         evidence.kmer_frequency,
         evidence.replacement_segments,
         evidence.replacement_shared_segments,
@@ -6699,6 +7144,7 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         .iter()
         .filter_map(|line| paf_alignment_block_bp(line))
         .sum::<u64>();
+    let alignment_profile = classify_paf_alignment_profile(&paf_lines);
     if paf_lines.is_empty() {
         log::info!(
             "crush sweepga: {} backend emitted zero replacement PAF record(s) for {} traversal(s), {} aligner-input traversal(s), {} input bp; skipping replacement induction",
@@ -6763,6 +7209,9 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         alignment_records: paf_lines.len(),
         aligned_bp,
         paf_bytes: paf.len(),
+        collinear_records: alignment_profile.collinear_records,
+        off_diagonal_records: alignment_profile.off_diagonal_records,
+        dust_like_records: alignment_profile.dust_like_records,
         kmer_frequency,
         replacement_segments: replacement.segments.len(),
         replacement_shared_segments,
@@ -6786,6 +7235,56 @@ fn sweepga_backend_min_sequence_len(aligner: &str) -> usize {
 
 fn paf_alignment_block_bp(line: &str) -> Option<u64> {
     line.split('\t').nth(10)?.parse().ok()
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PafAlignmentProfile {
+    collinear_records: usize,
+    off_diagonal_records: usize,
+    dust_like_records: usize,
+}
+
+fn classify_paf_alignment_profile(lines: &[String]) -> PafAlignmentProfile {
+    let mut profile = PafAlignmentProfile::default();
+    for line in lines {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 12 {
+            continue;
+        }
+        let q_len = fields[1].parse::<f64>().unwrap_or(0.0);
+        let q_start = fields[2].parse::<f64>().unwrap_or(0.0);
+        let q_end = fields[3].parse::<f64>().unwrap_or(0.0);
+        let strand = fields[4];
+        let t_len = fields[6].parse::<f64>().unwrap_or(0.0);
+        let t_start = fields[7].parse::<f64>().unwrap_or(0.0);
+        let t_end = fields[8].parse::<f64>().unwrap_or(0.0);
+        let matches = fields[9].parse::<f64>().unwrap_or(0.0);
+        let block = fields[10].parse::<f64>().unwrap_or(0.0);
+        if q_len <= 0.0 || t_len <= 0.0 || block <= 0.0 {
+            continue;
+        }
+        let identity = if block > 0.0 { matches / block } else { 0.0 };
+        let q_mid = ((q_start + q_end) / 2.0) / q_len;
+        let t_mid_raw = ((t_start + t_end) / 2.0) / t_len;
+        let t_mid = if strand == "-" {
+            1.0 - t_mid_raw
+        } else {
+            t_mid_raw
+        };
+        let diagonal_distance = (q_mid - t_mid).abs();
+        let q_frac = (q_end - q_start).max(0.0) / q_len;
+        let t_frac = (t_end - t_start).max(0.0) / t_len;
+        let short_fraction = q_frac.min(t_frac);
+        if block < 100.0 || identity < 0.75 || short_fraction < 0.05 {
+            profile.dust_like_records += 1;
+        }
+        if diagonal_distance <= 0.10 && short_fraction >= 0.10 {
+            profile.collinear_records += 1;
+        } else if diagonal_distance >= 0.30 {
+            profile.off_diagonal_records += 1;
+        }
+    }
+    profile
 }
 
 /// Wrapper for `method=wfmash` that forces the SweepGA backend's aligner to
@@ -8689,6 +9188,83 @@ P\tp1\t1+,3+,4+\t*
             MultiLevelWindowMode::parse_name("combined"),
             Some(MultiLevelWindowMode::Combined)
         );
+        assert_eq!(
+            ResolutionMethod::parse_name("coverage-multi-bubble"),
+            Some(ResolutionMethod::CoverageMultiBubble)
+        );
+        assert_eq!(
+            MultiLevelObjectiveMode::parse_name("node-path-coverage"),
+            Some(MultiLevelObjectiveMode::Coverage)
+        );
+    }
+
+    #[test]
+    fn coverage_objective_accepts_coverage_or_singleton_improvements() {
+        let before = GraphQuality {
+            node_coverage_bp_weighted_mean: 2.0,
+            singleton_bp: 100,
+            ..GraphQuality::default()
+        };
+        let singleton_better = GraphQuality {
+            node_coverage_bp_weighted_mean: 2.0,
+            singleton_bp: 50,
+            ..GraphQuality::default()
+        };
+        let coverage_better = GraphQuality {
+            node_coverage_bp_weighted_mean: 2.1,
+            singleton_bp: 120,
+            ..GraphQuality::default()
+        };
+        let both_worse = GraphQuality {
+            node_coverage_bp_weighted_mean: 1.9,
+            singleton_bp: 120,
+            ..GraphQuality::default()
+        };
+
+        assert!(
+            graph_objective_delta_for_mode(
+                before,
+                singleton_better,
+                MultiLevelObjectiveMode::Coverage
+            ) > 0
+        );
+        assert!(
+            graph_objective_delta_for_mode(
+                before,
+                coverage_better,
+                MultiLevelObjectiveMode::Coverage
+            ) > 0
+        );
+        assert!(
+            graph_objective_delta_for_mode(before, both_worse, MultiLevelObjectiveMode::Coverage)
+                < 0
+        );
+    }
+
+    #[test]
+    fn repeat_aware_boundaries_reject_tiny_high_frequency_low_complexity_anchors() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAAAAAAAAA
+S\t2\tTTTTTTTTTT
+L\t1\t+\t2\t+\t0M
+P\tp1\t1+,2+\t*
+P\tp2\t1+,2+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let visits = graph_node_visit_counts(&graph);
+        assert!(repeat_boundary_should_reject(
+            &graph,
+            Step {
+                node: 0,
+                rev: false
+            },
+            Step {
+                node: 1,
+                rev: false
+            },
+            &visits
+        ));
     }
 
     #[test]
@@ -9670,6 +10246,31 @@ P\talt\t1+,12+,13+,24+,25+,36+,37+\t*
                     == MultiLevelCandidateSource::OutwardResidualWindow),
             "{:?}",
             generated.source_counts
+        );
+
+        let coverage_config = ResolutionConfig {
+            method: ResolutionMethod::CoverageMultiBubble,
+            multi_level_window_mode: MultiLevelWindowMode::Combined,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let generated = generate_multi_level_candidates(
+            &graph,
+            &coverage_config,
+            &discovered,
+            &FxHashSet::default(),
+        );
+        assert!(
+            generated
+                .candidates
+                .iter()
+                .any(|candidate| candidate.source
+                    == MultiLevelCandidateSource::OutwardResidualWindow),
+            "coverage-multi-bubble should include outward residual windows by default; sources={:?}, repeat_boundary_rejected={}",
+            generated.source_counts,
+            generated.repeat_boundary_rejected
         );
     }
 

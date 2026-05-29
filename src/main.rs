@@ -2913,13 +2913,34 @@ fn parse_crush_stage(
                     )
                 })?;
             }
+            "objective" | "window-objective" | "multi-level-objective" => {
+                let Some(objective) =
+                    impg::resolution::MultiLevelObjectiveMode::parse_name(&param.value)
+                else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': multi-level objective '{}' is unsupported (expected size or coverage)",
+                            raw, param.value
+                        ),
+                    ));
+                };
+                config.multi_level_objective = objective;
+            }
+            "repeat-aware"
+            | "repeat-aware-boundaries"
+            | "repeat-boundaries"
+            | "coverage-repeat-aware" => {
+                config.multi_level_repeat_aware_boundaries =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
                 else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, or iterative-multi-level)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level, or coverage-multi-bubble)",
                             raw, param.value
                         ),
                     ));
@@ -5213,7 +5234,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, or iterative-multi-level
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level, or coverage-multi-bubble
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -5387,6 +5408,26 @@ GFA engine shorthand:
         /// Minimum positive local objective score required for iterative-multi-level candidate acceptance
         #[clap(long = "min-objective-delta", value_parser, default_value = "1")]
         multi_level_min_objective_delta: i128,
+
+        /// Objective for iterative multi-bubble candidate acceptance: size or coverage
+        #[clap(
+            long = "objective",
+            alias = "window-objective",
+            value_parser,
+            default_value = "size"
+        )]
+        multi_level_objective: String,
+
+        /// Avoid tiny high-frequency low-complexity anchors as multi-bubble window boundaries
+        #[clap(
+            long = "repeat-aware-boundaries",
+            alias = "repeat-aware",
+            value_parser = clap::value_parser!(bool),
+            default_value_t = false,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
+        multi_level_repeat_aware_boundaries: bool,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -8259,6 +8300,8 @@ fn run() -> io::Result<()> {
             multi_level_max_window_sites,
             multi_level_candidate_limit,
             multi_level_min_objective_delta,
+            multi_level_objective,
+            multi_level_repeat_aware_boundaries,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -8283,7 +8326,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level, coverage-multi-bubble",
                 ));
             };
             let Some(multi_level_window_mode) =
@@ -8292,6 +8335,14 @@ fn run() -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "--window-mode must be one of: sibling, sliding, outward, combined",
+                ));
+            };
+            let Some(multi_level_objective) =
+                impg::resolution::MultiLevelObjectiveMode::parse_name(&multi_level_objective)
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--objective must be one of: size, coverage",
                 ));
             };
             let Some(polish_method) =
@@ -8428,6 +8479,8 @@ fn run() -> io::Result<()> {
                 multi_level_max_window_sites,
                 multi_level_candidate_limit,
                 multi_level_min_objective_delta,
+                multi_level_objective,
+                multi_level_repeat_aware_boundaries,
                 scoring_params: poa_scoring,
                 ..Default::default()
             };
@@ -13342,6 +13395,44 @@ mod tests {
                     impg::resolution::MultiLevelWindowMode::Outward
                 );
                 assert_eq!(crush.multi_level_max_window_sites, 10);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_coverage_multi_bubble_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=coverage-multi-bubble,objective=coverage,repeat-aware-boundaries=true,window-mode=combined,max-window-sites=12,max-rounds=3",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.method,
+                    impg::resolution::ResolutionMethod::CoverageMultiBubble
+                );
+                assert_eq!(
+                    crush.multi_level_objective,
+                    impg::resolution::MultiLevelObjectiveMode::Coverage
+                );
+                assert!(crush.multi_level_repeat_aware_boundaries);
+                assert_eq!(crush.multi_level_max_window_sites, 12);
+                assert_eq!(crush.max_iterations, 3);
             }
             _ => panic!("expected query command"),
         }
