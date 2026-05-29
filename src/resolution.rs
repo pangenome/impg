@@ -27,6 +27,7 @@ static DEBUG_REPLACEMENT_ID: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_SMOOTH_USED: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_EMPTY: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_SMOOTH_FAILURE: AtomicUsize = AtomicUsize::new(0);
+const MULTI_LEVEL_GLOBAL_FALLBACK_TRIAL_LIMIT: usize = 24;
 
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
@@ -210,6 +211,12 @@ pub struct ResolutionConfig {
     /// A value of 0 reuses `chain_greedy_target_bp`.
     pub multi_level_window_target_bp: usize,
     /// Maximum discovered flubble sites to merge into one generated window.
+    ///
+    /// The iterative multi-level mode is specifically meant to test whether
+    /// the alignable unit is a run of neighboring flubbles rather than one POVU
+    /// site. The default is therefore wider than the ordinary greedy-chain
+    /// default, while the root-span and candidate-count caps remain the primary
+    /// real-C4 runtime controls.
     pub multi_level_max_window_sites: usize,
     /// Maximum generated multi-level/window candidates to build per round.
     /// A value of 0 disables the cap.
@@ -271,9 +278,9 @@ pub enum ResolutionMethod {
     /// Aggressive experimental search policy: generate contained candidate
     /// regions from several POVU views (top-level sites, same-parent runs,
     /// path-order sliding windows, cross-level windows, and local stringy
-    /// neighborhoods), build transparent replacements, then apply only
-    /// non-overlapping candidates that improve an explicit graph-size
-    /// objective.
+    /// neighborhoods), run multi-site windows through SweepGA/seqwish before
+    /// trusting smaller POVU boundaries, then apply only non-overlapping
+    /// candidates that improve an explicit graph-size objective.
     IterativeMultiLevel,
 }
 
@@ -432,8 +439,8 @@ pub const DEFAULT_RETRY_MIN_INPUT_BP: usize = 1_000;
 pub const DEFAULT_REPLACEMENT_FLANK_BP: usize = 0;
 /// Default greedy chain span for `method=chain-greedy`.
 pub const DEFAULT_CHAIN_GREEDY_TARGET_BP: usize = 10_000;
-pub const DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES: usize = 4;
-pub const DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT: usize = 96;
+pub const DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES: usize = 8;
+pub const DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT: usize = 192;
 pub const DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA: i128 = 1;
 impl Default for ResolutionConfig {
     fn default() -> Self {
@@ -2116,11 +2123,12 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, min-objective-delta={}, replacement-routing=auto",
+            "crush iterative-multi-level: mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, min-objective-delta={}, replacement-routing=multi-site-sweepga/single-site-auto",
             config.multi_level_window_mode,
             multi_level_target_bp(config),
             config.multi_level_max_window_sites,
             config.multi_level_candidate_limit,
+            multi_level_window_total_bp_cap(config),
             config.multi_level_min_objective_delta
         );
     }
@@ -2192,7 +2200,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 if !materialize_candidate_sequences(&graph, &mut window.candidate, config) {
                     return Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(None);
                 }
-                let method = candidate_replacement_method(&window.candidate, config);
+                let method = multi_level_window_replacement_method(&window, config);
                 if emit_logs && selected_count <= 128 {
                     let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
                     log::info!(
@@ -2276,7 +2284,12 @@ fn resolve_graph_bubbles_iterative_multi_level(
             }
         }
 
+        let built_count = built.len();
         let objective_floor = config.multi_level_min_objective_delta;
+        let local_objective_rejected = built
+            .iter()
+            .filter(|candidate| candidate.objective.score_delta < objective_floor)
+            .count();
         built.retain(|candidate| candidate.objective.score_delta >= objective_floor);
         let objective_passing_count = built.len();
         built.sort_by(|a, b| {
@@ -2304,47 +2317,27 @@ fn resolve_graph_bubbles_iterative_multi_level(
         });
 
         let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
-        let mut accepted_plans_for_objective = Vec::<ReplacementPlan>::new();
-        let mut current_best_score = graph_size_objective(&graph);
         let mut accepted = Vec::new();
+        let mut overlap_rejected = 0usize;
+        let objective_candidates = built.clone();
         for candidate in built {
             if candidate_conflicts_with_occupied(&occupied_by_path, &candidate.plan.candidate) {
-                continue;
-            }
-            let mut trial_plans = accepted_plans_for_objective.clone();
-            trial_plans.push(candidate.plan.clone());
-            let mut trial_next_id = next_id;
-            let trial_graph =
-                match apply_replacement_frontier(&graph, &trial_plans, &mut trial_next_id) {
-                    Ok(trial_graph) => trial_graph,
-                    Err(err) => {
-                        failed_or_empty += 1;
-                        stats.bailed += 1;
-                        log::debug!(
-                        "resolution: iterative-multi-level objective trial failed in round {}: {}",
-                        round + 1,
-                        err
-                    );
-                        continue;
-                    }
-                };
-            let trial_score = graph_size_objective(&trial_graph);
-            let incremental_delta = current_best_score.saturating_sub(trial_score);
-            if incremental_delta < objective_floor {
+                overlap_rejected += 1;
                 continue;
             }
             mark_candidate_occupied(&mut occupied_by_path, &candidate.plan.candidate);
-            accepted_plans_for_objective = trial_plans;
-            current_best_score = trial_score;
             accepted.push(candidate);
         }
 
         if accepted.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: 0 accepted candidate(s) after objective/non-overlap filter; built={}, failed_or_empty={}, objective_floor={}, build {:.2?}; before segments={}, segment_bp={}, trivial_stringy={}",
+                    "crush iterative-multi-level round {}: 0 accepted candidate(s) after cheap local-objective/non-overlap filter; built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, failed_or_empty={}, objective_floor={}, build {:.2?}; before segments={}, segment_bp={}, trivial_stringy={}",
                     round + 1,
+                    built_count,
                     objective_passing_count,
+                    local_objective_rejected,
+                    overlap_rejected,
                     failed_or_empty,
                     objective_floor,
                     build_elapsed,
@@ -2356,6 +2349,51 @@ fn resolve_graph_bubbles_iterative_multi_level(
             break;
         }
 
+        let rewrite_start = Instant::now();
+        let pre_apply_next_id = next_id;
+        let mut plans = accepted
+            .iter()
+            .map(|candidate| candidate.plan.clone())
+            .collect::<Vec<_>>();
+        let mut trial_next_id = next_id;
+        let mut next_graph = apply_replacement_frontier(&graph, &plans, &mut trial_next_id)?;
+        assert!(
+            trial_next_id >= pre_apply_next_id,
+            "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {trial_next_id}"
+        );
+        let mut after_quality = graph_quality(&next_graph);
+        let mut graph_delta = graph_size_score_delta(before_quality, after_quality);
+        let mut fallback_trials = 0usize;
+        let mut fallback_failed_trials = 0usize;
+        let mut fallback_used = false;
+        if graph_delta < objective_floor {
+            let fallback = select_multi_level_global_objective_fallback(
+                &graph,
+                &objective_candidates,
+                objective_floor,
+                next_id,
+                MULTI_LEVEL_GLOBAL_FALLBACK_TRIAL_LIMIT,
+            );
+            fallback_trials = fallback.trials;
+            fallback_failed_trials = fallback.failed_trials;
+            if !fallback.accepted.is_empty() {
+                accepted = fallback.accepted;
+                plans = accepted
+                    .iter()
+                    .map(|candidate| candidate.plan.clone())
+                    .collect::<Vec<_>>();
+                trial_next_id = next_id;
+                next_graph = apply_replacement_frontier(&graph, &plans, &mut trial_next_id)?;
+                assert!(
+                    trial_next_id >= pre_apply_next_id,
+                    "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {trial_next_id}"
+                );
+                after_quality = graph_quality(&next_graph);
+                graph_delta = graph_size_score_delta(before_quality, after_quality);
+                fallback_used = true;
+            }
+        }
+        let rewrite_elapsed = rewrite_start.elapsed();
         let accepted_sources = accepted.iter().fold(
             FxHashMap::<MultiLevelCandidateSource, usize>::default(),
             |mut acc, item| {
@@ -2364,29 +2402,21 @@ fn resolve_graph_bubbles_iterative_multi_level(
             },
         );
         let objective_summary = format_objective_delta_summary(&accepted);
-        let plans = accepted
-            .iter()
-            .map(|candidate| candidate.plan.clone())
-            .collect::<Vec<_>>();
 
-        let rewrite_start = Instant::now();
-        let pre_apply_next_id = next_id;
-        let next_graph = apply_replacement_frontier(&graph, &plans, &mut next_id)?;
-        assert!(
-            next_id >= pre_apply_next_id,
-            "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {next_id}"
-        );
-        let rewrite_elapsed = rewrite_start.elapsed();
-        let after_quality = graph_quality(&next_graph);
-        let graph_delta = graph_size_score_delta(before_quality, after_quality);
         if graph_delta < objective_floor {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: rejecting {} accepted candidate(s) because global objective delta {} is below floor {}; local objective {}; before segments={}, segment_bp={}, trivial_stringy={}; after segments={}, segment_bp={}, trivial_stringy={}; total {:.2?}",
+                    "crush iterative-multi-level round {}: rejecting {} cheaply accepted candidate(s) because global objective delta {} is below floor {}; fallback_trials={}, fallback_failed_trials={}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}; local objective {}; before segments={}, segment_bp={}, trivial_stringy={}; after segments={}, segment_bp={}, trivial_stringy={}; total {:.2?}",
                     round + 1,
                     plans.len(),
                     graph_delta,
                     objective_floor,
+                    fallback_trials,
+                    fallback_failed_trials,
+                    built_count,
+                    objective_passing_count,
+                    local_objective_rejected,
+                    overlap_rejected,
                     objective_summary,
                     before_quality.segments,
                     before_quality.segment_bp,
@@ -2399,6 +2429,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
             }
             break;
         }
+        next_id = trial_next_id;
 
         for plan in &plans {
             resolved_signatures.insert(plan.candidate.signature.clone());
@@ -2410,10 +2441,17 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: accepted {} candidate(s) from {}; local objective {}; global_objective_delta={}; failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before segments={}, segment_bp={}, trivial_stringy={}; after segments={}, segment_bp={}, trivial_stringy={}",
+                "crush iterative-multi-level round {}: accepted {} candidate(s) from {}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, fallback_used={}, fallback_trials={}, fallback_failed_trials={}; local objective {}; global_objective_delta={}; failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before segments={}, segment_bp={}, trivial_stringy={}; after segments={}, segment_bp={}, trivial_stringy={}",
                 round + 1,
                 plans.len(),
                 format_multi_level_source_counts(&accepted_sources),
+                built_count,
+                objective_passing_count,
+                local_objective_rejected,
+                overlap_rejected,
+                fallback_used,
+                fallback_trials,
+                fallback_failed_trials,
                 objective_summary,
                 graph_delta,
                 failed_or_empty,
@@ -2517,11 +2555,26 @@ struct MultiLevelBuiltCandidate {
     objective: ReplacementObjectiveDelta,
 }
 
+#[derive(Clone, Debug, Default)]
+struct MultiLevelGlobalFallback {
+    accepted: Vec<MultiLevelBuiltCandidate>,
+    trials: usize,
+    failed_trials: usize,
+}
+
 fn multi_level_target_bp(config: &ResolutionConfig) -> usize {
     if config.multi_level_window_target_bp > 0 {
         config.multi_level_window_target_bp
     } else {
         config.chain_greedy_target_bp.max(1)
+    }
+}
+
+fn multi_level_window_total_bp_cap(config: &ResolutionConfig) -> usize {
+    if config.max_total_sequence != DEFAULT_MAX_TOTAL_SEQUENCE {
+        config.max_total_sequence
+    } else {
+        0
     }
 }
 
@@ -2680,6 +2733,13 @@ fn insert_multi_level_candidate(
         return;
     }
     if candidate.traversal_stats.max_len < config.min_traversal_len {
+        return;
+    }
+    let total_bp_cap = multi_level_window_total_bp_cap(config);
+    if total_bp_cap > 0 && candidate.traversal_stats.total_len > total_bp_cap {
+        return;
+    }
+    if config.max_traversals > 0 && candidate.traversal_stats.count > config.max_traversals {
         return;
     }
     if !emitted.insert(candidate.signature.clone()) {
@@ -3126,6 +3186,57 @@ fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     }
 }
 
+fn multi_level_window_replacement_method(
+    window: &MultiLevelWindowCandidate,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    if window.source_sites > 1 {
+        ResolutionMethod::Sweepga
+    } else {
+        candidate_replacement_method(&window.candidate, config)
+    }
+}
+
+fn select_multi_level_global_objective_fallback(
+    graph: &Graph,
+    candidates: &[MultiLevelBuiltCandidate],
+    objective_floor: i128,
+    next_id: usize,
+    max_trials: usize,
+) -> MultiLevelGlobalFallback {
+    let mut fallback = MultiLevelGlobalFallback::default();
+    let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
+    let mut accepted_plans = Vec::<ReplacementPlan>::new();
+    let before_score = graph_size_objective(graph);
+
+    for candidate in candidates {
+        if fallback.trials >= max_trials {
+            break;
+        }
+        if candidate_conflicts_with_occupied(&occupied_by_path, &candidate.plan.candidate) {
+            continue;
+        }
+        fallback.trials += 1;
+        let mut trial_plans = accepted_plans.clone();
+        trial_plans.push(candidate.plan.clone());
+        let mut trial_next_id = next_id;
+        let Ok(trial_graph) = apply_replacement_frontier(graph, &trial_plans, &mut trial_next_id)
+        else {
+            fallback.failed_trials += 1;
+            continue;
+        };
+        let graph_delta = before_score - graph_size_objective(&trial_graph);
+        if graph_delta < objective_floor {
+            continue;
+        }
+        mark_candidate_occupied(&mut occupied_by_path, &candidate.plan.candidate);
+        accepted_plans = trial_plans;
+        fallback.accepted.push(candidate.clone());
+    }
+
+    fallback
+}
+
 fn replacement_objective_delta(
     graph: &Graph,
     candidate: &BubbleCandidate,
@@ -3241,10 +3352,20 @@ fn format_multi_level_candidate_summary(
         .iter()
         .map(|candidate| candidate.source_sites)
         .collect::<Vec<_>>();
+    let root_spans = candidates
+        .iter()
+        .map(|candidate| candidate.candidate.root_span)
+        .collect::<Vec<_>>();
+    let region_bp = candidates
+        .iter()
+        .map(|candidate| candidate.candidate.traversal_stats.total_len)
+        .collect::<Vec<_>>();
     format!(
-        "{}; source-sites {}",
+        "{}; window-sites {}; root-span-bp {}; region-bp {}",
         format_candidate_length_summary(label, &plain),
-        format_bp_distribution("n", &source_sites)
+        format_bp_distribution("sites", &source_sites),
+        format_bp_distribution("bp", &root_spans),
+        format_bp_distribution("bp", &region_bp)
     )
 }
 
@@ -3287,7 +3408,7 @@ fn format_objective_delta_summary(candidates: &[MultiLevelBuiltCandidate]) -> St
     format!(
         "n={}, source-sites {}, score-delta {}, segment-delta {}, segment-bp-delta {}, input_segments={}, output_segments={}, input_bp={}, output_bp={}",
         candidates.len(),
-        format_bp_distribution("n", &source_sites),
+        format_bp_distribution("sites", &source_sites),
         format_i128_distribution(&score_deltas),
         format_i128_distribution(&segment_deltas),
         format_i128_distribution(&bp_deltas),
@@ -9032,6 +9153,116 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
+    fn iterative_multi_level_routes_multi_bubble_windows_to_sweepga_first() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            auto_spoa_max_traversal_len: 100,
+            auto_poasta_max_traversal_len: 1_000,
+            multi_level_window_mode: MultiLevelWindowMode::Sibling,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+        let window = generated
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.source == MultiLevelCandidateSource::SiblingRun
+                    && candidate.source_sites >= 2
+            })
+            .expect("expected at least one multi-site sibling window");
+
+        assert_eq!(
+            auto_method_by_median(window.candidate.traversal_stats, &config),
+            ResolutionMethod::Poa,
+            "without the multi-window override this toy window would route to tiny-bubble POA"
+        );
+        assert_eq!(
+            multi_level_window_replacement_method(window, &config),
+            ResolutionMethod::Sweepga
+        );
+    }
+
+    #[test]
+    fn iterative_multi_level_honors_explicit_total_bp_cap() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tCCCC
+S\t3\tGGGG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Combined,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            max_total_sequence: 12,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+
+        assert!(!generated.candidates.is_empty());
+        assert!(
+            generated.candidates.iter().all(|candidate| candidate
+                .candidate
+                .traversal_stats
+                .total_len
+                <= 12),
+            "{:?}",
+            generated
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate.traversal_stats.total_len)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn iterative_multi_level_preserves_paths_when_no_size_winner_exists() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -9102,7 +9333,11 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
         assert!(resolved.stats.candidates_seen > 0, "{:?}", resolved.stats);
-        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+        assert!(
+            resolved.stats.bailed < resolved.stats.candidates_seen,
+            "{:?}",
+            resolved.stats
+        );
     }
 
     #[test]

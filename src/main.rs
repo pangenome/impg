@@ -2866,7 +2866,10 @@ fn parse_crush_stage(
                 config.chain_greedy_target_bp =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
-            "window-mode" | "multi-level-window-mode" | "multi-window-mode" => {
+            "window-mode"
+            | "multi-level-window-mode"
+            | "multi-window-mode"
+            | "multi-bubble-window-mode" => {
                 let Some(mode) = impg::resolution::MultiLevelWindowMode::parse_name(&param.value)
                 else {
                     return Err(io::Error::new(
@@ -2886,7 +2889,12 @@ fn parse_crush_stage(
                 config.multi_level_window_target_bp =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
-            "max-window-sites" | "window-sites" | "multi-level-max-window-sites" => {
+            "max-window-sites"
+            | "window-sites"
+            | "multi-level-max-window-sites"
+            | "wide-window-sites"
+            | "multi-bubble-window-sites"
+            | "max-multi-bubble-window-sites" => {
                 config.multi_level_max_window_sites =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
@@ -5350,6 +5358,7 @@ GFA engine shorthand:
         #[clap(
             long = "window-mode",
             alias = "multi-level-window-mode",
+            alias = "multi-bubble-window-mode",
             value_parser,
             default_value = "combined"
         )]
@@ -5360,11 +5369,19 @@ GFA engine shorthand:
         multi_level_window_target_bp: usize,
 
         /// Maximum discovered flubble sites to merge into one iterative-multi-level window
-        #[clap(long = "max-window-sites", alias = "multi-level-max-window-sites", value_parser = parse_usize_size, default_value = "4")]
+        #[clap(
+            long = "max-window-sites",
+            alias = "multi-level-max-window-sites",
+            alias = "wide-window-sites",
+            alias = "multi-bubble-window-sites",
+            alias = "max-multi-bubble-window-sites",
+            value_parser = parse_usize_size,
+            default_value = "8"
+        )]
         multi_level_max_window_sites: usize,
 
         /// Maximum generated iterative-multi-level candidates to build per round; 0 disables
-        #[clap(long = "candidate-limit", alias = "window-candidate-limit", value_parser = parse_usize_size, default_value = "96")]
+        #[clap(long = "candidate-limit", alias = "window-candidate-limit", value_parser = parse_usize_size, default_value = "192")]
         multi_level_candidate_limit: usize,
 
         /// Minimum positive local objective score required for iterative-multi-level candidate acceptance
@@ -13260,6 +13277,39 @@ mod tests {
                 assert_eq!(crush.multi_level_candidate_limit, 17);
                 assert_eq!(crush.multi_level_min_objective_delta, 3);
                 assert_eq!(crush.max_iterations, 4);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_wide_multi_bubble_window_aliases() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=iterative-multi-level,multi-bubble-window-mode=combined,wide-window-sites=12,candidate-limit=0",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.multi_level_window_mode,
+                    impg::resolution::MultiLevelWindowMode::Combined
+                );
+                assert_eq!(crush.multi_level_max_window_sites, 12);
+                assert_eq!(crush.multi_level_candidate_limit, 0);
             }
             _ => panic!("expected query command"),
         }
