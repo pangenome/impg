@@ -51,6 +51,7 @@ pub struct SyngGfaFrequencyMask {
     pub drop_top_fraction: f64,
     pub max_occurrences: Option<u32>,
     pub min_shared_run: usize,
+    pub min_sequence_span_bp: usize,
     pub local_repeat_max_minor: u32,
     pub local_repeat_min_dominant_fraction: f64,
     pub cut_n_gaps: bool,
@@ -63,6 +64,7 @@ impl SyngGfaFrequencyMask {
             drop_top_fraction: 0.0,
             max_occurrences: None,
             min_shared_run: 1,
+            min_sequence_span_bp: 0,
             local_repeat_max_minor: 0,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
             cut_n_gaps: false,
@@ -75,6 +77,7 @@ impl SyngGfaFrequencyMask {
             drop_top_fraction: DEFAULT_GFA_MASK_TOP_FRACTION,
             max_occurrences: None,
             min_shared_run: 1,
+            min_sequence_span_bp: 0,
             local_repeat_max_minor: DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
             cut_n_gaps: false,
@@ -86,6 +89,7 @@ impl SyngGfaFrequencyMask {
         self.drop_top_fraction > 0.0
             || self.max_occurrences.is_some()
             || self.min_shared_run > 1
+            || self.min_sequence_span_bp > 0
             || self.local_repeat_max_minor > 0
             || self.cut_n_gaps
     }
@@ -96,6 +100,14 @@ impl SyngGfaFrequencyMask {
 
     fn shared_run_filter_enabled(self) -> bool {
         self.min_shared_run > 1
+    }
+
+    fn sequence_context_filter_enabled(self) -> bool {
+        self.min_sequence_span_bp > 0
+    }
+
+    fn shared_context_filter_enabled(self) -> bool {
+        self.shared_run_filter_enabled() || self.sequence_context_filter_enabled()
     }
 }
 
@@ -978,14 +990,26 @@ fn collect_range_syncmer_nodes(
     Ok(nodes)
 }
 
-fn collect_range_syncmer_walk_abs(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalSyncmerWalkStep {
+    node: u32,
+    pos: u64,
+}
+
+fn collect_range_syncmer_walk(
     index: &SyngIndex,
     range: &SyngGfaPathRange,
-) -> io::Result<Vec<u32>> {
-    Ok(index
-        .walk_path_range(range.path_idx, range.start, range.end)?
+) -> io::Result<Vec<LocalSyncmerWalkStep>> {
+    let mut walk = index.walk_path_range(range.path_idx, range.start, range.end)?;
+    if range.strand == '-' {
+        walk.reverse();
+    }
+    Ok(walk
         .into_iter()
-        .map(|(node, _)| node.unsigned_abs())
+        .map(|(node, pos)| LocalSyncmerWalkStep {
+            node: node.unsigned_abs(),
+            pos,
+        })
         .collect())
 }
 
@@ -1045,6 +1069,148 @@ fn weak_shared_run_syncmers(walks: &[Vec<u32>], min_shared_run: usize) -> FxHash
         .difference(&strong_nodes)
         .copied()
         .collect::<FxHashSet<_>>()
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct ExactSequenceRunKey {
+    nodes: Vec<u32>,
+    deltas: Vec<u64>,
+}
+
+#[derive(Default)]
+struct SharedContextFilterResult {
+    weak_nodes: FxHashSet<u32>,
+    shared_nodes: usize,
+    run_supported_nodes: usize,
+    sequence_supported_nodes: usize,
+}
+
+fn step_delta(a: LocalSyncmerWalkStep, b: LocalSyncmerWalkStep) -> u64 {
+    a.pos.abs_diff(b.pos)
+}
+
+fn canonical_exact_sequence_run_key(window: &[LocalSyncmerWalkStep]) -> ExactSequenceRunKey {
+    let nodes: Vec<u32> = window.iter().map(|step| step.node).collect();
+    let deltas: Vec<u64> = window.windows(2).map(|w| step_delta(w[0], w[1])).collect();
+    let mut rev_nodes = nodes.clone();
+    rev_nodes.reverse();
+    let mut rev_deltas = deltas.clone();
+    rev_deltas.reverse();
+
+    let forward = ExactSequenceRunKey { nodes, deltas };
+    let reverse = ExactSequenceRunKey {
+        nodes: rev_nodes,
+        deltas: rev_deltas,
+    };
+    forward.min(reverse)
+}
+
+fn shared_nodes_from_local_walks(walks: &[Vec<LocalSyncmerWalkStep>]) -> FxHashSet<u32> {
+    let mut counts: FxHashMap<u32, u32> = FxHashMap::default();
+    for walk in walks {
+        for step in walk {
+            *counts.entry(step.node).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(node, count)| (count > 1).then_some(node))
+        .collect()
+}
+
+fn run_supported_syncmers(
+    walks: &[Vec<LocalSyncmerWalkStep>],
+    min_shared_run: usize,
+) -> FxHashSet<u32> {
+    if min_shared_run <= 1 {
+        return FxHashSet::default();
+    }
+    let walk_nodes: Vec<Vec<u32>> = walks
+        .iter()
+        .map(|walk| walk.iter().map(|step| step.node).collect())
+        .collect();
+    let weak = weak_shared_run_syncmers(&walk_nodes, min_shared_run);
+    let shared = shared_nodes_from_local_walks(walks);
+    shared.difference(&weak).copied().collect()
+}
+
+fn sequence_supported_syncmers(
+    walks: &[Vec<LocalSyncmerWalkStep>],
+    syncmer_len: u64,
+    min_sequence_span_bp: usize,
+    shared_nodes: &FxHashSet<u32>,
+) -> FxHashSet<u32> {
+    if min_sequence_span_bp == 0 || walks.is_empty() || shared_nodes.is_empty() {
+        return FxHashSet::default();
+    }
+    if min_sequence_span_bp as u64 <= syncmer_len {
+        return shared_nodes.clone();
+    }
+
+    let min_span = min_sequence_span_bp as u64;
+    let mut run_counts: FxHashMap<ExactSequenceRunKey, u32> = FxHashMap::default();
+    let mut candidate_runs: Vec<(ExactSequenceRunKey, Vec<u32>)> = Vec::new();
+    for walk in walks {
+        for start in 0..walk.len() {
+            let mut end = start;
+            while end + 1 < walk.len() {
+                let delta = step_delta(walk[end], walk[end + 1]);
+                if delta > syncmer_len {
+                    break;
+                }
+                end += 1;
+                let span = step_delta(walk[start], walk[end]) + syncmer_len;
+                if span >= min_span {
+                    let window = &walk[start..=end];
+                    let key = canonical_exact_sequence_run_key(window);
+                    let nodes = window.iter().map(|step| step.node).collect();
+                    *run_counts.entry(key.clone()).or_default() += 1;
+                    candidate_runs.push((key, nodes));
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut supported = FxHashSet::default();
+    for (key, nodes) in candidate_runs {
+        if run_counts.get(&key).copied().unwrap_or(0) > 1 {
+            supported.extend(nodes.into_iter().filter(|node| shared_nodes.contains(node)));
+        }
+    }
+    supported
+}
+
+fn shared_context_filtered_syncmers(
+    walks: &[Vec<LocalSyncmerWalkStep>],
+    syncmer_len: u64,
+    min_shared_run: usize,
+    min_sequence_span_bp: usize,
+) -> SharedContextFilterResult {
+    if walks.is_empty() || (min_shared_run <= 1 && min_sequence_span_bp == 0) {
+        return SharedContextFilterResult::default();
+    }
+
+    let shared_nodes = shared_nodes_from_local_walks(walks);
+    if shared_nodes.is_empty() {
+        return SharedContextFilterResult::default();
+    }
+
+    let run_supported = run_supported_syncmers(walks, min_shared_run);
+    let sequence_supported =
+        sequence_supported_syncmers(walks, syncmer_len, min_sequence_span_bp, &shared_nodes);
+    let supported: FxHashSet<u32> = run_supported.union(&sequence_supported).copied().collect();
+    let weak_nodes = shared_nodes
+        .difference(&supported)
+        .copied()
+        .collect::<FxHashSet<_>>();
+
+    SharedContextFilterResult {
+        weak_nodes,
+        shared_nodes: shared_nodes.len(),
+        run_supported_nodes: run_supported.len(),
+        sequence_supported_nodes: sequence_supported.len(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1159,6 +1325,23 @@ fn local_repeat_clone_occurrences(
         }
     }
     clone_occurrences
+}
+
+fn split_syncmer_clone_occurrences(
+    work: &PathWork,
+    split_syncmers: &FxHashSet<u32>,
+) -> FxHashSet<u32> {
+    if split_syncmers.is_empty() {
+        return FxHashSet::default();
+    }
+    raw_work_syncmer_context_occurrences(work)
+        .into_iter()
+        .filter_map(|occ| {
+            split_syncmers
+                .contains(&occ.syncmer.abs())
+                .then_some(occ.syncmer.occ)
+        })
+        .collect()
 }
 
 fn top_frequency_nodes(occurrence_counts: &[(u32, u32)], drop_top_fraction: f64) -> FxHashSet<u32> {
@@ -1537,12 +1720,12 @@ pub fn write_range_gfa<W: Write>(
 
     let syncmer_len_u64 = syncmer_len as u64;
     let need_local_walks =
-        frequency_mask.frequency_filter_enabled() || frequency_mask.shared_run_filter_enabled();
+        frequency_mask.frequency_filter_enabled() || frequency_mask.shared_context_filter_enabled();
     let local_walks = if need_local_walks {
         let mask_collect_start = Instant::now();
-        let walks: Vec<Vec<u32>> = ranges
+        let walks: Vec<Vec<LocalSyncmerWalkStep>> = ranges
             .par_iter()
-            .map(|range| collect_range_syncmer_walk_abs(index, range))
+            .map(|range| collect_range_syncmer_walk(index, range))
             .collect::<io::Result<Vec<_>>>()?;
         info!(
             "[syng2gfa] collected {} local syncmer walk(s) for raw-layer masking in {:.3}s using {} rayon threads",
@@ -1554,10 +1737,14 @@ pub fn write_range_gfa<W: Write>(
     } else {
         None
     };
-    let all_local_syncmers = local_walks
-        .as_ref()
-        .map(|walks| walks.iter().flatten().copied().collect::<FxHashSet<_>>());
-    let mut masked_syncmers = if frequency_mask.frequency_filter_enabled() {
+    let all_local_syncmers = local_walks.as_ref().map(|walks| {
+        walks
+            .iter()
+            .flatten()
+            .map(|step| step.node)
+            .collect::<FxHashSet<_>>()
+    });
+    let frequency_masked_syncmers = if frequency_mask.frequency_filter_enabled() {
         frequency_masked_syncmers(
             index,
             all_local_syncmers.as_ref().expect("local syncmers"),
@@ -1566,20 +1753,46 @@ pub fn write_range_gfa<W: Write>(
     } else {
         FxHashSet::default()
     };
-    if frequency_mask.shared_run_filter_enabled() {
-        let run_start = Instant::now();
-        let weak_runs = weak_shared_run_syncmers(
+    let masked_syncmers = frequency_masked_syncmers.clone();
+    let mut split_syncmers = FxHashSet::default();
+    let mut shared_context_split = 0usize;
+    if frequency_mask.shared_context_filter_enabled() {
+        let context_start = Instant::now();
+        let context_filter = shared_context_filtered_syncmers(
             local_walks.as_ref().expect("local syncmer walks"),
+            syncmer_len_u64,
             frequency_mask.min_shared_run,
+            frequency_mask.min_sequence_span_bp,
         );
-        if !weak_runs.is_empty() {
+        split_syncmers = context_filter
+            .weak_nodes
+            .difference(&frequency_masked_syncmers)
+            .copied()
+            .collect();
+        shared_context_split = split_syncmers.len();
+        info!(
+            "[syng2gfa] sequence-context evaluated {} local shared syncmer node(s) before raw GFA materialization (weak={}, split={}, min_run={}, run-supported={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            context_filter.shared_nodes,
+            context_filter.weak_nodes.len(),
+            split_syncmers.len(),
+            frequency_mask.min_shared_run,
+            context_filter.run_supported_nodes,
+            frequency_mask.min_sequence_span_bp,
+            context_filter.sequence_supported_nodes,
+            context_start.elapsed().as_secs_f64()
+        );
+        if !split_syncmers.is_empty() {
             info!(
-                "[syng2gfa] shared-run filtered {} local syncmer node(s) with no shared run of >= {} anchor(s) in {:.3}s",
-                weak_runs.len(),
+                "[syng2gfa] sequence-context split {} local syncmer node(s) into private per-occurrence topology before raw GFA materialization (shared nodes={}, weak={}, min_run={}, run-supported={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+                split_syncmers.len(),
+                context_filter.shared_nodes,
+                context_filter.weak_nodes.len(),
                 frequency_mask.min_shared_run,
-                run_start.elapsed().as_secs_f64()
+                context_filter.run_supported_nodes,
+                frequency_mask.min_sequence_span_bp,
+                context_filter.sequence_supported_nodes,
+                context_start.elapsed().as_secs_f64()
             );
-            masked_syncmers.extend(weak_runs);
         }
     };
 
@@ -1624,6 +1837,7 @@ pub fn write_range_gfa<W: Write>(
     }
     let mut cloned_syncmers: Vec<(String, u32)> = Vec::new();
     let mut n_local_repeat_clones = 0usize;
+    let mut n_sequence_context_clones = 0usize;
     let mut n_skipped = 0usize;
     let mut gaps_filled_with_ns = 0usize;
     let mut gap_occurrences = 0usize;
@@ -1647,14 +1861,17 @@ pub fn write_range_gfa<W: Write>(
         n_cut_runs += work.n_cut_runs;
         n_cut_bp += work.n_cut_bp;
 
+        let work_occurrences = raw_work_syncmer_context_occurrences(&work);
+        let split_clone_occurrences = split_syncmer_clone_occurrences(&work, &split_syncmers);
         let local_repeat_clone_occurrences =
             local_repeat_clone_occurrences(&work, &dominant_repeat_contexts);
-        let work_occurrences = raw_work_syncmer_context_occurrences(&work);
+        let mut clone_occurrences = split_clone_occurrences.clone();
+        clone_occurrences.extend(local_repeat_clone_occurrences.iter().copied());
         let mut cloned_syncmer_ids: FxHashMap<u32, String> = FxHashMap::default();
-        if !local_repeat_clone_occurrences.is_empty() {
+        if !clone_occurrences.is_empty() {
             let mut local_occurrences: Vec<_> = work_occurrences
                 .iter()
-                .filter(|occ| local_repeat_clone_occurrences.contains(&occ.syncmer.occ))
+                .filter(|occ| clone_occurrences.contains(&occ.syncmer.occ))
                 .collect();
             local_occurrences.sort_by_key(|occ| (occ.syncmer.abs(), occ.syncmer.occ));
             for occ in local_occurrences {
@@ -1662,7 +1879,11 @@ pub fn write_range_gfa<W: Write>(
                 let clone_id = gap_interner.next_segment_id();
                 cloned_syncmer_ids.insert(occ.syncmer.occ, clone_id.clone());
                 cloned_syncmers.push((clone_id, node));
-                n_local_repeat_clones += 1;
+                if split_clone_occurrences.contains(&occ.syncmer.occ) {
+                    n_sequence_context_clones += 1;
+                } else {
+                    n_local_repeat_clones += 1;
+                }
             }
         }
 
@@ -1727,11 +1948,14 @@ pub fn write_range_gfa<W: Write>(
         push_walked_path_segments(&mut walked_paths, work.name, segments, had_break);
     }
     info!(
-        "[syng2gfa] reduced selected path walks into {} shared syncmer node(s), {} cloned syncmer segment(s) ({} local-repeat), {} high-frequency syncmer node(s) filtered before raw GFA, {} unique gap segment(s), {} edge(s) in {:.3}s",
+        "[syng2gfa] reduced selected path walks into {} shared syncmer node(s), {} cloned syncmer segment(s) ({} local-repeat, {} sequence-context), {} raw-layer syncmer node(s) removed/split before raw GFA ({} frequency removed, {} sequence-context split), {} unique gap segment(s), {} edge(s) in {:.3}s",
         used_syncmers.len(),
         cloned_syncmers.len(),
         n_local_repeat_clones,
+        n_sequence_context_clones,
         masked_syncmers.len(),
+        frequency_masked_syncmers.len(),
+        shared_context_split,
         gap_interner.len(),
         edges.len(),
         reduce_start.elapsed().as_secs_f64()
@@ -2163,6 +2387,7 @@ P\tp\t1+,2+,3+\t3M,1M\n";
             drop_top_fraction: 0.5,
             max_occurrences: None,
             min_shared_run: 1,
+            min_sequence_span_bp: 0,
             local_repeat_max_minor: 0,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
             cut_n_gaps: false,
@@ -2256,6 +2481,71 @@ P\tp\t1+,2+,3+\t3M,1M\n";
         for node in [10, 11, 12] {
             assert!(!stricter.contains(&node));
         }
+    }
+
+    #[test]
+    fn test_sequence_k_filter_uses_exact_span_or_min_run_support() {
+        let walk = |items: &[(u32, u64)]| -> Vec<LocalSyncmerWalkStep> {
+            items
+                .iter()
+                .map(|&(node, pos)| LocalSyncmerWalkStep { node, pos })
+                .collect()
+        };
+        let walks = vec![
+            walk(&[(1, 0), (2, 32), (3, 96), (10, 200), (11, 232), (12, 264)]),
+            walk(&[(4, 0), (2, 96), (5, 160), (10, 200), (11, 232), (12, 264)]),
+        ];
+
+        let sequence_supported = shared_context_filtered_syncmers(&walks, 63, 1, 127);
+        assert!(
+            sequence_supported.weak_nodes.contains(&2),
+            "isolated shared node 2 should be filtered"
+        );
+        for node in [10, 11, 12] {
+            assert!(
+                !sequence_supported.weak_nodes.contains(&node),
+                "node {node} is part of a repeated exact 127 bp syncmer span"
+            );
+        }
+        assert_eq!(sequence_supported.sequence_supported_nodes, 3);
+
+        let too_short = shared_context_filtered_syncmers(&walks, 63, 1, 191);
+        for node in [10, 11, 12] {
+            assert!(
+                too_short.weak_nodes.contains(&node),
+                "127 bp evidence should not satisfy sequence-k=191"
+            );
+        }
+
+        let rescued_by_run = shared_context_filtered_syncmers(&walks, 63, 3, 191);
+        for node in [10, 11, 12] {
+            assert!(
+                !rescued_by_run.weak_nodes.contains(&node),
+                "min-run=3 should rescue the consecutive syncmer run"
+            );
+        }
+        assert!(
+            rescued_by_run.weak_nodes.contains(&2),
+            "isolated shared node 2 is supported by neither sequence-k nor min-run"
+        );
+    }
+
+    #[test]
+    fn test_sequence_context_split_clones_all_weak_node_occurrences() {
+        let work = context_test_work("p", &[1, 2, -2, 3, 2]);
+        let split_syncmers = [2].into_iter().collect::<FxHashSet<_>>();
+        let clone_occurrences = split_syncmer_clone_occurrences(&work, &split_syncmers);
+        assert_eq!(clone_occurrences.len(), 3);
+        for occ in [1, 2, 4] {
+            assert!(
+                clone_occurrences.contains(&occ),
+                "occurrence {occ} of weak shared node 2 should be split"
+            );
+        }
+        assert!(
+            !clone_occurrences.contains(&0) && !clone_occurrences.contains(&3),
+            "unflagged syncmer nodes should remain shared"
+        );
     }
 
     #[test]

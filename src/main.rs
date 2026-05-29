@@ -2542,6 +2542,18 @@ fn parse_syng_mask_stage(
             | "mask-min-run" => {
                 mask.min_shared_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "sequence-k"
+            | "seq-k"
+            | "sequence-span"
+            | "sequence-context"
+            | "min-sequence-span"
+            | "min-sequence-context"
+            | "min-sequence-bp"
+            | "mask-sequence-k"
+            | "mask-seq-k" => {
+                mask.min_sequence_span_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "repeat-minor"
             | "repeat-max-minor"
             | "local-repeat-minor"
@@ -3395,6 +3407,18 @@ where
                 | "min-run"
                 | "shared-run" => {
                     syng_gfa_frequency_mask.min_shared_run =
+                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                }
+                "sequence-k"
+                | "seq-k"
+                | "sequence-span"
+                | "sequence-context"
+                | "min-sequence-span"
+                | "min-sequence-context"
+                | "min-sequence-bp"
+                | "mask-sequence-k"
+                | "mask-seq-k" => {
+                    syng_gfa_frequency_mask.min_sequence_span_bp =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
                 "mask-repeat-minor"
@@ -4695,7 +4719,11 @@ Syng notes:
   topology before bluntification and clones rare repeated-copy local syncmer
   contexts by default so repeats seed ranges but do not glue unrelated copies;
   use `:nomask` or `:nofilter` to disable this or
-  `:mask,top=0.001,max-occ=500` to tune it. Add `:cut-ns` to drop ambiguous
+  `:mask,top=0.001,max-occ=500,sequence-k=191,min-run=3` to tune it. The
+  explicit `sequence-k` filter splits weak shared syncmer topology into
+  private per-occurrence segments unless it is supported by an exact repeated
+  consecutive-syncmer span of that many bp or by the configured `min-run`
+  anchor run. Add `:cut-ns` to drop ambiguous
   N-runs from fetched gap DNA and split emitted graph paths at those breaks.
   The compact forms
   `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
@@ -13001,7 +13029,9 @@ mod tests {
             "filters the top 0.05% high-frequency local syncmer nodes",
             "`:nomask` or `:nofilter`",
             "rare repeated-copy",
-            ":mask,top=0.001,max-occ=500",
+            ":mask,top=0.001,max-occ=500,sequence-k=191,min-run=3",
+            "private per-occurrence segments",
+            "consecutive-syncmer span",
             "`:cut-ns`",
             "`--render-graph-depth`",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
@@ -13046,6 +13076,7 @@ mod tests {
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
                 assert_eq!(parsed.syng_params, None);
+                assert_eq!(parsed.syng_gfa_frequency_mask.min_sequence_span_bp, 0);
                 assert_eq!(
                     parsed.graph_sort_pipeline.as_deref(),
                     Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
@@ -13571,7 +13602,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:mask,top=0.001,max-occ=500,min-run=3:crush",
+            "gfa:syng:mask,top=0.001,max-occ=500,min-run=3,sequence-k=191:crush",
         ])
         .unwrap();
         match args {
@@ -13590,6 +13621,7 @@ mod tests {
                         drop_top_fraction: 0.001,
                         max_occurrences: Some(500),
                         min_shared_run: 3,
+                        min_sequence_span_bp: 191,
                         local_repeat_max_minor:
                             impg::commands::syng2gfa::DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
                         local_repeat_min_dominant_fraction:
@@ -13698,6 +13730,28 @@ mod tests {
                 assert!(parsed.syng_gfa_frequency_mask.cut_n_gaps);
                 assert_eq!(parsed.syng_gfa_frequency_mask.cut_n_min_run, 10);
                 assert!(parsed.crush_config.is_some());
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_sequence_k_alias() {
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:mask,seq-k=311"])
+                .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.syng_gfa_frequency_mask.min_sequence_span_bp, 311);
+                assert_eq!(parsed.syng_gfa_frequency_mask.min_shared_run, 1);
             }
             _ => panic!("expected query command"),
         }
