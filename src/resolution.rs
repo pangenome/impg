@@ -8437,13 +8437,74 @@ fn render_rewritten_graph(
         used_ids.insert(original.segments[*node].id.clone());
     }
 
-    let mut seen_ordered = FxHashSet::<OutNode>::default();
     let mut ordered_nodes = Vec::new();
-    for (_, steps) in out_paths {
-        for step in steps {
-            if seen_ordered.insert(step.node) {
-                ordered_nodes.push(step.node);
+    if replacements.is_empty() {
+        let mut seen_original = vec![false; original.segments.len()];
+        for (_, steps) in out_paths {
+            for step in steps {
+                if let OutNode::Original(idx) = step.node {
+                    if !seen_original[idx] {
+                        seen_original[idx] = true;
+                        ordered_nodes.push(step.node);
+                    }
+                }
             }
+        }
+    } else {
+        let mut seen_original = vec![false; original.segments.len()];
+        for (_, steps) in out_paths {
+            for step in steps {
+                if let OutNode::Original(idx) = step.node {
+                    if !seen_original[idx] {
+                        seen_original[idx] = true;
+                        ordered_nodes.push(step.node);
+                    }
+                }
+            }
+        }
+
+        let mut original_position = vec![usize::MAX; original.segments.len()];
+        for (position, node) in ordered_nodes.iter().enumerate() {
+            if let OutNode::Original(idx) = *node {
+                original_position[idx] = position;
+            }
+        }
+
+        let mut insertions: Vec<(usize, OutNode)> = Vec::new();
+        let mut seen_replacement = FxHashSet::<(usize, usize)>::default();
+        for (_, steps) in out_paths {
+            let mut last_original_position = usize::MAX;
+            for step in steps {
+                match step.node {
+                    OutNode::Original(idx) => {
+                        let position = original_position[idx];
+                        if position != usize::MAX {
+                            last_original_position = position;
+                        }
+                    }
+                    OutNode::Replacement(replacement_idx, replacement_node_idx) => {
+                        if seen_replacement.insert((replacement_idx, replacement_node_idx)) {
+                            insertions.push((last_original_position, step.node));
+                        }
+                    }
+                }
+            }
+        }
+
+        insertions.sort_by_key(|&(position, _)| position);
+        let original_ordered = std::mem::take(&mut ordered_nodes);
+        ordered_nodes.reserve(original_ordered.len() + insertions.len());
+        let mut insertion_idx = 0usize;
+        for (position, node) in original_ordered.iter().enumerate() {
+            ordered_nodes.push(*node);
+            while insertion_idx < insertions.len() && insertions[insertion_idx].0 == position {
+                ordered_nodes.push(insertions[insertion_idx].1);
+                insertion_idx += 1;
+            }
+        }
+        while insertion_idx < insertions.len() {
+            ordered_nodes.push(insertions[insertion_idx].1);
+            insertion_idx += 1;
         }
     }
 

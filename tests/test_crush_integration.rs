@@ -86,6 +86,13 @@ fn gfa_segment_stats(gfa: &str) -> (usize, usize) {
     (count, bp)
 }
 
+fn seq_map(gfa: &str) -> HashMap<String, String> {
+    path_sequences(gfa)
+        .expect("path_sequences failed")
+        .into_iter()
+        .collect()
+}
+
 fn fasta_records(path: &Path) -> Vec<(String, Vec<u8>)> {
     let text = std::fs::read_to_string(path).expect("failed to read FASTA");
     let mut records = Vec::new();
@@ -1398,4 +1405,55 @@ fn nested_bubble_level_descent_actually_descends() {
          the L0 replacement's local subgraph); got {}",
         per_round[1]
     );
+}
+
+#[test]
+fn crush_public_api_preserves_paths_p_line_gfa() {
+    let gfa = include_str!("test_data/crush/small_insertion.gfa");
+    let before = seq_map(gfa);
+    assert!(!before.is_empty(), "fixture must have at least one path");
+
+    let result = resolve_gfa_bubbles(gfa, &ResolutionConfig::default())
+        .expect("resolve_gfa_bubbles failed on P-line GFA");
+
+    assert!(
+        result.stats.resolved >= 1,
+        "expected at least 1 resolved bubble, got {:?}",
+        result.stats,
+    );
+    assert_eq!(before, seq_map(&result.gfa));
+}
+
+#[test]
+fn crush_public_api_preserves_paths_w_line_gfa() {
+    let gfa = include_str!("test_data/crush/small_insertion_walks.gfa");
+    let before = seq_map(gfa);
+    assert!(!before.is_empty(), "fixture must have at least one walk");
+
+    let result = resolve_gfa_bubbles(gfa, &ResolutionConfig::default())
+        .expect("resolve_gfa_bubbles failed on W-line GFA");
+
+    assert!(
+        result.stats.resolved >= 1,
+        "expected at least 1 resolved bubble in W-line GFA, got {:?}",
+        result.stats,
+    );
+    assert_eq!(before, seq_map(&result.gfa));
+}
+
+#[test]
+fn crush_public_api_p_and_w_line_produce_same_sequences() {
+    let gfa_p = include_str!("test_data/crush/small_insertion.gfa");
+    let gfa_w = include_str!("test_data/crush/small_insertion_walks.gfa");
+
+    let result_p = resolve_gfa_bubbles(gfa_p, &ResolutionConfig::default())
+        .expect("resolve_gfa_bubbles failed on P-line GFA");
+    let result_w = resolve_gfa_bubbles(gfa_w, &ResolutionConfig::default())
+        .expect("resolve_gfa_bubbles failed on W-line GFA");
+
+    assert_eq!(
+        result_p.stats.resolved, result_w.stats.resolved,
+        "both GFA variants should resolve the same number of bubbles",
+    );
+    assert_eq!(seq_map(&result_p.gfa), seq_map(&result_w.gfa));
 }
