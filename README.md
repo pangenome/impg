@@ -454,11 +454,18 @@ one set of engine implementations, selected via `--gfa-engine`:
 | `poa` | single-pass SPOA | small regions, quick MSA-based output |
 | `syng` / `syng:blunt` | regional syng syncmer graph + bluntg | syng-native zero-overlap graph output from syng indexes |
 | `syng:raw` | regional syng syncmer overlap graph | debugging native syncmer graph overlaps |
+| `syng-local` / `syng-local:blunt` | extract query-selected sequences, build a fresh local syng graph, then bluntg | experimental regional syncmer parameter sweeps |
 
 For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
 The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
 shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
 `k/s/seed` tail is checked against the loaded syng index.
+Use `syng-local` when the local graph should be rebuilt from the extracted
+regional sequences with its own syncmer scheme, for example
+`-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`; in this mode `k/s/seed`
+select the local rebuild parameters rather than asserting the global index.
+Unlike `syng`, `syng-local` does not apply the syng frequency mask unless
+`:mask` is requested explicitly.
 Syng GFA extraction removes the top 0.05% most frequent local syncmer nodes
 from the raw topology and splits rare repeated-copy local syncmer contexts by
 default, so high-copy repeats and single-syncmer repeat loops do not become

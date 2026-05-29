@@ -55,6 +55,10 @@ pub enum GfaEngine {
     ///   5. left-align indels in partition-ref frame
     ///   6. emit PAF → seqwish → GFA
     SyngNative,
+    /// Syng-local: extract query-selected sequences, build a fresh regional
+    /// syng syncmer graph with explicit local syncmer parameters, then apply
+    /// the same blunt/crush/sort graph transforms as other GFA engines.
+    SyngLocal,
 }
 
 pub const DEFAULT_SYNG_GFA_SORT_PIPELINE: &str = "Ygs";
@@ -87,9 +91,11 @@ impl Default for SmoothPipelineConfig {
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
-    /// Syng GFA mode when `engine == GfaEngine::SyngNative`.
+    /// Syng GFA mode when `engine` is `GfaEngine::SyngNative` or
+    /// `GfaEngine::SyngLocal`.
     pub syng_gfa_mode: Option<commands::syng2gfa::SyngGfaMode>,
-    /// Optional assertion about the syncmer scheme of a syng input index.
+    /// Optional assertion about the syncmer scheme of a syng input index
+    /// (`SyngNative`) or requested local rebuild scheme (`SyngLocal`).
     pub syng_params: Option<syng::SyncmerParams>,
     /// Frequency-aware node sharing policy for syng-native local GFA output.
     pub syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
@@ -588,11 +594,12 @@ fn write_fasta_records(
     out.flush()
 }
 
-pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
-    source_index: &syng::SyngIndex,
+pub fn write_syng_region_gfa_from_sequences_with_params<W: std::io::Write>(
     sequences: &[(String, Vec<u8>)],
     out: &mut W,
+    params: syng::SyncmerParams,
     mode: commands::syng2gfa::SyngGfaMode,
+    frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
 ) -> std::io::Result<()> {
     if sequences.is_empty() {
         writeln!(out, "H\tVN:Z:1.0")?;
@@ -602,9 +609,12 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
     let total_start = std::time::Instant::now();
     let total_bp: usize = sequences.iter().map(|(_, seq)| seq.len()).sum();
     log::info!(
-        "[syng region gfa] rendering {} sequence(s), {} bp, mode={}",
+        "[syng local gfa] rendering {} sequence(s), {} bp, syncmer k={},s={},seed={}, mode={}",
         sequences.len(),
         total_bp,
+        params.k + params.w,
+        params.k,
+        params.seed,
         mode.label()
     );
 
@@ -623,9 +633,10 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
         .map(|(name, seq)| (name.clone(), seq.as_slice()))
         .collect();
     let build_start = std::time::Instant::now();
-    source_index.build_region_gbwt(&seq_refs, region_prefix)?;
+    let local_builder = syng::SyngIndex::new(params);
+    local_builder.build_region_gbwt(&seq_refs, region_prefix)?;
     log::info!(
-        "[syng region gfa] built regional syng GBWT in {:.3}s",
+        "[syng local gfa] built regional syng GBWT in {:.3}s",
         build_start.elapsed().as_secs_f64()
     );
 
@@ -633,37 +644,110 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
     let fasta_start = std::time::Instant::now();
     write_fasta_records(&fasta_path, sequences)?;
     log::info!(
-        "[syng region gfa] wrote temporary FASTA in {:.3}s",
+        "[syng local gfa] wrote temporary FASTA in {:.3}s",
         fasta_start.elapsed().as_secs_f64()
     );
     let sequence_files = vec![fasta_path.to_string_lossy().to_string()];
     let seqidx_start = std::time::Instant::now();
     let sequence_index = sequence_index::UnifiedSequenceIndex::from_files(&sequence_files)?;
     log::info!(
-        "[syng region gfa] built temporary sequence index in {:.3}s",
+        "[syng local gfa] built temporary sequence index in {:.3}s",
         seqidx_start.elapsed().as_secs_f64()
     );
     let load_start = std::time::Instant::now();
-    let region_index = syng::SyngIndex::load(region_prefix, source_index.params)?;
+    let region_index = syng::SyngIndex::load(region_prefix, params)?;
     log::info!(
-        "[syng region gfa] loaded regional syng index in {:.3}s",
+        "[syng local gfa] loaded regional syng index in {:.3}s",
         load_start.elapsed().as_secs_f64()
     );
 
+    let ranges: Vec<commands::syng2gfa::SyngGfaPathRange> = sequences
+        .iter()
+        .map(|(name, seq)| {
+            let path_idx = region_index
+                .name_map
+                .name_to_path
+                .get(name)
+                .copied()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("local syng path '{name}' was not recorded in the name map"),
+                    )
+                })? as usize;
+            Ok(commands::syng2gfa::SyngGfaPathRange {
+                path_idx,
+                name: name.clone(),
+                start: 0,
+                end: seq.len() as u64,
+                strand: '+',
+            })
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+
     let write_start = std::time::Instant::now();
-    commands::syng2gfa::write_gfa_with_mode(
+    commands::syng2gfa::write_range_gfa_with_mode(
         &region_index,
+        &ranges,
         out,
         commands::syng2gfa::GfaVersion::V1_0,
         Some(&sequence_index),
         mode,
+        frequency_mask,
     )?;
     log::info!(
-        "[syng region gfa] wrote regional GFA in {:.3}s; total {:.3}s",
+        "[syng local gfa] wrote regional GFA in {:.3}s; total {:.3}s",
         write_start.elapsed().as_secs_f64(),
         total_start.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
+    source_index: &syng::SyngIndex,
+    sequences: &[(String, Vec<u8>)],
+    out: &mut W,
+    mode: commands::syng2gfa::SyngGfaMode,
+) -> std::io::Result<()> {
+    write_syng_region_gfa_from_sequences_with_params(
+        sequences,
+        out,
+        source_index.params,
+        mode,
+        commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+    )
+}
+
+fn build_syng_local_region_gfa_from_intervals(
+    impg: &impl impg_index::ImpgIndex,
+    query_intervals: &[coitrees::Interval<u32>],
+    sequence_index: &sequence_index::UnifiedSequenceIndex,
+    mode: commands::syng2gfa::SyngGfaMode,
+    params: syng::SyncmerParams,
+    frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
+) -> std::io::Result<String> {
+    let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
+    if sequences.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+    let seq_pairs: Vec<(String, Vec<u8>)> = sequences
+        .iter()
+        .map(|(seq, meta)| (meta.path_name(), seq.as_bytes().to_vec()))
+        .collect();
+    let mut out = Vec::new();
+    write_syng_region_gfa_from_sequences_with_params(
+        &seq_pairs,
+        &mut out,
+        params,
+        mode,
+        frequency_mask,
+    )?;
+    String::from_utf8(out).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("local syng GFA is not UTF-8: {e}"),
+        )
+    })
 }
 
 fn build_syng_region_gfa_from_intervals(
@@ -1078,6 +1162,29 @@ fn dispatch_gfa_engine_inner(
                     graph::normalize_and_sort(gfa, num_threads)
                 }
             }
+        }
+        GfaEngine::SyngLocal => {
+            let mode = engine_opts
+                .syng_gfa_mode
+                .unwrap_or(commands::syng2gfa::SyngGfaMode::Blunt);
+            let params = engine_opts
+                .syng_params
+                .or_else(|| impg.syng_index_ref().map(|idx| idx.params))
+                .unwrap_or_default();
+            log::info!(
+                "[syng local gfa] rebuilding query-selected sequences with syncmer k={},s={},seed={}",
+                params.k + params.w,
+                params.k,
+                params.seed
+            );
+            build_syng_local_region_gfa_from_intervals(
+                impg,
+                query_intervals,
+                sequence_index,
+                mode,
+                params,
+                engine_opts.syng_gfa_frequency_mask,
+            )
         }
     }
 }
@@ -1610,5 +1717,66 @@ P\talt\t1+,3+,4+\t*
         assert!(paths
             .iter()
             .any(|(name, seq)| name == "seq2:5-9" && seq == "ACGA"));
+    }
+
+    #[test]
+    fn syng_local_rebuild_uses_requested_syncmer_length() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let seq: String = (0..127)
+            .map(|i| match (i * 5 + 3) % 4 {
+                0 => 'A',
+                1 => 'C',
+                2 => 'G',
+                _ => 'T',
+            })
+            .collect();
+        let fasta_path = tempdir.path().join("local.fa");
+        std::fs::write(&fasta_path, format!(">sample#0#chr1\n{seq}\n")).unwrap();
+        let fasta_files = vec![fasta_path.to_string_lossy().to_string()];
+        let sequence_index =
+            sequence_index::UnifiedSequenceIndex::from_files(&fasta_files).unwrap();
+
+        let mut seq_index = seqidx::SequenceIndex::new();
+        let seq_id = seq_index.get_or_insert_id("sample#0#chr1", Some(seq.len()));
+        let intervals = vec![coitrees::Interval::new(0, seq.len() as i32, seq_id)];
+
+        let opts = EngineOpts {
+            engine: GfaEngine::SyngLocal,
+            syng_gfa_mode: Some(commands::syng2gfa::SyngGfaMode::Raw),
+            syng_params: Some(syng::SyncmerParams {
+                k: 16,
+                w: 111,
+                seed: 7,
+            }),
+            syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+            pipeline: commands::graph::GraphBuildConfig {
+                num_threads: 1,
+                show_progress: false,
+                ..commands::graph::GraphBuildConfig::default()
+            },
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            partition_size: None,
+            crush_config: None,
+            smooth_after_crush: None,
+            graph_sort_pipeline: None,
+        };
+        let impg = SeqIndexWrapper { seq_index };
+        let gfa = dispatch_gfa_engine(&impg, &intervals, &sequence_index, None, &opts).unwrap();
+
+        let segment_lengths: Vec<usize> = gfa
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                (fields.next()? == "S").then(|| fields.nth(1).unwrap_or("").len())
+            })
+            .collect();
+        assert_eq!(
+            segment_lengths,
+            vec![127],
+            "syng-local should emit a 127 bp syncmer segment when k=127,s=16 is requested:\n{gfa}"
+        );
+        assert!(gfa.contains("P\tsample#0#chr1:0-127\t"));
     }
 }

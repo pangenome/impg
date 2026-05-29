@@ -2123,10 +2123,11 @@ impl SmoothOpts {
 /// Engine + graph-building options shared by query, partition, similarity, and graph.
 #[derive(Parser, Debug)]
 struct EngineCliOpts {
-    /// GFA engine: 'pggb' (default), 'seqwish', 'poa', or 'syng'.
+    /// GFA engine: 'pggb' (default), 'seqwish', 'poa', 'syng', or 'syng-local'.
     /// Append ':WINDOW' to pggb/seqwish/poa for partitioned mode, e.g. 'pggb:10000'.
-    /// Syng modes are 'syng'/'syng:blunt' (default bluntg output) or 'syng:raw';
-    /// optional syng assertions use comma parameters, e.g. 'syng:blunt,k=63,s=8,seed=7'.
+    /// Syng modes are 'syng'/'syng:blunt' (default bluntg output), 'syng:raw',
+    /// or 'syng-local'; comma parameters assert global syng params for 'syng'
+    /// and select rebuild params for 'syng-local', e.g. 'syng-local,k=127,s=16'.
     #[arg(help_heading = "Output options")]
     #[clap(
         long = "gfa-engine",
@@ -3584,7 +3585,10 @@ impl EngineCliOpts {
             Ok(ps)
         };
 
-        let is_syng = matches!(engine_name, "syng" | "syng-native");
+        let is_syng = matches!(
+            engine_name,
+            "syng" | "syng-native" | "syng-local" | "local-syng"
+        );
         let mut partition_size = None;
         let mut syng_gfa_mode = None;
 
@@ -3593,11 +3597,12 @@ impl EngineCliOpts {
             "seqwish" => GfaEngine::Seqwish,
             "poa" => GfaEngine::Poa,
             "syng" | "syng-native" => GfaEngine::SyngNative,
+            "syng-local" | "local-syng" => GfaEngine::SyngLocal,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng",
+                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng, syng-local",
                         engine_stage.name
                     ),
                 ));
@@ -3610,10 +3615,11 @@ impl EngineCliOpts {
         let mut saw_syng_param = false;
         let mut crush_config = None;
         let mut smooth_after_crush: Option<impg::SmoothPipelineConfig> = None;
-        let mut syng_gfa_frequency_mask = if is_syng {
-            SyngGfaFrequencyMask::local_default()
-        } else {
-            SyngGfaFrequencyMask::disabled()
+        let mut syng_gfa_frequency_mask = match engine {
+            GfaEngine::SyngNative => SyngGfaFrequencyMask::local_default(),
+            GfaEngine::SyngLocal | GfaEngine::Pggb | GfaEngine::Seqwish | GfaEngine::Poa => {
+                SyngGfaFrequencyMask::disabled()
+            }
         };
         let mut graph_sort_pipeline = if is_syng {
             Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string())
@@ -3731,7 +3737,7 @@ impl EngineCliOpts {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "Invalid --gfa-engine '{}': crush requires blunt syng GFA; use syng:crush or syng:blunt:crush",
+                    "Invalid --gfa-engine '{}': crush requires blunt syng GFA; use syng:crush, syng:blunt:crush, or syng-local:crush",
                     raw
                 ),
             ));
@@ -3791,7 +3797,7 @@ impl EngineCliOpts {
                 }
             }
             GfaEngine::Seqwish | GfaEngine::Pggb => {}
-            GfaEngine::SyngNative => {
+            GfaEngine::SyngNative | GfaEngine::SyngLocal => {
                 // Syng-native will generate its own alignments internally
                 // from syncmer anchors + BiWFA. Sparsification is driven by
                 // syng anchor density and sweepga::knn_graph, not --sparsify.
@@ -3801,7 +3807,7 @@ impl EngineCliOpts {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "--sparsify controls external-aligner pair selection; \
-                         --gfa-engine syng-native selects pairs from syng anchor counts",
+                         --gfa-engine syng/syng-local selects pairs from syng anchor counts",
                     ));
                 }
             }
@@ -4680,7 +4686,11 @@ Syng notes:
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
   query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
   defaults to syng:blunt plus gfasort pipeline Ygs; use syng:raw to preserve
-  native overlaps and `:nosort` to skip final ordering. Syng GFA extraction
+  native overlaps and `:nosort` to skip final ordering. `--gfa-engine syng-local`
+  rebuilds a fresh regional syng index from query-selected sequences; its
+  k/s/seed parameters select the local rebuild scheme rather than asserting the
+  global index, and it only applies the syng frequency mask when `:mask` is
+  requested explicitly. Syng GFA extraction
   filters the top 0.05% high-frequency local syncmer nodes from the raw syng
   topology before bluntification and clones rare repeated-copy local syncmer
   contexts by default so repeats seed ranges but do not glue unrelated copies;
@@ -4689,6 +4699,7 @@ Syng notes:
   N-runs from fetched gap DNA and split emitted graph paths at those breaks.
   The compact forms
   `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
+  `-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`,
   `-o gfa:syng:crush:sort,pipeline=Ygs`, and `-o vcf:syng` are accepted
   as shorthand. Use
   `impg syng2gfa` to dump the whole syng syncmer graph instead.
@@ -8214,13 +8225,13 @@ fn run() -> io::Result<()> {
                     GfaEngine::Seqwish => {
                         graph::run_graph_build(fasta_files, &output, graph_config)?;
                     }
-                    GfaEngine::SyngNative => {
+                    GfaEngine::SyngNative | GfaEngine::SyngLocal => {
                         // `impg graph` is the flat whole-FASTA entry point and
                         // doesn't produce syng partitions. Syng-native only has
                         // a meaning inside `partition --gfa-engine syng-native`.
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            "--gfa-engine syng-native is only available under `partition` (requires a syng index); use `seqwish` or `pggb` here",
+                            "--gfa-engine syng/syng-local is only available under `query`/`partition` with selected intervals; use `seqwish` or `pggb` here",
                         ));
                     }
                     GfaEngine::Pggb => {
@@ -13005,6 +13016,9 @@ mod tests {
             "chain-povu",
             "top-flubble-sweepga",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
+            "syng-local",
+            "rebuilds a fresh regional syng index",
+            "-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush",
         ] {
             assert!(
                 help.contains(expected),
@@ -13071,6 +13085,68 @@ mod tests {
                         seed: 7
                     })
                 );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_engine_syng_local_mode_and_rebuild_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local:blunt,k=127,s=16,seed=11:crush,max-rounds=1",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngLocal);
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
+                assert_eq!(
+                    parsed.syng_params,
+                    Some(impg::syng::SyncmerParams {
+                        k: 16,
+                        w: 111,
+                        seed: 11
+                    })
+                );
+                assert!(parsed.crush_config.is_some());
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask,
+                    impg::commands::syng2gfa::SyngGfaFrequencyMask::disabled()
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_engine_syng_local_rejects_even_total_length() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local,k=128,s=16",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let err = engine_cli.parse_engine().unwrap_err();
+                assert!(err.to_string().contains("must be odd"));
             }
             _ => panic!("expected query command"),
         }
