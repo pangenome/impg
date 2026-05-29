@@ -588,12 +588,22 @@ struct BubbleCandidate {
     level: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct GraphQuality {
     segments: usize,
     segment_bp: usize,
     links: usize,
     path_steps: usize,
+    node_coverage_mean: f64,
+    node_coverage_bp_weighted_mean: f64,
+    node_coverage_p10: usize,
+    node_coverage_median: usize,
+    node_coverage_p90: usize,
+    singleton_nodes: usize,
+    singleton_bp: usize,
+    high_coverage_threshold: usize,
+    high_coverage_nodes: usize,
+    high_coverage_bp: usize,
     trivial_stringy: usize,
     path_white_space_bp_total: u64,
     path_white_space_bp_p99: usize,
@@ -2150,14 +2160,12 @@ fn resolve_graph_bubbles_iterative_multi_level(
         if generated.candidates.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: no generated candidate(s) from {} POVU site(s), {} polymorphic site(s) in {:.2?}; before segments={}, segment_bp={}, trivial_stringy={}",
+                    "crush iterative-multi-level round {}: no generated candidate(s) from {} POVU site(s), {} polymorphic site(s) in {:.2?}; before {}",
                     round + 1,
                     sites_seen,
                     all_discovered.len(),
                     discovery_elapsed,
-                    before_quality.segments,
-                    before_quality.segment_bp,
-                    before_quality.trivial_stringy
+                    before_quality.summary()
                 );
             }
             break;
@@ -2168,7 +2176,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before segments={}, segment_bp={}, trivial_stringy={}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2182,9 +2190,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 timings.id_map,
                 timings.path_index,
                 timings.candidate_build,
-                before_quality.segments,
-                before_quality.segment_bp,
-                before_quality.trivial_stringy
+                before_quality.summary()
             );
             log::info!(
                 "crush iterative-multi-level round {} traversal stats: {}",
@@ -2400,7 +2406,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
         if accepted.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: 0 accepted candidate(s) after cheap local-objective/non-overlap filter; built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, failed_or_empty={}, objective_floor={}, build {:.2?}; before segments={}, segment_bp={}, trivial_stringy={}",
+                    "crush iterative-multi-level round {}: 0 accepted candidate(s) after cheap local-objective/non-overlap filter; built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, failed_or_empty={}, objective_floor={}, build {:.2?}; before {}",
                     round + 1,
                     built_count,
                     objective_passing_count,
@@ -2409,9 +2415,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                     failed_or_empty,
                     objective_floor,
                     build_elapsed,
-                    before_quality.segments,
-                    before_quality.segment_bp,
-                    before_quality.trivial_stringy
+                    before_quality.summary()
                 );
             }
             break;
@@ -2474,7 +2478,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
         if graph_delta < objective_floor {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: rejecting {} cheaply accepted candidate(s) because global objective delta {} is below floor {}; fallback_trials={}, fallback_failed_trials={}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}; local objective {}; before segments={}, segment_bp={}, trivial_stringy={}; after segments={}, segment_bp={}, trivial_stringy={}; total {:.2?}",
+                    "crush iterative-multi-level round {}: rejecting {} cheaply accepted candidate(s) because global objective delta {} is below floor {}; fallback_trials={}, fallback_failed_trials={}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}; local objective {}; before {}; after {}; total {:.2?}",
                     round + 1,
                     plans.len(),
                     graph_delta,
@@ -2486,12 +2490,8 @@ fn resolve_graph_bubbles_iterative_multi_level(
                     local_objective_rejected,
                     overlap_rejected,
                     objective_summary,
-                    before_quality.segments,
-                    before_quality.segment_bp,
-                    before_quality.trivial_stringy,
-                    after_quality.segments,
-                    after_quality.segment_bp,
-                    after_quality.trivial_stringy,
+                    before_quality.summary(),
+                    after_quality.summary(),
                     round_start.elapsed()
                 );
             }
@@ -2509,7 +2509,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: accepted {} candidate(s) from {}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, fallback_used={}, fallback_trials={}, fallback_failed_trials={}; local objective {}; global_objective_delta={}; failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before segments={}, segment_bp={}, trivial_stringy={}; after segments={}, segment_bp={}, trivial_stringy={}",
+                "crush iterative-multi-level round {}: accepted {} candidate(s) from {}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, fallback_used={}, fallback_trials={}, fallback_failed_trials={}; local objective {}; global_objective_delta={}; failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before {}; after {}",
                 round + 1,
                 plans.len(),
                 format_multi_level_source_counts(&accepted_sources),
@@ -2528,12 +2528,8 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 round_start.elapsed(),
                 pre_apply_next_id,
                 next_id,
-                before_quality.segments,
-                before_quality.segment_bp,
-                before_quality.trivial_stringy,
-                after_quality.segments,
-                after_quality.segment_bp,
-                after_quality.trivial_stringy
+                before_quality.summary(),
+                after_quality.summary()
             );
         }
     }
@@ -4241,12 +4237,22 @@ fn median_value(values: &mut [usize]) -> usize {
 impl GraphQuality {
     fn summary(&self) -> String {
         format!(
-            "score={}, segments={}, segment-bp={}, links={}, path-steps={}, trivial_stringy={}, ws-total={}, ws-p99={}, ws-max={}, ws-long>={}bp={}",
+            "score={}, segments={}, segment-bp={}, links={}, path-steps={}, mean-node-coverage={:.2}, bp-weighted-node-coverage={:.2}, node-coverage-p10/median/p90={}/{}/{}, singleton-nodes={} ({}bp), high-coverage-nodes>={}={} ({}bp), trivial_stringy={}, ws-total={}, ws-p99={}, ws-max={}, ws-long>={}bp={}",
             self.score,
             self.segments,
             self.segment_bp,
             self.links,
             self.path_steps,
+            self.node_coverage_mean,
+            self.node_coverage_bp_weighted_mean,
+            self.node_coverage_p10,
+            self.node_coverage_median,
+            self.node_coverage_p90,
+            self.singleton_nodes,
+            self.singleton_bp,
+            self.high_coverage_threshold,
+            self.high_coverage_nodes,
+            self.high_coverage_bp,
             self.trivial_stringy,
             self.path_white_space_bp_total,
             self.path_white_space_bp_p99,
@@ -4269,6 +4275,49 @@ fn graph_quality(graph: &Graph) -> GraphQuality {
         .iter()
         .map(|path| path.steps.len())
         .sum::<usize>();
+    let mut node_visits = vec![0usize; segments];
+    for path in &graph.paths {
+        for step in &path.steps {
+            if step.node < node_visits.len() {
+                node_visits[step.node] += 1;
+            }
+        }
+    }
+    let total_node_visits = node_visits.iter().copied().sum::<usize>();
+    let node_coverage_mean = if segments == 0 {
+        0.0
+    } else {
+        total_node_visits as f64 / segments as f64
+    };
+    let mut sorted_node_visits = node_visits.clone();
+    sorted_node_visits.sort_unstable();
+    let node_coverage_p10 = quantile_usize(&sorted_node_visits, 10, 100);
+    let node_coverage_median = quantile_usize(&sorted_node_visits, 50, 100);
+    let node_coverage_p90 = quantile_usize(&sorted_node_visits, 90, 100);
+    let high_coverage_threshold = graph.paths.len().div_ceil(2).max(2);
+    let mut weighted_visit_bp = 0u128;
+    let mut singleton_nodes = 0usize;
+    let mut singleton_bp = 0usize;
+    let mut high_coverage_nodes = 0usize;
+    let mut high_coverage_bp = 0usize;
+    for (visits, segment) in node_visits.iter().copied().zip(&graph.segments) {
+        let len = segment.seq.len();
+        weighted_visit_bp =
+            weighted_visit_bp.saturating_add((visits as u128).saturating_mul(len as u128));
+        if visits == 1 {
+            singleton_nodes += 1;
+            singleton_bp = singleton_bp.saturating_add(len);
+        }
+        if visits >= high_coverage_threshold {
+            high_coverage_nodes += 1;
+            high_coverage_bp = high_coverage_bp.saturating_add(len);
+        }
+    }
+    let node_coverage_bp_weighted_mean = if segment_bp == 0 {
+        0.0
+    } else {
+        weighted_visit_bp as f64 / segment_bp as f64
+    };
     let mut links = BTreeSet::new();
     let mut white_space_gaps = Vec::new();
     let segment_starts = segment_starts(graph);
@@ -4312,6 +4361,16 @@ fn graph_quality(graph: &Graph) -> GraphQuality {
         segment_bp,
         links: links.len(),
         path_steps,
+        node_coverage_mean,
+        node_coverage_bp_weighted_mean,
+        node_coverage_p10,
+        node_coverage_median,
+        node_coverage_p90,
+        singleton_nodes,
+        singleton_bp,
+        high_coverage_threshold,
+        high_coverage_nodes,
+        high_coverage_bp,
         trivial_stringy: trivial_stringy_bubble_count(graph),
         path_white_space_bp_total,
         path_white_space_bp_p99,

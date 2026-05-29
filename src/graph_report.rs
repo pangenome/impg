@@ -20,6 +20,7 @@ pub struct GraphReportOptions {
     pub min_white_space_region_support: usize,
     pub max_path_white_space_p99: usize,
     pub max_sparse_coverage_path_fraction: f64,
+    pub high_coverage_min_path_fraction: f64,
     pub include_povu: bool,
     pub povu_reference_names: Vec<String>,
 }
@@ -42,6 +43,7 @@ impl Default for GraphReportOptions {
             min_white_space_region_support: 1,
             max_path_white_space_p99: 5_000,
             max_sparse_coverage_path_fraction: 0.25,
+            high_coverage_min_path_fraction: 0.50,
             include_povu: false,
             povu_reference_names: Vec::new(),
         }
@@ -76,6 +78,18 @@ pub struct GraphMetrics {
     pub paths: usize,
     pub path_steps: usize,
     pub total_segment_bp: usize,
+    pub node_path_step_visits: usize,
+    pub node_coverage_mean: f64,
+    pub node_coverage_bp_weighted_mean: f64,
+    pub node_coverage_p10: usize,
+    pub node_coverage_median: usize,
+    pub node_coverage_p90: usize,
+    pub singleton_nodes: usize,
+    pub singleton_bp: usize,
+    pub high_coverage_threshold: usize,
+    pub high_coverage_nodes: usize,
+    pub high_coverage_bp: usize,
+    pub node_coverage_histogram: Vec<NodeCoverageBucket>,
     pub components: usize,
     pub largest_component_nodes: usize,
     pub largest_component_frac: f64,
@@ -114,6 +128,15 @@ pub struct GraphMetrics {
     pub reused_nodes: usize,
     pub local_repeat_context_nodes: usize,
     pub local_repeat_context_occurrences: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NodeCoverageBucket {
+    pub label: String,
+    pub min: usize,
+    pub max: Option<usize>,
+    pub nodes: usize,
+    pub bp: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -424,6 +447,36 @@ impl GraphReport {
             m.reused_nodes
         ));
         out.push_str(&format!(
+            "- Node path coverage: {} total path-step visits over {} nodes; mean {:.2}, bp-weighted mean {:.2}; p10/median/p90 {}/{}/{}\n",
+            m.node_path_step_visits,
+            m.segments,
+            m.node_coverage_mean,
+            m.node_coverage_bp_weighted_mean,
+            m.node_coverage_p10,
+            m.node_coverage_median,
+            m.node_coverage_p90
+        ));
+        out.push_str(&format!(
+            "- Singleton nodes (coverage=1): {} nodes, {} bp; high-coverage shared nodes (coverage>={}): {} nodes, {} bp\n",
+            m.singleton_nodes,
+            m.singleton_bp,
+            m.high_coverage_threshold,
+            m.high_coverage_nodes,
+            m.high_coverage_bp
+        ));
+        if !m.node_coverage_histogram.is_empty() {
+            let histogram = m
+                .node_coverage_histogram
+                .iter()
+                .filter(|bucket| bucket.nodes > 0)
+                .map(|bucket| format!("{}:{} nodes/{} bp", bucket.label, bucket.nodes, bucket.bp))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !histogram.is_empty() {
+                out.push_str(&format!("- Node coverage histogram: {histogram}\n"));
+            }
+        }
+        out.push_str(&format!(
             "- Path-by-segment occupancy: {:.3} covered, {:.3} white-space cells ({} missing path-bp); node occupancy fractions p05 {:.3}, median {:.3}, p95 {:.3}\n",
             m.segment_occupancy_bp_fraction,
             m.segment_white_space_bp_fraction,
@@ -661,6 +714,18 @@ impl GraphReport {
             "links",
             "paths",
             "path_steps",
+            "total_segment_bp",
+            "node_path_step_visits",
+            "node_coverage_mean",
+            "node_coverage_bp_weighted_mean",
+            "node_coverage_p10",
+            "node_coverage_median",
+            "node_coverage_p90",
+            "singleton_nodes",
+            "singleton_bp",
+            "high_coverage_threshold",
+            "high_coverage_nodes",
+            "high_coverage_bp",
             "components",
             "largest_component_frac",
             "internal_tips",
@@ -698,6 +763,18 @@ impl GraphReport {
             m.links.to_string(),
             m.paths.to_string(),
             m.path_steps.to_string(),
+            m.total_segment_bp.to_string(),
+            m.node_path_step_visits.to_string(),
+            format!("{:.6}", m.node_coverage_mean),
+            format!("{:.6}", m.node_coverage_bp_weighted_mean),
+            m.node_coverage_p10.to_string(),
+            m.node_coverage_median.to_string(),
+            m.node_coverage_p90.to_string(),
+            m.singleton_nodes.to_string(),
+            m.singleton_bp.to_string(),
+            m.high_coverage_threshold.to_string(),
+            m.high_coverage_nodes.to_string(),
+            m.high_coverage_bp.to_string(),
             m.components.to_string(),
             format!("{:.6}", m.largest_component_frac),
             m.internal_tips.to_string(),
@@ -776,6 +853,17 @@ impl GraphReport {
             lines.push("More than half of the path-by-segment matrix is white space; in a homologous core locus this usually means underalignment, repeat/paralog splitting, or large rare insertions rather than a compact pangenome representation.".to_string());
         } else if m.segment_white_space_bp_fraction > 0.20 {
             lines.push("The path-by-segment matrix has substantial white space; inspect the sparse-coverage runs to distinguish real insertion alleles from repeat-driven underalignment.".to_string());
+        }
+        lines.push(format!(
+            "Mean node coverage is {:.2} path-step visits per node; bp-weighted mean path-depth is {:.2} haplotype bases per stored segment base. Prefer the bp-weighted value when comparing graph condensation because it discounts many tiny high-depth nodes and emphasizes shared representation across longer sequence.",
+            m.node_coverage_mean,
+            m.node_coverage_bp_weighted_mean
+        ));
+        if m.singleton_nodes > 0 {
+            lines.push(format!(
+                "{} singleton node(s) covering {} bp have coverage=1; persistent singleton bp usually marks private sequence, underalignment, or unshared replacement fragments.",
+                m.singleton_nodes, m.singleton_bp
+            ));
         }
         if m.path_white_space_bp_p99 > self.white_space_gap_threshold_bp {
             lines.push("Many consecutive path steps bridge long sorted-order gaps; these are the horizontal white-space spans visible in path renders and are direct targets for additional local alignment/crushing.".to_string());
@@ -1064,6 +1152,7 @@ fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMet
     let path_depth_median = quantile(&path_depths, 0.50);
     let path_depth_p95 = quantile(&path_depths, 0.95);
     let path_depth_max = path_depths.last().copied().unwrap_or(0);
+    let node_coverage = node_coverage_summary(parsed, options.high_coverage_min_path_fraction);
     let reused_nodes = if parsed.paths.is_empty() {
         0
     } else {
@@ -1079,6 +1168,18 @@ fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMet
         paths: parsed.paths.len(),
         path_steps,
         total_segment_bp: parsed.segment_lengths.values().sum(),
+        node_path_step_visits: node_coverage.total_visits,
+        node_coverage_mean: node_coverage.mean,
+        node_coverage_bp_weighted_mean: node_coverage.bp_weighted_mean,
+        node_coverage_p10: node_coverage.p10,
+        node_coverage_median: node_coverage.median,
+        node_coverage_p90: node_coverage.p90,
+        singleton_nodes: node_coverage.singleton_nodes,
+        singleton_bp: node_coverage.singleton_bp,
+        high_coverage_threshold: node_coverage.high_coverage_threshold,
+        high_coverage_nodes: node_coverage.high_coverage_nodes,
+        high_coverage_bp: node_coverage.high_coverage_bp,
+        node_coverage_histogram: node_coverage.histogram,
         components: component_sizes.len(),
         largest_component_nodes,
         largest_component_frac,
@@ -1117,6 +1218,144 @@ fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMet
         reused_nodes,
         local_repeat_context_nodes: repeat_contexts.len(),
         local_repeat_context_occurrences,
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct NodeCoverageSummary {
+    total_visits: usize,
+    mean: f64,
+    bp_weighted_mean: f64,
+    p10: usize,
+    median: usize,
+    p90: usize,
+    singleton_nodes: usize,
+    singleton_bp: usize,
+    high_coverage_threshold: usize,
+    high_coverage_nodes: usize,
+    high_coverage_bp: usize,
+    histogram: Vec<NodeCoverageBucket>,
+}
+
+fn node_coverage_summary(parsed: &ParsedGfa, high_min_path_fraction: f64) -> NodeCoverageSummary {
+    let mut visits_by_node: HashMap<&str, usize> = HashMap::new();
+    for path in &parsed.paths {
+        for step in &path.steps {
+            *visits_by_node.entry(step.node.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    let high_threshold = high_coverage_threshold(parsed.paths.len(), high_min_path_fraction);
+    let mut coverages = Vec::with_capacity(parsed.order.len());
+    let mut total_visits = 0usize;
+    let mut total_bp = 0usize;
+    let mut weighted_visit_bp = 0u128;
+    let mut singleton_nodes = 0usize;
+    let mut singleton_bp = 0usize;
+    let mut high_coverage_nodes = 0usize;
+    let mut high_coverage_bp = 0usize;
+    let mut histogram = empty_node_coverage_histogram();
+
+    for node in parsed.order.keys() {
+        let coverage = visits_by_node.get(node.as_str()).copied().unwrap_or(0);
+        let len = parsed.segment_lengths.get(node).copied().unwrap_or(0);
+        coverages.push(coverage);
+        total_visits = total_visits.saturating_add(coverage);
+        total_bp = total_bp.saturating_add(len);
+        weighted_visit_bp =
+            weighted_visit_bp.saturating_add((coverage as u128).saturating_mul(len as u128));
+        if coverage == 1 {
+            singleton_nodes += 1;
+            singleton_bp = singleton_bp.saturating_add(len);
+        }
+        if coverage >= high_threshold {
+            high_coverage_nodes += 1;
+            high_coverage_bp = high_coverage_bp.saturating_add(len);
+        }
+        add_to_node_coverage_histogram(&mut histogram, coverage, len);
+    }
+
+    coverages.sort_unstable();
+    let mean = if coverages.is_empty() {
+        0.0
+    } else {
+        total_visits as f64 / coverages.len() as f64
+    };
+    let bp_weighted_mean = if total_bp == 0 {
+        0.0
+    } else {
+        weighted_visit_bp as f64 / total_bp as f64
+    };
+
+    NodeCoverageSummary {
+        total_visits,
+        mean,
+        bp_weighted_mean,
+        p10: quantile(&coverages, 0.10),
+        median: quantile(&coverages, 0.50),
+        p90: quantile(&coverages, 0.90),
+        singleton_nodes,
+        singleton_bp,
+        high_coverage_threshold: high_threshold,
+        high_coverage_nodes,
+        high_coverage_bp,
+        histogram,
+    }
+}
+
+fn high_coverage_threshold(paths: usize, min_path_fraction: f64) -> usize {
+    let fraction = if min_path_fraction.is_finite() {
+        min_path_fraction.clamp(0.0, 1.0)
+    } else {
+        0.50
+    };
+    ((paths as f64 * fraction).ceil() as usize).max(2)
+}
+
+fn empty_node_coverage_histogram() -> Vec<NodeCoverageBucket> {
+    [
+        ("0", 0, Some(0)),
+        ("1", 1, Some(1)),
+        ("2", 2, Some(2)),
+        ("3-4", 3, Some(4)),
+        ("5-8", 5, Some(8)),
+        ("9-16", 9, Some(16)),
+        ("17-32", 17, Some(32)),
+        ("33-64", 33, Some(64)),
+        ("65-128", 65, Some(128)),
+        ("129+", 129, None),
+    ]
+    .into_iter()
+    .map(|(label, min, max)| NodeCoverageBucket {
+        label: label.to_string(),
+        min,
+        max,
+        nodes: 0,
+        bp: 0,
+    })
+    .collect()
+}
+
+fn add_to_node_coverage_histogram(
+    histogram: &mut [NodeCoverageBucket],
+    coverage: usize,
+    bp: usize,
+) {
+    let idx = match coverage {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3..=4 => 3,
+        5..=8 => 4,
+        9..=16 => 5,
+        17..=32 => 6,
+        33..=64 => 7,
+        65..=128 => 8,
+        _ => 9,
+    };
+    if let Some(bucket) = histogram.get_mut(idx) {
+        bucket.nodes += 1;
+        bucket.bp = bucket.bp.saturating_add(bp);
     }
 }
 
@@ -2273,6 +2512,62 @@ P\talt2\t1+,3+,4+\t*
             annotated.contains("_povu_flubble_path_0_lv0_leaf_span2_path2_hit0_alt2"),
             "{annotated}"
         );
+    }
+
+    #[test]
+    fn reports_node_path_coverage_metrics_on_known_fixture() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\tCC
+S\t3\tGGGGGG
+S\t4\tTTTTTTTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t3\t+\t0M
+P\tp1\t1+,2+,3+\t*
+P\tp2\t1+,2+,3+\t*
+P\tp3\t1+,4+,3+\t*
+W\ts\t0\tchr1\t0\t14\t>1>2>2>3
+";
+        let report = describe_gfa("coverage.gfa", gfa, &GraphReportOptions::default()).unwrap();
+        let m = &report.metrics;
+        assert_eq!(m.segments, 4);
+        assert_eq!(m.paths, 4);
+        assert_eq!(m.path_steps, 13);
+        assert_eq!(m.node_path_step_visits, 13);
+        assert!((m.node_coverage_mean - 3.25).abs() < 1e-9);
+        assert!((m.node_coverage_bp_weighted_mean - 2.80).abs() < 1e-9);
+        assert_eq!(m.node_coverage_p10, 1);
+        assert_eq!(m.node_coverage_median, 4);
+        assert_eq!(m.node_coverage_p90, 4);
+        assert_eq!(m.singleton_nodes, 1);
+        assert_eq!(m.singleton_bp, 8);
+        assert_eq!(m.high_coverage_threshold, 2);
+        assert_eq!(m.high_coverage_nodes, 3);
+        assert_eq!(m.high_coverage_bp, 12);
+
+        let singleton_bucket = m
+            .node_coverage_histogram
+            .iter()
+            .find(|bucket| bucket.label == "1")
+            .unwrap();
+        assert_eq!(singleton_bucket.nodes, 1);
+        assert_eq!(singleton_bucket.bp, 8);
+        let shared_bucket = m
+            .node_coverage_histogram
+            .iter()
+            .find(|bucket| bucket.label == "3-4")
+            .unwrap();
+        assert_eq!(shared_bucket.nodes, 3);
+        assert_eq!(shared_bucket.bp, 12);
+        assert!(report
+            .to_markdown()
+            .contains("Node path coverage: 13 total path-step visits"));
+        assert!(report
+            .to_markdown()
+            .contains("bp-weighted mean path-depth is 2.80"));
     }
 
     #[test]
