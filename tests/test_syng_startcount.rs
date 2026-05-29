@@ -6,6 +6,8 @@ use impg::syng_ffi;
 use std::ffi::CString;
 use std::path::Path;
 
+const SYNG_SIMPLE_SIDE_COUNT_LIMIT: u32 = 65_000;
+
 static SYNG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
@@ -58,15 +60,15 @@ fn test_path_offset_above_u16_is_preserved() {
 
         assert_eq!(walk_first_step(gbwt, 1, 0), (2, 70_000));
 
-        let dir = std::env::temp_dir().join("impg_test_syng_large_offset");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let loaded = roundtrip_gbwt(gbwt, &dir.join("idx.1gbwt"));
+        let dir = tempfile::Builder::new()
+            .prefix("impg_test_syng_large_offset_")
+            .tempdir()
+            .unwrap();
+        let loaded = roundtrip_gbwt(gbwt, &dir.path().join("idx.1gbwt"));
         syng_ffi::syngBWTdestroy(gbwt);
 
         assert_eq!(walk_first_step(loaded, 1, 0), (2, 70_000));
         syng_ffi::syngBWTdestroy(loaded);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -77,22 +79,23 @@ fn test_one_edge_rskip_side_survives_load() {
     unsafe {
         syng_ffi::impg_syng_suppress_debug();
         let gbwt = syng_ffi::syngBWTcreate(63, 0);
-        let n_paths = 70_000u32;
+        let n_paths = SYNG_SIMPLE_SIDE_COUNT_LIMIT + 1;
         for _ in 0..n_paths {
             let sbp = syng_ffi::syngBWTpathStartNew(gbwt, 1);
             syng_ffi::syngBWTpathAdd(sbp, 2, 10);
             syng_ffi::syngBWTpathFinish(sbp);
         }
 
-        let dir = std::env::temp_dir().join("impg_test_syng_one_edge_rskip_load");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let loaded = roundtrip_gbwt(gbwt, &dir.join("idx.1gbwt"));
+        let dir = tempfile::Builder::new()
+            .prefix("impg_test_syng_one_edge_rskip_load_")
+            .tempdir()
+            .unwrap();
+        let loaded = roundtrip_gbwt(gbwt, &dir.path().join("idx.1gbwt"));
         syng_ffi::syngBWTdestroy(gbwt);
 
+        assert_eq!(walk_first_step(loaded, 1, 0), (2, 10));
         assert_eq!(walk_first_step(loaded, 1, n_paths - 1), (2, 10));
         syng_ffi::syngBWTdestroy(loaded);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -326,10 +329,11 @@ fn test_identical_sequences_get_distinct_start_counts() {
     );
 
     // Also round-trip: save, load, then try to walk each path via query_region.
-    let dir = std::env::temp_dir().join("impg_test_ident_seqs");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let prefix = dir.join("idx");
+    let dir = tempfile::Builder::new()
+        .prefix("impg_test_ident_seqs_")
+        .tempdir()
+        .unwrap();
+    let prefix = dir.path().join("idx");
     let prefix_str = prefix.to_str().unwrap();
     index.save(prefix_str).expect("save failed");
     let loaded = SyngIndex::load(prefix_str, SyncmerParams::default()).expect("load failed");
@@ -344,5 +348,4 @@ fn test_identical_sequences_get_distinct_start_counts() {
 
     drop(loaded);
     drop(index);
-    std::fs::remove_dir_all(&dir).ok();
 }
