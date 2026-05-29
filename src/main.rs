@@ -2866,13 +2866,52 @@ fn parse_crush_stage(
                 config.chain_greedy_target_bp =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "window-mode" | "multi-level-window-mode" | "multi-window-mode" => {
+                let Some(mode) = impg::resolution::MultiLevelWindowMode::parse_name(&param.value)
+                else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': multi-level window mode '{}' is unsupported (expected sibling, sliding, or combined)",
+                            raw, param.value
+                        ),
+                    ));
+                };
+                config.multi_level_window_mode = mode;
+            }
+            "window-target-bp"
+            | "window-target-len"
+            | "multi-level-window-target-bp"
+            | "multi-window-target-bp" => {
+                config.multi_level_window_target_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-window-sites" | "window-sites" | "multi-level-max-window-sites" => {
+                config.multi_level_max_window_sites =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "candidate-limit" | "window-candidate-limit" | "multi-level-candidate-limit" => {
+                config.multi_level_candidate_limit =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "min-objective-delta" | "window-min-objective-delta" => {
+                config.multi_level_min_objective_delta = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid integer objective delta",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+            }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
                 else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, or top-flubble-sweepga)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, or iterative-multi-level)",
                             raw, param.value
                         ),
                     ));
@@ -2994,6 +3033,15 @@ fn parse_crush_stage(
             io::ErrorKind::InvalidInput,
             format!(
                 "Invalid --gfa-engine '{}': chain-greedy target bp must be > 0",
+                raw
+            ),
+        ));
+    }
+    if config.multi_level_max_window_sites == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': multi-level max-window-sites must be > 0",
                 raw
             ),
         ));
@@ -5157,7 +5205,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, or top-flubble-sweepga
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, or iterative-multi-level
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -5297,6 +5345,31 @@ GFA engine shorthand:
             default_value = "10k"
         )]
         chain_greedy_target_bp: usize,
+
+        /// Candidate source set for --method iterative-multi-level: sibling, sliding, or combined
+        #[clap(
+            long = "window-mode",
+            alias = "multi-level-window-mode",
+            value_parser,
+            default_value = "combined"
+        )]
+        multi_level_window_mode: String,
+
+        /// Maximum root-path span for generated iterative-multi-level windows; 0 reuses --chain-target-bp
+        #[clap(long = "window-target-bp", alias = "multi-level-window-target-bp", value_parser = parse_usize_size, default_value = "0")]
+        multi_level_window_target_bp: usize,
+
+        /// Maximum discovered flubble sites to merge into one iterative-multi-level window
+        #[clap(long = "max-window-sites", alias = "multi-level-max-window-sites", value_parser = parse_usize_size, default_value = "4")]
+        multi_level_max_window_sites: usize,
+
+        /// Maximum generated iterative-multi-level candidates to build per round; 0 disables
+        #[clap(long = "candidate-limit", alias = "window-candidate-limit", value_parser = parse_usize_size, default_value = "96")]
+        multi_level_candidate_limit: usize,
+
+        /// Minimum positive local objective score required for iterative-multi-level candidate acceptance
+        #[clap(long = "min-objective-delta", value_parser, default_value = "1")]
+        multi_level_min_objective_delta: i128,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -8164,6 +8237,11 @@ fn run() -> io::Result<()> {
             sweepga_sparse_pairs,
             replacement_flank_bp,
             chain_greedy_target_bp,
+            multi_level_window_mode,
+            multi_level_window_target_bp,
+            multi_level_max_window_sites,
+            multi_level_candidate_limit,
+            multi_level_min_objective_delta,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -8188,7 +8266,15 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level",
+                ));
+            };
+            let Some(multi_level_window_mode) =
+                impg::resolution::MultiLevelWindowMode::parse_name(&multi_level_window_mode)
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--window-mode must be one of: sibling, sliding, combined",
                 ));
             };
             let Some(polish_method) =
@@ -8253,6 +8339,12 @@ fn run() -> io::Result<()> {
                     "--chain-target-bp must be > 0",
                 ));
             }
+            if multi_level_max_window_sites == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--max-window-sites must be > 0",
+                ));
+            }
             let replacement_num_mappings = normalize_filter_mode_value(&replacement_num_mappings)
                 .ok_or_else(|| {
                     io::Error::new(
@@ -8314,6 +8406,11 @@ fn run() -> io::Result<()> {
                 sweepga_sparse_pairs,
                 replacement_flank_bp,
                 chain_greedy_target_bp,
+                multi_level_window_mode,
+                multi_level_window_target_bp,
+                multi_level_max_window_sites,
+                multi_level_candidate_limit,
+                multi_level_min_objective_delta,
                 scoring_params: poa_scoring,
                 ..Default::default()
             };
@@ -13123,6 +13220,46 @@ mod tests {
                 );
                 assert_eq!(crush.chain_greedy_target_bp, 8_000);
                 assert_eq!(crush.max_iterations, 3);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_iterative_multi_level_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=iterative-multi-level,window-mode=sliding,window-target-bp=12k,max-window-sites=5,candidate-limit=17,min-objective-delta=3,max-rounds=4",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.method,
+                    impg::resolution::ResolutionMethod::IterativeMultiLevel
+                );
+                assert_eq!(
+                    crush.multi_level_window_mode,
+                    impg::resolution::MultiLevelWindowMode::Sliding
+                );
+                assert_eq!(crush.multi_level_window_target_bp, 12_000);
+                assert_eq!(crush.multi_level_max_window_sites, 5);
+                assert_eq!(crush.multi_level_candidate_limit, 17);
+                assert_eq!(crush.multi_level_min_objective_delta, 3);
+                assert_eq!(crush.max_iterations, 4);
             }
             _ => panic!("expected query command"),
         }
