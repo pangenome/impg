@@ -4372,6 +4372,10 @@ enum GenotypeCommand {
         #[clap(long, value_parser, default_value_t = 0.8)]
         min_span_fraction: f64,
 
+        /// Optional human-readable evidence report path for debugging candidate vectors and score decomposition
+        #[clap(long = "emit-report", alias = "debug-report", value_parser)]
+        emit_report: Option<String>,
+
         /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
         #[clap(short = 'O', long, value_parser)]
         output: Option<String>,
@@ -7748,6 +7752,7 @@ fn run() -> io::Result<()> {
                 syng_extension,
                 min_anchors,
                 min_span_fraction,
+                emit_report,
                 output,
                 common,
             } => {
@@ -7812,6 +7817,7 @@ fn run() -> io::Result<()> {
                     syng_prefix: &syng_prefix,
                     pack_path: &pack_path,
                     target_range: &target_range,
+                    emit_report_path: emit_report.as_deref(),
                     candidate_mode,
                     ploidy,
                     top_n,

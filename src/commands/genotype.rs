@@ -2,7 +2,8 @@ use clap::ValueEnum;
 use log::info;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 
 use crate::commands::partition;
 use crate::genotyping::{self, FeatureSpace, ScoringMethod};
@@ -48,6 +49,7 @@ pub struct SyngCosigtConfig<'a> {
     pub syng_prefix: &'a str,
     pub pack_path: &'a str,
     pub target_range: &'a str,
+    pub emit_report_path: Option<&'a str>,
     pub candidate_mode: CandidateMode,
     pub ploidy: usize,
     pub top_n: usize,
@@ -331,6 +333,337 @@ fn format_candidate_region(candidate: &HaplotypeCandidate) -> String {
     )
 }
 
+fn candidate_count_for_feature(candidate: &HaplotypeCandidate, node_id: u32) -> u64 {
+    candidate
+        .features
+        .binary_search_by_key(&node_id, |&(feature_id, _)| feature_id)
+        .map(|idx| candidate.features[idx].1)
+        .unwrap_or(0)
+}
+
+fn candidate_count_mass(candidate: &HaplotypeCandidate) -> u64 {
+    candidate.features.iter().map(|&(_, count)| count).sum()
+}
+
+fn candidate_repeated_stats(candidate: &HaplotypeCandidate) -> (usize, u64, u64) {
+    let repeated_nodes = candidate
+        .features
+        .iter()
+        .filter(|&&(_, count)| count > 1)
+        .count();
+    let repeated_extra_count = candidate
+        .features
+        .iter()
+        .map(|&(_, count)| count.saturating_sub(1))
+        .sum();
+    let max_node_count = candidate
+        .features
+        .iter()
+        .map(|&(_, count)| count)
+        .max()
+        .unwrap_or(0);
+    (repeated_nodes, repeated_extra_count, max_node_count)
+}
+
+fn candidate_sample_overlap(
+    candidate: &HaplotypeCandidate,
+    sample_counts: &FxHashMap<u32, u64>,
+) -> (usize, u64, f64) {
+    let mut overlap_unique_nodes = 0usize;
+    let mut overlap_sample_count_mass = 0u64;
+    let mut dot = 0.0;
+    for &(node_id, candidate_count) in &candidate.features {
+        let sample_count = sample_counts.get(&node_id).copied().unwrap_or(0);
+        if sample_count > 0 {
+            overlap_unique_nodes += 1;
+            overlap_sample_count_mass += sample_count;
+            dot += sample_count as f64 * candidate_count as f64;
+        }
+    }
+    (overlap_unique_nodes, overlap_sample_count_mass, dot)
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "NA".to_string())
+}
+
+fn write_report_kv<W: Write>(
+    out: &mut W,
+    key: &str,
+    value: impl std::fmt::Display,
+) -> io::Result<()> {
+    writeln!(out, "{key}\t{value}")
+}
+
+pub fn write_syng_cosigt_report<W: Write>(
+    out: &mut W,
+    config: &SyngCosigtConfig<'_>,
+    coverage: &pack::Coverage,
+    result: &SyngCosigtOutput,
+) -> io::Result<()> {
+    writeln!(out, "#impg genotype cos report")?;
+    writeln!(out, "#format\tsectioned-tsv-v1")?;
+
+    writeln!(out, "#section\tinput_metadata")?;
+    writeln!(out, "key\tvalue")?;
+    write_report_kv(out, "syng_prefix", config.syng_prefix)?;
+    write_report_kv(out, "pack_path", config.pack_path)?;
+    write_report_kv(out, "target_range", config.target_range)?;
+    write_report_kv(out, "resolved_region", &result.region_name)?;
+    write_report_kv(out, "feature_space", FeatureSpace::SyngSyncmerNode.as_str())?;
+    write_report_kv(out, "method", ScoringMethod::Cos.as_str())?;
+    write_report_kv(out, "metric", ScoringMethod::Cos.metric_str())?;
+    write_report_kv(
+        out,
+        "candidate_mode",
+        format!("{:?}", config.candidate_mode),
+    )?;
+    write_report_kv(out, "ploidy", config.ploidy)?;
+    write_report_kv(out, "top_n", config.top_n)?;
+    write_report_kv(out, "candidate_top_k", config.candidate_top_k)?;
+    write_report_kv(out, "max_combinations", config.max_combinations)?;
+    write_report_kv(out, "syng_padding", config.syng_padding)?;
+    write_report_kv(out, "syng_extension", config.syng_extension)?;
+    write_report_kv(out, "min_anchors", config.min_anchors)?;
+    write_report_kv(
+        out,
+        "min_span_fraction",
+        format!("{:.6}", config.min_span_fraction),
+    )?;
+    write_report_kv(out, "pack_nonzero_nodes", coverage.nonzero_nodes)?;
+    write_report_kv(
+        out,
+        "pack_universe_nodes",
+        format_optional_u64(coverage.universe_nodes),
+    )?;
+    write_report_kv(
+        out,
+        "pack_retained_records",
+        format_optional_u64(coverage.retained_records),
+    )?;
+    write_report_kv(
+        out,
+        "pack_syncmer_anchors",
+        format_optional_u64(coverage.syncmer_anchors),
+    )?;
+    write_report_kv(
+        out,
+        "sample_pack_counting_semantics",
+        "distinct_nodes_per_read",
+    )?;
+    write_report_kv(
+        out,
+        "sample_pack_counting_detail",
+        "impg map pack counts each distinct syng node at most once per retained read; repeated node occurrences in one read do not increase that node count",
+    )?;
+
+    let sample_locus_count_mass: u64 = result
+        .selected_features
+        .iter()
+        .map(|node_id| coverage.counts.get(node_id).copied().unwrap_or(0))
+        .sum();
+    let sample_locus_overlap_features = result
+        .selected_features
+        .iter()
+        .filter(|node_id| coverage.counts.get(node_id).copied().unwrap_or(0) > 0)
+        .count();
+    let sample_norm_sq =
+        genotyping::sample_norm_sq_for_features(&coverage.counts, &result.selected_features);
+    writeln!(out, "#section\tpack_evidence_summary")?;
+    writeln!(out, "metric\tvalue")?;
+    write_report_kv(out, "pack_nonzero_nodes", coverage.nonzero_nodes)?;
+    write_report_kv(
+        out,
+        "pack_universe_nodes",
+        format_optional_u64(coverage.universe_nodes),
+    )?;
+    write_report_kv(
+        out,
+        "pack_retained_records",
+        format_optional_u64(coverage.retained_records),
+    )?;
+    write_report_kv(
+        out,
+        "pack_syncmer_anchors",
+        format_optional_u64(coverage.syncmer_anchors),
+    )?;
+    write_report_kv(
+        out,
+        "selected_locus_features",
+        result.selected_features.len(),
+    )?;
+    write_report_kv(
+        out,
+        "locus_feature_overlap_nonzero_nodes",
+        sample_locus_overlap_features,
+    )?;
+    write_report_kv(
+        out,
+        "locus_feature_overlap_sample_count_mass",
+        sample_locus_count_mass,
+    )?;
+    write_report_kv(
+        out,
+        "sample_norm_over_selected_locus_features",
+        format!("{:.6}", sample_norm_sq.sqrt()),
+    )?;
+
+    writeln!(out, "#section\tsample_locus_features")?;
+    writeln!(out, "node_id\tsample_count")?;
+    for &node_id in &result.selected_features {
+        writeln!(
+            out,
+            "{}\t{}",
+            node_id,
+            coverage.counts.get(&node_id).copied().unwrap_or(0)
+        )?;
+    }
+
+    writeln!(out, "#section\tcandidates")?;
+    writeln!(
+        out,
+        "candidate_index\tpath\tinterval\tstart\tend\tstrand\tanchors\tspan_fraction\tfeature_count\ttotal_candidate_node_count_mass\tunique_nodes\trepeated_nodes\trepeated_extra_count\tmax_node_count\tsingle_haplotype_cosine\tsample_overlap_unique_nodes\tsample_overlap_sample_count_mass\tsample_overlap_dot_contribution"
+    )?;
+    for (idx, candidate) in result.candidates.iter().enumerate() {
+        let total_mass = candidate_count_mass(candidate);
+        let (repeated_nodes, repeated_extra_count, max_node_count) =
+            candidate_repeated_stats(candidate);
+        let (overlap_unique_nodes, overlap_sample_count_mass, overlap_dot) =
+            candidate_sample_overlap(candidate, &coverage.counts);
+        writeln!(
+            out,
+            "{}\t{}\t{}:{}-{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{}\t{}\t{:.3}",
+            idx,
+            candidate.path_name,
+            candidate.path_name,
+            candidate.start,
+            candidate.end,
+            candidate.start,
+            candidate.end,
+            candidate.strand,
+            candidate.anchors,
+            candidate.query_span_fraction,
+            candidate.features.len(),
+            total_mass,
+            candidate.features.len(),
+            repeated_nodes,
+            repeated_extra_count,
+            max_node_count,
+            candidate.single_similarity,
+            overlap_unique_nodes,
+            overlap_sample_count_mass,
+            overlap_dot,
+        )?;
+    }
+
+    writeln!(out, "#section\tcandidate_features")?;
+    writeln!(
+        out,
+        "candidate_index\tpath\tnode_id\tsample_count\tcandidate_count\tdot_contribution"
+    )?;
+    for (idx, candidate) in result.candidates.iter().enumerate() {
+        for &(node_id, candidate_count) in &candidate.features {
+            let sample_count = coverage.counts.get(&node_id).copied().unwrap_or(0);
+            let dot_contribution = sample_count as f64 * candidate_count as f64;
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}\t{:.3}",
+                idx, candidate.path_name, node_id, sample_count, candidate_count, dot_contribution,
+            )?;
+        }
+    }
+
+    writeln!(out, "#section\tresult_scores")?;
+    writeln!(
+        out,
+        "rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\tcandidate_indices\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
+    )?;
+    for (rank, genotype_result) in result.results.iter().enumerate() {
+        let candidate_indices: Vec<String> = genotype_result
+            .combination
+            .iter()
+            .map(|idx| idx.to_string())
+            .collect();
+        let haplotypes: Vec<&str> = genotype_result
+            .combination
+            .iter()
+            .map(|&idx| result.candidates[idx].path_name.as_str())
+            .collect();
+        let regions: Vec<String> = genotype_result
+            .combination
+            .iter()
+            .map(|&idx| format_candidate_region(&result.candidates[idx]))
+            .collect();
+        let anchors: Vec<String> = genotype_result
+            .combination
+            .iter()
+            .map(|&idx| result.candidates[idx].anchors.to_string())
+            .collect();
+        let spans: Vec<String> = genotype_result
+            .combination
+            .iter()
+            .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
+            .collect();
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}",
+            rank + 1,
+            ScoringMethod::Cos.as_str(),
+            result.ploidy,
+            genotype_result.similarity,
+            genotype_result.qv,
+            genotype_result.dot,
+            genotype_result.sample_norm,
+            genotype_result.genotype_norm,
+            candidate_indices.join(","),
+            haplotypes.join(","),
+            regions.join(","),
+            anchors.join(","),
+            spans.join(","),
+        )?;
+    }
+
+    writeln!(out, "#section\tresult_features")?;
+    writeln!(
+        out,
+        "rank\tnode_id\tsample_count\tcandidate_counts\tgenotype_count\tdot_contribution"
+    )?;
+    for (rank, genotype_result) in result.results.iter().enumerate() {
+        let mut genotype_counts = BTreeMap::new();
+        for &candidate_idx in &genotype_result.combination {
+            for &(node_id, count) in &result.candidates[candidate_idx].features {
+                *genotype_counts.entry(node_id).or_insert(0u64) += count;
+            }
+        }
+        for (node_id, genotype_count) in genotype_counts {
+            let sample_count = coverage.counts.get(&node_id).copied().unwrap_or(0);
+            let candidate_counts: Vec<String> = genotype_result
+                .combination
+                .iter()
+                .map(|&candidate_idx| {
+                    candidate_count_for_feature(&result.candidates[candidate_idx], node_id)
+                        .to_string()
+                })
+                .collect();
+            let dot_contribution = sample_count as f64 * genotype_count as f64;
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}\t{:.3}",
+                rank + 1,
+                node_id,
+                sample_count,
+                candidate_counts.join(","),
+                genotype_count,
+                dot_contribution,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> io::Result<()> {
     info!("Loading syng index from prefix: {}", config.syng_prefix);
     let syng_index = syng::SyngIndex::load(config.syng_prefix, syng::SyncmerParams::default())?;
@@ -349,7 +682,13 @@ pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> 
         min_span_fraction: config.min_span_fraction,
     };
     let result = compute_syng_cosigt(&syng_index, &coverage, &query)?;
-    write_syng_cosigt_output(out, &result)
+    write_syng_cosigt_output(out, &result)?;
+    if let Some(path) = config.emit_report_path {
+        let mut report = BufWriter::new(File::create(path)?);
+        write_syng_cosigt_report(&mut report, config, &coverage, &result)?;
+        report.flush()?;
+    }
+    Ok(())
 }
 
 pub fn compute_syng_cosigt(

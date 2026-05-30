@@ -44,6 +44,29 @@ path. `pack-tsv` is the human-readable export of the same abstraction, and
 bundles add metadata and read-walk evidence around the pack so packs cannot be
 accidentally combined with the wrong graph or feature namespace.
 
+## Evidence Debug Reports
+
+`impg genotype cos` accepts `--emit-report <path>` (alias:
+`--debug-report <path>`) to write an optional sectioned TSV text report without
+changing the normal genotype TSV on stdout or `-O`. The report is intended for
+human audits and focused regression tests of one locus.
+
+The report records the resolved syng prefix, pack path, target range, candidate
+mode, ploidy, `top_n`, `candidate_top_k`, syng padding/extension, candidate
+anchor/span filters, and pack metadata. It also states the current pack counting
+semantics explicitly: packs produced by `impg map -o pack` count each distinct
+syng node at most once per retained read, so repeated node occurrences within a
+single read do not increase that node's sample count.
+
+Report sections expose the selected locus sample vector, candidate vectors,
+candidate overlap summaries, top genotype score rows, and feature-level score
+decomposition. The `result_scores` section uses the same similarity, QV, dot,
+sample norm, genotype norm, haplotypes, regions, anchor counts, and span
+fraction formatting as the primary genotype TSV. The `result_features` section
+shows `node_id`, `sample_count`, per-haplotype candidate counts,
+`genotype_count`, and each node's dot contribution, making repeated-node and
+ploidy dosage effects visible.
+
 See [`pangenome-genotyping-roadmap.md`](pangenome-genotyping-roadmap.md) for
 the longer-term plan: backend-neutral pangenome genotyping, local variation
 graph backends, alignment evidence, learned local scorers, and phased copying

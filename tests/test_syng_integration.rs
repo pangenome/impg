@@ -8,7 +8,8 @@
 
 use ahash::AHashSet;
 use ragc_core::{StreamingQueueCompressor, StreamingQueueConfig};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // All syng tests must be serialized because the C library has non-thread-safe
@@ -201,6 +202,40 @@ fn impg_binary() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn read_pack_tsv_counts(path: &Path) -> BTreeMap<u32, u64> {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut counts = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 2, "pack row should have two fields: {line}");
+        counts.insert(fields[0].parse().unwrap(), fields[1].parse().unwrap());
+    }
+    counts
+}
+
+fn report_section_lines<'a>(report: &'a str, section: &str) -> Vec<&'a str> {
+    let marker = format!("#section\t{section}");
+    let mut in_section = false;
+    let mut lines = Vec::new();
+    for line in report.lines() {
+        if line.starts_with("#section\t") {
+            if in_section {
+                break;
+            }
+            in_section = line == marker;
+            continue;
+        }
+        if in_section && !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 #[test]
@@ -1970,6 +2005,323 @@ fn test_syng_genotype_cos_cli_permutations() {
             stderr
         );
     }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_genotype_cos_emit_report_exposes_counts() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cos_emit_report");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(650, 41));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(650, 42));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(650, 43));
+    let right = numeric_to_ascii(&make_sequence_numeric(650, 44));
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("reads.fq");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        writeln!(f, "@read_a").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(hap_a.len())).unwrap();
+        writeln!(f, "@read_b").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(hap_b.len())).unwrap();
+    }
+
+    let pack_path = dir.join("sample.pack.tsv");
+    let map_pack = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "pack-tsv",
+            "-O",
+            pack_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack-tsv");
+    assert!(
+        map_pack.status.success(),
+        "impg map -o pack-tsv failed: {}",
+        String::from_utf8_lossy(&map_pack.stderr)
+    );
+    let pack_counts = read_pack_tsv_counts(&pack_path);
+    assert!(!pack_counts.is_empty(), "pack TSV should contain counts");
+
+    let target_range = format!("sampleA#0#chr1:0-{}", hap_a.len());
+    let idx_prefix_str = idx_prefix.to_str().unwrap();
+    let pack_path_str = pack_path.to_str().unwrap();
+    let base_args = vec![
+        "genotype",
+        "cos",
+        "-a",
+        idx_prefix_str,
+        "-p",
+        pack_path_str,
+        "-r",
+        target_range.as_str(),
+        "--top-n",
+        "3",
+        "--candidate-top-k",
+        "10",
+        "--min-anchors",
+        "2",
+        "--min-span-fraction",
+        "0.7",
+    ];
+
+    let baseline = Command::new(&bin)
+        .args(&base_args)
+        .output()
+        .expect("failed to run baseline impg genotype cos");
+    assert!(
+        baseline.status.success(),
+        "baseline impg genotype cos failed: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+
+    let report_path = dir.join("genotype.report.tsv");
+    let mut report_args = base_args.clone();
+    report_args.extend_from_slice(&["--emit-report", report_path.to_str().unwrap()]);
+    let with_report = Command::new(&bin)
+        .args(&report_args)
+        .output()
+        .expect("failed to run impg genotype cos --emit-report");
+    assert!(
+        with_report.status.success(),
+        "impg genotype cos --emit-report failed: {}",
+        String::from_utf8_lossy(&with_report.stderr)
+    );
+    assert_eq!(
+        with_report.stdout, baseline.stdout,
+        "--emit-report must not change primary genotype TSV stdout"
+    );
+
+    let stdout = String::from_utf8_lossy(&with_report.stdout);
+    let top = stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected at least one cosine genotype result row");
+    let top_fields: Vec<&str> = top.split('\t').collect();
+    assert!(
+        top_fields[8].contains("sampleA#0#chr1") && top_fields[8].contains("sampleB#0#chr1"),
+        "top genotype should be the synthetic A/B diploid, got:\n{}",
+        stdout
+    );
+
+    let report = std::fs::read_to_string(&report_path).unwrap();
+    assert!(report.contains("#impg genotype cos report"), "{report}");
+    assert!(
+        report.contains("sample_pack_counting_semantics\tdistinct_nodes_per_read"),
+        "report should state pack counting semantics:\n{report}"
+    );
+
+    let sample_rows = report_section_lines(&report, "sample_locus_features");
+    assert_eq!(
+        sample_rows.first().copied(),
+        Some("node_id\tsample_count"),
+        "sample feature section should have a parseable header"
+    );
+    let mut nonzero_sample_features = 0usize;
+    for row in sample_rows.iter().skip(1) {
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields.len(), 2, "bad sample feature row: {row}");
+        let node_id: u32 = fields[0].parse().unwrap();
+        let sample_count: u64 = fields[1].parse().unwrap();
+        assert_eq!(
+            sample_count,
+            pack_counts.get(&node_id).copied().unwrap_or(0),
+            "report sample count should match pack TSV for node {node_id}"
+        );
+        if sample_count > 0 {
+            nonzero_sample_features += 1;
+        }
+    }
+    assert!(
+        nonzero_sample_features > 0,
+        "report should expose nonzero sample evidence over locus features"
+    );
+
+    let summary_rows = report_section_lines(&report, "pack_evidence_summary");
+    assert!(
+        summary_rows
+            .iter()
+            .any(|row| *row == format!("pack_nonzero_nodes\t{}", pack_counts.len())),
+        "pack summary should match pack TSV nonzero node count:\n{report}"
+    );
+
+    let candidate_rows = report_section_lines(&report, "candidates");
+    assert!(
+        candidate_rows
+            .first()
+            .unwrap()
+            .contains("sample_overlap_unique_nodes"),
+        "candidate table should include sample overlap columns"
+    );
+    let mut saw_candidate_overlap = false;
+    for row in candidate_rows.iter().skip(1) {
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert!(
+            fields.len() >= 18,
+            "candidate rows should include feature counts and overlap stats: {row}"
+        );
+        let feature_count = fields[8].parse::<usize>().unwrap();
+        let total_mass = fields[9].parse::<u64>().unwrap();
+        let unique_nodes = fields[10].parse::<usize>().unwrap();
+        let sample_overlap = fields[15].parse::<usize>().unwrap();
+        assert!(feature_count > 0, "candidate should have features: {row}");
+        assert!(
+            total_mass >= feature_count as u64,
+            "bad candidate mass: {row}"
+        );
+        assert_eq!(
+            feature_count, unique_nodes,
+            "unique node count should match vector width"
+        );
+        if sample_overlap > 0 {
+            saw_candidate_overlap = true;
+        }
+    }
+    assert!(
+        saw_candidate_overlap,
+        "candidate table should show sample overlaps"
+    );
+
+    let candidate_feature_rows = report_section_lines(&report, "candidate_features");
+    assert_eq!(
+        candidate_feature_rows.first().copied(),
+        Some("candidate_index\tpath\tnode_id\tsample_count\tcandidate_count\tdot_contribution")
+    );
+    assert!(
+        candidate_feature_rows.iter().skip(1).any(|row| row
+            .split('\t')
+            .nth(4)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0),
+        "candidate feature table should expose candidate node counts"
+    );
+
+    let result_rows = report_section_lines(&report, "result_scores");
+    assert!(
+        result_rows.len() >= 2,
+        "report should include result scores"
+    );
+    let report_top_fields: Vec<&str> = result_rows[1].split('\t').collect();
+    assert_eq!(report_top_fields[0], top_fields[0], "rank should match");
+    assert_eq!(report_top_fields[1], top_fields[1], "method should match");
+    assert_eq!(report_top_fields[2], top_fields[2], "ploidy should match");
+    assert_eq!(
+        report_top_fields[3], top_fields[3],
+        "similarity should match"
+    );
+    assert_eq!(report_top_fields[4], top_fields[4], "qv should match");
+    assert_eq!(report_top_fields[5], top_fields[5], "dot should match");
+    assert_eq!(
+        report_top_fields[6], top_fields[6],
+        "sample norm should match"
+    );
+    assert_eq!(
+        report_top_fields[7], top_fields[7],
+        "genotype norm should match"
+    );
+    assert_eq!(
+        report_top_fields[9], top_fields[8],
+        "report haplotypes should match primary output"
+    );
+
+    let result_feature_rows = report_section_lines(&report, "result_features");
+    assert_eq!(
+        result_feature_rows.first().copied(),
+        Some("rank\tnode_id\tsample_count\tcandidate_counts\tgenotype_count\tdot_contribution")
+    );
+    let mut saw_nonzero_dot = false;
+    for row in result_feature_rows.iter().skip(1) {
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields.len(), 6, "bad result feature row: {row}");
+        let sample_count = fields[2].parse::<u64>().unwrap();
+        let candidate_sum = fields[3]
+            .split(',')
+            .map(|count| count.parse::<u64>().unwrap())
+            .sum::<u64>();
+        let genotype_count = fields[4].parse::<u64>().unwrap();
+        let dot = fields[5].parse::<f64>().unwrap();
+        assert_eq!(
+            candidate_sum, genotype_count,
+            "genotype count should be the sum of candidate counts: {row}"
+        );
+        assert_eq!(
+            dot,
+            (sample_count * genotype_count) as f64,
+            "dot contribution should decompose sample_count * genotype_count: {row}"
+        );
+        if dot > 0.0 {
+            saw_nonzero_dot = true;
+        }
+    }
+    assert!(
+        saw_nonzero_dot,
+        "result feature table should include nonzero dot contributions"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
