@@ -27,7 +27,6 @@ static DEBUG_REPLACEMENT_ID: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_SMOOTH_USED: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_EMPTY: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_SMOOTH_FAILURE: AtomicUsize = AtomicUsize::new(0);
-const MULTI_LEVEL_GLOBAL_FALLBACK_TRIAL_LIMIT: usize = 24;
 
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
@@ -221,16 +220,20 @@ pub struct ResolutionConfig {
     /// Maximum generated multi-level/window candidates to build per round.
     /// A value of 0 disables the cap.
     pub multi_level_candidate_limit: usize,
-    /// Minimum positive local objective score required before a candidate can
-    /// be considered for application by `method=iterative-multi-level`.
+    /// Diagnostic objective floor retained for CLI/report compatibility.
+    ///
+    /// Candidate application is gated only by exact path preservation and
+    /// successful replacement construction. This value is logged as a
+    /// would-have-failed diagnostic; it must not veto a replacement.
     pub multi_level_min_objective_delta: i128,
     /// Objective used to rank and accept generated multi-bubble/window
     /// candidates.
     pub multi_level_objective: MultiLevelObjectiveMode,
-    /// When true, candidate generation treats tiny high-frequency,
-    /// low-complexity anchors as poor window boundaries. This is an explicit
-    /// selection-time decision and is reported in the round logs; alignments
-    /// for accepted windows are still passed through transparently.
+    /// When true, candidate generation logs tiny high-frequency,
+    /// low-complexity anchors as poor window boundaries.
+    ///
+    /// This is diagnostic only. Repeat-like boundaries must not veto a
+    /// candidate; exact path preservation is the only correctness gate.
     pub multi_level_repeat_aware_boundaries: bool,
 }
 
@@ -2197,7 +2200,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, objective={:?}, min-objective-delta={}, repeat-aware-boundaries={}, replacement-routing=multi-site-sweepga/single-site-auto",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-sweepga/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
@@ -2239,7 +2242,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-skipped={}; discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-flagged={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2431,12 +2434,11 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         let built_count = built.len();
         let objective_floor = config.multi_level_min_objective_delta;
-        let local_objective_rejected = built
+        let local_objective_below_floor = built
             .iter()
             .filter(|candidate| candidate.objective.score_delta < objective_floor)
             .count();
-        built.retain(|candidate| candidate.objective.score_delta >= objective_floor);
-        let objective_passing_count = built.len();
+        let objective_passing_count = built_count.saturating_sub(local_objective_below_floor);
         built.sort_by(|a, b| {
             b.objective
                 .score_delta
@@ -2463,11 +2465,10 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
         let mut accepted = Vec::new();
-        let mut overlap_rejected = 0usize;
-        let objective_candidates = built.clone();
+        let mut overlap_deferred = 0usize;
         for candidate in built {
             if candidate_conflicts_with_occupied(&occupied_by_path, &candidate.plan.candidate) {
-                overlap_rejected += 1;
+                overlap_deferred += 1;
                 continue;
             }
             mark_candidate_occupied(&mut occupied_by_path, &candidate.plan.candidate);
@@ -2477,12 +2478,12 @@ fn resolve_graph_bubbles_iterative_multi_level(
         if accepted.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: 0 accepted candidate(s) after cheap local-objective/non-overlap filter; built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, failed_or_empty={}, objective_floor={}, build {:.2?}; before {}",
+                    "crush iterative-multi-level round {}: 0 applicable candidate(s) after build/non-overlap scheduling; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, failed_or_empty={}, objective_floor={} (diagnostic only), build {:.2?}; before {}",
                     round + 1,
                     built_count,
                     objective_passing_count,
-                    local_objective_rejected,
-                    overlap_rejected,
+                    local_objective_below_floor,
+                    overlap_deferred,
                     failed_or_empty,
                     objective_floor,
                     build_elapsed,
@@ -2494,51 +2495,19 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         let rewrite_start = Instant::now();
         let pre_apply_next_id = next_id;
-        let mut plans = accepted
+        let plans = accepted
             .iter()
             .map(|candidate| candidate.plan.clone())
             .collect::<Vec<_>>();
         let mut trial_next_id = next_id;
-        let mut next_graph = apply_replacement_frontier(&graph, &plans, &mut trial_next_id)?;
+        let next_graph = apply_replacement_frontier(&graph, &plans, &mut trial_next_id)?;
         assert!(
             trial_next_id >= pre_apply_next_id,
             "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {trial_next_id}"
         );
-        let mut after_quality = graph_quality(&next_graph);
-        let mut graph_delta =
+        let after_quality = graph_quality(&next_graph);
+        let graph_delta =
             graph_objective_delta_for_mode(before_quality, after_quality, objective_mode);
-        let mut fallback_trials = 0usize;
-        let mut fallback_failed_trials = 0usize;
-        let mut fallback_used = false;
-        if graph_delta < objective_floor {
-            let fallback = select_multi_level_global_objective_fallback(
-                &graph,
-                &objective_candidates,
-                objective_floor,
-                next_id,
-                MULTI_LEVEL_GLOBAL_FALLBACK_TRIAL_LIMIT,
-                objective_mode,
-            );
-            fallback_trials = fallback.trials;
-            fallback_failed_trials = fallback.failed_trials;
-            if !fallback.accepted.is_empty() {
-                accepted = fallback.accepted;
-                plans = accepted
-                    .iter()
-                    .map(|candidate| candidate.plan.clone())
-                    .collect::<Vec<_>>();
-                trial_next_id = next_id;
-                next_graph = apply_replacement_frontier(&graph, &plans, &mut trial_next_id)?;
-                assert!(
-                    trial_next_id >= pre_apply_next_id,
-                    "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {trial_next_id}"
-                );
-                after_quality = graph_quality(&next_graph);
-                graph_delta =
-                    graph_objective_delta_for_mode(before_quality, after_quality, objective_mode);
-                fallback_used = true;
-            }
-        }
         let rewrite_elapsed = rewrite_start.elapsed();
         let accepted_sources = accepted.iter().fold(
             FxHashMap::<MultiLevelCandidateSource, usize>::default(),
@@ -2548,29 +2517,6 @@ fn resolve_graph_bubbles_iterative_multi_level(
             },
         );
         let objective_summary = format_objective_delta_summary(&accepted);
-
-        if graph_delta < objective_floor {
-            if emit_logs {
-                log::info!(
-                    "crush iterative-multi-level round {}: rejecting {} cheaply accepted candidate(s) because global objective delta {} is below floor {}; fallback_trials={}, fallback_failed_trials={}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}; local objective {}; before {}; after {}; total {:.2?}",
-                    round + 1,
-                    plans.len(),
-                    graph_delta,
-                    objective_floor,
-                    fallback_trials,
-                    fallback_failed_trials,
-                    built_count,
-                    objective_passing_count,
-                    local_objective_rejected,
-                    overlap_rejected,
-                    objective_summary,
-                    before_quality.summary(),
-                    after_quality.summary(),
-                    round_start.elapsed()
-                );
-            }
-            break;
-        }
         next_id = trial_next_id;
 
         for plan in &plans {
@@ -2583,17 +2529,15 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: accepted {} candidate(s) from {}; cheap-selection built={}, local_objective_passing={}, local_objective_rejected={}, overlap_rejected={}, fallback_used={}, fallback_trials={}, fallback_failed_trials={}; local objective {}; global_objective_delta={}; failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before {}; after {}",
+                "crush iterative-multi-level round {}: applied {} candidate(s) from {}; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, objective_floor={} (diagnostic only); local objective {}; global_objective_delta={} (diagnostic only); failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before {}; after {}",
                 round + 1,
                 plans.len(),
                 format_multi_level_source_counts(&accepted_sources),
                 built_count,
                 objective_passing_count,
-                local_objective_rejected,
-                overlap_rejected,
-                fallback_used,
-                fallback_trials,
-                fallback_failed_trials,
+                local_objective_below_floor,
+                overlap_deferred,
+                objective_floor,
                 objective_summary,
                 graph_delta,
                 failed_or_empty,
@@ -2701,13 +2645,6 @@ struct MultiLevelBuiltCandidate {
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct MultiLevelGlobalFallback {
-    accepted: Vec<MultiLevelBuiltCandidate>,
-    trials: usize,
-    failed_trials: usize,
 }
 
 fn multi_level_target_bp(config: &ResolutionConfig) -> usize {
@@ -2963,19 +2900,12 @@ fn insert_multi_level_candidate(
     if resolved_signatures.contains(&candidate.signature) {
         return;
     }
-    if config.max_bubble_span > 0 && candidate.root_span > config.max_bubble_span {
-        return;
-    }
-    if candidate.traversal_stats.max_len < config.min_traversal_len {
-        return;
-    }
-    let total_bp_cap = multi_level_window_total_bp_cap(config);
-    if total_bp_cap > 0 && candidate.traversal_stats.total_len > total_bp_cap {
-        return;
-    }
-    if config.max_traversals > 0 && candidate.traversal_stats.count > config.max_traversals {
-        return;
-    }
+    let _diagnostic_only = (
+        config.max_bubble_span,
+        config.min_traversal_len,
+        multi_level_window_total_bp_cap(config),
+        config.max_traversals,
+    );
     if !emitted.insert(candidate.signature.clone()) {
         return;
     }
@@ -3361,7 +3291,6 @@ fn add_specific_index_window(
         };
         if repeat_boundary_should_reject(graph, entry, exit, visits) {
             generated.repeat_boundary_rejected += 1;
-            return;
         }
     }
     let Some(candidate) = candidate_from_root_interval(
@@ -3636,49 +3565,6 @@ fn multi_level_window_replacement_method(
     } else {
         candidate_replacement_method(&window.candidate, config)
     }
-}
-
-fn select_multi_level_global_objective_fallback(
-    graph: &Graph,
-    candidates: &[MultiLevelBuiltCandidate],
-    objective_floor: i128,
-    next_id: usize,
-    max_trials: usize,
-    objective_mode: MultiLevelObjectiveMode,
-) -> MultiLevelGlobalFallback {
-    let mut fallback = MultiLevelGlobalFallback::default();
-    let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
-    let mut accepted_plans = Vec::<ReplacementPlan>::new();
-    let before_quality = graph_quality(graph);
-
-    for candidate in candidates {
-        if fallback.trials >= max_trials {
-            break;
-        }
-        if candidate_conflicts_with_occupied(&occupied_by_path, &candidate.plan.candidate) {
-            continue;
-        }
-        fallback.trials += 1;
-        let mut trial_plans = accepted_plans.clone();
-        trial_plans.push(candidate.plan.clone());
-        let mut trial_next_id = next_id;
-        let Ok(trial_graph) = apply_replacement_frontier(graph, &trial_plans, &mut trial_next_id)
-        else {
-            fallback.failed_trials += 1;
-            continue;
-        };
-        let trial_quality = graph_quality(&trial_graph);
-        let graph_delta =
-            graph_objective_delta_for_mode(before_quality, trial_quality, objective_mode);
-        if graph_delta < objective_floor {
-            continue;
-        }
-        mark_candidate_occupied(&mut occupied_by_path, &candidate.plan.candidate);
-        accepted_plans = trial_plans;
-        fallback.accepted.push(candidate.clone());
-    }
-
-    fallback
 }
 
 fn replacement_objective_delta(
@@ -5072,16 +4958,17 @@ fn discover_all_candidates(
                     unique_steps.insert(path.steps[step_idx]);
                 }
             }
-            // Tree-driven modes need complete POVU topology. Under
-            // `method=hierarchical`, the min-traversal-len floor gates only
-            // level-0 roots. Under `method=chain-povu` and
-            // `method=top-flubble-sweepga`, all discovered sites are admitted
-            // so parent/top-level blocks can absorb every descendant under the
-            // same bounded region. For other methods the filter applies at
-            // every level, as before.
+            // Tree-driven and experimental multi-bubble modes need complete
+            // POVU topology. `min-traversal-len` is a coarse search knob for
+            // legacy one-bubble modes only; it must not veto candidates in
+            // modes where the purpose is to learn which graph rewrites are
+            // valid after exact path-preservation checks.
             let apply_min_len_filter = match config.method {
                 ResolutionMethod::Hierarchical => site.level == 0,
-                ResolutionMethod::ChainPovu | ResolutionMethod::TopFlubbleSweepga => false,
+                ResolutionMethod::ChainPovu
+                | ResolutionMethod::TopFlubbleSweepga
+                | ResolutionMethod::IterativeMultiLevel
+                | ResolutionMethod::CoverageMultiBubble => false,
                 _ => true,
             };
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
@@ -6006,13 +5893,11 @@ fn materialize_candidate_sequences(
     if config.replacement_flank_bp > 0 {
         materialize_flanked_sequences(graph, candidate, config.replacement_flank_bp);
     }
-    let Some(first) = candidate.ranges.first() else {
-        return false;
-    };
-    candidate
-        .ranges
-        .iter()
-        .any(|range| range.sequence != first.sequence)
+    // Even byte-identical traversals are legitimate repair targets: the graph
+    // can be structurally fragmented while spelling the same sequence on every
+    // path. Let the replacement backend build a path-preserving graph instead
+    // of using sequence equality as a quality/utility gate.
+    !candidate.ranges.is_empty()
 }
 
 /// Compute up to `flank_bp` bp of path-sequence context on each side of each
@@ -10393,7 +10278,7 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
-    fn iterative_multi_level_honors_explicit_total_bp_cap() {
+    fn iterative_multi_level_treats_total_bp_cap_as_diagnostic_only() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -10429,13 +10314,12 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         let generated =
             generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
 
-        assert!(!generated.candidates.is_empty());
         assert!(
-            generated.candidates.iter().all(|candidate| candidate
+            generated.candidates.iter().any(|candidate| candidate
                 .candidate
                 .traversal_stats
                 .total_len
-                <= 12),
+                > 12),
             "{:?}",
             generated
                 .candidates
