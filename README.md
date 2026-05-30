@@ -452,14 +452,20 @@ one set of engine implementations, selected via `--gfa-engine`:
 | `pggb` (default) | sweepga + seqwish + smoothxg-style smoothing + gfaffix | smoothed variation graphs |
 | `seqwish` | sweepga + seqwish + gfaffix | raw (unsmoothed) graphs |
 | `poa` | single-pass SPOA | small regions, quick MSA-based output |
-| `syng` / `syng:blunt` | regional syng syncmer graph + bluntg | syng-native zero-overlap graph output from syng indexes |
-| `syng:raw` | regional syng syncmer overlap graph | debugging native syncmer graph overlaps |
-| `syng-local` / `syng-local:blunt` | extract query-selected sequences, build a fresh local syng graph, then bluntg | experimental regional syncmer parameter sweeps |
+| `syng` / `syng:blunt` | regional syng syncmer graph with exact zero-overlap path materialization | source-spelling syng graph output from syng indexes |
+| `syng:raw` | regional syng syncmer overlap graph | explicit native overlap graph for debugging or overlap-aware consumers |
+| `syng-local` / `syng-local:blunt` | extract query-selected sequences, build a fresh local syng graph, then exact zero-overlap materialization | experimental regional syncmer parameter sweeps |
 
 For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
 The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
 shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
 `k/s/seed` tail is checked against the loaded syng index.
+Blunt syng output is sequence-preserving when the graph can fetch source DNA
+for non-syncmer spans via `--sequence-files` or the local temporary FASTA used
+by `syng-local`. Without source sequence files, missing gap DNA is emitted as
+`N`, and those paths are explicitly not source-preserving. Use `syng:raw` when
+you want the native syng overlap graph; raw path spelling requires an
+overlap-aware parser and is not the same as concatenating S-line DNA.
 Use `syng-local` when the local graph should be rebuilt from the extracted
 regional sequences with its own syncmer scheme, for example
 `-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`; in this mode `k/s/seed`

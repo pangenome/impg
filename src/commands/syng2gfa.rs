@@ -11,10 +11,10 @@
 //! signed-syncmer context, so identical terminal/inter-syncmer DNA shared
 //! by the same local graph context is one node, without collapsing unrelated
 //! repeated sequence elsewhere. High-frequency syncmers are filtered out of
-//! the raw syng walk before any bluntification, and the original sequence is
-//! used to bridge retained anchors. The CLI default is blunt mode
-//! (`pangenome/bluntg`), which converts native variable overlaps to 0M links;
-//! raw mode keeps syng's native overlap graph.
+//! the raw syng walk before materialization, and the original sequence is
+//! used to bridge retained anchors. The CLI default is blunt mode, which
+//! materializes exact source-spelling 0M paths directly; raw mode is the
+//! explicit syng-native overlap graph.
 
 use std::io::{self, BufWriter, Write};
 use std::time::Instant;
@@ -316,6 +316,108 @@ impl GapInterner {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum ExactSegmentKey {
+    Gap(GapKey),
+    SyncmerSlice {
+        signed: i32,
+        left_trim: u32,
+        right_trim: u32,
+    },
+    PrivateSyncmerSlice {
+        path_name: String,
+        occurrence: u32,
+        signed: i32,
+        left_trim: u32,
+        right_trim: u32,
+    },
+}
+
+struct ExactSegmentInterner {
+    n_nodes: usize,
+    next_extra_id: u64,
+    keys: FxHashMap<ExactSegmentKey, String>,
+    segments: Vec<GapSegment>,
+    gap_segments: usize,
+    total_gap_segment_bp: u64,
+}
+
+impl ExactSegmentInterner {
+    fn new(n_nodes: usize) -> Self {
+        Self {
+            n_nodes,
+            next_extra_id: 0,
+            keys: FxHashMap::default(),
+            segments: Vec::new(),
+            gap_segments: 0,
+            total_gap_segment_bp: 0,
+        }
+    }
+
+    fn next_segment_id(&mut self) -> String {
+        let id = format!("{}", self.n_nodes as u64 + 1 + self.next_extra_id);
+        self.next_extra_id += 1;
+        id
+    }
+
+    fn intern(&mut self, key: ExactSegmentKey, seq: Vec<u8>, is_gap: bool) -> String {
+        if let Some(id) = self.keys.get(&key) {
+            return id.clone();
+        }
+
+        let id = self.next_segment_id();
+        if is_gap {
+            self.gap_segments += 1;
+            self.total_gap_segment_bp += seq.len() as u64;
+        }
+        self.segments.push(GapSegment {
+            id: id.clone(),
+            seq,
+        });
+        self.keys.insert(key, id.clone());
+        id
+    }
+
+    fn intern_gap(&mut self, context: GapContext, seq: Vec<u8>) -> String {
+        let key = ExactSegmentKey::Gap(GapKey {
+            context,
+            seq: seq.clone(),
+        });
+        self.intern(key, seq, true)
+    }
+
+    fn intern_syncmer_slice(
+        &mut self,
+        path_name: &str,
+        syncmer: RawSyncmerOcc,
+        left_trim: u32,
+        right_trim: u32,
+        seq: Vec<u8>,
+        private: bool,
+    ) -> String {
+        let key = if private {
+            ExactSegmentKey::PrivateSyncmerSlice {
+                path_name: path_name.to_string(),
+                occurrence: syncmer.occ,
+                signed: syncmer.signed,
+                left_trim,
+                right_trim,
+            }
+        } else {
+            ExactSegmentKey::SyncmerSlice {
+                signed: syncmer.signed,
+                left_trim,
+                right_trim,
+            }
+        };
+        self.intern(key, seq, false)
+    }
+
+    fn total_extra_segments(&self) -> usize {
+        self.segments.len()
+    }
+}
+
 /// Walked path plus any inserted gap segments.
 struct WalkedPath {
     name: String,
@@ -354,6 +456,9 @@ fn push_walked_path_segments(
 struct RawSyncmerOcc {
     signed: i32,
     occ: u32,
+    pos: u64,
+    left_clip: u32,
+    right_clip: u32,
 }
 
 impl RawSyncmerOcc {
@@ -412,21 +517,20 @@ struct PathWork {
     skipped: bool,
 }
 
-type GfaWriteStats = (usize, usize, usize, usize, usize, u64);
-
-struct RangeGfaRender {
-    stats: GfaWriteStats,
-    clone_blunt_sequences: FxHashMap<String, Vec<u8>>,
-}
-
 fn push_syncmer_step(
     steps: &mut Vec<RawPathStep>,
     next_occ: &mut u32,
     signed: i32,
+    pos: u64,
+    left_clip: u32,
+    right_clip: u32,
 ) -> RawSyncmerOcc {
     let syncmer = RawSyncmerOcc {
         signed,
         occ: *next_occ,
+        pos,
+        left_clip,
+        right_clip,
     };
     *next_occ += 1;
     steps.push(RawPathStep::Syncmer(syncmer));
@@ -541,6 +645,57 @@ fn raw_endpoint_to_gfa(
     }
 }
 
+fn path_step_endpoint(step: &PathStep) -> (String, char) {
+    match step {
+        PathStep::Syncmer(signed) => {
+            let (id, sign) = signed_to_gfa(*signed);
+            (id.to_string(), sign)
+        }
+        PathStep::Segment { id, sign } => (id.clone(), *sign),
+        PathStep::Gap(id) => (id.clone(), '+'),
+    }
+}
+
+fn add_zero_edges_for_steps(
+    steps: &[PathStep],
+    edges: &mut FxHashSet<(String, char, String, char, u32)>,
+) {
+    for pair in steps.windows(2) {
+        let (from_id, from_sign) = path_step_endpoint(&pair[0]);
+        let (to_id, to_sign) = path_step_endpoint(&pair[1]);
+        edges.insert((from_id, from_sign, to_id, to_sign, 0));
+    }
+}
+
+fn syncmer_path_step_exact(
+    index: &SyngIndex,
+    interner: &mut ExactSegmentInterner,
+    used_syncmers: &mut FxHashSet<i32>,
+    path_name: &str,
+    syncmer: RawSyncmerOcc,
+    incoming_overlap: u32,
+    private: bool,
+) -> Option<PathStep> {
+    let syncmer_len = index.syncmer_length_bp() as u32;
+    let left_trim = syncmer.left_clip.max(incoming_overlap).min(syncmer_len);
+    let right_trim = syncmer.right_clip.min(syncmer_len);
+    if left_trim.saturating_add(right_trim) >= syncmer_len {
+        return None;
+    }
+    if left_trim == 0 && right_trim == 0 && !private {
+        let (id, _) = signed_to_gfa(syncmer.signed);
+        used_syncmers.insert(id);
+        return Some(PathStep::Syncmer(syncmer.signed));
+    }
+
+    let mut seq = index.syncmer_seq(syncmer.signed);
+    seq.make_ascii_uppercase();
+    let end = seq.len().saturating_sub(right_trim as usize);
+    let seq = seq[left_trim as usize..end].to_vec();
+    let id = interner.intern_syncmer_slice(path_name, syncmer, left_trim, right_trim, seq, private);
+    Some(PathStep::Segment { id, sign: '+' })
+}
+
 fn collect_path_work(
     index: &SyngIndex,
     name: &str,
@@ -600,7 +755,8 @@ fn collect_path_work(
         } else {
             None
         };
-        let first_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, first);
+        let first_occ =
+            push_syncmer_step(&mut steps, &mut next_syncmer_occ, first, first_pos, 0, 0);
         if let Some(gap_idx) = prefix_gap_idx {
             edges.push((
                 raw_gap_endpoint(gap_idx),
@@ -619,7 +775,7 @@ fn collect_path_work(
         if off_u64 <= syncmer_len_u64 {
             // Direct adjacency: overlap = syncmer_len - offset.
             let overlap = (syncmer_len_u64 - off_u64) as u32;
-            let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b);
+            let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b, pos_b, 0, 0);
             edges.push((
                 raw_syncmer_endpoint(a_occ),
                 raw_syncmer_endpoint(b_occ),
@@ -642,7 +798,7 @@ fn collect_path_work(
                 gap_seq,
                 &mut steps,
             );
-            let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b);
+            let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b, pos_b, 0, 0);
             edges.push((raw_syncmer_endpoint(a_occ), raw_gap_endpoint(gap_idx), 0));
             edges.push((raw_gap_endpoint(gap_idx), raw_syncmer_endpoint(b_occ), 0));
             last_syncmer_occ = Some(b_occ);
@@ -697,6 +853,24 @@ fn fetch_oriented_gap_dna(
         seq = crate::graph::reverse_complement(&seq);
     }
     Ok(seq)
+}
+
+fn oriented_syncmer_clips(
+    pos: u64,
+    range_start: u64,
+    range_end: u64,
+    syncmer_len: u64,
+    reverse: bool,
+) -> (u32, u32) {
+    let syncmer_end = pos.saturating_add(syncmer_len);
+    let low_clip = range_start.saturating_sub(pos).min(syncmer_len);
+    let high_clip = syncmer_end.saturating_sub(range_end).min(syncmer_len);
+    let (left, right) = if reverse {
+        (high_clip, low_clip)
+    } else {
+        (low_clip, high_clip)
+    };
+    (left as u32, right as u32)
 }
 
 fn collect_range_work(
@@ -799,7 +973,16 @@ fn collect_range_work(
             } else {
                 None
             };
-            let first_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, first);
+            let (left_clip, right_clip) =
+                oriented_syncmer_clips(first_pos, range.start, range.end, syncmer_len_u64, false);
+            let first_occ = push_syncmer_step(
+                &mut steps,
+                &mut next_syncmer_occ,
+                first,
+                first_pos,
+                left_clip,
+                right_clip,
+            );
             if let Some(gap) = prefix_gap_idx {
                 if !gap.ends_with_cut {
                     if let Some(endpoint) = gap.last_endpoint() {
@@ -817,7 +1000,16 @@ fn collect_range_work(
                 last_syncmer_occ.expect("range window without a previous syncmer occurrence");
             let off_u64 = pos_b.saturating_sub(pos_a);
             if off_u64 <= syncmer_len_u64 {
-                let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b);
+                let (left_clip, right_clip) =
+                    oriented_syncmer_clips(pos_b, range.start, range.end, syncmer_len_u64, false);
+                let b_occ = push_syncmer_step(
+                    &mut steps,
+                    &mut next_syncmer_occ,
+                    b,
+                    pos_b,
+                    left_clip,
+                    right_clip,
+                );
                 edges.push((
                     raw_syncmer_endpoint(a_occ),
                     raw_syncmer_endpoint(b_occ),
@@ -837,7 +1029,16 @@ fn collect_range_work(
                     gap_seq,
                     &mut steps,
                 );
-                let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b);
+                let (left_clip, right_clip) =
+                    oriented_syncmer_clips(pos_b, range.start, range.end, syncmer_len_u64, false);
+                let b_occ = push_syncmer_step(
+                    &mut steps,
+                    &mut next_syncmer_occ,
+                    b,
+                    pos_b,
+                    left_clip,
+                    right_clip,
+                );
                 if !gap.starts_with_cut {
                     if let Some(endpoint) = gap.first_endpoint() {
                         edges.push((raw_syncmer_endpoint(a_occ), endpoint, 0));
@@ -888,7 +1089,16 @@ fn collect_range_work(
             } else {
                 None
             };
-            let first_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, first_oriented);
+            let (left_clip, right_clip) =
+                oriented_syncmer_clips(last_fwd_pos, range.start, range.end, syncmer_len_u64, true);
+            let first_occ = push_syncmer_step(
+                &mut steps,
+                &mut next_syncmer_occ,
+                first_oriented,
+                last_fwd_pos,
+                left_clip,
+                right_clip,
+            );
             if let Some(gap) = prefix_gap_idx {
                 if !gap.ends_with_cut {
                     if let Some(endpoint) = gap.last_endpoint() {
@@ -906,7 +1116,21 @@ fn collect_range_work(
                 last_syncmer_occ.expect("range window without a previous syncmer occurrence");
             let off_u64 = a_fwd_pos.saturating_sub(b_fwd_pos);
             if off_u64 <= syncmer_len_u64 {
-                let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b_oriented);
+                let (left_clip, right_clip) = oriented_syncmer_clips(
+                    b_fwd_pos,
+                    range.start,
+                    range.end,
+                    syncmer_len_u64,
+                    true,
+                );
+                let b_occ = push_syncmer_step(
+                    &mut steps,
+                    &mut next_syncmer_occ,
+                    b_oriented,
+                    b_fwd_pos,
+                    left_clip,
+                    right_clip,
+                );
                 edges.push((
                     raw_syncmer_endpoint(a_occ),
                     raw_syncmer_endpoint(b_occ),
@@ -929,7 +1153,21 @@ fn collect_range_work(
                     gap_seq,
                     &mut steps,
                 );
-                let b_occ = push_syncmer_step(&mut steps, &mut next_syncmer_occ, b_oriented);
+                let (left_clip, right_clip) = oriented_syncmer_clips(
+                    b_fwd_pos,
+                    range.start,
+                    range.end,
+                    syncmer_len_u64,
+                    true,
+                );
+                let b_occ = push_syncmer_step(
+                    &mut steps,
+                    &mut next_syncmer_occ,
+                    b_oriented,
+                    b_fwd_pos,
+                    left_clip,
+                    right_clip,
+                );
                 if !gap.starts_with_cut {
                     if let Some(endpoint) = gap.first_endpoint() {
                         edges.push((raw_syncmer_endpoint(a_occ), endpoint, 0));
@@ -1351,102 +1589,6 @@ fn split_syncmer_clone_occurrences(
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct BluntTrim {
-    left: usize,
-    right: usize,
-}
-
-fn bump_syncmer_blunt_trim(
-    trims: &mut FxHashMap<u32, BluntTrim>,
-    syncmer: RawSyncmerOcc,
-    left_side: bool,
-    amount: usize,
-) {
-    if amount == 0 {
-        return;
-    }
-    let trim = trims.entry(syncmer.abs()).or_default();
-    if left_side {
-        trim.left = trim.left.max(amount);
-    } else {
-        trim.right = trim.right.max(amount);
-    }
-}
-
-fn bump_blunt_trim_for_link_side(
-    trims: &mut FxHashMap<u32, BluntTrim>,
-    endpoint: &RawEndpoint,
-    is_from: bool,
-    left_amount: usize,
-    right_amount: usize,
-) {
-    let RawEndpoint::Syncmer(syncmer) = endpoint else {
-        return;
-    };
-    let plus = syncmer.signed >= 0;
-    let left_side = if is_from { !plus } else { plus };
-    let amount = if left_side { left_amount } else { right_amount };
-    bump_syncmer_blunt_trim(trims, *syncmer, left_side, amount);
-}
-
-fn syncmer_blunt_trims(path_work: &[PathWork]) -> FxHashMap<u32, BluntTrim> {
-    let mut first_overlap: Option<u32> = None;
-    let mut uniform = true;
-    for work in path_work {
-        if work.skipped {
-            continue;
-        }
-        for (_, _, overlap) in &work.edges {
-            match first_overlap {
-                Some(first) if first != *overlap => uniform = false,
-                Some(_) => {}
-                None => first_overlap = Some(*overlap),
-            }
-        }
-    }
-
-    let Some(first_overlap) = first_overlap else {
-        return FxHashMap::default();
-    };
-    let mut trims = FxHashMap::default();
-    for work in path_work {
-        if work.skipped {
-            continue;
-        }
-        for (from, to, overlap) in &work.edges {
-            let (left_amount, right_amount) = if uniform {
-                let k = first_overlap as usize + 1;
-                if k < 2 {
-                    (0, 0)
-                } else {
-                    ((k - 1) / 2, k / 2)
-                }
-            } else {
-                let amount = (*overlap as usize + 1) / 2;
-                (amount, amount)
-            };
-            bump_blunt_trim_for_link_side(&mut trims, from, true, left_amount, right_amount);
-            bump_blunt_trim_for_link_side(&mut trims, to, false, left_amount, right_amount);
-        }
-    }
-    trims
-}
-
-fn trim_sequence_like_bluntg(seq: &[u8], trim: BluntTrim) -> Vec<u8> {
-    if trim.left >= seq.len() {
-        return Vec::new();
-    }
-    let take = (seq.len() - trim.left).saturating_sub(trim.right);
-    seq[trim.left..trim.left + take].to_vec()
-}
-
-fn syncmer_blunt_sequence(index: &SyngIndex, node: u32, trim: BluntTrim) -> Vec<u8> {
-    let mut seq = index.syncmer_seq(node as i32);
-    seq.make_ascii_uppercase();
-    trim_sequence_like_bluntg(&seq, trim)
-}
-
 fn top_frequency_nodes(occurrence_counts: &[(u32, u32)], drop_top_fraction: f64) -> FxHashSet<u32> {
     if drop_top_fraction <= 0.0 || occurrence_counts.is_empty() {
         return FxHashSet::default();
@@ -1520,6 +1662,250 @@ fn frequency_masked_syncmers(
         );
     }
     Ok(masked)
+}
+
+fn push_exact_walked_path_segments(
+    walked_paths: &mut Vec<WalkedPath>,
+    edges: &mut FxHashSet<(String, char, String, char, u32)>,
+    name: String,
+    segments: Vec<Vec<PathStep>>,
+    had_break: bool,
+) {
+    let non_empty: Vec<Vec<PathStep>> = segments
+        .into_iter()
+        .filter(|steps| !steps.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return;
+    }
+    if !had_break && non_empty.len() == 1 {
+        let steps = non_empty.into_iter().next().expect("non-empty segment");
+        add_zero_edges_for_steps(&steps, edges);
+        walked_paths.push(WalkedPath { name, steps });
+        return;
+    }
+    for (idx, steps) in non_empty.into_iter().enumerate() {
+        add_zero_edges_for_steps(&steps, edges);
+        walked_paths.push(WalkedPath {
+            name: format!("{name}|part{}", idx + 1),
+            steps,
+        });
+    }
+}
+
+fn write_exact_blunt_path_work_gfa<W: Write>(
+    index: &SyngIndex,
+    path_work: Vec<PathWork>,
+    writer: &mut W,
+    version: GfaVersion,
+    split_syncmers: &FxHashSet<u32>,
+    frequency_mask: SyngGfaFrequencyMask,
+) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
+    unsafe { syng_ffi::impg_syng_suppress_debug() };
+    writeln!(writer, "H\tVN:Z:{}", version.header_tag())?;
+
+    let reduce_start = Instant::now();
+    let mut walked_paths: Vec<WalkedPath> = Vec::with_capacity(path_work.len());
+    let mut edges: FxHashSet<(String, char, String, char, u32)> = FxHashSet::default();
+    let mut interner = ExactSegmentInterner::new(index.num_syncmer_nodes());
+    let mut used_syncmers: FxHashSet<i32> = FxHashSet::default();
+    let dominant_repeat_contexts = dominant_local_repeat_contexts(
+        &path_work,
+        frequency_mask.local_repeat_max_minor,
+        frequency_mask.local_repeat_min_dominant_fraction,
+    );
+    if !dominant_repeat_contexts.is_empty() {
+        info!(
+            "[syng2gfa] detected {} near-single-copy syncmer node(s) with rare repeated local contexts (max_minor={}, min_dominant_fraction={})",
+            dominant_repeat_contexts.len(),
+            frequency_mask.local_repeat_max_minor,
+            frequency_mask.local_repeat_min_dominant_fraction
+        );
+    }
+
+    let mut n_skipped = 0usize;
+    let mut gaps_filled_with_ns = 0usize;
+    let mut gap_occurrences = 0usize;
+    let mut gap_occurrence_bp = 0u64;
+    let mut n_cut_runs = 0usize;
+    let mut n_cut_bp = 0u64;
+    let mut n_local_repeat_clones = 0usize;
+    let mut n_sequence_context_clones = 0usize;
+
+    for work in path_work {
+        if work.skipped {
+            warn!(
+                "[syng2gfa] path '{}' has no GBWT start info — skipping",
+                work.name
+            );
+            n_skipped += 1;
+            continue;
+        }
+
+        gaps_filled_with_ns += work.gaps_filled_with_ns;
+        gap_occurrences += work.gap_occurrences;
+        gap_occurrence_bp += work.gap_occurrence_bp;
+        n_cut_runs += work.n_cut_runs;
+        n_cut_bp += work.n_cut_bp;
+
+        let split_clone_occurrences = split_syncmer_clone_occurrences(&work, split_syncmers);
+        let local_repeat_clone_occurrences =
+            local_repeat_clone_occurrences(&work, &dominant_repeat_contexts);
+        let mut clone_occurrences = split_clone_occurrences.clone();
+        clone_occurrences.extend(local_repeat_clone_occurrences.iter().copied());
+        n_sequence_context_clones += split_clone_occurrences.len();
+        n_local_repeat_clones += local_repeat_clone_occurrences.len();
+
+        let mut incoming_overlap_by_occ: FxHashMap<u32, u32> = FxHashMap::default();
+        for (_, to, overlap) in &work.edges {
+            if let RawEndpoint::Syncmer(syncmer) = to {
+                let entry = incoming_overlap_by_occ.entry(syncmer.occ).or_default();
+                *entry = (*entry).max(*overlap);
+            }
+        }
+
+        let gap_ids: Vec<String> = work
+            .gaps
+            .into_iter()
+            .map(|gap| interner.intern_gap(gap.context, gap.seq))
+            .collect();
+
+        let mut segments = vec![Vec::new()];
+        let mut had_break = false;
+        for step in work.steps {
+            match step {
+                RawPathStep::Syncmer(syncmer) => {
+                    let incoming_overlap = incoming_overlap_by_occ
+                        .get(&syncmer.occ)
+                        .copied()
+                        .unwrap_or(0);
+                    let private = clone_occurrences.contains(&syncmer.occ);
+                    if let Some(path_step) = syncmer_path_step_exact(
+                        index,
+                        &mut interner,
+                        &mut used_syncmers,
+                        &work.name,
+                        syncmer,
+                        incoming_overlap,
+                        private,
+                    ) {
+                        segments.last_mut().expect("path segment").push(path_step);
+                    }
+                }
+                RawPathStep::Gap(idx) => {
+                    segments
+                        .last_mut()
+                        .expect("path segment")
+                        .push(PathStep::Gap(gap_ids[idx].clone()));
+                }
+                RawPathStep::Break => {
+                    had_break = true;
+                    segments.push(Vec::new());
+                }
+            }
+        }
+
+        push_exact_walked_path_segments(
+            &mut walked_paths,
+            &mut edges,
+            work.name,
+            segments,
+            had_break,
+        );
+    }
+
+    info!(
+        "[syng2gfa] reduced exact blunt path walks into {} shared syncmer node(s), {} extra sequence segment(s) ({} gap, {} syncmer-slice; {} local-repeat clones, {} sequence-context clones), {} edge(s) in {:.3}s",
+        used_syncmers.len(),
+        interner.total_extra_segments(),
+        interner.gap_segments,
+        interner.total_extra_segments().saturating_sub(interner.gap_segments),
+        n_local_repeat_clones,
+        n_sequence_context_clones,
+        edges.len(),
+        reduce_start.elapsed().as_secs_f64()
+    );
+
+    if gaps_filled_with_ns > 0 {
+        warn!(
+            "[syng2gfa] filled {} gap occurrence(s) with 'N' ({} bp over paths; {} unique segment bp). \
+                 Concatenating these paths will NOT reconstruct the original genome. \
+                 Pass --sequence-files <FASTA> to splice in real DNA.",
+            gaps_filled_with_ns,
+            gap_occurrence_bp,
+            interner.total_gap_segment_bp
+        );
+    } else if interner.gap_segments > 0 {
+        info!(
+            "[syng2gfa] spliced {} unique real-DNA gap segment(s) from {} gap occurrence(s), {} unique bp ({} bp over paths)",
+            interner.gap_segments,
+            gap_occurrences,
+            interner.total_gap_segment_bp,
+            gap_occurrence_bp
+        );
+    }
+    if n_cut_runs > 0 {
+        info!(
+            "[syng2gfa] cut {} N-run(s) ({} bp) out of gap DNA and split emitted paths at those breaks",
+            n_cut_runs,
+            n_cut_bp
+        );
+    }
+
+    let write_start = Instant::now();
+    let mut used_nodes: Vec<i32> = used_syncmers.into_iter().collect();
+    used_nodes.sort_unstable();
+    for node_id in &used_nodes {
+        let mut seq = index.syncmer_seq(*node_id);
+        seq.make_ascii_uppercase();
+        write_segment(writer, &node_id.to_string(), &seq)?;
+    }
+    for segment in &interner.segments {
+        write_segment(writer, &segment.id, &segment.seq)?;
+    }
+
+    let mut edge_vec: Vec<(String, char, String, char, u32)> = edges.into_iter().collect();
+    edge_vec.sort_unstable();
+    for (a_id, a_sign, b_id, b_sign, overlap) in &edge_vec {
+        writeln!(writer, "L\t{a_id}\t{a_sign}\t{b_id}\t{b_sign}\t{overlap}M")?;
+    }
+
+    for walked in &walked_paths {
+        match version {
+            GfaVersion::V1_0 => write_p_line(writer, &walked.name, &walked.steps)?,
+            GfaVersion::V1_1 => {
+                if let Some(parts) = parse_pansn(&walked.name) {
+                    write_w_line(writer, &parts, &walked.steps)?;
+                } else {
+                    warn!(
+                        "[syng2gfa] path '{}' is not PanSN-style; falling back to P line under GFA 1.1",
+                        walked.name
+                    );
+                    write_p_line(writer, &walked.name, &walked.steps)?;
+                }
+            }
+        }
+    }
+
+    let n_segments = used_nodes.len() + interner.total_extra_segments();
+    let n_links = edge_vec.len();
+    let n_paths_emitted = walked_paths.len();
+    info!(
+        "[syng2gfa] wrote exact blunt GFA: {} S, {} L, {} path line(s) in {:.3}s",
+        n_segments,
+        n_links,
+        n_paths_emitted,
+        write_start.elapsed().as_secs_f64()
+    );
+
+    Ok((
+        n_segments,
+        n_links,
+        n_paths_emitted,
+        n_skipped,
+        interner.gap_segments,
+        interner.total_gap_segment_bp,
+    ))
 }
 
 /// Walk every forward path in `index`, gap-fill via FASTA/AGC if given,
@@ -1742,7 +2128,203 @@ pub fn write_gfa<W: Write>(
     ))
 }
 
-/// Write syng GFA in either native overlap form or bluntg-processed form.
+/// Write every forward path as an exact, zero-overlap GFA.
+fn write_gfa_blunt_exact<W: Write>(
+    index: &SyngIndex,
+    writer: &mut W,
+    version: GfaVersion,
+    gap_fill: Option<&UnifiedSequenceIndex>,
+) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
+    if version != GfaVersion::V1_0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--gfa-mode blunt currently requires --gfa-version 1.0",
+        ));
+    }
+
+    let syncmer_len = index.syncmer_length_bp();
+    info!(
+        "[syng2gfa] rendering exact blunt GFA for {} syncmer segments (length {} bp), gap fill: {}",
+        index.num_syncmer_nodes(),
+        syncmer_len,
+        if gap_fill.is_some() {
+            "FASTA/AGC"
+        } else {
+            "Ns"
+        }
+    );
+
+    let syncmer_len_u64 = syncmer_len as u64;
+    let collect_start = Instant::now();
+    let path_work: Vec<PathWork> = (0..index.name_map.path_to_name.len())
+        .into_par_iter()
+        .map(|path_idx| {
+            let name = &index.name_map.path_to_name[path_idx];
+            let start_info = index
+                .name_map
+                .path_starts
+                .get(path_idx)
+                .and_then(|o| o.as_ref());
+            let path_len_bp = index
+                .name_map
+                .path_to_length
+                .get(path_idx)
+                .copied()
+                .unwrap_or(0);
+            collect_path_work(
+                index,
+                name,
+                start_info,
+                path_len_bp,
+                syncmer_len_u64,
+                gap_fill,
+            )
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    info!(
+        "[syng2gfa] collected {} path walks for exact blunt materialization in {:.3}s using {} rayon threads",
+        path_work.len(),
+        collect_start.elapsed().as_secs_f64(),
+        rayon::current_num_threads()
+    );
+
+    write_exact_blunt_path_work_gfa(
+        index,
+        path_work,
+        writer,
+        version,
+        &FxHashSet::default(),
+        SyngGfaFrequencyMask::disabled(),
+    )
+}
+
+fn write_range_gfa_blunt_exact<W: Write>(
+    index: &SyngIndex,
+    ranges: &[SyngGfaPathRange],
+    writer: &mut W,
+    version: GfaVersion,
+    gap_fill: Option<&UnifiedSequenceIndex>,
+    frequency_mask: SyngGfaFrequencyMask,
+) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
+    if version != GfaVersion::V1_0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--gfa-mode blunt currently requires --gfa-version 1.0",
+        ));
+    }
+
+    let syncmer_len = index.syncmer_length_bp();
+    info!(
+        "[syng2gfa] rendering {} selected path range(s) as exact blunt GFA, gap fill: {}",
+        ranges.len(),
+        if gap_fill.is_some() {
+            "FASTA/AGC"
+        } else {
+            "Ns"
+        }
+    );
+
+    let syncmer_len_u64 = syncmer_len as u64;
+    let need_local_walks =
+        frequency_mask.frequency_filter_enabled() || frequency_mask.shared_context_filter_enabled();
+    let local_walks = if need_local_walks {
+        let mask_collect_start = Instant::now();
+        let walks: Vec<Vec<LocalSyncmerWalkStep>> = ranges
+            .par_iter()
+            .map(|range| collect_range_syncmer_walk(index, range))
+            .collect::<io::Result<Vec<_>>>()?;
+        info!(
+            "[syng2gfa] collected {} local syncmer walk(s) for exact blunt masking in {:.3}s using {} rayon threads",
+            walks.len(),
+            mask_collect_start.elapsed().as_secs_f64(),
+            rayon::current_num_threads()
+        );
+        Some(walks)
+    } else {
+        None
+    };
+    let all_local_syncmers = local_walks.as_ref().map(|walks| {
+        walks
+            .iter()
+            .flatten()
+            .map(|step| step.node)
+            .collect::<FxHashSet<_>>()
+    });
+    let frequency_masked_syncmers = if frequency_mask.frequency_filter_enabled() {
+        frequency_masked_syncmers(
+            index,
+            all_local_syncmers.as_ref().expect("local syncmers"),
+            frequency_mask,
+        )?
+    } else {
+        FxHashSet::default()
+    };
+    let masked_syncmers = frequency_masked_syncmers.clone();
+    let mut split_syncmers = FxHashSet::default();
+    if frequency_mask.shared_context_filter_enabled() {
+        let context_start = Instant::now();
+        let context_filter = shared_context_filtered_syncmers(
+            local_walks.as_ref().expect("local syncmer walks"),
+            syncmer_len_u64,
+            frequency_mask.min_shared_run,
+            frequency_mask.min_sequence_span_bp,
+        );
+        split_syncmers = context_filter
+            .weak_nodes
+            .difference(&frequency_masked_syncmers)
+            .copied()
+            .collect();
+        info!(
+            "[syng2gfa] sequence-context evaluated {} local shared syncmer node(s) before exact blunt materialization (weak={}, split={}, min_run={}, run-supported={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            context_filter.shared_nodes,
+            context_filter.weak_nodes.len(),
+            split_syncmers.len(),
+            frequency_mask.min_shared_run,
+            context_filter.run_supported_nodes,
+            frequency_mask.min_sequence_span_bp,
+            context_filter.sequence_supported_nodes,
+            context_start.elapsed().as_secs_f64()
+        );
+        if !split_syncmers.is_empty() {
+            info!(
+                "[syng2gfa] sequence-context split {} local syncmer node(s) into private per-occurrence exact sequence segments",
+                split_syncmers.len()
+            );
+        }
+    }
+
+    let collect_start = Instant::now();
+    let path_work: Vec<PathWork> = ranges
+        .par_iter()
+        .map(|range| {
+            collect_range_work(
+                index,
+                range,
+                syncmer_len_u64,
+                gap_fill,
+                (!masked_syncmers.is_empty()).then_some(&masked_syncmers),
+                frequency_mask,
+            )
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    info!(
+        "[syng2gfa] collected {} selected path walks for exact blunt materialization in {:.3}s using {} rayon threads",
+        path_work.len(),
+        collect_start.elapsed().as_secs_f64(),
+        rayon::current_num_threads()
+    );
+
+    write_exact_blunt_path_work_gfa(
+        index,
+        path_work,
+        writer,
+        version,
+        &split_syncmers,
+        frequency_mask,
+    )
+}
+
+/// Write syng GFA in either explicit native-overlap form or exact blunt form.
 pub fn write_gfa_with_mode<W: Write>(
     index: &SyngIndex,
     writer: &mut W,
@@ -1752,18 +2334,7 @@ pub fn write_gfa_with_mode<W: Write>(
 ) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
     match mode {
         SyngGfaMode::Raw => write_gfa(index, writer, version, gap_fill),
-        SyngGfaMode::Blunt => {
-            let mut raw = Vec::new();
-            let stats = write_gfa(index, &mut raw, version, gap_fill)?;
-            let blunted = bluntify_gfa_bytes(&raw, version)?;
-            info!(
-                "[syng2gfa] bluntg processed {} raw GFA bytes into {} blunt GFA bytes",
-                raw.len(),
-                blunted.len()
-            );
-            writer.write_all(&blunted)?;
-            Ok(stats)
-        }
+        SyngGfaMode::Blunt => write_gfa_blunt_exact(index, writer, version, gap_fill),
     }
 }
 
@@ -1781,29 +2352,7 @@ pub fn write_range_gfa_with_mode<W: Write>(
             write_range_gfa(index, ranges, writer, version, gap_fill, frequency_mask)
         }
         SyngGfaMode::Blunt => {
-            let mut raw = Vec::new();
-            let render = write_range_gfa_internal(
-                index,
-                ranges,
-                &mut raw,
-                version,
-                gap_fill,
-                frequency_mask,
-            )?;
-            let blunt_start = Instant::now();
-            let blunted = bluntify_gfa_bytes_with_stable_clones(
-                &raw,
-                version,
-                &render.clone_blunt_sequences,
-            )?;
-            info!(
-                "[syng2gfa] bluntg processed {} raw range-GFA bytes into {} blunt GFA bytes in {:.3}s",
-                raw.len(),
-                blunted.len(),
-                blunt_start.elapsed().as_secs_f64()
-            );
-            writer.write_all(&blunted)?;
-            Ok(render.stats)
+            write_range_gfa_blunt_exact(index, ranges, writer, version, gap_fill, frequency_mask)
         }
     }
 }
@@ -1817,7 +2366,6 @@ pub fn write_range_gfa<W: Write>(
     frequency_mask: SyngGfaFrequencyMask,
 ) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
     write_range_gfa_internal(index, ranges, writer, version, gap_fill, frequency_mask)
-        .map(|render| render.stats)
 }
 
 fn write_range_gfa_internal<W: Write>(
@@ -1827,7 +2375,7 @@ fn write_range_gfa_internal<W: Write>(
     version: GfaVersion,
     gap_fill: Option<&UnifiedSequenceIndex>,
     frequency_mask: SyngGfaFrequencyMask,
-) -> io::Result<RangeGfaRender> {
+) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
     let syncmer_len = index.syncmer_length_bp();
     info!(
         "[syng2gfa] rendering {} selected path range(s), GFA {}, gap fill: {}",
@@ -1943,7 +2491,6 @@ fn write_range_gfa_internal<W: Write>(
     );
 
     let reduce_start = Instant::now();
-    let syncmer_blunt_trims = syncmer_blunt_trims(&path_work);
     let mut walked_paths: Vec<WalkedPath> = Vec::with_capacity(path_work.len());
     let mut edges: FxHashSet<(String, char, String, char, u32)> = FxHashSet::default();
     let mut gap_interner = GapInterner::new(index.num_syncmer_nodes());
@@ -1962,7 +2509,6 @@ fn write_range_gfa_internal<W: Write>(
         );
     }
     let mut cloned_syncmers: Vec<(String, u32)> = Vec::new();
-    let mut clone_blunt_sequences: FxHashMap<String, Vec<u8>> = FxHashMap::default();
     let mut n_local_repeat_clones = 0usize;
     let mut n_sequence_context_clones = 0usize;
     let mut n_skipped = 0usize;
@@ -2005,14 +2551,6 @@ fn write_range_gfa_internal<W: Write>(
                 let node = occ.syncmer.abs();
                 let clone_id = gap_interner.next_segment_id();
                 cloned_syncmer_ids.insert(occ.syncmer.occ, clone_id.clone());
-                clone_blunt_sequences.insert(
-                    clone_id.clone(),
-                    syncmer_blunt_sequence(
-                        index,
-                        node,
-                        syncmer_blunt_trims.get(&node).copied().unwrap_or_default(),
-                    ),
-                );
                 cloned_syncmers.push((clone_id, node));
                 if split_clone_occurrences.contains(&occ.syncmer.occ) {
                     n_sequence_context_clones += 1;
@@ -2174,19 +2712,17 @@ fn write_range_gfa_internal<W: Write>(
         write_start.elapsed().as_secs_f64()
     );
 
-    Ok(RangeGfaRender {
-        stats: (
-            n_segments,
-            n_links,
-            n_paths_emitted,
-            n_skipped,
-            n_gap_segments,
-            gap_interner.total_segment_bp(),
-        ),
-        clone_blunt_sequences,
-    })
+    Ok((
+        n_segments,
+        n_links,
+        n_paths_emitted,
+        n_skipped,
+        n_gap_segments,
+        gap_interner.total_segment_bp(),
+    ))
 }
 
+#[cfg(test)]
 fn bluntify_gfa_bytes(raw: &[u8], version: GfaVersion) -> io::Result<Vec<u8>> {
     if version != GfaVersion::V1_0 {
         return Err(io::Error::new(
@@ -2202,6 +2738,7 @@ fn bluntify_gfa_bytes(raw: &[u8], version: GfaVersion) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+#[cfg(test)]
 fn bluntify_gfa_bytes_with_stable_clones(
     raw: &[u8],
     version: GfaVersion,
@@ -2214,6 +2751,7 @@ fn bluntify_gfa_bytes_with_stable_clones(
     patch_blunted_clone_segment_sequences(&blunted, clone_blunt_sequences)
 }
 
+#[cfg(test)]
 fn patch_blunted_clone_segment_sequences(
     blunted: &[u8],
     clone_blunt_sequences: &FxHashMap<String, Vec<u8>>,
@@ -2491,6 +3029,9 @@ mod tests {
                 RawPathStep::Syncmer(RawSyncmerOcc {
                     signed: *signed,
                     occ: occ as u32,
+                    pos: occ as u64,
+                    left_clip: 0,
+                    right_clip: 0,
                 })
             })
             .collect();

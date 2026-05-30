@@ -138,9 +138,13 @@ Strict path-spelled DNA validation:
   is given internally, but the syng/blunt materialization is still not a
   source-sequence-preserving GFA renderer.
 
-This is a blocker for making `syng-local` permanent as a user-facing default.
-The engine path is useful for experiments, but exact path spelling needs a
-separate fix before it can be promoted.
+Follow-up on 2026-05-30: `syng:blunt` and `syng-local:blunt` now bypass the
+generic bluntg trimming pass and materialize exact zero-overlap paths directly
+from the syng walk plus source gap DNA. `syng:raw` remains the explicit native
+overlap graph mode; concatenating raw S-line DNA without interpreting overlaps
+is not a sequence-preserving validation mode. Blunt syng output is exact only
+when source sequence files are available for non-syncmer spans; otherwise the
+documented `N` gap fill remains an explicit non-source-preserving fallback.
 
 ## Render URLs
 
