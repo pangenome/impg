@@ -1815,7 +1815,7 @@ fn write_exact_blunt_path_work_gfa<W: Write>(
     }
 
     info!(
-        "[syng2gfa] reduced exact blunt path walks into {} shared syncmer node(s), {} extra sequence segment(s) ({} gap, {} syncmer-slice; {} local-repeat clones, {} sequence-context clones), {} edge(s) in {:.3}s",
+        "[syng2gfa] reduced exact blunt path walks into {} full untrimmed syncmer anchor segment(s), {} interned exact sequence segment(s) ({} gap, {} trimmed syncmer-slice; {} local-repeat clones, {} sequence-context clones), {} edge(s) in {:.3}s",
         used_syncmers.len(),
         interner.total_extra_segments(),
         interner.gap_segments,
