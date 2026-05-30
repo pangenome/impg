@@ -269,44 +269,46 @@ genotype output. GFA should not repeat that gap.
 
 ### GAF To GFA Features
 
-Initial GFA projection should support GAF records whose path field is a graph
-walk over segment names:
+The first implemented GFA projection supports GAF records whose path field is a
+graph walk over segment names:
 
 ```text
 read1  qlen  qstart  qend  +  >s1>s2<s3  tlen  tstart  tend  ...
 ```
 
-Projection steps:
+Implemented projection steps:
 
 1. Resolve each segment name in the GAF path to `feature_id`.
 2. Use segment lengths and GAF target start/end to compute per-step graph-bp
-   overlap. If a `cg` or `cs` tag is present, it can refine aligned bases, but
-   the first implementation can use graph-span overlap and record that choice
-   in the projection manifest.
-3. Apply alignment filters: primary/supplementary policy, minimum mapQ,
-   minimum aligned bp, and optional maximum multimapping.
-4. Split ambiguous read weight across retained alignments if multiple
-   alignments survive for the same read.
-5. Emit one contribution row per read-feature overlap:
+   overlap. The current converter uses graph-span overlap and raw traversal
+   count deltas; `cg` / `cs` base-level refinement is still future work.
+3. Emit one contribution row per retained read-feature overlap:
 
 ```text
-read_id  alignment_ordinal  feature_id  segment_name  orientation
-read_start  read_end  graph_start  graph_end  aligned_bp
-mapq  alignment_weight  normalized_weight  filter_status
+read_name  read_ordinal  step_index  segment_name  orientation
+feature_id  segment_visit_in_read  count_delta  explanation
 ```
 
-6. Aggregate by feature:
+4. Aggregate by feature into a typed pack TSV:
 
 ```text
-observed_aligned_bp_f += aligned_bp * alignment_weight * mapq_weight
-read_count_f += read contributed nonzero aligned bp to f
-sample_weight_f = observed_aligned_bp_f / scoring_length_f
+#feature_space              gfa-segment
+#graph_id                   gfa-fnv1a64:...
+#feature_id_mode            segment-name|dense
+#graph_contribution_model   raw|length-normalized
+feature_id                  count
 ```
 
 Unlike syng pack construction, GFA projection should not deduplicate repeated
 visits to the same feature within a read by default. If a graph alignment walks
 the same segment twice, both traversals carry copy-number evidence. The
-read-contribution table must make repeated visits inspectable.
+read-contribution table makes repeated visits inspectable with
+`segment_visit_in_read` and an explanation field, for example `repeated visit 2
+to segment in read; counted again`.
+
+Future projection refinements can add primary/supplementary filtering,
+minimum mapQ, multimapping weight splitting, and base-level aligned-bp weights
+without changing the typed pack compatibility checks.
 
 ### Syng Pack To Local GFA Features
 
@@ -489,7 +491,7 @@ Compatibility rules:
 
 ### First Slice
 
-Introduce a projection command before exposing direct GFA genotyping:
+The first slice now includes a projection command for external GFA/GAF evidence:
 
 ```bash
 # External graph aligner produced GAF over graph.gfa segment names.
@@ -520,9 +522,10 @@ impg genotype cos \
   -r graph_path:10000-20000
 ```
 
-This should be a later part of the first slice or the second slice, because it
-requires graph path coordinate parsing and candidate extraction without the
-render-bundle namespace.
+The `--proj` path resolves the bundle's typed pack and relies on pack metadata
+for feature-space, graph ID, feature ID mode, and contribution-model checks.
+Direct `--gfa --pack` also works for typed pack TSVs, but `--proj` preserves the
+read-contribution table and manifest alongside the aggregate counts.
 
 ### Later Convenience
 
@@ -569,8 +572,8 @@ features.tsv
   feature_id  segment_name  length  scoring_length  source_context_count
 
 read-contrib.tsv
-  read_id  alignment_ordinal  feature_id  segment_name  aligned_bp
-  normalized_weight  mapq  filter_status
+  read_name  read_ordinal  step_index  segment_name  orientation
+  feature_id  segment_visit_in_read  count_delta  explanation
 
 candidate-features.tsv
   candidate_id  path_name  source_interval  feature_id  segment_name

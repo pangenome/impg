@@ -215,6 +215,7 @@ pub struct GraphPackMetadata {
     pub feature_space: Option<String>,
     pub graph_id: Option<String>,
     pub feature_id_mode: Option<String>,
+    pub contribution_model: Option<String>,
     pub source: Option<String>,
 }
 
@@ -1727,6 +1728,9 @@ fn merge_pack_metadata(target: &mut GraphPackMetadata, key: &str, value: &str, s
         "feature_id_mode" | "graph_feature_id_mode" | "pack_feature_id_mode" => {
             target.feature_id_mode.get_or_insert(value);
         }
+        "contribution_model" | "graph_contribution_model" | "pack_contribution_model" => {
+            target.contribution_model.get_or_insert(value);
+        }
         _ => return,
     }
     target.source.get_or_insert_with(|| source.to_string());
@@ -1797,6 +1801,7 @@ fn validate_graph_pack_compatibility(
     pack_path: &str,
     pack_feature_space: Option<&str>,
     pack_graph_id: Option<&str>,
+    contribution_model: GraphContributionModel,
 ) -> io::Result<GraphPackMetadata> {
     let mut metadata = read_graph_pack_metadata(pack_path)?;
     if let Some(feature_space) = pack_feature_space {
@@ -1842,6 +1847,18 @@ fn validate_graph_pack_compatibility(
                     "pack feature_id_mode '{}' does not match graph feature_id_mode '{}'",
                     mode,
                     graph.effective_feature_id_mode.as_str()
+                ),
+            ));
+        }
+    }
+    if let Some(model) = metadata.contribution_model.as_deref() {
+        if model != contribution_model.as_str() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "pack graph_contribution_model '{}' does not match requested graph_contribution_model '{}'",
+                    model,
+                    contribution_model.as_str()
                 ),
             ));
         }
@@ -1911,6 +1928,7 @@ pub fn compute_graph_cosigt(config: &GraphCosigtConfig<'_>) -> io::Result<GraphC
         config.pack_path,
         config.pack_feature_space,
         config.pack_graph_id,
+        config.contribution_model,
     )?;
     let sample_weights = sample_weights_for_graph(&graph, &coverage, config.contribution_model)?;
     let (mut candidates, region_name, resolved_target_path) =
@@ -2119,6 +2137,15 @@ pub fn write_graph_cosigt_report<W: Write>(
         out,
         "pack_declared_graph_id",
         result.pack_metadata.graph_id.as_deref().unwrap_or("NA"),
+    )?;
+    write_report_kv(
+        out,
+        "pack_declared_contribution_model",
+        result
+            .pack_metadata
+            .contribution_model
+            .as_deref()
+            .unwrap_or("NA"),
     )?;
     write_report_kv(
         out,

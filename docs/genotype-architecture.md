@@ -41,8 +41,10 @@ The command now has two concrete `cos` backends:
    - GFA `P` paths and `W` walks become genotype haplotype candidates;
    - candidate vectors count segment traversals, with
      `--graph-contribution-model raw` or `length-normalized`;
-   - sample evidence is currently a pack-like vector over the graph feature
-     IDs, guarded by explicit feature-space metadata.
+  - sample evidence comes from a typed graph pack or a projection bundle
+    produced by `impg project --gfa graph.gfa --gaf reads.gaf`;
+  - graph evidence is guarded by explicit feature-space, graph ID, feature ID
+    mode, and contribution-model metadata.
 
 These are intentionally only the first backends, not the whole model. Other
 projection methods should be able to feed the same typed coverage abstraction:
@@ -57,9 +59,12 @@ projection methods should be able to feed the same typed coverage abstraction:
 remains a compatibility alias for compact pack output. For GFA graph
 genotyping, a pack must declare `feature_space = gfa-segment` or
 `variation-graph-node` in TSV header metadata, a `.meta.tsv` / `.metadata.tsv`
-sidecar, or the CLI override `--pack-feature-space`. If a graph ID is declared,
-it must match the loaded graph. This prevents a syng-node pack from being
-silently treated as graph-node evidence.
+sidecar, or the CLI override `--pack-feature-space`. Typed GFA packs produced
+by `impg project` also declare `graph_id`, `feature_id_mode`, and
+`graph_contribution_model`; `genotype cos --graph ... --proj ...` resolves the
+bundle pack and checks the same metadata. If a graph ID is declared, it must
+match the loaded graph. This prevents a syng-node pack from being silently
+treated as graph-node evidence.
 
 GFA feature IDs are selected by `--graph-feature-id-mode`:
 
@@ -68,9 +73,13 @@ GFA feature IDs are selected by `--graph-feature-id-mode`:
 - `segment-name`: require numeric `S` names and use those as pack feature IDs;
 - `dense`: assign feature IDs `1..N` in `S`-line order.
 
-The current GFA pack path does not project BAM/GAF reads into graph packs.
-That projection layer must be implemented explicitly so read-walk evidence,
-graph identity, and feature-space identity remain inspectable.
+The implemented GFA projection slice accepts GAF records whose path field is an
+oriented graph walk over GFA segment names, such as `>segA<segB>segC`. It
+counts every contributing segment visit in the aligned graph interval; unlike
+the syng pack builder, repeated visits to the same segment within one read are
+not deduplicated. Projection bundles include `sample.pack.tsv`,
+`manifest.json`, a copy of the source GAF, and `read-contributions.tsv` so the
+aggregate pack can be audited back to individual read-walk steps.
 
 ## Evidence Debug Reports
 
@@ -106,6 +115,16 @@ and span fractions.
 Common GFA examples:
 
 ```bash
+impg project \
+  --gfa local.gfa \
+  --gaf reads.gaf \
+  -O sample.gfa.proj
+
+impg genotype cos \
+  --graph local.gfa \
+  --proj sample.gfa.proj \
+  --target-path REF_PATH:0-10000
+
 impg genotype cos \
   --graph local.gfa \
   --pack sample.graph.pack.tsv \

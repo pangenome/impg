@@ -5003,6 +5003,42 @@ GFA engine shorthand:
         command: GenotypeCommand,
     },
 
+    /// Project graph alignments into typed GFA genotype evidence
+    #[command(alias = "projection")]
+    Project {
+        /// GFA graph whose S-line segment names appear in the GAF path walks
+        #[clap(long = "gfa", alias = "graph", value_parser)]
+        gfa: String,
+
+        /// GAF alignments with path fields like >segA<segB over GFA segment names
+        #[clap(long, value_parser)]
+        gaf: String,
+
+        /// Output format: proj (projection bundle) or pack-tsv
+        #[clap(short = 'o', long, value_parser, default_value = "proj")]
+        output_format: String,
+
+        /// Output projection directory or typed pack TSV path
+        #[clap(short = 'O', long, value_parser)]
+        output: String,
+
+        /// Optional read-contribution table path for -o pack-tsv output; proj bundles always include one
+        #[clap(long = "read-contributions", value_parser)]
+        read_contributions: Option<String>,
+
+        /// How GFA S-line names map to integer pack feature IDs
+        #[clap(long = "graph-feature-id-mode", value_enum, default_value_t = genotype::GraphFeatureIdMode::Auto)]
+        graph_feature_id_mode: genotype::GraphFeatureIdMode,
+
+        /// Contribution model declared for graph-node evidence
+        #[clap(long = "graph-contribution-model", value_enum, default_value_t = genotype::GraphContributionModel::Raw)]
+        graph_contribution_model: genotype::GraphContributionModel,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Infer allele calls across ranges or partitions from graph-derived evidence
     Infer {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
@@ -5836,6 +5872,35 @@ GFA engine shorthand:
         #[clap(flatten)]
         common: CommonOpts,
     },
+}
+
+#[cfg(test)]
+impl Args {
+    fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString>,
+    {
+        let args: Vec<std::ffi::OsString> = itr.into_iter().map(Into::into).collect();
+        std::thread::Builder::new()
+            .name("impg-clap-parse".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || <Self as Parser>::try_parse_from(args))
+            .expect("failed to spawn clap parser thread")
+            .join()
+            .expect("clap parser thread panicked")
+    }
+}
+
+#[cfg(test)]
+fn args_command_for_test() -> clap::Command {
+    std::thread::Builder::new()
+        .name("impg-clap-command".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(<Args as clap::CommandFactory>::command)
+        .expect("failed to spawn clap command thread")
+        .join()
+        .expect("clap command thread panicked")
 }
 
 fn main() {
@@ -7818,18 +7883,47 @@ fn run() -> io::Result<()> {
 
                 let pack_path: String;
                 let backend = if use_graph_backend {
-                    if proj.is_some() {
+                    let graph_projection = if let Some(path) = proj.as_deref() {
+                        Some(impg::projection::converter::load_gfa_projection_bundle(
+                            path,
+                        )?)
+                    } else {
+                        None
+                    };
+                    if let Some(projection) = &graph_projection {
+                        if !matches!(
+                            projection.feature_space.as_str(),
+                            "gfa-segment" | "variation-graph-node"
+                        ) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "projection feature_space '{}' is not a graph genotype feature space",
+                                    projection.feature_space
+                                ),
+                            ));
+                        }
+                        if projection.contribution_model != graph_contribution_model.as_str() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "projection contribution_model '{}' does not match requested --graph-contribution-model '{}'",
+                                    projection.contribution_model,
+                                    graph_contribution_model.as_str()
+                                ),
+                            ));
+                        }
+                    }
+                    pack_path = if let Some(pack) = pack {
+                        pack
+                    } else if let Some(projection) = &graph_projection {
+                        projection.pack_path.to_string_lossy().to_string()
+                    } else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            "GFA graph genotyping currently consumes --pack vectors only; GAF/BAM/proj projection into graph packs is a separate projection step",
+                            "GFA graph genotype requires --pack or --proj",
                         ));
-                    }
-                    pack_path = pack.ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "GFA graph genotype requires --pack",
-                        )
-                    })?;
+                    };
 
                     let graph_source = if let Some(graph_path) = graph.as_deref() {
                         genotype::GraphSource::Gfa { path: graph_path }
@@ -7995,6 +8089,51 @@ fn run() -> io::Result<()> {
                 }
             }
         },
+        Args::Project {
+            gfa,
+            gaf,
+            output_format,
+            output,
+            read_contributions,
+            graph_feature_id_mode,
+            graph_contribution_model,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let output_format =
+                impg::projection::converter::GfaProjectionOutputFormat::parse(&output_format)?;
+            if output_format
+                == impg::projection::converter::GfaProjectionOutputFormat::ProjectionBundle
+                && read_contributions.is_some()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--read-contributions is only used with -o pack-tsv; projection bundles write read-contributions.tsv inside the bundle",
+                ));
+            }
+            let summary = impg::projection::converter::project_gaf_to_gfa(
+                &impg::projection::converter::GfaProjectionConfig {
+                    gfa_path: Path::new(&gfa),
+                    gaf_path: Path::new(&gaf),
+                    output_path: Path::new(&output),
+                    output_format,
+                    feature_id_mode: graph_feature_id_mode,
+                    contribution_model: graph_contribution_model,
+                    read_contributions_path: read_contributions.as_deref().map(Path::new),
+                },
+            )?;
+            info!(
+                "Projected {} GAF record(s) ({} retained, {} contributed step(s)) into {} graph feature(s); pack={} graph_id={} feature_id_mode={} contribution_model={}",
+                summary.total_records,
+                summary.retained_records,
+                summary.contributed_steps,
+                summary.nonzero_features,
+                summary.pack_path.display(),
+                summary.graph_id,
+                summary.feature_id_mode,
+                summary.contribution_model
+            );
+        }
         Args::Infer {
             index,
             render_bundle,
@@ -13219,7 +13358,7 @@ mod tests {
 
     #[test]
     fn test_query_help_explains_output_formats() {
-        let mut cmd = <Args as clap::CommandFactory>::command();
+        let mut cmd = args_command_for_test();
         let query_cmd = cmd.find_subcommand_mut("query").unwrap();
         let mut help = Vec::new();
         query_cmd.write_help(&mut help).unwrap();
