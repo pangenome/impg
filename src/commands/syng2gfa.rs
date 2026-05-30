@@ -412,6 +412,13 @@ struct PathWork {
     skipped: bool,
 }
 
+type GfaWriteStats = (usize, usize, usize, usize, usize, u64);
+
+struct RangeGfaRender {
+    stats: GfaWriteStats,
+    clone_blunt_sequences: FxHashMap<String, Vec<u8>>,
+}
+
 fn push_syncmer_step(
     steps: &mut Vec<RawPathStep>,
     next_occ: &mut u32,
@@ -1344,6 +1351,102 @@ fn split_syncmer_clone_occurrences(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BluntTrim {
+    left: usize,
+    right: usize,
+}
+
+fn bump_syncmer_blunt_trim(
+    trims: &mut FxHashMap<u32, BluntTrim>,
+    syncmer: RawSyncmerOcc,
+    left_side: bool,
+    amount: usize,
+) {
+    if amount == 0 {
+        return;
+    }
+    let trim = trims.entry(syncmer.abs()).or_default();
+    if left_side {
+        trim.left = trim.left.max(amount);
+    } else {
+        trim.right = trim.right.max(amount);
+    }
+}
+
+fn bump_blunt_trim_for_link_side(
+    trims: &mut FxHashMap<u32, BluntTrim>,
+    endpoint: &RawEndpoint,
+    is_from: bool,
+    left_amount: usize,
+    right_amount: usize,
+) {
+    let RawEndpoint::Syncmer(syncmer) = endpoint else {
+        return;
+    };
+    let plus = syncmer.signed >= 0;
+    let left_side = if is_from { !plus } else { plus };
+    let amount = if left_side { left_amount } else { right_amount };
+    bump_syncmer_blunt_trim(trims, *syncmer, left_side, amount);
+}
+
+fn syncmer_blunt_trims(path_work: &[PathWork]) -> FxHashMap<u32, BluntTrim> {
+    let mut first_overlap: Option<u32> = None;
+    let mut uniform = true;
+    for work in path_work {
+        if work.skipped {
+            continue;
+        }
+        for (_, _, overlap) in &work.edges {
+            match first_overlap {
+                Some(first) if first != *overlap => uniform = false,
+                Some(_) => {}
+                None => first_overlap = Some(*overlap),
+            }
+        }
+    }
+
+    let Some(first_overlap) = first_overlap else {
+        return FxHashMap::default();
+    };
+    let mut trims = FxHashMap::default();
+    for work in path_work {
+        if work.skipped {
+            continue;
+        }
+        for (from, to, overlap) in &work.edges {
+            let (left_amount, right_amount) = if uniform {
+                let k = first_overlap as usize + 1;
+                if k < 2 {
+                    (0, 0)
+                } else {
+                    ((k - 1) / 2, k / 2)
+                }
+            } else {
+                let amount = (*overlap as usize + 1) / 2;
+                (amount, amount)
+            };
+            bump_blunt_trim_for_link_side(&mut trims, from, true, left_amount, right_amount);
+            bump_blunt_trim_for_link_side(&mut trims, to, false, left_amount, right_amount);
+        }
+    }
+    trims
+}
+
+fn trim_sequence_like_bluntg(seq: &[u8], trim: BluntTrim) -> Vec<u8> {
+    if trim.left >= seq.len() {
+        return Vec::new();
+    }
+    let take = (seq.len() - trim.left).saturating_sub(trim.right);
+    seq[trim.left..trim.left + take].to_vec()
+}
+
+fn syncmer_blunt_sequence(index: &SyngIndex, node: u32, trim: BluntTrim) -> Vec<u8> {
+    let mut seq = index.syncmer_seq(node as i32);
+    seq.make_ascii_uppercase();
+    trim_sequence_like_bluntg(&seq, trim)
+}
+
 fn top_frequency_nodes(occurrence_counts: &[(u32, u32)], drop_top_fraction: f64) -> FxHashSet<u32> {
     if drop_top_fraction <= 0.0 || occurrence_counts.is_empty() {
         return FxHashSet::default();
@@ -1679,10 +1782,20 @@ pub fn write_range_gfa_with_mode<W: Write>(
         }
         SyngGfaMode::Blunt => {
             let mut raw = Vec::new();
-            let stats =
-                write_range_gfa(index, ranges, &mut raw, version, gap_fill, frequency_mask)?;
+            let render = write_range_gfa_internal(
+                index,
+                ranges,
+                &mut raw,
+                version,
+                gap_fill,
+                frequency_mask,
+            )?;
             let blunt_start = Instant::now();
-            let blunted = bluntify_gfa_bytes(&raw, version)?;
+            let blunted = bluntify_gfa_bytes_with_stable_clones(
+                &raw,
+                version,
+                &render.clone_blunt_sequences,
+            )?;
             info!(
                 "[syng2gfa] bluntg processed {} raw range-GFA bytes into {} blunt GFA bytes in {:.3}s",
                 raw.len(),
@@ -1690,7 +1803,7 @@ pub fn write_range_gfa_with_mode<W: Write>(
                 blunt_start.elapsed().as_secs_f64()
             );
             writer.write_all(&blunted)?;
-            Ok(stats)
+            Ok(render.stats)
         }
     }
 }
@@ -1703,6 +1816,18 @@ pub fn write_range_gfa<W: Write>(
     gap_fill: Option<&UnifiedSequenceIndex>,
     frequency_mask: SyngGfaFrequencyMask,
 ) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
+    write_range_gfa_internal(index, ranges, writer, version, gap_fill, frequency_mask)
+        .map(|render| render.stats)
+}
+
+fn write_range_gfa_internal<W: Write>(
+    index: &SyngIndex,
+    ranges: &[SyngGfaPathRange],
+    writer: &mut W,
+    version: GfaVersion,
+    gap_fill: Option<&UnifiedSequenceIndex>,
+    frequency_mask: SyngGfaFrequencyMask,
+) -> io::Result<RangeGfaRender> {
     let syncmer_len = index.syncmer_length_bp();
     info!(
         "[syng2gfa] rendering {} selected path range(s), GFA {}, gap fill: {}",
@@ -1818,6 +1943,7 @@ pub fn write_range_gfa<W: Write>(
     );
 
     let reduce_start = Instant::now();
+    let syncmer_blunt_trims = syncmer_blunt_trims(&path_work);
     let mut walked_paths: Vec<WalkedPath> = Vec::with_capacity(path_work.len());
     let mut edges: FxHashSet<(String, char, String, char, u32)> = FxHashSet::default();
     let mut gap_interner = GapInterner::new(index.num_syncmer_nodes());
@@ -1836,6 +1962,7 @@ pub fn write_range_gfa<W: Write>(
         );
     }
     let mut cloned_syncmers: Vec<(String, u32)> = Vec::new();
+    let mut clone_blunt_sequences: FxHashMap<String, Vec<u8>> = FxHashMap::default();
     let mut n_local_repeat_clones = 0usize;
     let mut n_sequence_context_clones = 0usize;
     let mut n_skipped = 0usize;
@@ -1878,6 +2005,14 @@ pub fn write_range_gfa<W: Write>(
                 let node = occ.syncmer.abs();
                 let clone_id = gap_interner.next_segment_id();
                 cloned_syncmer_ids.insert(occ.syncmer.occ, clone_id.clone());
+                clone_blunt_sequences.insert(
+                    clone_id.clone(),
+                    syncmer_blunt_sequence(
+                        index,
+                        node,
+                        syncmer_blunt_trims.get(&node).copied().unwrap_or_default(),
+                    ),
+                );
                 cloned_syncmers.push((clone_id, node));
                 if split_clone_occurrences.contains(&occ.syncmer.occ) {
                     n_sequence_context_clones += 1;
@@ -2039,14 +2174,17 @@ pub fn write_range_gfa<W: Write>(
         write_start.elapsed().as_secs_f64()
     );
 
-    Ok((
-        n_segments,
-        n_links,
-        n_paths_emitted,
-        n_skipped,
-        n_gap_segments,
-        gap_interner.total_segment_bp(),
-    ))
+    Ok(RangeGfaRender {
+        stats: (
+            n_segments,
+            n_links,
+            n_paths_emitted,
+            n_skipped,
+            n_gap_segments,
+            gap_interner.total_segment_bp(),
+        ),
+        clone_blunt_sequences,
+    })
 }
 
 fn bluntify_gfa_bytes(raw: &[u8], version: GfaVersion) -> io::Result<Vec<u8>> {
@@ -2061,6 +2199,73 @@ fn bluntify_gfa_bytes(raw: &[u8], version: GfaVersion) -> io::Result<Vec<u8>> {
     let blunted = bluntg::bluntify_auto(gfa);
     let mut out = Vec::new();
     bluntg::write_gfa(&mut out, &blunted)?;
+    Ok(out)
+}
+
+fn bluntify_gfa_bytes_with_stable_clones(
+    raw: &[u8],
+    version: GfaVersion,
+    clone_blunt_sequences: &FxHashMap<String, Vec<u8>>,
+) -> io::Result<Vec<u8>> {
+    let blunted = bluntify_gfa_bytes(raw, version)?;
+    if clone_blunt_sequences.is_empty() {
+        return Ok(blunted);
+    }
+    patch_blunted_clone_segment_sequences(&blunted, clone_blunt_sequences)
+}
+
+fn patch_blunted_clone_segment_sequences(
+    blunted: &[u8],
+    clone_blunt_sequences: &FxHashMap<String, Vec<u8>>,
+) -> io::Result<Vec<u8>> {
+    let text = std::str::from_utf8(blunted).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bluntg emitted non-UTF8 GFA: {err}"),
+        )
+    })?;
+    let mut out = Vec::with_capacity(blunted.len());
+    let mut replaced = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let has_newline = line.ends_with('\n');
+        let body = if has_newline {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+        let mut fields = body.splitn(4, '\t');
+        if fields.next() == Some("S") {
+            let id = fields.next().unwrap_or("");
+            let _old_seq = fields.next();
+            if let Some(seq) = clone_blunt_sequences.get(id) {
+                out.extend_from_slice(b"S\t");
+                out.extend_from_slice(id.as_bytes());
+                out.push(b'\t');
+                out.extend_from_slice(seq);
+                if let Some(rest) = fields.next() {
+                    out.push(b'\t');
+                    out.extend_from_slice(rest.as_bytes());
+                }
+                if has_newline {
+                    out.push(b'\n');
+                }
+                replaced += 1;
+                continue;
+            }
+        }
+        out.extend_from_slice(line.as_bytes());
+    }
+
+    if replaced != clone_blunt_sequences.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bluntg output omitted {} private syncmer clone segment(s)",
+                clone_blunt_sequences.len() - replaced
+            ),
+        ));
+    }
     Ok(out)
 }
 
@@ -2241,6 +2446,43 @@ pub fn run(
 mod tests {
     use super::*;
 
+    fn blunt_path_map(gfa: &[u8]) -> FxHashMap<String, String> {
+        let text = std::str::from_utf8(gfa).expect("GFA should be UTF-8");
+        crate::resolution::path_sequences(text)
+            .expect("blunt GFA path sequences")
+            .into_iter()
+            .collect()
+    }
+
+    fn assert_stable_private_clone_fixture(
+        baseline_raw: &[u8],
+        split_raw: &[u8],
+        clone_id: &str,
+        clone_blunt_seq: &[u8],
+        mismatching_path: &str,
+    ) {
+        let baseline = bluntify_gfa_bytes(baseline_raw, GfaVersion::V1_0).unwrap();
+        let unpatched_split = bluntify_gfa_bytes(split_raw, GfaVersion::V1_0).unwrap();
+        let baseline_paths = blunt_path_map(&baseline);
+        let unpatched_split_paths = blunt_path_map(&unpatched_split);
+        assert_ne!(
+            unpatched_split_paths.get(mismatching_path),
+            baseline_paths.get(mismatching_path),
+            "the reduced fixture should reproduce the pre-fix private-copy spelling drift"
+        );
+
+        let mut clone_sequences = FxHashMap::default();
+        clone_sequences.insert(clone_id.to_string(), clone_blunt_seq.to_vec());
+        let patched =
+            bluntify_gfa_bytes_with_stable_clones(split_raw, GfaVersion::V1_0, &clone_sequences)
+                .unwrap();
+        let patched_paths = blunt_path_map(&patched);
+        assert_eq!(
+            patched_paths, baseline_paths,
+            "private clone should preserve every post-blunt path spelling from the shared-node baseline"
+        );
+    }
+
     fn context_test_work(name: &str, nodes: &[i32]) -> PathWork {
         let steps: Vec<RawPathStep> = nodes
             .iter()
@@ -2295,6 +2537,102 @@ P\tp\t1+,2+,3+\t3M,1M\n";
         assert!(out.contains("P\tp\t1+,2+,3+\t0M,0M"), "{out}");
         assert!(!out.contains("\t3M"), "{out}");
         assert!(!out.contains("\t1M"), "{out}");
+    }
+
+    #[test]
+    fn test_private_clone_blunt_spelling_uses_shared_trim_coordinates() {
+        assert_stable_private_clone_fixture(
+            b"\
+H\tVN:Z:1.0\n\
+S\t1\tAA\n\
+S\t2\tCCGGTT\n\
+S\t3\tTT\n\
+S\t4\tGGGGCC\n\
+L\t1\t+\t2\t+\t0M\n\
+L\t2\t+\t3\t+\t0M\n\
+L\t4\t+\t2\t+\t4M\n\
+P\ttarget\t1+,2+,3+\t*\n\
+P\tcontext\t4+,2+\t*\n",
+            b"\
+H\tVN:Z:1.0\n\
+S\t1\tAA\n\
+S\t2\tCCGGTT\n\
+S\t3\tTT\n\
+S\t4\tGGGGCC\n\
+S\t5\tCCGGTT\n\
+L\t1\t+\t5\t+\t0M\n\
+L\t5\t+\t3\t+\t0M\n\
+L\t4\t+\t2\t+\t4M\n\
+P\ttarget\t1+,5+,3+\t*\n\
+P\tcontext\t4+,2+\t*\n",
+            "5",
+            b"GGTT",
+            "target",
+        );
+    }
+
+    #[test]
+    fn test_sequence_k_191_chr1_reduced_fixture_preserves_blunt_path_spellings() {
+        assert_stable_private_clone_fixture(
+            b"\
+H\tVN:Z:1.0\n\
+S\t1\tAA\n\
+S\t2\tCCGGTT\n\
+S\t3\tTT\n\
+S\t4\tGGGGCC\n\
+L\t1\t+\t2\t+\t0M\n\
+L\t2\t+\t3\t+\t0M\n\
+L\t4\t+\t2\t+\t4M\n\
+P\tchr1-sanity#0#chr1:0-10\t1+,2+,3+\t*\n\
+P\tchr1-sanity#0#chr1-context:0-8\t4+,2+\t*\n",
+            b"\
+H\tVN:Z:1.0\n\
+S\t1\tAA\n\
+S\t2\tCCGGTT\n\
+S\t3\tTT\n\
+S\t4\tGGGGCC\n\
+S\t5\tCCGGTT\n\
+L\t1\t+\t5\t+\t0M\n\
+L\t5\t+\t3\t+\t0M\n\
+L\t4\t+\t2\t+\t4M\n\
+P\tchr1-sanity#0#chr1:0-10\t1+,5+,3+\t*\n\
+P\tchr1-sanity#0#chr1-context:0-8\t4+,2+\t*\n",
+            "5",
+            b"GGTT",
+            "chr1-sanity#0#chr1:0-10",
+        );
+    }
+
+    #[test]
+    fn test_sequence_k_311_c4_reduced_fixture_preserves_blunt_path_spellings() {
+        assert_stable_private_clone_fixture(
+            b"\
+H\tVN:Z:1.0\n\
+S\t1\tAA\n\
+S\t2\tCCGGTT\n\
+S\t3\tTT\n\
+S\t4\tTTGGGG\n\
+L\t1\t+\t2\t+\t0M\n\
+L\t2\t+\t3\t+\t0M\n\
+L\t2\t+\t4\t+\t4M\n\
+P\tC4#0#chr6:31744284-31744294\t1+,2+,3+\t*\n\
+P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
+            b"\
+H\tVN:Z:1.0\n\
+S\t1\tAA\n\
+S\t2\tCCGGTT\n\
+S\t3\tTT\n\
+S\t4\tTTGGGG\n\
+S\t5\tCCGGTT\n\
+L\t1\t+\t5\t+\t0M\n\
+L\t5\t+\t3\t+\t0M\n\
+L\t2\t+\t4\t+\t4M\n\
+P\tC4#0#chr6:31744284-31744294\t1+,5+,3+\t*\n\
+P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
+            "5",
+            b"CCGG",
+            "C4#0#chr6:31744284-31744294",
+        );
     }
 
     #[test]

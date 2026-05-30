@@ -4727,8 +4727,10 @@ Syng notes:
   explicit `sequence-k` filter splits weak shared syncmer topology into
   private per-occurrence segments unless it is supported by an exact repeated
   consecutive-syncmer span of that many bp or by the configured `min-run`
-  anchor run. Add `:cut-ns` to drop ambiguous
-  N-runs from fetched gap DNA and split emitted graph paths at those breaks.
+  anchor run. Blunt output pins private copies to the shared syncmer's blunt
+  trim coordinates so splitting cannot change post-blunt path spellings. Add
+  `:cut-ns` to drop ambiguous N-runs from fetched gap DNA and split emitted
+  graph paths at those breaks.
   The compact forms
   `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
   `-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`,
