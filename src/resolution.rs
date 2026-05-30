@@ -5893,6 +5893,8 @@ fn materialize_candidate_sequences(
     if config.replacement_flank_bp > 0 {
         materialize_flanked_sequences(graph, candidate, config.replacement_flank_bp);
     }
+    // Flanks are aligner context only; skip candidates whose substituted
+    // interiors spell the same sequence on every path.
     let Some(first) = candidate.ranges.first() else {
         return false;
     };
@@ -9689,6 +9691,123 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 0);
         assert_eq!(resolved.stats.bailed, 0);
+    }
+
+    #[test]
+    fn deferred_identity_skip_ignores_flank_context_differences() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "l_ref".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "l_alt".to_string(),
+                    seq: b"A".to_vec(),
+                },
+                Segment {
+                    id: "m_ref".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "m_alt".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "r_ref".to_string(),
+                    seq: b"T".to_vec(),
+                },
+                Segment {
+                    id: "r_alt".to_string(),
+                    seq: b"G".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "ref".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 4,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "alt".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "manual-identical-interior".to_string(),
+            root_start_step: 1,
+            root_end_step: 2,
+            root_span: 1,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 1,
+                median_len: 1,
+                p90_len: 1,
+                max_len: 1,
+                total_len: 2,
+            },
+            level: 0,
+        };
+        let should_build = materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 1,
+                ..ResolutionConfig::default()
+            },
+        );
+
+        assert!(!should_build);
+        assert_eq!(candidate.ranges[0].sequence, b"C");
+        assert_eq!(candidate.ranges[1].sequence, b"C");
+        assert_eq!(candidate.ranges[0].extended_sequence, b"GCT");
+        assert_eq!(candidate.ranges[1].extended_sequence, b"ACG");
+        assert_ne!(
+            candidate.ranges[0].extended_sequence,
+            candidate.ranges[1].extended_sequence
+        );
     }
 
     #[test]
