@@ -1353,6 +1353,42 @@ mod tests {
         seq
     }
 
+    fn has_multiple_syncmers_and_non_syncmer_span(
+        index: &syng::SyngIndex,
+        name: &str,
+        len: usize,
+    ) -> bool {
+        let path_idx = index.name_map.name_to_path[name] as usize;
+        let walk = index
+            .walk_path_range(path_idx, 0, len as u64)
+            .expect("walk_path_range failed");
+        let syncmer_len = index.syncmer_length_bp() as u64;
+        let has_internal_gap = walk
+            .windows(2)
+            .any(|pair| pair[1].1.saturating_sub(pair[0].1) > syncmer_len);
+        let has_prefix = walk.first().is_some_and(|(_, pos)| *pos > 0);
+        let has_suffix = walk
+            .last()
+            .is_some_and(|(_, pos)| pos.saturating_add(syncmer_len) < len as u64);
+        walk.len() >= 3 && (has_internal_gap || has_prefix || has_suffix)
+    }
+
+    fn find_syng_local_roundtrip_sequence(params: syng::SyncmerParams, len: usize) -> Vec<u8> {
+        for seed in 1..=64 {
+            let seq = make_test_sequence(len, seed);
+            let index = syng::SyngIndex::build(
+                params,
+                vec![("probe".to_string(), seq.clone())].into_iter(),
+            );
+            if has_multiple_syncmers_and_non_syncmer_span(&index, "probe", seq.len()) {
+                return seq;
+            }
+        }
+        panic!(
+            "could not find a deterministic {len} bp fixture with multiple syncmers and a non-syncmer span"
+        );
+    }
+
     /// Build a SyngIndex with shared-backbone sequences for testing.
     fn build_test_syng() -> (syng::SyngIndex, seqidx::SequenceIndex) {
         let params = syng::SyncmerParams {
@@ -1778,5 +1814,88 @@ P\talt\t1+,3+,4+\t*
             "syng-local should emit a 127 bp syncmer segment when k=127,s=16 is requested:\n{gfa}"
         );
         assert!(gfa.contains("P\tsample#0#chr1:0-127\t"));
+    }
+
+    #[test]
+    fn syng_local_blunt_crush_round_trips_source_sequence() {
+        let _guard = lock_syng();
+        let params = syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
+        let seq_a = find_syng_local_roundtrip_sequence(params, 4096);
+        let mut seq_b = seq_a.clone();
+        for pos in [257usize, 811, 1597, 2609, 3613] {
+            seq_b[pos] = match seq_b[pos] {
+                b'A' => b'C',
+                b'C' => b'G',
+                b'G' => b'T',
+                _ => b'A',
+            };
+        }
+
+        let sequences = vec![
+            ("sampleA#0#chr1:100-4196".to_string(), seq_a),
+            ("sampleB#0#chr1:100-4196".to_string(), seq_b),
+        ];
+        let probe_index = syng::SyngIndex::build(params, sequences.clone().into_iter());
+        for (name, seq) in &sequences {
+            assert!(
+                has_multiple_syncmers_and_non_syncmer_span(&probe_index, name, seq.len()),
+                "{name} fixture must contain multiple syncmers and at least one non-syncmer span"
+            );
+        }
+
+        let mut gfa_bytes = Vec::new();
+        write_syng_region_gfa_from_sequences_with_params(
+            &sequences,
+            &mut gfa_bytes,
+            params,
+            commands::syng2gfa::SyngGfaMode::Blunt,
+            commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+        )
+        .expect("syng-local blunt GFA build failed");
+        let gfa = String::from_utf8(gfa_bytes).expect("GFA was not UTF-8");
+        assert!(
+            gfa.lines()
+                .filter(|line| line.starts_with("L\t"))
+                .all(|line| line.ends_with("\t0M")),
+            "blunt syng-local GFA should contain only 0M links:\n{gfa}"
+        );
+
+        let before_paths: std::collections::HashMap<_, _> = resolution::path_sequences(&gfa)
+            .unwrap()
+            .into_iter()
+            .collect();
+        for (name, seq) in &sequences {
+            let observed = before_paths
+                .get(name)
+                .unwrap_or_else(|| panic!("missing syng-local path {name} before crush"));
+            assert_eq!(
+                observed.as_bytes(),
+                seq.as_slice(),
+                "{name} did not spell the source sequence before crush"
+            );
+        }
+
+        let resolved =
+            resolution::resolve_gfa_bubbles(&gfa, &resolution::ResolutionConfig::default())
+                .expect("crush failed on syng-local blunt GFA");
+        let after_paths: std::collections::HashMap<_, _> =
+            resolution::path_sequences(&resolved.gfa)
+                .unwrap()
+                .into_iter()
+                .collect();
+        for (name, seq) in &sequences {
+            let observed = after_paths
+                .get(name)
+                .unwrap_or_else(|| panic!("missing syng-local path {name} after crush"));
+            assert_eq!(
+                observed.as_bytes(),
+                seq.as_slice(),
+                "{name} did not spell the source sequence after crush"
+            );
+        }
     }
 }
