@@ -4749,8 +4749,9 @@ Syng notes:
   native overlaps and `:nosort` to skip final ordering. `--gfa-engine syng-local`
   rebuilds a fresh regional syng index from query-selected sequences; its
   k/s/seed parameters select the local rebuild scheme rather than asserting the
-  global index. Syng and syng-local GFA extraction filter the top 0.05%
-  high-frequency local syncmer nodes from the raw syng topology before
+  global index. Syng and syng-local GFA extraction
+  filters the top 0.05% high-frequency local syncmer nodes
+  from the raw syng topology before
   bluntification, require shared syncmer support to appear in a short
   consecutive run by default, and clone rare repeated-copy local syncmer
   contexts so repeats seed ranges but do not glue unrelated copies;

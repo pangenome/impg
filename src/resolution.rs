@@ -5893,11 +5893,13 @@ fn materialize_candidate_sequences(
     if config.replacement_flank_bp > 0 {
         materialize_flanked_sequences(graph, candidate, config.replacement_flank_bp);
     }
-    // Even byte-identical traversals are legitimate repair targets: the graph
-    // can be structurally fragmented while spelling the same sequence on every
-    // path. Let the replacement backend build a path-preserving graph instead
-    // of using sequence equality as a quality/utility gate.
-    !candidate.ranges.is_empty()
+    let Some(first) = candidate.ranges.first() else {
+        return false;
+    };
+    candidate
+        .ranges
+        .iter()
+        .any(|range| range.sequence != first.sequence)
 }
 
 /// Compute up to `flank_bp` bp of path-sequence context on each side of each
