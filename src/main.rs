@@ -2522,6 +2522,13 @@ fn parse_syng_mask_stage(
     {
         return Ok(SyngGfaFrequencyMask::disabled());
     }
+    if matches!(
+        stage.name.as_str(),
+        "mask" | "frequency-mask" | "freq-mask" | "filter" | "frequency-filter" | "freq-filter"
+    ) && !mask.enabled()
+    {
+        mask = SyngGfaFrequencyMask::local_default();
+    }
     if stage.params.is_empty() {
         return Ok(mask);
     }
@@ -3640,8 +3647,8 @@ impl EngineCliOpts {
         let mut crush_config = None;
         let mut smooth_after_crush: Option<impg::SmoothPipelineConfig> = None;
         let mut syng_gfa_frequency_mask = match engine {
-            GfaEngine::SyngNative => SyngGfaFrequencyMask::local_default(),
-            GfaEngine::SyngLocal | GfaEngine::Pggb | GfaEngine::Seqwish | GfaEngine::Poa => {
+            GfaEngine::SyngNative | GfaEngine::SyngLocal => SyngGfaFrequencyMask::local_default(),
+            GfaEngine::Pggb | GfaEngine::Seqwish | GfaEngine::Poa => {
                 SyngGfaFrequencyMask::disabled()
             }
         };
@@ -4742,11 +4749,11 @@ Syng notes:
   native overlaps and `:nosort` to skip final ordering. `--gfa-engine syng-local`
   rebuilds a fresh regional syng index from query-selected sequences; its
   k/s/seed parameters select the local rebuild scheme rather than asserting the
-  global index, and it only applies the syng frequency mask when `:mask` is
-  requested explicitly. Syng GFA extraction
-  filters the top 0.05% high-frequency local syncmer nodes from the raw syng
-  topology before bluntification and clones rare repeated-copy local syncmer
-  contexts by default so repeats seed ranges but do not glue unrelated copies;
+  global index. Syng and syng-local GFA extraction filter the top 0.05%
+  high-frequency local syncmer nodes from the raw syng topology before
+  bluntification, require shared syncmer support to appear in a short
+  consecutive run by default, and clone rare repeated-copy local syncmer
+  contexts so repeats seed ranges but do not glue unrelated copies;
   use `:nomask` or `:nofilter` to disable this or
   `:mask,top=0.001,max-occ=500,sequence-k=191,min-run=3` to tune it. The
   explicit `sequence-k` filter splits weak shared syncmer topology into
@@ -13510,7 +13517,7 @@ mod tests {
                 assert!(parsed.crush_config.is_some());
                 assert_eq!(
                     parsed.syng_gfa_frequency_mask,
-                    impg::commands::syng2gfa::SyngGfaFrequencyMask::disabled()
+                    impg::commands::syng2gfa::SyngGfaFrequencyMask::local_default()
                 );
             }
             _ => panic!("expected query command"),
@@ -14063,6 +14070,41 @@ mod tests {
     }
 
     #[test]
+    fn test_gfa_output_format_syng_local_mask_defaults_and_reenable() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng-local:nomask:mask",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngLocal);
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask,
+                    SyngGfaFrequencyMask::local_default()
+                );
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask.min_shared_run,
+                    impg::commands::syng2gfa::DEFAULT_GFA_MIN_SHARED_RUN
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
     fn test_gfa_output_format_accepts_syng_cut_ns_stage() {
         let args = Args::try_parse_from([
             "impg",
@@ -14107,7 +14149,10 @@ mod tests {
                 assert_eq!(output_format, "gfa");
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.syng_gfa_frequency_mask.min_sequence_span_bp, 311);
-                assert_eq!(parsed.syng_gfa_frequency_mask.min_shared_run, 1);
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask.min_shared_run,
+                    impg::commands::syng2gfa::DEFAULT_GFA_MIN_SHARED_RUN
+                );
             }
             _ => panic!("expected query command"),
         }

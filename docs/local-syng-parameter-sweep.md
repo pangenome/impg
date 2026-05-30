@@ -17,10 +17,12 @@ query-selected sequences, builds a fresh regional syng index with requested
 local syncmer parameters, renders it, then applies the normal graph transforms
 such as `:crush` and sort. `gfa:syng` semantics are unchanged.
 
-`syng-local` intentionally defaults to no syng frequency mask; add `:mask`
-when the mask should be part of a local experiment. In contrast, `gfa:syng`
-keeps the existing default syng frequency mask, and `k/s/seed` remain assertions
-against the loaded global index.
+`syng-local` now uses the same default conversion mask as `gfa:syng`: top
+0.05% local syncmer frequency filtering, rare-repeat context splitting, and a
+short consecutive shared-syncmer run requirement. Add `:nomask` only when the
+raw local syng topology is the experiment. `k/s/seed` remain local rebuild
+parameters for `syng-local` and assertions against the loaded global index for
+`gfa:syng`.
 
 ## Test Matrix
 
@@ -80,7 +82,8 @@ Code changes:
 - Added `gfa:syng-local` / `gfa:local-syng` parser support.
 - Made `k/s/seed` select the local rebuild parameters for `syng-local`, while
   preserving assertion semantics for `syng`.
-- Kept `syng-local` unmasked by default; `:mask` remains explicit.
+- `syng-local` originally defaulted unmasked; current behavior is masked by
+  default to match `gfa:syng`, with `:nomask` as the explicit raw-topology mode.
 
 Parser/regression coverage added:
 
@@ -195,7 +198,7 @@ Keep `gfa:syng-local` as an explicit experimental engine. Do not replace
 Recommended permanent syntax:
 
 - Keep `gfa:syng-local:blunt,k=<K>,s=<S>,seed=<SEED>:crush` for experiments.
-- Keep `:mask` explicit on `syng-local`.
+- Use `:nomask` explicitly on `syng-local` only for raw-topology experiments.
 - Keep `gfa:syng:mask:crush` as the global-index comparison/control syntax.
 
 Recommended follow-up before promotion:

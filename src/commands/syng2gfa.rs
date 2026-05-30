@@ -31,6 +31,10 @@ use crate::syng_ffi;
 /// topology. This mirrors the minimizer-style seed filter: only the worst
 /// 0.05% of used nodes are treated as repetitive glue.
 pub const DEFAULT_GFA_MASK_TOP_FRACTION: f64 = 0.0005;
+/// Default minimum run of consecutive shared syncmers required before a local
+/// syncmer node is allowed to act as graph glue. This mirrors the default
+/// bounded-walk seed length used during syng query discovery.
+pub const DEFAULT_GFA_MIN_SHARED_RUN: usize = crate::syng::DEFAULT_WALK_SEED_ANCHORS;
 /// Clone rare repeated-copy contexts for otherwise dominant local syncmers.
 /// This catches single-syncmer loops where a mostly single-copy node appears
 /// a second time in a selected path and glues two paralogous contexts together.
@@ -76,7 +80,7 @@ impl SyngGfaFrequencyMask {
         Self {
             drop_top_fraction: DEFAULT_GFA_MASK_TOP_FRACTION,
             max_occurrences: None,
-            min_shared_run: 1,
+            min_shared_run: DEFAULT_GFA_MIN_SHARED_RUN,
             min_sequence_span_bp: 0,
             local_repeat_max_minor: DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
