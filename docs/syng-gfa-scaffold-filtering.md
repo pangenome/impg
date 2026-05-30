@@ -40,16 +40,17 @@ this order:
 3. Build occurrence candidates from the post-frequency-mask walks. Only syncmer
    nodes with more than one remaining occurrence are candidates for scaffold
    filtering; singletons can be emitted as ordinary private topology because no
-   other path occurrence shares their node. A path-copy guard removes nodes
-   whose local occurrence count is materially above the selected path count
-   from scaffold support. The current `1.25x` path-count factor is a
-   provisional bounded-performance guard for avoiding C4-scale all-pairs
-   expansion, not the final biological frequency policy. These nodes are not
+   other path occurrence shares their node. The converter also records a compact
+   local node spectrum over the remaining shared syncmers: total local
+   occurrences, carrying path/haplotype count, occurrence-per-carrying-path
+   ratio, maximum copies on any one path, and maximum path-local positional
+   span for repeated copies. Nodes in the dispersed high-copy tail are removed
+   from scaffold support when they satisfy all provisional calibrated defaults:
+   at least `64` local occurrences, occurrence-per-carrying-path ratio at least
+   `2.0`, at least two copies on one carrying path, and maximum path-local span
+   at least the scaffold gap budget (`1 kb` by default). These nodes are not
    deleted; they are split as private occurrences so repeat/CNV sequence is
-   preserved without allowing the syncmer to act as shared graph glue. A
-   follow-up should calibrate this boundary from local syng node spectra
-   (occurrence count, path count, occ/path ratio, max copies per path, and
-   dispersion).
+   preserved without allowing the syncmer to act as shared graph glue.
 4. Build bounded scaffold candidates from repeated windows of `min-run`
    consecutive shared syncmer occurrences. The old exhaustive all-pairs
    expansion was:
@@ -107,7 +108,7 @@ The conversion has three distinct decisions:
 | Decision | Granularity | Effect |
 | --- | --- | --- |
 | Frequency mask (`top=`, `max-occ=`) | Node | Removes all local occurrences of rejected high-copy syncmer nodes and bridges them by sequence. |
-| Path-copy scaffold-glue guard | Node for support, occurrence for output | Prevents nodes with materially more local occurrences than selected paths from acting as shared scaffold glue; their occurrences are split/private rather than deleted. |
+| Spectrum scaffold-glue guard | Node for support, occurrence for output | Prevents dispersed high-copy local-spectrum tail nodes from acting as shared scaffold glue; their occurrences are split/private rather than deleted. |
 | Scaffold-chain support (`min-run=`) | Occurrence | Keeps only the exact syncmer occurrences that are members of retained SweepGA scaffold chains. |
 | Local repeat context rescue/split | Occurrence | Clones rare repeated local contexts when a near-single-copy node appears in a minor context. |
 

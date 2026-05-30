@@ -40,10 +40,14 @@ pub const DEFAULT_GFA_MIN_SHARED_RUN: usize = crate::syng::DEFAULT_WALK_SEED_ANC
 /// a second time in a selected path and glues two paralogous contexts together.
 pub const DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR: u32 = 2;
 pub const DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION: f64 = 0.80;
-/// Local syncmers with materially more occurrences than selected paths are not
-/// allowed to act as scaffold glue. They are split per occurrence instead of
-/// removed, preserving path spelling while avoiding repeat/CNV all-pairs glue.
-pub const DEFAULT_GFA_SCAFFOLD_GLUE_MAX_PATH_COPY_FACTOR: f64 = 1.25;
+/// Local syncmers that are repeatedly reused within carrying paths and spread
+/// over scaffold-scale path distance are not allowed to act as scaffold glue.
+/// They are split per occurrence instead of removed, preserving path spelling
+/// while avoiding dispersed repeat all-pairs glue.
+pub const DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCC_PER_PATH_RATIO: f64 = 2.0;
+pub const DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCCURRENCES: u32 = 64;
+pub const DEFAULT_GFA_SCAFFOLD_GLUE_MIN_DISPERSION_BP: u64 =
+    crate::syng_transitive::DEFAULT_EXTEND_BUDGET_BP;
 /// Default minimum N-run length that splits syng GFA paths when N cutting is
 /// enabled. A value of 1 means any ambiguous base breaks the emitted path.
 pub const DEFAULT_GFA_CUT_N_MIN_RUN: usize = 1;
@@ -1297,6 +1301,35 @@ const SCAFFOLD_CONTEXT_GAP_BP: u64 = crate::syng_transitive::DEFAULT_EXTEND_BUDG
 const MAX_SCAFFOLD_SIGNATURE_SEED_PAIRS: usize = if cfg!(test) { 32 } else { 1_000_000 };
 const MAX_SCAFFOLD_TOTAL_CANDIDATE_ANCHORS: usize = if cfg!(test) { 10_000 } else { 250_000 };
 
+#[derive(Clone, Copy, Debug)]
+struct LocalSyncmerNodeSpectrum {
+    node: u32,
+    total_occurrences: u32,
+    carrier_paths: u32,
+    max_occurrences_per_path: u32,
+    max_path_span_bp: u64,
+}
+
+impl LocalSyncmerNodeSpectrum {
+    fn occ_per_path_ratio(self) -> f64 {
+        self.total_occurrences as f64 / self.carrier_paths.max(1) as f64
+    }
+}
+
+#[derive(Default)]
+struct LocalSyncmerNodeAccumulator {
+    total_occurrences: u32,
+    carrier_paths: u32,
+    max_occurrences_per_path: u32,
+    max_path_span_bp: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LocalSyncmerCandidateSummary {
+    nodes: usize,
+    occurrences: usize,
+}
+
 fn range_oriented_syncmer_pos(
     pos: u64,
     range: &SyngGfaPathRange,
@@ -1343,6 +1376,7 @@ struct SharedContextFilterResult {
     sequence_supported_occurrences: usize,
     scaffold_candidate_anchors: usize,
     scaffold_dense_signatures: usize,
+    path_copy_filtered_nodes: usize,
     path_copy_filtered_occurrences: usize,
 }
 
@@ -1379,28 +1413,241 @@ fn shared_nodes_from_local_walks(walks: &[Vec<LocalSyncmerWalkStep>]) -> FxHashS
         .collect()
 }
 
-fn path_copy_excess_shared_nodes(
+fn local_syncmer_node_spectrum(
     walks: &[Vec<LocalSyncmerWalkStep>],
     shared_nodes: &FxHashSet<u32>,
-) -> FxHashSet<u32> {
+) -> Vec<LocalSyncmerNodeSpectrum> {
     if walks.is_empty() || shared_nodes.is_empty() {
-        return FxHashSet::default();
+        return Vec::new();
     }
 
-    let max_glue_occurrences =
-        ((walks.len() as f64) * DEFAULT_GFA_SCAFFOLD_GLUE_MAX_PATH_COPY_FACTOR).ceil() as u32;
-    let mut counts: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut accumulators: FxHashMap<u32, LocalSyncmerNodeAccumulator> = FxHashMap::default();
     for walk in walks {
+        let mut path_occurrences: FxHashMap<u32, (u32, u64, u64)> = FxHashMap::default();
         for step in walk {
             if shared_nodes.contains(&step.node) {
-                *counts.entry(step.node).or_default() += 1;
+                let entry = path_occurrences
+                    .entry(step.node)
+                    .or_insert((0, step.pos, step.pos));
+                entry.0 = entry.0.saturating_add(1);
+                entry.1 = entry.1.min(step.pos);
+                entry.2 = entry.2.max(step.pos);
             }
         }
+        for (node, (count, min_pos, max_pos)) in path_occurrences {
+            let acc = accumulators.entry(node).or_default();
+            acc.total_occurrences = acc.total_occurrences.saturating_add(count);
+            acc.carrier_paths = acc.carrier_paths.saturating_add(1);
+            acc.max_occurrences_per_path = acc.max_occurrences_per_path.max(count);
+            acc.max_path_span_bp = acc.max_path_span_bp.max(max_pos.saturating_sub(min_pos));
+        }
     }
-    counts
+
+    let mut spectrum = accumulators
         .into_iter()
-        .filter_map(|(node, count)| (count > max_glue_occurrences).then_some(node))
+        .map(|(node, acc)| LocalSyncmerNodeSpectrum {
+            node,
+            total_occurrences: acc.total_occurrences,
+            carrier_paths: acc.carrier_paths,
+            max_occurrences_per_path: acc.max_occurrences_per_path,
+            max_path_span_bp: acc.max_path_span_bp,
+        })
+        .collect::<Vec<_>>();
+    spectrum.sort_by_key(|stat| stat.node);
+    spectrum
+}
+
+fn is_dispersed_scaffold_glue_candidate(
+    stat: LocalSyncmerNodeSpectrum,
+    min_occ_per_path_ratio: f64,
+) -> bool {
+    stat.total_occurrences >= DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCCURRENCES
+        && stat.max_occurrences_per_path >= 2
+        && stat.occ_per_path_ratio() >= min_occ_per_path_ratio
+        && stat.max_path_span_bp >= DEFAULT_GFA_SCAFFOLD_GLUE_MIN_DISPERSION_BP
+}
+
+fn dispersed_scaffold_glue_summary(
+    spectrum: &[LocalSyncmerNodeSpectrum],
+    min_occ_per_path_ratio: f64,
+) -> LocalSyncmerCandidateSummary {
+    spectrum.iter().fold(
+        LocalSyncmerCandidateSummary::default(),
+        |mut summary, stat| {
+            if is_dispersed_scaffold_glue_candidate(*stat, min_occ_per_path_ratio) {
+                summary.nodes += 1;
+                summary.occurrences += stat.total_occurrences as usize;
+            }
+            summary
+        },
+    )
+}
+
+fn fixed_selected_path_factor_summary(
+    spectrum: &[LocalSyncmerNodeSpectrum],
+    selected_paths: usize,
+    factor: f64,
+) -> LocalSyncmerCandidateSummary {
+    if selected_paths == 0 {
+        return LocalSyncmerCandidateSummary::default();
+    }
+    let max_occurrences = ((selected_paths as f64) * factor).ceil() as u32;
+    spectrum.iter().fold(
+        LocalSyncmerCandidateSummary::default(),
+        |mut summary, stat| {
+            if stat.total_occurrences > max_occurrences {
+                summary.nodes += 1;
+                summary.occurrences += stat.total_occurrences as usize;
+            }
+            summary
+        },
+    )
+}
+
+fn spectrum_scaffold_glue_nodes(spectrum: &[LocalSyncmerNodeSpectrum]) -> FxHashSet<u32> {
+    spectrum
+        .iter()
+        .filter_map(|stat| {
+            is_dispersed_scaffold_glue_candidate(
+                *stat,
+                DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCC_PER_PATH_RATIO,
+            )
+            .then_some(stat.node)
+        })
         .collect()
+}
+
+fn format_spectrum_bins<F>(
+    spectrum: &[LocalSyncmerNodeSpectrum],
+    labels: &[&str],
+    classify: F,
+) -> String
+where
+    F: Fn(LocalSyncmerNodeSpectrum) -> usize,
+{
+    let mut bins = vec![LocalSyncmerCandidateSummary::default(); labels.len()];
+    for stat in spectrum {
+        let idx = classify(*stat).min(labels.len().saturating_sub(1));
+        bins[idx].nodes += 1;
+        bins[idx].occurrences += stat.total_occurrences as usize;
+    }
+    labels
+        .iter()
+        .zip(bins)
+        .map(|(label, summary)| format!("{label}={}/{}", summary.nodes, summary.occurrences))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_local_spectrum_ratio_bins(spectrum: &[LocalSyncmerNodeSpectrum]) -> String {
+    format_spectrum_bins(
+        spectrum,
+        &["<=1.0", "<=1.25", "<=2.0", "<=4.0", "<=8.0", ">8.0"],
+        |stat| {
+            let ratio = stat.occ_per_path_ratio();
+            if ratio <= 1.0 {
+                0
+            } else if ratio <= 1.25 {
+                1
+            } else if ratio <= 2.0 {
+                2
+            } else if ratio <= 4.0 {
+                3
+            } else if ratio <= 8.0 {
+                4
+            } else {
+                5
+            }
+        },
+    )
+}
+
+fn format_local_spectrum_max_copy_bins(spectrum: &[LocalSyncmerNodeSpectrum]) -> String {
+    format_spectrum_bins(spectrum, &["1", "2", "3-4", "5-8", ">8"], |stat| match stat
+        .max_occurrences_per_path
+    {
+        0 | 1 => 0,
+        2 => 1,
+        3 | 4 => 2,
+        5..=8 => 3,
+        _ => 4,
+    })
+}
+
+fn format_local_spectrum_dispersion_bins(spectrum: &[LocalSyncmerNodeSpectrum]) -> String {
+    format_spectrum_bins(
+        spectrum,
+        &["0", "<1kb", "1-10kb", "10-100kb", ">100kb"],
+        |stat| match stat.max_path_span_bp {
+            0 => 0,
+            1..=999 => 1,
+            1_000..=9_999 => 2,
+            10_000..=99_999 => 3,
+            _ => 4,
+        },
+    )
+}
+
+fn format_candidate_summary(summary: LocalSyncmerCandidateSummary) -> String {
+    format!("{}/{}", summary.nodes, summary.occurrences)
+}
+
+fn log_local_syncmer_spectrum(spectrum: &[LocalSyncmerNodeSpectrum], selected_paths: usize) {
+    if spectrum.is_empty() {
+        return;
+    }
+
+    let total_occurrences: usize = spectrum
+        .iter()
+        .map(|stat| stat.total_occurrences as usize)
+        .sum();
+    let max_occurrences = spectrum
+        .iter()
+        .map(|stat| stat.total_occurrences)
+        .max()
+        .unwrap_or(0);
+    let max_carrier_paths = spectrum
+        .iter()
+        .map(|stat| stat.carrier_paths)
+        .max()
+        .unwrap_or(0);
+    let max_occurrences_per_path = spectrum
+        .iter()
+        .map(|stat| stat.max_occurrences_per_path)
+        .max()
+        .unwrap_or(0);
+    let max_path_span_bp = spectrum
+        .iter()
+        .map(|stat| stat.max_path_span_bp)
+        .max()
+        .unwrap_or(0);
+    info!(
+        "[syng2gfa] local syng shared-node spectrum: nodes={}, occurrences={}, selected_paths={}, max_occurrences={}, max_carrier_paths={}, max_occ_per_path={}, max_path_span_bp={}, occ/path_bins(nodes/occ)=[{}], max-copy_bins(nodes/occ)=[{}], dispersion_bins(nodes/occ)=[{}]",
+        spectrum.len(),
+        total_occurrences,
+        selected_paths,
+        max_occurrences,
+        max_carrier_paths,
+        max_occurrences_per_path,
+        max_path_span_bp,
+        format_local_spectrum_ratio_bins(spectrum),
+        format_local_spectrum_max_copy_bins(spectrum),
+        format_local_spectrum_dispersion_bins(spectrum)
+    );
+    info!(
+        "[syng2gfa] local syng scaffold-glue threshold candidates (nodes/occurrences): selected-path-factor>1.25={}, dispersed-ratio>=1.25={}, dispersed-ratio>=2.0={}, dispersed-ratio>=3.0={}, dispersed-ratio>=4.0={} (min_occurrences={}, min_path_span_bp={})",
+        format_candidate_summary(fixed_selected_path_factor_summary(
+            spectrum,
+            selected_paths,
+            1.25,
+        )),
+        format_candidate_summary(dispersed_scaffold_glue_summary(spectrum, 1.25)),
+        format_candidate_summary(dispersed_scaffold_glue_summary(spectrum, 2.0)),
+        format_candidate_summary(dispersed_scaffold_glue_summary(spectrum, 3.0)),
+        format_candidate_summary(dispersed_scaffold_glue_summary(spectrum, 4.0)),
+        DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCCURRENCES,
+        DEFAULT_GFA_SCAFFOLD_GLUE_MIN_DISPERSION_BP,
+    );
 }
 
 fn shared_occurrence_keys(
@@ -1785,14 +2032,25 @@ fn shared_context_filtered_occurrences(
         };
     }
 
-    let path_copy_excess_nodes = path_copy_excess_shared_nodes(walks, &shared_nodes);
+    let spectrum = local_syncmer_node_spectrum(walks, &shared_nodes);
+    log_local_syncmer_spectrum(&spectrum, walks.len());
+    let scaffold_glue_nodes = spectrum_scaffold_glue_nodes(&spectrum);
     let scaffold_nodes: FxHashSet<u32> = shared_nodes
-        .difference(&path_copy_excess_nodes)
+        .difference(&scaffold_glue_nodes)
         .copied()
         .collect();
     let shared_occurrences = shared_occurrence_keys(walks, &shared_nodes);
-    let path_copy_filtered_occurrences =
-        shared_occurrence_keys(walks, &path_copy_excess_nodes).len();
+    let path_copy_filtered_occurrences = shared_occurrence_keys(walks, &scaffold_glue_nodes).len();
+    if !scaffold_glue_nodes.is_empty() {
+        info!(
+            "[syng2gfa] spectrum-selected {} dispersed high-copy scaffold-glue node(s) covering {} local occurrence(s) for private splitting (min_occ_per_path_ratio={}, min_occurrences={}, min_path_span_bp={})",
+            scaffold_glue_nodes.len(),
+            path_copy_filtered_occurrences,
+            DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCC_PER_PATH_RATIO,
+            DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCCURRENCES,
+            DEFAULT_GFA_SCAFFOLD_GLUE_MIN_DISPERSION_BP
+        );
+    }
     let (scaffold_supported, scaffold_candidate_anchors, scaffold_dense_signatures) =
         scaffold_supported_occurrences(walks, syncmer_len, min_shared_run, &scaffold_nodes);
     let sequence_supported =
@@ -1815,6 +2073,7 @@ fn shared_context_filtered_occurrences(
         sequence_supported_occurrences: sequence_supported.len(),
         scaffold_candidate_anchors,
         scaffold_dense_signatures,
+        path_copy_filtered_nodes: scaffold_glue_nodes.len(),
         path_copy_filtered_occurrences,
     }
 }
@@ -2662,11 +2921,12 @@ fn write_range_gfa_blunt_exact<W: Write>(
             .sum::<usize>();
         split_occurrences = context_filter.weak_occurrences;
         info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before exact blunt materialization (weak={}, split={}, min_run={}, path-copy-filtered={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before exact blunt materialization (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
             context_filter.shared_occurrences,
             weak_occurrences,
             weak_occurrences,
             frequency_mask.min_shared_run,
+            context_filter.path_copy_filtered_nodes,
             context_filter.path_copy_filtered_occurrences,
             context_filter.scaffold_supported_occurrences,
             context_filter.scaffold_candidate_anchors,
@@ -2838,11 +3098,12 @@ fn write_range_gfa_internal<W: Write>(
             .sum::<usize>();
         split_occurrences = context_filter.weak_occurrences;
         info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before raw GFA materialization (weak={}, split={}, min_run={}, path-copy-filtered={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before raw GFA materialization (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
             context_filter.shared_occurrences,
             shared_context_split,
             shared_context_split,
             frequency_mask.min_shared_run,
+            context_filter.path_copy_filtered_nodes,
             context_filter.path_copy_filtered_occurrences,
             context_filter.scaffold_supported_occurrences,
             context_filter.scaffold_candidate_anchors,
@@ -2853,10 +3114,11 @@ fn write_range_gfa_internal<W: Write>(
         );
         if shared_context_split > 0 {
             info!(
-                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private per-occurrence topology before raw GFA materialization (shared occurrences={}, min_run={}, path-copy-filtered={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private per-occurrence topology before raw GFA materialization (shared occurrences={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
                 shared_context_split,
                 context_filter.shared_occurrences,
                 frequency_mask.min_shared_run,
+                context_filter.path_copy_filtered_nodes,
                 context_filter.path_copy_filtered_occurrences,
                 context_filter.scaffold_supported_occurrences,
                 context_filter.scaffold_candidate_anchors,
@@ -3807,7 +4069,30 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
     }
 
     #[test]
-    fn test_scaffold_context_splits_nodes_above_path_copy_factor() {
+    fn test_scaffold_context_splits_dispersed_high_copy_glue_from_spectrum() {
+        let repeated = (0..16).map(|copy| (99, copy * 2_000)).collect::<Vec<_>>();
+        let walks = (0..4).map(|_| local_walk(&repeated)).collect::<Vec<_>>();
+
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0);
+        assert_eq!(filtered.shared_occurrences, 64);
+        assert_eq!(filtered.path_copy_filtered_nodes, 1);
+        assert_eq!(
+            filtered.path_copy_filtered_occurrences, 64,
+            "node 99 has a high occ/path ratio and scaffold-scale positional dispersion"
+        );
+        assert_eq!(filtered.scaffold_supported_occurrences, 0);
+        assert_eq!(
+            filtered
+                .weak_occurrences
+                .iter()
+                .map(FxHashSet::len)
+                .sum::<usize>(),
+            64
+        );
+    }
+
+    #[test]
+    fn test_scaffold_context_preserves_compact_repeated_copy_structure() {
         let walks = vec![
             local_walk(&[(99, 0), (99, 100), (99, 200)]),
             local_walk(&[(99, 0), (99, 100), (99, 200)]),
@@ -3818,17 +4103,16 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0);
         assert_eq!(filtered.shared_occurrences, 12);
         assert_eq!(
-            filtered.path_copy_filtered_occurrences, 12,
-            "node 99 has materially more local copies than selected paths"
+            filtered.path_copy_filtered_occurrences, 0,
+            "compact local repeat copies are not selected by the dispersed-glue spectrum rule"
         );
-        assert_eq!(filtered.scaffold_supported_occurrences, 0);
         assert_eq!(
-            filtered
-                .weak_occurrences
-                .iter()
-                .map(FxHashSet::len)
-                .sum::<usize>(),
-            12
+            filtered.scaffold_supported_occurrences, 12,
+            "bounded occurrence-level scaffold support can preserve compact repeated structure"
+        );
+        assert!(
+            filtered.weak_occurrences.iter().all(FxHashSet::is_empty),
+            "compact repeated structure should stay shared for later graph resolution"
         );
     }
 
