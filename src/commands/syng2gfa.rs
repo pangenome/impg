@@ -40,6 +40,10 @@ pub const DEFAULT_GFA_MIN_SHARED_RUN: usize = crate::syng::DEFAULT_WALK_SEED_ANC
 /// a second time in a selected path and glues two paralogous contexts together.
 pub const DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR: u32 = 2;
 pub const DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION: f64 = 0.80;
+/// Local syncmers with materially more occurrences than selected paths are not
+/// allowed to act as scaffold glue. They are split per occurrence instead of
+/// removed, preserving path spelling while avoiding repeat/CNV all-pairs glue.
+pub const DEFAULT_GFA_SCAFFOLD_GLUE_MAX_PATH_COPY_FACTOR: f64 = 1.25;
 /// Default minimum N-run length that splits syng GFA paths when N cutting is
 /// enabled. A value of 1 means any ambiguous base breaks the emitted path.
 pub const DEFAULT_GFA_CUT_N_MIN_RUN: usize = 1;
@@ -1252,14 +1256,16 @@ struct LocalOccurrenceKey {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct LocalSyncmerOccurrence {
-    key: LocalOccurrenceKey,
+struct PairAnchorOccurrence {
+    query_occ: u32,
+    target_occ: u32,
     node: u32,
-    pos: u64,
+    query_pos: u64,
+    target_pos: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PairAnchorOccurrence {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PairAnchorOccurrenceKey {
     query_occ: u32,
     target_occ: u32,
     node: u32,
@@ -1273,6 +1279,23 @@ struct PairAnchorKey {
     target_pos: u64,
     node: u32,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct SharedWalkOccurrence {
+    occ: u32,
+    node: u32,
+    pos: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScaffoldRunSeed {
+    path_idx: usize,
+    start: usize,
+}
+
+const SCAFFOLD_CONTEXT_GAP_BP: u64 = crate::syng_transitive::DEFAULT_EXTEND_BUDGET_BP;
+const MAX_SCAFFOLD_SIGNATURE_SEED_PAIRS: usize = if cfg!(test) { 32 } else { 1_000_000 };
+const MAX_SCAFFOLD_TOTAL_CANDIDATE_ANCHORS: usize = if cfg!(test) { 10_000 } else { 250_000 };
 
 fn range_oriented_syncmer_pos(
     pos: u64,
@@ -1318,6 +1341,9 @@ struct SharedContextFilterResult {
     shared_occurrences: usize,
     scaffold_supported_occurrences: usize,
     sequence_supported_occurrences: usize,
+    scaffold_candidate_anchors: usize,
+    scaffold_dense_signatures: usize,
+    path_copy_filtered_occurrences: usize,
 }
 
 fn step_delta(a: LocalSyncmerWalkStep, b: LocalSyncmerWalkStep) -> u64 {
@@ -1353,6 +1379,30 @@ fn shared_nodes_from_local_walks(walks: &[Vec<LocalSyncmerWalkStep>]) -> FxHashS
         .collect()
 }
 
+fn path_copy_excess_shared_nodes(
+    walks: &[Vec<LocalSyncmerWalkStep>],
+    shared_nodes: &FxHashSet<u32>,
+) -> FxHashSet<u32> {
+    if walks.is_empty() || shared_nodes.is_empty() {
+        return FxHashSet::default();
+    }
+
+    let max_glue_occurrences =
+        ((walks.len() as f64) * DEFAULT_GFA_SCAFFOLD_GLUE_MAX_PATH_COPY_FACTOR).ceil() as u32;
+    let mut counts: FxHashMap<u32, u32> = FxHashMap::default();
+    for walk in walks {
+        for step in walk {
+            if shared_nodes.contains(&step.node) {
+                *counts.entry(step.node).or_default() += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(node, count)| (count > max_glue_occurrences).then_some(node))
+        .collect()
+}
+
 fn shared_occurrence_keys(
     walks: &[Vec<LocalSyncmerWalkStep>],
     shared_nodes: &FxHashSet<u32>,
@@ -1371,30 +1421,93 @@ fn shared_occurrence_keys(
     keys
 }
 
-fn local_occurrences_by_node(
+fn shared_walk_occurrences(
     walks: &[Vec<LocalSyncmerWalkStep>],
     shared_nodes: &FxHashSet<u32>,
-) -> FxHashMap<u32, Vec<LocalSyncmerOccurrence>> {
-    let mut by_node: FxHashMap<u32, Vec<LocalSyncmerOccurrence>> = FxHashMap::default();
-    for (path_idx, walk) in walks.iter().enumerate() {
-        for (occ, step) in walk.iter().enumerate() {
-            if !shared_nodes.contains(&step.node) {
+) -> Vec<Vec<SharedWalkOccurrence>> {
+    walks
+        .iter()
+        .map(|walk| {
+            walk.iter()
+                .enumerate()
+                .filter_map(|(occ, step)| {
+                    shared_nodes
+                        .contains(&step.node)
+                        .then_some(SharedWalkOccurrence {
+                            occ: occ as u32,
+                            node: step.node,
+                            pos: step.pos,
+                        })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn scaffold_run_seeds_by_key(
+    shared_walks: &[Vec<SharedWalkOccurrence>],
+    min_shared_run: usize,
+    max_anchor_step_bp: u64,
+) -> FxHashMap<Vec<u32>, Vec<ScaffoldRunSeed>> {
+    let mut seeds_by_key: FxHashMap<Vec<u32>, Vec<ScaffoldRunSeed>> = FxHashMap::default();
+    if min_shared_run == 0 {
+        return seeds_by_key;
+    }
+
+    for (path_idx, walk) in shared_walks.iter().enumerate() {
+        if walk.len() < min_shared_run {
+            continue;
+        }
+        for start in 0..=walk.len() - min_shared_run {
+            let window = &walk[start..start + min_shared_run];
+            if window
+                .windows(2)
+                .any(|pair| pair[0].pos.abs_diff(pair[1].pos) > max_anchor_step_bp)
+            {
                 continue;
             }
-            by_node
-                .entry(step.node)
+            let key = window.iter().map(|occ| occ.node).collect::<Vec<_>>();
+            seeds_by_key
+                .entry(key)
                 .or_default()
-                .push(LocalSyncmerOccurrence {
-                    key: LocalOccurrenceKey {
-                        path_idx,
-                        occ: occ as u32,
-                    },
-                    node: step.node,
-                    pos: step.pos,
-                });
+                .push(ScaffoldRunSeed { path_idx, start });
         }
     }
-    by_node
+
+    seeds_by_key
+}
+
+fn seed_pair_count(seeds_by_path: &[(usize, Vec<usize>)]) -> usize {
+    let mut total = 0usize;
+    let mut previous = 0usize;
+    for (_path_idx, starts) in seeds_by_path {
+        total = total.saturating_add(previous.saturating_mul(starts.len()));
+        previous = previous.saturating_add(starts.len());
+    }
+    total
+}
+
+fn support_seed_occurrences(
+    supported: &mut FxHashSet<LocalOccurrenceKey>,
+    shared_walks: &[Vec<SharedWalkOccurrence>],
+    seeds_by_path: &[(usize, Vec<usize>)],
+    min_shared_run: usize,
+) {
+    for (path_idx, starts) in seeds_by_path {
+        let Some(walk) = shared_walks.get(*path_idx) else {
+            continue;
+        };
+        for &start in starts {
+            for offset in 0..min_shared_run {
+                if let Some(occ) = walk.get(start + offset) {
+                    supported.insert(LocalOccurrenceKey {
+                        path_idx: *path_idx,
+                        occ: occ.occ,
+                    });
+                }
+            }
+        }
+    }
 }
 
 fn scaffold_supported_occurrences(
@@ -1402,43 +1515,99 @@ fn scaffold_supported_occurrences(
     syncmer_len: u64,
     min_shared_run: usize,
     shared_nodes: &FxHashSet<u32>,
-) -> FxHashSet<LocalOccurrenceKey> {
+) -> (FxHashSet<LocalOccurrenceKey>, usize, usize) {
     if min_shared_run <= 1 || walks.len() < 2 || shared_nodes.is_empty() {
-        return FxHashSet::default();
+        return (FxHashSet::default(), 0, 0);
     }
 
-    let mut pair_anchors: FxHashMap<(usize, usize), Vec<PairAnchorOccurrence>> =
+    let shared_walks = shared_walk_occurrences(walks, shared_nodes);
+    let max_anchor_step_bp = SCAFFOLD_CONTEXT_GAP_BP.saturating_add(syncmer_len.max(1));
+    let seeds_by_key = scaffold_run_seeds_by_key(&shared_walks, min_shared_run, max_anchor_step_bp);
+    if seeds_by_key.is_empty() {
+        return (FxHashSet::default(), 0, 0);
+    }
+
+    let mut direct_supported = FxHashSet::default();
+    let mut pair_anchor_keys: FxHashMap<(usize, usize), FxHashSet<PairAnchorOccurrenceKey>> =
         FxHashMap::default();
-    for (_node, occurrences) in local_occurrences_by_node(walks, shared_nodes) {
-        for left_idx in 0..occurrences.len() {
-            for right_idx in (left_idx + 1)..occurrences.len() {
-                let left = occurrences[left_idx];
-                let right = occurrences[right_idx];
-                if left.key.path_idx == right.key.path_idx {
-                    continue;
+    let mut dense_signatures = 0usize;
+    let mut projected_candidate_anchors = 0usize;
+
+    for (_run_key, seeds) in seeds_by_key {
+        let mut grouped: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for seed in seeds {
+            grouped.entry(seed.path_idx).or_default().push(seed.start);
+        }
+        if grouped.len() < 2 {
+            continue;
+        }
+
+        let mut seeds_by_path = grouped.into_iter().collect::<Vec<_>>();
+        seeds_by_path.sort_unstable_by_key(|(path_idx, _starts)| *path_idx);
+        support_seed_occurrences(
+            &mut direct_supported,
+            &shared_walks,
+            &seeds_by_path,
+            min_shared_run,
+        );
+
+        let seed_pairs = seed_pair_count(&seeds_by_path);
+        let signature_candidate_anchors = seed_pairs.saturating_mul(min_shared_run);
+        let exceeds_signature_budget = seed_pairs > MAX_SCAFFOLD_SIGNATURE_SEED_PAIRS;
+        let exceeds_total_budget = projected_candidate_anchors
+            .saturating_add(signature_candidate_anchors)
+            > MAX_SCAFFOLD_TOTAL_CANDIDATE_ANCHORS;
+        if exceeds_signature_budget || exceeds_total_budget {
+            dense_signatures += 1;
+            continue;
+        }
+        projected_candidate_anchors =
+            projected_candidate_anchors.saturating_add(signature_candidate_anchors);
+
+        for left_idx in 0..seeds_by_path.len() {
+            for right_idx in (left_idx + 1)..seeds_by_path.len() {
+                let (query_idx, query_starts) = &seeds_by_path[left_idx];
+                let (target_idx, target_starts) = &seeds_by_path[right_idx];
+                let query_walk = &shared_walks[*query_idx];
+                let target_walk = &shared_walks[*target_idx];
+                let pair_set = pair_anchor_keys
+                    .entry((*query_idx, *target_idx))
+                    .or_default();
+                for &query_start in query_starts {
+                    for &target_start in target_starts {
+                        for offset in 0..min_shared_run {
+                            let query = query_walk[query_start + offset];
+                            let target = target_walk[target_start + offset];
+                            debug_assert_eq!(query.node, target.node);
+                            pair_set.insert(PairAnchorOccurrenceKey {
+                                query_occ: query.occ,
+                                target_occ: target.occ,
+                                node: query.node,
+                                query_pos: query.pos,
+                                target_pos: target.pos,
+                            });
+                        }
+                    }
                 }
-                let (query, target) = if left.key.path_idx < right.key.path_idx {
-                    (left, right)
-                } else {
-                    (right, left)
-                };
-                pair_anchors
-                    .entry((query.key.path_idx, target.key.path_idx))
-                    .or_default()
-                    .push(PairAnchorOccurrence {
-                        query_occ: query.key.occ,
-                        target_occ: target.key.occ,
-                        node: query.node,
-                        query_pos: query.pos,
-                        target_pos: target.pos,
-                    });
             }
         }
     }
 
     let min_scaffold_length = (min_shared_run as u64).saturating_mul(syncmer_len.max(1));
-    let mut supported = FxHashSet::default();
-    for ((query_idx, target_idx), anchors) in pair_anchors {
+    let mut supported = direct_supported;
+    let mut candidate_anchors = 0usize;
+    for ((query_idx, target_idx), anchor_keys) in pair_anchor_keys {
+        candidate_anchors = candidate_anchors.saturating_add(anchor_keys.len());
+        let anchors = anchor_keys
+            .into_iter()
+            .map(|key| PairAnchorOccurrence {
+                query_occ: key.query_occ,
+                target_occ: key.target_occ,
+                node: key.node,
+                query_pos: key.query_pos,
+                target_pos: key.target_pos,
+            })
+            .collect::<Vec<_>>();
         supported.extend(retained_pair_scaffold_occurrences(
             query_idx,
             target_idx,
@@ -1447,7 +1616,7 @@ fn scaffold_supported_occurrences(
             min_scaffold_length,
         ));
     }
-    supported
+    (supported, candidate_anchors, dense_signatures)
 }
 
 fn retained_pair_scaffold_occurrences(
@@ -1616,11 +1785,18 @@ fn shared_context_filtered_occurrences(
         };
     }
 
+    let path_copy_excess_nodes = path_copy_excess_shared_nodes(walks, &shared_nodes);
+    let scaffold_nodes: FxHashSet<u32> = shared_nodes
+        .difference(&path_copy_excess_nodes)
+        .copied()
+        .collect();
     let shared_occurrences = shared_occurrence_keys(walks, &shared_nodes);
-    let scaffold_supported =
-        scaffold_supported_occurrences(walks, syncmer_len, min_shared_run, &shared_nodes);
+    let path_copy_filtered_occurrences =
+        shared_occurrence_keys(walks, &path_copy_excess_nodes).len();
+    let (scaffold_supported, scaffold_candidate_anchors, scaffold_dense_signatures) =
+        scaffold_supported_occurrences(walks, syncmer_len, min_shared_run, &scaffold_nodes);
     let sequence_supported =
-        sequence_supported_occurrences(walks, syncmer_len, min_sequence_span_bp, &shared_nodes);
+        sequence_supported_occurrences(walks, syncmer_len, min_sequence_span_bp, &scaffold_nodes);
     let supported: FxHashSet<LocalOccurrenceKey> = scaffold_supported
         .union(&sequence_supported)
         .copied()
@@ -1637,6 +1813,9 @@ fn shared_context_filtered_occurrences(
         shared_occurrences: shared_occurrences.len(),
         scaffold_supported_occurrences: scaffold_supported.len(),
         sequence_supported_occurrences: sequence_supported.len(),
+        scaffold_candidate_anchors,
+        scaffold_dense_signatures,
+        path_copy_filtered_occurrences,
     }
 }
 
@@ -2483,12 +2662,15 @@ fn write_range_gfa_blunt_exact<W: Write>(
             .sum::<usize>();
         split_occurrences = context_filter.weak_occurrences;
         info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before exact blunt materialization (weak={}, split={}, min_run={}, scaffold-supported={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before exact blunt materialization (weak={}, split={}, min_run={}, path-copy-filtered={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
             context_filter.shared_occurrences,
             weak_occurrences,
             weak_occurrences,
             frequency_mask.min_shared_run,
+            context_filter.path_copy_filtered_occurrences,
             context_filter.scaffold_supported_occurrences,
+            context_filter.scaffold_candidate_anchors,
+            context_filter.scaffold_dense_signatures,
             frequency_mask.min_sequence_span_bp,
             context_filter.sequence_supported_occurrences,
             context_start.elapsed().as_secs_f64()
@@ -2656,23 +2838,29 @@ fn write_range_gfa_internal<W: Write>(
             .sum::<usize>();
         split_occurrences = context_filter.weak_occurrences;
         info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before raw GFA materialization (weak={}, split={}, min_run={}, scaffold-supported={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before raw GFA materialization (weak={}, split={}, min_run={}, path-copy-filtered={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
             context_filter.shared_occurrences,
             shared_context_split,
             shared_context_split,
             frequency_mask.min_shared_run,
+            context_filter.path_copy_filtered_occurrences,
             context_filter.scaffold_supported_occurrences,
+            context_filter.scaffold_candidate_anchors,
+            context_filter.scaffold_dense_signatures,
             frequency_mask.min_sequence_span_bp,
             context_filter.sequence_supported_occurrences,
             context_start.elapsed().as_secs_f64()
         );
         if shared_context_split > 0 {
             info!(
-                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private per-occurrence topology before raw GFA materialization (shared occurrences={}, min_run={}, scaffold-supported={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private per-occurrence topology before raw GFA materialization (shared occurrences={}, min_run={}, path-copy-filtered={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
                 shared_context_split,
                 context_filter.shared_occurrences,
                 frequency_mask.min_shared_run,
+                context_filter.path_copy_filtered_occurrences,
                 context_filter.scaffold_supported_occurrences,
+                context_filter.scaffold_candidate_anchors,
+                context_filter.scaffold_dense_signatures,
                 frequency_mask.min_sequence_span_bp,
                 context_filter.sequence_supported_occurrences,
                 context_start.elapsed().as_secs_f64()
@@ -3579,6 +3767,86 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         assert!(
             filtered.weak_occurrences[2].contains(&0),
             "the singleton path-2 copy of node 42 is off-chain and must be private"
+        );
+    }
+
+    #[test]
+    fn test_scaffold_context_prunes_high_copy_singletons_without_global_blessing() {
+        let mut walks = vec![
+            local_walk(&[(10, 0), (11, 100), (99, 200), (12, 300), (13, 400)]),
+            local_walk(&[(10, 0), (11, 100), (99, 200), (12, 300), (13, 400)]),
+        ];
+        for copy in 0..64 {
+            walks.push(local_walk(&[(99, 10_000 + copy * 2_000)]));
+        }
+
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 5, 0);
+        assert_eq!(filtered.shared_occurrences, 74);
+        assert_eq!(
+            filtered.scaffold_supported_occurrences, 10,
+            "only the two five-anchor run copies should be scaffold-supported"
+        );
+        assert!(
+            filtered.scaffold_candidate_anchors <= 5,
+            "high-copy singleton copies must not materialize all pairwise anchors"
+        );
+
+        for occ in 0..5 {
+            assert!(
+                !filtered.weak_occurrences[0].contains(&occ)
+                    && !filtered.weak_occurrences[1].contains(&occ),
+                "occurrence {occ} belongs to the retained scaffold run"
+            );
+        }
+        for path_idx in 2..walks.len() {
+            assert!(
+                filtered.weak_occurrences[path_idx].contains(&0),
+                "isolated high-copy path {path_idx} should remain private"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scaffold_context_splits_nodes_above_path_copy_factor() {
+        let walks = vec![
+            local_walk(&[(99, 0), (99, 100), (99, 200)]),
+            local_walk(&[(99, 0), (99, 100), (99, 200)]),
+            local_walk(&[(99, 0), (99, 100), (99, 200)]),
+            local_walk(&[(99, 0), (99, 100), (99, 200)]),
+        ];
+
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0);
+        assert_eq!(filtered.shared_occurrences, 12);
+        assert_eq!(
+            filtered.path_copy_filtered_occurrences, 12,
+            "node 99 has materially more local copies than selected paths"
+        );
+        assert_eq!(filtered.scaffold_supported_occurrences, 0);
+        assert_eq!(
+            filtered
+                .weak_occurrences
+                .iter()
+                .map(FxHashSet::len)
+                .sum::<usize>(),
+            12
+        );
+    }
+
+    #[test]
+    fn test_scaffold_context_dense_repeated_runs_stay_occurrence_level() {
+        let repeated = [(1, 0), (2, 100), (3, 200), (4, 300), (5, 400)];
+        let walks = (0..10).map(|_| local_walk(&repeated)).collect::<Vec<_>>();
+
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 5, 0);
+        assert!(
+            filtered.scaffold_dense_signatures > 0,
+            "test-sized dense signatures should exercise the bounded fallback"
+        );
+        assert_eq!(filtered.path_copy_filtered_occurrences, 0);
+        assert_eq!(filtered.scaffold_supported_occurrences, 50);
+        assert!(
+            filtered.weak_occurrences.iter().all(FxHashSet::is_empty),
+            "dense exact runs are still supported by occurrence, not by global node id"
         );
     }
 

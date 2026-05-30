@@ -40,9 +40,36 @@ this order:
 3. Build occurrence candidates from the post-frequency-mask walks. Only syncmer
    nodes with more than one remaining occurrence are candidates for scaffold
    filtering; singletons can be emitted as ordinary private topology because no
-   other path occurrence shares their node.
-4. For every pair of selected paths that share candidate nodes, convert matching
-   occurrences into exact PAF-style syng anchors:
+   other path occurrence shares their node. A path-copy guard removes nodes
+   whose local occurrence count is materially above the selected path count
+   from scaffold support. The current `1.25x` path-count factor is a
+   provisional bounded-performance guard for avoiding C4-scale all-pairs
+   expansion, not the final biological frequency policy. These nodes are not
+   deleted; they are split as private occurrences so repeat/CNV sequence is
+   preserved without allowing the syncmer to act as shared graph glue. A
+   follow-up should calibrate this boundary from local syng node spectra
+   (occurrence count, path count, occ/path ratio, max copies per path, and
+   dispersion).
+4. Build bounded scaffold candidates from repeated windows of `min-run`
+   consecutive shared syncmer occurrences. The old exhaustive all-pairs
+   expansion was:
+
+   ```text
+   all occurrences of node X on path A x all occurrences of node X on path B
+   ```
+
+   That is too large for C4-scale high-copy syncmers. The current conversion
+   first indexes path-local shared-node windows whose adjacent anchors are
+   within the normal scaffold gap. A pairwise anchor is only materialized when
+   the full `min-run` node window is observed on at least two selected paths.
+   Each repeated window directly supports its member occurrences. This
+   preserves the configured consecutive-run semantics even when syncmer anchors
+   overlap in base coordinates. Pathologically dense repeated windows, or
+   otherwise moderate windows that would exceed the global candidate-anchor
+   budget in aggregate, stop there rather than allocating every path-pair
+   combination.
+5. For repeated windows that remain within the candidate budget, also convert
+   matching occurrences into exact PAF-style syng anchors:
 
    ```text
    query_pos  = occurrence coordinate on the lower-index path
@@ -52,23 +79,24 @@ this order:
    identity   = 1.0
    ```
 
-5. Pass those anchors to
+6. Pass those bounded anchors to
    `syng_transitive::chain_anchors_with_sweepga_scaffold_mass`. This is the same
    SweepGA-backed scaffold-chain path used by syng query collection. The GFA
-   conversion does not implement its own diagonal-offset, drift, or plane-sweep
-   logic.
-6. Use `mask,min-run=` as the scaffold mass threshold: the minimum scaffold
+   conversion does not reimplement SweepGA's diagonal-offset, drift, or
+   plane-sweep logic; it only prunes anchors that cannot satisfy the configured
+   `min-run` scaffold context.
+7. Use `mask,min-run=` as the scaffold mass threshold: the minimum scaffold
    length is `min_run * syncmer_len`. The scaffold gap follows the query
    collection default `DEFAULT_EXTEND_BUDGET_BP`. The default therefore remains
    conservative, and existing `:mask` / `:filter` syntax continues to tune the
    support requirement.
-7. Mark every occurrence whose pairwise anchor is returned as a member of a
+8. Mark every occurrence whose pairwise anchor is returned as a member of a
    retained SweepGA scaffold chain. These occurrences remain shared syncmer
    topology.
-8. Optionally apply the existing `sequence-k=` exact-span rule as an additional
+9. Optionally apply the existing `sequence-k=` exact-span rule as an additional
    occurrence-level support source. This keeps previous exact sequence-span
    behavior but no longer blesses all occurrences of a node.
-9. Any remaining shared-node occurrence that is not SweepGA-scaffold-supported
+10. Any remaining shared-node occurrence that is not SweepGA-scaffold-supported
    or `sequence-k`-supported is split into a private occurrence during GFA
    materialization.
 
@@ -79,6 +107,7 @@ The conversion has three distinct decisions:
 | Decision | Granularity | Effect |
 | --- | --- | --- |
 | Frequency mask (`top=`, `max-occ=`) | Node | Removes all local occurrences of rejected high-copy syncmer nodes and bridges them by sequence. |
+| Path-copy scaffold-glue guard | Node for support, occurrence for output | Prevents nodes with materially more local occurrences than selected paths from acting as shared scaffold glue; their occurrences are split/private rather than deleted. |
 | Scaffold-chain support (`min-run=`) | Occurrence | Keeps only the exact syncmer occurrences that are members of retained SweepGA scaffold chains. |
 | Local repeat context rescue/split | Occurrence | Clones rare repeated local contexts when a near-single-copy node appears in a minor context. |
 
@@ -101,12 +130,15 @@ segments instead of reusing node `Z`.
 Syng query collection already turns raw syncmer hits into exact PAF-style
 records and delegates chain/scaffold filtering to SweepGA through
 `chain_anchors_with_sweepga_scaffold_mass`. Conversion now reuses that helper
-for local selected paths. This keeps off-diagonal and indel-shifted colinear
-handling in one implementation:
+for bounded local selected-path candidates. This keeps off-diagonal and
+indel-shifted colinear handling in one implementation once an occurrence pair
+has enough local context to be a plausible scaffold member:
 
 - indel-shifted but colinear runs can remain one scaffold chain;
 - short off-chain singleton hits fail the scaffold mass threshold;
-- no custom diagonal test in the GFA writer decides chain membership.
+- no custom diagonal test in the GFA writer decides chain membership;
+- high-copy singleton coincidences are pruned before SweepGA instead of being
+  expanded into an all-pairs anchor set.
 
 No SweepGA filtering semantics were changed for this integration.
 
