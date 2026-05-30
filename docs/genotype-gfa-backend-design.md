@@ -40,6 +40,77 @@ extend the feature-vector model without making syng packs look like GFA packs.
   implemented. Direct `genotype cos --gfa graph.gfa --pack sample.pack` should
   wait until packs are typed enough to reject syng/GFA mismatches reliably.
 
+## Implementation Status
+
+`impg genotype cos` now has an initial backend-neutral graph path for
+`gfa-segment` / `variation-graph-node` evidence while preserving the existing
+syng syncmer-node path.
+
+Implemented graph source modes:
+
+- `--graph <local.gfa>` loads a prebuilt local GFA directly.
+- `--render-bundle <bundle>` loads render bundles whose manifest declares
+  `feature_space = gfa-segment` or `variation-graph-node` and contains
+  `graph_gfa`.
+- `-a <panel.syng> -r <REF:start-end> --sequence-files ... --gfa-engine ...`
+  builds a dynamic GFA through the same `dispatch_gfa_engine` path used by
+  `impg query -o gfa`, then genotypes that emitted graph.
+- A GFA produced by `impg query -o gfa...` can be handed back through
+  `--graph` with identical downstream semantics to an independently built GFA.
+
+Implemented graph feature behavior:
+
+- GFA `S` records define the node universe. Length comes from sequence length
+  or `LN:i:` when the sequence is `*`.
+- GFA `P` paths and `W` walks become candidate haplotypes. W-line names are
+  imported as Pan-SN-like `sample#hap#seqid` names.
+- `--target-path PATH[:start-end]` selects a path interval. Without an
+  interval, each graph path is scored as a full-path candidate. For interval
+  targets, the same path-coordinate interval is clipped across candidate paths.
+- `--graph-feature-id-mode auto|dense|segment-name` controls integer feature
+  IDs. `auto` uses numeric segment names when all segment names are unique
+  positive `u32`s, otherwise dense import order.
+- `--graph-contribution-model raw` scores raw node traversal counts.
+  `--graph-contribution-model length-normalized` divides sample counts by node
+  length and scores partial candidate traversals as covered-bp divided by node
+  length.
+
+Pack compatibility is explicit. A graph pack must declare `feature_space` in
+one of these ways:
+
+```text
+#feature_space    gfa-segment
+#feature_id_mode  segment-name
+```
+
+or a sidecar:
+
+```text
+sample.pack.tsv.meta.tsv
+sample.pack.tsv.metadata.tsv
+```
+
+with `key<TAB>value` rows, or the CLI override:
+
+```bash
+--pack-feature-space gfa-segment
+```
+
+If a pack declares `graph_id`, it must match the loaded graph ID. If it
+declares `feature_id_mode`, it must match the effective GFA import mode. Pack
+feature IDs not present in the loaded graph are rejected.
+
+The debug report from `--emit-report` now has graph sections for source,
+dynamic build command, graph ID, feature universe, node lengths, sample raw
+counts and weights, candidate counts, contribution model, and node-level
+dot/norm decomposition.
+
+Remaining limitation: this implementation consumes a pack-like vector over
+graph feature IDs. It does not map BAM, CRAM, FASTQ, or GAF reads into graph
+packs. That projection layer should be implemented as a separate typed
+converter so read-walk evidence, graph identity, feature namespace, and
+normalization policy are preserved rather than faked inside genotyping.
+
 ## Current Constraints To Preserve
 
 The syng backend has deliberately simple semantics:

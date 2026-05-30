@@ -4307,16 +4307,20 @@ enum GenotypeCommand {
     #[command(alias = "cosigt")]
     Cos {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
-        #[clap(
-            short = 'a',
-            long,
-            value_parser,
-            required_unless_present = "render_bundle"
-        )]
+        #[clap(short = 'a', long, value_parser)]
         index: Option<String>,
 
+        /// Prebuilt local GFA graph to genotype with gfa-segment features
+        #[clap(
+            long = "graph",
+            alias = "gfa",
+            value_parser,
+            conflicts_with = "render_bundle"
+        )]
+        graph: Option<String>,
+
         /// Render bundle directory produced by `impg render --engine syng-native`
-        #[clap(long = "render-bundle", value_parser, conflicts_with = "index")]
+        #[clap(long = "render-bundle", value_parser, conflicts_with = "graph")]
         render_bundle: Option<String>,
 
         /// Sample support vector produced by `impg map -o pack`
@@ -4328,13 +4332,28 @@ enum GenotypeCommand {
         proj: Option<String>,
 
         /// Reference path range to genotype, in the format `seq_name:start-end`
-        #[clap(
-            short = 'r',
-            long,
-            value_parser,
-            required_unless_present = "render_bundle"
-        )]
+        #[clap(short = 'r', long, value_parser)]
         target_range: Option<String>,
+
+        /// Graph path or path interval to genotype, in the format `PATH[:start-end]`
+        #[clap(long = "target-path", value_parser)]
+        target_path: Option<String>,
+
+        /// Declare the feature space of an untyped graph pack (gfa-segment or variation-graph-node)
+        #[clap(long = "pack-feature-space", value_parser)]
+        pack_feature_space: Option<String>,
+
+        /// Optional graph ID assertion for graph packs
+        #[clap(long = "pack-graph-id", value_parser)]
+        pack_graph_id: Option<String>,
+
+        /// How GFA S-line names map to integer pack feature IDs
+        #[clap(long = "graph-feature-id-mode", value_enum, default_value_t = genotype::GraphFeatureIdMode::Auto)]
+        graph_feature_id_mode: genotype::GraphFeatureIdMode,
+
+        /// Contribution model for graph-node evidence
+        #[clap(long = "graph-contribution-model", value_enum, default_value_t = genotype::GraphContributionModel::Raw)]
+        graph_contribution_model: genotype::GraphContributionModel,
 
         /// Candidate extraction mode
         #[clap(long, value_enum, default_value_t = genotype::CandidateMode::Spanning)]
@@ -4375,6 +4394,12 @@ enum GenotypeCommand {
         /// Optional human-readable evidence report path for debugging candidate vectors and score decomposition
         #[clap(long = "emit-report", alias = "debug-report", value_parser)]
         emit_report: Option<String>,
+
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        #[clap(flatten)]
+        engine_cli: EngineCliOpts,
 
         /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
         #[clap(short = 'O', long, value_parser)]
@@ -7741,10 +7766,16 @@ fn run() -> io::Result<()> {
         Args::Genotype { command } => match command {
             GenotypeCommand::Cos {
                 index,
+                graph,
                 render_bundle,
                 pack,
                 proj,
                 target_range,
+                target_path,
+                pack_feature_space,
+                pack_graph_id,
+                graph_feature_id_mode,
+                graph_contribution_model,
                 candidate_mode,
                 ploidy,
                 top_n,
@@ -7755,6 +7786,8 @@ fn run() -> io::Result<()> {
                 min_anchors,
                 min_span_fraction,
                 emit_report,
+                sequence,
+                engine_cli,
                 output,
                 common,
             } => {
@@ -7763,72 +7796,165 @@ fn run() -> io::Result<()> {
                     .as_deref()
                     .map(impg::render_bundle::load_bundle)
                     .transpose()?;
-                let (syng_prefix, target_range) = if let Some(bundle) = &loaded_render_bundle {
-                    if bundle.manifest.feature_space != "syng-syncmer-node" {
+                let sequence_files_supplied = !sequence.resolve_sequence_files()?.is_empty();
+                let render_feature_space = loaded_render_bundle
+                    .as_ref()
+                    .map(|bundle| bundle.manifest.feature_space.as_str());
+                let render_is_graph = render_feature_space
+                    .is_some_and(|space| matches!(space, "gfa-segment" | "variation-graph-node"));
+                let dynamic_query_graph =
+                    graph.is_none() && render_bundle.is_none() && sequence_files_supplied;
+                let use_graph_backend = graph.is_some() || render_is_graph || dynamic_query_graph;
+
+                enum CosBackend<'a> {
+                    Syng(genotype::SyngCosigtConfig<'a>),
+                    Graph(genotype::GraphCosigtConfig<'a>),
+                }
+
+                let query_gfa_storage: String;
+                let query_build_command_storage: String;
+                let syng_prefix_storage: String;
+                let syng_target_range_storage: String;
+
+                let pack_path: String;
+                let backend = if use_graph_backend {
+                    if proj.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            format!(
-                                "impg genotype cos can consume syng-native render bundles; bundle feature_space is '{}'",
-                                bundle.manifest.feature_space
-                            ),
+                            "GFA graph genotyping currently consumes --pack vectors only; GAF/BAM/proj projection into graph packs is a separate projection step",
                         ));
                     }
-                    (
-                        bundle.syng_prefix_path()?.to_string_lossy().to_string(),
-                        bundle.rendered_target_range(target_range.as_deref())?,
-                    )
-                } else {
-                    let index = index.ok_or_else(|| {
+                    pack_path = pack.ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            "impg genotype cos requires --index or --render-bundle",
+                            "GFA graph genotype requires --pack",
                         )
                     })?;
-                    let target_range = target_range.ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "impg genotype cos requires --target-range or --render-bundle",
-                        )
-                    })?;
-                    (detect_syng_prefix(&index).unwrap_or(index), target_range)
-                };
-                let projection = if let Some(path) = proj.as_deref() {
-                    Some(impg::projection::load(path)?)
+
+                    let graph_source = if let Some(graph_path) = graph.as_deref() {
+                        genotype::GraphSource::Gfa { path: graph_path }
+                    } else if let Some(render_path) = render_bundle.as_deref() {
+                        genotype::GraphSource::RenderBundle { path: render_path }
+                    } else {
+                        let index_path = index.as_deref().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "dynamic graph genotype requires --index",
+                            )
+                        })?;
+                        let target = target_range.as_deref().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "dynamic graph genotype requires --target-range",
+                            )
+                        })?;
+                        let (gfa, build_command) = build_genotype_query_gfa(
+                            index_path,
+                            target,
+                            &sequence,
+                            &engine_cli,
+                            common.threads.get(),
+                            syng_padding,
+                            syng_extension,
+                        )?;
+                        query_gfa_storage = gfa;
+                        query_build_command_storage = build_command;
+                        genotype::GraphSource::Query {
+                            gfa: query_gfa_storage.as_str(),
+                            description: "syng",
+                            build_command: Some(query_build_command_storage.as_str()),
+                            default_target_path: Some(target),
+                        }
+                    };
+                    let effective_target_path = target_path.as_deref().or(target_range.as_deref());
+                    CosBackend::Graph(genotype::GraphCosigtConfig {
+                        graph_source,
+                        pack_path: &pack_path,
+                        target_path: effective_target_path,
+                        pack_feature_space: pack_feature_space.as_deref(),
+                        pack_graph_id: pack_graph_id.as_deref(),
+                        feature_id_mode: graph_feature_id_mode,
+                        contribution_model: graph_contribution_model,
+                        emit_report_path: emit_report.as_deref(),
+                        ploidy,
+                        top_n,
+                        candidate_top_k,
+                        max_combinations,
+                    })
                 } else {
-                    None
-                };
-                if let Some(projection) = &projection {
-                    if projection.syng_prefix != syng_prefix {
-                        warn!(
-                            "Projection was built against syng prefix '{}', current index is '{}'",
-                            projection.syng_prefix, syng_prefix
-                        );
+                    let (syng_prefix, resolved_target_range) = if let Some(bundle) =
+                        &loaded_render_bundle
+                    {
+                        if bundle.manifest.feature_space != "syng-syncmer-node" {
+                            return Err(io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    format!(
+                                        "impg genotype cos can consume syng-native render bundles and gfa-segment render bundles; bundle feature_space is '{}'",
+                                        bundle.manifest.feature_space
+                                    ),
+                                ));
+                        }
+                        (
+                            bundle.syng_prefix_path()?.to_string_lossy().to_string(),
+                            bundle.rendered_target_range(target_range.as_deref())?,
+                        )
+                    } else {
+                        let index = index.ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "impg genotype cos requires --index, --graph, --render-bundle, or --sequence-files for dynamic graph construction",
+                                )
+                            })?;
+                        let target_range = target_range.ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "impg genotype cos requires --target-range, --target-path, or --render-bundle",
+                                )
+                            })?;
+                        (detect_syng_prefix(&index).unwrap_or(index), target_range)
+                    };
+                    syng_prefix_storage = syng_prefix;
+                    syng_target_range_storage = resolved_target_range;
+                    let syng_prefix = syng_prefix_storage.as_str();
+                    let resolved_target_range = syng_target_range_storage.as_str();
+                    let projection = if let Some(path) = proj.as_deref() {
+                        Some(impg::projection::load(path)?)
+                    } else {
+                        None
+                    };
+                    if let Some(projection) = &projection {
+                        if projection.syng_prefix != syng_prefix {
+                            warn!(
+                                "Projection was built against syng prefix '{}', current index is '{}'",
+                                projection.syng_prefix, syng_prefix
+                            );
+                        }
                     }
-                }
-                let pack_path = if let Some(pack) = pack.as_deref() {
-                    pack.to_string()
-                } else if let Some(projection) = &projection {
-                    projection.pack_path.to_string_lossy().to_string()
-                } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "impg genotype cos requires --pack or --proj",
-                    ));
-                };
-                let config = genotype::SyngCosigtConfig {
-                    syng_prefix: &syng_prefix,
-                    pack_path: &pack_path,
-                    target_range: &target_range,
-                    emit_report_path: emit_report.as_deref(),
-                    candidate_mode,
-                    ploidy,
-                    top_n,
-                    candidate_top_k,
-                    max_combinations,
-                    syng_padding,
-                    syng_extension,
-                    min_anchors,
-                    min_span_fraction,
+                    pack_path = if let Some(pack) = pack.as_deref() {
+                        pack.to_string()
+                    } else if let Some(projection) = &projection {
+                        projection.pack_path.to_string_lossy().to_string()
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "impg genotype cos requires --pack or --proj",
+                        ));
+                    };
+                    CosBackend::Syng(genotype::SyngCosigtConfig {
+                        syng_prefix,
+                        pack_path: &pack_path,
+                        target_range: resolved_target_range,
+                        emit_report_path: emit_report.as_deref(),
+                        candidate_mode,
+                        ploidy,
+                        top_n,
+                        candidate_top_k,
+                        max_combinations,
+                        syng_padding,
+                        syng_extension,
+                        min_anchors,
+                        min_span_fraction,
+                    })
                 };
 
                 #[cfg(unix)]
@@ -7838,7 +7964,10 @@ fn run() -> io::Result<()> {
 
                 if let Some(path) = output {
                     let mut out = create_map_output_writer(&path)?;
-                    genotype::run_syng_cosigt(&mut out, &config)?;
+                    match &backend {
+                        CosBackend::Syng(config) => genotype::run_syng_cosigt(&mut out, config)?,
+                        CosBackend::Graph(config) => genotype::run_graph_cosigt(&mut out, config)?,
+                    }
                     out.flush()?;
                     #[cfg(unix)]
                     unsafe {
@@ -7846,7 +7975,10 @@ fn run() -> io::Result<()> {
                     }
                 } else {
                     let mut out = Vec::new();
-                    genotype::run_syng_cosigt(&mut out, &config)?;
+                    match &backend {
+                        CosBackend::Syng(config) => genotype::run_syng_cosigt(&mut out, config)?,
+                        CosBackend::Graph(config) => genotype::run_graph_cosigt(&mut out, config)?,
+                    }
                     #[cfg(unix)]
                     {
                         write_all_to_fd(saved_stdout, &out)?;
@@ -11161,6 +11293,83 @@ fn syng_intervals_to_merged_query_intervals(
         .into_iter()
         .map(|(query_interval, _, _)| query_interval)
         .collect()
+}
+
+fn build_genotype_query_gfa(
+    index_path: &str,
+    target_range: &str,
+    sequence: &SequenceOpts,
+    engine_cli: &EngineCliOpts,
+    threads: usize,
+    syng_padding: u64,
+    syng_extension: u64,
+) -> io::Result<(String, String)> {
+    let syng_prefix = detect_syng_prefix(index_path).unwrap_or_else(|| index_path.to_string());
+    let (target_name, (range_start, range_end), _region_name) =
+        partition::parse_target_range(target_range)?;
+    if range_start < 0 || range_end <= range_start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("target range must be non-empty with non-negative coordinates: {target_range}"),
+        ));
+    }
+
+    info!(
+        "Loading syng index from prefix for dynamic graph: {}",
+        syng_prefix
+    );
+    let syng_index =
+        impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
+    let seq_index_built = syng_index.build_seq_index();
+    let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index_built, syng_padding);
+    let sequence_index = sequence.build_sequence_index()?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "dynamic genotype graph construction requires --sequence-files or --sequence-list",
+        )
+    })?;
+
+    let intervals = wrapper.syng_index().query_region_ext(
+        &target_name,
+        range_start as u64,
+        range_end as u64,
+        syng_padding,
+        syng_extension,
+    )?;
+    let mut query_intervals = syng_intervals_to_merged_query_intervals(
+        &intervals,
+        &target_name,
+        range_start,
+        range_end,
+        wrapper.seq_index(),
+        0,
+        true,
+    );
+    if query_intervals.is_empty() {
+        let target_id = wrapper.seq_index().get_id(&target_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence '{}' not found in syng index", target_name),
+            )
+        })?;
+        query_intervals.push(Interval::new(range_start, range_end, target_id));
+    }
+
+    let engine_opts = engine_cli.build(threads)?;
+    let scoring_params = Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?);
+    let gfa_output = impg::dispatch_gfa_engine(
+        &wrapper,
+        &query_intervals,
+        &sequence_index,
+        scoring_params,
+        &engine_opts,
+    )?;
+    let sequence_files = sequence.resolve_sequence_files()?.join(",");
+    let build_command = format!(
+        "impg query -a {index_path} -r {target_range} -o gfa --sequence-files {sequence_files} --gfa-engine {}",
+        engine_cli.engine_raw
+    );
+    Ok((gfa_output, build_command))
 }
 
 fn output_results_bed(
