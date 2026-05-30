@@ -103,6 +103,7 @@ struct PathData {
 /// A sequence entry prepared for SPOA with padding metadata.
 struct SeqEntry {
     sequence: String,
+    core_sequence: String,
     path_name: String,
     left_pad: usize,
     right_pad: usize,
@@ -469,8 +470,8 @@ fn smooth_gfa_pass(
                         );
                         Ok(Some(s))
                     }
-                    Ok(_) => Err(io::Error::other(format!(
-                        "smooth block {i} produced no GFA; refusing passthrough fallback"
+                    Ok(_) => Err(io::Error::other(smooth_empty_block_error(
+                        i, block, input_bp,
                     ))),
                     Err(e) => Err(io::Error::other(format!(
                         "smooth block {i} failed; refusing passthrough fallback: {e}"
@@ -2013,6 +2014,27 @@ fn log_flubble_block_compression(
     }
 }
 
+fn smooth_empty_block_error(block_idx: usize, block: &Block, input_bp: usize) -> String {
+    let source = match &block.source {
+        BlockSource::PathOverlap => "path-overlap",
+        BlockSource::Flubble { .. } => "flubble",
+        BlockSource::NeighborMerge { .. } => "neighbor-merge",
+        BlockSource::Gap => "gap",
+    };
+    let max_range_bp = block
+        .path_ranges
+        .iter()
+        .map(|range| range.length)
+        .max()
+        .unwrap_or(0);
+    format!(
+        "smooth block {block_idx} ({source}, ranges={}, input_bp={}, max_range_bp={}) produced no path-preserving GFA after padded/no-padding POA attempts; refusing graph-loss output",
+        block.path_ranges.len(),
+        input_bp,
+        max_range_bp
+    )
+}
+
 /// Realign a neighbor-merged local block with POASTA and emit lacer-compatible
 /// GFA. The surrounding smooth pass owns block placement, path coordinate
 /// naming, gap passthrough, smoothable-block error handling, and final lacing.
@@ -2038,6 +2060,33 @@ fn poasta_block(
     }
 
     crate::resolution::poasta_sequences_to_gfa(&headers, &sequences, config.scoring_params)
+}
+
+fn smooth_entries_without_padding(
+    entries: &[SeqEntry],
+    config: &SmoothConfig,
+) -> io::Result<String> {
+    if entries.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut ordered_entries: Vec<&SeqEntry> = entries.iter().collect();
+    ordered_entries.sort_by(|a, b| b.core_sequence.len().cmp(&a.core_sequence.len()));
+
+    let (mut spoa_graph, mut spoa_engine) = build_spoa_engine(config.scoring_params);
+    feed_sequences_to_graph(
+        &mut spoa_engine,
+        &mut spoa_graph,
+        ordered_entries
+            .iter()
+            .map(|entry| entry.core_sequence.as_str()),
+    );
+    let headers: Vec<String> = ordered_entries
+        .iter()
+        .map(|entry| entry.path_name.clone())
+        .collect();
+    let gfa = spoa_graph.generate_gfa(&headers, false);
+    unchop_gfa(&gfa)
 }
 
 /// Smooth a single block: extract sequences → SPOA → GFA.
@@ -2147,6 +2196,7 @@ fn smooth_block(
 
         entries.push(SeqEntry {
             sequence: String::from_utf8_lossy(&full_seq).to_string(),
+            core_sequence: String::from_utf8_lossy(&core_seq).to_string(),
             path_name,
             left_pad: actual_left_pad,
             right_pad: actual_right_pad,
@@ -2160,7 +2210,13 @@ fn smooth_block(
     // Sort by sequence length descending (SPOA benefits from longest-first)
     entries.sort_by(|a, b| b.sequence.len().cmp(&a.sequence.len()));
 
-    // 3. Run SPOA on all sequences
+    let any_padding = entries.iter().any(|e| e.left_pad > 0 || e.right_pad > 0);
+    if !any_padding {
+        // No padding — generate GFA directly
+        return smooth_entries_without_padding(&entries, config);
+    }
+
+    // 3. Run SPOA on padded sequences to find the core alignment window.
     let (mut spoa_graph, mut spoa_engine) = build_spoa_engine(config.scoring_params);
     feed_sequences_to_graph(
         &mut spoa_engine,
@@ -2169,14 +2225,6 @@ fn smooth_block(
     );
 
     // 4. Handle padding trimming
-    let any_padding = entries.iter().any(|e| e.left_pad > 0 || e.right_pad > 0);
-
-    if !any_padding {
-        // No padding — generate GFA directly
-        let headers: Vec<String> = entries.iter().map(|e| e.path_name.clone()).collect();
-        let gfa = spoa_graph.generate_gfa(&headers, false);
-        return unchop_gfa(&gfa);
-    }
 
     // With padding: use MSA-based trimming approach
     let msa = spoa_graph.generate_msa();
@@ -2185,8 +2233,7 @@ fn smooth_block(
     let (core_start, core_end) = find_core_column_range(&msa, &entries);
 
     if core_start >= core_end {
-        // Degenerate case — return empty
-        return Ok(String::new());
+        return smooth_entries_without_padding(&entries, config);
     }
 
     // Extract core subsequences and re-run SPOA
@@ -2207,14 +2254,14 @@ fn smooth_block(
         core_sequences.push(core_seq);
     }
 
-    // Any entry with an empty core would be fed an empty string to SPOA,
-    // which silently emits no P-line for that entry — losing that input
-    // path-range's bp coverage. Even ONE empty core is a correctness
-    // problem, not just a quality one: the laced graph's path-bp coverage
-    // contract is "every input range survives somewhere". Route the whole
-    // block through passthrough rather than emit partial smoothed output.
+    // Any entry with an empty core would be fed an empty string to SPOA, which
+    // silently emits no P-line for that entry and loses that input path-range's
+    // bp coverage. Even ONE empty core is a correctness problem, not just a
+    // quality one: the laced graph's path-bp coverage contract is "every input
+    // range survives somewhere". Retry the block as unpadded POA rather than
+    // emit partial smoothed output or substitute the original subgraph.
     if n_empty_core > 0 {
-        return Ok(String::new());
+        return smooth_entries_without_padding(&entries, config);
     }
 
     // Stronger check: `find_core_column_range`'s MAX-of-left-pad-end /
@@ -2234,12 +2281,13 @@ fn smooth_block(
         .take(nseqs)
         .map(|e| e.sequence.len() - e.left_pad - e.right_pad)
         .sum();
-    // Strict equality. Any bp loss from MSA-trim ends up as a P-line
-    // whose name claims input bp coords but whose step walk is shorter.
-    // The lacer trusts the name and so does the next pass — the bp
-    // shortfall becomes a real coordinate error in the output graph.
+    // Strict equality. Any bp loss from MSA-trim ends up as a P-line whose name
+    // claims input bp coords but whose step walk is shorter. The lacer trusts
+    // the name and so does the next pass — the bp shortfall becomes a real
+    // coordinate error in the output graph. Use no-padding POA for this block
+    // instead; that preserves the path range contract without passthrough.
     if total_core_bp != total_input_bp {
-        return Ok(String::new());
+        return smooth_entries_without_padding(&entries, config);
     }
 
     // Build fresh SPOA graph from core sequences
@@ -2551,6 +2599,72 @@ P\tchr2:200-212\t1+,2+,3+\t*
         // At least two L-lines: edges 1→2 (both paths) and 2→3 (chr2 only).
         let l_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("L\t")).collect();
         assert!(l_lines.len() >= 2, "edges: {:?}", l_lines);
+    }
+
+    #[test]
+    fn test_smooth_block_retries_without_padding_when_trim_would_empty_core() {
+        // The lower-locus PGGB failure produced an empty smoothable block
+        // because MSA-based padding trim would have dropped a path's entire
+        // core. That is not an aligner failure: the block can still be
+        // validly POA-smoothed if retried without flank padding.
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\tAAAA
+S\t3\tAAAA
+L\t1\t+\t2\t+\t0M
+P\tp1:0-8\t1+,2+\t*
+P\tp2:0-4\t3+\t*
+";
+        let graph = parse_gfa(gfa);
+        let path_positions = compute_path_positions(&graph);
+        let block = Block {
+            path_ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 1,
+                    end_step: 2,
+                    length: 4,
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 0,
+                    end_step: 1,
+                    length: 4,
+                },
+            ],
+            source: BlockSource::PathOverlap,
+        };
+        let config = SmoothConfig {
+            poa_padding_fraction: 1.0,
+            num_threads: 1,
+            ..SmoothConfig::new(2)
+        };
+
+        let out = smooth_block(&block, &graph, &config, &path_positions)
+            .expect("block should retry without padding instead of failing empty");
+        assert!(!out.is_empty(), "no-padding retry should emit a GFA");
+        let smoothed = parse_gfa(&out);
+        let paths: FxHashMap<_, _> = smoothed
+            .paths
+            .iter()
+            .map(|path| {
+                let seq = path
+                    .steps
+                    .iter()
+                    .flat_map(|&(node_idx, is_reverse)| {
+                        if is_reverse {
+                            reverse_complement(&smoothed.nodes[node_idx])
+                        } else {
+                            smoothed.nodes[node_idx].clone()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (path.name.as_str(), String::from_utf8(seq).unwrap())
+            })
+            .collect();
+        assert_eq!(paths.get("p1:4-8").map(String::as_str), Some("AAAA"));
+        assert_eq!(paths.get("p2:0-4").map(String::as_str), Some("AAAA"));
     }
 
     #[test]
