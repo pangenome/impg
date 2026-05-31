@@ -52,6 +52,39 @@ METHOD_FAMILIES = (
 INVALID_OBJECTIVE = 1.0e12
 PATH_STEP_RE = re.compile(r"(.+)([+-])$")
 WALK_STEP_RE = re.compile(r"([<>])([^<>]+)")
+DEFAULT_FREQUENCY_BIN_LABELS = (
+    "0-0.01",
+    "0.01-0.05",
+    "0.05-0.1",
+    "0.1-0.25",
+    "0.25-0.5",
+    "0.5-0.75",
+    "0.75-1",
+    "1-1.5",
+    "1.5-2",
+    "2-3",
+    ">=3",
+)
+DEFAULT_LENGTH_BIN_LABELS = (
+    "0-1",
+    "1-2",
+    "2-4",
+    "4-8",
+    "8-16",
+    "16-32",
+    "32-64",
+    "64-128",
+    "128-256",
+    "256-512",
+    "512-1024",
+    "1024-2048",
+    "2048-4096",
+    "4096-8192",
+    "8192-16384",
+    "16384-32768",
+    "32768-65536",
+    ">=65536",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,6 +147,42 @@ class TrialResult:
     optimizer: str
     started_at: str
     finished_at: str
+
+
+@dataclasses.dataclass(frozen=True)
+class HistogramBin:
+    label: str
+    lower: float
+    upper: float | None
+    center: float
+
+
+@dataclasses.dataclass(frozen=True)
+class GraphShape:
+    path_count: int
+    segment_count: int
+    total_bp: int
+    path_steps: int
+    bp_weighted_depth_mean: float
+    singleton_bp: int
+    frequency_distribution: tuple[float, ...]
+    length_distribution: tuple[float, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class TargetProfile:
+    source_gfa: str | None
+    source_freq_bins: str | None
+    source_summary: str | None
+    freq_graph: str | None
+    frequency_bins: tuple[HistogramBin, ...]
+    frequency_distribution: tuple[float, ...]
+    length_bins: tuple[HistogramBin, ...]
+    length_distribution: tuple[float, ...] | None
+    total_bp: float | None
+    path_count: int | None
+    bp_weighted_depth_mean: float | None
+    singleton_bp: float | None
 
 
 class Optimizer:
@@ -450,6 +519,45 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--objective-bp-scale", type=float, help="Override total-bp objective normalization")
+    parser.add_argument(
+        "--target-gfa",
+        type=Path,
+        help="PGGB/control GFA used to derive target path-depth frequency, node length, and total-bp profiles",
+    )
+    parser.add_argument(
+        "--target-freq-bins",
+        type=Path,
+        help="TSV with freq_bin and bp_frac columns; bin labels define target frequency histogram bins",
+    )
+    parser.add_argument(
+        "--target-summary",
+        type=Path,
+        help="TSV summary for target metadata such as paths, segment_bp, bp_weighted_depth_mean, and singleton_bp",
+    )
+    parser.add_argument(
+        "--target-frequency-weight",
+        type=float,
+        default=1000.0,
+        help="Weight applied to target frequency TV+ordered-distance score",
+    )
+    parser.add_argument(
+        "--target-length-weight",
+        type=float,
+        default=100.0,
+        help="Weight applied to bp-weighted node length distribution distance",
+    )
+    parser.add_argument(
+        "--target-total-bp-weight",
+        type=float,
+        default=25.0,
+        help="Weight applied to excess total segment bp ratio relative to the target",
+    )
+    parser.add_argument(
+        "--target-whitespace-weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to legacy path-whitespace penalties when target-shape scoring is enabled",
+    )
     parser.add_argument("--report-top", type=int, default=20)
     parser.add_argument("--query-extra-arg", action="append", default=[], help="Extra single token for impg query")
     parser.add_argument("--crush-extra-arg", action="append", default=[], help="Extra single token for impg crush")
@@ -479,6 +587,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--timeout must be >= 1")
     if args.report_top < 1:
         raise SystemExit("--report-top must be >= 1")
+    for name in (
+        "target_frequency_weight",
+        "target_length_weight",
+        "target_total_bp_weight",
+        "target_whitespace_weight",
+    ):
+        if getattr(args, name) < 0.0:
+            raise SystemExit(f"--{name.replace('_', '-')} must be >= 0")
+    for name in ("target_gfa", "target_freq_bins", "target_summary"):
+        path = getattr(args, name)
+        if path and not path.exists():
+            raise SystemExit(f"--{name.replace('_', '-')} does not exist: {path}")
     if args.sequence_files and args.sequence_list:
         raise SystemExit("--sequence-files and --sequence-list are mutually exclusive")
     if args.mode == "crush-only":
@@ -519,12 +639,28 @@ def ensure_study(args: argparse.Namespace, dimensions: list[Dimension], optimize
             }
             for dim in dimensions
         ],
-        "objective": objective_description(),
+        "objective": objective_description(args),
+        "target_profile": target_profile_json(getattr(args, "target_profile", None)),
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
 
-def objective_description() -> dict[str, Any]:
+def objective_description(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "target_profile", None) is not None:
+        return {
+            "formula": (
+                "target_frequency_weight*(target_frequency_tv + target_frequency_emd) + "
+                "target_length_weight*target_length_distance + "
+                "target_total_bp_weight*max(0,total_segment_bp/target_total_bp - 1) + "
+                "target_whitespace_weight*legacy_path_whitespace_penalty + "
+                "duplicate_sequence_frac + local_repeat_context_nodes/segments"
+            ),
+            "target_frequency_weight": args.target_frequency_weight,
+            "target_length_weight": args.target_length_weight,
+            "target_total_bp_weight": args.target_total_bp_weight,
+            "target_whitespace_weight": args.target_whitespace_weight,
+            "invalid_trials": INVALID_OBJECTIVE,
+        }
     return {
         "formula": (
             "total_segment_bp/bp_scale + 2*(singleton_bp/total_segment_bp) + "
@@ -739,7 +875,10 @@ def run_trial(plan: TrialPlan, args: argparse.Namespace, objective_scale: float 
         invalid_reasons.extend(path_validation.get("reasons", ["path_validation_failed"]))
 
     if metrics and not invalid_reasons:
-        raw_objective, objective_terms = compute_objective(metrics, args, objective_scale)
+        try:
+            raw_objective, objective_terms = compute_objective(metrics, args, objective_scale, plan.output_gfa)
+        except Exception as exc:
+            invalid_reasons.append(f"objective_error:{exc}")
 
     tell_objective = raw_objective if raw_objective is not None else INVALID_OBJECTIVE + plan.trial_id
     result = TrialResult(
@@ -889,9 +1028,297 @@ def parse_report_tsv(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def load_target_profile(args: argparse.Namespace) -> TargetProfile | None:
+    if not (args.target_gfa or args.target_freq_bins or args.target_summary):
+        return None
+
+    frequency_bins = parse_histogram_bins(DEFAULT_FREQUENCY_BIN_LABELS)
+    frequency_distribution: tuple[float, ...] | None = None
+    freq_graph: str | None = None
+    if args.target_freq_bins:
+        frequency_bins, frequency_distribution, freq_graph = read_frequency_bins_tsv(args.target_freq_bins)
+
+    length_bins = parse_histogram_bins(DEFAULT_LENGTH_BIN_LABELS)
+    summary = read_target_summary_tsv(args.target_summary) if args.target_summary else {}
+    target_shape: GraphShape | None = None
+    if args.target_gfa:
+        target_shape = graph_shape_from_gfa(args.target_gfa, frequency_bins, length_bins)
+        frequency_distribution = target_shape.frequency_distribution
+    elif args.target_length_weight > 0.0:
+        raise SystemExit("--target-gfa is required when --target-length-weight is greater than zero")
+
+    if frequency_distribution is None:
+        raise SystemExit("--target-gfa or --target-freq-bins is required for target-shape scoring")
+
+    total_bp = (
+        float(target_shape.total_bp)
+        if target_shape is not None
+        else optional_positive_float(summary.get("segment_bp") or summary.get("total_segment_bp"))
+    )
+    path_count = (
+        target_shape.path_count
+        if target_shape is not None
+        else optional_int(summary.get("paths") or summary.get("path_count"))
+    )
+    bp_weighted_depth_mean = (
+        target_shape.bp_weighted_depth_mean
+        if target_shape is not None
+        else optional_positive_float(
+            summary.get("bp_weighted_depth_mean") or summary.get("node_coverage_bp_weighted_mean")
+        )
+    )
+    singleton_bp = (
+        float(target_shape.singleton_bp)
+        if target_shape is not None
+        else optional_positive_float(summary.get("singleton_bp"))
+    )
+    length_distribution = target_shape.length_distribution if target_shape is not None else None
+
+    if args.target_total_bp_weight > 0.0 and not total_bp:
+        raise SystemExit("--target-gfa or --target-summary with segment_bp is required for total-bp target")
+
+    return TargetProfile(
+        source_gfa=str(args.target_gfa) if args.target_gfa else None,
+        source_freq_bins=str(args.target_freq_bins) if args.target_freq_bins else None,
+        source_summary=str(args.target_summary) if args.target_summary else None,
+        freq_graph=freq_graph,
+        frequency_bins=frequency_bins,
+        frequency_distribution=frequency_distribution,
+        length_bins=length_bins,
+        length_distribution=length_distribution,
+        total_bp=total_bp,
+        path_count=path_count,
+        bp_weighted_depth_mean=bp_weighted_depth_mean,
+        singleton_bp=singleton_bp,
+    )
+
+
+def target_profile_json(target: TargetProfile | None) -> dict[str, Any] | None:
+    if target is None:
+        return None
+    return {
+        "source_gfa": target.source_gfa,
+        "source_freq_bins": target.source_freq_bins,
+        "source_summary": target.source_summary,
+        "freq_graph": target.freq_graph,
+        "frequency_bins": [bin_json(item) for item in target.frequency_bins],
+        "frequency_distribution": list(target.frequency_distribution),
+        "length_bins": [bin_json(item) for item in target.length_bins],
+        "length_distribution": list(target.length_distribution) if target.length_distribution else None,
+        "total_bp": target.total_bp,
+        "path_count": target.path_count,
+        "bp_weighted_depth_mean": target.bp_weighted_depth_mean,
+        "singleton_bp": target.singleton_bp,
+    }
+
+
+def bin_json(item: HistogramBin) -> dict[str, Any]:
+    return {
+        "label": item.label,
+        "lower": item.lower,
+        "upper": item.upper,
+        "center": item.center,
+    }
+
+
+def parse_histogram_bins(labels: Iterable[str]) -> tuple[HistogramBin, ...]:
+    parsed: list[tuple[str, float, float | None]] = []
+    for raw_label in labels:
+        label = str(raw_label).strip()
+        if not label:
+            continue
+        if label.startswith(">="):
+            parsed.append((label, float(label[2:]), None))
+            continue
+        if "-" not in label:
+            raise ValueError(f"malformed histogram bin label: {label}")
+        low, high = label.split("-", 1)
+        parsed.append((label, float(low), float(high)))
+
+    bins: list[HistogramBin] = []
+    previous_width = 1.0
+    for label, lower, upper in parsed:
+        if upper is None:
+            center = lower + previous_width / 2.0
+        else:
+            center = (lower + upper) / 2.0
+            previous_width = max(upper - lower, 1.0e-12)
+        bins.append(HistogramBin(label=label, lower=lower, upper=upper, center=center))
+    if not bins:
+        raise ValueError("empty histogram bin list")
+    return tuple(bins)
+
+
+def read_frequency_bins_tsv(path: Path) -> tuple[tuple[HistogramBin, ...], tuple[float, ...], str | None]:
+    labels: list[str] = []
+    fractions: list[float] = []
+    selected_graph: str | None = None
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            graph = row.get("graph") or ""
+            if selected_graph is None:
+                selected_graph = graph
+            if graph != selected_graph:
+                continue
+            label = row.get("freq_bin")
+            if label is None:
+                raise ValueError(f"{path} is missing a freq_bin column")
+            labels.append(label)
+            fractions.append(positive_float(row.get("bp_frac"), 0.0))
+    if not labels:
+        raise ValueError(f"{path} did not contain any target frequency bins")
+    return parse_histogram_bins(labels), tuple(normalize_distribution(fractions)), selected_graph
+
+
+def read_target_summary_tsv(path: Path) -> dict[str, Any]:
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        try:
+            row = next(reader)
+        except StopIteration:
+            return {}
+    return dict(row)
+
+
+def graph_shape_from_gfa(
+    path: Path, frequency_bins: tuple[HistogramBin, ...], length_bins: tuple[HistogramBin, ...]
+) -> GraphShape:
+    segment_lengths: dict[str, int] = {}
+    occurrence_depth: dict[str, int] = defaultdict(int)
+    path_count = 0
+    path_steps = 0
+
+    with path.open() as handle:
+        for line in handle:
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 3 and fields[0] == "S":
+                segment_lengths[fields[1]] = gfa_segment_length(fields)
+            elif len(fields) >= 3 and fields[0] == "P":
+                path_count += 1
+                steps = parse_p_steps(fields[2])
+                path_steps += len(steps)
+                for node, _orientation in steps:
+                    occurrence_depth[node] += 1
+            elif len(fields) >= 7 and fields[0] == "W":
+                path_count += 1
+                steps = parse_w_steps(fields[6])
+                path_steps += len(steps)
+                for node, _orientation in steps:
+                    occurrence_depth[node] += 1
+
+    total_bp = sum(segment_lengths.values())
+    path_denominator = max(1, path_count)
+    frequency_bp = [0.0] * len(frequency_bins)
+    length_bp = [0.0] * len(length_bins)
+    singleton_bp = 0
+    weighted_depth_sum = 0.0
+
+    for node, length in segment_lengths.items():
+        depth = occurrence_depth.get(node, 0)
+        weighted_depth_sum += depth * length
+        if depth == 1:
+            singleton_bp += length
+        frequency = depth / path_denominator
+        frequency_bp[histogram_bin_index(frequency_bins, frequency)] += length
+        length_bp[histogram_bin_index(length_bins, float(length))] += length
+
+    bp_weighted_depth_mean = weighted_depth_sum / total_bp if total_bp > 0 else 0.0
+    return GraphShape(
+        path_count=path_count,
+        segment_count=len(segment_lengths),
+        total_bp=total_bp,
+        path_steps=path_steps,
+        bp_weighted_depth_mean=bp_weighted_depth_mean,
+        singleton_bp=singleton_bp,
+        frequency_distribution=tuple(normalize_distribution(frequency_bp)),
+        length_distribution=tuple(normalize_distribution(length_bp)),
+    )
+
+
+def gfa_segment_length(fields: list[str]) -> int:
+    sequence = fields[2]
+    if sequence != "*":
+        return len(sequence)
+    for tag in fields[3:]:
+        parts = tag.split(":", 2)
+        if len(parts) == 3 and parts[0] == "LN":
+            try:
+                return max(0, int(parts[2]))
+            except ValueError:
+                return 0
+    return 0
+
+
+def histogram_bin_index(bins: tuple[HistogramBin, ...], value: float) -> int:
+    if value < bins[0].lower:
+        return 0
+    for idx, item in enumerate(bins):
+        if item.upper is None:
+            if value >= item.lower:
+                return idx
+        elif item.lower <= value < item.upper:
+            return idx
+    return len(bins) - 1
+
+
+def normalize_distribution(values: Iterable[float]) -> list[float]:
+    items = [max(0.0, float(value)) for value in values]
+    total = sum(items)
+    if total <= 0.0:
+        return [0.0 for _ in items]
+    return [value / total for value in items]
+
+
+def total_variation(left: Iterable[float], right: Iterable[float]) -> float:
+    return 0.5 * sum(abs(a - b) for a, b in zip(left, right))
+
+
+def ordered_distribution_distance(
+    left: Iterable[float],
+    right: Iterable[float],
+    bins: tuple[HistogramBin, ...],
+    transform: Callable[[float], float] | None = None,
+) -> float:
+    left_items = list(left)
+    right_items = list(right)
+    if len(left_items) != len(right_items):
+        raise ValueError("distribution lengths differ")
+    if len(left_items) <= 1:
+        return total_variation(left_items, right_items)
+
+    centers = [item.center for item in bins]
+    if transform is not None:
+        centers = [transform(center) for center in centers]
+    span = max(centers) - min(centers)
+    if span <= 0.0:
+        span = 1.0
+
+    cdf_delta = 0.0
+    distance = 0.0
+    for idx in range(len(left_items) - 1):
+        cdf_delta += left_items[idx] - right_items[idx]
+        distance += abs(cdf_delta) * max(0.0, centers[idx + 1] - centers[idx])
+    return distance / span
+
+
 def compute_objective(
-    metrics: dict[str, Any], args: argparse.Namespace, objective_scale: float | None
+    metrics: dict[str, Any], args: argparse.Namespace, objective_scale: float | None, output_gfa: Path
 ) -> tuple[float, dict[str, float]]:
+    legacy_terms = compute_legacy_objective_terms(metrics, args, objective_scale)
+    target_profile = getattr(args, "target_profile", None)
+    if target_profile is None:
+        return sum(legacy_terms.values()), legacy_terms
+
+    target_terms = compute_target_objective_terms(output_gfa, metrics, args, target_profile, legacy_terms)
+    return target_terms["raw_objective_weighted_total"], {**legacy_terms, **target_terms}
+
+
+def compute_legacy_objective_terms(
+    metrics: dict[str, Any], args: argparse.Namespace, objective_scale: float | None
+) -> dict[str, float]:
     total_bp = positive_float(metrics.get("total_segment_bp"), 1.0)
     paths = positive_float(metrics.get("paths"), max(1, args.expected_path_count or 1))
     segments = positive_float(metrics.get("segments"), 1.0)
@@ -918,7 +1345,97 @@ def compute_objective(
         "coverage_reward": -positive_float(metrics.get("node_coverage_bp_weighted_mean"), 0.0)
         / paths,
     }
-    return sum(terms.values()), terms
+    return terms
+
+
+def compute_target_objective_terms(
+    output_gfa: Path,
+    metrics: dict[str, Any],
+    args: argparse.Namespace,
+    target: TargetProfile,
+    legacy_terms: dict[str, float],
+) -> dict[str, float]:
+    trial_shape = graph_shape_from_gfa(output_gfa, target.frequency_bins, target.length_bins)
+    frequency_tv = total_variation(
+        trial_shape.frequency_distribution,
+        target.frequency_distribution,
+    )
+    frequency_emd = ordered_distribution_distance(
+        trial_shape.frequency_distribution,
+        target.frequency_distribution,
+        target.frequency_bins,
+    )
+    frequency_score = frequency_tv + frequency_emd
+    frequency_weighted = args.target_frequency_weight * frequency_score
+
+    if target.length_distribution is None:
+        length_tv = 0.0
+        length_emd = 0.0
+        length_distance = 0.0
+    else:
+        length_tv = total_variation(trial_shape.length_distribution, target.length_distribution)
+        length_emd = ordered_distribution_distance(
+            trial_shape.length_distribution,
+            target.length_distribution,
+            target.length_bins,
+            transform=lambda value: math.log2(value + 1.0),
+        )
+        length_distance = length_tv + length_emd
+    length_weighted = args.target_length_weight * length_distance
+
+    target_total_bp = target.total_bp or 0.0
+    trial_total_bp = positive_float(metrics.get("total_segment_bp"), float(trial_shape.total_bp))
+    if target_total_bp > 0.0:
+        total_bp_ratio = trial_total_bp / target_total_bp
+        total_bp_excess = max(0.0, trial_total_bp - target_total_bp)
+        total_bp_excess_ratio = max(0.0, total_bp_ratio - 1.0)
+    else:
+        total_bp_ratio = 0.0
+        total_bp_excess = 0.0
+        total_bp_excess_ratio = 0.0
+    total_bp_weighted = args.target_total_bp_weight * total_bp_excess_ratio
+
+    whitespace_penalty = (
+        legacy_terms["path_white_space_bp_p99_fraction_x10"]
+        + legacy_terms["path_white_space_bp_max_fraction_x5"]
+        + legacy_terms["long_white_space_bridges_per_path"]
+    )
+    whitespace_weighted = args.target_whitespace_weight * whitespace_penalty
+    residual_graph_penalty = (
+        legacy_terms["duplicate_sequence_frac"] + legacy_terms["local_repeat_context_nodes_fraction"]
+    )
+    raw_objective = (
+        frequency_weighted
+        + length_weighted
+        + total_bp_weighted
+        + whitespace_weighted
+        + residual_graph_penalty
+    )
+
+    return {
+        "target_frequency_tv": frequency_tv,
+        "target_frequency_emd": frequency_emd,
+        "target_frequency_score": frequency_score,
+        "target_frequency_weighted": frequency_weighted,
+        "target_length_tv": length_tv,
+        "target_length_emd": length_emd,
+        "target_length_distance": length_distance,
+        "target_length_weighted": length_weighted,
+        "target_total_bp": target_total_bp,
+        "target_total_bp_ratio": total_bp_ratio,
+        "target_total_bp_excess": total_bp_excess,
+        "target_total_bp_excess_ratio": total_bp_excess_ratio,
+        "target_total_bp_weighted": total_bp_weighted,
+        "target_whitespace_penalty": whitespace_penalty,
+        "target_whitespace_weighted": whitespace_weighted,
+        "target_residual_graph_penalty_weighted": residual_graph_penalty,
+        "target_trial_path_count": float(trial_shape.path_count),
+        "target_trial_bp_weighted_depth_mean": trial_shape.bp_weighted_depth_mean,
+        "target_bp_weighted_depth_mean": target.bp_weighted_depth_mean or 0.0,
+        "target_trial_singleton_bp": float(trial_shape.singleton_bp),
+        "target_singleton_bp": target.singleton_bp or 0.0,
+        "raw_objective_weighted_total": raw_objective,
+    }
 
 
 def positive_float(value: Any, default: float) -> float:
@@ -929,6 +1446,27 @@ def positive_float(value: Any, default: float) -> float:
     if not math.isfinite(out):
         return default
     return max(0.0, out)
+
+
+def optional_positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out < 0.0:
+        return None
+    return out
+
+
+def optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).replace(",", ""))
+    except ValueError:
+        return None
 
 
 def parse_int(value: Any) -> int | None:
@@ -1102,6 +1640,7 @@ def dry_run(args: argparse.Namespace, dimensions: list[Dimension]) -> int:
                     for dim in dimensions
                 ],
                 "decoded": decoded,
+                "target_profile": target_profile_json(getattr(args, "target_profile", None)),
                 "primary_command": plan.primary_command,
                 "graph_report_command": plan.graph_report_command,
                 "command_sh": command_script(plan),
@@ -1137,6 +1676,7 @@ def read_segments(path: Path) -> dict[str, str]:
 
 def main() -> int:
     args = parse_args()
+    args.target_profile = load_target_profile(args)
     dimensions = build_dimensions(args)
     if args.dry_run:
         return dry_run(args, dimensions)
