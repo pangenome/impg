@@ -226,8 +226,10 @@ pub struct ResolutionConfig {
     /// successful replacement construction. This value is logged as a
     /// would-have-failed diagnostic; it must not veto a replacement.
     pub multi_level_min_objective_delta: i128,
-    /// Objective used to rank and accept generated multi-bubble/window
-    /// candidates.
+    /// Objective used to rank generated multi-bubble/window candidates.
+    ///
+    /// This never gates application after a replacement has been built; exact
+    /// path preservation remains the acceptance gate.
     pub multi_level_objective: MultiLevelObjectiveMode,
     /// When true, candidate generation logs tiny high-frequency,
     /// low-complexity anchors as poor window boundaries.
@@ -291,13 +293,14 @@ pub enum ResolutionMethod {
     /// path-order sliding windows, cross-level windows, local stringy
     /// neighborhoods, and explicitly outward-expanded residual windows), run
     /// multi-site windows through SweepGA/seqwish before trusting smaller POVU
-    /// boundaries, then apply only non-overlapping candidates that improve an
-    /// explicit graph-size objective.
+    /// boundaries, then apply non-overlapping path-valid candidates. Objective
+    /// metrics rank and diagnose candidates; they do not veto accepted
+    /// replacements.
     IterativeMultiLevel,
     /// Coverage-driven multi-bubble pass: use the iterative multi-level window
     /// generator, include outward residual windows by default, run multi-site
-    /// windows through SweepGA/seqwish, and accept only windows that improve
-    /// bp-weighted node path coverage and/or reduce singleton bp.
+    /// windows through SweepGA/seqwish, and report bp-weighted node path
+    /// coverage / singleton-bp deltas diagnostically.
     CoverageMultiBubble,
 }
 
@@ -1165,11 +1168,7 @@ fn resolve_graph_bubbles(
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
                     if selected_count <= 32 || done == selected_count || done % 25 == 0 {
-                        let status = match &result {
-                            Ok(Some(_)) => "accepted",
-                            Ok(None) => "empty",
-                            Err(_) => "failed",
-                        };
+                        let status = replacement_build_status(&result);
                         log::info!(
                             "crush round {}: replacement build progress {}/{} ({})",
                             round + 1,
@@ -1185,17 +1184,24 @@ fn resolve_graph_bubbles(
         let build_elapsed = build_start.elapsed();
 
         let mut plans: Vec<ReplacementPlan> = Vec::new();
-        let mut failed_or_empty = 0usize;
+        let mut empty = 0usize;
+        let mut failed = 0usize;
+        let mut path_invalid = 0usize;
         for result in build_results {
             match result {
                 Ok(Some(plan)) => {
                     plans.push(plan);
                 }
                 Ok(None) => {
-                    failed_or_empty += 1;
+                    empty += 1;
                     stats.bailed += 1;
                 }
                 Err(err) => {
+                    if replacement_failure_is_path_invalid(&err) {
+                        path_invalid += 1;
+                    } else {
+                        failed += 1;
+                    }
                     log::debug!(
                         "resolution: candidate replacement failed in round {}: {}",
                         round + 1,
@@ -1209,25 +1215,29 @@ fn resolve_graph_bubbles(
         if plans.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush round {}: 0/{} replacement(s) accepted in {:.2?} ({} failed or produced empty replacements)",
+                    "crush round {}: 0/{} replacement(s) accepted in {:.2?} (failed={}, empty={}, path-invalid={})",
                     round + 1,
                     selected_count,
                     build_elapsed,
-                    failed_or_empty
+                    failed,
+                    empty,
+                    path_invalid
                 );
             }
             last_round_resolved_ref_bp_regions.clear();
             continue;
         }
 
-        if emit_logs && failed_or_empty > 0 {
+        if emit_logs && (failed > 0 || empty > 0 || path_invalid > 0) {
             log::info!(
-                "crush round {}: accepted {}/{} replacement(s) in {:.2?}; {} failed or produced empty replacements",
+                "crush round {}: accepted {}/{} replacement(s) in {:.2?}; failed={}, empty={}, path-invalid={}",
                 round + 1,
                 plans.len(),
                 selected_count,
                 build_elapsed,
-                failed_or_empty
+                failed,
+                empty,
+                path_invalid
             );
         }
 
@@ -1549,11 +1559,7 @@ fn resolve_graph_bubble_chains(
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
                     if selected_count <= 64 || done == selected_count || done % 25 == 0 {
-                        let status = match &result {
-                            Ok(Some(_)) => "accepted",
-                            Ok(None) => "empty",
-                            Err(_) => "failed",
-                        };
+                        let status = replacement_build_status(&result);
                         log::info!(
                             "crush chain-greedy round {}: replacement build progress {}/{} ({})",
                             round + 1,
@@ -1801,11 +1807,7 @@ fn resolve_graph_bubbles_chain_povu(
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
                     if selected_count <= 32 || done == selected_count || done % 25 == 0 {
-                        let status = match &result {
-                            Ok(Some(_)) => "accepted",
-                            Ok(None) => "empty",
-                            Err(_) => "failed",
-                        };
+                        let status = replacement_build_status(&result);
                         log::info!(
                             "crush chain-povu round {}: block build progress {}/{} ({})",
                             round + 1,
@@ -7894,6 +7896,27 @@ fn clip_replacement_to_interior(
     })
 }
 
+fn replacement_build_status<T>(result: &io::Result<Option<T>>) -> &'static str {
+    match result {
+        Ok(Some(_)) => "accepted",
+        Ok(None) => "empty",
+        Err(err) if replacement_failure_is_path_invalid(err) => "path-invalid",
+        Err(_) => "failed",
+    }
+}
+
+fn replacement_failure_is_path_invalid(err: &io::Error) -> bool {
+    let message = err.to_string();
+    message.contains("changed sequence length")
+        || message.contains("resolved graph failed exact path-sequence validation")
+        || message.contains("does not contain the expected traversal sequence")
+        || message.contains("replacement graph is missing path")
+        || message.contains("replacement emitted")
+        || message.contains("clipped replacement emitted")
+        || message.contains("clipped replacement path")
+        || message.contains("interior span")
+}
+
 struct ReplacementPathPiece {
     node: usize,
     rev: bool,
@@ -8529,6 +8552,17 @@ mod tests {
             .collect::<FxHashMap<_, _>>()
     }
 
+    fn sorted_segment_sequences(gfa: &str) -> Vec<String> {
+        let mut sequences = parse_gfa(gfa)
+            .unwrap()
+            .segments
+            .into_iter()
+            .map(|segment| String::from_utf8(segment.seq).unwrap())
+            .collect::<Vec<_>>();
+        sequences.sort();
+        sequences
+    }
+
     fn poasta_resolution_config() -> ResolutionConfig {
         ResolutionConfig {
             method: ResolutionMethod::Poasta,
@@ -8681,6 +8715,60 @@ P\tref\t1+,3+\t*
 P\tins\t1+,2+,3+\t*
 ";
         assert_poasta_resolves_exact(gfa, poasta_resolution_config());
+    }
+
+    #[test]
+    fn direct_poa_and_poasta_accept_topology_changing_replacements() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tCTT
+S\t3\tCGG
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\talt\t1+,3+,4+\t*
+";
+        let before_paths = seq_map(gfa);
+        let before_segments = sorted_segment_sequences(gfa);
+
+        for method in [ResolutionMethod::Poa, ResolutionMethod::Poasta] {
+            let resolved = resolve_gfa_bubbles(
+                gfa,
+                &ResolutionConfig {
+                    method,
+                    max_traversal_len: 100_000,
+                    max_median_traversal_len: 100_000,
+                    max_total_sequence: 10_000_000,
+                    retry_min_compression_ratio: 1_000_000.0,
+                    ..ResolutionConfig::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(before_paths, seq_map(&resolved.gfa), "{method:?}");
+            assert_eq!(
+                resolved.stats.resolved, 1,
+                "{method:?}: {:?}",
+                resolved.stats
+            );
+            assert_eq!(resolved.stats.bailed, 0, "{method:?}: {:?}", resolved.stats);
+            assert_eq!(resolved.stats.retry_attempts, 0, "{method:?}");
+
+            let after_segments = sorted_segment_sequences(&resolved.gfa);
+            assert_ne!(
+                before_segments, after_segments,
+                "{method:?} should be accepted even when it rewrites local segmentation"
+            );
+            assert!(
+                after_segments.iter().any(|seq| seq == "AC"),
+                "{method:?} should expose the shared C prefix in the accepted replacement: {:?}",
+                after_segments
+            );
+        }
     }
 
     #[test]
