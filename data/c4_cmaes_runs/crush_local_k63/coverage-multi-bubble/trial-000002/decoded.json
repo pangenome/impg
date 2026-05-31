@@ -1,0 +1,15 @@
+{
+  "candidate_limit": 60,
+  "max_median_traversal_len": 4420,
+  "max_rounds": 2,
+  "max_traversal_len": 16344,
+  "max_traversals": 264,
+  "max_window_sites": 3,
+  "min_objective_delta": 4,
+  "min_traversal_len": 85,
+  "polish_max_median_traversal_len": 1300,
+  "polish_max_traversal_len": 5624,
+  "polish_rounds": 2,
+  "replacement_flank_bp": 160,
+  "window_target_bp": 10423
+}
