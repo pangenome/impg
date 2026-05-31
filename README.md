@@ -474,10 +474,13 @@ Unlike `syng`, `syng-local` does not apply the syng frequency mask unless
 `:mask` is requested explicitly.
 Syng GFA extraction selects the top 0.05% most frequent local syncmer nodes and
 private-splits unsupported high-frequency occurrences before raw or blunt graph
-materialization. Occurrences in supported high-frequency runs stay shared
-(`freq-run=10` by default, or `freq-span=<bp>` when configured). It also splits
-rare repeated-copy local syncmer contexts by default, so high-copy repeats and
-single-syncmer repeat loops do not become global graph glue. Use
+materialization. Occurrences in supported high-frequency runs or exact spans
+stay shared (`freq-run=10` and `freq-span=1k` by default). The same
+run/span rescue is applied to spectrum-selected dispersed scaffold-glue nodes,
+so there is no second private-split path that bypasses the high-frequency
+support policy. It also splits rare repeated-copy local syncmer contexts by
+default, so high-copy repeats and single-syncmer repeat loops do not become
+global graph glue. Use
 `-o gfa:syng:nomask` to disable this, or
 `-o gfa:syng:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k:crush` to
 tune it. Use `freq-run-aware=false` or `legacy-freq-mask=true` to reproduce the

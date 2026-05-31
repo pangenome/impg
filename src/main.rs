@@ -4869,10 +4869,12 @@ Syng notes:
   global index. Syng and syng-local GFA extraction
   selects the top 0.05% high-frequency local syncmer nodes and private-splits
   unsupported occurrences before bluntification, while rescuing supported
-  high-frequency runs by `freq-run` (default 10 syncmers) or `freq-span` bp.
-  They also require other shared syncmer support to appear in a short
-  consecutive run by default, and clone rare repeated-copy local syncmer
-  contexts so repeats seed ranges but do not glue unrelated copies;
+  high-frequency runs by `freq-run` (default 10 syncmers) or exact spans by
+  `freq-span` (default 1k bp). Spectrum-selected dispersed scaffold glue uses
+  the same `freq-run` / `freq-span` rescue before any private split. They also
+  require other shared syncmer support to appear in a short consecutive run by
+  default, and clone rare repeated-copy local syncmer contexts so repeats seed
+  ranges but do not glue unrelated copies;
   use `:nomask` or `:nofilter` to disable this or
   `:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k,sequence-k=191,min-run=3`
   to tune it. Add `:mask,freq-run-aware=false` or

@@ -33,24 +33,27 @@ this order:
    use range-relative forward coordinates. Reverse ranges use reverse-oriented
    range coordinates, so colinear anchors are still increasing in the emitted
    path coordinate system.
-2. Apply the existing high-frequency syncmer mask. This remains node-level:
-   a node rejected by `top=` or `max-occ=` is removed from all local walks, and
-   adjacent retained anchors are bridged with source sequence or `N` fill as
-   before.
-3. Build occurrence candidates from the post-frequency-mask walks. Only syncmer
-   nodes with more than one remaining occurrence are candidates for scaffold
-   filtering; singletons can be emitted as ordinary private topology because no
-   other path occurrence shares their node. The converter also records a compact
-   local node spectrum over the remaining shared syncmers: total local
-   occurrences, carrying path/haplotype count, occurrence-per-carrying-path
-   ratio, maximum copies on any one path, and maximum path-local positional
-   span for repeated copies. Nodes in the dispersed high-copy tail are removed
-   from scaffold support when they satisfy all provisional calibrated defaults:
-   at least `64` local occurrences, occurrence-per-carrying-path ratio at least
-   `2.0`, at least two copies on one carrying path, and maximum path-local span
-   at least the scaffold gap budget (`1 kb` by default). These nodes are not
-   deleted; they are split as private occurrences so repeat/CNV sequence is
-   preserved without allowing the syncmer to act as shared graph glue.
+2. Select explicit high-frequency syncmer nodes using `top=` and/or
+   `max-occ=`. In the default occurrence-level policy, selected nodes are not
+   removed globally. Their occurrences are private-split only when they lack
+   support from `freq-run` consecutive syncmers or `freq-span` bp of repeated
+   exact local sequence. `legacy-freq-mask=true` restores the older node-level
+   removal behavior for comparisons.
+3. Build occurrence candidates from the post-frequency-selection walks. Only
+   syncmer nodes with more than one remaining occurrence are candidates for
+   scaffold filtering; singletons can be emitted as ordinary private topology
+   because no other path occurrence shares their node. The converter also
+   records a compact local node spectrum over the remaining shared syncmers:
+   total local occurrences, carrying path/haplotype count,
+   occurrence-per-carrying-path ratio, maximum copies on any one path, and
+   maximum path-local positional span for repeated copies. Nodes in the
+   dispersed high-copy tail are treated as a second high-frequency source when
+   they satisfy all calibrated defaults: at least `64` local occurrences,
+   occurrence-per-carrying-path ratio at least `2.0`, at least two copies on one
+   carrying path, and maximum path-local span at least the scaffold gap budget
+   (`1 kb` by default). These nodes are not blindly private-split; their
+   occurrences use the same `freq-run` / `freq-span` rescue as explicit
+   high-frequency selections.
 4. Build bounded scaffold candidates from repeated windows of `min-run`
    consecutive shared syncmer occurrences. The old exhaustive all-pairs
    expansion was:
@@ -97,9 +100,8 @@ this order:
 9. Optionally apply the existing `sequence-k=` exact-span rule as an additional
    occurrence-level support source. This keeps previous exact sequence-span
    behavior but no longer blesses all occurrences of a node.
-10. Any remaining shared-node occurrence that is not SweepGA-scaffold-supported
-   or `sequence-k`-supported is split into a private occurrence during GFA
-   materialization.
+10. Any remaining shared-node occurrence that is not supported by its applicable
+   policy is split into a private occurrence during GFA materialization.
 
 ## Node vs occurrence semantics
 
@@ -107,9 +109,9 @@ The conversion has three distinct decisions:
 
 | Decision | Granularity | Effect |
 | --- | --- | --- |
-| Frequency mask (`top=`, `max-occ=`) | Node | Removes all local occurrences of rejected high-copy syncmer nodes and bridges them by sequence. |
-| Spectrum scaffold-glue guard | Node for support, occurrence for output | Prevents dispersed high-copy local-spectrum tail nodes from acting as shared scaffold glue; their occurrences are split/private rather than deleted. |
-| Scaffold-chain support (`min-run=`) | Occurrence | Keeps only the exact syncmer occurrences that are members of retained SweepGA scaffold chains. |
+| Frequency selection (`top=`, `max-occ=`) | Node for selection, occurrence for output | Selects explicit high-frequency nodes; unsupported occurrences are split/private, while occurrences rescued by `freq-run` or `freq-span` remain shared. |
+| Spectrum scaffold-glue source | Node for selection, occurrence for output | Selects dispersed high-copy local-spectrum tail nodes and applies the same `freq-run` / `freq-span` rescue before private splitting. |
+| Scaffold-chain support (`min-run=`) | Occurrence | Keeps non-spectrum shared syncmer occurrences that are members of retained SweepGA scaffold chains. |
 | Local repeat context rescue/split | Occurrence | Clones rare repeated local contexts when a near-single-copy node appears in a minor context. |
 
 The important change is the middle row. A syncmer node can now have both shared
@@ -148,11 +150,11 @@ No SweepGA filtering semantics were changed for this integration.
 Filtering happens before shared topology is materialized, but path spelling is
 preserved:
 
-- frequency-masked nodes are removed from the anchor walk and the gap between
-  neighboring retained anchors is filled from the selected input sequence when
-  sequence files are available;
-- scaffold-filtered off-chain syncmers are not deleted, only cloned/private, so
-  they keep the same syncmer sequence on the path;
+- in the default occurrence policy, explicit high-frequency and
+  spectrum-selected scaffold-glue syncmers are not deleted, only cloned/private
+  when unsupported, so they keep the same syncmer sequence on the path;
+- in legacy node-level frequency masking, removed anchors are bridged with the
+  selected input sequence when sequence files are available;
 - exact blunt output still trims syncmer slices by the same overlap/clip logic
   used before this change;
 - optional N cutting is the only intended path-spelling change, and only for

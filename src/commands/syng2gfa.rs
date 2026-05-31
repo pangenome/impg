@@ -39,8 +39,10 @@ pub const DEFAULT_GFA_MIN_SHARED_RUN: usize = crate::syng::DEFAULT_WALK_SEED_ANC
 /// private by default; long collinear runs remain shared.
 pub const DEFAULT_GFA_HIGH_FREQ_MIN_RUN: usize = 10;
 /// Default exact sequence span for rescuing high-frequency syncmer occurrences.
-/// Zero disables span rescue unless explicitly requested.
-pub const DEFAULT_GFA_HIGH_FREQ_MIN_SEQUENCE_SPAN_BP: usize = 0;
+/// A 1 kb default matches the C4 high-frequency sweep setting that first
+/// materially reduced private-copy explosion while keeping isolated singleton
+/// reuse private.
+pub const DEFAULT_GFA_HIGH_FREQ_MIN_SEQUENCE_SPAN_BP: usize = 1_000;
 /// Clone rare repeated-copy contexts for otherwise dominant local syncmers.
 /// This catches single-syncmer loops where a mostly single-copy node appears
 /// a second time in a selected path and glues two paralogous contexts together.
@@ -141,7 +143,10 @@ impl SyngGfaFrequencyMask {
     }
 
     fn shared_context_filter_enabled(self) -> bool {
-        self.shared_run_filter_enabled() || self.sequence_context_filter_enabled()
+        self.shared_run_filter_enabled()
+            || self.sequence_context_filter_enabled()
+            || self.high_freq_min_run > 0
+            || self.high_freq_min_sequence_span_bp > 0
     }
 }
 
@@ -1400,11 +1405,18 @@ struct SharedContextFilterResult {
     scaffold_dense_signatures: usize,
     path_copy_filtered_nodes: usize,
     path_copy_filtered_occurrences: usize,
+    path_copy_supported_occurrences: usize,
+    path_copy_run_supported_occurrences: usize,
+    path_copy_sequence_supported_occurrences: usize,
+    path_copy_private_split_occurrences: usize,
+    path_copy_scaffold_candidate_anchors: usize,
+    path_copy_scaffold_dense_signatures: usize,
 }
 
 #[derive(Default)]
 struct HighFrequencyOccurrencePolicyResult {
     split_occurrences: Vec<FxHashSet<u32>>,
+    supported_occurrence_keys: FxHashSet<LocalOccurrenceKey>,
     selected_nodes: usize,
     total_occurrences: usize,
     supported_occurrences: usize,
@@ -2074,8 +2086,13 @@ fn shared_context_filtered_occurrences(
     syncmer_len: u64,
     min_shared_run: usize,
     min_sequence_span_bp: usize,
+    high_freq_min_run: usize,
+    high_freq_min_sequence_span_bp: usize,
 ) -> SharedContextFilterResult {
-    if walks.is_empty() || (min_shared_run <= 1 && min_sequence_span_bp == 0) {
+    let generic_context_enabled = min_shared_run > 1 || min_sequence_span_bp > 0;
+    let high_frequency_context_enabled =
+        high_freq_min_run > 0 || high_freq_min_sequence_span_bp > 0;
+    if walks.is_empty() || (!generic_context_enabled && !high_frequency_context_enabled) {
         return SharedContextFilterResult {
             weak_occurrences: vec![FxHashSet::default(); walks.len()],
             ..SharedContextFilterResult::default()
@@ -2101,7 +2118,7 @@ fn shared_context_filtered_occurrences(
     let path_copy_filtered_occurrences = shared_occurrence_keys(walks, &scaffold_glue_nodes).len();
     if !scaffold_glue_nodes.is_empty() {
         info!(
-            "[syng2gfa] spectrum-selected {} dispersed high-copy scaffold-glue node(s) covering {} local occurrence(s) for private splitting (min_occ_per_path_ratio={}, min_occurrences={}, min_path_span_bp={})",
+            "[syng2gfa] spectrum-selected {} dispersed high-copy scaffold-glue node(s) covering {} local occurrence(s) for unified run/span masking (min_occ_per_path_ratio={}, min_occurrences={}, min_path_span_bp={})",
             scaffold_glue_nodes.len(),
             path_copy_filtered_occurrences,
             DEFAULT_GFA_SCAFFOLD_GLUE_MIN_OCC_PER_PATH_RATIO,
@@ -2113,9 +2130,22 @@ fn shared_context_filtered_occurrences(
         scaffold_supported_occurrences(walks, syncmer_len, min_shared_run, &scaffold_nodes);
     let sequence_supported =
         sequence_supported_occurrences(walks, syncmer_len, min_sequence_span_bp, &scaffold_nodes);
+    let spectrum_glue_policy = high_frequency_occurrence_policy(
+        walks,
+        syncmer_len,
+        &scaffold_glue_nodes,
+        high_freq_min_run,
+        high_freq_min_sequence_span_bp,
+    );
     let supported: FxHashSet<LocalOccurrenceKey> = scaffold_supported
         .union(&sequence_supported)
         .copied()
+        .chain(
+            spectrum_glue_policy
+                .supported_occurrence_keys
+                .iter()
+                .copied(),
+        )
         .collect();
     let mut weak_occurrences = vec![FxHashSet::default(); walks.len()];
     for key in shared_occurrences.difference(&supported).copied() {
@@ -2133,6 +2163,13 @@ fn shared_context_filtered_occurrences(
         scaffold_dense_signatures,
         path_copy_filtered_nodes: scaffold_glue_nodes.len(),
         path_copy_filtered_occurrences,
+        path_copy_supported_occurrences: spectrum_glue_policy.supported_occurrences,
+        path_copy_run_supported_occurrences: spectrum_glue_policy.run_supported_occurrences,
+        path_copy_sequence_supported_occurrences: spectrum_glue_policy
+            .sequence_supported_occurrences,
+        path_copy_private_split_occurrences: spectrum_glue_policy.private_split_occurrences,
+        path_copy_scaffold_candidate_anchors: spectrum_glue_policy.scaffold_candidate_anchors,
+        path_copy_scaffold_dense_signatures: spectrum_glue_policy.scaffold_dense_signatures,
     }
 }
 
@@ -2177,6 +2214,10 @@ fn high_frequency_occurrence_policy(
     result.scaffold_candidate_anchors = scaffold_candidate_anchors;
     result.scaffold_dense_signatures = scaffold_dense_signatures;
     result.supported_occurrences = high_frequency_occurrences.intersection(&supported).count();
+    result.supported_occurrence_keys = high_frequency_occurrences
+        .intersection(&supported)
+        .copied()
+        .collect();
 
     for key in high_frequency_occurrences.difference(&supported).copied() {
         if let Some(path_set) = result.split_occurrences.get_mut(key.path_idx) {
@@ -2551,6 +2592,8 @@ fn evaluate_range_masking(
                 syncmer_len,
                 frequency_mask.min_shared_run,
                 frequency_mask.min_sequence_span_bp,
+                frequency_mask.high_freq_min_run,
+                frequency_mask.high_freq_min_sequence_span_bp,
             );
             context_filter.weak_occurrences = remap_occurrences_to_original(
                 &context_filter.weak_occurrences,
@@ -2565,6 +2608,8 @@ fn evaluate_range_masking(
                 syncmer_len,
                 frequency_mask.min_shared_run,
                 frequency_mask.min_sequence_span_bp,
+                frequency_mask.high_freq_min_run,
+                frequency_mask.high_freq_min_sequence_span_bp,
             )
         };
         evaluation.shared_context_split = context_filter
@@ -2577,7 +2622,7 @@ fn evaluate_range_masking(
             &context_filter.weak_occurrences,
         );
         info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before {} (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before {} (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}, spectrum-glue-rescued={}, spectrum-glue-run-supported={}, spectrum-glue-sequence-supported={}, spectrum-glue-private-split={}, spectrum-glue-scaffold-candidates={}, spectrum-glue-dense-signatures={}, freq-run={}, freq-span={}) in {:.3}s",
             context_filter.shared_occurrences,
             materialization_label,
             evaluation.shared_context_split,
@@ -2590,6 +2635,14 @@ fn evaluate_range_masking(
             context_filter.scaffold_dense_signatures,
             frequency_mask.min_sequence_span_bp,
             context_filter.sequence_supported_occurrences,
+            context_filter.path_copy_supported_occurrences,
+            context_filter.path_copy_run_supported_occurrences,
+            context_filter.path_copy_sequence_supported_occurrences,
+            context_filter.path_copy_private_split_occurrences,
+            context_filter.path_copy_scaffold_candidate_anchors,
+            context_filter.path_copy_scaffold_dense_signatures,
+            frequency_mask.high_freq_min_run,
+            frequency_mask.high_freq_min_sequence_span_bp,
             context_start.elapsed().as_secs_f64()
         );
         if inserted > 0 {
@@ -4263,7 +4316,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             local_walk(&[(42, 7_000)]),
         ];
 
-        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0);
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0, 3, 0);
         assert_eq!(filtered.shared_occurrences, 8);
         assert_eq!(
             filtered.scaffold_supported_occurrences, 6,
@@ -4300,7 +4353,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             walks.push(local_walk(&[(99, 10_000 + copy * 2_000)]));
         }
 
-        let filtered = shared_context_filtered_occurrences(&walks, 31, 5, 0);
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 5, 0, 5, 0);
         assert_eq!(filtered.shared_occurrences, 74);
         assert_eq!(
             filtered.scaffold_supported_occurrences, 10,
@@ -4331,7 +4384,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         let repeated = (0..16).map(|copy| (99, copy * 2_000)).collect::<Vec<_>>();
         let walks = (0..4).map(|_| local_walk(&repeated)).collect::<Vec<_>>();
 
-        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0);
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0, 3, 0);
         assert_eq!(filtered.shared_occurrences, 64);
         assert_eq!(filtered.path_copy_filtered_nodes, 1);
         assert_eq!(
@@ -4339,6 +4392,8 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             "node 99 has a high occ/path ratio and scaffold-scale positional dispersion"
         );
         assert_eq!(filtered.scaffold_supported_occurrences, 0);
+        assert_eq!(filtered.path_copy_supported_occurrences, 0);
+        assert_eq!(filtered.path_copy_private_split_occurrences, 64);
         assert_eq!(
             filtered
                 .weak_occurrences
@@ -4346,6 +4401,50 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
                 .map(FxHashSet::len)
                 .sum::<usize>(),
             64
+        );
+    }
+
+    #[test]
+    fn test_scaffold_context_rescues_spectrum_glue_with_high_frequency_run_policy() {
+        let repeated = (0..16).map(|copy| (99, copy * 100)).collect::<Vec<_>>();
+        let walks = (0..4).map(|_| local_walk(&repeated)).collect::<Vec<_>>();
+
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0, 10, 0);
+
+        assert_eq!(filtered.shared_occurrences, 64);
+        assert_eq!(filtered.path_copy_filtered_nodes, 1);
+        assert_eq!(filtered.path_copy_filtered_occurrences, 64);
+        assert_eq!(
+            filtered.path_copy_run_supported_occurrences, 64,
+            "spectrum-selected nodes must use the same freq-run rescue as explicit high-frequency nodes"
+        );
+        assert_eq!(filtered.path_copy_supported_occurrences, 64);
+        assert_eq!(filtered.path_copy_private_split_occurrences, 0);
+        assert!(
+            filtered.weak_occurrences.iter().all(FxHashSet::is_empty),
+            "a spectrum-selected node in a supported run should remain shared"
+        );
+    }
+
+    #[test]
+    fn test_scaffold_context_rescues_spectrum_glue_with_high_frequency_span_policy() {
+        let repeated = (0..20).map(|copy| (99, copy * 63)).collect::<Vec<_>>();
+        let walks = (0..4).map(|_| local_walk(&repeated)).collect::<Vec<_>>();
+
+        let filtered = shared_context_filtered_occurrences(&walks, 63, 1, 0, 0, 1_000);
+
+        assert_eq!(filtered.shared_occurrences, 80);
+        assert_eq!(filtered.path_copy_filtered_nodes, 1);
+        assert_eq!(filtered.path_copy_filtered_occurrences, 80);
+        assert_eq!(
+            filtered.path_copy_sequence_supported_occurrences, 80,
+            "spectrum-selected nodes must use the same freq-span rescue as explicit high-frequency nodes"
+        );
+        assert_eq!(filtered.path_copy_supported_occurrences, 80);
+        assert_eq!(filtered.path_copy_private_split_occurrences, 0);
+        assert!(
+            filtered.weak_occurrences.iter().all(FxHashSet::is_empty),
+            "a spectrum-selected node in a supported exact span should remain shared"
         );
     }
 
@@ -4358,7 +4457,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             local_walk(&[(99, 0), (99, 100), (99, 200)]),
         ];
 
-        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0);
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 3, 0, 3, 0);
         assert_eq!(filtered.shared_occurrences, 12);
         assert_eq!(
             filtered.path_copy_filtered_occurrences, 0,
@@ -4379,7 +4478,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         let repeated = [(1, 0), (2, 100), (3, 200), (4, 300), (5, 400)];
         let walks = (0..10).map(|_| local_walk(&repeated)).collect::<Vec<_>>();
 
-        let filtered = shared_context_filtered_occurrences(&walks, 31, 5, 0);
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 5, 0, 5, 0);
         assert!(
             filtered.scaffold_dense_signatures > 0,
             "test-sized dense signatures should exercise the bounded fallback"
@@ -4399,7 +4498,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             local_walk(&[(1, 0), (2, 100), (3, 260), (4, 360)]),
         ];
 
-        let filtered = shared_context_filtered_occurrences(&walks, 31, 4, 0);
+        let filtered = shared_context_filtered_occurrences(&walks, 31, 4, 0, 4, 0);
         assert_eq!(
             filtered.scaffold_supported_occurrences, 8,
             "SweepGA scaffold membership should retain all four shifted anchors on both paths"
@@ -4431,7 +4530,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             ]),
         ];
 
-        let sequence_supported = shared_context_filtered_occurrences(&walks, 63, 1, 127);
+        let sequence_supported = shared_context_filtered_occurrences(&walks, 63, 1, 127, 1, 127);
         assert!(
             sequence_supported.weak_occurrences[0].contains(&1)
                 && sequence_supported.weak_occurrences[1].contains(&1),
@@ -4446,7 +4545,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         }
         assert_eq!(sequence_supported.sequence_supported_occurrences, 6);
 
-        let too_short = shared_context_filtered_occurrences(&walks, 63, 1, 191);
+        let too_short = shared_context_filtered_occurrences(&walks, 63, 1, 191, 1, 191);
         for occ in [3, 4, 5] {
             assert!(
                 too_short.weak_occurrences[0].contains(&occ)
@@ -4455,7 +4554,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             );
         }
 
-        let rescued_by_scaffold = shared_context_filtered_occurrences(&walks, 63, 3, 191);
+        let rescued_by_scaffold = shared_context_filtered_occurrences(&walks, 63, 3, 191, 3, 191);
         for occ in [3, 4, 5] {
             assert!(
                 !rescued_by_scaffold.weak_occurrences[0].contains(&occ)

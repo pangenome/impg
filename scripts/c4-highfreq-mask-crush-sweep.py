@@ -97,6 +97,22 @@ CONFIGS = (
     SweepConfig("top002_run10_span1k", 0.002, 0, 10, 1000, "2x top with 1 kb span rescue"),
     SweepConfig("maxocc1000_run10_span1k", 0.0, 1000, 10, 1000, "absolute occurrence cap"),
     SweepConfig(
+        "unified_top001_run10_span1k",
+        0.001,
+        0,
+        10,
+        1000,
+        "unified explicit-HF plus spectrum-glue run/span rescue",
+    ),
+    SweepConfig(
+        "unified_maxocc1000_run10_span1k",
+        0.0,
+        1000,
+        10,
+        1000,
+        "unified absolute cap plus spectrum-glue run/span rescue",
+    ),
+    SweepConfig(
         "top001_run10_span1k_sharedrun10_seq1k",
         0.001,
         0,
@@ -298,6 +314,12 @@ def parse_mask_log(path: Path) -> dict[str, str]:
         "hf_private_split_occurrences": "",
         "spectrum_glue_nodes": "",
         "spectrum_glue_occurrences": "",
+        "spectrum_glue_rescued_occurrences": "",
+        "spectrum_glue_run_supported": "",
+        "spectrum_glue_sequence_supported": "",
+        "spectrum_glue_private_split_occurrences": "",
+        "spectrum_glue_scaffold_candidates": "",
+        "spectrum_glue_dense_signatures": "",
         "scaffold_weak_occurrences": "",
         "scaffold_split_occurrences": "",
         "scaffold_min_run": "",
@@ -358,7 +380,7 @@ def parse_mask_log(path: Path) -> dict[str, str]:
         r"\(weak=(\d+), split=(\d+), min_run=(\d+), spectrum-glue-filtered-nodes=(\d+), "
         r"spectrum-glue-filtered-occurrences=(\d+), scaffold-supported=(\d+), "
         r"scaffold-candidates=(\d+), dense-signatures=(\d+), sequence_k=(\d+), "
-        r"sequence-supported=(\d+)\)",
+        r"sequence-supported=(\d+)(?:, [^)]*)?\)",
         text,
     )
     if scaffold_re:
@@ -374,6 +396,23 @@ def parse_mask_log(path: Path) -> dict[str, str]:
                 "scaffold_dense_signatures": scaffold_re.group(8),
                 "scaffold_sequence_k": scaffold_re.group(9),
                 "scaffold_sequence_supported": scaffold_re.group(10),
+            }
+        )
+    spectrum_policy_re = re.search(
+        r"spectrum-glue-rescued=(\d+), spectrum-glue-run-supported=(\d+), "
+        r"spectrum-glue-sequence-supported=(\d+), spectrum-glue-private-split=(\d+), "
+        r"spectrum-glue-scaffold-candidates=(\d+), spectrum-glue-dense-signatures=(\d+)",
+        text,
+    )
+    if spectrum_policy_re:
+        out.update(
+            {
+                "spectrum_glue_rescued_occurrences": spectrum_policy_re.group(1),
+                "spectrum_glue_run_supported": spectrum_policy_re.group(2),
+                "spectrum_glue_sequence_supported": spectrum_policy_re.group(3),
+                "spectrum_glue_private_split_occurrences": spectrum_policy_re.group(4),
+                "spectrum_glue_scaffold_candidates": spectrum_policy_re.group(5),
+                "spectrum_glue_dense_signatures": spectrum_policy_re.group(6),
             }
         )
     return out

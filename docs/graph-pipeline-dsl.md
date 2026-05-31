@@ -62,9 +62,11 @@ For syng GFA extraction, `syng` defaults to a small raw-layer high-frequency
 syncmer filter: the top 0.05% most frequent local syncmer nodes are selected
 before bluntification, but the default policy is occurrence-level. Unsupported
 high-frequency occurrences are private-split, while occurrences in supported
-high-frequency runs stay shared. `freq-run` / `high-freq-run` controls the
-minimum run length in syncmers and defaults to `10`; `freq-span` /
-`high-freq-span` enables exact-sequence span rescue in bp. Use
+high-frequency runs or exact spans stay shared. `freq-run` / `high-freq-run`
+controls the minimum run length in syncmers and defaults to `10`; `freq-span` /
+`high-freq-span` controls exact-sequence span rescue in bp and defaults to
+`1000`. The same `freq-run` / `freq-span` rescue applies to the
+spectrum-selected dispersed scaffold-glue source. Use
 `freq-run-aware=false` or `legacy-freq-mask=true` for the historical node-level
 removal behavior. Rare repeated-copy local syncmer contexts are still split
 rather than emitted as one globally shared graph node. This is a
@@ -237,10 +239,11 @@ repeated seeds to survive, while the downstream plane-sweep/scaffold filter and
 Syng-native graph extraction has an earlier raw-layer mask before bluntification
 or crush. `gfa:syng:mask,min-run=3,freq-run=10:crush` private-splits locally
 shared syncmer occurrences that never appear in a supported shared run, and
-private-splits high-frequency occurrences unless they are rescued by the
-high-frequency `freq-run` or `freq-span` policy. Private splits preserve the
-selected path spelling while preventing isolated shared syncmers from becoming
-graph glue. `legacy-freq-mask=true` restores the older behavior that removed
+private-splits high-frequency occurrences from explicit frequency selection or
+the spectrum-glue source unless they are rescued by the high-frequency
+`freq-run` or `freq-span` policy. Private splits preserve the selected path
+spelling while preventing isolated shared syncmers from becoming graph glue.
+`legacy-freq-mask=true` restores the older behavior that removed
 selected high-frequency syncmer nodes and bridged them in cis using source
 sequence.
 
