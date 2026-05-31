@@ -10,11 +10,10 @@
 //! emitted. Gap segments are interned by exact sequence plus local
 //! signed-syncmer context, so identical terminal/inter-syncmer DNA shared
 //! by the same local graph context is one node, without collapsing unrelated
-//! repeated sequence elsewhere. High-frequency syncmers are filtered out of
-//! the raw syng walk before materialization, and the original sequence is
-//! used to bridge retained anchors. The CLI default is blunt mode, which
-//! materializes exact source-spelling 0M paths directly; raw mode is the
-//! explicit syng-native overlap graph.
+//! repeated sequence elsewhere. High-frequency syncmer occurrences are
+//! private-split unless they are part of a configured supported run. The CLI
+//! default is blunt mode, which materializes exact source-spelling 0M paths
+//! directly; raw mode is the explicit syng-native overlap graph.
 
 use std::io::{self, BufWriter, Write};
 use std::time::Instant;
@@ -35,6 +34,13 @@ pub const DEFAULT_GFA_MASK_TOP_FRACTION: f64 = 0.0005;
 /// syncmer node is allowed to act as graph glue. This mirrors the default
 /// bounded-walk seed length used during syng query discovery.
 pub const DEFAULT_GFA_MIN_SHARED_RUN: usize = crate::syng::DEFAULT_WALK_SEED_ANCHORS;
+/// Default minimum high-frequency run that rescues otherwise private
+/// high-frequency syncmer occurrences. High-frequency singleton reuse is
+/// private by default; long collinear runs remain shared.
+pub const DEFAULT_GFA_HIGH_FREQ_MIN_RUN: usize = 10;
+/// Default exact sequence span for rescuing high-frequency syncmer occurrences.
+/// Zero disables span rescue unless explicitly requested.
+pub const DEFAULT_GFA_HIGH_FREQ_MIN_SEQUENCE_SPAN_BP: usize = 0;
 /// Clone rare repeated-copy contexts for otherwise dominant local syncmers.
 /// This catches single-syncmer loops where a mostly single-copy node appears
 /// a second time in a selected path and glues two paralogous contexts together.
@@ -54,14 +60,20 @@ pub const DEFAULT_GFA_CUT_N_MIN_RUN: usize = 1;
 
 /// Frequency-aware syncmer node sharing policy for syng GFA materialization.
 ///
-/// High-frequency syncmers are removed from the raw syng topology before
-/// bluntification and the retained anchors are bridged by sequence. Rare
-/// repeated local contexts are still emitted as per-occurrence clones so
-/// ordinary variation is not erased while obvious single-copy glue is split.
+/// High-frequency syncmers are selected by node-level frequency, but the
+/// default policy is occurrence-level: unsupported occurrences are emitted as
+/// private clones while occurrences in long supported runs stay shared. A
+/// compatibility flag keeps the historical node-removal behavior available for
+/// debugging and comparisons. Rare repeated local contexts are still emitted as
+/// per-occurrence clones so ordinary variation is not erased while obvious
+/// single-copy glue is split.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SyngGfaFrequencyMask {
     pub drop_top_fraction: f64,
     pub max_occurrences: Option<u32>,
+    pub high_freq_min_run: usize,
+    pub high_freq_min_sequence_span_bp: usize,
+    pub run_aware_frequency_mask: bool,
     pub min_shared_run: usize,
     pub min_sequence_span_bp: usize,
     pub local_repeat_max_minor: u32,
@@ -75,6 +87,9 @@ impl SyngGfaFrequencyMask {
         Self {
             drop_top_fraction: 0.0,
             max_occurrences: None,
+            high_freq_min_run: 0,
+            high_freq_min_sequence_span_bp: 0,
+            run_aware_frequency_mask: true,
             min_shared_run: 1,
             min_sequence_span_bp: 0,
             local_repeat_max_minor: 0,
@@ -88,6 +103,9 @@ impl SyngGfaFrequencyMask {
         Self {
             drop_top_fraction: DEFAULT_GFA_MASK_TOP_FRACTION,
             max_occurrences: None,
+            high_freq_min_run: DEFAULT_GFA_HIGH_FREQ_MIN_RUN,
+            high_freq_min_sequence_span_bp: DEFAULT_GFA_HIGH_FREQ_MIN_SEQUENCE_SPAN_BP,
+            run_aware_frequency_mask: true,
             min_shared_run: DEFAULT_GFA_MIN_SHARED_RUN,
             min_sequence_span_bp: 0,
             local_repeat_max_minor: DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
@@ -108,6 +126,10 @@ impl SyngGfaFrequencyMask {
 
     fn frequency_filter_enabled(self) -> bool {
         self.drop_top_fraction > 0.0 || self.max_occurrences.is_some()
+    }
+
+    fn run_aware_frequency_filter_enabled(self) -> bool {
+        self.frequency_filter_enabled() && self.run_aware_frequency_mask
     }
 
     fn shared_run_filter_enabled(self) -> bool {
@@ -1380,6 +1402,42 @@ struct SharedContextFilterResult {
     path_copy_filtered_occurrences: usize,
 }
 
+#[derive(Default)]
+struct HighFrequencyOccurrencePolicyResult {
+    split_occurrences: Vec<FxHashSet<u32>>,
+    selected_nodes: usize,
+    total_occurrences: usize,
+    supported_occurrences: usize,
+    private_split_occurrences: usize,
+    run_supported_occurrences: usize,
+    sequence_supported_occurrences: usize,
+    scaffold_candidate_anchors: usize,
+    scaffold_dense_signatures: usize,
+}
+
+struct FilteredLocalWalks {
+    walks: Vec<Vec<LocalSyncmerWalkStep>>,
+    original_occurrences: Vec<Vec<u32>>,
+}
+
+struct RangeMaskEvaluation {
+    filtered_syncmers: FxHashSet<u32>,
+    split_occurrences: Vec<FxHashSet<u32>>,
+    shared_context_split: usize,
+    high_frequency_split: usize,
+}
+
+impl RangeMaskEvaluation {
+    fn empty(path_count: usize) -> Self {
+        Self {
+            filtered_syncmers: FxHashSet::default(),
+            split_occurrences: vec![FxHashSet::default(); path_count],
+            shared_context_split: 0,
+            high_frequency_split: 0,
+        }
+    }
+}
+
 fn step_delta(a: LocalSyncmerWalkStep, b: LocalSyncmerWalkStep) -> u64 {
     a.pos.abs_diff(b.pos)
 }
@@ -2078,6 +2136,57 @@ fn shared_context_filtered_occurrences(
     }
 }
 
+fn high_frequency_occurrence_policy(
+    walks: &[Vec<LocalSyncmerWalkStep>],
+    syncmer_len: u64,
+    high_frequency_nodes: &FxHashSet<u32>,
+    min_run: usize,
+    min_sequence_span_bp: usize,
+) -> HighFrequencyOccurrencePolicyResult {
+    let mut result = HighFrequencyOccurrencePolicyResult {
+        split_occurrences: vec![FxHashSet::default(); walks.len()],
+        selected_nodes: high_frequency_nodes.len(),
+        ..HighFrequencyOccurrencePolicyResult::default()
+    };
+    if walks.is_empty() || high_frequency_nodes.is_empty() {
+        return result;
+    }
+
+    let high_frequency_occurrences = shared_occurrence_keys(walks, high_frequency_nodes);
+    result.total_occurrences = high_frequency_occurrences.len();
+    if high_frequency_occurrences.is_empty() {
+        return result;
+    }
+
+    let (run_supported, scaffold_candidate_anchors, scaffold_dense_signatures) = match min_run {
+        0 => (FxHashSet::default(), 0, 0),
+        1 => (high_frequency_occurrences.clone(), 0, 0),
+        _ => scaffold_supported_occurrences(walks, syncmer_len, min_run, high_frequency_nodes),
+    };
+    let sequence_supported = sequence_supported_occurrences(
+        walks,
+        syncmer_len,
+        min_sequence_span_bp,
+        high_frequency_nodes,
+    );
+    let supported: FxHashSet<LocalOccurrenceKey> =
+        run_supported.union(&sequence_supported).copied().collect();
+
+    result.run_supported_occurrences = run_supported.len();
+    result.sequence_supported_occurrences = sequence_supported.len();
+    result.scaffold_candidate_anchors = scaffold_candidate_anchors;
+    result.scaffold_dense_signatures = scaffold_dense_signatures;
+    result.supported_occurrences = high_frequency_occurrences.intersection(&supported).count();
+
+    for key in high_frequency_occurrences.difference(&supported).copied() {
+        if let Some(path_set) = result.split_occurrences.get_mut(key.path_idx) {
+            path_set.insert(key.occ);
+            result.private_split_occurrences += 1;
+        }
+    }
+    result
+}
+
 fn local_walks_after_frequency_mask(
     walks: &[Vec<LocalSyncmerWalkStep>],
     masked_syncmers: &FxHashSet<u32>,
@@ -2094,6 +2203,72 @@ fn local_walks_after_frequency_mask(
                 .collect()
         })
         .collect()
+}
+
+fn local_walks_without_nodes(
+    walks: &[Vec<LocalSyncmerWalkStep>],
+    excluded_nodes: &FxHashSet<u32>,
+) -> FilteredLocalWalks {
+    if excluded_nodes.is_empty() {
+        return FilteredLocalWalks {
+            walks: walks.to_vec(),
+            original_occurrences: walks
+                .iter()
+                .map(|walk| (0..walk.len() as u32).collect())
+                .collect(),
+        };
+    }
+
+    let mut filtered_walks = Vec::with_capacity(walks.len());
+    let mut original_occurrences = Vec::with_capacity(walks.len());
+    for walk in walks {
+        let mut filtered = Vec::new();
+        let mut mapping = Vec::new();
+        for (original_occ, step) in walk.iter().copied().enumerate() {
+            if excluded_nodes.contains(&step.node) {
+                continue;
+            }
+            filtered.push(step);
+            mapping.push(original_occ as u32);
+        }
+        filtered_walks.push(filtered);
+        original_occurrences.push(mapping);
+    }
+    FilteredLocalWalks {
+        walks: filtered_walks,
+        original_occurrences,
+    }
+}
+
+fn remap_occurrences_to_original(
+    occurrences: &[FxHashSet<u32>],
+    original_occurrences: &[Vec<u32>],
+) -> Vec<FxHashSet<u32>> {
+    occurrences
+        .iter()
+        .enumerate()
+        .map(|(path_idx, path_occurrences)| {
+            let Some(mapping) = original_occurrences.get(path_idx) else {
+                return FxHashSet::default();
+            };
+            path_occurrences
+                .iter()
+                .filter_map(|occ| mapping.get(*occ as usize).copied())
+                .collect()
+        })
+        .collect()
+}
+
+fn merge_split_occurrences(destination: &mut [FxHashSet<u32>], source: &[FxHashSet<u32>]) -> usize {
+    let mut inserted = 0usize;
+    for (dest, src) in destination.iter_mut().zip(source) {
+        for occ in src {
+            if dest.insert(*occ) {
+                inserted += 1;
+            }
+        }
+    }
+    inserted
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2288,7 +2463,7 @@ fn frequency_masked_syncmers(
             .min()
             .unwrap_or(0);
         info!(
-            "[syng2gfa] frequency-filtered {} / {} local syncmer node(s) before raw GFA materialization (top_fraction={}, max_occurrences={:?}, local max={}, filtered min/max={}/{}) in {:.3}s",
+            "[syng2gfa] selected {} / {} high-frequency local syncmer node(s) for frequency masking (top_fraction={}, max_occurrences={:?}, local max={}, selected min/max={}/{}) in {:.3}s",
             masked.len(),
             occurrence_counts.len(),
             mask.drop_top_fraction,
@@ -2300,6 +2475,133 @@ fn frequency_masked_syncmers(
         );
     }
     Ok(masked)
+}
+
+fn evaluate_range_masking(
+    index: &SyngIndex,
+    local_walks: &[Vec<LocalSyncmerWalkStep>],
+    syncmer_len: u64,
+    frequency_mask: SyngGfaFrequencyMask,
+    path_count: usize,
+    materialization_label: &str,
+) -> io::Result<RangeMaskEvaluation> {
+    let mut evaluation = RangeMaskEvaluation::empty(path_count);
+    if local_walks.is_empty() {
+        return Ok(evaluation);
+    }
+
+    let all_local_syncmers = local_walks
+        .iter()
+        .flatten()
+        .map(|step| step.node)
+        .collect::<FxHashSet<_>>();
+    let selected_frequency_syncmers = if frequency_mask.frequency_filter_enabled() {
+        frequency_masked_syncmers(index, &all_local_syncmers, frequency_mask)?
+    } else {
+        FxHashSet::default()
+    };
+    let run_aware_frequency = frequency_mask.run_aware_frequency_filter_enabled();
+
+    if run_aware_frequency {
+        let high_freq_start = Instant::now();
+        let high_frequency = high_frequency_occurrence_policy(
+            local_walks,
+            syncmer_len,
+            &selected_frequency_syncmers,
+            frequency_mask.high_freq_min_run,
+            frequency_mask.high_freq_min_sequence_span_bp,
+        );
+        evaluation.high_frequency_split = high_frequency.private_split_occurrences;
+        merge_split_occurrences(
+            &mut evaluation.split_occurrences,
+            &high_frequency.split_occurrences,
+        );
+        info!(
+            "[syng2gfa] high-frequency occurrence mask selected {} node(s) covering {} local occurrence(s); rescued/supported {} occurrence(s) (run-supported={}, sequence-supported={}, scaffold-candidates={}, dense-signatures={}), privately split {} occurrence(s), settings: freq-run={}, freq-span={}bp before {} in {:.3}s",
+            high_frequency.selected_nodes,
+            high_frequency.total_occurrences,
+            high_frequency.supported_occurrences,
+            high_frequency.run_supported_occurrences,
+            high_frequency.sequence_supported_occurrences,
+            high_frequency.scaffold_candidate_anchors,
+            high_frequency.scaffold_dense_signatures,
+            high_frequency.private_split_occurrences,
+            frequency_mask.high_freq_min_run,
+            frequency_mask.high_freq_min_sequence_span_bp,
+            materialization_label,
+            high_freq_start.elapsed().as_secs_f64()
+        );
+    } else {
+        evaluation.filtered_syncmers = selected_frequency_syncmers.clone();
+        if frequency_mask.frequency_filter_enabled() {
+            info!(
+                "[syng2gfa] high-frequency occurrence mask disabled; using legacy node-level removal for {} selected high-frequency syncmer node(s) before {}",
+                evaluation.filtered_syncmers.len(),
+                materialization_label
+            );
+        }
+    }
+
+    if frequency_mask.shared_context_filter_enabled() {
+        let context_start = Instant::now();
+        let context_filter = if run_aware_frequency && !selected_frequency_syncmers.is_empty() {
+            let filtered = local_walks_without_nodes(local_walks, &selected_frequency_syncmers);
+            let mut context_filter = shared_context_filtered_occurrences(
+                &filtered.walks,
+                syncmer_len,
+                frequency_mask.min_shared_run,
+                frequency_mask.min_sequence_span_bp,
+            );
+            context_filter.weak_occurrences = remap_occurrences_to_original(
+                &context_filter.weak_occurrences,
+                &filtered.original_occurrences,
+            );
+            context_filter
+        } else {
+            let context_walks =
+                local_walks_after_frequency_mask(local_walks, &evaluation.filtered_syncmers);
+            shared_context_filtered_occurrences(
+                &context_walks,
+                syncmer_len,
+                frequency_mask.min_shared_run,
+                frequency_mask.min_sequence_span_bp,
+            )
+        };
+        evaluation.shared_context_split = context_filter
+            .weak_occurrences
+            .iter()
+            .map(FxHashSet::len)
+            .sum::<usize>();
+        let inserted = merge_split_occurrences(
+            &mut evaluation.split_occurrences,
+            &context_filter.weak_occurrences,
+        );
+        info!(
+            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before {} (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
+            context_filter.shared_occurrences,
+            materialization_label,
+            evaluation.shared_context_split,
+            inserted,
+            frequency_mask.min_shared_run,
+            context_filter.path_copy_filtered_nodes,
+            context_filter.path_copy_filtered_occurrences,
+            context_filter.scaffold_supported_occurrences,
+            context_filter.scaffold_candidate_anchors,
+            context_filter.scaffold_dense_signatures,
+            frequency_mask.min_sequence_span_bp,
+            context_filter.sequence_supported_occurrences,
+            context_start.elapsed().as_secs_f64()
+        );
+        if inserted > 0 {
+            info!(
+                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private topology before {}",
+                inserted,
+                materialization_label
+            );
+        }
+    }
+
+    Ok(evaluation)
 }
 
 fn push_exact_walked_path_segments(
@@ -2369,6 +2671,7 @@ fn write_exact_blunt_path_work_gfa<W: Write>(
     let mut n_cut_bp = 0u64;
     let mut n_local_repeat_clones = 0usize;
     let mut n_scaffold_context_clones = 0usize;
+    let mask_policy_split = split_occurrences.iter().map(FxHashSet::len).sum::<usize>();
 
     for (work_idx, work) in path_work.into_iter().enumerate() {
         if work.skipped {
@@ -2456,13 +2759,14 @@ fn write_exact_blunt_path_work_gfa<W: Write>(
     }
 
     info!(
-        "[syng2gfa] reduced exact blunt path walks into {} full untrimmed syncmer anchor segment(s), {} interned exact sequence segment(s) ({} gap, {} trimmed syncmer-slice; {} local-repeat clones, {} scaffold-context clones), {} edge(s) in {:.3}s",
+        "[syng2gfa] reduced exact blunt path walks into {} full untrimmed syncmer anchor segment(s), {} interned exact sequence segment(s) ({} gap, {} trimmed syncmer-slice; {} local-repeat clones, {} mask-policy clones from {} split occurrence(s)), {} edge(s) in {:.3}s",
         used_syncmers.len(),
         interner.total_extra_segments(),
         interner.gap_segments,
         interner.total_extra_segments().saturating_sub(interner.gap_segments),
         n_local_repeat_clones,
         n_scaffold_context_clones,
+        mask_policy_split,
         edges.len(),
         reduce_start.elapsed().as_secs_f64()
     );
@@ -2884,64 +3188,20 @@ fn write_range_gfa_blunt_exact<W: Write>(
     } else {
         None
     };
-    let all_local_syncmers = local_walks.as_ref().map(|walks| {
-        walks
-            .iter()
-            .flatten()
-            .map(|step| step.node)
-            .collect::<FxHashSet<_>>()
-    });
-    let frequency_masked_syncmers = if frequency_mask.frequency_filter_enabled() {
-        frequency_masked_syncmers(
+    let mask_evaluation = if let Some(walks) = local_walks.as_ref() {
+        evaluate_range_masking(
             index,
-            all_local_syncmers.as_ref().expect("local syncmers"),
+            walks,
+            syncmer_len_u64,
             frequency_mask,
+            ranges.len(),
+            "exact blunt materialization",
         )?
     } else {
-        FxHashSet::default()
+        RangeMaskEvaluation::empty(ranges.len())
     };
-    let masked_syncmers = frequency_masked_syncmers.clone();
-    let mut split_occurrences = vec![FxHashSet::default(); ranges.len()];
-    if frequency_mask.shared_context_filter_enabled() {
-        let context_start = Instant::now();
-        let context_walks = local_walks_after_frequency_mask(
-            local_walks.as_ref().expect("local syncmer walks"),
-            &frequency_masked_syncmers,
-        );
-        let context_filter = shared_context_filtered_occurrences(
-            &context_walks,
-            syncmer_len_u64,
-            frequency_mask.min_shared_run,
-            frequency_mask.min_sequence_span_bp,
-        );
-        let weak_occurrences = context_filter
-            .weak_occurrences
-            .iter()
-            .map(FxHashSet::len)
-            .sum::<usize>();
-        split_occurrences = context_filter.weak_occurrences;
-        info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before exact blunt materialization (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
-            context_filter.shared_occurrences,
-            weak_occurrences,
-            weak_occurrences,
-            frequency_mask.min_shared_run,
-            context_filter.path_copy_filtered_nodes,
-            context_filter.path_copy_filtered_occurrences,
-            context_filter.scaffold_supported_occurrences,
-            context_filter.scaffold_candidate_anchors,
-            context_filter.scaffold_dense_signatures,
-            frequency_mask.min_sequence_span_bp,
-            context_filter.sequence_supported_occurrences,
-            context_start.elapsed().as_secs_f64()
-        );
-        if weak_occurrences > 0 {
-            info!(
-                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private exact sequence segments",
-                weak_occurrences
-            );
-        }
-    }
+    let masked_syncmers = mask_evaluation.filtered_syncmers;
+    let split_occurrences = mask_evaluation.split_occurrences;
 
     let collect_start = Instant::now();
     let path_work: Vec<PathWork> = ranges
@@ -3060,75 +3320,23 @@ fn write_range_gfa_internal<W: Write>(
     } else {
         None
     };
-    let all_local_syncmers = local_walks.as_ref().map(|walks| {
-        walks
-            .iter()
-            .flatten()
-            .map(|step| step.node)
-            .collect::<FxHashSet<_>>()
-    });
-    let frequency_masked_syncmers = if frequency_mask.frequency_filter_enabled() {
-        frequency_masked_syncmers(
+    let mask_evaluation = if let Some(walks) = local_walks.as_ref() {
+        evaluate_range_masking(
             index,
-            all_local_syncmers.as_ref().expect("local syncmers"),
+            walks,
+            syncmer_len_u64,
             frequency_mask,
+            ranges.len(),
+            "raw GFA materialization",
         )?
     } else {
-        FxHashSet::default()
+        RangeMaskEvaluation::empty(ranges.len())
     };
-    let masked_syncmers = frequency_masked_syncmers.clone();
-    let mut split_occurrences = vec![FxHashSet::default(); ranges.len()];
-    let mut shared_context_split = 0usize;
-    if frequency_mask.shared_context_filter_enabled() {
-        let context_start = Instant::now();
-        let context_walks = local_walks_after_frequency_mask(
-            local_walks.as_ref().expect("local syncmer walks"),
-            &frequency_masked_syncmers,
-        );
-        let context_filter = shared_context_filtered_occurrences(
-            &context_walks,
-            syncmer_len_u64,
-            frequency_mask.min_shared_run,
-            frequency_mask.min_sequence_span_bp,
-        );
-        shared_context_split = context_filter
-            .weak_occurrences
-            .iter()
-            .map(FxHashSet::len)
-            .sum::<usize>();
-        split_occurrences = context_filter.weak_occurrences;
-        info!(
-            "[syng2gfa] scaffold-context evaluated {} local shared syncmer occurrence(s) before raw GFA materialization (weak={}, split={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
-            context_filter.shared_occurrences,
-            shared_context_split,
-            shared_context_split,
-            frequency_mask.min_shared_run,
-            context_filter.path_copy_filtered_nodes,
-            context_filter.path_copy_filtered_occurrences,
-            context_filter.scaffold_supported_occurrences,
-            context_filter.scaffold_candidate_anchors,
-            context_filter.scaffold_dense_signatures,
-            frequency_mask.min_sequence_span_bp,
-            context_filter.sequence_supported_occurrences,
-            context_start.elapsed().as_secs_f64()
-        );
-        if shared_context_split > 0 {
-            info!(
-                "[syng2gfa] scaffold-context split {} local syncmer occurrence(s) into private per-occurrence topology before raw GFA materialization (shared occurrences={}, min_run={}, spectrum-glue-filtered-nodes={}, spectrum-glue-filtered-occurrences={}, scaffold-supported={}, scaffold-candidates={}, dense-signatures={}, sequence_k={}, sequence-supported={}) in {:.3}s",
-                shared_context_split,
-                context_filter.shared_occurrences,
-                frequency_mask.min_shared_run,
-                context_filter.path_copy_filtered_nodes,
-                context_filter.path_copy_filtered_occurrences,
-                context_filter.scaffold_supported_occurrences,
-                context_filter.scaffold_candidate_anchors,
-                context_filter.scaffold_dense_signatures,
-                frequency_mask.min_sequence_span_bp,
-                context_filter.sequence_supported_occurrences,
-                context_start.elapsed().as_secs_f64()
-            );
-        }
-    };
+    let high_frequency_split = mask_evaluation.high_frequency_split;
+    let shared_context_split = mask_evaluation.shared_context_split;
+    let masked_syncmers = mask_evaluation.filtered_syncmers;
+    let split_occurrences = mask_evaluation.split_occurrences;
+    let mask_policy_split = split_occurrences.iter().map(FxHashSet::len).sum::<usize>();
 
     let collect_start = Instant::now();
     let path_work: Vec<PathWork> = ranges
@@ -3285,13 +3493,15 @@ fn write_range_gfa_internal<W: Write>(
         push_walked_path_segments(&mut walked_paths, work.name, segments, had_break);
     }
     info!(
-        "[syng2gfa] reduced selected path walks into {} shared syncmer node(s), {} cloned syncmer segment(s) ({} local-repeat, {} scaffold-context), {} frequency syncmer node(s) removed and {} scaffold-context occurrence(s) split before raw GFA, {} unique gap segment(s), {} edge(s) in {:.3}s",
+        "[syng2gfa] reduced selected path walks into {} shared syncmer node(s), {} cloned syncmer segment(s) ({} local-repeat, {} mask-policy), {} legacy frequency syncmer node(s) removed, {} high-frequency occurrence(s) split, and {} scaffold-context occurrence(s) split before raw GFA ({} total mask-policy split occurrence(s)), {} unique gap segment(s), {} edge(s) in {:.3}s",
         used_syncmers.len(),
         cloned_syncmers.len(),
         n_local_repeat_clones,
         n_scaffold_context_clones,
-        frequency_masked_syncmers.len(),
+        masked_syncmers.len(),
+        high_frequency_split,
         shared_context_split,
+        mask_policy_split,
         gap_interner.len(),
         edges.len(),
         reduce_start.elapsed().as_secs_f64()
@@ -3894,7 +4104,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
     }
 
     #[test]
-    fn test_range_gfa_frequency_filter_drops_repetitive_syncmers_before_raw_gfa() {
+    fn test_range_gfa_legacy_frequency_filter_drops_repetitive_syncmers_before_raw_gfa() {
         let params = crate::syng::SyncmerParams {
             k: 8,
             w: 55,
@@ -3928,6 +4138,9 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         let mask = SyngGfaFrequencyMask {
             drop_top_fraction: 0.5,
             max_occurrences: None,
+            high_freq_min_run: 0,
+            high_freq_min_sequence_span_bp: 0,
+            run_aware_frequency_mask: false,
             min_shared_run: 1,
             min_sequence_span_bp: 0,
             local_repeat_max_minor: 0,
@@ -3959,7 +4172,7 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
         let gfa = String::from_utf8(out).unwrap();
         assert!(
             !gfa.contains("\nS\thf"),
-            "high-frequency syncmers should be filtered, not cloned into raw GFA:\n{gfa}"
+            "legacy high-frequency syncmers should be filtered, not cloned into raw GFA:\n{gfa}"
         );
         let segment_ids: FxHashSet<String> = gfa
             .lines()
@@ -3995,6 +4208,51 @@ P\tC4#0#chr6-context:31744284-31744292\t2+,4+\t*\n",
             .iter()
             .map(|&(node, pos)| LocalSyncmerWalkStep { node, pos })
             .collect()
+    }
+
+    #[test]
+    fn test_high_frequency_occurrence_policy_splits_isolated_reuse() {
+        let walks = vec![local_walk(&[(99, 0)]), local_walk(&[(99, 10_000)])];
+        let high_frequency_nodes = [99].into_iter().collect::<FxHashSet<_>>();
+
+        let filtered = high_frequency_occurrence_policy(&walks, 31, &high_frequency_nodes, 3, 0);
+
+        assert_eq!(filtered.selected_nodes, 1);
+        assert_eq!(filtered.total_occurrences, 2);
+        assert_eq!(filtered.supported_occurrences, 0);
+        assert_eq!(filtered.private_split_occurrences, 2);
+        assert!(filtered.split_occurrences[0].contains(&0));
+        assert!(filtered.split_occurrences[1].contains(&0));
+    }
+
+    #[test]
+    fn test_high_frequency_occurrence_policy_keeps_configured_run_shared() {
+        let run = [(10, 0), (11, 100), (12, 200), (13, 300)];
+        let walks = vec![local_walk(&run), local_walk(&run)];
+        let high_frequency_nodes = [10, 11, 12, 13].into_iter().collect::<FxHashSet<_>>();
+
+        let filtered = high_frequency_occurrence_policy(&walks, 31, &high_frequency_nodes, 4, 0);
+
+        assert_eq!(filtered.total_occurrences, 8);
+        assert_eq!(filtered.supported_occurrences, 8);
+        assert_eq!(filtered.run_supported_occurrences, 8);
+        assert_eq!(filtered.private_split_occurrences, 0);
+        assert!(filtered.split_occurrences.iter().all(FxHashSet::is_empty));
+    }
+
+    #[test]
+    fn test_high_frequency_occurrence_policy_keeps_configured_exact_span_shared() {
+        let run = [(20, 0), (21, 32), (22, 64)];
+        let walks = vec![local_walk(&run), local_walk(&run)];
+        let high_frequency_nodes = [20, 21, 22].into_iter().collect::<FxHashSet<_>>();
+
+        let filtered = high_frequency_occurrence_policy(&walks, 63, &high_frequency_nodes, 0, 127);
+
+        assert_eq!(filtered.total_occurrences, 6);
+        assert_eq!(filtered.supported_occurrences, 6);
+        assert_eq!(filtered.sequence_supported_occurrences, 6);
+        assert_eq!(filtered.private_split_occurrences, 0);
+        assert!(filtered.split_occurrences.iter().all(FxHashSet::is_empty));
     }
 
     #[test]

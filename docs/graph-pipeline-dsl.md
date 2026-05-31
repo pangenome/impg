@@ -49,6 +49,8 @@ syng,mode=raw
 syng,k=63,s=8,seed=7:blunt
 syng:blunt,k=63,s=8,seed=7
 syng:mask,top=0.001,max-occ=500
+syng:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k
+syng:mask,legacy-freq-mask=true
 syng:filter,top=0.001,max-occ=500
 syng:cut-ns
 syng:filter,cut-ns=true,cut-n-min-run=10
@@ -57,11 +59,16 @@ syng:nofilter
 ```
 
 For syng GFA extraction, `syng` defaults to a small raw-layer high-frequency
-syncmer filter: the top 0.05% most frequent local syncmer nodes are removed
-from the raw syng topology before bluntification and bridged by sequence. Rare
-repeated-copy local syncmer contexts are still split rather than emitted as one
-globally shared graph node. This is a graph-materialization policy, separate
-from the query seed filter.
+syncmer filter: the top 0.05% most frequent local syncmer nodes are selected
+before bluntification, but the default policy is occurrence-level. Unsupported
+high-frequency occurrences are private-split, while occurrences in supported
+high-frequency runs stay shared. `freq-run` / `high-freq-run` controls the
+minimum run length in syncmers and defaults to `10`; `freq-span` /
+`high-freq-span` enables exact-sequence span rescue in bp. Use
+`freq-run-aware=false` or `legacy-freq-mask=true` for the historical node-level
+removal behavior. Rare repeated-copy local syncmer contexts are still split
+rather than emitted as one globally shared graph node. This is a
+graph-materialization policy, separate from the query seed filter.
 
 `syng:cut-ns` is an optional materialization policy for assembly gaps. It drops
 N-runs from fetched inter-syncmer DNA and splits emitted GFA paths at those
@@ -228,11 +235,14 @@ repeated seeds to survive, while the downstream plane-sweep/scaffold filter and
 `seqwish-k` control graph glue.
 
 Syng-native graph extraction has an earlier raw-layer mask before bluntification
-or crush. `gfa:syng:mask,min-run=3:crush` removes locally shared syncmer nodes
-that never appear in a shared run of at least three syncmer anchors in any
-selected path range. Removed syncmer nodes are bridged in cis using the source
-sequence, so isolated shared syncmers do not become graph glue while the path
-sequence is preserved.
+or crush. `gfa:syng:mask,min-run=3,freq-run=10:crush` private-splits locally
+shared syncmer occurrences that never appear in a supported shared run, and
+private-splits high-frequency occurrences unless they are rescued by the
+high-frequency `freq-run` or `freq-span` policy. Private splits preserve the
+selected path spelling while preventing isolated shared syncmers from becoming
+graph glue. `legacy-freq-mask=true` restores the older behavior that removed
+selected high-frequency syncmer nodes and bridged them in cis using source
+sequence.
 
 `method=biwfa` is the coarse condenser path. It aligns every selected POVU
 bubble traversal end-to-end against the longest traversal with BiWFA, induces a

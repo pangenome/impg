@@ -2541,6 +2541,49 @@ fn parse_syng_mask_stage(
                 let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
                 mask.max_occurrences = (value > 0).then_some(value);
             }
+            "freq-run"
+            | "frequency-run"
+            | "freq-min-run"
+            | "high-freq-run"
+            | "high-frequency-run"
+            | "high-freq-min-run"
+            | "high-frequency-min-run" => {
+                mask.high_freq_min_run =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "freq-span"
+            | "frequency-span"
+            | "freq-sequence-span"
+            | "freq-seq-span"
+            | "freq-seq-k"
+            | "high-freq-span"
+            | "high-frequency-span"
+            | "high-freq-sequence-span"
+            | "high-frequency-sequence-span"
+            | "high-freq-seq-k" => {
+                mask.high_freq_min_sequence_span_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "freq-run-aware"
+            | "frequency-run-aware"
+            | "high-freq-run-aware"
+            | "high-frequency-run-aware"
+            | "run-aware-freq"
+            | "run-aware-frequency"
+            | "freq-occurrence"
+            | "frequency-occurrence"
+            | "high-freq-occurrence"
+            | "high-frequency-occurrence" => {
+                mask.run_aware_frequency_mask =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            "legacy-freq-mask"
+            | "legacy-frequency-mask"
+            | "node-freq-mask"
+            | "node-frequency-mask" => {
+                mask.run_aware_frequency_mask =
+                    !parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
             "min-shared-run"
             | "min-run"
             | "run"
@@ -3407,6 +3450,80 @@ where
                 "mask-max-occurrences" | "mask-max-occurrence" | "mask-max-occ" => {
                     let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
                     syng_gfa_frequency_mask.max_occurrences = (value > 0).then_some(value);
+                }
+                "mask-freq-run"
+                | "mask-frequency-run"
+                | "mask-freq-min-run"
+                | "mask-high-freq-run"
+                | "mask-high-frequency-run"
+                | "mask-high-freq-min-run"
+                | "mask-high-frequency-min-run"
+                | "freq-run"
+                | "frequency-run"
+                | "freq-min-run"
+                | "high-freq-run"
+                | "high-frequency-run"
+                | "high-freq-min-run"
+                | "high-frequency-min-run" => {
+                    syng_gfa_frequency_mask.high_freq_min_run =
+                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                }
+                "mask-freq-span"
+                | "mask-frequency-span"
+                | "mask-freq-sequence-span"
+                | "mask-freq-seq-span"
+                | "mask-freq-seq-k"
+                | "mask-high-freq-span"
+                | "mask-high-frequency-span"
+                | "mask-high-freq-sequence-span"
+                | "mask-high-frequency-sequence-span"
+                | "mask-high-freq-seq-k"
+                | "freq-span"
+                | "frequency-span"
+                | "freq-sequence-span"
+                | "freq-seq-span"
+                | "freq-seq-k"
+                | "high-freq-span"
+                | "high-frequency-span"
+                | "high-freq-sequence-span"
+                | "high-frequency-sequence-span"
+                | "high-freq-seq-k" => {
+                    syng_gfa_frequency_mask.high_freq_min_sequence_span_bp =
+                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                }
+                "mask-freq-run-aware"
+                | "mask-frequency-run-aware"
+                | "mask-high-freq-run-aware"
+                | "mask-high-frequency-run-aware"
+                | "mask-run-aware-freq"
+                | "mask-run-aware-frequency"
+                | "mask-freq-occurrence"
+                | "mask-frequency-occurrence"
+                | "mask-high-freq-occurrence"
+                | "mask-high-frequency-occurrence"
+                | "freq-run-aware"
+                | "frequency-run-aware"
+                | "high-freq-run-aware"
+                | "high-frequency-run-aware"
+                | "run-aware-freq"
+                | "run-aware-frequency"
+                | "freq-occurrence"
+                | "frequency-occurrence"
+                | "high-freq-occurrence"
+                | "high-frequency-occurrence" => {
+                    syng_gfa_frequency_mask.run_aware_frequency_mask =
+                        parse_bool_engine_param(raw, &param.key, &param.value)?;
+                }
+                "mask-legacy-freq-mask"
+                | "mask-legacy-frequency-mask"
+                | "mask-node-freq-mask"
+                | "mask-node-frequency-mask"
+                | "legacy-freq-mask"
+                | "legacy-frequency-mask"
+                | "node-freq-mask"
+                | "node-frequency-mask" => {
+                    syng_gfa_frequency_mask.run_aware_frequency_mask =
+                        !parse_bool_engine_param(raw, &param.key, &param.value)?;
                 }
                 "mask-min-shared-run"
                 | "mask-min-run"
@@ -4750,13 +4867,17 @@ Syng notes:
   rebuilds a fresh regional syng index from query-selected sequences; its
   k/s/seed parameters select the local rebuild scheme rather than asserting the
   global index. Syng and syng-local GFA extraction
-  filters the top 0.05% high-frequency local syncmer nodes
-  from the raw syng topology before
-  bluntification, require shared syncmer support to appear in a short
+  selects the top 0.05% high-frequency local syncmer nodes and private-splits
+  unsupported occurrences before bluntification, while rescuing supported
+  high-frequency runs by `freq-run` (default 10 syncmers) or `freq-span` bp.
+  They also require other shared syncmer support to appear in a short
   consecutive run by default, and clone rare repeated-copy local syncmer
   contexts so repeats seed ranges but do not glue unrelated copies;
   use `:nomask` or `:nofilter` to disable this or
-  `:mask,top=0.001,max-occ=500,sequence-k=191,min-run=3` to tune it. The
+  `:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k,sequence-k=191,min-run=3`
+  to tune it. Add `:mask,freq-run-aware=false` or
+  `:mask,legacy-freq-mask=true` to reproduce legacy node-level frequency
+  removal. The
   explicit `sequence-k` filter splits weak shared syncmer topology into
   private per-occurrence segments unless it is supported by an exact repeated
   consecutive-syncmer span of that many bp or by the configured `min-run`
@@ -13390,10 +13511,15 @@ mod tests {
             "`--gfa-engine syng` emits a syng syncmer GFA",
             "defaults to syng:blunt plus gfasort pipeline Ygs",
             "`:nosort` to skip final ordering",
-            "filters the top 0.05% high-frequency local syncmer nodes",
+            "selects the top 0.05% high-frequency local syncmer nodes",
+            "private-splits",
+            "`freq-run`",
+            "`freq-span`",
             "`:nomask` or `:nofilter`",
             "rare repeated-copy",
-            ":mask,top=0.001,max-occ=500,sequence-k=191,min-run=3",
+            ":mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k,sequence-k=191,min-run=3",
+            ":mask,freq-run-aware=false",
+            ":mask,legacy-freq-mask=true",
             "private per-occurrence segments",
             "consecutive-syncmer span",
             "`:cut-ns`",
@@ -13966,7 +14092,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:mask,top=0.001,max-occ=500,min-run=3,sequence-k=191:crush",
+            "gfa:syng:mask,top=0.001,max-occ=500,freq-run=10,high-freq-span=1k,min-run=3,sequence-k=191:crush",
         ])
         .unwrap();
         match args {
@@ -13984,6 +14110,9 @@ mod tests {
                     SyngGfaFrequencyMask {
                         drop_top_fraction: 0.001,
                         max_occurrences: Some(500),
+                        high_freq_min_run: 10,
+                        high_freq_min_sequence_span_bp: 1_000,
+                        run_aware_frequency_mask: true,
                         min_shared_run: 3,
                         min_sequence_span_bp: 191,
                         local_repeat_max_minor:
@@ -14154,6 +14283,64 @@ mod tests {
                     parsed.syng_gfa_frequency_mask.min_shared_run,
                     impg::commands::syng2gfa::DEFAULT_GFA_MIN_SHARED_RUN
                 );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_high_frequency_mask_aliases() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:mask,high-freq-run=12,freq-span=2k,freq-run-aware=false",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.syng_gfa_frequency_mask.high_freq_min_run, 12);
+                assert_eq!(
+                    parsed
+                        .syng_gfa_frequency_mask
+                        .high_freq_min_sequence_span_bp,
+                    2_000
+                );
+                assert!(!parsed.syng_gfa_frequency_mask.run_aware_frequency_mask);
+            }
+            _ => panic!("expected query command"),
+        }
+
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:mask,legacy-freq-mask=true",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert!(!parsed.syng_gfa_frequency_mask.run_aware_frequency_mask);
             }
             _ => panic!("expected query command"),
         }

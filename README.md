@@ -472,12 +472,16 @@ regional sequences with its own syncmer scheme, for example
 select the local rebuild parameters rather than asserting the global index.
 Unlike `syng`, `syng-local` does not apply the syng frequency mask unless
 `:mask` is requested explicitly.
-Syng GFA extraction removes the top 0.05% most frequent local syncmer nodes
-from the raw topology and splits rare repeated-copy local syncmer contexts by
-default, so high-copy repeats and single-syncmer repeat loops do not become
-global graph glue. Use
+Syng GFA extraction selects the top 0.05% most frequent local syncmer nodes and
+private-splits unsupported high-frequency occurrences before raw or blunt graph
+materialization. Occurrences in supported high-frequency runs stay shared
+(`freq-run=10` by default, or `freq-span=<bp>` when configured). It also splits
+rare repeated-copy local syncmer contexts by default, so high-copy repeats and
+single-syncmer repeat loops do not become global graph glue. Use
 `-o gfa:syng:nomask` to disable this, or
-`-o gfa:syng:mask,top=0.001,max-occ=500:crush` to tune it.
+`-o gfa:syng:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k:crush` to
+tune it. Use `freq-run-aware=false` or `legacy-freq-mask=true` to reproduce the
+older node-level frequency removal for debugging.
 Add `:cut-ns`, for example `-o gfa:syng:cut-ns:crush`, to drop assembly N-runs
 from fetched gap DNA and split graph paths at those breaks.
 
