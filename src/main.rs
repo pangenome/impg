@@ -2965,6 +2965,24 @@ fn parse_crush_stage(
                 config.multi_level_candidate_limit =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "admission-only" | "admit-only" | "dry-run" | "outward-dry-run" => {
+                config.multi_level_admission_only =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-transclosure-cells"
+            | "build-max-transclosure-cells"
+            | "multi-level-max-transclosure-cells"
+            | "max-build-transclosure-cells" => {
+                config.multi_level_max_transclosure_cells =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-poasta-cells"
+            | "build-max-poasta-cells"
+            | "multi-level-max-poasta-cells"
+            | "max-build-poasta-cells" => {
+                config.multi_level_max_poasta_cells =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "min-objective-delta" | "window-min-objective-delta" => {
                 config.multi_level_min_objective_delta = param.value.parse().map_err(|_| {
                     io::Error::new(
@@ -5641,6 +5659,27 @@ GFA engine shorthand:
         /// Maximum generated iterative-multi-level candidates to build per round; 0 disables
         #[clap(long = "candidate-limit", alias = "window-candidate-limit", value_parser = parse_usize_size, default_value = "192")]
         multi_level_candidate_limit: usize,
+
+        /// Report iterative multi-level/outward candidate admission and exit without building replacements
+        #[clap(
+            long = "admission-only",
+            alias = "admit-only",
+            alias = "dry-run",
+            alias = "outward-dry-run",
+            value_parser = clap::value_parser!(bool),
+            default_value_t = false,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
+        multi_level_admission_only: bool,
+
+        /// Maximum estimated transitive-closure cells for one outward residual replacement; 0 disables
+        #[clap(long = "max-transclosure-cells", alias = "build-max-transclosure-cells", value_parser = parse_usize_size, default_value = "0")]
+        multi_level_max_transclosure_cells: usize,
+
+        /// Maximum estimated POASTA cells for one outward residual replacement; 0 disables
+        #[clap(long = "max-poasta-cells", alias = "build-max-poasta-cells", value_parser = parse_usize_size, default_value = "0")]
+        multi_level_max_poasta_cells: usize,
 
         /// Minimum positive local objective score required for iterative-multi-level candidate acceptance
         #[clap(long = "min-objective-delta", value_parser, default_value = "1")]
@@ -8748,6 +8787,9 @@ fn run() -> io::Result<()> {
             multi_level_window_target_bp,
             multi_level_max_window_sites,
             multi_level_candidate_limit,
+            multi_level_admission_only,
+            multi_level_max_transclosure_cells,
+            multi_level_max_poasta_cells,
             multi_level_min_objective_delta,
             multi_level_objective,
             multi_level_repeat_aware_boundaries,
@@ -8927,6 +8969,9 @@ fn run() -> io::Result<()> {
                 multi_level_window_target_bp,
                 multi_level_max_window_sites,
                 multi_level_candidate_limit,
+                multi_level_admission_only,
+                multi_level_max_transclosure_cells,
+                multi_level_max_poasta_cells,
                 multi_level_min_objective_delta,
                 multi_level_objective,
                 multi_level_repeat_aware_boundaries,
@@ -13902,7 +13947,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=iterative-multi-level,window-mode=sliding,window-target-bp=12k,max-window-sites=5,candidate-limit=17,min-objective-delta=3,max-rounds=4",
+            "gfa:syng:crush,method=iterative-multi-level,window-mode=sliding,window-target-bp=12k,max-window-sites=5,candidate-limit=17,admission-only=true,max-transclosure-cells=2m,max-poasta-cells=3m,min-objective-delta=3,max-rounds=4",
         ])
         .unwrap();
         match args {
@@ -13927,6 +13972,9 @@ mod tests {
                 assert_eq!(crush.multi_level_window_target_bp, 12_000);
                 assert_eq!(crush.multi_level_max_window_sites, 5);
                 assert_eq!(crush.multi_level_candidate_limit, 17);
+                assert!(crush.multi_level_admission_only);
+                assert_eq!(crush.multi_level_max_transclosure_cells, 2_000_000);
+                assert_eq!(crush.multi_level_max_poasta_cells, 3_000_000);
                 assert_eq!(crush.multi_level_min_objective_delta, 3);
                 assert_eq!(crush.max_iterations, 4);
             }

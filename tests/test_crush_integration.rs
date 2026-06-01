@@ -1122,6 +1122,86 @@ fn c4_slice_auto_crush_with_flank_preserves_path_sequences() {
     );
 }
 
+#[test]
+fn c4_slice_outward_admission_only_cli_reports_without_building() {
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping CLI admission-only test: impg binary not found");
+        return;
+    };
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let gfa_path = manifest_dir.join("tests/test_data/crush/c4_slice_1500_3000.gfa");
+    if !gfa_path.exists() {
+        eprintln!("SKIP: test data slice not found at {:?}", gfa_path);
+        return;
+    }
+    let out_path = std::env::temp_dir().join(format!(
+        "impg_c4_outward_admission_only_{}.gfa",
+        std::process::id()
+    ));
+    std::fs::remove_file(&out_path).ok();
+
+    let run = Command::new(&bin)
+        .args([
+            "crush",
+            "--gfa",
+            gfa_path.to_str().unwrap(),
+            "--output",
+            out_path.to_str().unwrap(),
+            "--method",
+            "iterative-multi-level",
+            "--window-mode",
+            "outward",
+            "--window-target-bp",
+            "200k",
+            "--max-window-sites",
+            "8",
+            "--candidate-limit",
+            "16",
+            "--admission-only",
+            "--max-iterations",
+            "1",
+            "-v",
+            "2",
+        ])
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("failed to run impg crush admission-only CLI");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "admission-only crush failed:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("admission-only dry-run admitted"),
+        "missing admission-only summary:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("source=outward-residual-window"),
+        "missing outward residual admission detail:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("replacement build concurrency"),
+        "dry-run must not schedule replacement builds:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("building candidate"),
+        "dry-run must not enter replacement builders:\n{}",
+        stderr
+    );
+
+    let input = std::fs::read_to_string(&gfa_path).expect("failed to reread C4 slice fixture");
+    let output = std::fs::read_to_string(&out_path).expect("failed to read dry-run output");
+    assert_eq!(
+        input, output,
+        "admission-only dry-run should not rewrite GFA"
+    );
+    std::fs::remove_file(&out_path).ok();
+}
+
 // ---------------------------------------------------------------------------
 // Nested-bubble level descent — see docs/crush-nested-bubble-test.md
 //

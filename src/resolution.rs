@@ -220,6 +220,18 @@ pub struct ResolutionConfig {
     /// Maximum generated multi-level/window candidates to build per round.
     /// A value of 0 disables the cap.
     pub multi_level_candidate_limit: usize,
+    /// Admission-only dry run for iterative multi-level/outward candidates.
+    ///
+    /// When set, candidate discovery, sorting, capping, and admission logging
+    /// still run, but no replacement builder is invoked and the original graph
+    /// is returned unchanged.
+    pub multi_level_admission_only: bool,
+    /// Maximum estimated transitive-closure work for one outward residual
+    /// replacement. A value of 0 disables this guard.
+    pub multi_level_max_transclosure_cells: usize,
+    /// Maximum estimated POASTA dynamic-programming work for one outward
+    /// residual replacement. A value of 0 disables this guard.
+    pub multi_level_max_poasta_cells: usize,
     /// Diagnostic objective floor retained for CLI/report compatibility.
     ///
     /// Candidate application is gated only by exact path preservation and
@@ -560,6 +572,9 @@ impl Default for ResolutionConfig {
             multi_level_window_target_bp: 0,
             multi_level_max_window_sites: DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES,
             multi_level_candidate_limit: DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT,
+            multi_level_admission_only: false,
+            multi_level_max_transclosure_cells: 0,
+            multi_level_max_poasta_cells: 0,
             multi_level_min_objective_delta: DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA,
             multi_level_objective: MultiLevelObjectiveMode::Size,
             multi_level_repeat_aware_boundaries: DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES,
@@ -2210,13 +2225,18 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, admission-only={}, window-total-bp-cap={}, outward-build-budgets=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
             config.multi_level_max_window_sites,
             config.multi_level_candidate_limit,
+            config.multi_level_admission_only,
             multi_level_window_total_bp_cap(config),
+            config.max_pair_alignments,
+            config.max_replacement_paf_bytes,
+            config.multi_level_max_transclosure_cells,
+            config.multi_level_max_poasta_cells,
             objective_mode,
             config.multi_level_min_objective_delta,
             repeat_aware_boundaries
@@ -2289,7 +2309,54 @@ fn resolve_graph_bubbles_iterative_multi_level(
             );
         }
 
-        let selected_count = generated.candidates.len();
+        if config.multi_level_admission_only {
+            if emit_logs {
+                let admitted_source_counts =
+                    multi_level_window_source_counts(&generated.candidates);
+                log::info!(
+                    "crush iterative-multi-level round {}: admission-only dry-run admitted {} candidate(s) from {}; replacement builders not invoked; before {}",
+                    round + 1,
+                    generated.candidates.len(),
+                    format_multi_level_source_counts(&admitted_source_counts),
+                    before_quality.summary()
+                );
+                log::info!(
+                    "crush iterative-multi-level round {} admission detail: {}",
+                    round + 1,
+                    format_multi_level_candidate_details(&graph, &generated.candidates, 48)
+                );
+            }
+            break;
+        }
+
+        let admitted_count = generated.candidates.len();
+        let (build_candidates, budget_rejections) =
+            partition_multi_level_candidates_by_build_budget(generated.candidates, config);
+        if emit_logs && !budget_rejections.is_empty() {
+            log::info!(
+                "crush iterative-multi-level round {}: rejected {} outward residual candidate(s) before replacement build by configured build budgets; admitted-for-build={} of {}; detail: {}",
+                round + 1,
+                budget_rejections.len(),
+                build_candidates.len(),
+                admitted_count,
+                format_multi_level_budget_rejections(&graph, &budget_rejections, 24)
+            );
+        }
+
+        let selected_count = build_candidates.len();
+        stats.bailed += budget_rejections.len();
+        if selected_count == 0 {
+            if emit_logs {
+                log::info!(
+                    "crush iterative-multi-level round {}: 0 candidate(s) admitted to replacement build after budget checks; budget_rejected={}; before {}",
+                    round + 1,
+                    budget_rejections.len(),
+                    before_quality.summary()
+                );
+            }
+            break;
+        }
+
         let build_start = Instant::now();
         let build_started = AtomicUsize::new(0);
         let build_progress = AtomicUsize::new(0);
@@ -2304,7 +2371,6 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 selected_count
             );
         }
-        let build_candidates = generated.candidates;
         let build_results = if build_parallelism <= 1 {
             build_candidates
                 .into_iter()
@@ -2420,13 +2486,14 @@ fn resolve_graph_bubbles_iterative_multi_level(
         if accepted.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: 0 applicable candidate(s) after build/non-overlap scheduling; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, failed_or_empty={}, objective_floor={} (diagnostic only), build {:.2?}; before {}",
+                    "crush iterative-multi-level round {}: 0 applicable candidate(s) after build/non-overlap scheduling; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, failed_or_empty={}, budget_rejected={}, objective_floor={} (diagnostic only), build {:.2?}; before {}",
                     round + 1,
                     built_count,
                     objective_passing_count,
                     local_objective_below_floor,
                     overlap_deferred,
                     failed_or_empty,
+                    budget_rejections.len(),
                     objective_floor,
                     build_elapsed,
                     before_quality.summary()
@@ -2471,7 +2538,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: applied {} candidate(s) from {}; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, objective_floor={} (diagnostic only); local objective {}; global_objective_delta={} (diagnostic only); failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before {}; after {}",
+                "crush iterative-multi-level round {}: applied {} candidate(s) from {}; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, budget_rejected={}, objective_floor={} (diagnostic only); local objective {}; global_objective_delta={} (diagnostic only); failed_or_empty={}; build {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; before {}; after {}",
                 round + 1,
                 plans.len(),
                 format_multi_level_source_counts(&accepted_sources),
@@ -2479,6 +2546,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 objective_passing_count,
                 local_objective_below_floor,
                 overlap_deferred,
+                budget_rejections.len(),
                 objective_floor,
                 objective_summary,
                 graph_delta,
@@ -2590,6 +2658,193 @@ struct MultiLevelBuiltCandidate {
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MultiLevelBuildEstimate {
+    pair_alignments: usize,
+    paf_bytes: usize,
+    transclosure_cells: usize,
+    poasta_cells: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MultiLevelBuildBudgetKind {
+    PairAlignments,
+    PafBytes,
+    TransclosureCells,
+    PoastaCells,
+}
+
+impl MultiLevelBuildBudgetKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PairAlignments => "pair-alignments",
+            Self::PafBytes => "paf-bytes",
+            Self::TransclosureCells => "transclosure-cells",
+            Self::PoastaCells => "poasta-cells",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MultiLevelBuildBudgetRejection {
+    window: MultiLevelWindowCandidate,
+    method: ResolutionMethod,
+    estimate: MultiLevelBuildEstimate,
+    kind: MultiLevelBuildBudgetKind,
+    observed: usize,
+    limit: usize,
+}
+
+fn estimate_multi_level_build(window: &MultiLevelWindowCandidate) -> MultiLevelBuildEstimate {
+    let stats = window.candidate.traversal_stats;
+    let pair_alignments = stats.count.saturating_mul(stats.count.saturating_sub(1));
+    let average_len = if stats.count == 0 {
+        0
+    } else {
+        stats
+            .total_len
+            .saturating_add(stats.count.saturating_sub(1))
+            / stats.count
+    };
+    let estimated_record_bytes =
+        128usize.saturating_add(stats.max_len.max(stats.median_len).max(average_len));
+    MultiLevelBuildEstimate {
+        pair_alignments,
+        paf_bytes: pair_alignments.saturating_mul(estimated_record_bytes),
+        transclosure_cells: pair_alignments.saturating_mul(stats.median_len.max(average_len)),
+        poasta_cells: stats.count.saturating_mul(stats.total_len),
+    }
+}
+
+fn method_uses_pairwise_induction(method: ResolutionMethod) -> bool {
+    matches!(
+        method,
+        ResolutionMethod::Allwave | ResolutionMethod::Sweepga | ResolutionMethod::Wfmash
+    )
+}
+
+fn method_uses_poasta_builder(method: ResolutionMethod) -> bool {
+    matches!(
+        method,
+        ResolutionMethod::Poasta | ResolutionMethod::ChainGreedy | ResolutionMethod::ChainPovu
+    )
+}
+
+fn multi_level_build_budget_rejection(
+    window: &MultiLevelWindowCandidate,
+    config: &ResolutionConfig,
+    method: ResolutionMethod,
+) -> Option<MultiLevelBuildBudgetRejection> {
+    if window.source != MultiLevelCandidateSource::OutwardResidualWindow {
+        return None;
+    }
+    let estimate = estimate_multi_level_build(window);
+    let checks = [
+        (
+            method_uses_pairwise_induction(method),
+            config.max_pair_alignments,
+            estimate.pair_alignments,
+            MultiLevelBuildBudgetKind::PairAlignments,
+        ),
+        (
+            method_uses_pairwise_induction(method),
+            config.max_replacement_paf_bytes,
+            estimate.paf_bytes,
+            MultiLevelBuildBudgetKind::PafBytes,
+        ),
+        (
+            method_uses_pairwise_induction(method),
+            config.multi_level_max_transclosure_cells,
+            estimate.transclosure_cells,
+            MultiLevelBuildBudgetKind::TransclosureCells,
+        ),
+        (
+            method_uses_poasta_builder(method),
+            config.multi_level_max_poasta_cells,
+            estimate.poasta_cells,
+            MultiLevelBuildBudgetKind::PoastaCells,
+        ),
+    ];
+    checks
+        .into_iter()
+        .filter(|(applies, limit, observed, _)| *applies && *limit > 0 && *observed > *limit)
+        .map(
+            |(_, limit, observed, kind)| MultiLevelBuildBudgetRejection {
+                window: window.clone(),
+                method,
+                estimate,
+                kind,
+                observed,
+                limit,
+            },
+        )
+        .next()
+}
+
+fn partition_multi_level_candidates_by_build_budget(
+    candidates: Vec<MultiLevelWindowCandidate>,
+    config: &ResolutionConfig,
+) -> (
+    Vec<MultiLevelWindowCandidate>,
+    Vec<MultiLevelBuildBudgetRejection>,
+) {
+    let mut admitted = Vec::with_capacity(candidates.len());
+    let mut rejected = Vec::new();
+    for window in candidates {
+        let method = multi_level_window_replacement_method(&window, config);
+        if let Some(rejection) = multi_level_build_budget_rejection(&window, config, method) {
+            rejected.push(rejection);
+        } else {
+            admitted.push(window);
+        }
+    }
+    (admitted, rejected)
+}
+
+fn format_multi_level_budget_rejection(
+    graph: &Graph,
+    rejection: &MultiLevelBuildBudgetRejection,
+) -> String {
+    format!(
+        "source={} sites={} method={:?} {}; traversals={}, max-len={}, median-len={}, total-len={}, pair-alignments={} paf-bytes={} transclosure-cells={} poasta-cells={}; rejected-budget={} observed={} limit={}",
+        rejection.window.source.as_str(),
+        rejection.window.source_sites,
+        rejection.method,
+        format_candidate_boundary(graph, &rejection.window.candidate),
+        rejection.window.candidate.traversal_stats.count,
+        rejection.window.candidate.traversal_stats.max_len,
+        rejection.window.candidate.traversal_stats.median_len,
+        rejection.window.candidate.traversal_stats.total_len,
+        rejection.estimate.pair_alignments,
+        rejection.estimate.paf_bytes,
+        rejection.estimate.transclosure_cells,
+        rejection.estimate.poasta_cells,
+        rejection.kind.as_str(),
+        rejection.observed,
+        rejection.limit
+    )
+}
+
+fn format_multi_level_budget_rejections(
+    graph: &Graph,
+    rejections: &[MultiLevelBuildBudgetRejection],
+    limit: usize,
+) -> String {
+    rejections
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(idx, rejection)| {
+            format!(
+                "#{} {}",
+                idx + 1,
+                format_multi_level_budget_rejection(graph, rejection)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn build_multi_level_window_candidate(
@@ -3860,6 +4115,18 @@ fn format_multi_level_source_counts(
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn multi_level_window_source_counts(
+    candidates: &[MultiLevelWindowCandidate],
+) -> FxHashMap<MultiLevelCandidateSource, usize> {
+    candidates.iter().fold(
+        FxHashMap::<MultiLevelCandidateSource, usize>::default(),
+        |mut acc, window| {
+            *acc.entry(window.source).or_insert(0) += 1;
+            acc
+        },
+    )
 }
 
 fn format_multi_level_candidate_summary(
@@ -8660,6 +8927,59 @@ mod tests {
         sequences
     }
 
+    fn tiny_boundary_graph() -> Graph {
+        Graph {
+            segments: vec![
+                Segment {
+                    id: "1".to_string(),
+                    seq: b"A".to_vec(),
+                },
+                Segment {
+                    id: "2".to_string(),
+                    seq: b"T".to_vec(),
+                },
+            ],
+            paths: vec![Path {
+                name: "ref".to_string(),
+                steps: vec![
+                    Step {
+                        node: 0,
+                        rev: false,
+                    },
+                    Step {
+                        node: 1,
+                        rev: false,
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn budget_test_window(source: MultiLevelCandidateSource) -> MultiLevelWindowCandidate {
+        MultiLevelWindowCandidate {
+            candidate: BubbleCandidate {
+                ranges: Vec::new(),
+                signature: "budget-test".to_string(),
+                root_start_step: 0,
+                root_end_step: 1,
+                root_span: 10_000,
+                total_steps: 400,
+                unique_steps: 400,
+                traversal_stats: TraversalStats {
+                    count: 20,
+                    min_len: 10_000,
+                    median_len: 10_000,
+                    p90_len: 10_000,
+                    max_len: 10_000,
+                    total_len: 200_000,
+                },
+                level: 0,
+            },
+            source,
+            source_sites: 4,
+        }
+    }
+
     fn poasta_resolution_config() -> ResolutionConfig {
         ResolutionConfig {
             method: ResolutionMethod::Poasta,
@@ -10532,6 +10852,73 @@ P\talt\t1+,12+,13+,24+,25+,36+,37+\t*
             generated.source_counts,
             generated.repeat_boundary_rejected
         );
+
+        let before = seq_map(gfa);
+        let dry_run = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::IterativeMultiLevel,
+                multi_level_window_mode: MultiLevelWindowMode::Outward,
+                multi_level_window_target_bp: 100,
+                multi_level_max_window_sites: 3,
+                multi_level_candidate_limit: 32,
+                multi_level_admission_only: true,
+                auto_spoa_max_traversal_len: 0,
+                auto_poasta_max_traversal_len: 1_000_000,
+                // Poison-pill POASTA scoring: replacement building would reject
+                // this tuple, so success proves admission-only exits first.
+                scoring_params: (1, 4, 6, 1, 26, 2),
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&dry_run.gfa));
+        assert_eq!(dry_run.stats.resolved, 0, "{:?}", dry_run.stats);
+        assert_eq!(dry_run.stats.bailed, 0, "{:?}", dry_run.stats);
+        assert!(
+            dry_run.stats.candidates_seen > 0,
+            "admission-only mode should still report admitted candidates: {:?}",
+            dry_run.stats
+        );
+    }
+
+    #[test]
+    fn outward_residual_build_budget_rejection_log_includes_source_and_limit() {
+        let graph = tiny_boundary_graph();
+        let window = budget_test_window(MultiLevelCandidateSource::OutwardResidualWindow);
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            max_pair_alignments: 10,
+            ..ResolutionConfig::default()
+        };
+        let rejection =
+            multi_level_build_budget_rejection(&window, &config, ResolutionMethod::Sweepga)
+                .expect("outward residual window should exceed pair budget");
+
+        assert_eq!(rejection.kind, MultiLevelBuildBudgetKind::PairAlignments);
+        let line = format_multi_level_budget_rejection(&graph, &rejection);
+        assert!(line.contains("source=outward-residual-window"), "{line}");
+        assert!(line.contains("method=Sweepga"), "{line}");
+        assert!(line.contains("rejected-budget=pair-alignments"), "{line}");
+        assert!(line.contains("observed=380"), "{line}");
+        assert!(line.contains("limit=10"), "{line}");
+    }
+
+    #[test]
+    fn outward_residual_build_budget_rejects_poasta_work_before_builder() {
+        let window = budget_test_window(MultiLevelCandidateSource::OutwardResidualWindow);
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_max_poasta_cells: 1_000,
+            ..ResolutionConfig::default()
+        };
+        let rejection =
+            multi_level_build_budget_rejection(&window, &config, ResolutionMethod::Poasta)
+                .expect("outward residual window should exceed POASTA budget");
+
+        assert_eq!(rejection.kind, MultiLevelBuildBudgetKind::PoastaCells);
+        assert_eq!(rejection.observed, 4_000_000);
+        assert_eq!(rejection.limit, 1_000);
     }
 
     #[test]
