@@ -5429,7 +5429,7 @@ GFA engine shorthand:
         #[clap(long, alias = "max-bubble-span", value_parser = parse_usize_size, default_value = "0")]
         max_span: usize,
 
-        /// Maximum traversal length for direct POA/POASTA/star-BiWFA candidates
+        /// Maximum traversal length for direct single-bubble candidates; iterative multi-bubble reports this as a diagnostic only
         #[clap(long, alias = "max-traversal-length", value_parser = parse_usize_size, default_value = "10k")]
         max_traversal_len: usize,
 
@@ -5437,11 +5437,11 @@ GFA engine shorthand:
         #[clap(long, alias = "min-traversal-length", alias = "min-max-traversal-len", value_parser = parse_usize_size, default_value = "0")]
         min_traversal_len: usize,
 
-        /// Maximum median traversal length for direct POA/POASTA/star-BiWFA candidates; 0 disables
+        /// Maximum median traversal length for direct single-bubble candidates; iterative multi-bubble reports this as a diagnostic only
         #[clap(long, alias = "max-median-traversal-length", value_parser = parse_usize_size, default_value = "1k")]
         max_median_traversal_len: usize,
 
-        /// Maximum total sequence across all traversals for one direct candidate
+        /// Maximum total sequence across all traversals for direct single-bubble candidates; iterative multi-bubble reports this as a diagnostic only
         #[clap(long, alias = "max-total-seq", value_parser = parse_usize_size, default_value = "1m")]
         max_total_sequence: usize,
 
@@ -5579,11 +5579,11 @@ GFA engine shorthand:
         #[clap(long, value_parser)]
         sweepga_map_pct_identity: Option<String>,
 
-        /// Maximum selected/produced pair alignments for one pairwise replacement; 0 disables
+        /// Maximum selected/produced pair alignments for diagnostics; iterative multi-bubble does not skip candidates on this limit
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_pair_alignments: usize,
 
-        /// Maximum PAF bytes handed to seqwish for one replacement; 0 disables
+        /// Maximum estimated PAF bytes for diagnostics; iterative multi-bubble does not skip candidates on this limit
         #[clap(long, value_parser = parse_usize_size, default_value = "67108864")]
         max_replacement_paf_bytes: usize,
 
@@ -5673,11 +5673,11 @@ GFA engine shorthand:
         )]
         multi_level_admission_only: bool,
 
-        /// Maximum estimated transitive-closure cells for one outward residual replacement; 0 disables
+        /// Maximum estimated transitive-closure cells for outward residual diagnostics; 0 disables the warning
         #[clap(long = "max-transclosure-cells", alias = "build-max-transclosure-cells", value_parser = parse_usize_size, default_value = "0")]
         multi_level_max_transclosure_cells: usize,
 
-        /// Maximum estimated POASTA cells for one outward residual replacement; 0 disables
+        /// Maximum estimated POASTA cells for outward residual diagnostics; 0 disables the warning
         #[clap(long = "max-poasta-cells", alias = "build-max-poasta-cells", value_parser = parse_usize_size, default_value = "0")]
         multi_level_max_poasta_cells: usize,
 

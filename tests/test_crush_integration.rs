@@ -56,8 +56,8 @@ fn impg_binary() -> Option<std::path::PathBuf> {
     }
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for candidate in [
-        manifest_dir.join("target/release/impg"),
         manifest_dir.join("target/debug/impg"),
+        manifest_dir.join("target/release/impg"),
         // Fall back to the main repo binary on this machine
         std::path::PathBuf::from("/home/erikg/impg/target/release/impg"),
     ] {
