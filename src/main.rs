@@ -3003,7 +3003,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level, or coverage-multi-bubble)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble)",
                             raw, param.value
                         ),
                     ));
@@ -5471,7 +5471,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level, or coverage-multi-bubble
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -8775,7 +8775,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level, coverage-multi-bubble",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble",
                 ));
             };
             let Some(multi_level_window_mode) =
@@ -13942,7 +13942,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=iterative-multi-level,multi-bubble-window-mode=combined,wide-window-sites=12,candidate-limit=0",
+            "gfa:syng:crush,method=multi-bubble,multi-bubble-window-mode=combined,wide-window-sites=12,candidate-limit=0",
         ])
         .unwrap();
         match args {
@@ -13956,6 +13956,10 @@ mod tests {
                 assert_eq!(output_format, "gfa");
                 let parsed = engine_cli.parse_engine().unwrap();
                 let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.method,
+                    impg::resolution::ResolutionMethod::IterativeMultiLevel
+                );
                 assert_eq!(
                     crush.multi_level_window_mode,
                     impg::resolution::MultiLevelWindowMode::Combined

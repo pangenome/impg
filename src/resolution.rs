@@ -420,6 +420,14 @@ impl ResolutionMethod {
             | "povu-sweepga"
             | "crush-top-flubble-sweepga" => Some(Self::TopFlubbleSweepga),
             "iterative-multi-level"
+            | "multi-bubble"
+            | "multi-bubbles"
+            | "multi-flubble"
+            | "multi-flubbles"
+            | "flubble-window"
+            | "flubble-windows"
+            | "bubble-window"
+            | "bubble-windows"
             | "multi-level"
             | "multi-level-window"
             | "multi-level-windows"
@@ -9208,6 +9216,14 @@ P\tp1\t1+,3+,4+\t*
     fn iterative_multi_level_parse_name_and_modes_accept_aliases() {
         assert_eq!(
             ResolutionMethod::parse_name("iterative-multi-level"),
+            Some(ResolutionMethod::IterativeMultiLevel)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("multi-bubble"),
+            Some(ResolutionMethod::IterativeMultiLevel)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("multi-flubble"),
             Some(ResolutionMethod::IterativeMultiLevel)
         );
         assert_eq!(
