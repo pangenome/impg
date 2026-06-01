@@ -13972,6 +13972,65 @@ mod tests {
     }
 
     #[test]
+    fn test_gfa_output_format_accepts_c4_multi_bubble_command_shape() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:mask,top=0.001,freq-run=10,freq-span=1000:crush,method=multi-bubble,window-mode=combined,max-window-sites=8,window-target-bp=30k,candidate-limit=192,max-rounds=1,min-match-length=off,max-pair-alignments=0,max-replacement-paf-bytes=0,sweepga-no-filter=true,polish-rounds=0:nosort",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(parsed.graph_sort_pipeline, None);
+                assert_eq!(parsed.syng_gfa_frequency_mask.drop_top_fraction, 0.001);
+                assert_eq!(parsed.syng_gfa_frequency_mask.high_freq_min_run, 10);
+                assert_eq!(
+                    parsed
+                        .syng_gfa_frequency_mask
+                        .high_freq_min_sequence_span_bp,
+                    1_000
+                );
+                assert!(parsed.syng_gfa_frequency_mask.run_aware_frequency_mask);
+
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.method,
+                    impg::resolution::ResolutionMethod::IterativeMultiLevel
+                );
+                assert_eq!(
+                    crush.multi_level_window_mode,
+                    impg::resolution::MultiLevelWindowMode::Combined
+                );
+                assert_eq!(crush.multi_level_max_window_sites, 8);
+                assert_eq!(crush.multi_level_window_target_bp, 30_000);
+                assert_eq!(crush.multi_level_candidate_limit, 192);
+                assert_eq!(crush.max_iterations, 1);
+                assert_eq!(
+                    crush.replacement_min_match_len_policy,
+                    impg::resolution::ReplacementMinMatchLenPolicy::Fixed(1)
+                );
+                assert_eq!(crush.max_pair_alignments, 0);
+                assert_eq!(crush.max_replacement_paf_bytes, 0);
+                assert!(crush.sweepga_no_filter);
+                assert_eq!(crush.polish_iterations, 0);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
     fn test_gfa_output_format_accepts_outward_window_mode() {
         let args = Args::try_parse_from([
             "impg",

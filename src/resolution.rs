@@ -2210,7 +2210,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-sweepga/single-site-auto, application_gate=exact-path-preservation",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, window-total-bp-cap={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
@@ -2252,7 +2252,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-flagged={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-flagged={} (diagnostic only); total-bp-cap-rejected={}, max-len-cap-rejected={}, median-len-cap-rejected={}; discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2261,6 +2261,9 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 discovery_elapsed,
                 format_multi_level_source_counts(&generated.source_counts),
                 generated.repeat_boundary_rejected,
+                generated.total_bp_cap_rejected,
+                generated.max_len_cap_rejected,
+                generated.median_len_cap_rejected,
                 timings.render,
                 timings.povu_parse,
                 timings.povu_decompose,
@@ -2290,135 +2293,64 @@ fn resolve_graph_bubbles_iterative_multi_level(
         let build_start = Instant::now();
         let build_started = AtomicUsize::new(0);
         let build_progress = AtomicUsize::new(0);
-        let build_results = generated
-            .candidates
-            .into_par_iter()
-            .map(|mut window| {
-                if !materialize_candidate_sequences(&graph, &mut window.candidate, config) {
-                    return Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(None);
-                }
-                let method = multi_level_window_replacement_method(&window, config);
-                if emit_logs && selected_count <= 128 {
-                    let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
-                    log::info!(
-                        "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
-                        round + 1,
-                        started,
-                        selected_count,
-                        window.source.as_str(),
-                        window.source_sites,
-                        method,
-                        window.candidate.traversal_stats.count,
-                        window.candidate.traversal_stats.max_len,
-                        window.candidate.traversal_stats.median_len,
-                        window.candidate.traversal_stats.total_len,
-                        window.candidate.root_span
-                    );
-                }
-                let source = window.source;
-                let source_sites = window.source_sites;
-                let candidate_boundary = if emit_logs && selected_count <= 128 {
-                    format_candidate_boundary(&graph, &window.candidate)
-                } else {
-                    String::new()
-                };
-                let result = (|| {
-                    let report = build_replacement_with_method_catching_unwind_report(
-                        &window.candidate,
-                        config,
-                        method,
-                    )?;
-                    let replacement = report.replacement;
-                    if replacement.segments.is_empty() {
-                        return Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(None);
-                    }
-                    let objective = replacement_objective_delta(
+        let build_parallelism =
+            multi_level_replacement_build_parallelism(rayon::current_num_threads(), selected_count);
+        if emit_logs {
+            log::info!(
+                "crush iterative-multi-level round {}: replacement build concurrency={} (global threads={}, candidates={})",
+                round + 1,
+                build_parallelism,
+                rayon::current_num_threads(),
+                selected_count
+            );
+        }
+        let build_candidates = generated.candidates;
+        let build_results = if build_parallelism <= 1 {
+            build_candidates
+                .into_iter()
+                .map(|window| {
+                    build_multi_level_window_candidate(
                         &graph,
-                        &window.candidate,
-                        &replacement,
+                        config,
                         objective_mode,
-                    );
-                    Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(
-                        MultiLevelBuiltCandidate {
-                            source,
-                            source_sites,
-                            plan: ReplacementPlan {
-                                candidate: window.candidate,
-                                replacement,
-                            },
-                            objective,
-                            evidence: report.evidence,
-                        },
+                        emit_logs,
+                        selected_count,
+                        round + 1,
+                        &build_started,
+                        &build_progress,
+                        window,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let build_pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(build_parallelism)
+                .stack_size(16 * 1024 * 1024)
+                .build()
+                .map_err(|err| {
+                    io::Error::other(format!(
+                        "iterative multi-level replacement build pool: {err}"
                     ))
-                })();
-                if emit_logs {
-                    let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
-                    if selected_count <= 128 || done == selected_count || done % 25 == 0 {
-                        let status = match &result {
-                            Ok(Some(_)) => "built",
-                            Ok(None) => "empty",
-                            Err(_) => "failed",
-                        };
-                        log::info!(
-                            "crush iterative-multi-level round {}: build progress {}/{} ({})",
-                            round + 1,
-                            done,
+                })?;
+            build_pool.install(|| {
+                build_candidates
+                    .into_par_iter()
+                    .map(|window| {
+                        build_multi_level_window_candidate(
+                            &graph,
+                            config,
+                            objective_mode,
+                            emit_logs,
                             selected_count,
-                            status
-                        );
-                    }
-                    match &result {
-                        Ok(Some(candidate)) if selected_count <= 128 => {
-                            let evidence = candidate
-                                .evidence
-                                .as_ref()
-                                .map(format_sweepga_evidence)
-                                .unwrap_or_else(|| "alignment_evidence=not-applicable".to_string());
-                            log::info!(
-                                "crush iterative-multi-level round {}: built candidate detail source={} sites={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
-                                round + 1,
-                                candidate.source.as_str(),
-                                candidate.source_sites,
-                                method,
-                                format_candidate_boundary(&graph, &candidate.plan.candidate),
-                                format_candidate_repeat_summary(&graph, &candidate.plan.candidate),
-                                evidence,
-                                candidate.plan.replacement.segments.len(),
-                                replacement_segment_bp(&candidate.plan.replacement),
-                                candidate.objective.score_delta,
-                                candidate.objective.bp_weighted_coverage_delta_scaled,
-                                candidate.objective.singleton_bp_delta,
-                                candidate.objective.segment_delta,
-                                candidate.objective.segment_bp_delta
-                            );
-                        }
-                        Ok(None) if selected_count <= 128 => {
-                            log::info!(
-                                "crush iterative-multi-level round {}: candidate returned empty replacement source={} sites={} method={:?} {}; reason=empty-replacement",
-                                round + 1,
-                                source.as_str(),
-                                source_sites,
-                                method,
-                                candidate_boundary
-                            );
-                        }
-                        Err(err) if selected_count <= 128 => {
-                            log::info!(
-                                "crush iterative-multi-level round {}: candidate failed source={} sites={} method={:?} {}; reason={}",
-                                round + 1,
-                                source.as_str(),
-                                source_sites,
-                                method,
-                                candidate_boundary,
-                                err
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                result
+                            round + 1,
+                            &build_started,
+                            &build_progress,
+                            window,
+                        )
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+        };
         let build_elapsed = build_start.elapsed();
 
         let mut built = Vec::new();
@@ -2629,6 +2561,9 @@ struct MultiLevelGeneratedCandidates {
     generated_total: usize,
     source_counts: FxHashMap<MultiLevelCandidateSource, usize>,
     repeat_boundary_rejected: usize,
+    total_bp_cap_rejected: usize,
+    max_len_cap_rejected: usize,
+    median_len_cap_rejected: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2657,6 +2592,143 @@ struct MultiLevelBuiltCandidate {
     evidence: Option<SweepgaReplacementEvidence>,
 }
 
+fn build_multi_level_window_candidate(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    objective_mode: MultiLevelObjectiveMode,
+    emit_logs: bool,
+    selected_count: usize,
+    round_number: usize,
+    build_started: &AtomicUsize,
+    build_progress: &AtomicUsize,
+    mut window: MultiLevelWindowCandidate,
+) -> io::Result<Option<MultiLevelBuiltCandidate>> {
+    if !materialize_candidate_sequences(graph, &mut window.candidate, config) {
+        return Ok(None);
+    }
+    let method = multi_level_window_replacement_method(&window, config);
+    if emit_logs && selected_count <= 128 {
+        let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
+        log::info!(
+            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
+            round_number,
+            started,
+            selected_count,
+            window.source.as_str(),
+            window.source_sites,
+            method,
+            window.candidate.traversal_stats.count,
+            window.candidate.traversal_stats.max_len,
+            window.candidate.traversal_stats.median_len,
+            window.candidate.traversal_stats.total_len,
+            window.candidate.root_span
+        );
+    }
+    let source = window.source;
+    let source_sites = window.source_sites;
+    let candidate_boundary = if emit_logs && selected_count <= 128 {
+        format_candidate_boundary(graph, &window.candidate)
+    } else {
+        String::new()
+    };
+    let result = (|| {
+        let report = build_replacement_with_method_catching_unwind_report(
+            &window.candidate,
+            config,
+            method,
+        )?;
+        let replacement = report.replacement;
+        if replacement.segments.is_empty() {
+            return Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(None);
+        }
+        let objective =
+            replacement_objective_delta(graph, &window.candidate, &replacement, objective_mode);
+        Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(MultiLevelBuiltCandidate {
+            source,
+            source_sites,
+            plan: ReplacementPlan {
+                candidate: window.candidate,
+                replacement,
+            },
+            objective,
+            evidence: report.evidence,
+        }))
+    })();
+    if emit_logs {
+        let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
+        if selected_count <= 128 || done == selected_count || done % 25 == 0 {
+            let status = match &result {
+                Ok(Some(_)) => "built",
+                Ok(None) => "empty",
+                Err(_) => "failed",
+            };
+            log::info!(
+                "crush iterative-multi-level round {}: build progress {}/{} ({})",
+                round_number,
+                done,
+                selected_count,
+                status
+            );
+        }
+        match &result {
+            Ok(Some(candidate)) if selected_count <= 128 => {
+                let evidence = candidate
+                    .evidence
+                    .as_ref()
+                    .map(format_sweepga_evidence)
+                    .unwrap_or_else(|| "alignment_evidence=not-applicable".to_string());
+                log::info!(
+                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
+                    round_number,
+                    candidate.source.as_str(),
+                    candidate.source_sites,
+                    method,
+                    format_candidate_boundary(graph, &candidate.plan.candidate),
+                    format_candidate_repeat_summary(graph, &candidate.plan.candidate),
+                    evidence,
+                    candidate.plan.replacement.segments.len(),
+                    replacement_segment_bp(&candidate.plan.replacement),
+                    candidate.objective.score_delta,
+                    candidate.objective.bp_weighted_coverage_delta_scaled,
+                    candidate.objective.singleton_bp_delta,
+                    candidate.objective.segment_delta,
+                    candidate.objective.segment_bp_delta
+                );
+            }
+            Ok(None) if selected_count <= 128 => {
+                log::info!(
+                    "crush iterative-multi-level round {}: candidate returned empty replacement source={} sites={} method={:?} {}; reason=empty-replacement",
+                    round_number,
+                    source.as_str(),
+                    source_sites,
+                    method,
+                    candidate_boundary
+                );
+            }
+            Err(err) if selected_count <= 128 => {
+                log::info!(
+                    "crush iterative-multi-level round {}: candidate failed source={} sites={} method={:?} {}; reason={}",
+                    round_number,
+                    source.as_str(),
+                    source_sites,
+                    method,
+                    candidate_boundary,
+                    err
+                );
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+fn multi_level_replacement_build_parallelism(
+    total_threads: usize,
+    candidate_count: usize,
+) -> usize {
+    total_threads.max(1).min(4).min(candidate_count.max(1))
+}
+
 fn multi_level_target_bp(config: &ResolutionConfig) -> usize {
     if config.multi_level_window_target_bp > 0 {
         config.multi_level_window_target_bp
@@ -2666,11 +2738,7 @@ fn multi_level_target_bp(config: &ResolutionConfig) -> usize {
 }
 
 fn multi_level_window_total_bp_cap(config: &ResolutionConfig) -> usize {
-    if config.max_total_sequence != DEFAULT_MAX_TOTAL_SEQUENCE {
-        config.max_total_sequence
-    } else {
-        0
-    }
+    config.max_total_sequence
 }
 
 fn effective_multi_level_objective(config: &ResolutionConfig) -> MultiLevelObjectiveMode {
@@ -2913,9 +2981,24 @@ fn insert_multi_level_candidate(
     let _diagnostic_only = (
         config.max_bubble_span,
         config.min_traversal_len,
-        multi_level_window_total_bp_cap(config),
         config.max_traversals,
     );
+    let total_bp_cap = multi_level_window_total_bp_cap(config);
+    if total_bp_cap > 0 && candidate.traversal_stats.total_len > total_bp_cap {
+        generated.total_bp_cap_rejected += 1;
+        return;
+    }
+    if config.max_traversal_len > 0 && candidate.traversal_stats.max_len > config.max_traversal_len
+    {
+        generated.max_len_cap_rejected += 1;
+        return;
+    }
+    if config.max_median_traversal_len > 0
+        && candidate.traversal_stats.median_len > config.max_median_traversal_len
+    {
+        generated.median_len_cap_rejected += 1;
+        return;
+    }
     if !emitted.insert(candidate.signature.clone()) {
         return;
     }
@@ -3571,7 +3654,13 @@ fn multi_level_window_replacement_method(
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
     if window.source_sites > 1 {
-        ResolutionMethod::Sweepga
+        match candidate_replacement_method(&window.candidate, config) {
+            // Multi-site windows should not go through the tiny-bubble SPOA
+            // path: POASTA is the direct aligner tier that can handle these
+            // larger local structures without invoking pairwise graph induction.
+            ResolutionMethod::Poa => ResolutionMethod::Poasta,
+            method => method,
+        }
     } else {
         candidate_replacement_method(&window.candidate, config)
     }
@@ -10446,7 +10535,7 @@ P\talt\t1+,12+,13+,24+,25+,36+,37+\t*
     }
 
     #[test]
-    fn iterative_multi_level_routes_multi_bubble_windows_to_sweepga_first() {
+    fn iterative_multi_level_routes_multi_bubble_windows_through_direct_auto_tiers() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -10498,12 +10587,22 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         );
         assert_eq!(
             multi_level_window_replacement_method(window, &config),
+            ResolutionMethod::Poasta
+        );
+
+        let forced_sweepga = ResolutionConfig {
+            auto_spoa_max_traversal_len: 0,
+            auto_poasta_max_traversal_len: 0,
+            ..config.clone()
+        };
+        assert_eq!(
+            multi_level_window_replacement_method(window, &forced_sweepga),
             ResolutionMethod::Sweepga
         );
     }
 
     #[test]
-    fn iterative_multi_level_treats_total_bp_cap_as_diagnostic_only() {
+    fn iterative_multi_level_enforces_total_bp_cap_before_replacement_build() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -10539,12 +10638,13 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         let generated =
             generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
 
+        assert!(generated.total_bp_cap_rejected > 0, "{generated:?}");
         assert!(
-            generated.candidates.iter().any(|candidate| candidate
+            generated.candidates.iter().all(|candidate| candidate
                 .candidate
                 .traversal_stats
                 .total_len
-                > 12),
+                <= 12),
             "{:?}",
             generated
                 .candidates
@@ -10552,6 +10652,93 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
                 .map(|candidate| candidate.candidate.traversal_stats.total_len)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn iterative_multi_level_enforces_traversal_len_caps_before_replacement_build() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tCCCC
+S\t3\tGGGG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let base_config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Combined,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            max_total_sequence: 1_000,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &base_config, false).unwrap();
+
+        let max_len_config = ResolutionConfig {
+            max_traversal_len: 3,
+            max_median_traversal_len: 1_000,
+            ..base_config.clone()
+        };
+        let generated = generate_multi_level_candidates(
+            &graph,
+            &max_len_config,
+            &discovered,
+            &FxHashSet::default(),
+        );
+        assert!(generated.max_len_cap_rejected > 0, "{generated:?}");
+        assert!(
+            generated.candidates.iter().all(|candidate| candidate
+                .candidate
+                .traversal_stats
+                .max_len
+                <= 3),
+            "{generated:?}"
+        );
+
+        let median_len_config = ResolutionConfig {
+            max_traversal_len: 1_000,
+            max_median_traversal_len: 3,
+            ..base_config
+        };
+        let generated = generate_multi_level_candidates(
+            &graph,
+            &median_len_config,
+            &discovered,
+            &FxHashSet::default(),
+        );
+        assert!(generated.median_len_cap_rejected > 0, "{generated:?}");
+        assert!(
+            generated.candidates.iter().all(|candidate| candidate
+                .candidate
+                .traversal_stats
+                .median_len
+                <= 3),
+            "{generated:?}"
+        );
+    }
+
+    #[test]
+    fn iterative_multi_level_caps_replacement_build_parallelism() {
+        assert_eq!(multi_level_replacement_build_parallelism(0, 192), 1);
+        assert_eq!(multi_level_replacement_build_parallelism(1, 192), 1);
+        assert_eq!(multi_level_replacement_build_parallelism(2, 192), 2);
+        assert_eq!(multi_level_replacement_build_parallelism(32, 192), 4);
+        assert_eq!(multi_level_replacement_build_parallelism(32, 3), 3);
     }
 
     #[test]
