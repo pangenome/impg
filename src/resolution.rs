@@ -2226,6 +2226,8 @@ fn resolve_graph_bubbles_iterative_multi_level(
 ) -> io::Result<ResolvedGfa> {
     let mut changed = false;
     let mut resolved_signatures: FxHashSet<String> = FxHashSet::default();
+    let mut near_identity_regions: Vec<NearIdentityRegion> = Vec::new();
+    let mut suppressed_near_identity_regions: Vec<NearIdentityRegion> = Vec::new();
     let mut per_round_accepted = Vec::new();
     let objective_mode = effective_multi_level_objective(config);
     let repeat_aware_boundaries = effective_repeat_aware_boundaries(config);
@@ -2256,18 +2258,27 @@ fn resolve_graph_bubbles_iterative_multi_level(
         let discovery_start = Instant::now();
         let (all_discovered, sites_seen, timings) =
             discover_all_candidates(&graph, config, emit_logs)?;
-        let generated =
-            generate_multi_level_candidates(&graph, config, &all_discovered, &resolved_signatures);
+        let generated = generate_multi_level_candidates_with_expansion(
+            &graph,
+            config,
+            &all_discovered,
+            &resolved_signatures,
+            &near_identity_regions,
+            &suppressed_near_identity_regions,
+        );
         let discovery_elapsed = discovery_start.elapsed();
 
         if generated.candidates.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush iterative-multi-level round {}: no generated candidate(s) from {} POVU site(s), {} polymorphic site(s) in {:.2?}; before {}",
+                    "crush iterative-multi-level round {}: no generated candidate(s) from {} POVU site(s), {} polymorphic site(s) in {:.2?}; near-identity-expansion-pending={}, near-identity-suppressed-regions={}, near-identity-repeat-suppressed={}; before {}",
                     round + 1,
                     sites_seen,
                     all_discovered.len(),
                     discovery_elapsed,
+                    near_identity_regions.len(),
+                    suppressed_near_identity_regions.len(),
+                    generated.near_identity_repeat_suppressed,
                     before_quality.summary()
                 );
             }
@@ -2279,7 +2290,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; near-identity-expansion-pending={}, near-identity-suppressed-regions={}, near-identity-repeat-suppressed={}; repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2287,6 +2298,9 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 generated.candidates.len(),
                 discovery_elapsed,
                 format_multi_level_source_counts(&generated.source_counts),
+                near_identity_regions.len(),
+                suppressed_near_identity_regions.len(),
+                generated.near_identity_repeat_suppressed,
                 generated.repeat_boundary_rejected,
                 generated.total_bp_cap_exceeded,
                 generated.max_len_cap_exceeded,
@@ -2337,6 +2351,10 @@ fn resolve_graph_bubbles_iterative_multi_level(
         }
 
         let build_diagnostics = multi_level_build_budget_diagnostics(&generated.candidates, config);
+        let round_expanded_due_to_near_identity = generated
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source == MultiLevelCandidateSource::NearIdentityExpansion);
         if emit_logs && !build_diagnostics.is_empty() {
             log::info!(
                 "crush iterative-multi-level round {}: {} candidate(s) exceed configured build-budget diagnostics; all remain admitted for replacement build; detail: {}",
@@ -2505,6 +2523,64 @@ fn resolve_graph_bubbles_iterative_multi_level(
             break;
         }
 
+        let mut skipped_near_identity = Vec::new();
+        let mut material_accepted = Vec::new();
+        let mut next_near_identity_regions = Vec::new();
+        let skip_near_identity_rewrites = matches!(
+            effective_multi_level_window_mode(config),
+            MultiLevelWindowMode::Largest
+        );
+        for candidate in accepted {
+            if skip_near_identity_rewrites && replacement_is_near_identity(&candidate.objective) {
+                record_near_identity_candidate_region(
+                    &graph,
+                    &candidate,
+                    config.multi_level_max_window_sites,
+                    &mut next_near_identity_regions,
+                    &mut suppressed_near_identity_regions,
+                );
+                skipped_near_identity.push(candidate);
+            } else {
+                material_accepted.push(candidate);
+            }
+        }
+
+        if emit_logs && !skipped_near_identity.is_empty() {
+            log_multi_level_replacement_audit(
+                &graph,
+                round + 1,
+                &skipped_near_identity,
+                round_expanded_due_to_near_identity,
+                "skipped-near-identity",
+            );
+        }
+
+        if material_accepted.is_empty() {
+            near_identity_regions = next_near_identity_regions;
+            per_round_accepted.push(0);
+            if emit_logs {
+                log::info!(
+                    "crush iterative-multi-level round {}: skipped {} near-identity candidate(s) without graph rewrite; active-near-identity-regions={}, suppressed-near-identity-regions={}; built={}, objective_passing_diagnostic={}, objective_below_floor_diagnostic={}, overlap_deferred={}, budget_diagnostic={}, objective_floor={} (diagnostic only); failed_or_empty={}; build {:.2?}; total {:.2?}; before {}",
+                    round + 1,
+                    skipped_near_identity.len(),
+                    near_identity_regions.len(),
+                    suppressed_near_identity_regions.len(),
+                    built_count,
+                    objective_passing_count,
+                    local_objective_below_floor,
+                    overlap_deferred,
+                    build_diagnostics.len(),
+                    objective_floor,
+                    failed_or_empty,
+                    build_elapsed,
+                    round_start.elapsed(),
+                    before_quality.summary()
+                );
+            }
+            continue;
+        }
+
+        let accepted = material_accepted;
         let rewrite_start = Instant::now();
         let pre_apply_next_id = next_id;
         let plans = accepted
@@ -2529,12 +2605,22 @@ fn resolve_graph_bubbles_iterative_multi_level(
             },
         );
         let objective_summary = format_objective_delta_summary(&accepted);
+        if emit_logs {
+            log_multi_level_replacement_audit(
+                &graph,
+                round + 1,
+                &accepted,
+                round_expanded_due_to_near_identity,
+                "applied",
+            );
+        }
         next_id = trial_next_id;
 
         for plan in &plans {
             resolved_signatures.insert(plan.candidate.signature.clone());
         }
         graph = next_graph;
+        near_identity_regions = next_near_identity_regions;
         changed = true;
         stats.resolved += plans.len();
         per_round_accepted.push(plans.len());
@@ -2603,6 +2689,7 @@ struct MultiLevelWindowCandidate {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum MultiLevelCandidateSource {
+    NearIdentityExpansion,
     TopLevel,
     SiblingRun,
     ParentDescendants,
@@ -2615,6 +2702,7 @@ enum MultiLevelCandidateSource {
 impl MultiLevelCandidateSource {
     fn as_str(self) -> &'static str {
         match self {
+            Self::NearIdentityExpansion => "near-identity-expansion",
             Self::TopLevel => "top-level",
             Self::SiblingRun => "sibling-run",
             Self::ParentDescendants => "parent-descendants",
@@ -2626,12 +2714,33 @@ impl MultiLevelCandidateSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NearIdentityRegion {
+    root_begin_bp: usize,
+    root_end_bp: usize,
+    source_sites: usize,
+}
+
+impl NearIdentityRegion {
+    fn span_bp(self) -> usize {
+        self.root_end_bp.saturating_sub(self.root_begin_bp)
+    }
+
+    fn with_source_sites(self, source_sites: usize) -> Self {
+        Self {
+            source_sites: source_sites.max(1),
+            ..self
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct MultiLevelGeneratedCandidates {
     candidates: Vec<MultiLevelWindowCandidate>,
     generated_total: usize,
     source_counts: FxHashMap<MultiLevelCandidateSource, usize>,
     repeat_boundary_rejected: usize,
+    near_identity_repeat_suppressed: usize,
     total_bp_cap_exceeded: usize,
     max_len_cap_exceeded: usize,
     median_len_cap_exceeded: usize,
@@ -2658,6 +2767,7 @@ struct ReplacementObjectiveDelta {
 struct MultiLevelBuiltCandidate {
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    method: ResolutionMethod,
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
@@ -2898,6 +3008,7 @@ fn build_multi_level_window_candidate(
         Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(MultiLevelBuiltCandidate {
             source,
             source_sites,
+            method,
             plan: ReplacementPlan {
                 candidate: window.candidate,
                 replacement,
@@ -3039,6 +3150,24 @@ fn generate_multi_level_candidates(
     discovered: &[DiscoveredCandidate],
     resolved_signatures: &FxHashSet<String>,
 ) -> MultiLevelGeneratedCandidates {
+    generate_multi_level_candidates_with_expansion(
+        graph,
+        config,
+        discovered,
+        resolved_signatures,
+        &[],
+        &[],
+    )
+}
+
+fn generate_multi_level_candidates_with_expansion(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    discovered: &[DiscoveredCandidate],
+    resolved_signatures: &FxHashSet<String>,
+    near_identity_regions: &[NearIdentityRegion],
+    suppressed_near_identity_regions: &[NearIdentityRegion],
+) -> MultiLevelGeneratedCandidates {
     let mut generated = MultiLevelGeneratedCandidates::default();
     if discovered.is_empty() {
         return generated;
@@ -3059,6 +3188,23 @@ fn generate_multi_level_candidates(
     };
     let window_mode = effective_multi_level_window_mode(config);
 
+    if !near_identity_regions.is_empty() {
+        add_near_identity_expansion_windows(
+            graph,
+            discovered,
+            near_identity_regions,
+            target_bp,
+            max_sites,
+            &path_positions_by_path,
+            &path_step_indexes,
+            node_visits.as_deref(),
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
+
     let use_parent = matches!(
         window_mode,
         MultiLevelWindowMode::Largest
@@ -3073,9 +3219,14 @@ fn generate_multi_level_candidates(
         window_mode,
         MultiLevelWindowMode::Sliding | MultiLevelWindowMode::Combined
     );
+    let near_identity_escalation_active = !near_identity_regions.is_empty();
     let use_outward = matches!(window_mode, MultiLevelWindowMode::Outward)
-        || coverage_mode_includes_outward(config);
-    let add_outward_first = coverage_mode_includes_outward(config);
+        || coverage_mode_includes_outward(config)
+        || (matches!(window_mode, MultiLevelWindowMode::Largest)
+            && near_identity_escalation_active);
+    let add_outward_first = coverage_mode_includes_outward(config)
+        || (matches!(window_mode, MultiLevelWindowMode::Largest)
+            && near_identity_escalation_active);
 
     if use_outward && add_outward_first {
         add_outward_residual_windows(
@@ -3195,6 +3346,23 @@ fn generate_multi_level_candidates(
         );
     }
 
+    if !near_identity_regions.is_empty() {
+        generated.near_identity_repeat_suppressed = suppress_near_identity_repeat_candidates(
+            graph,
+            &mut generated.candidates,
+            near_identity_regions,
+            false,
+        );
+    }
+    if !suppressed_near_identity_regions.is_empty() {
+        generated.near_identity_repeat_suppressed += suppress_near_identity_repeat_candidates(
+            graph,
+            &mut generated.candidates,
+            suppressed_near_identity_regions,
+            true,
+        );
+    }
+
     generated.generated_total = generated.candidates.len();
     generated.candidates.sort_by(|a, b| {
         multi_level_source_priority(a.source)
@@ -3250,8 +3418,11 @@ fn compare_same_source_window_priority(
                     .estimated_step_savings()
                     .cmp(&a.candidate.estimated_step_savings())
             })
-    } else if a.source == MultiLevelCandidateSource::OutwardResidualWindow
-        && b.source == MultiLevelCandidateSource::OutwardResidualWindow
+    } else if matches!(
+        a.source,
+        MultiLevelCandidateSource::OutwardResidualWindow
+            | MultiLevelCandidateSource::NearIdentityExpansion
+    ) && a.source == b.source
     {
         b.candidate
             .traversal_stats
@@ -3537,9 +3708,13 @@ fn add_outward_residual_windows(
         reference_minimal_discovered_indexes(discovered, reference_path_order_indexes(discovered));
 
     let path_count = graph.paths.len().max(1);
+    let reject_tiny_long_range_seeds = matches!(
+        effective_multi_level_window_mode(config),
+        MultiLevelWindowMode::Largest
+    );
     for site in discovered {
         if site.candidate.root_span <= target_bp
-            && is_outward_residual_seed(&site.candidate, path_count)
+            && is_outward_residual_seed(&site.candidate, path_count, reject_tiny_long_range_seeds)
         {
             insert_multi_level_candidate(
                 generated,
@@ -3558,7 +3733,11 @@ fn add_outward_residual_windows(
     }
 
     for (pos, &seed_idx) in indexes.iter().enumerate() {
-        if !is_outward_residual_seed(&discovered[seed_idx].candidate, path_count) {
+        if !is_outward_residual_seed(
+            &discovered[seed_idx].candidate,
+            path_count,
+            reject_tiny_long_range_seeds,
+        ) {
             continue;
         }
 
@@ -3596,6 +3775,163 @@ fn add_outward_residual_windows(
             }
         }
     }
+}
+
+fn add_near_identity_expansion_windows(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    near_identity_regions: &[NearIdentityRegion],
+    target_bp: usize,
+    max_sites: usize,
+    path_positions_by_path: &[Vec<usize>],
+    path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if discovered.len() < 2 || near_identity_regions.is_empty() {
+        return;
+    }
+
+    let indexes = reference_path_order_indexes(discovered);
+    let root_positions = &path_positions_by_path[0];
+    for region in near_identity_regions {
+        let overlapping_positions = indexes
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, &idx)| {
+                let interval = candidate_root_bp_interval_with_positions(
+                    &discovered[idx].candidate,
+                    root_positions,
+                )?;
+                if intervals_overlap(interval, (region.root_begin_bp, region.root_end_bp))
+                    || interval_contains(interval, (region.root_begin_bp, region.root_end_bp))
+                    || interval_contains((region.root_begin_bp, region.root_end_bp), interval)
+                {
+                    Some(pos)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let Some((&first_pos, &last_pos)) = overlapping_positions
+            .first()
+            .zip(overlapping_positions.last())
+        else {
+            continue;
+        };
+
+        let expansion_target_bp = near_identity_expansion_target_bp(*region, target_bp);
+        if region.source_sites < max_sites {
+            let desired_start = first_pos.saturating_sub(1);
+            let desired_end = (last_pos + 2).min(indexes.len());
+            add_near_identity_window_range(
+                graph,
+                discovered,
+                &indexes,
+                desired_start,
+                desired_end,
+                *region,
+                expansion_target_bp,
+                max_sites,
+                path_positions_by_path,
+                path_step_indexes,
+                node_visits,
+                generated,
+                emitted,
+                resolved_signatures,
+                config,
+            );
+        }
+
+        for &seed_pos in &overlapping_positions {
+            if region.source_sites >= max_sites {
+                continue;
+            }
+            for window_size in 2..=max_sites.min(indexes.len()) {
+                let min_start = seed_pos.saturating_add(1).saturating_sub(window_size);
+                let max_start = seed_pos.min(indexes.len() - window_size);
+                if min_start > max_start {
+                    continue;
+                }
+                let preferred = seed_pos
+                    .saturating_sub((window_size - 1) / 2)
+                    .max(min_start)
+                    .min(max_start);
+                let mut starts = [preferred, min_start, max_start]
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                starts.sort_unstable();
+                starts.dedup();
+                for start in starts {
+                    add_near_identity_window_range(
+                        graph,
+                        discovered,
+                        &indexes,
+                        start,
+                        start + window_size,
+                        *region,
+                        expansion_target_bp,
+                        max_sites,
+                        path_positions_by_path,
+                        path_step_indexes,
+                        node_visits,
+                        generated,
+                        emitted,
+                        resolved_signatures,
+                        config,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn add_near_identity_window_range(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    ordered_indexes: &[usize],
+    start: usize,
+    end: usize,
+    region: NearIdentityRegion,
+    target_bp: usize,
+    max_sites: usize,
+    path_positions_by_path: &[Vec<usize>],
+    path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if end <= start + 1 || end > ordered_indexes.len() || end.saturating_sub(start) > max_sites {
+        return;
+    }
+    let window = &ordered_indexes[start..end];
+    let Some((begin_bp, end_bp)) =
+        discovered_window_root_bp_interval(discovered, window, &path_positions_by_path[0])
+    else {
+        return;
+    };
+    if !near_identity_window_expands_region((begin_bp, end_bp), window.len(), region) {
+        return;
+    }
+    add_specific_index_window(
+        graph,
+        discovered,
+        window,
+        target_bp,
+        path_positions_by_path,
+        path_step_indexes,
+        node_visits,
+        MultiLevelCandidateSource::NearIdentityExpansion,
+        generated,
+        emitted,
+        resolved_signatures,
+        config,
+    );
 }
 
 fn add_index_windows(
@@ -3786,6 +4122,118 @@ fn candidate_from_root_interval(
     })
 }
 
+fn candidate_root_bp_interval(
+    graph: &Graph,
+    candidate: &BubbleCandidate,
+) -> Option<(usize, usize)> {
+    let positions = path_positions(graph, 0);
+    candidate_root_bp_interval_with_positions(candidate, &positions)
+}
+
+fn candidate_root_bp_interval_with_positions(
+    candidate: &BubbleCandidate,
+    root_positions: &[usize],
+) -> Option<(usize, usize)> {
+    let begin = root_positions.get(candidate.root_start_step).copied()?;
+    let end = candidate
+        .root_end_step
+        .checked_add(1)
+        .and_then(|idx| root_positions.get(idx).copied())?;
+    Some((begin, end))
+}
+
+fn discovered_window_root_bp_interval(
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+    root_positions: &[usize],
+) -> Option<(usize, usize)> {
+    let mut root_start = usize::MAX;
+    let mut root_end = 0usize;
+    for &idx in indexes {
+        let candidate = &discovered.get(idx)?.candidate;
+        root_start = root_start.min(candidate.root_start_step);
+        root_end = root_end.max(candidate.root_end_step);
+    }
+    let begin = root_positions.get(root_start).copied()?;
+    let end = root_end
+        .checked_add(1)
+        .and_then(|idx| root_positions.get(idx).copied())?;
+    Some((begin, end))
+}
+
+fn intervals_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
+fn interval_contains(outer: (usize, usize), inner: (usize, usize)) -> bool {
+    outer.0 <= inner.0 && outer.1 >= inner.1
+}
+
+fn near_identity_window_expands_region(
+    interval: (usize, usize),
+    source_sites: usize,
+    region: NearIdentityRegion,
+) -> bool {
+    interval.0 < region.root_begin_bp
+        || interval.1 > region.root_end_bp
+        || (interval.0 == region.root_begin_bp
+            && interval.1 == region.root_end_bp
+            && source_sites > region.source_sites)
+}
+
+fn near_identity_expansion_target_bp(region: NearIdentityRegion, target_bp: usize) -> usize {
+    let target_bp = target_bp.max(1);
+    let span = region.span_bp().max(1);
+    span.saturating_add(target_bp.max(span / 2))
+}
+
+fn suppress_near_identity_repeat_candidates(
+    graph: &Graph,
+    candidates: &mut Vec<MultiLevelWindowCandidate>,
+    near_identity_regions: &[NearIdentityRegion],
+    suppress_expansion_source: bool,
+) -> usize {
+    let before = candidates.len();
+    candidates.retain(|window| {
+        let repeats_suppressed_region = if suppress_expansion_source {
+            candidate_overlaps_near_identity_region(graph, &window.candidate, near_identity_regions)
+        } else {
+            candidate_repeats_near_identity_region(graph, &window.candidate, near_identity_regions)
+        };
+        (window.source == MultiLevelCandidateSource::NearIdentityExpansion
+            && !suppress_expansion_source)
+            || !repeats_suppressed_region
+    });
+    before.saturating_sub(candidates.len())
+}
+
+fn candidate_overlaps_near_identity_region(
+    graph: &Graph,
+    candidate: &BubbleCandidate,
+    near_identity_regions: &[NearIdentityRegion],
+) -> bool {
+    let Some(interval) = candidate_root_bp_interval(graph, candidate) else {
+        return false;
+    };
+    near_identity_regions
+        .iter()
+        .any(|region| intervals_overlap(interval, (region.root_begin_bp, region.root_end_bp)))
+}
+
+fn candidate_repeats_near_identity_region(
+    graph: &Graph,
+    candidate: &BubbleCandidate,
+    near_identity_regions: &[NearIdentityRegion],
+) -> bool {
+    let Some(interval) = candidate_root_bp_interval(graph, candidate) else {
+        return false;
+    };
+    near_identity_regions.iter().any(|region| {
+        interval_contains((region.root_begin_bp, region.root_end_bp), interval)
+            || interval == (region.root_begin_bp, region.root_end_bp)
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RepeatAnchorDiagnostic {
     visits: usize,
@@ -3927,7 +4375,11 @@ fn is_locally_stringy_candidate(candidate: &BubbleCandidate) -> bool {
         && candidate.unique_steps >= candidate.traversal_stats.count.saturating_mul(5)
 }
 
-fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> bool {
+fn is_outward_residual_seed(
+    candidate: &BubbleCandidate,
+    path_count: usize,
+    reject_tiny_long_range_seeds: bool,
+) -> bool {
     if is_locally_stringy_candidate(candidate) {
         return true;
     }
@@ -3935,20 +4387,23 @@ fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> b
     let broad_support = candidate.traversal_stats.count >= path_count.saturating_div(4).max(2);
     let high_step_density =
         candidate.unique_steps >= candidate.traversal_stats.count.saturating_mul(3).max(12);
-    let high_total_bp = candidate.traversal_stats.total_len >= 50_000 && broad_support;
+    let high_total_bp = (!reject_tiny_long_range_seeds || candidate.root_span >= 1_000)
+        && candidate.traversal_stats.total_len >= 50_000
+        && broad_support;
     let long_local_region = candidate.root_span >= 1_000 && high_step_density;
     high_total_bp || long_local_region
 }
 
 fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     match source {
-        MultiLevelCandidateSource::TopLevel => 0,
-        MultiLevelCandidateSource::ParentDescendants => 1,
-        MultiLevelCandidateSource::OutwardResidualWindow => 2,
-        MultiLevelCandidateSource::LevelWindow => 3,
-        MultiLevelCandidateSource::SiblingRun => 4,
-        MultiLevelCandidateSource::SlidingWindow => 5,
-        MultiLevelCandidateSource::StringyNeighborhood => 6,
+        MultiLevelCandidateSource::NearIdentityExpansion => 0,
+        MultiLevelCandidateSource::OutwardResidualWindow => 1,
+        MultiLevelCandidateSource::TopLevel => 2,
+        MultiLevelCandidateSource::ParentDescendants => 3,
+        MultiLevelCandidateSource::LevelWindow => 4,
+        MultiLevelCandidateSource::SiblingRun => 5,
+        MultiLevelCandidateSource::SlidingWindow => 6,
+        MultiLevelCandidateSource::StringyNeighborhood => 7,
     }
 }
 
@@ -3956,6 +4411,16 @@ fn multi_level_window_replacement_method(
     window: &MultiLevelWindowCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
+    if matches!(
+        window.source,
+        MultiLevelCandidateSource::NearIdentityExpansion
+            | MultiLevelCandidateSource::OutwardResidualWindow
+    ) {
+        return match config.method {
+            ResolutionMethod::Wfmash => ResolutionMethod::Wfmash,
+            _ => ResolutionMethod::Sweepga,
+        };
+    }
     if window.source_sites > 1 {
         match candidate_replacement_method(&window.candidate, config) {
             // Multi-site windows should not go through the tiny-bubble SPOA
@@ -4017,6 +4482,124 @@ fn replacement_objective_delta(
         segment_delta: input_segments as i128 - output_segments as i128,
         segment_bp_delta: input_segment_bp as i128 - output_segment_bp as i128,
         score_delta,
+    }
+}
+
+fn replacement_is_near_identity(delta: &ReplacementObjectiveDelta) -> bool {
+    if delta.input_segments == 0 || delta.output_segments == 0 {
+        return false;
+    }
+    let segment_delta = delta.input_segments as i128 - delta.output_segments as i128;
+    let segment_bp_delta = delta.input_segment_bp as i128 - delta.output_segment_bp as i128;
+    if segment_delta < 0 || segment_bp_delta < 0 {
+        return true;
+    }
+
+    let small_segment_delta = (delta.input_segments / 20).max(2) as i128;
+    let small_bp_delta = (delta.input_segment_bp / 20).max(128) as i128;
+    let singleton_slack = (delta.input_singleton_bp / 20).max(128) as i128;
+    let singleton_delta = delta.input_singleton_bp as i128 - delta.output_singleton_bp as i128;
+
+    segment_delta <= small_segment_delta
+        && segment_bp_delta <= small_bp_delta
+        && singleton_delta <= singleton_slack
+}
+
+fn near_identity_region_for_candidate(
+    graph: &Graph,
+    candidate: &BubbleCandidate,
+    source_sites: usize,
+) -> Option<NearIdentityRegion> {
+    let (root_begin_bp, root_end_bp) = candidate_root_bp_interval(graph, candidate)?;
+    Some(NearIdentityRegion {
+        root_begin_bp,
+        root_end_bp,
+        source_sites: source_sites.max(1),
+    })
+}
+
+fn near_identity_replacement_has_already_escalated(
+    candidate: &MultiLevelBuiltCandidate,
+    max_window_sites: usize,
+) -> bool {
+    candidate.source == MultiLevelCandidateSource::NearIdentityExpansion
+        || method_uses_pairwise_induction(candidate.method)
+        || candidate.source_sites >= max_window_sites.max(1)
+}
+
+fn record_near_identity_candidate_region(
+    graph: &Graph,
+    candidate: &MultiLevelBuiltCandidate,
+    max_window_sites: usize,
+    active_regions: &mut Vec<NearIdentityRegion>,
+    suppressed_regions: &mut Vec<NearIdentityRegion>,
+) {
+    let source_sites = candidate.source_sites.max(1);
+    let Some(region) =
+        near_identity_region_for_candidate(graph, &candidate.plan.candidate, source_sites)
+    else {
+        return;
+    };
+    if near_identity_replacement_has_already_escalated(candidate, max_window_sites) {
+        push_near_identity_suppression_region(
+            suppressed_regions,
+            region.with_source_sites(max_window_sites),
+        );
+    } else {
+        active_regions.push(region);
+    }
+}
+
+fn push_near_identity_suppression_region(
+    suppressed: &mut Vec<NearIdentityRegion>,
+    region: NearIdentityRegion,
+) {
+    if suppressed.iter().any(|existing| {
+        interval_contains(
+            (existing.root_begin_bp, existing.root_end_bp),
+            (region.root_begin_bp, region.root_end_bp),
+        )
+    }) {
+        return;
+    }
+    suppressed.retain(|existing| {
+        !interval_contains(
+            (region.root_begin_bp, region.root_end_bp),
+            (existing.root_begin_bp, existing.root_end_bp),
+        )
+    });
+    suppressed.push(region);
+}
+
+fn log_multi_level_replacement_audit(
+    graph: &Graph,
+    round_number: usize,
+    accepted: &[MultiLevelBuiltCandidate],
+    round_expanded_due_to_near_identity: bool,
+    application_status: &str,
+) {
+    for (idx, candidate) in accepted.iter().enumerate() {
+        let near_identity = replacement_is_near_identity(&candidate.objective);
+        log::info!(
+            "crush iterative-multi-level round {} replacement audit #{}: source={} sites={} application_status={} expanded_due_to_near_identity={} round_had_near_identity_expansion={} resolver={:?}; selected_region={}; traversals={}, input_segments={}, output_segments={}, input_bp={}, output_bp={}, singleton_bp={}->{}, near_identity_output={}, path_validation=passed",
+            round_number,
+            idx + 1,
+            candidate.source.as_str(),
+            candidate.source_sites,
+            application_status,
+            candidate.source == MultiLevelCandidateSource::NearIdentityExpansion,
+            round_expanded_due_to_near_identity,
+            candidate.method,
+            format_candidate_boundary(graph, &candidate.plan.candidate),
+            candidate.plan.candidate.traversal_stats.count,
+            candidate.objective.input_segments,
+            candidate.objective.output_segments,
+            candidate.objective.input_segment_bp,
+            candidate.objective.output_segment_bp,
+            candidate.objective.input_singleton_bp,
+            candidate.objective.output_singleton_bp,
+            near_identity,
+        );
     }
 }
 
@@ -4144,6 +4727,7 @@ fn format_multi_level_source_counts(
     counts: &FxHashMap<MultiLevelCandidateSource, usize>,
 ) -> String {
     let ordered = [
+        MultiLevelCandidateSource::NearIdentityExpansion,
         MultiLevelCandidateSource::TopLevel,
         MultiLevelCandidateSource::SiblingRun,
         MultiLevelCandidateSource::ParentDescendants,
@@ -9832,6 +10416,271 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
+    fn largest_mode_near_identity_expands_to_neighboring_compound_region() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let first_site = discovered
+            .iter()
+            .min_by_key(|site| site.candidate.root_start_step)
+            .expect("fixture should expose at least one bubble");
+        let region = near_identity_region_for_candidate(&graph, &first_site.candidate, 1).unwrap();
+        let generated = generate_multi_level_candidates_with_expansion(
+            &graph,
+            &config,
+            &discovered,
+            &FxHashSet::default(),
+            &[region],
+            &[],
+        );
+
+        assert!(
+            generated.near_identity_repeat_suppressed > 0,
+            "the prior near-identity interval should be suppressed unless expanded: {generated:?}"
+        );
+        assert_eq!(generated.candidates.len(), 1, "{generated:?}");
+        let selected = &generated.candidates[0];
+        assert_eq!(
+            selected.source,
+            MultiLevelCandidateSource::NearIdentityExpansion
+        );
+        assert!(
+            selected.source_sites >= 2,
+            "expanded candidate should absorb a neighboring flubble: {selected:?}"
+        );
+        let selected_interval = candidate_root_bp_interval(&graph, &selected.candidate).unwrap();
+        assert!(
+            near_identity_window_expands_region(selected_interval, selected.source_sites, region),
+            "selected interval {selected_interval:?} should strictly expand {region:?}"
+        );
+        assert_eq!(
+            multi_level_window_replacement_method(selected, &config),
+            ResolutionMethod::Sweepga,
+            "near-identity expansion switches resolver to robust SweepGA/seqwish induction"
+        );
+    }
+
+    #[test]
+    fn maxed_near_identity_expansion_escalates_to_outward_without_exceeding_site_cap() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let max_sites = 3;
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: max_sites,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let first_site = discovered
+            .iter()
+            .min_by_key(|site| site.candidate.root_start_step)
+            .expect("fixture should expose at least one bubble");
+        let mut region =
+            near_identity_region_for_candidate(&graph, &first_site.candidate, 1).unwrap();
+        region.source_sites = max_sites;
+
+        let generated = generate_multi_level_candidates_with_expansion(
+            &graph,
+            &config,
+            &discovered,
+            &FxHashSet::default(),
+            &[region],
+            &[],
+        );
+
+        assert_eq!(generated.candidates.len(), 1, "{generated:?}");
+        let selected = &generated.candidates[0];
+        assert_ne!(
+            selected.source,
+            MultiLevelCandidateSource::NearIdentityExpansion,
+            "a max-site near-identity expansion should not generate a larger same-source window"
+        );
+        assert!(
+            selected.source_sites <= max_sites,
+            "source-site cap must remain authoritative: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn suppressed_near_identity_region_is_not_rediscovered_after_failed_escalation() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\talt\t1+,3+,4+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let first_site = discovered
+            .first()
+            .expect("fixture should expose a single small bubble");
+        let region = near_identity_region_for_candidate(&graph, &first_site.candidate, 1).unwrap();
+        let overlapping_region = NearIdentityRegion {
+            root_begin_bp: region.root_end_bp.saturating_sub(1),
+            root_end_bp: region.root_end_bp.saturating_add(10),
+            source_sites: 1,
+        };
+        assert!(
+            candidate_overlaps_near_identity_region(
+                &graph,
+                &first_site.candidate,
+                &[overlapping_region],
+            ),
+            "persistent suppression should treat overlapping intervals as the same effective local region"
+        );
+        assert!(
+            !candidate_repeats_near_identity_region(
+                &graph,
+                &first_site.candidate,
+                &[overlapping_region],
+            ),
+            "the overlap-only case should remain distinct from active exact/contained repeat suppression"
+        );
+
+        let generated = generate_multi_level_candidates_with_expansion(
+            &graph,
+            &config,
+            &discovered,
+            &FxHashSet::default(),
+            &[],
+            &[region],
+        );
+
+        assert!(
+            generated.near_identity_repeat_suppressed > 0,
+            "suppressed regions must still remove repeat candidates after the active expansion round"
+        );
+        assert!(
+            generated.candidates.iter().all(|candidate| {
+                !candidate_repeats_near_identity_region(
+                    &graph,
+                    &candidate.candidate,
+                    &[region],
+                )
+            }),
+            "suppressed interval should not be re-admitted as another ordinary largest candidate: {generated:?}"
+        );
+
+        let generated = generate_multi_level_candidates_with_expansion(
+            &graph,
+            &config,
+            &discovered,
+            &FxHashSet::default(),
+            &[region],
+            &[region],
+        );
+        assert!(
+            generated
+                .candidates
+                .iter()
+                .all(|candidate| candidate.source != MultiLevelCandidateSource::NearIdentityExpansion),
+            "persistent suppression must also block overlapping near-identity expansion candidates: {generated:?}"
+        );
+    }
+
+    #[test]
+    fn near_identity_detection_treats_identity_and_tiny_rewrites_as_escalation_triggers() {
+        let identity = ReplacementObjectiveDelta {
+            input_segments: 224,
+            output_segments: 224,
+            input_segment_bp: 50_000,
+            output_segment_bp: 50_000,
+            input_singleton_bp: 20_000,
+            output_singleton_bp: 20_000,
+            ..ReplacementObjectiveDelta::default()
+        };
+        assert!(replacement_is_near_identity(&identity));
+
+        let tiny_rewrite = ReplacementObjectiveDelta {
+            input_segments: 111,
+            output_segments: 109,
+            input_segment_bp: 40_000,
+            output_segment_bp: 39_500,
+            input_singleton_bp: 18_000,
+            output_singleton_bp: 17_900,
+            ..ReplacementObjectiveDelta::default()
+        };
+        assert!(replacement_is_near_identity(&tiny_rewrite));
+
+        let material_rewrite = ReplacementObjectiveDelta {
+            input_segments: 224,
+            output_segments: 80,
+            input_segment_bp: 50_000,
+            output_segment_bp: 20_000,
+            input_singleton_bp: 20_000,
+            output_singleton_bp: 5_000,
+            ..ReplacementObjectiveDelta::default()
+        };
+        assert!(!replacement_is_near_identity(&material_rewrite));
+    }
+
+    #[test]
     fn coverage_objective_accepts_coverage_or_singleton_improvements() {
         let before = GraphQuality {
             node_coverage_bp_weighted_mean: 2.0,
@@ -10823,6 +11672,144 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
+    fn compound_neighboring_bubbles_preserve_paths_when_crushed_together() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tC
+S\t3\tG
+S\t4\tTT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tTA
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+P\tcombo\t1+,3+,4+,6+,7+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 1,
+                method: ResolutionMethod::IterativeMultiLevel,
+                multi_level_window_mode: MultiLevelWindowMode::Sibling,
+                multi_level_window_target_bp: 100,
+                multi_level_max_window_sites: 3,
+                multi_level_candidate_limit: 8,
+                auto_spoa_max_traversal_len: 0,
+                auto_poasta_max_traversal_len: 1_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert!(resolved.stats.resolved >= 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn y_shaped_parent_flubble_preserves_paths_with_local_smoothing() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 1,
+                method: ResolutionMethod::ChainPovu,
+                retry_min_compression_ratio: 0.0,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn repeated_short_anchors_do_not_create_false_expansion_glue() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tCCCC
+S\t3\tGGGG
+S\t4\tTTTT
+S\t5\tA
+S\t6\tGG
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t1\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t5\t+\t0M
+L\t5\t+\t6\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+P\tref\t1+,2+,1+,3+,5+,6+\t*
+P\talt\t1+,4+,5+,6+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 4,
+            multi_level_candidate_limit: 8,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        if let Some(site) = discovered.first() {
+            let region = near_identity_region_for_candidate(&graph, &site.candidate, 1).unwrap();
+            let generated = generate_multi_level_candidates_with_expansion(
+                &graph,
+                &config,
+                &discovered,
+                &FxHashSet::default(),
+                &[region],
+                &[],
+            );
+            assert!(
+                generated.candidates.iter().all(|candidate| candidate
+                    .candidate
+                    .ranges
+                    .iter()
+                    .all(|range| range.end_step <= graph.paths[range.path_idx].steps.len())),
+                "{generated:?}"
+            );
+        }
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+    }
+
+    #[test]
     fn iterative_multi_level_generates_sibling_and_sliding_windows() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -10927,6 +11914,45 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
             )),
             "{:?}",
             generated.source_counts
+        );
+    }
+
+    #[test]
+    fn outward_residual_seed_rejects_tiny_anchor_long_range_glue() {
+        let tiny_anchor = BubbleCandidate {
+            ranges: Vec::new(),
+            signature: "tiny-anchor".to_string(),
+            root_start_step: 0,
+            root_end_step: 4,
+            root_span: 284,
+            total_steps: 10_000,
+            unique_steps: 2_469,
+            traversal_stats: TraversalStats {
+                count: 379,
+                min_len: 20,
+                median_len: 26_653,
+                p90_len: 33_000,
+                max_len: 33_140,
+                total_len: 7_616_867,
+            },
+            level: 0,
+        };
+        assert!(
+            !is_outward_residual_seed(&tiny_anchor, 465, true),
+            "a tiny root-span anchor with long traversals is repeat-glue evidence, not a safe outward seed"
+        );
+        assert!(
+            is_outward_residual_seed(&tiny_anchor, 465, false),
+            "explicit outward mode remains a diagnostic/admission mode and should expose high-bp residuals"
+        );
+
+        let local_residual = BubbleCandidate {
+            root_span: 6_406,
+            ..tiny_anchor
+        };
+        assert!(
+            is_outward_residual_seed(&local_residual, 465, true),
+            "the C4 outward high-bp class still needs admission when it spans a real local region"
         );
     }
 
