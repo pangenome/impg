@@ -2232,7 +2232,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=compound-run-sweepga/multi-site-direct-auto/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
@@ -2599,10 +2599,12 @@ struct MultiLevelWindowCandidate {
     candidate: BubbleCandidate,
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    source_max_site_span: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum MultiLevelCandidateSource {
+    CompoundRun,
     TopLevel,
     SiblingRun,
     ParentDescendants,
@@ -2615,6 +2617,7 @@ enum MultiLevelCandidateSource {
 impl MultiLevelCandidateSource {
     fn as_str(self) -> &'static str {
         match self {
+            Self::CompoundRun => "compound-run",
             Self::TopLevel => "top-level",
             Self::SiblingRun => "sibling-run",
             Self::ParentDescendants => "parent-descendants",
@@ -3073,9 +3076,30 @@ fn generate_multi_level_candidates(
         window_mode,
         MultiLevelWindowMode::Sliding | MultiLevelWindowMode::Combined
     );
+    let use_compound = matches!(
+        window_mode,
+        MultiLevelWindowMode::Largest
+            | MultiLevelWindowMode::Parent
+            | MultiLevelWindowMode::Combined
+    );
     let use_outward = matches!(window_mode, MultiLevelWindowMode::Outward)
         || coverage_mode_includes_outward(config);
     let add_outward_first = coverage_mode_includes_outward(config);
+
+    if use_compound {
+        add_compound_run_windows(
+            graph,
+            discovered,
+            target_bp,
+            &path_positions_by_path,
+            &path_step_indexes,
+            node_visits.as_deref(),
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
 
     if use_outward && add_outward_first {
         add_outward_residual_windows(
@@ -3233,11 +3257,21 @@ fn compare_same_source_window_priority(
             | MultiLevelWindowMode::Combined
     ) && matches!(
         a.source,
-        MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
+        MultiLevelCandidateSource::CompoundRun
+            | MultiLevelCandidateSource::TopLevel
+            | MultiLevelCandidateSource::ParentDescendants
     ) && a.source == b.source
     {
-        multi_level_parent_frontier_span_score(&b.candidate)
-            .cmp(&multi_level_parent_frontier_span_score(&a.candidate))
+        let source_site_order = if a.source == MultiLevelCandidateSource::CompoundRun {
+            b.source_max_site_span.cmp(&a.source_max_site_span)
+        } else {
+            std::cmp::Ordering::Equal
+        };
+        source_site_order
+            .then_with(|| {
+                multi_level_parent_frontier_span_score(&b.candidate)
+                    .cmp(&multi_level_parent_frontier_span_score(&a.candidate))
+            })
             .then_with(|| b.candidate.root_span.cmp(&a.candidate.root_span))
             .then_with(|| {
                 b.candidate
@@ -3281,6 +3315,29 @@ fn insert_multi_level_candidate(
     source_sites: usize,
     config: &ResolutionConfig,
 ) {
+    let source_max_site_span = candidate.root_span;
+    insert_multi_level_candidate_with_source_span(
+        generated,
+        emitted,
+        resolved_signatures,
+        candidate,
+        source,
+        source_sites,
+        source_max_site_span,
+        config,
+    );
+}
+
+fn insert_multi_level_candidate_with_source_span(
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    candidate: BubbleCandidate,
+    source: MultiLevelCandidateSource,
+    source_sites: usize,
+    source_max_site_span: usize,
+    config: &ResolutionConfig,
+) {
     if resolved_signatures.contains(&candidate.signature) {
         return;
     }
@@ -3310,7 +3367,189 @@ fn insert_multi_level_candidate(
         candidate,
         source,
         source_sites,
+        source_max_site_span,
     });
+}
+
+fn compound_run_gap_bp(target_bp: usize) -> usize {
+    target_bp.saturating_div(32).max(64).min(2_000)
+}
+
+fn compound_run_span_cap_bp(target_bp: usize) -> usize {
+    target_bp.saturating_add(target_bp.saturating_div(3).max(10_000))
+}
+
+fn root_interval_bp(root_positions: &[usize], start_step: usize, end_step: usize) -> Option<usize> {
+    let start_bp = root_positions.get(start_step).copied()?;
+    let end_bp = end_step
+        .checked_add(1)
+        .and_then(|idx| root_positions.get(idx).copied())?;
+    Some(end_bp.saturating_sub(start_bp))
+}
+
+fn root_gap_bp(
+    root_positions: &[usize],
+    previous_end_step: usize,
+    next_start_step: usize,
+) -> Option<usize> {
+    if next_start_step <= previous_end_step {
+        return Some(0);
+    }
+    let previous_end_bp = previous_end_step
+        .checked_add(1)
+        .and_then(|idx| root_positions.get(idx).copied())?;
+    let next_start_bp = root_positions.get(next_start_step).copied()?;
+    Some(next_start_bp.saturating_sub(previous_end_bp))
+}
+
+fn add_compound_run_windows(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    target_bp: usize,
+    path_positions_by_path: &[Vec<usize>],
+    path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if discovered.len() < 2 || graph.paths.is_empty() {
+        return;
+    }
+    let root_positions = &path_positions_by_path[0];
+    let gap_limit = compound_run_gap_bp(target_bp);
+    let span_cap = compound_run_span_cap_bp(target_bp);
+    let mut current = Vec::<usize>::new();
+    let mut run_start = 0usize;
+    let mut run_end = 0usize;
+
+    for idx in reference_path_order_indexes(discovered) {
+        if resolved_signatures.contains(&discovered[idx].candidate.signature) {
+            continue;
+        }
+        let candidate = &discovered[idx].candidate;
+        let start = candidate.root_start_step;
+        let end = candidate.root_end_step;
+        if current.is_empty() {
+            current.push(idx);
+            run_start = start;
+            run_end = end;
+            continue;
+        }
+
+        let projected_start = run_start.min(start);
+        let projected_end = run_end.max(end);
+        let overlaps_or_nested = start <= run_end;
+        let gap_bp = root_gap_bp(root_positions, run_end, start).unwrap_or(usize::MAX);
+        let projected_bp =
+            root_interval_bp(root_positions, projected_start, projected_end).unwrap_or(usize::MAX);
+        let span_allowed = projected_bp <= span_cap;
+        let close_enough = gap_bp <= gap_limit && projected_bp <= target_bp;
+        if span_allowed && (overlaps_or_nested || close_enough) {
+            current.push(idx);
+            run_start = projected_start;
+            run_end = projected_end;
+        } else {
+            add_compound_run_window(
+                graph,
+                discovered,
+                &current,
+                path_positions_by_path,
+                path_step_indexes,
+                node_visits,
+                generated,
+                emitted,
+                resolved_signatures,
+                config,
+            );
+            current.clear();
+            current.push(idx);
+            run_start = start;
+            run_end = end;
+        }
+    }
+
+    add_compound_run_window(
+        graph,
+        discovered,
+        &current,
+        path_positions_by_path,
+        path_step_indexes,
+        node_visits,
+        generated,
+        emitted,
+        resolved_signatures,
+        config,
+    );
+}
+
+fn add_compound_run_window(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+    path_positions_by_path: &[Vec<usize>],
+    path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+    node_visits: Option<&[usize]>,
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    let Some((&first_idx, rest)) = indexes.split_first() else {
+        return;
+    };
+    if indexes.len() < 2 {
+        return;
+    }
+
+    let mut root_start = discovered[first_idx].candidate.root_start_step;
+    let mut root_end = discovered[first_idx].candidate.root_end_step;
+    let mut level = discovered[first_idx].povu_level;
+    let mut source_max_site_span = discovered[first_idx].candidate.root_span;
+    for &idx in rest {
+        let candidate = &discovered[idx].candidate;
+        root_start = root_start.min(candidate.root_start_step);
+        root_end = root_end.max(candidate.root_end_step);
+        level = level.min(discovered[idx].povu_level);
+        source_max_site_span = source_max_site_span.max(candidate.root_span);
+    }
+
+    if let Some(visits) = node_visits {
+        let Some(root_path) = graph.paths.first() else {
+            return;
+        };
+        let Some(&entry) = root_path.steps.get(root_start) else {
+            return;
+        };
+        let Some(&exit) = root_path.steps.get(root_end) else {
+            return;
+        };
+        if repeat_boundary_should_reject(graph, entry, exit, visits) {
+            generated.repeat_boundary_rejected += 1;
+        }
+    }
+
+    let Some(candidate) = candidate_from_root_interval(
+        graph,
+        root_start,
+        root_end,
+        level,
+        path_positions_by_path,
+        path_step_indexes,
+    ) else {
+        return;
+    };
+    insert_multi_level_candidate_with_source_span(
+        generated,
+        emitted,
+        resolved_signatures,
+        candidate,
+        MultiLevelCandidateSource::CompoundRun,
+        indexes.len(),
+        source_max_site_span,
+        config,
+    );
 }
 
 fn add_same_parent_sibling_windows(
@@ -3657,10 +3896,12 @@ fn add_specific_index_window(
     let mut root_start = discovered[first_idx].candidate.root_start_step;
     let mut root_end = discovered[first_idx].candidate.root_end_step;
     let mut level = discovered[first_idx].povu_level;
+    let mut source_max_site_span = discovered[first_idx].candidate.root_span;
     for &idx in rest {
         root_start = root_start.min(discovered[idx].candidate.root_start_step);
         root_end = root_end.max(discovered[idx].candidate.root_end_step);
         level = level.min(discovered[idx].povu_level);
+        source_max_site_span = source_max_site_span.max(discovered[idx].candidate.root_span);
     }
     let root_positions = &path_positions_by_path[0];
     let Some(end_bp) = root_end
@@ -3699,13 +3940,14 @@ fn add_specific_index_window(
     ) else {
         return;
     };
-    insert_multi_level_candidate(
+    insert_multi_level_candidate_with_source_span(
         generated,
         emitted,
         resolved_signatures,
         candidate,
         source,
         indexes.len(),
+        source_max_site_span,
         config,
     );
 }
@@ -3942,13 +4184,14 @@ fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> b
 
 fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     match source {
-        MultiLevelCandidateSource::TopLevel => 0,
-        MultiLevelCandidateSource::ParentDescendants => 1,
-        MultiLevelCandidateSource::OutwardResidualWindow => 2,
-        MultiLevelCandidateSource::LevelWindow => 3,
-        MultiLevelCandidateSource::SiblingRun => 4,
-        MultiLevelCandidateSource::SlidingWindow => 5,
-        MultiLevelCandidateSource::StringyNeighborhood => 6,
+        MultiLevelCandidateSource::CompoundRun => 0,
+        MultiLevelCandidateSource::TopLevel => 1,
+        MultiLevelCandidateSource::ParentDescendants => 2,
+        MultiLevelCandidateSource::OutwardResidualWindow => 3,
+        MultiLevelCandidateSource::LevelWindow => 4,
+        MultiLevelCandidateSource::SiblingRun => 5,
+        MultiLevelCandidateSource::SlidingWindow => 6,
+        MultiLevelCandidateSource::StringyNeighborhood => 7,
     }
 }
 
@@ -3956,6 +4199,9 @@ fn multi_level_window_replacement_method(
     window: &MultiLevelWindowCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
+    if window.source == MultiLevelCandidateSource::CompoundRun {
+        return ResolutionMethod::Sweepga;
+    }
     if window.source_sites > 1 {
         match candidate_replacement_method(&window.candidate, config) {
             // Multi-site windows should not go through the tiny-bubble SPOA
@@ -4144,6 +4390,7 @@ fn format_multi_level_source_counts(
     counts: &FxHashMap<MultiLevelCandidateSource, usize>,
 ) -> String {
     let ordered = [
+        MultiLevelCandidateSource::CompoundRun,
         MultiLevelCandidateSource::TopLevel,
         MultiLevelCandidateSource::SiblingRun,
         MultiLevelCandidateSource::ParentDescendants,
@@ -4192,6 +4439,10 @@ fn format_multi_level_candidate_summary(
         .iter()
         .map(|candidate| candidate.source_sites)
         .collect::<Vec<_>>();
+    let source_max_spans = candidates
+        .iter()
+        .map(|candidate| candidate.source_max_site_span)
+        .collect::<Vec<_>>();
     let root_spans = candidates
         .iter()
         .map(|candidate| candidate.candidate.root_span)
@@ -4201,9 +4452,10 @@ fn format_multi_level_candidate_summary(
         .map(|candidate| candidate.candidate.traversal_stats.total_len)
         .collect::<Vec<_>>();
     format!(
-        "{}; window-sites {}; root-span-bp {}; region-bp {}",
+        "{}; window-sites {}; source-max-span-bp {}; root-span-bp {}; region-bp {}",
         format_candidate_length_summary(label, &plain),
         format_bp_distribution("sites", &source_sites),
+        format_bp_distribution("bp", &source_max_spans),
         format_bp_distribution("bp", &root_spans),
         format_bp_distribution("bp", &region_bp)
     )
@@ -4298,10 +4550,11 @@ fn format_multi_level_candidate_details(
         .enumerate()
         .map(|(idx, window)| {
             format!(
-                "#{} source={} sites={} level={} {} traversals={} max={} median={} total={} unique_steps={} step_savings={}",
+                "#{} source={} sites={} source_max_span={} level={} {} traversals={} max={} median={} total={} unique_steps={} step_savings={}",
                 idx + 1,
                 window.source.as_str(),
                 window.source_sites,
+                window.source_max_site_span,
                 window.candidate.level,
                 format_candidate_boundary(graph, &window.candidate),
                 window.candidate.traversal_stats.count,
@@ -8757,8 +9010,13 @@ fn render_rewritten_graph(
 
     let mut id_by_node: FxHashMap<OutNode, String> = FxHashMap::default();
     let mut used_ids = FxHashSet::<String>::default();
+    let mut surviving_original_id_by_seq = FxHashMap::<Vec<u8>, String>::default();
     for node in used_original {
-        used_ids.insert(original.segments[*node].id.clone());
+        let segment = &original.segments[*node];
+        used_ids.insert(segment.id.clone());
+        surviving_original_id_by_seq
+            .entry(segment.seq.clone())
+            .or_insert_with(|| segment.id.clone());
     }
 
     let mut ordered_nodes = Vec::new();
@@ -8847,6 +9105,12 @@ fn render_rewritten_graph(
                 let replacement = replacements
                     .get(replacement_idx)
                     .expect("used replacement index must refer to an emitted replacement graph");
+                if let Some(id) = surviving_original_id_by_seq
+                    .get(&replacement.segments[replacement_node_idx].seq)
+                {
+                    id_by_node.insert(node, id.clone());
+                    continue;
+                }
                 let id = next_unused_segment_id(&mut used_ids, next_id);
                 id_by_node.insert(node, id.clone());
                 out.push_str(&format!(
@@ -9025,6 +9289,7 @@ mod tests {
             },
             source,
             source_sites: 4,
+            source_max_site_span: 10_000,
         }
     }
 
@@ -9774,11 +10039,13 @@ P\tp1\t1+,3+,4+\t*
                 candidate: tiny_root_repeat,
                 source: MultiLevelCandidateSource::TopLevel,
                 source_sites: 1,
+                source_max_site_span: 98,
             },
             MultiLevelWindowCandidate {
                 candidate: balanced_parent,
                 source: MultiLevelCandidateSource::TopLevel,
                 source_sites: 1,
+                source_max_site_span: 32_787,
             },
         ];
         candidates.sort_by(|a, b| {
@@ -9786,6 +10053,28 @@ P\tp1\t1+,3+,4+\t*
         });
 
         assert_eq!(candidates[0].candidate.root_span, 32_787);
+    }
+
+    #[test]
+    fn compound_run_priority_prefers_largest_source_site_span() {
+        let broad_generic = MultiLevelWindowCandidate {
+            candidate: routing_candidate_with_stats(traversal_stats_with(30_000, 30_000, 465)),
+            source: MultiLevelCandidateSource::CompoundRun,
+            source_sites: 291,
+            source_max_site_span: 12_000,
+        };
+        let unresolved_c4_like = MultiLevelWindowCandidate {
+            candidate: routing_candidate_with_stats(traversal_stats_with(28_000, 33_000, 48)),
+            source: MultiLevelCandidateSource::CompoundRun,
+            source_sites: 106,
+            source_max_site_span: 32_800,
+        };
+        let mut candidates = [broad_generic, unresolved_c4_like];
+        candidates.sort_by(|a, b| {
+            compare_same_source_window_priority(a, b, MultiLevelWindowMode::Largest)
+        });
+
+        assert_eq!(candidates[0].source_max_site_span, 32_800);
     }
 
     #[test]
@@ -9824,11 +10113,459 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         let generated =
             generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
         assert_eq!(generated.candidates.len(), 1, "{generated:?}");
-        assert!(matches!(
+        assert_eq!(
             generated.candidates[0].source,
-            MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
-        ));
+            MultiLevelCandidateSource::CompoundRun
+        );
+        assert!(generated.candidates[0].source_sites >= 2);
+        assert_eq!(
+            multi_level_window_replacement_method(&generated.candidates[0], &config),
+            ResolutionMethod::Sweepga
+        );
         assert_eq!(effective_multi_level_candidate_limit(&config), 1);
+    }
+
+    fn largest_compound_config(target_bp: usize) -> ResolutionConfig {
+        ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: target_bp,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        }
+    }
+
+    fn generated_largest_compound_window(
+        gfa: &str,
+        target_bp: usize,
+    ) -> (
+        Graph,
+        ResolutionConfig,
+        Vec<DiscoveredCandidate>,
+        MultiLevelWindowCandidate,
+    ) {
+        let graph = parse_gfa(gfa).unwrap();
+        let config = largest_compound_config(target_bp);
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        assert!(
+            discovered.len() >= 2,
+            "compound fixtures must expose at least two discovered sites: {discovered:?}"
+        );
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+        assert_eq!(generated.candidates.len(), 1, "{generated:?}");
+        let window = generated.candidates[0].clone();
+        assert_eq!(window.source, MultiLevelCandidateSource::CompoundRun);
+        assert!(window.source_sites >= 2, "{window:?}");
+        (graph, config, discovered, window)
+    }
+
+    fn direct_sequence_replacement(candidate: &BubbleCandidate) -> Graph {
+        let mut segments = Vec::<Segment>::new();
+        let mut id_by_sequence = FxHashMap::<Vec<u8>, usize>::default();
+        let mut paths = Vec::<Path>::new();
+        for (path_idx, range) in candidate.ranges.iter().enumerate() {
+            let mut steps = Vec::new();
+            if !range.sequence.is_empty() {
+                let node = if let Some(&node) = id_by_sequence.get(&range.sequence) {
+                    node
+                } else {
+                    let node = segments.len();
+                    id_by_sequence.insert(range.sequence.clone(), node);
+                    segments.push(Segment {
+                        id: format!("r{node}"),
+                        seq: range.sequence.clone(),
+                    });
+                    node
+                };
+                steps.push(Step { node, rev: false });
+            }
+            paths.push(Path {
+                name: format!("replacement_{path_idx}"),
+                steps,
+            });
+        }
+        Graph { segments, paths }
+    }
+
+    #[test]
+    fn compound_run_merges_adjacent_bubbles_before_single_flubbles() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let (_graph, config, discovered, window) = generated_largest_compound_window(gfa, 100);
+        let min_start = discovered
+            .iter()
+            .map(|site| site.candidate.root_start_step)
+            .min()
+            .unwrap();
+        let max_end = discovered
+            .iter()
+            .map(|site| site.candidate.root_end_step)
+            .max()
+            .unwrap();
+
+        assert_eq!(window.candidate.root_start_step, min_start);
+        assert_eq!(window.candidate.root_end_step, max_end);
+        assert_eq!(
+            multi_level_window_replacement_method(&window, &config),
+            ResolutionMethod::Sweepga
+        );
+    }
+
+    #[test]
+    fn compound_run_selects_largest_nested_region() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let (_graph, _config, discovered, window) = generated_largest_compound_window(gfa, 100);
+        let min_start = discovered
+            .iter()
+            .map(|site| site.candidate.root_start_step)
+            .min()
+            .unwrap();
+        let max_end = discovered
+            .iter()
+            .map(|site| site.candidate.root_end_step)
+            .max()
+            .unwrap();
+
+        assert_eq!(window.candidate.root_start_step, min_start);
+        assert_eq!(window.candidate.root_end_step, max_end);
+        assert!(window.candidate.root_span >= 4, "{window:?}");
+    }
+
+    #[test]
+    fn compound_replacement_lacing_preserves_exact_path_spellings() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let (graph, _config, _discovered, mut window) = generated_largest_compound_window(gfa, 100);
+        assert!(materialize_candidate_sequences(
+            &graph,
+            &mut window.candidate,
+            &ResolutionConfig::default()
+        ));
+        let replacement = direct_sequence_replacement(&window.candidate);
+        let mut next_id = initial_next_segment_id(&graph);
+        let rewritten = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan {
+                candidate: window.candidate,
+                replacement,
+            }],
+            &mut next_id,
+        )
+        .unwrap();
+        assert!(path_sequences_equal(&graph, &rewritten).unwrap());
+    }
+
+    #[test]
+    fn compound_run_condenses_correlated_adjacent_bubbles_more_than_separate_lacing() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tCCC
+S\t3\tGGG
+S\t4\tT
+S\t5\tAAA
+S\t6\tCCCC
+S\t7\tG
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\talt\t1+,3+,4+,6+,7+\t*
+";
+        let (graph, _config, discovered, mut window) = generated_largest_compound_window(gfa, 100);
+        assert!(
+            discovered
+                .iter()
+                .filter(|site| site.candidate.root_span < window.candidate.root_span)
+                .count()
+                >= 2,
+            "fixture must have separately discoverable adjacent bubbles"
+        );
+
+        assert!(materialize_candidate_sequences(
+            &graph,
+            &mut window.candidate,
+            &ResolutionConfig::default()
+        ));
+        let replacement = direct_sequence_replacement(&window.candidate);
+        let mut compound_next_id = initial_next_segment_id(&graph);
+        let compound_laced = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan {
+                candidate: window.candidate,
+                replacement,
+            }],
+            &mut compound_next_id,
+        )
+        .unwrap();
+
+        assert!(path_sequences_equal(&graph, &compound_laced).unwrap());
+        let separate_steps = graph
+            .paths
+            .iter()
+            .map(|path| path.steps.len())
+            .sum::<usize>();
+        let compound_steps = compound_laced
+            .paths
+            .iter()
+            .map(|path| path.steps.len())
+            .sum::<usize>();
+        assert!(
+            compound_steps < separate_steps,
+            "whole-run lacing should keep correlated adjacent bubbles in one induced spelling"
+        );
+    }
+
+    #[test]
+    fn replacement_lacing_reuses_surviving_original_segments_by_sequence() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "1".to_string(),
+                    seq: b"A".to_vec(),
+                },
+                Segment {
+                    id: "2".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "3".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "4".to_string(),
+                    seq: b"T".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "ref".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "alt".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "outside_c".to_string(),
+                    steps: vec![Step {
+                        node: 1,
+                        rev: false,
+                    }],
+                },
+            ],
+        };
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 1,
+                    end_step: 2,
+                    sequence: b"C".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 1,
+                    end_step: 2,
+                    sequence: b"G".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "manual-reuse".to_string(),
+            root_start_step: 1,
+            root_end_step: 1,
+            root_span: 1,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: traversal_stats_from_lengths(vec![1, 1]),
+            level: 0,
+        };
+        let replacement = Graph {
+            segments: vec![
+                Segment {
+                    id: "r0".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "r1".to_string(),
+                    seq: b"G".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "r_ref".to_string(),
+                    steps: vec![Step {
+                        node: 0,
+                        rev: false,
+                    }],
+                },
+                Path {
+                    name: "r_alt".to_string(),
+                    steps: vec![Step {
+                        node: 1,
+                        rev: false,
+                    }],
+                },
+            ],
+        };
+        let mut next_id = initial_next_segment_id(&graph);
+        let rewritten = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan {
+                candidate,
+                replacement,
+            }],
+            &mut next_id,
+        )
+        .unwrap();
+
+        assert!(path_sequences_equal(&graph, &rewritten).unwrap());
+        assert_eq!(
+            rewritten
+                .segments
+                .iter()
+                .filter(|segment| segment.seq == b"C")
+                .count(),
+            1,
+            "replacement C should reuse the surviving original C segment"
+        );
+    }
+
+    #[test]
+    fn compound_run_keeps_short_internal_anchor_inside_region() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tA
+S\t5\tT
+S\t6\tGG
+S\t7\tC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+P\tboth_alt\t1+,3+,4+,6+,7+\t*
+";
+        let (_graph, _config, discovered, window) = generated_largest_compound_window(gfa, 100);
+        let internal_anchor_step = 2usize;
+
+        assert!(
+            window.candidate.root_start_step < internal_anchor_step
+                && window.candidate.root_end_step > internal_anchor_step,
+            "short shared anchor should remain inside the compound window: {window:?}"
+        );
+        assert!(
+            discovered
+                .iter()
+                .filter(
+                    |site| site.candidate.root_start_step <= internal_anchor_step
+                        && site.candidate.root_end_step >= internal_anchor_step
+                )
+                .count()
+                >= 2,
+            "fixture should expose adjacent discovered sites around the short anchor"
+        );
     }
 
     #[test]
@@ -10923,7 +11660,9 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         assert!(
             generated.candidates.iter().all(|candidate| matches!(
                 candidate.source,
-                MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
+                MultiLevelCandidateSource::CompoundRun
+                    | MultiLevelCandidateSource::TopLevel
+                    | MultiLevelCandidateSource::ParentDescendants
             )),
             "{:?}",
             generated.source_counts
