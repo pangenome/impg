@@ -643,6 +643,8 @@ struct Graph {
 struct PathRange {
     path_idx: usize,
     source_path_name: Option<String>,
+    source_begin_bp: usize,
+    source_end_bp: usize,
     begin_step: usize,
     end_step: usize,
     /// Bubble interior sequence (the bytes between `begin_step` and `end_step`
@@ -3727,9 +3729,12 @@ fn candidate_from_root_interval(
     let mut ranges = Vec::new();
     for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
         if let Some((begin_step, end_step)) = unique_anchor_range(path_index, entry, exit) {
+            let positions = &path_positions_by_path[path_idx];
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                source_begin_bp: positions[begin_step],
+                source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -5339,9 +5344,12 @@ fn discover_all_candidates(
             for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
                 if let Some((range_begin, range_end)) = unique_anchor_range(path_index, entry, exit)
                 {
+                    let positions = &path_positions_by_path[path_idx];
                     ranges.push(PathRange {
                         path_idx,
                         source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                        source_begin_bp: positions[range_begin],
+                        source_end_bp: positions[range_end],
                         begin_step: range_begin,
                         end_step: range_end,
                         sequence: Vec::new(),
@@ -5637,9 +5645,12 @@ fn chain_candidate_from_group(
     let mut ranges = Vec::new();
     for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
         if let Some((begin_step, end_step)) = unique_anchor_range(path_index, entry, exit) {
+            let positions = &path_positions_by_path[path_idx];
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                source_begin_bp: positions[begin_step],
+                source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -6869,16 +6880,67 @@ fn candidate_sequence_headers(candidate: &BubbleCandidate) -> Vec<String> {
         .collect()
 }
 
-fn candidate_sequence_name((i, range): (usize, &PathRange)) -> String {
-    let synthetic = format!("__impg_bubble_path{}_{}", range.path_idx, i);
-    match range
+fn candidate_sequence_name((_, range): (usize, &PathRange)) -> String {
+    let source_path_name = range
         .source_path_name
         .as_deref()
         .filter(|name| !name.is_empty())
-    {
-        Some(source_path_name) => format!("{source_path_name}|{synthetic}"),
-        None => synthetic,
+        .expect("local replacement ranges must preserve source path names");
+    local_replacement_visible_source_name(
+        source_path_name,
+        range.source_begin_bp,
+        range.source_end_bp,
+    )
+    .unwrap_or_else(|| source_path_name.to_string())
+}
+
+fn local_replacement_visible_source_name(
+    source_path_name: &str,
+    source_begin_bp: usize,
+    source_end_bp: usize,
+) -> Option<String> {
+    let (prefix, coords) = source_path_name.rsplit_once(':')?;
+    let parsed = parse_visible_name_range(coords)?;
+    let (begin, end) = if parsed.strand == Some('-') {
+        (
+            parsed.end.checked_sub(source_end_bp as u64)?,
+            parsed.end.checked_sub(source_begin_bp as u64)?,
+        )
+    } else {
+        (
+            parsed.start.checked_add(source_begin_bp as u64)?,
+            parsed.start.checked_add(source_end_bp as u64)?,
+        )
+    };
+    let strand = parsed
+        .strand
+        .map(|strand| format!("({strand})"))
+        .unwrap_or_default();
+    Some(format!("{prefix}:{begin}-{end}{strand}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleNameRange {
+    start: u64,
+    end: u64,
+    strand: Option<char>,
+}
+
+fn parse_visible_name_range(coords: &str) -> Option<VisibleNameRange> {
+    let (coords, strand) = if let Some(core) = coords.strip_suffix("(+)") {
+        (core, Some('+'))
+    } else if let Some(core) = coords.strip_suffix("(-)") {
+        (core, Some('-'))
+    } else {
+        (coords, None)
+    };
+    let (start, end) = coords.split_once('-')?;
+    if start.is_empty() || end.is_empty() {
+        return None;
     }
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    Some(VisibleNameRange { start, end, strand })
 }
 
 fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
@@ -10288,11 +10350,16 @@ P\talt\t1+,3+,4+\t*
                 PathRange {
                     path_idx: 7,
                     source_path_name: Some("HG001#2#chr6:10-20".to_string()),
+                    source_begin_bp: 2,
+                    source_end_bp: 6,
                     sequence: b"ACGT".to_vec(),
                     ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 8,
+                    source_path_name: Some("HG002#1#chr6:30-34".to_string()),
+                    source_begin_bp: 0,
+                    source_end_bp: 4,
                     sequence: b"ACGA".to_vec(),
                     ..PathRange::default()
                 },
@@ -10309,18 +10376,42 @@ P\talt\t1+,3+,4+\t*
 
         let (headers, seqs) = candidate_named_sequences(&candidate);
         assert_eq!(
-            headers[0],
-            "HG001#2#chr6:10-20|__impg_bubble_path7_0",
-            "local replacement FASTA IDs should retain the original path name before the unique suffix"
+            headers[0], "HG001#2#chr6:12-16",
+            "local replacement FASTA IDs should adjust only the source interval"
         );
         assert_eq!(
             sweepga::pansn::extract_pansn_key(&headers[0], sweepga::pansn::PanSnLevel::Haplotype),
             Some("HG001#2".to_string()),
             "PanSN grouping remains recoverable from replacement FASTA IDs"
         );
-        assert_eq!(headers[1], "__impg_bubble_path8_1");
+        assert_eq!(headers[1], "HG002#1#chr6:30-34");
         assert_eq!(seqs[0].0, headers[0]);
         assert_eq!(seqs[1].0, headers[1]);
+    }
+
+    #[test]
+    fn local_replacement_visible_names_adjust_only_ranges() {
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500", 20, 60).as_deref(),
+            Some("HG001#1#chr6:120-160")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500(+)", 20, 60).as_deref(),
+            Some("HG001#1#chr6:120-160(+)")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500(-)", 20, 60).as_deref(),
+            Some("HG001#1#chr6:440-480(-)")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500(+):50-150", 10, 30)
+                .as_deref(),
+            Some("HG001#1#chr6:100-500(+):60-80")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6", 20, 60),
+            None
+        );
     }
 
     #[test]
@@ -10400,8 +10491,8 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(
             headers,
             vec![
-                "HG001#1#chr6:100-103|__impg_bubble_path0_0".to_string(),
-                "HG002#2#chr6:200-203|__impg_bubble_path1_1".to_string(),
+                "HG001#1#chr6:100-103".to_string(),
+                "HG002#2#chr6:200-203".to_string(),
             ]
         );
     }
