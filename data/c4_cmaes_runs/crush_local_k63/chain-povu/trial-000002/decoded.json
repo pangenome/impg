@@ -1,0 +1,12 @@
+{
+  "chain_target_bp": 16567,
+  "max_median_traversal_len": 6231,
+  "max_rounds": 2,
+  "max_traversal_len": 19003,
+  "max_traversals": 13004,
+  "min_traversal_len": 1106,
+  "polish_max_median_traversal_len": 761,
+  "polish_max_traversal_len": 4488,
+  "polish_rounds": 2,
+  "replacement_flank_bp": 262
+}

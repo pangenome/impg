@@ -152,7 +152,12 @@ fn render_local_graph(config: &RenderConfig<'_>) -> io::Result<()> {
     let index = SyngIndex::load(config.syng_prefix, syng::SyncmerParams::default())?;
     let inputs = collect_render_inputs(&index, config)?;
     write_rendered_fasta(&paths.rendered_fasta, &inputs.fetched)?;
-    build_local_graph(&engine, &paths.rendered_fasta, &paths.graph_gfa, config.threads)?;
+    build_local_graph(
+        &engine,
+        &paths.rendered_fasta,
+        &paths.graph_gfa,
+        config.threads,
+    )?;
     let step_samples = collect_gfa_step_samples(&paths.graph_gfa, &inputs.rendered_paths)?;
 
     let tables = RenderTranslationTables {
@@ -260,7 +265,10 @@ fn collect_render_inputs(index: &SyngIndex, config: &RenderConfig<'_>) -> io::Re
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("source '{}' is missing from namespace", interval.source_name),
+                    format!(
+                        "source '{}' is missing from namespace",
+                        interval.source_name
+                    ),
                 )
             })?;
         let mut seq = fetch_source_interval(
@@ -319,12 +327,7 @@ fn build_local_graph(engine: &str, fasta: &Path, gfa: &Path, threads: usize) -> 
     match engine {
         "poa" => {
             let mut writer = BufWriter::new(File::create(gfa)?);
-            graph::run_graph_build_poa(
-                fasta_files,
-                &mut writer,
-                (5, 4, 6, 2, 24, 1),
-                &config,
-            )
+            graph::run_graph_build_poa(fasta_files, &mut writer, (5, 4, 6, 2, 24, 1), &config)
         }
         "seqwish" => {
             let gfa_path = gfa.to_string_lossy().to_string();
@@ -483,8 +486,8 @@ fn collect_gfa_step_samples(
 
     let mut records = Vec::new();
     for rendered_path in rendered_paths {
-        let walk = find_gfa_path_walk(&path_walks, &rendered_path.rendered_name)
-            .ok_or_else(|| {
+        let walk =
+            find_gfa_path_walk(&path_walks, &rendered_path.rendered_name).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(

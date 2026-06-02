@@ -6,6 +6,8 @@ use impg::syng_ffi;
 use std::ffi::CString;
 use std::path::Path;
 
+const SYNG_SIMPLE_SIDE_COUNT_LIMIT: u32 = 65_000;
+
 static SYNG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
@@ -58,15 +60,15 @@ fn test_path_offset_above_u16_is_preserved() {
 
         assert_eq!(walk_first_step(gbwt, 1, 0), (2, 70_000));
 
-        let dir = std::env::temp_dir().join("impg_test_syng_large_offset");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let loaded = roundtrip_gbwt(gbwt, &dir.join("idx.1gbwt"));
+        let dir = tempfile::Builder::new()
+            .prefix("impg_test_syng_large_offset_")
+            .tempdir()
+            .unwrap();
+        let loaded = roundtrip_gbwt(gbwt, &dir.path().join("idx.1gbwt"));
         syng_ffi::syngBWTdestroy(gbwt);
 
         assert_eq!(walk_first_step(loaded, 1, 0), (2, 70_000));
         syng_ffi::syngBWTdestroy(loaded);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -77,22 +79,23 @@ fn test_one_edge_rskip_side_survives_load() {
     unsafe {
         syng_ffi::impg_syng_suppress_debug();
         let gbwt = syng_ffi::syngBWTcreate(63, 0);
-        let n_paths = 70_000u32;
+        let n_paths = SYNG_SIMPLE_SIDE_COUNT_LIMIT + 1;
         for _ in 0..n_paths {
             let sbp = syng_ffi::syngBWTpathStartNew(gbwt, 1);
             syng_ffi::syngBWTpathAdd(sbp, 2, 10);
             syng_ffi::syngBWTpathFinish(sbp);
         }
 
-        let dir = std::env::temp_dir().join("impg_test_syng_one_edge_rskip_load");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let loaded = roundtrip_gbwt(gbwt, &dir.join("idx.1gbwt"));
+        let dir = tempfile::Builder::new()
+            .prefix("impg_test_syng_one_edge_rskip_load_")
+            .tempdir()
+            .unwrap();
+        let loaded = roundtrip_gbwt(gbwt, &dir.path().join("idx.1gbwt"));
         syng_ffi::syngBWTdestroy(gbwt);
 
+        assert_eq!(walk_first_step(loaded, 1, 0), (2, 10));
         assert_eq!(walk_first_step(loaded, 1, n_paths - 1), (2, 10));
         syng_ffi::syngBWTdestroy(loaded);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -134,7 +137,10 @@ fn test_start_count_increments_on_second_path() {
         syng_ffi::syngBWTdestroy(gbwt);
 
         assert_eq!(j1, 0, "First path should have j_last=0");
-        assert_eq!(j2, 1, "Second path should have j_last=1 (startCount incrementing)");
+        assert_eq!(
+            j2, 1,
+            "Second path should have j_last=1 (startCount incrementing)"
+        );
         assert_eq!(j3, 2, "Third path should have j_last=2");
     }
 }
@@ -148,12 +154,16 @@ fn test_start_count_node5_long() {
         let gbwt = syng_ffi::syngBWTcreate(63, 0);
         let sbp_a = syng_ffi::syngBWTpathStartNew(gbwt, 5);
         let j_a = (*sbp_a).j_last;
-        for k in 6..=55i32 { syng_ffi::syngBWTpathAdd(sbp_a, k, 10); }
+        for k in 6..=55i32 {
+            syng_ffi::syngBWTpathAdd(sbp_a, k, 10);
+        }
         syng_ffi::syngBWTpathFinish(sbp_a);
 
         let sbp_b = syng_ffi::syngBWTpathStartNew(gbwt, 5);
         let j_b = (*sbp_b).j_last;
-        for k in 6..=55i32 { syng_ffi::syngBWTpathAdd(sbp_b, k, 10); }
+        for k in 6..=55i32 {
+            syng_ffi::syngBWTpathAdd(sbp_b, k, 10);
+        }
         syng_ffi::syngBWTpathFinish(sbp_b);
         syng_ffi::syngBWTdestroy(gbwt);
 
@@ -254,7 +264,10 @@ fn test_start_count_with_long_paths_and_rc() {
         syng_ffi::syngBWTdestroy(gbwt);
 
         assert_eq!(j_a, 0);
-        assert_eq!(j_b, 1, "Path B should have j_last=1 (not 0) — bug repro if this fails");
+        assert_eq!(
+            j_b, 1,
+            "Path B should have j_last=1 (not 0) — bug repro if this fails"
+        );
     }
 }
 
@@ -286,11 +299,21 @@ fn test_identical_sequences_get_distinct_start_counts() {
 
     let mut index = SyngIndex::build(params, sequences.into_iter());
 
-    let start_a = index.name_map.path_starts[0].as_ref().expect("seqA missing");
-    let start_b = index.name_map.path_starts[1].as_ref().expect("seqB missing");
+    let start_a = index.name_map.path_starts[0]
+        .as_ref()
+        .expect("seqA missing");
+    let start_b = index.name_map.path_starts[1]
+        .as_ref()
+        .expect("seqB missing");
 
-    eprintln!("seqA: start_node={} start_count={}", start_a.start_node, start_a.start_count);
-    eprintln!("seqB: start_node={} start_count={}", start_b.start_node, start_b.start_count);
+    eprintln!(
+        "seqA: start_node={} start_count={}",
+        start_a.start_node, start_a.start_count
+    );
+    eprintln!(
+        "seqB: start_node={} start_count={}",
+        start_b.start_node, start_b.start_count
+    );
 
     assert_eq!(
         start_a.start_node, start_b.start_node,
@@ -306,20 +329,23 @@ fn test_identical_sequences_get_distinct_start_counts() {
     );
 
     // Also round-trip: save, load, then try to walk each path via query_region.
-    let dir = std::env::temp_dir().join("impg_test_ident_seqs");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let prefix = dir.join("idx");
+    let dir = tempfile::Builder::new()
+        .prefix("impg_test_ident_seqs_")
+        .tempdir()
+        .unwrap();
+    let prefix = dir.path().join("idx");
     let prefix_str = prefix.to_str().unwrap();
     index.save(prefix_str).expect("save failed");
     let loaded = SyngIndex::load(prefix_str, SyncmerParams::default()).expect("load failed");
 
     // Query seqB — if the start_count was wrong, this will crash with
     // "syngBWTpathStartOld ... >= startCount" in the C layer.
-    let intervals = loaded.query_region("seqB", 0, 1000, 0)
+    let intervals = loaded
+        .query_region("seqB", 0, 1000, 0)
         .expect("query_region for seqB should succeed");
     eprintln!("query_region(seqB) returned {} intervals", intervals.len());
     assert!(!intervals.is_empty(), "Should find at least self-hit");
 
-    std::fs::remove_dir_all(&dir).ok();
+    drop(loaded);
+    drop(index);
 }

@@ -433,9 +433,10 @@ path. For a focused syng-backed local GFA recipe, see
 For graph outputs, `query -o gfa|vcf --render-graph` also renders the final
 1D graph with `gfalook`. The default image is PNG beside the `-O` output prefix
 (`<prefix>.png`); `--render-graph-output` overrides the image path, and
-`--render-graph-format svg` or a `.svg` suffix emits SVG. With `-b regions.bed`
-graph output, `-O` is a directory for the graph files and the render output is
-written per BED row using the sanitized BED column 4 name.
+`--render-graph-format svg` or a `.svg` suffix emits SVG. Add
+`--render-graph-depth` to pass `-m` to `gfalook` for mean-depth coloring. With
+`-b regions.bed` graph output, `-O` is a directory for the graph files and the
+render output is written per BED row using the sanitized BED column 4 name.
 
 If you already have a local GFA, call variants directly with POVU via
 `impg gfa2vcf -g local.gfa -o local.vcf -r ref_path`. This is the same
@@ -451,13 +452,48 @@ one set of engine implementations, selected via `--gfa-engine`:
 | `pggb` (default) | sweepga + seqwish + smoothxg-style smoothing + gfaffix | smoothed variation graphs |
 | `seqwish` | sweepga + seqwish + gfaffix | raw (unsmoothed) graphs |
 | `poa` | single-pass SPOA | small regions, quick MSA-based output |
-| `syng` / `syng:blunt` | regional syng syncmer graph + bluntg | syng-native zero-overlap graph output from syng indexes |
-| `syng:raw` | regional syng syncmer overlap graph | debugging native syncmer graph overlaps |
+| `syng` / `syng:blunt` | regional syng syncmer graph with exact zero-overlap path materialization | source-spelling syng graph output from syng indexes |
+| `syng:raw` | regional syng syncmer overlap graph | explicit native overlap graph for debugging or overlap-aware consumers |
+| `syng-local` / `syng-local:blunt` | extract query-selected sequences, build a fresh local syng graph, then exact zero-overlap materialization | experimental regional syncmer parameter sweeps |
 
 For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
 The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
 shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
 `k/s/seed` tail is checked against the loaded syng index.
+Blunt syng output is sequence-preserving when the graph can fetch source DNA
+for non-syncmer spans via `--sequence-files` or the local temporary FASTA used
+by `syng-local`. Without source sequence files, missing gap DNA is emitted as
+`N`, and those paths are explicitly not source-preserving. Use `syng:raw` when
+you want the native syng overlap graph; raw path spelling requires an
+overlap-aware parser and is not the same as concatenating S-line DNA.
+Use `syng-local` when the local graph should be rebuilt from the extracted
+regional sequences with its own syncmer scheme, for example
+`-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`; in this mode `k/s/seed`
+select the local rebuild parameters rather than asserting the global index.
+Unlike `syng`, `syng-local` does not apply the syng frequency mask unless
+`:mask` is requested explicitly.
+Syng GFA extraction selects the top 0.05% most frequent local syncmer nodes and
+private-splits unsupported high-frequency occurrences before raw or blunt graph
+materialization. Occurrences in supported high-frequency runs or exact spans
+stay shared (`freq-run=10` and `freq-span=1k` by default). The same
+run/span rescue is applied to spectrum-selected dispersed scaffold-glue nodes,
+so there is no second private-split path that bypasses the high-frequency
+support policy. It also splits rare repeated-copy local syncmer contexts by
+default, so high-copy repeats and single-syncmer repeat loops do not become
+global graph glue. Use
+`-o gfa:syng:nomask` to disable this, or
+`-o gfa:syng:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k:crush` to
+tune it. Use `freq-run-aware=false` or `legacy-freq-mask=true` to reproduce the
+older node-level frequency removal for debugging.
+Add `:cut-ns`, for example `-o gfa:syng:cut-ns:crush`, to drop assembly N-runs
+from fetched gap DNA and split graph paths at those breaks.
+
+For graph builds from query-extracted sequences, add an explicit terminal
+N-run clipping stage before the engine: `-o gfa:cut-n=100:pggb`. This clips
+only leading and trailing `N`/`n` runs whose length is at least the requested
+threshold before graph construction; internal N-runs and shorter terminal
+N-runs are preserved. There is no default clipping threshold, and omitting
+`cut-n=<bp>` leaves extracted sequences unchanged.
 
 The same shorthand works for the other engines: `-o gfa:pggb`,
 `-o gfa:seqwish`, `-o gfa:poa`, and `-o gfa:syng`. Alignment-backed graph
@@ -465,6 +501,18 @@ builds may also include the aligner prefix, for example
 `-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
 `-o gfa:sweepga:seqwish`; this is equivalent to setting `--aligner` and
 `--gfa-engine` separately.
+
+For a C4/HPRCv2-style local render where terminal assembly N blocks would
+otherwise become noisy graph tips:
+
+```bash
+impg query -a ~/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
+  -r GRCh38#0#chr6:<C4-range> \
+  --sequence-files ~/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
+  -d 100000 \
+  -o gfa:cut-n=100:pggb \
+  -O c4.cutn100.pggb.gfa
+```
 
 VCF output uses the same graph engines and then converts the resulting local
 GFA through POVU. Use `-o vcf --gfa-engine <engine>` or the shorthand

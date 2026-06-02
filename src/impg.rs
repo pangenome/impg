@@ -2596,9 +2596,9 @@ impl ImpgIndex for Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         // Delegate to the existing method
-        Impg::query(
+        Ok(Impg::query(
             self,
             target_id,
             range_start,
@@ -2607,7 +2607,7 @@ impl ImpgIndex for Impg {
             min_gap_compressed_identity,
             sequence_index,
             approximate_mode,
-        )
+        ))
     }
 
     fn query_with_cache(
@@ -2619,8 +2619,8 @@ impl ImpgIndex for Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
-    ) -> Vec<AdjustedInterval> {
-        Impg::query_with_cache(
+    ) -> io::Result<Vec<AdjustedInterval>> {
+        Ok(Impg::query_with_cache(
             self,
             target_id,
             range_start,
@@ -2629,7 +2629,7 @@ impl ImpgIndex for Impg {
             min_gap_compressed_identity,
             sequence_index,
             cigar_cache,
-        )
+        ))
     }
 
     fn populate_cigar_cache(
@@ -2667,8 +2667,8 @@ impl ImpgIndex for Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval> {
-        Impg::query_transitive_dfs(
+    ) -> io::Result<Vec<AdjustedInterval>> {
+        Ok(Impg::query_transitive_dfs(
             self,
             target_id,
             range_start,
@@ -2683,7 +2683,7 @@ impl ImpgIndex for Impg {
             sequence_index,
             approximate_mode,
             subset_filter,
-        )
+        ))
     }
 
     fn query_transitive_bfs(
@@ -2701,8 +2701,8 @@ impl ImpgIndex for Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval> {
-        Impg::query_transitive_bfs(
+    ) -> io::Result<Vec<AdjustedInterval>> {
+        Ok(Impg::query_transitive_bfs(
             self,
             target_id,
             range_start,
@@ -2717,7 +2717,7 @@ impl ImpgIndex for Impg {
             sequence_index,
             approximate_mode,
             subset_filter,
-        )
+        ))
     }
 
     fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {

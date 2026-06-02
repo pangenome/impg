@@ -1,0 +1,13 @@
+{
+  "expected_paths": 2,
+  "extra_paths": 0,
+  "first_extra": null,
+  "first_missing": null,
+  "first_spelling_mismatch": null,
+  "missing_paths": 0,
+  "mode": "crush-only",
+  "observed_paths": 2,
+  "ok": true,
+  "reasons": [],
+  "spelling_mismatches": 0
+}

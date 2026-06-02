@@ -56,11 +56,14 @@ impg query \
   --sequence-files panel.agc \
   --force-large-region \
   --render-graph \
+  --render-graph-depth \
   -O c4.syng-crush
 ```
 
 This writes `c4.syng-crush.gfa` and `c4.syng-crush.png`. PNG is the default;
 use `--render-graph-format svg` or `--render-graph-output c4.svg` for SVG.
+`--render-graph-depth` passes `-m` to `gfalook`, giving the mean-depth 1D
+rendering that makes path-depth architecture easier to see.
 The renderer consumes the final graph after the configured graph transforms,
 so syng output is rendered after the default `Ygs` sort unless `:nosort` is
 explicitly requested.
@@ -74,6 +77,10 @@ Important flags:
 - `--sequence-files` can be FASTA or AGC.
 - `--force-large-region` is needed for large GFA/MAF requests.
 - `-O` is an output prefix; the `.gfa` suffix is added by `impg`.
+- Add `:cut-ns` to the syng engine, for example `-o gfa:syng:cut-ns:crush`,
+  when fetched gap DNA contains assembly N-runs that should break paths rather
+  than become path-private N segments. `cut-n-min-run=10` raises the minimum
+  N-run length.
 
 ## BED Batch
 
@@ -181,6 +188,12 @@ syng:...:sort,pipeline=Ygs
               final gfasort ordering; Ygs is the default for syng GFA output
 syng:...:nosort
               disable final gfasort ordering
+syng:...:nomask
+              disable raw-layer high-frequency syncmer filtering
+syng:...:mask,top=0.001,max-occ=500
+              filter high-frequency syncmers using a top-fraction and/or
+              whole-index occurrence threshold; rare repeated-copy local
+              contexts are split as per-occurrence clones
 ```
 
 `query` and `partition` differ only in how they gather local intervals. Once
@@ -212,9 +225,18 @@ Crush methods include `poa`, `biwfa`, `allwave`, and `sweepga`; for example,
 many-sequence pair selection and Mash orientation detection inside each
 selected POVU bubble.
 For syng GFA output, `impg` then runs an internal gfasort pass by default using
-pipeline `Ygs` (path-guided SGD, grooming, topological ordering). The pipeline
+pipeline `Ygs` (path-guided ordering, grooming, then topological sort). The pipeline
 can be changed with a sort stage, for example
 `gfa:syng:crush:sort,pipeline=Yg`, or disabled with `gfa:syng:crush:nosort`.
+
+Syng GFA extraction frequency-filters high-copy syncmer nodes by default before
+raw syng GFA is handed to bluntg. Filtered syncmers are removed from the raw
+topology and bridged by sequence, so Alu-like or other repeated syncmers do not
+become shared graph glue. It also splits rare repeated-copy local syncmer
+contexts, which catches single-syncmer loops where an otherwise single-copy
+syncmer appears a second time in one path. Use `gfa:syng:nomask` or
+`gfa:syng:nofilter` to disable this, or tune it with a stage such as
+`gfa:syng:filter,top=0.001,max-occ=500:crush`.
 
 The transform can also be run on an existing blunt GFA:
 

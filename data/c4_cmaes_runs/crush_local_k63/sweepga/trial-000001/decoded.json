@@ -1,0 +1,23 @@
+{
+  "k_farthest": 1,
+  "k_nearest": 4,
+  "mash_k": 18,
+  "max_median_traversal_len": 698,
+  "max_pair_alignments": 35776,
+  "max_replacement_paf_bytes": 29122383,
+  "max_rounds": 3,
+  "max_traversal_len": 5315,
+  "max_traversals": 893,
+  "min_match_length": 86,
+  "min_traversal_len": 28,
+  "pair_trees": 3,
+  "polish_max_median_traversal_len": 645,
+  "polish_max_traversal_len": 3671,
+  "polish_rounds": 4,
+  "random_fraction": 0.004571375282100472,
+  "replacement_flank_bp": 22,
+  "replacement_min_identity": 0.43623991912807464,
+  "replacement_min_map_length": 290,
+  "seqwish_k": 453,
+  "sweepga_kmer_frequency": 61
+}
