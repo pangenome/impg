@@ -643,6 +643,8 @@ struct Graph {
 struct PathRange {
     path_idx: usize,
     source_path_name: Option<String>,
+    source_start: usize,
+    source_end: usize,
     begin_step: usize,
     end_step: usize,
     /// Bubble interior sequence (the bytes between `begin_step` and `end_step`
@@ -3727,9 +3729,12 @@ fn candidate_from_root_interval(
     let mut ranges = Vec::new();
     for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
         if let Some((begin_step, end_step)) = unique_anchor_range(path_index, entry, exit) {
+            let positions = &path_positions_by_path[path_idx];
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                source_start: positions[begin_step],
+                source_end: positions[end_step],
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -5339,9 +5344,12 @@ fn discover_all_candidates(
             for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
                 if let Some((range_begin, range_end)) = unique_anchor_range(path_index, entry, exit)
                 {
+                    let positions = &path_positions_by_path[path_idx];
                     ranges.push(PathRange {
                         path_idx,
                         source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                        source_start: positions[range_begin],
+                        source_end: positions[range_end],
                         begin_step: range_begin,
                         end_step: range_end,
                         sequence: Vec::new(),
@@ -5637,9 +5645,12 @@ fn chain_candidate_from_group(
     let mut ranges = Vec::new();
     for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
         if let Some((begin_step, end_step)) = unique_anchor_range(path_index, entry, exit) {
+            let positions = &path_positions_by_path[path_idx];
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                source_start: positions[begin_step],
+                source_end: positions[end_step],
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -6845,8 +6856,10 @@ fn range_aligner_sequence(range: &PathRange) -> &[u8] {
     }
 }
 
-fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
-    let headers = candidate_sequence_headers(candidate);
+fn candidate_named_sequences(
+    candidate: &BubbleCandidate,
+) -> io::Result<(Vec<String>, Vec<(String, Vec<u8>)>)> {
+    let headers = candidate_sequence_headers(candidate)?;
     let seqs = headers
         .iter()
         .cloned()
@@ -6857,28 +6870,55 @@ fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(
                 .map(|range| range_aligner_sequence(range).to_vec()),
         )
         .collect();
-    (headers, seqs)
+    Ok((headers, seqs))
 }
 
-fn candidate_sequence_headers(candidate: &BubbleCandidate) -> Vec<String> {
-    candidate
+fn candidate_sequence_headers(candidate: &BubbleCandidate) -> io::Result<Vec<String>> {
+    let names = candidate
         .ranges
         .iter()
-        .enumerate()
         .map(candidate_sequence_name)
-        .collect()
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(uniquify_candidate_sequence_names(names))
 }
 
-fn candidate_sequence_name((i, range): (usize, &PathRange)) -> String {
-    let synthetic = format!("__impg_bubble_path{}_{}", range.path_idx, i);
-    match range
+fn candidate_sequence_name(range: &PathRange) -> io::Result<String> {
+    let source_path_name = range
         .source_path_name
         .as_deref()
-        .filter(|name| !name.is_empty())
-    {
-        Some(source_path_name) => format!("{source_path_name}|{synthetic}"),
-        None => synthetic,
-    }
+        .and_then(primary_sequence_name_token)
+        .ok_or_else(|| io::Error::other("crush replacement traversal is missing source path name"))?;
+    let (source_base, source_offset) = split_path_coordinate_suffix(source_path_name)
+        .map(|(base, start, _)| (base, start))
+        .unwrap_or((source_path_name, 0));
+    Ok(format!(
+        "{}:{}-{}",
+        source_base,
+        source_offset + range.source_start,
+        source_offset + range.source_end
+    ))
+}
+
+fn primary_sequence_name_token(name: &str) -> Option<&str> {
+    name.split_ascii_whitespace()
+        .next()
+        .filter(|token| !token.is_empty())
+}
+
+fn uniquify_candidate_sequence_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = FxHashMap::<String, usize>::default();
+    names
+        .into_iter()
+        .map(|name| {
+            let copy = seen.entry(name.clone()).or_insert(0);
+            *copy += 1;
+            if *copy == 1 {
+                name
+            } else {
+                format!("{name}|duplicate-source-interval-copy{copy}")
+            }
+        })
+        .collect()
 }
 
 fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
@@ -6890,11 +6930,11 @@ fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
 
 fn candidate_named_sequences_longest_first(
     candidate: &BubbleCandidate,
-) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+) -> io::Result<(Vec<String>, Vec<(String, Vec<u8>)>)> {
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     let mut sorted = seqs;
     sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-    (headers, sorted)
+    Ok((headers, sorted))
 }
 
 fn seqwish_replacement_config(
@@ -7136,7 +7176,7 @@ fn build_chain_povu_smooth_poasta_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     if seqs.iter().any(|(_, seq)| seq.is_empty()) {
         return Err(io::Error::other(
             "crush chain-povu: empty traversal present; refusing direct POASTA fallback",
@@ -7156,7 +7196,6 @@ fn build_chain_povu_smooth_poasta_replacement(
         };
         let smoothed = crate::smooth::smooth_gfa(&seed_gfa, &smooth_config)?;
         let smoothed = unchop_gfa(&smoothed)?;
-        let smoothed = strip_full_range_path_names(&smoothed)?;
         let mut poasta_config = config.clone();
         poasta_config.method = ResolutionMethod::Poasta;
         poasta_config.max_iterations = DEFAULT_CHAIN_POVU_POASTA_ITERATIONS;
@@ -7236,7 +7275,7 @@ fn build_allwave_seqwish_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     let non_empty = seqs.iter().filter(|(_, seq)| !seq.is_empty()).count();
     if non_empty < 2 {
         return Err(io::Error::other(format!(
@@ -7399,7 +7438,7 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     config: &ResolutionConfig,
     tail_mode: SweepgaSeqwishTailMode,
 ) -> io::Result<(Graph, SweepgaReplacementEvidence)> {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     let min_aligner_sequence_len = sweepga_backend_min_sequence_len(&config.sweepga_aligner);
     let named: Vec<(String, &[u8])> = seqs
         .iter()
@@ -7716,7 +7755,7 @@ fn build_poa_replacement(
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
     let (mut graph, mut engine) = build_global_spoa_engine(config.scoring_params);
-    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate);
+    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate)?;
     let sorted_headers = sorted_sequences
         .iter()
         .map(|(name, _)| name.clone())
@@ -7756,7 +7795,7 @@ fn build_poasta_replacement(
     use poasta::graphs::poa::POAGraph;
     use poasta::io::graph::graph_to_gfa;
 
-    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate);
+    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate)?;
     let sorted_headers = sorted_sequences
         .iter()
         .map(|(name, _)| name.clone())
@@ -7978,7 +8017,7 @@ fn build_biwfa_inmemory_replacement(
     candidate: &BubbleCandidate,
     _config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let headers = candidate_sequence_headers(candidate);
+    let headers = candidate_sequence_headers(candidate)?;
     let root_idx = candidate
         .ranges
         .iter()
@@ -8246,7 +8285,6 @@ fn polish_replacement_gfa_with_smooth(
         ..crate::smooth::SmoothConfig::new(n_haps.max(1))
     };
     let smoothed = crate::smooth::smooth_gfa(gfa, &smooth_config)?;
-    let smoothed = strip_full_range_path_names(&smoothed)?;
     let after = parse_gfa(&smoothed)?;
     let after_quality = graph_quality(&after);
     log::debug!(
@@ -8255,47 +8293,6 @@ fn polish_replacement_gfa_with_smooth(
         after_quality.summary()
     );
     Ok(smoothed)
-}
-
-fn strip_full_range_path_names(gfa: &str) -> io::Result<String> {
-    let graph = parse_gfa(gfa)?;
-    let mut rename = FxHashMap::default();
-    for path in &graph.paths {
-        let Some((base, start, end)) = split_path_coordinate_suffix(&path.name) else {
-            continue;
-        };
-        let sequence_len = path_sequence(&graph, path)?.len();
-        if start == 0 && end == sequence_len {
-            rename.insert(path.name.clone(), base.to_string());
-        }
-    }
-    if rename.is_empty() {
-        return Ok(gfa.to_string());
-    }
-
-    let mut out = String::with_capacity(gfa.len());
-    for line in gfa.lines() {
-        if let Some(rest) = line.strip_prefix("P\t") {
-            let mut fields = rest.splitn(3, '\t');
-            if let (Some(name), Some(walk), Some(overlaps)) =
-                (fields.next(), fields.next(), fields.next())
-            {
-                if let Some(new_name) = rename.get(name) {
-                    out.push_str("P\t");
-                    out.push_str(new_name);
-                    out.push('\t');
-                    out.push_str(walk);
-                    out.push('\t');
-                    out.push_str(overlaps);
-                    out.push('\n');
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    Ok(out)
 }
 
 fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
@@ -10287,12 +10284,17 @@ P\talt\t1+,3+,4+\t*
             ranges: vec![
                 PathRange {
                     path_idx: 7,
-                    source_path_name: Some("HG001#2#chr6:10-20".to_string()),
+                    source_path_name: Some("HG001#2#chr6:10-20 full defline".to_string()),
+                    source_start: 2,
+                    source_end: 6,
                     sequence: b"ACGT".to_vec(),
                     ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 8,
+                    source_path_name: Some("HG002#1#chr6".to_string()),
+                    source_start: 30,
+                    source_end: 34,
                     sequence: b"ACGA".to_vec(),
                     ..PathRange::default()
                 },
@@ -10307,20 +10309,111 @@ P\talt\t1+,3+,4+\t*
             level: 0,
         };
 
-        let (headers, seqs) = candidate_named_sequences(&candidate);
+        let (headers, seqs) = candidate_named_sequences(&candidate).unwrap();
         assert_eq!(
-            headers[0],
-            "HG001#2#chr6:10-20|__impg_bubble_path7_0",
-            "local replacement FASTA IDs should retain the original path name before the unique suffix"
+            headers,
+            vec![
+                "HG001#2#chr6:12-16".to_string(),
+                "HG002#1#chr6:30-34".to_string(),
+            ],
+            "local replacement FASTA IDs should use query-compatible source ranges"
         );
         assert_eq!(
             sweepga::pansn::extract_pansn_key(&headers[0], sweepga::pansn::PanSnLevel::Haplotype),
             Some("HG001#2".to_string()),
             "PanSN grouping remains recoverable from replacement FASTA IDs"
         );
-        assert_eq!(headers[1], "__impg_bubble_path8_1");
         assert_eq!(seqs[0].0, headers[0]);
         assert_eq!(seqs[1].0, headers[1]);
+        for header in &headers {
+            assert!(
+                !header.contains("__impg")
+                    && !header.contains("seq_")
+                    && !header.contains("path_")
+                    && !header.contains("candidate_"),
+                "replacement header should not expose a synthetic local ID: {header}"
+            );
+            assert!(
+                !header.contains(' '),
+                "replacement header should preserve FASTA first-token semantics: {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_source_intervals_get_meaningful_unique_suffixes() {
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some("HG001#1#chr6:100-200".to_string()),
+                    source_start: 10,
+                    source_end: 14,
+                    sequence: b"ACGT".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some("HG001#1#chr6:100-200".to_string()),
+                    source_start: 10,
+                    source_end: 14,
+                    sequence: b"ACGA".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "duplicate-naming".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let headers = candidate_sequence_headers(&candidate).unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                "HG001#1#chr6:110-114".to_string(),
+                "HG001#1#chr6:110-114|duplicate-source-interval-copy2".to_string(),
+            ]
+        );
+        for header in headers {
+            assert!(
+                !header.contains("__impg")
+                    && !header.contains("seq_")
+                    && !header.contains("path_")
+                    && !header.contains("candidate_"),
+                "duplicate uniquifier should be meaningful, not opaque: {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_interval_name_matches_query_fasta_contract() {
+        let candidate = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                source_path_name: Some("sample#0#chr1:100-220".to_string()),
+                source_start: 5,
+                source_end: 17,
+                sequence: b"ACGTACGTACGT".to_vec(),
+                ..PathRange::default()
+            }],
+            signature: "query-contract".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let headers = candidate_sequence_headers(&candidate).unwrap();
+        let query_fasta_header_for_same_interval = "sample#0#chr1:105-117";
+        assert_eq!(headers, vec![query_fasta_header_for_same_interval]);
     }
 
     #[test]
@@ -10395,15 +10488,109 @@ P\talt\t1+,3+,4+\t*
             &path_step_indexes,
         )
         .expect("shared entry/exit anchors should produce a candidate");
-        let headers = candidate_sequence_headers(&candidate);
+        let headers = candidate_sequence_headers(&candidate).unwrap();
 
         assert_eq!(
             headers,
             vec![
-                "HG001#1#chr6:100-103|__impg_bubble_path0_0".to_string(),
-                "HG002#2#chr6:200-203|__impg_bubble_path1_1".to_string(),
+                "HG001#1#chr6:100-103".to_string(),
+                "HG002#2#chr6:200-203".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn replacement_paf_sequence_names_match_fasta_headers() {
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some("HG001#1#chr6:100-120".to_string()),
+                    source_start: 2,
+                    source_end: 10,
+                    sequence: b"ACGTACGT".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some("HG002#2#chr6:200-220".to_string()),
+                    source_start: 3,
+                    source_end: 11,
+                    sequence: b"ACGTTCGT".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "paf-naming".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let (headers, seqs) = candidate_named_sequences(&candidate).unwrap();
+        let paf = crate::syng_graph::pairwise_biwfa_paf(
+            &seqs[1].0, &seqs[1].1, &seqs[0].0, &seqs[0].1,
+        )
+        .expect("BiWFA should emit a PAF row for non-empty local replacement sequences");
+        let fields = paf.trim_end().split('\t').collect::<Vec<_>>();
+
+        assert_eq!(fields[0], headers[1]);
+        assert_eq!(fields[5], headers[0]);
+    }
+
+    #[test]
+    fn local_replacement_gfa_path_names_preserve_semantic_source_names() {
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some("HG001#1#chr6:100-120".to_string()),
+                    source_start: 4,
+                    source_end: 12,
+                    sequence: b"ACGTACGT".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some("HG002#2#chr6:200-220".to_string()),
+                    source_start: 5,
+                    source_end: 13,
+                    sequence: b"ACGTTCGT".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "gfa-naming".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let headers = candidate_sequence_headers(&candidate).unwrap();
+        let replacement =
+            build_biwfa_inmemory_replacement(&candidate, &ResolutionConfig::default()).unwrap();
+        let path_names = replacement
+            .paths
+            .iter()
+            .map(|path| path.name.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(path_names, headers);
+        for path_name in path_names {
+            assert!(
+                !path_name.contains("__impg")
+                    && !path_name.contains("seq_")
+                    && !path_name.contains("path_")
+                    && !path_name.contains("candidate_"),
+                "local replacement GFA path name should stay semantic: {path_name}"
+            );
+        }
     }
 
     fn equal_length_paf_line(name_a: &str, seq_a: &str, name_b: &str, seq_b: &str) -> String {
