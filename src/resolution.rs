@@ -315,6 +315,9 @@ pub enum ResolutionMethod {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MultiLevelWindowMode {
+    /// One-at-a-time parent/frontier descent: select the largest balanced
+    /// parent flubble, replace it, re-decompose the whole graph, then repeat.
+    Largest,
     /// Parent/frontier chunks: top-level POVU sites and parent-descendant blocks.
     Parent,
     /// Same-parent/same-level runs and parent-descendant windows.
@@ -340,6 +343,8 @@ pub enum MultiLevelObjectiveMode {
 impl MultiLevelWindowMode {
     pub fn parse_name(value: &str) -> Option<Self> {
         match value.replace('_', "-").to_ascii_lowercase().as_str() {
+            "largest" | "biggest" | "frontier-largest" | "parent-largest" | "one-at-a-time"
+            | "one-by-one" | "single" => Some(Self::Largest),
             "parent" | "parents" | "frontier" | "parent-first" | "top-level" | "toplevel" => {
                 Some(Self::Parent)
             }
@@ -2227,12 +2232,12 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
             config.multi_level_max_window_sites,
-            config.multi_level_candidate_limit,
+            effective_multi_level_candidate_limit(config),
             config.multi_level_admission_only,
             multi_level_window_total_bp_cap(config),
             config.max_pair_alignments,
@@ -3005,6 +3010,21 @@ fn effective_multi_level_window_mode(config: &ResolutionConfig) -> MultiLevelWin
     config.multi_level_window_mode
 }
 
+fn effective_multi_level_candidate_limit(config: &ResolutionConfig) -> usize {
+    multi_level_candidate_limit_for_mode(config, effective_multi_level_window_mode(config))
+}
+
+fn multi_level_candidate_limit_for_mode(
+    config: &ResolutionConfig,
+    mode: MultiLevelWindowMode,
+) -> usize {
+    if matches!(mode, MultiLevelWindowMode::Largest) {
+        1
+    } else {
+        config.multi_level_candidate_limit
+    }
+}
+
 fn coverage_mode_includes_outward(config: &ResolutionConfig) -> bool {
     config.method == ResolutionMethod::CoverageMultiBubble
         && matches!(
@@ -3041,7 +3061,9 @@ fn generate_multi_level_candidates(
 
     let use_parent = matches!(
         window_mode,
-        MultiLevelWindowMode::Parent | MultiLevelWindowMode::Combined
+        MultiLevelWindowMode::Largest
+            | MultiLevelWindowMode::Parent
+            | MultiLevelWindowMode::Combined
     );
     let use_sibling = matches!(
         window_mode,
@@ -3192,12 +3214,9 @@ fn generate_multi_level_candidates(
             })
             .then_with(|| a.candidate.root_end_step.cmp(&b.candidate.root_end_step))
     });
-    if config.multi_level_candidate_limit > 0
-        && generated.candidates.len() > config.multi_level_candidate_limit
-    {
-        generated
-            .candidates
-            .truncate(config.multi_level_candidate_limit);
+    let candidate_limit = multi_level_candidate_limit_for_mode(config, window_mode);
+    if candidate_limit > 0 && generated.candidates.len() > candidate_limit {
+        generated.candidates.truncate(candidate_limit);
     }
     generated
 }
@@ -3209,7 +3228,9 @@ fn compare_same_source_window_priority(
 ) -> std::cmp::Ordering {
     if matches!(
         window_mode,
-        MultiLevelWindowMode::Parent | MultiLevelWindowMode::Combined
+        MultiLevelWindowMode::Largest
+            | MultiLevelWindowMode::Parent
+            | MultiLevelWindowMode::Combined
     ) && matches!(
         a.source,
         MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
@@ -9671,6 +9692,14 @@ P\tp1\t1+,3+,4+\t*
             Some(MultiLevelWindowMode::Sibling)
         );
         assert_eq!(
+            MultiLevelWindowMode::parse_name("largest"),
+            Some(MultiLevelWindowMode::Largest)
+        );
+        assert_eq!(
+            MultiLevelWindowMode::parse_name("one-at-a-time"),
+            Some(MultiLevelWindowMode::Largest)
+        );
+        assert_eq!(
             MultiLevelWindowMode::parse_name("parent"),
             Some(MultiLevelWindowMode::Parent)
         );
@@ -9757,6 +9786,49 @@ P\tp1\t1+,3+,4+\t*
         });
 
         assert_eq!(candidates[0].candidate.root_span, 32_787);
+    }
+
+    #[test]
+    fn iterative_multi_level_largest_mode_forces_one_parent_frontier_candidate() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+        assert_eq!(generated.candidates.len(), 1, "{generated:?}");
+        assert!(matches!(
+            generated.candidates[0].source,
+            MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
+        ));
+        assert_eq!(effective_multi_level_candidate_limit(&config), 1);
     }
 
     #[test]

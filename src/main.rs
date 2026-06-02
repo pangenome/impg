@@ -5630,7 +5630,7 @@ GFA engine shorthand:
         )]
         chain_greedy_target_bp: usize,
 
-        /// Candidate source set for --method iterative-multi-level: parent, sibling, sliding, outward, or combined
+        /// Candidate source set for --method iterative-multi-level: largest, parent, sibling, sliding, outward, or combined
         #[clap(
             long = "window-mode",
             alias = "multi-level-window-mode",
@@ -8825,7 +8825,7 @@ fn run() -> io::Result<()> {
             else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--window-mode must be one of: parent, sibling, sliding, outward, combined",
+                    "--window-mode must be one of: largest, parent, sibling, sliding, outward, combined",
                 ));
             };
             let Some(multi_level_objective) =
@@ -14137,6 +14137,39 @@ mod tests {
                     impg::resolution::MultiLevelWindowMode::Parent
                 );
                 assert_eq!(crush.multi_level_max_window_sites, 10);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_largest_window_mode() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=iterative-multi-level,window-mode=largest,max-rounds=12,candidate-limit=99",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.multi_level_window_mode,
+                    impg::resolution::MultiLevelWindowMode::Largest
+                );
+                assert_eq!(crush.max_iterations, 12);
+                assert_eq!(crush.multi_level_candidate_limit, 99);
             }
             _ => panic!("expected query command"),
         }
