@@ -281,6 +281,165 @@ fn gfa_line_stats(gfa: &str) -> (usize, usize, usize, usize) {
     (segments, segment_bp, links, paths)
 }
 
+#[derive(Default)]
+pub(crate) struct PafStageMetrics {
+    records: usize,
+    directed_pairs: usize,
+    undirected_pairs: usize,
+    aligned_block_bp: u64,
+    covered_sequences: usize,
+    zero_coverage_sequences: usize,
+    min_coverage_fraction: f64,
+    mean_coverage_fraction: f64,
+}
+
+pub(crate) fn write_path_spelling_debug(
+    dir: &std::path::Path,
+    seqs: &[(String, Vec<u8>)],
+) -> std::io::Result<()> {
+    let mut out = String::from("sequence\tlength\n");
+    for (name, seq) in seqs {
+        out.push_str(name);
+        out.push('\t');
+        out.push_str(&seq.len().to_string());
+        out.push('\n');
+    }
+    std::fs::write(dir.join("path_spellings.tsv"), out)
+}
+
+pub(crate) fn write_paf_stage_debug(
+    dir: &std::path::Path,
+    stage: &str,
+    seqs: &[(String, Vec<u8>)],
+    paf_path: &std::path::Path,
+) -> std::io::Result<PafStageMetrics> {
+    use std::io::BufRead;
+
+    let seq_index = seqs
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, seq))| (name.as_str(), (idx, seq.len())))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut coverage_diff = seqs
+        .iter()
+        .map(|(_, seq)| vec![0i32; seq.len().saturating_add(1)])
+        .collect::<Vec<_>>();
+    let mut query_records = vec![0usize; seqs.len()];
+    let mut target_records = vec![0usize; seqs.len()];
+    let mut neighbors = vec![std::collections::HashSet::<usize>::new(); seqs.len()];
+    let mut directed_pairs = std::collections::HashSet::<(usize, usize)>::new();
+    let mut undirected_pairs = std::collections::HashSet::<(usize, usize)>::new();
+    let mut metrics = PafStageMetrics::default();
+
+    let file = std::fs::File::open(paf_path)?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 11 {
+            continue;
+        }
+        metrics.records += 1;
+        metrics.aligned_block_bp = metrics
+            .aligned_block_bp
+            .saturating_add(fields[10].parse::<u64>().unwrap_or(0));
+        let Some(&(q_idx, q_len)) = seq_index.get(fields[0]) else {
+            continue;
+        };
+        let Some(&(t_idx, t_len)) = seq_index.get(fields[5]) else {
+            continue;
+        };
+        query_records[q_idx] += 1;
+        target_records[t_idx] += 1;
+        directed_pairs.insert((q_idx, t_idx));
+        let pair = if q_idx <= t_idx {
+            (q_idx, t_idx)
+        } else {
+            (t_idx, q_idx)
+        };
+        undirected_pairs.insert(pair);
+        if q_idx != t_idx {
+            neighbors[q_idx].insert(t_idx);
+            neighbors[t_idx].insert(q_idx);
+        }
+
+        let mark = |diff: &mut [i32], len: usize, start: &str, end: &str| {
+            let start = start.parse::<usize>().unwrap_or(0).min(len);
+            let end = end.parse::<usize>().unwrap_or(0).min(len);
+            if start < end {
+                diff[start] += 1;
+                diff[end] -= 1;
+            }
+        };
+        mark(&mut coverage_diff[q_idx], q_len, fields[2], fields[3]);
+        mark(&mut coverage_diff[t_idx], t_len, fields[7], fields[8]);
+    }
+
+    metrics.directed_pairs = directed_pairs.len();
+    metrics.undirected_pairs = undirected_pairs.len();
+    let mut coverage_rows =
+        String::from("stage\tsequence\tlength\tcovered_bp\tcoverage_fraction\tquery_records\ttarget_records\tpair_degree\n");
+    let mut total_fraction = 0.0;
+    metrics.min_coverage_fraction = if seqs.is_empty() { 0.0 } else { 1.0 };
+    for (idx, (name, seq)) in seqs.iter().enumerate() {
+        let mut active = 0i32;
+        let mut covered = 0usize;
+        for delta in coverage_diff[idx].iter().take(seq.len()) {
+            active += *delta;
+            if active > 0 {
+                covered += 1;
+            }
+        }
+        let fraction = if seq.is_empty() {
+            0.0
+        } else {
+            covered as f64 / seq.len() as f64
+        };
+        if covered > 0 {
+            metrics.covered_sequences += 1;
+        } else {
+            metrics.zero_coverage_sequences += 1;
+        }
+        metrics.min_coverage_fraction = metrics.min_coverage_fraction.min(fraction);
+        total_fraction += fraction;
+        coverage_rows.push_str(&format!(
+            "{stage}\t{name}\t{}\t{covered}\t{fraction:.6}\t{}\t{}\t{}\n",
+            seq.len(),
+            query_records[idx],
+            target_records[idx],
+            neighbors[idx].len()
+        ));
+    }
+    if !seqs.is_empty() {
+        metrics.mean_coverage_fraction = total_fraction / seqs.len() as f64;
+    }
+
+    std::fs::write(dir.join(format!("{stage}.coverage.tsv")), coverage_rows)?;
+    let summary = format!(
+        concat!(
+            "stage\trecords\tdirected_pairs\tundirected_pairs\taligned_block_bp\t",
+            "sequences\tcovered_sequences\tzero_coverage_sequences\t",
+            "min_coverage_fraction\tmean_coverage_fraction\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\n"
+        ),
+        stage,
+        metrics.records,
+        metrics.directed_pairs,
+        metrics.undirected_pairs,
+        metrics.aligned_block_bp,
+        seqs.len(),
+        metrics.covered_sequences,
+        metrics.zero_coverage_sequences,
+        metrics.min_coverage_fraction,
+        metrics.mean_coverage_fraction
+    );
+    std::fs::write(dir.join(format!("{stage}.metrics.tsv")), summary)?;
+    Ok(metrics)
+}
+
 /// Compact a byte CIGAR (one char per aligned position) into PAF-style
 /// run-length form: `b"MMMIMMM"` → `"3M1I3M"`.
 pub fn compact_cigar(cigar: &[u8]) -> String {
@@ -831,6 +990,7 @@ pub fn build_gfa_from_paf_and_sequences(
     }
     if let Some(dir) = &debug_dir {
         let _ = std::fs::copy(combined_fasta.path(), dir.join("combined.fa"));
+        let _ = write_path_spelling_debug(dir, seqs);
     }
 
     let mut paf_file = tempfile::Builder::new()
@@ -841,6 +1001,7 @@ pub fn build_gfa_from_paf_and_sequences(
     paf_file.flush()?;
     if let Some(dir) = &debug_dir {
         let _ = std::fs::write(dir.join("raw.paf"), paf_content);
+        let _ = write_paf_stage_debug(dir, "raw", seqs, paf_file.path());
     }
 
     let total_bases = seqs.iter().map(|(_, seq)| seq.len() as u64).sum::<u64>();
@@ -852,6 +1013,9 @@ pub fn build_gfa_from_paf_and_sequences(
     let filtered_paf = crate::commands::graph::filter_generated_paf(paf_file, avg_seq_len, config)?;
     if let Some(dir) = &debug_dir {
         let _ = std::fs::copy(filtered_paf.path(), dir.join("filtered.paf"));
+        let _ = std::fs::copy(filtered_paf.path(), dir.join("final.paf"));
+        let _ = write_paf_stage_debug(dir, "filtered", seqs, filtered_paf.path());
+        let _ = write_paf_stage_debug(dir, "final", seqs, filtered_paf.path());
     }
     let paf_match_stats = filtered_paf_exact_match_run_stats(seqs, filtered_paf.path())?;
 

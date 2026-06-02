@@ -20,8 +20,8 @@ use crate::graph::{sort_gfa, unchop_gfa, TerminalNRunClip};
 // Import from sweepga
 use sweepga::aligner::Aligner;
 use sweepga::library_api::{
-    apply_paf_filter, create_aligner_adaptive, filter_config_from_align_cfg, sweepga_align,
-    SweepgaAlignConfig,
+    apply_paf_filter, create_aligner_adaptive, filter_config_from_align_cfg, parse_filter_mode,
+    sweepga_align, SweepgaAlignConfig,
 };
 
 // Import from seqwish
@@ -729,6 +729,20 @@ pub fn filter_generated_paf(
     Ok(filtered_paf_file)
 }
 
+fn graph_wfmash_raw_num_mappings(
+    config: &GraphBuildConfig,
+    sequence_count: usize,
+) -> Option<usize> {
+    if !config.aligner.eq_ignore_ascii_case("wfmash") {
+        return None;
+    }
+    let (_, query_limit, target_limit) = parse_filter_mode(&config.num_mappings);
+    if config.no_filter || query_limit.is_none() || target_limit.is_none() {
+        return Some(sequence_count.max(1));
+    }
+    Some(query_limit.unwrap().max(target_limit.unwrap()).max(1))
+}
+
 /// Run the alignment + filtering stages of the graph pipeline, returning
 /// the combined FASTA and filtered PAF as temp files.
 pub fn align_sequences(
@@ -820,9 +834,17 @@ pub fn align_sequences(
     }
 
     // Debug: save combined FASTA
+    let debug_sequences = if config.debug_dir.is_some() {
+        read_sequences_from_fasta(combined_fasta.path()).ok()
+    } else {
+        None
+    };
     if let Some(ref debug_dir) = config.debug_dir {
         let dst = format!("{}/combined.fa", debug_dir);
         let _ = std::fs::copy(combined_fasta.path(), &dst);
+        if let Some(seqs) = &debug_sequences {
+            let _ = crate::syng_graph::write_path_spelling_debug(Path::new(debug_dir), seqs);
+        }
         info!("[graph::debug] Saved combined FASTA to {}", dst);
     }
 
@@ -866,12 +888,20 @@ pub fn align_sequences(
                 let segment_length = None;
                 let wfmash_density =
                     sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, num_genomes);
+                let wfmash_num_mappings = graph_wfmash_raw_num_mappings(config, num_sequences);
 
                 if config.show_progress {
                     if let Some(f) = wfmash_density {
                         info!(
                             "[graph::align] {:.3}s Wfmash mapping density: keeping {:.1}% of mappings ({} genomes)",
                             start_time.elapsed().as_secs_f64(), f * 100.0, num_genomes
+                        );
+                    }
+                    if let Some(n) = wfmash_num_mappings {
+                        info!(
+                            "[graph::align] {:.3}s Wfmash raw mapping multiplicity: -n{}",
+                            start_time.elapsed().as_secs_f64(),
+                            n
                         );
                     }
                 }
@@ -890,7 +920,7 @@ pub fn align_sequences(
                             segment_length,
                             Some(avg_seq_len),
                             wfmash_density,
-                            None,
+                            wfmash_num_mappings,
                             None,
                         )
                         .map_err(|e| io::Error::other(format!("Failed to create aligner: {e}")))?;
@@ -951,6 +981,14 @@ pub fn align_sequences(
     if let Some(ref debug_dir) = config.debug_dir {
         let dst = format!("{}/raw.paf", debug_dir);
         let _ = std::fs::copy(paf_temp.path(), &dst);
+        if let Some(seqs) = &debug_sequences {
+            let _ = crate::syng_graph::write_paf_stage_debug(
+                Path::new(debug_dir),
+                "raw",
+                seqs,
+                paf_temp.path(),
+            );
+        }
         info!("[graph::debug] Saved raw PAF to {}", dst);
     }
 
@@ -961,6 +999,23 @@ pub fn align_sequences(
     if let Some(ref debug_dir) = config.debug_dir {
         let dst = format!("{}/filtered.paf", debug_dir);
         let _ = std::fs::copy(filtered_paf.path(), &dst);
+        let final_dst = format!("{}/final.paf", debug_dir);
+        let _ = std::fs::copy(filtered_paf.path(), &final_dst);
+        if let Some(seqs) = &debug_sequences {
+            let debug_path = Path::new(debug_dir);
+            let _ = crate::syng_graph::write_paf_stage_debug(
+                debug_path,
+                "filtered",
+                seqs,
+                filtered_paf.path(),
+            );
+            let _ = crate::syng_graph::write_paf_stage_debug(
+                debug_path,
+                "final",
+                seqs,
+                filtered_paf.path(),
+            );
+        }
         info!("[graph::debug] Saved filtered PAF to {}", dst);
     }
 
@@ -1142,5 +1197,33 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
         size: seq_len as i32,
         strand: '+',
         total_length: seq_len,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wfmash_raw_mapping_multiplicity_matches_local_filter_mode() {
+        let mut config = GraphBuildConfig {
+            aligner: "wfmash".to_string(),
+            no_filter: true,
+            num_mappings: "1:1".to_string(),
+            ..GraphBuildConfig::default()
+        };
+        assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), Some(45));
+
+        config.no_filter = false;
+        assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), Some(1));
+
+        config.num_mappings = "many:many".to_string();
+        assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), Some(45));
+
+        config.num_mappings = "3:7".to_string();
+        assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), Some(7));
+
+        config.aligner = "fastga".to_string();
+        assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), None);
     }
 }

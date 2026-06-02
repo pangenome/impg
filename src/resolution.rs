@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -7430,10 +7430,7 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     let mut chunk = String::new();
     if named.len() >= 2 {
         let align_config = make_align_config(config.sweepga_aligner.clone());
-        let paf_file =
-            sweepga::library_api::sweepga_align(&named, &align_config).map_err(|err| {
-                io::Error::other(format!("SweepGA replacement alignment failed: {err}"))
-            })?;
+        let paf_file = run_replacement_alignment(&named, &align_config)?;
         std::fs::File::open(paf_file.path())?.read_to_string(&mut chunk)?;
     }
     let mut paf_lines = chunk
@@ -7521,6 +7518,97 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         replacement_bp: replacement_segment_bp(&replacement),
     };
     Ok((replacement, evidence))
+}
+
+fn run_replacement_alignment(
+    named: &[(String, &[u8])],
+    align_config: &sweepga::library_api::SweepgaAlignConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    if align_config.aligner.eq_ignore_ascii_case("wfmash") {
+        return run_local_wfmash_replacement_alignment(named, align_config);
+    }
+    sweepga::library_api::sweepga_align(named, align_config)
+        .map_err(|err| io::Error::other(format!("SweepGA replacement alignment failed: {err}")))
+}
+
+const LOCAL_WFMASH_REPLACEMENT_MAP_PCT_IDENTITY: &str = "70";
+
+fn run_local_wfmash_replacement_alignment(
+    named: &[(String, &[u8])],
+    align_config: &sweepga::library_api::SweepgaAlignConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    {
+        let mut writer = std::io::BufWriter::new(&mut combined_fasta);
+        for (name, seq) in named {
+            writeln!(writer, ">{name}")?;
+            writer.write_all(seq)?;
+            writeln!(writer)?;
+        }
+        writer.flush()?;
+    }
+
+    rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|err| {
+        io::Error::other(format!(
+            "failed to create FASTA index for local wfmash: {err}"
+        ))
+    })?;
+
+    let avg_len = if named.is_empty() {
+        None
+    } else {
+        Some(named.iter().map(|(_, seq)| seq.len() as u64).sum::<u64>() / named.len() as u64)
+    };
+    let wfmash_density =
+        sweepga::orchestrator::resolve_wfmash_density(&align_config.sparsify, named.len());
+    let num_mappings = local_wfmash_num_mappings(align_config, named.len());
+    let map_pct_identity = local_wfmash_map_pct_identity(align_config);
+    log::debug!(
+        "crush sweepga: local wfmash replacement alignment uses upstream -n{} and map identity {:?} over {} sequence(s)",
+        num_mappings,
+        map_pct_identity.as_deref(),
+        named.len()
+    );
+    let aligner = sweepga::library_api::create_aligner_adaptive(
+        &align_config.aligner,
+        align_config.kmer_frequency,
+        align_config.num_threads,
+        align_config.min_aln_length,
+        map_pct_identity,
+        align_config.temp_dir.clone(),
+        None,
+        avg_len,
+        wfmash_density,
+        Some(num_mappings),
+        None,
+    )
+    .map_err(|err| io::Error::other(format!("failed to create local wfmash aligner: {err}")))?;
+    aligner
+        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+        .map_err(|err| {
+            io::Error::other(format!("local wfmash replacement alignment failed: {err}"))
+        })
+}
+
+fn local_wfmash_map_pct_identity(
+    align_config: &sweepga::library_api::SweepgaAlignConfig,
+) -> Option<String> {
+    align_config
+        .map_pct_identity
+        .clone()
+        .or_else(|| Some(LOCAL_WFMASH_REPLACEMENT_MAP_PCT_IDENTITY.to_string()))
+}
+
+fn local_wfmash_num_mappings(
+    align_config: &sweepga::library_api::SweepgaAlignConfig,
+    sequence_count: usize,
+) -> usize {
+    let (_, query_limit, target_limit) =
+        sweepga::library_api::parse_filter_mode(&align_config.num_mappings);
+    if align_config.no_filter || query_limit.is_none() || target_limit.is_none() {
+        return sequence_count.max(1);
+    }
+    query_limit.unwrap().max(target_limit.unwrap()).max(1)
 }
 
 fn sweepga_backend_min_sequence_len(aligner: &str) -> usize {
@@ -10178,6 +10266,147 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(graph_config.scaffold_filter, "many:many");
     }
 
+    fn equal_length_paf_line(name_a: &str, seq_a: &str, name_b: &str, seq_b: &str) -> String {
+        assert_eq!(seq_a.len(), seq_b.len());
+        let mut cigar = String::new();
+        let mut matches = 0usize;
+        let mut run_len = 0usize;
+        let mut run_op = None::<char>;
+        for (a, b) in seq_a.bytes().zip(seq_b.bytes()) {
+            let op = if a == b {
+                matches += 1;
+                '='
+            } else {
+                'X'
+            };
+            if run_op == Some(op) {
+                run_len += 1;
+            } else {
+                if let Some(prev) = run_op {
+                    cigar.push_str(&run_len.to_string());
+                    cigar.push(prev);
+                }
+                run_op = Some(op);
+                run_len = 1;
+            }
+        }
+        if let Some(prev) = run_op {
+            cigar.push_str(&run_len.to_string());
+            cigar.push(prev);
+        }
+        format!(
+            "{name_a}\t{}\t0\t{}\t+\t{name_b}\t{}\t0\t{}\t{matches}\t{}\t60\tcg:Z:{cigar}",
+            seq_a.len(),
+            seq_a.len(),
+            seq_b.len(),
+            seq_b.len(),
+            seq_a.len()
+        )
+    }
+
+    #[test]
+    fn compound_seqwish_tail_keeps_raw_many_to_many_condensation_path_correct() {
+        let left = "ACGT".repeat(40);
+        let bridge = "GATTACA".repeat(20);
+        let right = "TGCA".repeat(40);
+        let seqs = vec![
+            (
+                "compound_a0".to_string(),
+                format!(
+                    "{left}{}{}{}{right}",
+                    "A".repeat(40),
+                    bridge,
+                    "C".repeat(40)
+                )
+                .into_bytes(),
+            ),
+            (
+                "compound_a1".to_string(),
+                format!(
+                    "{left}{}{}{}{right}",
+                    "A".repeat(40),
+                    bridge,
+                    "G".repeat(40)
+                )
+                .into_bytes(),
+            ),
+            (
+                "compound_b0".to_string(),
+                format!(
+                    "{left}{}{}{}{right}",
+                    "T".repeat(40),
+                    bridge,
+                    "C".repeat(40)
+                )
+                .into_bytes(),
+            ),
+            (
+                "compound_b1".to_string(),
+                format!(
+                    "{left}{}{}{}{right}",
+                    "T".repeat(40),
+                    bridge,
+                    "G".repeat(40)
+                )
+                .into_bytes(),
+            ),
+        ];
+        let seq_strings = seqs
+            .iter()
+            .map(|(name, seq)| (name.as_str(), String::from_utf8(seq.clone()).unwrap()))
+            .collect::<Vec<_>>();
+        let mut paf_lines = Vec::new();
+        for i in 0..seq_strings.len() {
+            for j in 0..seq_strings.len() {
+                if i == j {
+                    continue;
+                }
+                paf_lines.push(equal_length_paf_line(
+                    seq_strings[i].0,
+                    &seq_strings[i].1,
+                    seq_strings[j].0,
+                    &seq_strings[j].1,
+                ));
+            }
+        }
+        let mut paf = paf_lines.join("\n");
+        paf.push('\n');
+        let graph_config = crate::commands::graph::GraphBuildConfig {
+            no_filter: false,
+            num_mappings: "many:many".to_string(),
+            scaffold_filter: "many:many".to_string(),
+            scaffold_mass: 0,
+            min_map_length: 1,
+            min_identity: 0.0,
+            min_match_len: 1,
+            adaptive_min_match_len: false,
+            show_progress: false,
+            ..crate::commands::graph::GraphBuildConfig::default()
+        };
+        let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)
+            .expect("compound seqwish induction should build");
+        let observed = path_sequences(&gfa)
+            .unwrap()
+            .into_iter()
+            .collect::<FxHashMap<_, _>>();
+        for (name, seq) in &seq_strings {
+            assert_eq!(
+                observed.get(*name).map(String::as_str),
+                Some(seq.as_str()),
+                "{name} path sequence changed"
+            );
+        }
+        let graph = parse_gfa(&gfa).unwrap();
+        assert!(
+            replacement_shared_segment_count(&graph) >= 3,
+            "raw many-to-many support should induce shared compound segments:\n{gfa}"
+        );
+        assert!(
+            replacement_segment_bp(&graph) < seqs.iter().map(|(_, seq)| seq.len()).sum::<usize>(),
+            "induced graph should stay condensed relative to unfolded paths:\n{gfa}"
+        );
+    }
+
     #[test]
     fn adaptive_min_match_policy_is_opt_in() {
         let config = ResolutionConfig {
@@ -10277,6 +10506,45 @@ P\talt\t1+,3+,4+\t*
         config.sweepga_kmer_frequency = 0;
         config.sweepga_no_filter = false;
         assert_eq!(resolve_replacement_kmer_frequency(&config, 312), 3_120);
+    }
+
+    #[test]
+    fn local_wfmash_no_filter_raises_raw_mapping_multiplicity() {
+        let mut align_config = sweepga::library_api::SweepgaAlignConfig {
+            aligner: "wfmash".to_string(),
+            no_filter: true,
+            num_mappings: "1:1".to_string(),
+            ..sweepga::library_api::SweepgaAlignConfig::default()
+        };
+        assert_eq!(local_wfmash_num_mappings(&align_config, 45), 45);
+
+        align_config.no_filter = false;
+        assert_eq!(local_wfmash_num_mappings(&align_config, 45), 1);
+
+        align_config.num_mappings = "many:many".to_string();
+        assert_eq!(local_wfmash_num_mappings(&align_config, 45), 45);
+
+        align_config.num_mappings = "3:7".to_string();
+        assert_eq!(local_wfmash_num_mappings(&align_config, 45), 7);
+    }
+
+    #[test]
+    fn local_wfmash_replacement_uses_explicit_local_identity_default() {
+        let mut align_config = sweepga::library_api::SweepgaAlignConfig {
+            aligner: "wfmash".to_string(),
+            map_pct_identity: None,
+            ..sweepga::library_api::SweepgaAlignConfig::default()
+        };
+        assert_eq!(
+            local_wfmash_map_pct_identity(&align_config).as_deref(),
+            Some(LOCAL_WFMASH_REPLACEMENT_MAP_PCT_IDENTITY)
+        );
+
+        align_config.map_pct_identity = Some("90".to_string());
+        assert_eq!(
+            local_wfmash_map_pct_identity(&align_config).as_deref(),
+            Some("90")
+        );
     }
 
     #[test]

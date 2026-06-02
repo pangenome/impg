@@ -8654,6 +8654,7 @@ fn run() -> io::Result<()> {
                     &temp_dir,
                     num_threads,
                     show_progress,
+                    engine_cli.debug_dir.clone(),
                 )?;
 
                 let scoring = Some(poa_scoring);
@@ -8673,6 +8674,7 @@ fn run() -> io::Result<()> {
                     &temp_dir,
                     num_threads,
                     show_progress,
+                    engine_cli.debug_dir.clone(),
                 )?;
 
                 match parsed_engine {
@@ -10097,6 +10099,7 @@ fn build_graph_config(
     temp_dir: &str,
     num_threads: usize,
     show_progress: bool,
+    debug_dir: Option<String>,
 ) -> io::Result<graph::GraphBuildConfig> {
     Ok(graph::GraphBuildConfig {
         num_threads,
@@ -10124,7 +10127,7 @@ fn build_graph_config(
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
         scaffold_dist: engine_cli.aln.sw.scaffold_dist,
         min_map_length: engine_cli.aln.min_map_length,
-        debug_dir: None,
+        debug_dir,
         sparsify: sparsify.clone(),
         mash_params: sweepga::knn_graph::MashParams {
             kmer_size: engine_cli.aln.sw.mash_kmer_size,
