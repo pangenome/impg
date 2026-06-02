@@ -315,6 +315,8 @@ pub enum ResolutionMethod {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MultiLevelWindowMode {
+    /// Parent/frontier chunks: top-level POVU sites and parent-descendant blocks.
+    Parent,
     /// Same-parent/same-level runs and parent-descendant windows.
     Sibling,
     /// Reference path-order sliding windows and local stringy neighborhoods.
@@ -338,7 +340,10 @@ pub enum MultiLevelObjectiveMode {
 impl MultiLevelWindowMode {
     pub fn parse_name(value: &str) -> Option<Self> {
         match value.replace('_', "-").to_ascii_lowercase().as_str() {
-            "sibling" | "siblings" | "same-parent" | "same-level" | "parent" => Some(Self::Sibling),
+            "parent" | "parents" | "frontier" | "parent-first" | "top-level" | "toplevel" => {
+                Some(Self::Parent)
+            }
+            "sibling" | "siblings" | "same-parent" | "same-level" => Some(Self::Sibling),
             "sliding" | "path-order" | "path" | "windows" | "sliding-windows" => {
                 Some(Self::Sliding)
             }
@@ -3034,6 +3039,10 @@ fn generate_multi_level_candidates(
     };
     let window_mode = effective_multi_level_window_mode(config);
 
+    let use_parent = matches!(
+        window_mode,
+        MultiLevelWindowMode::Parent | MultiLevelWindowMode::Combined
+    );
     let use_sibling = matches!(
         window_mode,
         MultiLevelWindowMode::Sibling | MultiLevelWindowMode::Combined
@@ -3062,7 +3071,7 @@ fn generate_multi_level_candidates(
         );
     }
 
-    if use_sibling || use_sliding {
+    if use_parent || use_sibling || use_sliding {
         for d in discovered.iter().filter(|d| d.povu_level == 0) {
             insert_multi_level_candidate(
                 &mut generated,
@@ -3076,6 +3085,17 @@ fn generate_multi_level_candidates(
         }
     }
 
+    if use_parent || use_sibling {
+        add_parent_descendant_windows(
+            discovered,
+            target_bp,
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
+
     if use_sibling {
         add_same_parent_sibling_windows(
             graph,
@@ -3085,14 +3105,6 @@ fn generate_multi_level_candidates(
             &path_positions_by_path,
             &path_step_indexes,
             node_visits.as_deref(),
-            &mut generated,
-            &mut emitted,
-            resolved_signatures,
-            config,
-        );
-        add_parent_descendant_windows(
-            discovered,
-            target_bp,
             &mut generated,
             &mut emitted,
             resolved_signatures,
@@ -3165,7 +3177,7 @@ fn generate_multi_level_candidates(
     generated.candidates.sort_by(|a, b| {
         multi_level_source_priority(a.source)
             .cmp(&multi_level_source_priority(b.source))
-            .then_with(|| compare_same_source_window_priority(a, b))
+            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
             .then_with(|| {
                 b.candidate
                     .estimated_step_savings()
@@ -3193,8 +3205,31 @@ fn generate_multi_level_candidates(
 fn compare_same_source_window_priority(
     a: &MultiLevelWindowCandidate,
     b: &MultiLevelWindowCandidate,
+    window_mode: MultiLevelWindowMode,
 ) -> std::cmp::Ordering {
-    if a.source == MultiLevelCandidateSource::OutwardResidualWindow
+    if matches!(
+        window_mode,
+        MultiLevelWindowMode::Parent | MultiLevelWindowMode::Combined
+    ) && matches!(
+        a.source,
+        MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
+    ) && a.source == b.source
+    {
+        multi_level_parent_frontier_span_score(&b.candidate)
+            .cmp(&multi_level_parent_frontier_span_score(&a.candidate))
+            .then_with(|| b.candidate.root_span.cmp(&a.candidate.root_span))
+            .then_with(|| {
+                b.candidate
+                    .traversal_stats
+                    .total_len
+                    .cmp(&a.candidate.traversal_stats.total_len)
+            })
+            .then_with(|| {
+                b.candidate
+                    .estimated_step_savings()
+                    .cmp(&a.candidate.estimated_step_savings())
+            })
+    } else if a.source == MultiLevelCandidateSource::OutwardResidualWindow
         && b.source == MultiLevelCandidateSource::OutwardResidualWindow
     {
         b.candidate
@@ -3206,6 +3241,14 @@ fn compare_same_source_window_priority(
     } else {
         std::cmp::Ordering::Equal
     }
+}
+
+fn multi_level_parent_frontier_span_score(candidate: &BubbleCandidate) -> usize {
+    let traversal_span = candidate
+        .traversal_stats
+        .median_len
+        .max(candidate.traversal_stats.min_len);
+    candidate.root_span.min(traversal_span)
 }
 
 fn insert_multi_level_candidate(
@@ -3878,13 +3921,13 @@ fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> b
 
 fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     match source {
-        MultiLevelCandidateSource::OutwardResidualWindow => 0,
-        MultiLevelCandidateSource::StringyNeighborhood => 1,
-        MultiLevelCandidateSource::SiblingRun => 2,
-        MultiLevelCandidateSource::SlidingWindow => 3,
-        MultiLevelCandidateSource::LevelWindow => 4,
-        MultiLevelCandidateSource::ParentDescendants => 5,
-        MultiLevelCandidateSource::TopLevel => 6,
+        MultiLevelCandidateSource::TopLevel => 0,
+        MultiLevelCandidateSource::ParentDescendants => 1,
+        MultiLevelCandidateSource::OutwardResidualWindow => 2,
+        MultiLevelCandidateSource::LevelWindow => 3,
+        MultiLevelCandidateSource::SiblingRun => 4,
+        MultiLevelCandidateSource::SlidingWindow => 5,
+        MultiLevelCandidateSource::StringyNeighborhood => 6,
     }
 }
 
@@ -9628,6 +9671,14 @@ P\tp1\t1+,3+,4+\t*
             Some(MultiLevelWindowMode::Sibling)
         );
         assert_eq!(
+            MultiLevelWindowMode::parse_name("parent"),
+            Some(MultiLevelWindowMode::Parent)
+        );
+        assert_eq!(
+            MultiLevelWindowMode::parse_name("frontier"),
+            Some(MultiLevelWindowMode::Parent)
+        );
+        assert_eq!(
             MultiLevelWindowMode::parse_name("path-order"),
             Some(MultiLevelWindowMode::Sliding)
         );
@@ -9643,6 +9694,69 @@ P\tp1\t1+,3+,4+\t*
             MultiLevelObjectiveMode::parse_name("node-path-coverage"),
             Some(MultiLevelObjectiveMode::Coverage)
         );
+    }
+
+    #[test]
+    fn iterative_multi_level_parent_priority_prefers_balanced_parent_spans() {
+        let tiny_root_repeat = BubbleCandidate {
+            ranges: Vec::new(),
+            signature: "tiny-root-repeat".to_string(),
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 98,
+            total_steps: 220_000,
+            unique_steps: 2_016,
+            traversal_stats: TraversalStats {
+                count: 312,
+                min_len: 98,
+                median_len: 26_460,
+                p90_len: 32_000,
+                max_len: 32_954,
+                total_len: 5_385_717,
+            },
+            level: 0,
+        };
+        let balanced_parent = BubbleCandidate {
+            ranges: Vec::new(),
+            signature: "balanced-parent".to_string(),
+            root_start_step: 10,
+            root_end_step: 100,
+            root_span: 32_787,
+            total_steps: 91_000,
+            unique_steps: 1_696,
+            traversal_stats: TraversalStats {
+                count: 117,
+                min_len: 100,
+                median_len: 26_418,
+                p90_len: 32_000,
+                max_len: 32_787,
+                total_len: 2_363_564,
+            },
+            level: 0,
+        };
+
+        assert!(
+            multi_level_parent_frontier_span_score(&balanced_parent)
+                > multi_level_parent_frontier_span_score(&tiny_root_repeat)
+        );
+
+        let mut candidates = [
+            MultiLevelWindowCandidate {
+                candidate: tiny_root_repeat,
+                source: MultiLevelCandidateSource::TopLevel,
+                source_sites: 1,
+            },
+            MultiLevelWindowCandidate {
+                candidate: balanced_parent,
+                source: MultiLevelCandidateSource::TopLevel,
+                source_sites: 1,
+            },
+        ];
+        candidates.sort_by(|a, b| {
+            compare_same_source_window_priority(a, b, MultiLevelWindowMode::Parent)
+        });
+
+        assert_eq!(candidates[0].candidate.root_span, 32_787);
     }
 
     #[test]
@@ -10693,6 +10807,52 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
             generated.candidates.iter().any(|c| c.source
                 == MultiLevelCandidateSource::SlidingWindow
                 && c.source_sites >= 2),
+            "{:?}",
+            generated.source_counts
+        );
+    }
+
+    #[test]
+    fn iterative_multi_level_parent_mode_uses_parent_frontier_sources() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Parent,
+            multi_level_window_target_bp: 100,
+            multi_level_max_window_sites: 3,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+        assert!(!generated.candidates.is_empty(), "{generated:?}");
+        assert!(
+            generated.candidates.iter().all(|candidate| matches!(
+                candidate.source,
+                MultiLevelCandidateSource::TopLevel | MultiLevelCandidateSource::ParentDescendants
+            )),
             "{:?}",
             generated.source_counts
         );
