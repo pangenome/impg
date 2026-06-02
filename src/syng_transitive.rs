@@ -5,12 +5,10 @@
 //!      resolution intervals per (target, strand), with anchor positions.
 //!      No K-cap on anchor collection; chain-level positional cap
 //!      bounds memory downstream.
-//!   2. `chain_anchors` — flatten per-visit anchors to per-(target,
-//!      strand) anchor lists; greedy most-similar-diagonal assignment
-//!      with both a signature tolerance (`merge_distance`) and a
-//!      query-axis positional cap (`positional_cap_multiplier ×
-//!      extend_budget`). Defeats the "same-diagonal-far-apart"
-//!      pathology of pure diagonal clustering.
+//!   2. `chain_anchors` — flatten per-visit anchors into PAF-equivalent
+//!      exact-match records and delegate chain/scaffold filtering to
+//!      SweepGA's plane-sweep scaffold filter. This keeps the off-diagonal
+//!      short-hit handling in one battle-tested implementation.
 //!   3. `dedupe_strand_overlaps` — per path, overlapping +/- chains
 //!      resolved by majority anchor count.
 //!   4. `refine_ends_only` — per chain, two ends-free BiWFA calls:
@@ -66,17 +64,12 @@ where
     })
 }
 
-/// Plane-sweep chaining over anchors per (genome, strand).
+/// Chain exact syncmer anchors with SweepGA's scaffold-aware plane sweep.
 ///
-/// Walks anchors in query_pos order. Each anchor joins the nearest
-/// active chain (by current signature) if within per-hop drift
-/// tolerance AND the extension wouldn't push the chain's target span
-/// past the chain-total cap; otherwise it starts a new chain. Chains
-/// that haven't been extended within `max_hop` bp on the query axis
-/// are finalized.
-///
-/// Replaces the older O(N²) mutual-best-buddy + union-find pipeline.
-/// Algorithmic budget per bucket: O(N × active_chains). On realistic
+/// Syncmer anchors are represented as 1:1 exact PAF-style records and
+/// passed to `sweepga::paf_filter::PafFilter`. The syng query code must
+/// not maintain a parallel plane-sweep/scaffold implementation: SweepGA's
+/// scaffold filter is where off-diagonal short-hit suppression belongs.
 pub fn chain_anchors(
     hits: Vec<HomologousIntervalWithAnchors>,
     extend_budget: u64,
@@ -94,145 +87,176 @@ pub fn chain_anchors(
     )
 }
 
-/// Collinear-chain shared syncmer anchors per `(target path, strand)`.
+/// Collinear-chain shared syncmer anchors per `(target path, strand)` by
+/// delegating to SweepGA's scaffold filter.
 ///
-/// `max_query_hop` and `drift_per_hop` are deliberately explicit. Endpoint
-/// refinement budget and chain gap are different concepts: a query over a
-/// large bubble can need far-apart flanking anchors in the same chain while
-/// still using a much smaller base-alignment window at each boundary.
+/// `max_query_hop` is passed as SweepGA's scaffold gap. The drift/span
+/// parameters are retained in the signature for older callers but are no
+/// longer interpreted locally; avoiding an impg-side clone of SweepGA's
+/// scaffold algorithm is the point of this path.
 pub fn chain_anchors_with_limits(
     hits: Vec<HomologousIntervalWithAnchors>,
     syncmer_len: u64,
     max_query_hop: u64,
-    drift_per_hop: u64,
-    max_chain_span: u64,
+    _drift_per_hop: u64,
+    _max_chain_span: u64,
+) -> Vec<HomologousIntervalWithAnchors> {
+    chain_anchors_with_sweepga_scaffold_mass(hits, syncmer_len, max_query_hop, syncmer_len)
+}
+
+/// SweepGA-backed anchor chaining with an explicit scaffold mass.
+///
+/// `min_scaffold_length` is in bp of exact syncmer seed support, matching
+/// SweepGA's scaffold-mass semantics. Callers that already know the desired
+/// anchor-count threshold should pass `threshold * syncmer_len` here so
+/// short off-diagonal seed runs are removed before interval refinement.
+pub fn chain_anchors_with_sweepga_scaffold_mass(
+    hits: Vec<HomologousIntervalWithAnchors>,
+    syncmer_len: u64,
+    scaffold_gap: u64,
+    min_scaffold_length: u64,
 ) -> Vec<HomologousIntervalWithAnchors> {
     if hits.is_empty() {
         return hits;
     }
 
     use std::collections::HashMap;
-    let mut per_path: HashMap<(String, char), Vec<Anchor>> = HashMap::new();
-    for h in hits {
-        per_path
-            .entry((h.genome.clone(), h.strand))
-            .or_default()
-            .extend(h.anchors.into_iter());
+    use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, RecordMeta, ScoringFunction};
+
+    let syncmer_len = syncmer_len.max(1);
+    let scaffold_gap = scaffold_gap.max(syncmer_len);
+    let min_scaffold_length = min_scaffold_length.max(syncmer_len);
+    let per_target: HashMap<(String, char), Vec<Anchor>> = hits
+        .into_par_iter()
+        .fold(HashMap::new, |mut buckets, hit| {
+            buckets
+                .entry((hit.genome, hit.strand))
+                .or_insert_with(Vec::new)
+                .extend(hit.anchors);
+            buckets
+        })
+        .reduce(HashMap::new, |mut left, right| {
+            for (key, anchors) in right {
+                left.entry(key).or_insert_with(Vec::new).extend(anchors);
+            }
+            left
+        });
+
+    if per_target.is_empty() {
+        return Vec::new();
     }
 
-    let drift_per_hop: i64 = drift_per_hop.min(i64::MAX as u64) as i64;
-    let max_hop = max_query_hop.max(syncmer_len);
-    let max_chain_span = max_chain_span.max(syncmer_len);
+    let filter_config = FilterConfig {
+        chain_gap: 0,
+        min_block_length: syncmer_len,
+        mapping_filter_mode: FilterMode::ManyToMany,
+        mapping_max_per_query: None,
+        mapping_max_per_target: None,
+        plane_sweep_secondaries: 0,
+        scaffold_filter_mode: FilterMode::ManyToMany,
+        scaffold_max_per_query: None,
+        scaffold_max_per_target: None,
+        overlap_threshold: 0.95,
+        sparsity: 1.0,
+        no_merge: true,
+        scaffold_gap,
+        min_scaffold_length,
+        scaffold_overlap_threshold: 0.5,
+        scaffold_max_deviation: 0,
+        prefix_delimiter: '#',
+        skip_prefix: false,
+        scoring_function: ScoringFunction::LogLengthIdentity,
+        min_identity: 0.0,
+        min_scaffold_identity: 0.0,
+    };
 
-    fn anchor_sig(a: &Anchor, strand: char) -> i64 {
-        match strand {
-            '+' => a.target_pos as i64 - a.query_pos as i64,
-            '-' => a.target_pos as i64 + a.query_pos as i64,
-            _ => 0,
-        }
-    }
-
-    struct ActiveChain {
-        anchors: Vec<Anchor>,
-        current_sig: i64,
-        last_query_pos: u64,
-        min_target_pos: u64,
-        max_target_pos: u64,
-    }
-
-    let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
-    for ((genome, strand), mut anchors) in per_path {
-        if anchors.is_empty() {
-            continue;
-        }
+    let mut out: Vec<HomologousIntervalWithAnchors> = per_target
+        .into_par_iter()
+        .flat_map(|((genome, strand), mut anchors)| {
         anchors.sort_by(|a, b| {
             a.query_pos
                 .cmp(&b.query_pos)
                 .then(a.target_pos.cmp(&b.target_pos))
         });
-        anchors.dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
-
-        let mut active: Vec<ActiveChain> = Vec::new();
-        let mut finalized: Vec<ActiveChain> = Vec::new();
-
-        for a in anchors {
-            let sig = anchor_sig(&a, strand);
-
-            // Flush stale chains whose last_query_pos is too far behind.
-            let mut i = 0;
-            while i < active.len() {
-                if a.query_pos.saturating_sub(active[i].last_query_pos) > max_hop {
-                    finalized.push(active.swap_remove(i));
-                } else {
-                    i += 1;
-                }
-            }
-
-            // Find best chain to extend: smallest |sig − chain.current_sig|
-            // within DRIFT_PER_HOP, and post-extension span within cap.
-            // Monotonicity on target axis is required (dt > 0 in the
-            // strand's natural direction).
-            let mut best_idx: Option<usize> = None;
-            let mut best_diff: i64 = i64::MAX;
-            for (idx, c) in active.iter().enumerate() {
-                let diff = (sig - c.current_sig).abs();
-                if diff > drift_per_hop {
-                    continue;
-                }
-                // Target-axis monotonicity per strand.
-                let dt_ok = match strand {
-                    '+' => a.target_pos >= c.max_target_pos.saturating_sub(syncmer_len),
-                    '-' => a.target_pos + syncmer_len <= c.min_target_pos.saturating_add(syncmer_len),
-                    _ => false,
-                };
-                if !dt_ok {
-                    continue;
-                }
-                let new_min = c.min_target_pos.min(a.target_pos);
-                let new_max = c.max_target_pos.max(a.target_pos + syncmer_len);
-                if new_max.saturating_sub(new_min) > max_chain_span {
-                    continue;
-                }
-                if diff < best_diff {
-                    best_diff = diff;
-                    best_idx = Some(idx);
-                }
-            }
-
-            if let Some(idx) = best_idx {
-                let c = &mut active[idx];
-                c.anchors.push(a);
-                c.current_sig = sig;
-                c.last_query_pos = a.query_pos;
-                c.min_target_pos = c.min_target_pos.min(a.target_pos);
-                c.max_target_pos = c.max_target_pos.max(a.target_pos + syncmer_len);
-            } else {
-                active.push(ActiveChain {
-                    anchors: vec![a],
-                    current_sig: sig,
-                    last_query_pos: a.query_pos,
-                    min_target_pos: a.target_pos,
-                    max_target_pos: a.target_pos + syncmer_len,
-                });
-            }
+        anchors.dedup_by(|a, b| {
+            a.query_pos == b.query_pos && a.target_pos == b.target_pos && a.node_id == b.node_id
+        });
+        if anchors.is_empty() {
+            return Vec::new();
         }
-
-        // Finalize remaining active chains.
-        finalized.extend(active);
-
-        for c in finalized {
-            if c.anchors.is_empty() {
-                continue;
-            }
-            out.push(HomologousIntervalWithAnchors {
-                genome: genome.clone(),
-                start: c.min_target_pos,
-                end: c.max_target_pos,
+        let records: Vec<RecordMeta> = anchors
+            .iter()
+            .enumerate()
+            .map(|(rank, anchor)| RecordMeta {
+                rank,
+                query_name: "__syng_query#0#query".to_string(),
+                target_name: genome.clone(),
+                query_start: anchor.query_pos,
+                query_end: anchor.query_pos.saturating_add(syncmer_len),
+                target_start: anchor.target_pos,
+                target_end: anchor.target_pos.saturating_add(syncmer_len),
+                block_length: syncmer_len,
+                identity: 1.0,
+                matches: syncmer_len,
+                alignment_length: syncmer_len,
                 strand,
-                anchors: c.anchors,
+                chain_id: None,
+                chain_status: sweepga::mapping::ChainStatus::Unassigned,
+                discard: false,
+                overlapped: false,
+            })
+            .collect();
+        let passing = match PafFilter::new(filter_config.clone())
+            .with_keep_self(true)
+            .with_scaffolds_only(true)
+            .apply_filters(records)
+        {
+            Ok(passing) => passing,
+            Err(err) => {
+                warn!("SweepGA scaffold filtering failed for syng anchors on {genome}/{strand}: {err}");
+                return Vec::new();
+            }
+        };
+        let mut grouped: HashMap<String, Vec<Anchor>> = HashMap::new();
+        for (rank, meta) in passing {
+            let Some(anchor) = anchors.get(rank).copied() else {
+                continue;
+            };
+            let chain_id = meta.chain_id.unwrap_or_else(|| format!("rank_{rank}"));
+            grouped.entry(chain_id).or_default().push(anchor);
+        }
+        let mut bucket_out = Vec::with_capacity(grouped.len());
+        for (_chain_id, mut chain_anchors) in grouped {
+            chain_anchors.sort_by(|a, b| {
+                a.query_pos
+                    .cmp(&b.query_pos)
+                    .then(a.target_pos.cmp(&b.target_pos))
+            });
+            let start = chain_anchors.iter().map(|a| a.target_pos).min().unwrap_or(0);
+            let end = chain_anchors
+                .iter()
+                .map(|a| a.target_pos.saturating_add(syncmer_len))
+                .max()
+                .unwrap_or(start);
+            bucket_out.push(HomologousIntervalWithAnchors {
+                genome: genome.clone(),
+                start,
+                end,
+                strand,
+                anchors: chain_anchors,
             });
         }
-    }
+        bucket_out
+    })
+    .collect();
+    out.sort_by(|a, b| {
+        a.genome
+            .cmp(&b.genome)
+            .then(a.strand.cmp(&b.strand))
+            .then(a.start.cmp(&b.start))
+            .then(a.end.cmp(&b.end))
+            .then(a.anchors.len().cmp(&b.anchors.len()))
+    });
     out
 }
 
@@ -287,9 +311,7 @@ fn project_query_to_target(
     let t_anchor = anchor.target_pos;
     let projected: i128 = match strand {
         '+' => t_anchor as i128 + (q_pos as i128 - q_anchor as i128),
-        '-' => {
-            t_anchor as i128 + syncmer_len as i128 - (q_pos as i128 - q_anchor as i128)
-        }
+        '-' => t_anchor as i128 + syncmer_len as i128 - (q_pos as i128 - q_anchor as i128),
         _ => t_anchor as i128,
     };
     if projected < 0 {
@@ -319,10 +341,18 @@ fn refine_by_linear_projection(
     let leftmost = anchors[0];
     let rightmost = *anchors.last().unwrap();
     let t_for_qs = project_query_to_target(
-        query_start, leftmost, homolog.strand, syncmer_len, target_len,
+        query_start,
+        leftmost,
+        homolog.strand,
+        syncmer_len,
+        target_len,
     );
     let t_for_qe = project_query_to_target(
-        query_end, rightmost, homolog.strand, syncmer_len, target_len,
+        query_end,
+        rightmost,
+        homolog.strand,
+        syncmer_len,
+        target_len,
     );
     let (start, end) = if t_for_qs <= t_for_qe {
         (t_for_qs, t_for_qe)
@@ -440,7 +470,11 @@ fn project_end_align(
         }
         Some((
             skip_oriented_outer_bp,
-            if want_cigar { Some(cigar.to_vec()) } else { None },
+            if want_cigar {
+                Some(cigar.to_vec())
+            } else {
+                None
+            },
         ))
     });
     PROF_ALIGN_NS.fetch_add(t_align.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -513,9 +547,7 @@ fn refine_ends_only(
             .min(extend_budget.saturating_mul(2))
             .max(syncmer_len)
     };
-    let small_slop = |query_gap: u64| -> u64 {
-        (query_gap / 20).max(32).min(extend_budget)
-    };
+    let small_slop = |query_gap: u64| -> u64 { (query_gap / 20).max(32).min(extend_budget) };
     // Parallel-walk projection: for each edge, do BiWFA on at most
     // `extend_budget` bp of query closest to the anchor (where drift is
     // informative and alignment is cheap), then linearly extrapolate
@@ -536,7 +568,10 @@ fn refine_ends_only(
     // remaining `linear_back_ext` bp are linear-extrapolated to qs.
     let biwfa_back_gap = back_query_gap.min(extend_budget);
     let linear_back_ext = back_query_gap - biwfa_back_gap;
-    let back_biwfa_q_lo = a_first.query_pos.saturating_sub(biwfa_back_gap).max(query_region_start);
+    let back_biwfa_q_lo = a_first
+        .query_pos
+        .saturating_sub(biwfa_back_gap)
+        .max(query_region_start);
     let back_biwfa_q_hi = (a_first.query_pos + syncmer_len).min(query_region_end);
     // Shift backward_bounds to be centered on biwfa_back_gap rather
     // than the full back_query_gap.
@@ -559,7 +594,9 @@ fn refine_ends_only(
         // Linearly extend anchor_t by linear_back_ext along the
         // a_first diagonal, then clip to neighbor/target bounds.
         match hit.strand {
-            '+' => anchor_t.saturating_sub(linear_back_ext).max(prev_target_end),
+            '+' => anchor_t
+                .saturating_sub(linear_back_ext)
+                .max(prev_target_end),
             '-' => (anchor_t + linear_back_ext)
                 .min(next_target_start)
                 .min(target_len),
@@ -591,7 +628,14 @@ fn refine_ends_only(
         }
         let sq = slice_sub_q(back_biwfa_q_lo, back_biwfa_q_hi)?;
         let (skip, _cigar) = project_end_align(
-            sq, ts, te, hit.strand, &hit.genome, back_outer, sequence_index, false,
+            sq,
+            ts,
+            te,
+            hit.strand,
+            &hit.genome,
+            back_outer,
+            sequence_index,
+            false,
         )?;
         let t_at_biwfa_lo = match hit.strand {
             '+' => ts + skip,
@@ -600,12 +644,11 @@ fn refine_ends_only(
         };
         Some(linear_back_from(t_at_biwfa_lo))
     };
-    let back_result = try_back(small_slop(biwfa_back_gap))
-        .or_else(|| try_back(extend_budget));
+    let back_result = try_back(small_slop(biwfa_back_gap)).or_else(|| try_back(extend_budget));
 
     // ── Forward projection ──
-    let fwd_query_gap = query_region_end
-        .saturating_sub((a_last.query_pos + syncmer_len).min(query_region_end));
+    let fwd_query_gap =
+        query_region_end.saturating_sub((a_last.query_pos + syncmer_len).min(query_region_end));
     let fwd_outer = match hit.strand {
         '+' => Outer::Right,
         '-' => Outer::Left,
@@ -632,7 +675,9 @@ fn refine_ends_only(
     };
     let linear_fwd_from = |anchor_t: u64| -> u64 {
         match hit.strand {
-            '+' => (anchor_t + linear_fwd_ext).min(next_target_start).min(target_len),
+            '+' => (anchor_t + linear_fwd_ext)
+                .min(next_target_start)
+                .min(target_len),
             '-' => anchor_t.saturating_sub(linear_fwd_ext).max(prev_target_end),
             _ => anchor_t,
         }
@@ -662,7 +707,14 @@ fn refine_ends_only(
         }
         let sq = slice_sub_q(fwd_biwfa_q_lo, fwd_biwfa_q_hi)?;
         let (skip, _cigar) = project_end_align(
-            sq, ts, te, hit.strand, &hit.genome, fwd_outer, sequence_index, false,
+            sq,
+            ts,
+            te,
+            hit.strand,
+            &hit.genome,
+            fwd_outer,
+            sequence_index,
+            false,
         )?;
         let t_at_biwfa_hi = match hit.strand {
             '+' => te.saturating_sub(skip),
@@ -671,8 +723,7 @@ fn refine_ends_only(
         };
         Some(linear_fwd_from(t_at_biwfa_hi))
     };
-    let fwd_result = try_fwd(small_slop(biwfa_fwd_gap))
-        .or_else(|| try_fwd(extend_budget));
+    let fwd_result = try_fwd(small_slop(biwfa_fwd_gap)).or_else(|| try_fwd(extend_budget));
 
     // `back_result` / `fwd_result` already hold the refined forward-
     // strand target position for whichever tier succeeded. Compose
@@ -760,12 +811,12 @@ fn dedupe_strand_overlaps(
 
 /// Default cap on the adaptive minimum anchor count per chain for emission.
 ///
-/// This is deliberately a high ceiling, not a floor. The actual threshold is
-/// derived from query length, syncmer density, and an assumed identity in
-/// [`effective_min_chain_anchors_for_syncmer`]. Short queries therefore keep a
-/// small support requirement, while long repeat-dense loci can require many
-/// independent seed islands.
-pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 1_000;
+/// The actual threshold is derived from query length, syncmer density, and an
+/// assumed identity in [`effective_min_chain_anchors_for_syncmer`], then capped
+/// here. A modest cap avoids dropping legitimate CNV/SV loci whose SweepGA
+/// scaffold chains are intentionally local rather than one locus-spanning
+/// alignment.
+pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 20;
 
 /// Default identity used to estimate how many exact syncmers should survive in
 /// a true homologous chain.
@@ -940,11 +991,7 @@ pub fn one_hop_ext_visited_with_seed_filter(
         seed_filter,
     )?;
     if prof {
-        eprintln!(
-            "PROF emit={:?} hits={}",
-            t0.elapsed(),
-            hits.len()
-        );
+        eprintln!("PROF emit={:?} hits={}", t0.elapsed(), hits.len());
     }
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
     let query_range_len = query_end.saturating_sub(query_start);
@@ -952,14 +999,6 @@ pub fn one_hop_ext_visited_with_seed_filter(
     let total_anchors: usize = hits.iter().map(|h| h.anchors.len()).sum();
     let (chain_gap, drift_budget, target_span_cap) =
         query_scaled_chain_limits(query_range_len, extend_budget, syncmer_len, merge_distance);
-    let hits = chain_anchors_with_limits(
-        hits,
-        syncmer_len,
-        chain_gap,
-        drift_budget,
-        target_span_cap,
-    );
-    let pre_filter = hits.len();
     // Filter chains by a length-scaled anchor-count model. The default
     // estimates how many exact syncmers should survive at high identity and
     // requires a fraction of that, so short queries stay sensitive while
@@ -970,6 +1009,13 @@ pub fn one_hop_ext_visited_with_seed_filter(
         syng_index.params.k as u64,
         min_chain_anchors,
     );
+    let hits = chain_anchors_with_sweepga_scaffold_mass(
+        hits,
+        syncmer_len,
+        chain_gap,
+        (effective_min as u64).saturating_mul(syncmer_len),
+    );
+    let pre_filter = hits.len();
     // Chain query-extent = a_last.query_pos + syncmer_len - a_first.query_pos.
     // Threshold in bp; 0 means "no extent filter".
     let min_chain_extent_bp = (query_range_len as f64 * min_chain_fraction.max(0.0)) as u64;
@@ -1045,7 +1091,10 @@ pub fn one_hop_ext_visited_with_seed_filter(
     // how many chains this hop emits.
     let qb_slice = query_bytes_cache.as_deref();
     let t5 = Instant::now();
-    let singleton_count = hits_with_neighbors.iter().filter(|(h, _, _)| h.anchors.len() < 2).count();
+    let singleton_count = hits_with_neighbors
+        .iter()
+        .filter(|(h, _, _)| h.anchors.len() < 2)
+        .count();
     let out: Vec<HomologousInterval> = hits_with_neighbors
         .par_iter()
         .with_min_len(128)
@@ -1056,9 +1105,7 @@ pub fn one_hop_ext_visited_with_seed_filter(
                 .unwrap_or(u64::MAX);
 
             let (refined_start, refined_end) = if hit.anchors.len() < 2 {
-                refine_by_linear_projection(
-                    hit, query_start, query_end, syncmer_len, target_len,
-                )
+                refine_by_linear_projection(hit, query_start, query_end, syncmer_len, target_len)
             } else {
                 let projected = qb_slice.and_then(|qb| {
                     refine_ends_only(
@@ -1076,7 +1123,11 @@ pub fn one_hop_ext_visited_with_seed_filter(
                 });
                 projected.unwrap_or_else(|| {
                     refine_by_linear_projection(
-                        hit, query_start, query_end, syncmer_len, target_len,
+                        hit,
+                        query_start,
+                        query_end,
+                        syncmer_len,
+                        target_len,
                     )
                 })
             };
@@ -1122,7 +1173,10 @@ fn attach_target_neighbors(
     use std::collections::HashMap;
     let mut groups: HashMap<(String, char), Vec<HomologousIntervalWithAnchors>> = HashMap::new();
     for h in hits {
-        groups.entry((h.genome.clone(), h.strand)).or_default().push(h);
+        groups
+            .entry((h.genome.clone(), h.strand))
+            .or_default()
+            .push(h);
     }
     let mut out: Vec<(HomologousIntervalWithAnchors, u64, u64)> = Vec::new();
     for (_, mut group) in groups {
@@ -1254,6 +1308,7 @@ pub fn query_transitive_ext(
     min_chain_fraction: f64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    let merge_distance = extend_budget.min(i32::MAX as u64) as i32;
     query_transitive_ext_with_seed_filter(
         syng_index,
         query_name,
@@ -1266,7 +1321,7 @@ pub fn query_transitive_ext(
         min_chain_anchors,
         min_chain_fraction,
         SyngSeedFilter::default(),
-        -1,
+        merge_distance,
         sequence_index,
     )
 }
@@ -1462,7 +1517,11 @@ mod tests {
     use super::*;
 
     fn mk_anchor(q: u64, t: u64) -> Anchor {
-        Anchor { query_pos: q, target_pos: t, node_id: 0 }
+        Anchor {
+            query_pos: q,
+            target_pos: t,
+            node_id: 0,
+        }
     }
 
     #[test]
@@ -1585,17 +1644,43 @@ mod tests {
             strand: '+',
             anchors: vec![mk_anchor(0, 0), mk_anchor(80_000, 80_000)],
         }];
-        let out = chain_anchors_with_limits(
-            hits,
-            TEST_SYNCMER_LEN,
-            90_000,
-            90_000,
-            90_000,
-        );
+        let out = chain_anchors_with_limits(hits, TEST_SYNCMER_LEN, 90_000, 90_000, 90_000);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].anchors.len(), 2);
         assert_eq!(out[0].start, 0);
         assert_eq!(out[0].end, 80_000 + TEST_SYNCMER_LEN);
+    }
+
+    #[test]
+    fn sweepga_scaffold_mass_filters_short_off_diagonal_hits() {
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g#0#chr1".into(),
+            start: 0,
+            end: 10_000,
+            strand: '+',
+            anchors: vec![
+                // Long primary scaffold: five exact syncmer hits.
+                mk_anchor(0, 1000),
+                mk_anchor(100, 1100),
+                mk_anchor(200, 1200),
+                mk_anchor(300, 1300),
+                mk_anchor(400, 1400),
+                // Short off-diagonal coincidence: close enough to merge
+                // locally, but below SweepGA scaffold mass.
+                mk_anchor(0, 5000),
+                mk_anchor(100, 5100),
+            ],
+        }];
+        let out = chain_anchors_with_sweepga_scaffold_mass(
+            hits,
+            TEST_SYNCMER_LEN,
+            500,
+            3 * TEST_SYNCMER_LEN,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].anchors.len(), 5);
+        assert_eq!(out[0].start, 1000);
+        assert_eq!(out[0].end, 1400 + TEST_SYNCMER_LEN);
     }
 
     #[test]
@@ -1619,12 +1704,8 @@ mod tests {
         let query_len = 1_000;
         let extend_budget = 100;
         let merge_distance = 10_000;
-        let (gap, drift, span_cap) = query_scaled_chain_limits(
-            query_len,
-            extend_budget,
-            TEST_SYNCMER_LEN,
-            merge_distance,
-        );
+        let (gap, drift, span_cap) =
+            query_scaled_chain_limits(query_len, extend_budget, TEST_SYNCMER_LEN, merge_distance);
         assert!(
             gap >= query_len + merge_distance as u64,
             "-d should widen the pre-refinement chain gap"
@@ -1643,7 +1724,10 @@ mod tests {
     fn effective_min_chain_anchors_scales_with_query_span() {
         assert_eq!(effective_min_chain_anchors(0, TEST_SYNCMER_LEN, 1_000), 1);
         assert_eq!(effective_min_chain_anchors(63, TEST_SYNCMER_LEN, 1_000), 1);
-        assert_eq!(effective_min_chain_anchors(1_000, TEST_SYNCMER_LEN, 1_000), 1);
+        assert_eq!(
+            effective_min_chain_anchors(1_000, TEST_SYNCMER_LEN, 1_000),
+            1
+        );
         assert_eq!(
             effective_min_chain_anchors(10_000, TEST_SYNCMER_LEN, 1_000),
             2
@@ -1739,11 +1823,7 @@ mod tests {
             start: 0,
             end: 1000,
             strand: '+',
-            anchors: vec![
-                mk_anchor(0, 0),
-                mk_anchor(100, 100),
-                mk_anchor(100, 500),
-            ],
+            anchors: vec![mk_anchor(0, 0), mk_anchor(100, 100), mk_anchor(100, 500)],
         }];
         let out = chain_anchors(hits, 1000, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 1);
@@ -1792,12 +1872,16 @@ mod tests {
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
-                start: 0, end: 100, strand: '+',
+                start: 0,
+                end: 100,
+                strand: '+',
                 anchors: vec![mk_anchor(0, 0)],
             },
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
-                start: 50, end: 150, strand: '-',
+                start: 50,
+                end: 150,
+                strand: '-',
                 anchors: vec![mk_anchor(50, 150)],
             },
         ];
@@ -1805,10 +1889,18 @@ mod tests {
         assert_eq!(out.len(), 2);
     }
 
-    fn mk_hit(genome: &str, start: u64, end: u64, strand: char, n_anchors: usize) -> HomologousIntervalWithAnchors {
+    fn mk_hit(
+        genome: &str,
+        start: u64,
+        end: u64,
+        strand: char,
+        n_anchors: usize,
+    ) -> HomologousIntervalWithAnchors {
         HomologousIntervalWithAnchors {
             genome: genome.into(),
-            start, end, strand,
+            start,
+            end,
+            strand,
             anchors: (0..n_anchors)
                 .map(|i| mk_anchor(start + i as u64, start + i as u64))
                 .collect(),

@@ -1,0 +1,12 @@
+{
+  "auto_poasta_max_traversal_len": 4424,
+  "max_median_traversal_len": 274,
+  "max_rounds": 4,
+  "max_traversal_len": 3064,
+  "max_traversals": 87,
+  "min_traversal_len": 4,
+  "polish_max_median_traversal_len": 848,
+  "polish_max_traversal_len": 4090,
+  "polish_rounds": 4,
+  "replacement_flank_bp": 3
+}

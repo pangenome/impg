@@ -3,6 +3,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod converter;
+
 pub const PROJECTION_FORMAT: &str = "impg-projection";
 pub const PROJECTION_VERSION: u32 = 1;
 

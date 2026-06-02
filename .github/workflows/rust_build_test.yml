@@ -20,7 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout submodules
+        run: |
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git submodule sync --recursive
+          git submodule update --init --recursive
 
       - name: Install dependencies
         run: |

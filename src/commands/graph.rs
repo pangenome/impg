@@ -7,7 +7,7 @@ use log::info;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use bitvec::prelude::*;
@@ -15,7 +15,7 @@ use bitvec::prelude::*;
 use sweepga::knn_graph::SparsificationStrategy;
 
 // Import gfasort for graph sorting
-use crate::graph::{sort_gfa, unchop_gfa};
+use crate::graph::{sort_gfa, unchop_gfa, TerminalNRunClip};
 
 // Import from sweepga
 use sweepga::aligner::Aligner;
@@ -32,6 +32,8 @@ use seqwish::intervaltree::{AdaptiveTree, IntervalTree};
 use seqwish::links::{derive_links, RankSelectBitVector};
 use seqwish::seqindex::SeqIndex;
 use seqwish::transclosure::compute_transitive_closures;
+
+static SEQWISH_INDUCTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Configuration for graph building.
 #[derive(Clone)]
@@ -50,6 +52,9 @@ pub struct GraphBuildConfig {
     pub min_repeat_dist: u64,
     /// Minimum match length filter for alignments
     pub min_match_len: u64,
+    /// Allow local replacement induction to lower `min_match_len` to observed
+    /// traversal/CIGAR evidence before calling seqwish.
+    pub adaptive_min_match_len: bool,
     /// Sparse factor for input matches
     pub sparse_factor: f32,
     /// Batch size for transitive closure computation
@@ -94,6 +99,8 @@ pub struct GraphBuildConfig {
     pub batch_bytes: Option<String>,
     /// wfmash mapping percent identity (e.g. "90", "ani50-2"). `None` lets wfmash auto-estimate.
     pub map_pct_identity: Option<String>,
+    /// Clip terminal N-runs at or above this threshold before query GFA graph construction.
+    pub terminal_n_clip: Option<TerminalNRunClip>,
 }
 
 impl Default for GraphBuildConfig {
@@ -106,6 +113,7 @@ impl Default for GraphBuildConfig {
             repeat_max: 0,
             min_repeat_dist: 0,
             min_match_len: 23,
+            adaptive_min_match_len: false,
             sparse_factor: 0.0,
             transclose_batch: 10_000_000,
             disk_backed: false,
@@ -128,6 +136,7 @@ impl Default for GraphBuildConfig {
             mash_params: sweepga::knn_graph::MashParams::default(),
             batch_bytes: None,
             map_pct_identity: Some("90".to_string()),
+            terminal_n_clip: None,
         }
     }
 }
@@ -163,6 +172,14 @@ pub fn induce_graph_from_alignment<W: Write>(
     output: &mut W,
     config: &GraphBuildConfig,
 ) -> io::Result<usize> {
+    // The seqwish crate uses process-global temporary-file bookkeeping and
+    // cleanup. Keep concurrent in-process inductions from deleting each
+    // other's temp files while still allowing each induction to use threads.
+    let _seqwish_guard = SEQWISH_INDUCTION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| io::Error::other("seqwish induction lock poisoned"))?;
+
     let combined_fasta = aln_result.combined_fasta;
     let filtered_paf = aln_result.filtered_paf;
 
@@ -653,6 +670,65 @@ pub struct AlignmentResult {
     pub num_genomes: usize,
 }
 
+/// Apply the shared SweepGA PAF filter to alignments produced by any backend.
+///
+/// This keeps external-aligner PAF, syng-native PAF, and bubble-local
+/// replacement PAF on the same plane-sweep/scaffold-filter path before
+/// seqwish induction.
+pub fn filter_generated_paf(
+    paf_temp: tempfile::NamedTempFile,
+    avg_seq_len: u64,
+    config: &GraphBuildConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    let start_time = Instant::now();
+    if config.no_filter {
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering disabled (--no-filter)",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        return Ok(paf_temp);
+    }
+
+    // Derive the FilterConfig via sweepga's helper so the short-sequence
+    // scaffold-clamping logic stays in one place.
+    let align_cfg = SweepgaAlignConfig {
+        num_threads: config.num_threads,
+        num_mappings: config.num_mappings.clone(),
+        scaffold_jump: config.scaffold_jump,
+        scaffold_mass: config.scaffold_mass,
+        scaffold_filter: config.scaffold_filter.clone(),
+        overlap: config.overlap,
+        min_identity: config.min_identity,
+        scaffold_dist: config.scaffold_dist,
+        min_map_length: config.min_map_length,
+        ..SweepgaAlignConfig::default()
+    };
+    let filter_cfg = filter_config_from_align_cfg(&align_cfg, avg_seq_len);
+
+    if config.show_progress {
+        info!(
+            "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_filter={})",
+            start_time.elapsed().as_secs_f64(),
+            config.num_mappings,
+            config.scaffold_filter
+        );
+    }
+
+    let filtered_paf_file = apply_paf_filter(paf_temp, filter_cfg)
+        .map_err(|e| io::Error::other(format!("Filtering failed: {}", e)))?;
+
+    if config.show_progress {
+        info!(
+            "[graph::filter] {:.3}s Filtering complete",
+            start_time.elapsed().as_secs_f64()
+        );
+    }
+
+    Ok(filtered_paf_file)
+}
+
 /// Run the alignment + filtering stages of the graph pipeline, returning
 /// the combined FASTA and filtered PAF as temp files.
 pub fn align_sequences(
@@ -879,52 +955,7 @@ pub fn align_sequences(
     }
 
     // 3.5) Apply filtering
-    let filtered_paf = if config.no_filter {
-        if config.show_progress {
-            info!(
-                "[graph::filter] {:.3}s Filtering disabled (--no-filter)",
-                start_time.elapsed().as_secs_f64()
-            );
-        }
-        paf_temp
-    } else {
-        // Derive the FilterConfig via sweepga's helper so the
-        // short-sequence scaffold-clamping logic stays in one place.
-        let align_cfg = SweepgaAlignConfig {
-            num_threads: config.num_threads,
-            num_mappings: config.num_mappings.clone(),
-            scaffold_jump: config.scaffold_jump,
-            scaffold_mass: config.scaffold_mass,
-            scaffold_filter: config.scaffold_filter.clone(),
-            overlap: config.overlap,
-            min_identity: config.min_identity,
-            scaffold_dist: config.scaffold_dist,
-            min_map_length: config.min_map_length,
-            ..SweepgaAlignConfig::default()
-        };
-        let filter_cfg = filter_config_from_align_cfg(&align_cfg, avg_seq_len);
-
-        if config.show_progress {
-            info!(
-                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_filter={})",
-                start_time.elapsed().as_secs_f64(),
-                config.num_mappings,
-                config.scaffold_filter
-            );
-        }
-
-        let filtered_paf_file = apply_paf_filter(paf_temp, filter_cfg)
-            .map_err(|e| io::Error::other(format!("Filtering failed: {}", e)))?;
-
-        if config.show_progress {
-            info!(
-                "[graph::filter] {:.3}s Filtering complete",
-                start_time.elapsed().as_secs_f64()
-            );
-        }
-
-        filtered_paf_file
-    };
+    let filtered_paf = filter_generated_paf(paf_temp, avg_seq_len, config)?;
 
     // Debug: save filtered PAF
     if let Some(ref debug_dir) = config.debug_dir {

@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+cmd="${1:-}"
+shift || true
+
+if [ "$cmd" = "crush" ]; then
+    input=""
+    output=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -g)
+                input="$2"
+                shift 2
+                ;;
+            -o)
+                output="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    cp "$input" "$output"
+elif [ "$cmd" = "graph-report" ]; then
+    output=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -o)
+                output="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    {
+        printf 'segments\tlinks\tpaths\tpath_steps\ttotal_segment_bp\tnode_coverage_bp_weighted_mean\tsingleton_bp\tpath_white_space_bp_p99\tpath_white_space_bp_max\tpath_white_space_bridges_ge_threshold\tduplicate_sequence_frac\tlocal_repeat_context_nodes\n'
+        printf '3\t0\t2\t4\t16\t1.25\t12\t0\t0\t0\t0\t0\n'
+    } > "$output"
+else
+    echo "unsupported fake impg command: $cmd" >&2
+    exit 2
+fi

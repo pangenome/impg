@@ -48,7 +48,35 @@ syng,mode=blunt
 syng,mode=raw
 syng,k=63,s=8,seed=7:blunt
 syng:blunt,k=63,s=8,seed=7
+syng:mask,top=0.001,max-occ=500
+syng:mask,top=0.001,max-occ=500,freq-run=10,freq-span=1k
+syng:mask,legacy-freq-mask=true
+syng:filter,top=0.001,max-occ=500
+syng:cut-ns
+syng:filter,cut-ns=true,cut-n-min-run=10
+syng:nomask
+syng:nofilter
 ```
+
+For syng GFA extraction, `syng` defaults to a small raw-layer high-frequency
+syncmer filter: the top 0.05% most frequent local syncmer nodes are selected
+before bluntification, but the default policy is occurrence-level. Unsupported
+high-frequency occurrences are private-split, while occurrences in supported
+high-frequency runs or exact spans stay shared. `freq-run` / `high-freq-run`
+controls the minimum run length in syncmers and defaults to `10`; `freq-span` /
+`high-freq-span` controls exact-sequence span rescue in bp and defaults to
+`1000`. The same `freq-run` / `freq-span` rescue applies to the
+spectrum-selected dispersed scaffold-glue source. Use
+`freq-run-aware=false` or `legacy-freq-mask=true` for the historical node-level
+removal behavior. Rare repeated-copy local syncmer contexts are still split
+rather than emitted as one globally shared graph node. This is a
+graph-materialization policy, separate from the query seed filter.
+
+`syng:cut-ns` is an optional materialization policy for assembly gaps. It drops
+N-runs from fetched inter-syncmer DNA and splits emitted GFA paths at those
+breaks, preventing large path-private `N` segments from dominating graph
+layouts. `cut-n-min-run` controls the minimum ambiguous run length and defaults
+to `1`.
 
 Supported legacy alignment prefixes remain:
 
@@ -57,6 +85,21 @@ gfa:wfmash:seqwish
 gfa:fastga:pggb
 gfa:sweepga:seqwish
 ```
+
+Supported query-sequence preprocessing stages:
+
+```text
+gfa:cut-n=100:pggb
+vcf:cut-n=100:seqwish
+```
+
+`cut-n=<bp>` is explicit and has no bare default. It clips only terminal
+`N`/`n` runs from each query-extracted sequence when the run length is at
+least the requested threshold before graph construction. Internal N-runs and
+terminal runs shorter than the threshold are left unchanged. If both ends clip
+away the full extracted sequence, that sequence is omitted from the local graph.
+This is separate from syng's `syng:cut-ns` materialization policy, which cuts
+N-runs from fetched inter-syncmer gap DNA.
 
 Supported partition/window forms remain:
 
@@ -156,10 +199,53 @@ traverse it. `max-span` is optional and disabled by default; when set, it caps
 the span on the POVU root path, currently the first GFA path, so it is a rooted
 coordinate guard rather than the main runtime budget.
 
-`method=auto` currently uses the global/end-to-end SPOA-backed `poa` resolver.
-`method=poasta` is available for explicit experiments, but it is not the
-default until the POASTA GFA export path is proven to preserve clipped `W`
-walks exactly through impg's rewrite step.
+`method=auto` uses direct global/end-to-end SPOA only for bubbles whose longest
+traversal is at most `auto-spoa-max-len` (default `2k`) and whose traversal
+count / total sequence size are still inside the direct replacement budgets.
+Short but very high-copy bubbles are routed to the scalable pairwise induction
+path instead of being selection-guarded. Remaining bounded bubbles use pairwise
+graph induction, with seqwish using a high exact-match length by default
+(`seqwish-k=311`) so human repeats are not glued through short off-diagonal
+matches before the small SPOA polish pass. This is currently a human-repeat
+default chosen just above Alu length; the long-term default should be derived
+from the expected identity / repeat model for the local sequence set. Direct
+SPOA/POASTA replacements are exact path-sequence validated and are not rejected
+by the local graph-layout quality heuristic; pairwise-induced replacements still
+must pass local quality guards. All methods pass the round-level visual-tail
+guard: the score is dominated by long path white-space bridges (`ws-p99` and
+`ws-max`) and only lightly penalizes total white space, path steps, and link
+count, so useful local crushing is not rolled back merely because it splits
+paths more finely. `method=poasta` constructs POASTA in
+global/end-to-end mode with `GapAffine2Piece` costs from `poa-scoring`, and impg
+normalizes POASTA's clipped `W` walk GFA export before exact sequence
+validation. It remains an explicit experimental method because POASTA 0.1.0's
+public API does not give impg a stable exact numeric score contract for
+independently asserting long-gap two-piece affine costs; current tests validate
+structural wiring plus exact path preservation.
+
+Pairwise-induced replacements are filtered before seqwish induction. `seqwish-k`
+sets the minimum exact-match scale used by seqwish transitive closure, and
+`min-map-length` / `replacement-min-map-length` sets the minimum PAF mapping
+length kept by the SweepGA filter. A value of `min-map-length=0` follows
+`seqwish-k`, so the default graph-induction mapping scale is also `311`.
+`min-identity` / `replacement-min-identity` can require a minimum mapping
+identity before a pairwise alignment is allowed to seed local graph induction.
+For `method=sweepga`, `kmer-frequency=0` is the default and resolves per
+candidate to at least `1000` and otherwise `10 * traversal_count`. This differs
+from whole-genome FastGA defaults deliberately: local bubble crushing needs
+repeated seeds to survive, while the downstream plane-sweep/scaffold filter and
+`seqwish-k` control graph glue.
+
+Syng-native graph extraction has an earlier raw-layer mask before bluntification
+or crush. `gfa:syng:mask,min-run=3,freq-run=10:crush` private-splits locally
+shared syncmer occurrences that never appear in a supported shared run, and
+private-splits high-frequency occurrences from explicit frequency selection or
+the spectrum-glue source unless they are rescued by the high-frequency
+`freq-run` or `freq-span` policy. Private splits preserve the selected path
+spelling while preventing isolated shared syncmers from becoming graph glue.
+`legacy-freq-mask=true` restores the older behavior that removed
+selected high-frequency syncmer nodes and bridged them in cis using source
+sequence.
 
 `method=biwfa` is the coarse condenser path. It aligns every selected POVU
 bubble traversal end-to-end against the longest traversal with BiWFA, induces a

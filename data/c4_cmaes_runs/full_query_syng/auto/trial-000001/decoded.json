@@ -1,0 +1,16 @@
+{
+  "auto_poasta_max_traversal_len": 16611,
+  "mask_max_occ": 296,
+  "mask_min_run": 4,
+  "mask_sequence_k": 125,
+  "mask_top_fraction": 0.0010159722313770505,
+  "max_median_traversal_len": 1520,
+  "max_rounds": 2,
+  "max_traversal_len": 7946,
+  "max_traversals": 910,
+  "min_traversal_len": 17622,
+  "polish_max_median_traversal_len": 2552,
+  "polish_max_traversal_len": 2552,
+  "polish_rounds": 2,
+  "replacement_flank_bp": 70
+}

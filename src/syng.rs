@@ -4424,7 +4424,12 @@ impl SyngIndex {
             .filter(|hit| hit.anchors.len() >= min_anchors)
             .collect();
 
-        let chained = crate::syng_transitive::chain_anchors(raw_hits, chain_budget, syncmer_len);
+        let chained = crate::syng_transitive::chain_anchors_with_sweepga_scaffold_mass(
+            raw_hits,
+            syncmer_len,
+            chain_budget,
+            (min_anchors as u64).saturating_mul(syncmer_len),
+        );
         let query_len = query_seq.len() as u64;
         let mut hits: Vec<SyngMapHit> = chained
             .into_iter()
@@ -5132,48 +5137,67 @@ impl SyngIndex {
         }
         let count_elapsed = count_start.elapsed();
 
-        let mut located_hits = 0u64;
-        let mut emitted_anchors = 0u64;
         let locate_start = std::time::Instant::now();
         self.prepare_locate_checkpoint_lookup()?;
-        let mut per_node_sampled: FxHashMap<
-            (usize, u32, char),
-            (u64, u64, FxHashMap<i64, Anchor>),
-        > = FxHashMap::default();
-        for (query_node, query_positions) in unvisited {
-            let cached_counts = occurrence_counts_by_node.get(&query_node).copied();
-            for hit in self.locate_node_occurrences_with_counts(query_node, cached_counts)? {
-                located_hits += 1;
-                if hit.path_idx >= self.name_map.path_to_name.len() {
-                    continue;
+        type LocatedSeedBuckets = FxHashMap<(usize, u32, char), (u64, u64, FxHashMap<i64, Anchor>)>;
+        let locate_results: Vec<io::Result<(u64, u64, LocatedSeedBuckets)>> = unvisited
+            .into_par_iter()
+            .map(|(query_node, query_positions)| {
+                let mut located_hits = 0u64;
+                let mut emitted_anchors = 0u64;
+                let mut per_node_sampled: LocatedSeedBuckets = FxHashMap::default();
+                let cached_counts = occurrence_counts_by_node.get(&query_node).copied();
+                for hit in self.locate_node_occurrences_with_counts(query_node, cached_counts)? {
+                    located_hits += 1;
+                    if hit.path_idx >= self.name_map.path_to_name.len() {
+                        continue;
+                    }
+                    let genome_len = self.name_map.path_to_length[hit.path_idx];
+                    let hit_end = hit.target_pos + syncmer_len;
+                    let padded_start = hit.target_pos.saturating_sub(padding);
+                    let padded_end = (hit_end + padding).min(genome_len);
+                    for &(qp, q_orient) in &query_positions {
+                        let strand = if q_orient == hit.target_orient {
+                            '+'
+                        } else {
+                            '-'
+                        };
+                        let sig: i64 = if strand == '+' {
+                            hit.target_pos as i64 - qp as i64
+                        } else {
+                            hit.target_pos as i64 + qp as i64
+                        };
+                        let entry = per_node_sampled
+                            .entry((hit.path_idx, query_node, strand))
+                            .or_insert_with(|| (padded_start, padded_end, FxHashMap::default()));
+                        entry.0 = entry.0.min(padded_start);
+                        entry.1 = entry.1.max(padded_end);
+                        entry.2.entry(sig).or_insert(Anchor {
+                            query_pos: qp,
+                            target_pos: hit.target_pos,
+                            node_id: query_node,
+                        });
+                        emitted_anchors += 1;
+                    }
                 }
-                let genome_len = self.name_map.path_to_length[hit.path_idx];
-                let hit_end = hit.target_pos + syncmer_len;
-                let padded_start = hit.target_pos.saturating_sub(padding);
-                let padded_end = (hit_end + padding).min(genome_len);
-                for &(qp, q_orient) in &query_positions {
-                    let strand = if q_orient == hit.target_orient {
-                        '+'
-                    } else {
-                        '-'
-                    };
-                    let sig: i64 = if strand == '+' {
-                        hit.target_pos as i64 - qp as i64
-                    } else {
-                        hit.target_pos as i64 + qp as i64
-                    };
-                    let entry = per_node_sampled
-                        .entry((hit.path_idx, query_node, strand))
-                        .or_insert_with(|| (padded_start, padded_end, FxHashMap::default()));
-                    entry.0 = entry.0.min(padded_start);
-                    entry.1 = entry.1.max(padded_end);
-                    entry.2.entry(sig).or_insert(Anchor {
-                        query_pos: qp,
-                        target_pos: hit.target_pos,
-                        node_id: query_node,
-                    });
-                    emitted_anchors += 1;
-                }
+                Ok((located_hits, emitted_anchors, per_node_sampled))
+            })
+            .collect();
+
+        let mut located_hits = 0u64;
+        let mut emitted_anchors = 0u64;
+        let mut per_node_sampled: LocatedSeedBuckets = FxHashMap::default();
+        for result in locate_results {
+            let (local_located_hits, local_emitted_anchors, local_buckets) = result?;
+            located_hits += local_located_hits;
+            emitted_anchors += local_emitted_anchors;
+            for (key, (start, end, anchors_by_signature)) in local_buckets {
+                let entry = per_node_sampled
+                    .entry(key)
+                    .or_insert_with(|| (start, end, FxHashMap::default()));
+                entry.0 = entry.0.min(start);
+                entry.1 = entry.1.max(end);
+                entry.2.extend(anchors_by_signature);
             }
         }
         let locate_elapsed = locate_start.elapsed();

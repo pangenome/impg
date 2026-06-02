@@ -42,9 +42,7 @@ fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result
 /// through runs of contiguous singletons.
 ///
 /// Alignment-source-agnostic — works identically on syng and paf partitions.
-pub fn rehome_singleton_slivers(
-    collected_partitions: &mut Vec<(usize, Vec<Interval<u32>>)>,
-) {
+pub fn rehome_singleton_slivers(collected_partitions: &mut Vec<(usize, Vec<Interval<u32>>)>) {
     if collected_partitions.is_empty() {
         return;
     }
@@ -101,7 +99,11 @@ pub fn rehome_singleton_slivers(
             let target = if ls && rs {
                 let lp = left.unwrap();
                 let rp = right.unwrap();
-                if counts[lp] >= counts[rp] { lp } else { rp }
+                if counts[lp] >= counts[rp] {
+                    lp
+                } else {
+                    rp
+                }
             } else if ls {
                 left.unwrap()
             } else if rs {
@@ -132,8 +134,9 @@ pub fn rehome_singleton_slivers(
         pass
     );
 
-    let mut new_intervals: Vec<Vec<Interval<u32>>> =
-        (0..collected_partitions.len()).map(|_| Vec::new()).collect();
+    let mut new_intervals: Vec<Vec<Interval<u32>>> = (0..collected_partitions.len())
+        .map(|_| Vec::new())
+        .collect();
     for (_, _, _, pidx, iv) in rows.drain(..) {
         new_intervals[pidx].push(iv);
     }
@@ -368,7 +371,7 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )
+                )?
             } else {
                 impg.query_transitive_bfs(
                     seq_id,
@@ -384,7 +387,7 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )
+                )?
             };
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
@@ -670,11 +673,18 @@ pub fn partition_alignments(
                     crate::gfa_to_vcf_string(&final_gfa, &[])?,
                 )
             } else {
-                (create_output_path(output_folder, "partitions.gfa")?, final_gfa)
+                (
+                    create_output_path(output_folder, "partitions.gfa")?,
+                    final_gfa,
+                )
             };
             let mut out = std::io::BufWriter::new(File::create(&output_path)?);
             out.write_all(output_text.as_bytes())?;
-            info!("Wrote partitioned {} to {}", output_format.to_uppercase(), output_path);
+            info!(
+                "Wrote partitioned {} to {}",
+                output_format.to_uppercase(),
+                output_path
+            );
         } else {
             info!(
                 "Writing {} partitions to single {} file",

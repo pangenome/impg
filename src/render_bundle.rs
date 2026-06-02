@@ -213,7 +213,10 @@ impl LoadedRenderBundle {
                 ));
             }
         };
-        Ok(format!("{}:{}-{}", path.rendered_name, local_start, local_end))
+        Ok(format!(
+            "{}:{}-{}",
+            path.rendered_name, local_start, local_end
+        ))
     }
 }
 
@@ -503,7 +506,10 @@ mod tests {
         let loaded = load_bundle(&dir).unwrap();
 
         assert_eq!(loaded.manifest.engine, "poa");
-        assert_eq!(loaded.tables.rendered_paths[0].rendered_name, "HG002#1#chr6:10-100");
+        assert_eq!(
+            loaded.tables.rendered_paths[0].rendered_name,
+            "HG002#1#chr6:10-100"
+        );
         assert_eq!(loaded.tables.step_samples[0].source_bp, 10);
         std::fs::remove_dir_all(&dir).ok();
     }

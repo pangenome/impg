@@ -1,0 +1,6 @@
+study	trial_id	raw_objective	pggb_shape_distance	output_gfa	compressed_output_gfa
+crush_local_k63/auto	4	504.75800484568896	18.97003797204254	data/c4_cmaes_runs/crush_local_k63/auto/trial-000004/output.gfa	data/c4_cmaes_runs/best_by_study/crush_local_k63_auto_trial000004.gfa.gz
+crush_local_k63/chain-povu	1	556.7034164129782	24.274867619287043	data/c4_cmaes_runs/crush_local_k63/chain-povu/trial-000001/output.gfa	data/c4_cmaes_runs/best_by_study/crush_local_k63_chain-povu_trial000001.gfa.gz
+crush_local_k63/sweepga	2	498.46269732906893	20.947164844968867	data/c4_cmaes_runs/crush_local_k63/sweepga/trial-000002/output.gfa	data/c4_cmaes_runs/best_by_study/crush_local_k63_sweepga_trial000002.gfa.gz
+full_query_syng/auto	1	65.28133274092144	19.352308022969943	data/c4_cmaes_runs/full_query_syng/auto/trial-000001/output.gfa	data/c4_cmaes_runs/best_by_study/full_query_syng_auto_trial000001.gfa.gz
+full_query_syng_local/auto	1	81.0133516993899	18.868564548246052	data/c4_cmaes_runs/full_query_syng_local/auto/trial-000001/output.gfa	data/c4_cmaes_runs/best_by_study/full_query_syng_local_auto_trial000001.gfa.gz
