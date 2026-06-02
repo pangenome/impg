@@ -79,10 +79,7 @@ impl GraphPipelineStage {
                 return Err(format!("stage '{}' has an empty parameter", name));
             }
             let (key_raw, value_raw) = piece.split_once('=').ok_or_else(|| {
-                format!(
-                    "stage '{}' parameter '{}' must be key=value",
-                    name, piece
-                )
+                format!("stage '{}' parameter '{}' must be key=value", name, piece)
             })?;
             let key = normalize_name(key_raw);
             let value = value_raw.trim().to_string();
@@ -90,7 +87,10 @@ impl GraphPipelineStage {
                 return Err(format!("stage '{}' has an empty parameter key", name));
             }
             if value.is_empty() {
-                return Err(format!("stage '{}' parameter '{}' has empty value", name, key));
+                return Err(format!(
+                    "stage '{}' parameter '{}' has empty value",
+                    name, key
+                ));
             }
             if !seen.insert(key.clone()) {
                 return Err(format!("stage '{}' repeats parameter '{}'", name, key));
@@ -131,10 +131,9 @@ mod tests {
 
     #[test]
     fn parses_stage_params() {
-        let spec = GraphPipelineSpec::parse(
-            "syng,k=63,s=8,seed=7:crush,max-span=10k,max-traversals=128",
-        )
-        .unwrap();
+        let spec =
+            GraphPipelineSpec::parse("syng,k=63,s=8,seed=7:crush,max-span=10k,max-traversals=128")
+                .unwrap();
         assert_eq!(spec.stages.len(), 2);
         assert_eq!(spec.stages[0].name, "syng");
         assert_eq!(spec.stages[0].param("k"), Some("63"));
@@ -150,13 +149,19 @@ mod tests {
     fn preserves_legacy_pipeline_shapes() {
         let spec = GraphPipelineSpec::parse("wfmash:seqwish:10k").unwrap();
         assert_eq!(
-            spec.stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            spec.stages
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["wfmash", "seqwish", "10k"]
         );
 
         let spec = GraphPipelineSpec::parse("sweepga:fastga:pggb,window=20k").unwrap();
         assert_eq!(
-            spec.stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            spec.stages
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["sweepga", "fastga", "pggb"]
         );
         assert_eq!(spec.stages[2].param("window"), Some("20k"));

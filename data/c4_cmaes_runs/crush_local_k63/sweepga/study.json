@@ -1,0 +1,121 @@
+{
+  "cma_available": true,
+  "cma_import_error": "",
+  "created_or_updated_at": "2026-05-31T00:10:23Z",
+  "dimensions": [
+    {
+      "description": "crush frontier replacement rounds",
+      "name": "max_rounds",
+      "range": "linear integer [1, 4]"
+    },
+    {
+      "description": "minimum longest traversal length",
+      "name": "min_traversal_len",
+      "range": "log integer [1, 20000]"
+    },
+    {
+      "description": "maximum direct traversal length",
+      "name": "max_traversal_len",
+      "range": "log integer [1000, 120000]"
+    },
+    {
+      "description": "maximum median direct traversal length",
+      "name": "max_median_traversal_len",
+      "range": "log integer [200, 30000]"
+    },
+    {
+      "description": "maximum traversals per direct candidate",
+      "name": "max_traversals",
+      "range": "log integer [64, 25000]"
+    },
+    {
+      "description": "small-tangle polish rounds",
+      "name": "polish_rounds",
+      "range": "linear integer [1, 4]"
+    },
+    {
+      "description": "maximum polish traversal length",
+      "name": "polish_max_traversal_len",
+      "range": "log integer [500, 50000]"
+    },
+    {
+      "description": "maximum median polish traversal length",
+      "name": "polish_max_median_traversal_len",
+      "range": "log integer [100, 10000]"
+    },
+    {
+      "description": "bubble flank context bp",
+      "name": "replacement_flank_bp",
+      "range": "log integer [1, 1000]"
+    },
+    {
+      "description": "pair-sampling nearest neighbors",
+      "name": "k_nearest",
+      "range": "linear integer [1, 8]"
+    },
+    {
+      "description": "pair-sampling farthest neighbors",
+      "name": "k_farthest",
+      "range": "linear integer [0, 4]"
+    },
+    {
+      "description": "independent pair-sampling trees",
+      "name": "pair_trees",
+      "range": "linear integer [1, 4]"
+    },
+    {
+      "description": "deterministic random pair fraction",
+      "name": "random_fraction",
+      "range": "log float [0.0001, 0.05]"
+    },
+    {
+      "description": "mash k-mer size",
+      "name": "mash_k",
+      "range": "linear integer [11, 21]"
+    },
+    {
+      "description": "replacement seqwish exact-match floor",
+      "name": "seqwish_k",
+      "range": "linear odd integer [51, 501]"
+    },
+    {
+      "description": "replacement local exact-run floor",
+      "name": "min_match_length",
+      "range": "log integer [31, 501]"
+    },
+    {
+      "description": "minimum replacement mapping length",
+      "name": "replacement_min_map_length",
+      "range": "log integer [50, 2000]"
+    },
+    {
+      "description": "minimum replacement identity",
+      "name": "replacement_min_identity",
+      "range": "linear float [0.0, 0.99]"
+    },
+    {
+      "description": "maximum selected pair alignments",
+      "name": "max_pair_alignments",
+      "range": "log integer [500, 100000]"
+    },
+    {
+      "description": "maximum replacement PAF bytes",
+      "name": "max_replacement_paf_bytes",
+      "range": "log integer [1000000, 512000000]"
+    },
+    {
+      "description": "SweepGA/FastGA k-mer frequency",
+      "name": "sweepga_kmer_frequency",
+      "range": "linear integer [0, 100]"
+    }
+  ],
+  "method_family": "sweepga",
+  "mode": "crush-only",
+  "objective": {
+    "formula": "total_segment_bp/bp_scale + 2*(singleton_bp/total_segment_bp) + 10*(path_white_space_bp_p99/total_segment_bp) + 5*(path_white_space_bp_max/total_segment_bp) + (path_white_space_bridges_ge_threshold/paths) + duplicate_sequence_frac + (local_repeat_context_nodes/segments) - (node_coverage_bp_weighted_mean/paths)",
+    "invalid_trials": 1000000000000.0
+  },
+  "optimizer": "cma-es",
+  "population_size": 2,
+  "seed": 344
+}

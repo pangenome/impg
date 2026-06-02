@@ -2,16 +2,14 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 pub mod agc_index;
-pub mod syng_ffi;
-pub mod syng;
-pub mod syng_parallel;
 pub mod alignment_record;
 pub mod commands;
 pub mod faidx;
 pub mod forest_map;
+pub mod genotyping;
 pub mod graph;
 pub mod graph_pipeline;
-pub mod genotyping;
+pub mod graph_report;
 pub mod impg;
 pub mod impg_index;
 pub mod multi_impg;
@@ -19,15 +17,18 @@ pub mod onealn;
 pub mod pack;
 pub mod paf;
 pub mod projection;
-pub mod resolution;
 pub mod render_bundle;
+pub mod resolution;
 pub mod seqidx;
-pub mod sequence_namespace;
 pub mod sequence_index;
+pub mod sequence_namespace;
 pub mod smooth;
 pub mod subset_filter;
+pub mod syng;
+pub mod syng_ffi;
 pub mod syng_graph;
 pub mod syng_graph_norm;
+pub mod syng_parallel;
 pub mod syng_transitive;
 pub mod tpa_parser;
 
@@ -54,17 +55,50 @@ pub enum GfaEngine {
     ///   5. left-align indels in partition-ref frame
     ///   6. emit PAF → seqwish → GFA
     SyngNative,
+    /// Syng-local: extract query-selected sequences, build a fresh regional
+    /// syng syncmer graph with explicit local syncmer parameters, then apply
+    /// the same blunt/crush/sort graph transforms as other GFA engines.
+    SyngLocal,
 }
 
 pub const DEFAULT_SYNG_GFA_SORT_PIPELINE: &str = "Ygs";
 
+/// Configuration for a post-crush smoothxg pass applied as a pipeline stage.
+/// Distinct from the pggb-engine smoothing knobs in `EngineOpts` because it
+/// is a separate stage with its own enable/disable flag (`Option<...>`) and
+/// reuses the same defaults pggb does.
+#[derive(Clone, Debug)]
+pub struct SmoothPipelineConfig {
+    pub target_poa_lengths: Vec<usize>,
+    pub max_node_length: usize,
+    pub poa_padding_fraction: f64,
+    pub block_source: smooth::SmoothBlockSource,
+    pub flubble_reference_names: Vec<String>,
+}
+
+impl Default for SmoothPipelineConfig {
+    fn default() -> Self {
+        Self {
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            block_source: smooth::SmoothBlockSource::PathOverlap,
+            flubble_reference_names: Vec::new(),
+        }
+    }
+}
+
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
-    /// Syng GFA mode when `engine == GfaEngine::SyngNative`.
+    /// Syng GFA mode when `engine` is `GfaEngine::SyngNative` or
+    /// `GfaEngine::SyngLocal`.
     pub syng_gfa_mode: Option<commands::syng2gfa::SyngGfaMode>,
-    /// Optional assertion about the syncmer scheme of a syng input index.
+    /// Optional assertion about the syncmer scheme of a syng input index
+    /// (`SyngNative`) or requested local rebuild scheme (`SyngLocal`).
     pub syng_params: Option<syng::SyncmerParams>,
+    /// Frequency-aware node sharing policy for syng-native local GFA output.
+    pub syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
     pub pipeline: commands::graph::GraphBuildConfig,
     // Smoothxg-style smoothing parameters (pggb engine)
     /// Target POA length(s) per pass — one value per smoothing pass (default: [700, 1100]).
@@ -76,7 +110,9 @@ pub struct EngineOpts {
     pub partition_size: Option<usize>,
     /// Optional exact path-preserving blunt-graph resolution pass.
     pub crush_config: Option<resolution::ResolutionConfig>,
-    /// Optional final gfasort pipeline, e.g. `Ygs` or `Yg`. Currently enabled
+    /// Optional post-crush smoothxg pass on the whole graph.
+    pub smooth_after_crush: Option<SmoothPipelineConfig>,
+    /// Optional final gfasort pipeline, e.g. `Yg` or `Ygs`. Currently enabled
     /// by default for syng-native GFA output and disabled for already-normalized
     /// alignment engines.
     pub graph_sort_pipeline: Option<String>,
@@ -98,48 +134,84 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
     }
 
     fn query(
-        &self, _: u32, _: i32, _: i32, _: bool, _: Option<f64>,
-        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+        &self,
+        _: u32,
+        _: i32,
+        _: i32,
+        _: bool,
+        _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: bool,
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn query_with_cache(
-        &self, _: u32, _: i32, _: i32, _: bool, _: Option<f64>,
+        &self,
+        _: u32,
+        _: i32,
+        _: i32,
+        _: bool,
+        _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn populate_cigar_cache(
-        &self, _: u32, _: i32, _: i32, _: Option<f64>,
+        &self,
+        _: u32,
+        _: i32,
+        _: i32,
+        _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &mut rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
     ) {
     }
 
     fn query_transitive_dfs(
-        &self, _: u32, _: i32, _: i32,
+        &self,
+        _: u32,
+        _: i32,
+        _: i32,
         _: Option<&rustc_hash::FxHashMap<u32, impg::SortedRanges>>,
-        _: u16, _: i32, _: i32, _: Option<i32>, _: bool, _: Option<f64>,
-        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+        _: u16,
+        _: i32,
+        _: i32,
+        _: Option<i32>,
+        _: bool,
+        _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
     fn query_transitive_bfs(
-        &self, _: u32, _: i32, _: i32,
+        &self,
+        _: u32,
+        _: i32,
+        _: i32,
         _: Option<&rustc_hash::FxHashMap<u32, impg::SortedRanges>>,
-        _: u16, _: i32, _: i32, _: Option<i32>, _: bool, _: Option<f64>,
-        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+        _: u16,
+        _: i32,
+        _: i32,
+        _: Option<i32>,
+        _: bool,
+        _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
-        Vec::new()
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        Ok(Vec::new())
     }
 
-    fn get_or_load_tree(&self, _: u32) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
+    fn get_or_load_tree(
+        &self,
+        _: u32,
+    ) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
         None
     }
 
@@ -147,8 +219,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         (0..self.seq_index.len() as u32).collect()
     }
 
-    fn remove_cached_tree(&self, _: u32) {
-    }
+    fn remove_cached_tree(&self, _: u32) {}
 
     fn sequence_files(&self) -> &[String] {
         &[]
@@ -172,7 +243,11 @@ pub struct SyngImpgWrapper {
 }
 
 impl SyngImpgWrapper {
-    pub fn new(syng_index: syng::SyngIndex, seq_index: seqidx::SequenceIndex, syng_padding: u64) -> Self {
+    pub fn new(
+        syng_index: syng::SyngIndex,
+        seq_index: seqidx::SequenceIndex,
+        syng_padding: u64,
+    ) -> Self {
         Self {
             syng_index,
             seq_index,
@@ -210,10 +285,15 @@ impl SyngImpgWrapper {
     /// raw syncmer matches are plane-sweep-chained and filtered by anchor
     /// count / query-coverage fraction before being emitted — otherwise the
     /// raw per-syncmer intervals flow through unchanged.
-    fn query_via_syng(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<impg::AdjustedInterval> {
+    fn query_via_syng(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         let name = match self.seq_index.get_name(target_id) {
             Some(n) => n,
-            None => return vec![],
+            None => return Ok(Vec::new()),
         };
         match self.min_chain_anchors {
             None => self.query_via_syng_raw(name, range_start, range_end),
@@ -232,27 +312,32 @@ impl SyngImpgWrapper {
         name: &str,
         range_start: i32,
         range_end: i32,
-    ) -> Vec<impg::AdjustedInterval> {
-        let intervals = match self.syng_index.query_region(
-            name,
-            range_start as u64,
-            range_end as u64,
-            self.syng_padding,
-        ) {
-            Ok(ivs) => ivs,
-            Err(e) => {
-                log::warn!("syng query_region failed for {}:{}-{}: {}", name, range_start, range_end, e);
-                return vec![];
-            }
-        };
-        intervals
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let intervals = self
+            .syng_index
+            .query_region(
+                name,
+                range_start as u64,
+                range_end as u64,
+                self.syng_padding,
+            )
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "syng query_region failed for {}:{}-{}: {}",
+                        name, range_start, range_end, e
+                    ),
+                )
+            })?;
+        Ok(intervals
             .into_iter()
             .filter_map(|iv| {
                 let id = self.seq_index.get_id(&iv.genome)?;
                 let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
                 Some((interval, vec![], interval))
             })
-            .collect()
+            .collect())
     }
 
     fn query_via_syng_filtered(
@@ -262,27 +347,26 @@ impl SyngImpgWrapper {
         range_end: i32,
         min_anchors: usize,
         min_fraction: f64,
-    ) -> Vec<impg::AdjustedInterval> {
-        let hits = match self.syng_index.query_region_with_anchors_ext(
-            name,
-            range_start as u64,
-            range_end as u64,
-            self.syng_padding,
-            0,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                log::warn!("syng query_region_with_anchors failed for {}:{}-{}: {}", name, range_start, range_end, e);
-                return vec![];
-            }
-        };
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let hits = self
+            .syng_index
+            .query_region_with_anchors_ext(
+                name,
+                range_start as u64,
+                range_end as u64,
+                self.syng_padding,
+                0,
+            )
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "syng query_region_with_anchors failed for {}:{}-{}: {}",
+                        name, range_start, range_end, e
+                    ),
+                )
+            })?;
         let syncmer_len = (self.syng_index.params.w + self.syng_index.params.k) as u64;
-        // Reuse the same extend_budget default as `query_transitive_ext`.
-        let chained = syng_transitive::chain_anchors(
-            hits,
-            syng_transitive::DEFAULT_EXTEND_BUDGET_BP,
-            syncmer_len,
-        );
         let query_range_len = (range_end - range_start).max(0) as u64;
         let effective_min = syng_transitive::effective_min_chain_anchors_for_syncmer(
             query_range_len,
@@ -290,8 +374,16 @@ impl SyngImpgWrapper {
             self.syng_index.params.k as u64,
             min_anchors,
         );
+        // Reuse the same extend_budget default as `query_transitive_ext`,
+        // but pass the requested anchor support as SweepGA scaffold mass.
+        let chained = syng_transitive::chain_anchors_with_sweepga_scaffold_mass(
+            hits,
+            syncmer_len,
+            syng_transitive::DEFAULT_EXTEND_BUDGET_BP,
+            (effective_min as u64).saturating_mul(syncmer_len),
+        );
         let min_extent_bp = (query_range_len as f64 * min_fraction.max(0.0)) as u64;
-        chained
+        Ok(chained
             .into_iter()
             .filter(|c| {
                 if c.anchors.len() < effective_min {
@@ -317,7 +409,7 @@ impl SyngImpgWrapper {
                 let t_iv = coitrees::Interval::new(c.start as i32, c.end as i32, tid);
                 Some((t_iv, Vec::<impg::CigarOp>::new(), t_iv))
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -327,9 +419,15 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
     }
 
     fn query(
-        &self, target_id: u32, range_start: i32, range_end: i32, _: bool, _: Option<f64>,
-        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
-    ) -> Vec<impg::AdjustedInterval> {
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        _: bool,
+        _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: bool,
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
@@ -338,42 +436,71 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
     // panics so `SyngImpgWrapper` can safely live inside a heterogeneous
     // `Vec<Arc<dyn ImpgIndex + Send + Sync>>` alongside alignment backends.
     fn query_with_cache(
-        &self, target_id: u32, range_start: i32, range_end: i32,
-        _: bool, _: Option<f64>,
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        _: bool,
+        _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
     fn populate_cigar_cache(
-        &self, _: u32, _: i32, _: i32, _: Option<f64>,
+        &self,
+        _: u32,
+        _: i32,
+        _: i32,
+        _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &mut rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
     ) {
     }
 
     fn query_transitive_dfs(
-        &self, target_id: u32, range_start: i32, range_end: i32,
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
         _: Option<&rustc_hash::FxHashMap<u32, impg::SortedRanges>>,
-        _: u16, _: i32, _: i32, _: Option<i32>, _: bool, _: Option<f64>,
-        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+        _: u16,
+        _: i32,
+        _: i32,
+        _: Option<i32>,
+        _: bool,
+        _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
     fn query_transitive_bfs(
-        &self, target_id: u32, range_start: i32, range_end: i32,
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
         _: Option<&rustc_hash::FxHashMap<u32, impg::SortedRanges>>,
-        _: u16, _: i32, _: i32, _: Option<i32>, _: bool, _: Option<f64>,
-        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+        _: u16,
+        _: i32,
+        _: i32,
+        _: Option<i32>,
+        _: bool,
+        _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: bool,
         _: Option<&subset_filter::SubsetFilter>,
-    ) -> Vec<impg::AdjustedInterval> {
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
-    fn get_or_load_tree(&self, _: u32) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
+    fn get_or_load_tree(
+        &self,
+        _: u32,
+    ) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
         // Syng has no alignment interval tree. Returning None is correct —
         // callers that need this (partition / similarity / stats on PAF)
         // should dispatch via `query()` instead.
@@ -391,8 +518,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
             .collect()
     }
 
-    fn remove_cached_tree(&self, _: u32) {
-    }
+    fn remove_cached_tree(&self, _: u32) {}
 
     fn sequence_files(&self) -> &[String] {
         &[]
@@ -417,7 +543,13 @@ pub fn dispatch_gfa_engine_with_seq_index(
     let wrapper = SeqIndexWrapper {
         seq_index: seq_index.clone(),
     };
-    dispatch_gfa_engine(&wrapper, query_intervals, sequence_index, scoring_params, engine_opts)
+    dispatch_gfa_engine(
+        &wrapper,
+        query_intervals,
+        sequence_index,
+        scoring_params,
+        engine_opts,
+    )
 }
 
 fn format_syng_params(params: syng::SyncmerParams) -> String {
@@ -462,11 +594,12 @@ fn write_fasta_records(
     out.flush()
 }
 
-pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
-    source_index: &syng::SyngIndex,
+pub fn write_syng_region_gfa_from_sequences_with_params<W: std::io::Write>(
     sequences: &[(String, Vec<u8>)],
     out: &mut W,
+    params: syng::SyncmerParams,
     mode: commands::syng2gfa::SyngGfaMode,
+    frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
 ) -> std::io::Result<()> {
     if sequences.is_empty() {
         writeln!(out, "H\tVN:Z:1.0")?;
@@ -476,9 +609,12 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
     let total_start = std::time::Instant::now();
     let total_bp: usize = sequences.iter().map(|(_, seq)| seq.len()).sum();
     log::info!(
-        "[syng region gfa] rendering {} sequence(s), {} bp, mode={}",
+        "[syng local gfa] rendering {} sequence(s), {} bp, syncmer k={},s={},seed={}, mode={}",
         sequences.len(),
         total_bp,
+        params.k + params.w,
+        params.k,
+        params.seed,
         mode.label()
     );
 
@@ -487,16 +623,20 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
         .tempdir()?;
     let region_prefix_path = tempdir.path().join("region");
     let region_prefix = region_prefix_path.to_str().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "region prefix is not UTF-8")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "region prefix is not UTF-8",
+        )
     })?;
     let seq_refs: Vec<(String, &[u8])> = sequences
         .iter()
         .map(|(name, seq)| (name.clone(), seq.as_slice()))
         .collect();
     let build_start = std::time::Instant::now();
-    source_index.build_region_gbwt(&seq_refs, region_prefix)?;
+    let local_builder = syng::SyngIndex::new(params);
+    local_builder.build_region_gbwt(&seq_refs, region_prefix)?;
     log::info!(
-        "[syng region gfa] built regional syng GBWT in {:.3}s",
+        "[syng local gfa] built regional syng GBWT in {:.3}s",
         build_start.elapsed().as_secs_f64()
     );
 
@@ -504,37 +644,110 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
     let fasta_start = std::time::Instant::now();
     write_fasta_records(&fasta_path, sequences)?;
     log::info!(
-        "[syng region gfa] wrote temporary FASTA in {:.3}s",
+        "[syng local gfa] wrote temporary FASTA in {:.3}s",
         fasta_start.elapsed().as_secs_f64()
     );
     let sequence_files = vec![fasta_path.to_string_lossy().to_string()];
     let seqidx_start = std::time::Instant::now();
     let sequence_index = sequence_index::UnifiedSequenceIndex::from_files(&sequence_files)?;
     log::info!(
-        "[syng region gfa] built temporary sequence index in {:.3}s",
+        "[syng local gfa] built temporary sequence index in {:.3}s",
         seqidx_start.elapsed().as_secs_f64()
     );
     let load_start = std::time::Instant::now();
-    let region_index = syng::SyngIndex::load(region_prefix, source_index.params)?;
+    let region_index = syng::SyngIndex::load(region_prefix, params)?;
     log::info!(
-        "[syng region gfa] loaded regional syng index in {:.3}s",
+        "[syng local gfa] loaded regional syng index in {:.3}s",
         load_start.elapsed().as_secs_f64()
     );
 
+    let ranges: Vec<commands::syng2gfa::SyngGfaPathRange> = sequences
+        .iter()
+        .map(|(name, seq)| {
+            let path_idx = region_index
+                .name_map
+                .name_to_path
+                .get(name)
+                .copied()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("local syng path '{name}' was not recorded in the name map"),
+                    )
+                })? as usize;
+            Ok(commands::syng2gfa::SyngGfaPathRange {
+                path_idx,
+                name: name.clone(),
+                start: 0,
+                end: seq.len() as u64,
+                strand: '+',
+            })
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+
     let write_start = std::time::Instant::now();
-    commands::syng2gfa::write_gfa_with_mode(
+    commands::syng2gfa::write_range_gfa_with_mode(
         &region_index,
+        &ranges,
         out,
         commands::syng2gfa::GfaVersion::V1_0,
         Some(&sequence_index),
         mode,
+        frequency_mask,
     )?;
     log::info!(
-        "[syng region gfa] wrote regional GFA in {:.3}s; total {:.3}s",
+        "[syng local gfa] wrote regional GFA in {:.3}s; total {:.3}s",
         write_start.elapsed().as_secs_f64(),
         total_start.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
+    source_index: &syng::SyngIndex,
+    sequences: &[(String, Vec<u8>)],
+    out: &mut W,
+    mode: commands::syng2gfa::SyngGfaMode,
+) -> std::io::Result<()> {
+    write_syng_region_gfa_from_sequences_with_params(
+        sequences,
+        out,
+        source_index.params,
+        mode,
+        commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+    )
+}
+
+fn build_syng_local_region_gfa_from_intervals(
+    impg: &impl impg_index::ImpgIndex,
+    query_intervals: &[coitrees::Interval<u32>],
+    sequence_index: &sequence_index::UnifiedSequenceIndex,
+    mode: commands::syng2gfa::SyngGfaMode,
+    params: syng::SyncmerParams,
+    frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
+) -> std::io::Result<String> {
+    let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
+    if sequences.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+    let seq_pairs: Vec<(String, Vec<u8>)> = sequences
+        .iter()
+        .map(|(seq, meta)| (meta.path_name(), seq.as_bytes().to_vec()))
+        .collect();
+    let mut out = Vec::new();
+    write_syng_region_gfa_from_sequences_with_params(
+        &seq_pairs,
+        &mut out,
+        params,
+        mode,
+        frequency_mask,
+    )?;
+    String::from_utf8(out).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("local syng GFA is not UTF-8: {e}"),
+        )
+    })
 }
 
 fn build_syng_region_gfa_from_intervals(
@@ -543,6 +756,7 @@ fn build_syng_region_gfa_from_intervals(
     query_intervals: &[coitrees::Interval<u32>],
     sequence_index: &sequence_index::UnifiedSequenceIndex,
     mode: commands::syng2gfa::SyngGfaMode,
+    frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask,
 ) -> std::io::Result<String> {
     let range_start = std::time::Instant::now();
     let ranges: Vec<commands::syng2gfa::SyngGfaPathRange> = query_intervals
@@ -596,6 +810,7 @@ fn build_syng_region_gfa_from_intervals(
         commands::syng2gfa::GfaVersion::V1_0,
         Some(sequence_index),
         mode,
+        frequency_mask,
     )?;
     log::info!(
         "[syng region gfa] wrote direct syng range GFA in {:.3}s",
@@ -636,10 +851,7 @@ pub fn dispatch_gfa_engine(
     apply_graph_transforms(gfa, engine_opts)
 }
 
-fn apply_graph_transforms(
-    mut gfa: String,
-    engine_opts: &EngineOpts,
-) -> std::io::Result<String> {
+fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io::Result<String> {
     if let Some(config) = &engine_opts.crush_config {
         let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
         log::info!(
@@ -650,6 +862,48 @@ fn apply_graph_transforms(
             resolved.stats.iterations
         );
         gfa = resolved.gfa;
+    }
+
+    if let Some(config) = &engine_opts.smooth_after_crush {
+        let t0 = std::time::Instant::now();
+        // Count haplotypes from path names on the post-crush graph so the
+        // smoothxg block-weight scales the same way pggb does (target_poa_length
+        // * n_haps). Path names come from the syng/seqwish pipeline as
+        // `<sample>#<hap>#<chr>[:start-end]`; PanSnLevel::Haplotype groups by
+        // sample#hap and falls back to whole name for non-PanSN input.
+        let n_haps = sweepga::pansn::count_pansn_keys(
+            gfa.lines().filter_map(|line| {
+                let bytes = line.as_bytes();
+                if bytes.is_empty() || bytes[0] != b'P' {
+                    return None;
+                }
+                let mut iter = line.split('\t');
+                iter.next()?;
+                iter.next()
+            }),
+            sweepga::pansn::PanSnLevel::Haplotype,
+        );
+        let smooth_config = smooth::SmoothConfig {
+            num_threads: engine_opts.pipeline.num_threads,
+            target_poa_lengths: config.target_poa_lengths.clone(),
+            max_node_length: config.max_node_length,
+            poa_padding_fraction: config.poa_padding_fraction,
+            temp_dir: engine_opts.pipeline.temp_dir.clone(),
+            pre_sorted: false,
+            block_source: config.block_source,
+            flubble_reference_names: config.flubble_reference_names.clone(),
+            ..smooth::SmoothConfig::new(n_haps)
+        };
+        let smoothed = smooth::smooth_gfa(&gfa, &smooth_config)?;
+        log::info!(
+            "smooth: {:.3}s (n_haps={}, target_poa_lengths={:?})",
+            t0.elapsed().as_secs_f64(),
+            n_haps,
+            config.target_poa_lengths
+        );
+        // gfaffix normalize after smoothing (matches pggb's post-smooth step;
+        // sort is left for the optional graph_sort_pipeline below).
+        gfa = graph::run_gfaffix(&smoothed, engine_opts.pipeline.num_threads)?;
     }
 
     if let Some(pipeline) = &engine_opts.graph_sort_pipeline {
@@ -671,13 +925,11 @@ fn apply_graph_transforms(
 /// `reference_names` are matched against full path names, sample names, or path
 /// prefixes by POVU; callers should pass the queried range name and the bare
 /// target sequence name when both are known.
-pub fn gfa_to_vcf_string(
-    gfa: &str,
-    reference_names: &[String],
-) -> std::io::Result<String> {
-    if !gfa.lines().any(|line| {
-        line.starts_with("P\t") || line.starts_with("W\t")
-    }) {
+pub fn gfa_to_vcf_string(gfa: &str, reference_names: &[String]) -> std::io::Result<String> {
+    if !gfa
+        .lines()
+        .any(|line| line.starts_with("P\t") || line.starts_with("W\t"))
+    {
         return povu::VcfDocument::new(Vec::<String>::new(), Vec::new())
             .with_source("povu-rs-native")
             .to_vcf_string()
@@ -705,6 +957,27 @@ fn dispatch_gfa_engine_inner(
 ) -> std::io::Result<String> {
     let skip_normalize = engine_opts.partition_size.is_some();
     let num_threads = engine_opts.pipeline.num_threads;
+    let clipped_query_intervals;
+    let query_intervals = if let Some(clip) = engine_opts.pipeline.terminal_n_clip {
+        let before_bp = interval_bp(query_intervals);
+        clipped_query_intervals =
+            graph::clip_intervals_terminal_n_runs(impg, query_intervals, sequence_index, clip)?;
+        let after_bp = interval_bp(&clipped_query_intervals);
+        log::info!(
+            "terminal N clipping: min-run={} kept {} / {} interval(s), {} -> {} bp",
+            clip.min_run,
+            clipped_query_intervals.len(),
+            query_intervals.len(),
+            before_bp,
+            after_bp
+        );
+        clipped_query_intervals.as_slice()
+    } else {
+        query_intervals
+    };
+    if query_intervals.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
 
     match engine_opts.engine {
         GfaEngine::Poa => {
@@ -803,6 +1076,7 @@ fn dispatch_gfa_engine_inner(
                     query_intervals,
                     sequence_index,
                     mode,
+                    engine_opts.syng_gfa_frequency_mask,
                 );
             }
             // v2.3: if we have access to the underlying syng index,
@@ -889,7 +1163,37 @@ fn dispatch_gfa_engine_inner(
                 }
             }
         }
+        GfaEngine::SyngLocal => {
+            let mode = engine_opts
+                .syng_gfa_mode
+                .unwrap_or(commands::syng2gfa::SyngGfaMode::Blunt);
+            let params = engine_opts
+                .syng_params
+                .or_else(|| impg.syng_index_ref().map(|idx| idx.params))
+                .unwrap_or_default();
+            log::info!(
+                "[syng local gfa] rebuilding query-selected sequences with syncmer k={},s={},seed={}",
+                params.k + params.w,
+                params.k,
+                params.seed
+            );
+            build_syng_local_region_gfa_from_intervals(
+                impg,
+                query_intervals,
+                sequence_index,
+                mode,
+                params,
+                engine_opts.syng_gfa_frequency_mask,
+            )
+        }
     }
+}
+
+fn interval_bp(intervals: &[coitrees::Interval<u32>]) -> u64 {
+    intervals
+        .iter()
+        .map(|iv| (iv.last - iv.first).unsigned_abs() as u64)
+        .sum()
 }
 
 /// Run the partitioned GFA pipeline: build per-partition GFA (sequentially,
@@ -971,7 +1275,9 @@ pub fn partitioned_gfa_pipeline(
     );
     info!(
         "[partitioned] Two-pool scheduling: {} outer × {} inner = {} total threads",
-        outer_threads, inner_threads, outer_threads * inner_threads,
+        outer_threads,
+        inner_threads,
+        outer_threads * inner_threads,
     );
 
     let total_partitions = partitions.len();
@@ -1047,9 +1353,49 @@ mod tests {
         seq
     }
 
+    fn has_multiple_syncmers_and_non_syncmer_span(
+        index: &syng::SyngIndex,
+        name: &str,
+        len: usize,
+    ) -> bool {
+        let path_idx = index.name_map.name_to_path[name] as usize;
+        let walk = index
+            .walk_path_range(path_idx, 0, len as u64)
+            .expect("walk_path_range failed");
+        let syncmer_len = index.syncmer_length_bp() as u64;
+        let has_internal_gap = walk
+            .windows(2)
+            .any(|pair| pair[1].1.saturating_sub(pair[0].1) > syncmer_len);
+        let has_prefix = walk.first().is_some_and(|(_, pos)| *pos > 0);
+        let has_suffix = walk
+            .last()
+            .is_some_and(|(_, pos)| pos.saturating_add(syncmer_len) < len as u64);
+        walk.len() >= 3 && (has_internal_gap || has_prefix || has_suffix)
+    }
+
+    fn find_syng_local_roundtrip_sequence(params: syng::SyncmerParams, len: usize) -> Vec<u8> {
+        for seed in 1..=64 {
+            let seq = make_test_sequence(len, seed);
+            let index = syng::SyngIndex::build(
+                params,
+                vec![("probe".to_string(), seq.clone())].into_iter(),
+            );
+            if has_multiple_syncmers_and_non_syncmer_span(&index, "probe", seq.len()) {
+                return seq;
+            }
+        }
+        panic!(
+            "could not find a deterministic {len} bp fixture with multiple syncmers and a non-syncmer span"
+        );
+    }
+
     /// Build a SyngIndex with shared-backbone sequences for testing.
     fn build_test_syng() -> (syng::SyngIndex, seqidx::SequenceIndex) {
-        let params = syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+        let params = syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
         let shared_len = 500;
         let total_len = 1000;
         let backbone = make_test_sequence(shared_len, 42);
@@ -1069,6 +1415,29 @@ mod tests {
         ];
 
         let index = syng::SyngIndex::build(params, sequences.into_iter());
+        let seq_index = index.build_seq_index();
+        (index, seq_index)
+    }
+
+    fn build_test_syng_without_sampled_steps() -> (syng::SyngIndex, seqidx::SequenceIndex) {
+        let params = syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
+        let shared_len = 500;
+        let total_len = 1000;
+        let backbone = make_test_sequence(shared_len, 42);
+
+        let mut seq_a = backbone.clone();
+        seq_a.extend_from_slice(&make_test_sequence(total_len - shared_len, 1));
+
+        let mut seq_b = backbone;
+        seq_b.extend_from_slice(&make_test_sequence(total_len - shared_len, 2));
+
+        let mut index = syng::SyngIndex::new(params);
+        index.add_sequence("genome_a".to_string(), seq_a);
+        index.add_sequence("genome_b".to_string(), seq_b);
         let seq_index = index.build_seq_index();
         (index, seq_index)
     }
@@ -1095,9 +1464,11 @@ mod tests {
         let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
 
         // Query the shared backbone region via the ImpgIndex trait
-        let results = wrapper.query_transitive_dfs(
-            target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
+        let results = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
 
         // Should find at least genome_a (self) and genome_b (shared backbone)
         let genomes_found: Vec<&str> = results
@@ -1119,7 +1490,10 @@ mod tests {
         for (iv, cigar, target_iv) in &results {
             assert!(iv.last > iv.first, "interval end > start");
             assert!(cigar.is_empty(), "syng path produces no CIGAR ops");
-            assert_eq!(iv.first, target_iv.first, "query and target intervals should match");
+            assert_eq!(
+                iv.first, target_iv.first,
+                "query and target intervals should match"
+            );
             assert_eq!(iv.last, target_iv.last);
             assert_eq!(iv.metadata, target_iv.metadata);
         }
@@ -1133,12 +1507,16 @@ mod tests {
 
         let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
 
-        let dfs = wrapper.query_transitive_dfs(
-            target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
-        let bfs = wrapper.query_transitive_bfs(
-            target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
+        let dfs = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+        let bfs = wrapper
+            .query_transitive_bfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
 
         // Both should return the same results since they both call query_region
         assert_eq!(dfs.len(), bfs.len());
@@ -1156,9 +1534,47 @@ mod tests {
         let wrapper = SyngImpgWrapper::new(syng_index, seq_index, 0);
 
         // Query with an invalid target_id should return empty (not panic)
-        let results = wrapper.query_transitive_dfs(
-            999, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+        let results = wrapper
+            .query_transitive_dfs(
+                999, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_syng_impg_wrapper_query_failure_returns_error() {
+        let _guard = lock_syng();
+        let (syng_index, seq_index) = build_test_syng_without_sampled_steps();
+        let wrapper = SyngImpgWrapper::new(syng_index, seq_index, 0);
+        let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
+
+        let err = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("sampled path-step sidecar is missing"),
+            "unexpected syng query error: {err}"
         );
+    }
+
+    #[test]
+    fn test_syng_impg_wrapper_no_hit_query_returns_empty_ok() {
+        let _guard = lock_syng();
+        let (syng_index, seq_index) = build_test_syng();
+        let wrapper = SyngImpgWrapper::new(syng_index, seq_index, 0);
+        let target_id = wrapper.seq_index().get_id("genome_a").unwrap();
+
+        let results = wrapper
+            .query_transitive_dfs(
+                target_id, 0, 1, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+
         assert!(results.is_empty());
     }
 
@@ -1174,12 +1590,16 @@ mod tests {
 
         let target_a = no_pad.seq_index().get_id("genome_a").unwrap();
 
-        let results_no_pad = no_pad.query_transitive_dfs(
-            target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
-        let results_with_pad = with_pad.query_transitive_dfs(
-            target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
-        );
+        let results_no_pad = no_pad
+            .query_transitive_dfs(
+                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
+        let results_with_pad = with_pad
+            .query_transitive_dfs(
+                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+            )
+            .unwrap();
 
         // With padding, intervals should be at least as wide
         for (no_p, with_p) in results_no_pad.iter().zip(results_with_pad.iter()) {
@@ -1212,17 +1632,270 @@ P\talt\t1+,3+,4+\t*
             engine: GfaEngine::Poa,
             syng_gfa_mode: None,
             syng_params: None,
+            syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
             pipeline: commands::graph::GraphBuildConfig::default(),
             target_poa_lengths: vec![700, 1100],
             max_node_length: 100,
             poa_padding_fraction: 0.001,
             partition_size: None,
             crush_config: Some(resolution::ResolutionConfig::default()),
+            smooth_after_crush: None,
             graph_sort_pipeline: None,
         };
         let out = super::apply_graph_transforms(gfa.to_string(), &opts).unwrap();
         let after = resolution::path_sequences(&out).unwrap();
         assert_eq!(before, after);
         assert_ne!(gfa, out);
+    }
+
+    fn terminal_n_query_fixture() -> std::io::Result<(
+        tempfile::TempDir,
+        SeqIndexWrapper,
+        sequence_index::UnifiedSequenceIndex,
+        Vec<coitrees::Interval<u32>>,
+    )> {
+        let tempdir = tempfile::tempdir()?;
+        let fasta_path = tempdir.path().join("terminal_n.fa");
+        std::fs::write(
+            &fasta_path,
+            b">seq1\nNNNNNACGTNNNNN\n>seq2\nNNNNNACGANNNNN\n",
+        )?;
+        let fasta_files = vec![fasta_path.to_string_lossy().to_string()];
+        let sequence_index = sequence_index::UnifiedSequenceIndex::from_files(&fasta_files)?;
+
+        let mut seq_index = seqidx::SequenceIndex::new();
+        let seq1 = seq_index.get_or_insert_id("seq1", Some(14));
+        let seq2 = seq_index.get_or_insert_id("seq2", Some(14));
+        let intervals = vec![
+            coitrees::Interval::new(0, 14, seq1),
+            coitrees::Interval::new(0, 14, seq2),
+        ];
+
+        Ok((
+            tempdir,
+            SeqIndexWrapper { seq_index },
+            sequence_index,
+            intervals,
+        ))
+    }
+
+    fn poa_test_engine_opts(terminal_n_clip: Option<graph::TerminalNRunClip>) -> EngineOpts {
+        EngineOpts {
+            engine: GfaEngine::Poa,
+            syng_gfa_mode: None,
+            syng_params: None,
+            syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+            pipeline: commands::graph::GraphBuildConfig {
+                num_threads: 1,
+                show_progress: false,
+                terminal_n_clip,
+                ..commands::graph::GraphBuildConfig::default()
+            },
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            partition_size: Some(1),
+            crush_config: None,
+            smooth_after_crush: None,
+            graph_sort_pipeline: None,
+        }
+    }
+
+    #[test]
+    fn query_gfa_keeps_terminal_ns_by_default() {
+        let (_tempdir, impg, sequence_index, intervals) = terminal_n_query_fixture().unwrap();
+        let opts = poa_test_engine_opts(None);
+        let gfa = dispatch_gfa_engine(
+            &impg,
+            &intervals,
+            &sequence_index,
+            Some((1, 4, 6, 2, 26, 1)),
+            &opts,
+        )
+        .unwrap();
+
+        let paths = resolution::path_sequences(&gfa).unwrap();
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| { name == "seq1:0-14" && seq == "NNNNNACGTNNNNN" }));
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| { name == "seq2:0-14" && seq == "NNNNNACGANNNNN" }));
+    }
+
+    #[test]
+    fn query_gfa_cut_n_removes_terminal_n_tips_before_graph_build() {
+        let (_tempdir, impg, sequence_index, intervals) = terminal_n_query_fixture().unwrap();
+        let opts = poa_test_engine_opts(Some(graph::TerminalNRunClip { min_run: 5 }));
+        let gfa = dispatch_gfa_engine(
+            &impg,
+            &intervals,
+            &sequence_index,
+            Some((1, 4, 6, 2, 26, 1)),
+            &opts,
+        )
+        .unwrap();
+
+        assert!(
+            !gfa.lines().any(|line| {
+                line.starts_with("S\t")
+                    && line
+                        .split('\t')
+                        .nth(2)
+                        .is_some_and(|seq| seq.contains("NNNNN"))
+            }),
+            "terminal N-run reached graph segments:\n{gfa}"
+        );
+        let paths = resolution::path_sequences(&gfa).unwrap();
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| name == "seq1:5-9" && seq == "ACGT"));
+        assert!(paths
+            .iter()
+            .any(|(name, seq)| name == "seq2:5-9" && seq == "ACGA"));
+    }
+
+    #[test]
+    fn syng_local_rebuild_uses_requested_syncmer_length() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let seq: String = (0..127)
+            .map(|i| match (i * 5 + 3) % 4 {
+                0 => 'A',
+                1 => 'C',
+                2 => 'G',
+                _ => 'T',
+            })
+            .collect();
+        let fasta_path = tempdir.path().join("local.fa");
+        std::fs::write(&fasta_path, format!(">sample#0#chr1\n{seq}\n")).unwrap();
+        let fasta_files = vec![fasta_path.to_string_lossy().to_string()];
+        let sequence_index =
+            sequence_index::UnifiedSequenceIndex::from_files(&fasta_files).unwrap();
+
+        let mut seq_index = seqidx::SequenceIndex::new();
+        let seq_id = seq_index.get_or_insert_id("sample#0#chr1", Some(seq.len()));
+        let intervals = vec![coitrees::Interval::new(0, seq.len() as i32, seq_id)];
+
+        let opts = EngineOpts {
+            engine: GfaEngine::SyngLocal,
+            syng_gfa_mode: Some(commands::syng2gfa::SyngGfaMode::Raw),
+            syng_params: Some(syng::SyncmerParams {
+                k: 16,
+                w: 111,
+                seed: 7,
+            }),
+            syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+            pipeline: commands::graph::GraphBuildConfig {
+                num_threads: 1,
+                show_progress: false,
+                ..commands::graph::GraphBuildConfig::default()
+            },
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            partition_size: None,
+            crush_config: None,
+            smooth_after_crush: None,
+            graph_sort_pipeline: None,
+        };
+        let impg = SeqIndexWrapper { seq_index };
+        let gfa = dispatch_gfa_engine(&impg, &intervals, &sequence_index, None, &opts).unwrap();
+
+        let segment_lengths: Vec<usize> = gfa
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                (fields.next()? == "S").then(|| fields.nth(1).unwrap_or("").len())
+            })
+            .collect();
+        assert_eq!(
+            segment_lengths,
+            vec![127],
+            "syng-local should emit a 127 bp syncmer segment when k=127,s=16 is requested:\n{gfa}"
+        );
+        assert!(gfa.contains("P\tsample#0#chr1:0-127\t"));
+    }
+
+    #[test]
+    fn syng_local_blunt_crush_round_trips_source_sequence() {
+        let _guard = lock_syng();
+        let params = syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
+        let seq_a = find_syng_local_roundtrip_sequence(params, 4096);
+        let mut seq_b = seq_a.clone();
+        for pos in [257usize, 811, 1597, 2609, 3613] {
+            seq_b[pos] = match seq_b[pos] {
+                b'A' => b'C',
+                b'C' => b'G',
+                b'G' => b'T',
+                _ => b'A',
+            };
+        }
+
+        let sequences = vec![
+            ("sampleA#0#chr1:100-4196".to_string(), seq_a),
+            ("sampleB#0#chr1:100-4196".to_string(), seq_b),
+        ];
+        let probe_index = syng::SyngIndex::build(params, sequences.clone().into_iter());
+        for (name, seq) in &sequences {
+            assert!(
+                has_multiple_syncmers_and_non_syncmer_span(&probe_index, name, seq.len()),
+                "{name} fixture must contain multiple syncmers and at least one non-syncmer span"
+            );
+        }
+
+        let mut gfa_bytes = Vec::new();
+        write_syng_region_gfa_from_sequences_with_params(
+            &sequences,
+            &mut gfa_bytes,
+            params,
+            commands::syng2gfa::SyngGfaMode::Blunt,
+            commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+        )
+        .expect("syng-local blunt GFA build failed");
+        let gfa = String::from_utf8(gfa_bytes).expect("GFA was not UTF-8");
+        assert!(
+            gfa.lines()
+                .filter(|line| line.starts_with("L\t"))
+                .all(|line| line.ends_with("\t0M")),
+            "blunt syng-local GFA should contain only 0M links:\n{gfa}"
+        );
+
+        let before_paths: std::collections::HashMap<_, _> = resolution::path_sequences(&gfa)
+            .unwrap()
+            .into_iter()
+            .collect();
+        for (name, seq) in &sequences {
+            let observed = before_paths
+                .get(name)
+                .unwrap_or_else(|| panic!("missing syng-local path {name} before crush"));
+            assert_eq!(
+                observed.as_bytes(),
+                seq.as_slice(),
+                "{name} did not spell the source sequence before crush"
+            );
+        }
+
+        let resolved =
+            resolution::resolve_gfa_bubbles(&gfa, &resolution::ResolutionConfig::default())
+                .expect("crush failed on syng-local blunt GFA");
+        let after_paths: std::collections::HashMap<_, _> =
+            resolution::path_sequences(&resolved.gfa)
+                .unwrap()
+                .into_iter()
+                .collect();
+        for (name, seq) in &sequences {
+            let observed = after_paths
+                .get(name)
+                .unwrap_or_else(|| panic!("missing syng-local path {name} after crush"));
+            assert_eq!(
+                observed.as_bytes(),
+                seq.as_slice(),
+                "{name} did not spell the source sequence after crush"
+            );
+        }
     }
 }

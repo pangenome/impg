@@ -252,8 +252,8 @@ mod tests {
         // (A→?), and missing a C or T. Actually let me just verify the
         // invariant: if prev_op is X, the run doesn't shift past it.
         let cig = b"XMDMM".to_vec(); // position 2 is D, preceded by M at 1 preceded by X at 0.
-                                      // D can shift over M but should stop before X.
-        // Sequences for this: CIGAR consumes q=1+1+0+1+1=4, t=1+1+1+1+1=5.
+                                     // D can shift over M but should stop before X.
+                                     // Sequences for this: CIGAR consumes q=1+1+0+1+1=4, t=1+1+1+1+1=5.
         let query = b"ACGT";
         let target = b"ACGTT"; // extra T at the end.
         let out = left_align_indels(&cig, query, target);
@@ -261,7 +261,12 @@ mod tests {
         // base = target[t_pos + run_len - 1] = target[2+1-1] = target[2] = 'G'.
         // The swap_base (target[t_pos - 1]) = target[1] = 'C'. 'G' != 'C',
         // so no shift. Output == input.
-        assert_eq!(out, cig, "unexpected shift; got {}", std::str::from_utf8(&out).unwrap());
+        assert_eq!(
+            out,
+            cig,
+            "unexpected shift; got {}",
+            std::str::from_utf8(&out).unwrap()
+        );
     }
 
     #[test]
@@ -292,6 +297,11 @@ mod tests {
         // Should shift one position left: preceding base is 'C' at query[1]
         // which equals the last run base query[2]='C'. So shift once.
         // After shift: MIMMM. Now preceding base query[0]='A' != 'C', stop.
-        assert_eq!(out, b"MIMMM".to_vec(), "got {}", std::str::from_utf8(&out).unwrap());
+        assert_eq!(
+            out,
+            b"MIMMM".to_vec(),
+            "got {}",
+            std::str::from_utf8(&out).unwrap()
+        );
     }
 }

@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -636,8 +636,8 @@ impl ImpgIndex for MultiImpg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
-    ) -> Vec<AdjustedInterval> {
-        self.query_all_indices(
+    ) -> io::Result<Vec<AdjustedInterval>> {
+        Ok(self.query_all_indices(
             target_id,
             range_start,
             range_end,
@@ -645,7 +645,7 @@ impl ImpgIndex for MultiImpg {
             min_gap_compressed_identity,
             sequence_index,
             approximate_mode,
-        )
+        ))
     }
 
     fn query_with_cache(
@@ -657,7 +657,7 @@ impl ImpgIndex for MultiImpg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         _cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         // For MultiImpg, we don't use the shared cache since each sub-index
         // has its own file offsets. Just do a normal query.
         self.query(
@@ -699,9 +699,9 @@ impl ImpgIndex for MultiImpg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         // Transitive query implementation using DFS with deterministic ordering
-        self.transitive_query_impl(
+        Ok(self.transitive_query_impl(
             target_id,
             range_start,
             range_end,
@@ -716,7 +716,7 @@ impl ImpgIndex for MultiImpg {
             approximate_mode,
             subset_filter,
             true, // use_dfs
-        )
+        ))
     }
 
     fn query_transitive_bfs(
@@ -734,9 +734,9 @@ impl ImpgIndex for MultiImpg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         // Transitive query implementation using BFS with deterministic ordering
-        self.transitive_query_impl(
+        Ok(self.transitive_query_impl(
             target_id,
             range_start,
             range_end,
@@ -751,7 +751,7 @@ impl ImpgIndex for MultiImpg {
             approximate_mode,
             subset_filter,
             false, // use_dfs
-        )
+        ))
     }
 
     fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {

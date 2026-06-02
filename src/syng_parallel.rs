@@ -90,32 +90,21 @@ pub fn extract_packed_syncmers(
 
     let mut out = Vec::new();
     unsafe {
-        let seqhash = syng_ffi::impg_seqhashCreateSafe(
-            params.k as i32,
-            params.w as i32,
-            params.seed as i32,
-        );
+        let seqhash =
+            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
         if seqhash.is_null() {
             return Err(io::Error::other("seqhashCreate returned null"));
         }
 
-        let sit = syng_ffi::syncmerIterator(
-            seqhash,
-            seq_buf.as_mut_ptr() as *mut i8,
-            seq.len() as i32,
-        );
+        let sit =
+            syng_ffi::syncmerIterator(seqhash, seq_buf.as_mut_ptr() as *mut i8, seq.len() as i32);
         if sit.is_null() {
             syng_ffi::impg_seqhashDestroy(seqhash);
             return Err(io::Error::other("syncmerIterator returned null"));
         }
 
         let mut pos: i32 = 0;
-        while syng_ffi::syncmerNext(
-            sit,
-            std::ptr::null_mut(),
-            &mut pos,
-            std::ptr::null_mut(),
-        ) {
+        while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
             let start = pos as usize;
             if start + syncmer_len > seq.len() {
                 syng_ffi::impg_seqhashIteratorDestroy(sit);
@@ -129,9 +118,7 @@ pub fn extract_packed_syncmers(
                     ),
                 ));
             }
-            out.push(pack_canonical_syncmer(
-                &seq_buf[start..start + syncmer_len],
-            ));
+            out.push(pack_canonical_syncmer(&seq_buf[start..start + syncmer_len]));
         }
 
         syng_ffi::impg_seqhashIteratorDestroy(sit);

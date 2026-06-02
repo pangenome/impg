@@ -1,0 +1,8 @@
+{
+  "expected_paths": 466,
+  "mode": "full-query",
+  "observed_paths": 466,
+  "ok": true,
+  "reasons": [],
+  "report_paths": 466
+}

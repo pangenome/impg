@@ -1543,6 +1543,7 @@ dependencies = [
  "cc",
  "clap",
  "coitrees",
+ "criterion",
  "crossbeam-channel",
  "csv",
  "env_logger",

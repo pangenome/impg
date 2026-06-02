@@ -294,12 +294,14 @@ fn discover_partitions(
         engine: GfaEngine::Poa,
         syng_gfa_mode: None,
         syng_params: None,
+        syng_gfa_frequency_mask: crate::commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
         pipeline: graph::GraphBuildConfig::default(),
         target_poa_lengths: vec![700, 1100],
         max_node_length: 100,
         poa_padding_fraction: 0.001,
         partition_size: None,
         crush_config: None,
+        smooth_after_crush: None,
         graph_sort_pipeline: None,
     };
 
@@ -708,11 +710,7 @@ fn parse_gaf_query_positions(fields: &[&str], anchors: usize) -> io::Result<Opti
     Ok(None)
 }
 
-fn build_read_walk_steps(
-    nodes: &[i32],
-    positions: &[u64],
-    out: &mut Vec<syng::SyngWalkStep>,
-) {
+fn build_read_walk_steps(nodes: &[i32], positions: &[u64], out: &mut Vec<syng::SyngWalkStep>) {
     out.clear();
     out.extend(
         nodes
@@ -723,7 +721,11 @@ fn build_read_walk_steps(
                 bp_pos,
             }),
     );
-    out.sort_unstable_by(|a, b| a.bp_pos.cmp(&b.bp_pos).then(a.signed_node.cmp(&b.signed_node)));
+    out.sort_unstable_by(|a, b| {
+        a.bp_pos
+            .cmp(&b.bp_pos)
+            .then(a.signed_node.cmp(&b.signed_node))
+    });
 }
 
 fn reverse_read_walk_steps(
@@ -737,7 +739,11 @@ fn reverse_read_walk_steps(
         signed_node: -step.signed_node,
         bp_pos: query_len.saturating_sub(step.bp_pos.saturating_add(syncmer_len)),
     }));
-    out.sort_unstable_by(|a, b| a.bp_pos.cmp(&b.bp_pos).then(a.signed_node.cmp(&b.signed_node)));
+    out.sort_unstable_by(|a, b| {
+        a.bp_pos
+            .cmp(&b.bp_pos)
+            .then(a.signed_node.cmp(&b.signed_node))
+    });
 }
 
 fn sorted_candidate_hits(
