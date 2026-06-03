@@ -643,8 +643,8 @@ struct Graph {
 struct PathRange {
     path_idx: usize,
     source_path_name: Option<String>,
-    source_start: usize,
-    source_end: usize,
+    source_begin_bp: usize,
+    source_end_bp: usize,
     begin_step: usize,
     end_step: usize,
     /// Bubble interior sequence (the bytes between `begin_step` and `end_step`
@@ -3578,7 +3578,11 @@ fn candidate_root_bp_interval(candidate: &BubbleCandidate) -> Option<(String, us
         .source_path_name
         .clone()
         .unwrap_or_else(|| format!("path{}", root_range.path_idx));
-    Some((name, root_range.source_start, root_range.source_end))
+    Some((
+        name,
+        root_range.source_begin_bp,
+        root_range.source_end_bp,
+    ))
 }
 
 fn candidate_root_boundary_labels(graph: &Graph, candidate: &BubbleCandidate) -> (String, String) {
@@ -4382,8 +4386,8 @@ fn candidate_from_complete_homologous_cluster(
             Some(PathRange {
                 path_idx,
                 source_path_name: Some(path.name.clone()),
-                source_start,
-                source_end,
+                source_begin_bp: source_start,
+                source_end_bp: source_end,
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -4636,8 +4640,8 @@ fn candidate_from_root_interval(
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
-                source_start: positions[begin_step],
-                source_end: positions[end_step],
+                source_begin_bp: positions[begin_step],
+                source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -6370,8 +6374,8 @@ fn discover_all_candidates(
                     ranges.push(PathRange {
                         path_idx,
                         source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
-                        source_start: positions[range_begin],
-                        source_end: positions[range_end],
+                        source_begin_bp: positions[range_begin],
+                        source_end_bp: positions[range_end],
                         begin_step: range_begin,
                         end_step: range_end,
                         sequence: Vec::new(),
@@ -6671,8 +6675,8 @@ fn chain_candidate_from_group(
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
-                source_start: positions[begin_step],
-                source_end: positions[end_step],
+                source_begin_bp: positions[begin_step],
+                source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
                 sequence: Vec::new(),
@@ -7947,15 +7951,17 @@ fn candidate_sequence_name(range: &PathRange) -> io::Result<String> {
         .ok_or_else(|| {
             io::Error::other("crush replacement traversal is missing source path name")
         })?;
-    let (source_base, source_offset) = split_path_coordinate_suffix(source_path_name)
-        .map(|(base, start, _)| (base, start))
-        .unwrap_or((source_path_name, 0));
-    Ok(format!(
-        "{}:{}-{}",
-        source_base,
-        source_offset + range.source_start,
-        source_offset + range.source_end
-    ))
+    Ok(local_replacement_visible_source_name(
+        source_path_name,
+        range.source_begin_bp,
+        range.source_end_bp,
+    )
+    .unwrap_or_else(|| {
+        format!(
+            "{}:{}-{}",
+            source_path_name, range.source_begin_bp, range.source_end_bp
+        )
+    }))
 }
 
 fn primary_sequence_name_token(name: &str) -> Option<&str> {
@@ -7978,6 +7984,55 @@ fn uniquify_candidate_sequence_names(names: Vec<String>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn local_replacement_visible_source_name(
+    source_path_name: &str,
+    source_begin_bp: usize,
+    source_end_bp: usize,
+) -> Option<String> {
+    let (prefix, coords) = source_path_name.rsplit_once(':')?;
+    let parsed = parse_visible_name_range(coords)?;
+    let (begin, end) = if parsed.strand == Some('-') {
+        (
+            parsed.end.checked_sub(source_end_bp as u64)?,
+            parsed.end.checked_sub(source_begin_bp as u64)?,
+        )
+    } else {
+        (
+            parsed.start.checked_add(source_begin_bp as u64)?,
+            parsed.start.checked_add(source_end_bp as u64)?,
+        )
+    };
+    let strand = parsed
+        .strand
+        .map(|strand| format!("({strand})"))
+        .unwrap_or_default();
+    Some(format!("{prefix}:{begin}-{end}{strand}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleNameRange {
+    start: u64,
+    end: u64,
+    strand: Option<char>,
+}
+
+fn parse_visible_name_range(coords: &str) -> Option<VisibleNameRange> {
+    let (coords, strand) = if let Some(core) = coords.strip_suffix("(+)") {
+        (core, Some('+'))
+    } else if let Some(core) = coords.strip_suffix("(-)") {
+        (core, Some('-'))
+    } else {
+        (coords, None)
+    };
+    let (start, end) = coords.split_once('-')?;
+    if start.is_empty() || end.is_empty() {
+        return None;
+    }
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    Some(VisibleNameRange { start, end, strand })
 }
 
 fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
@@ -10968,8 +11023,8 @@ P\tp1\t1+,3+,4+\t*
                     source_path_name: Some(
                         "GRCh38#0#chr6:31891045-32123783 source haplotype".to_string(),
                     ),
-                    source_start: root_start_step,
-                    source_end: root_start_step + root_span,
+                    source_begin_bp: root_start_step,
+                    source_end_bp: root_start_step + root_span,
                     begin_step: root_start_step,
                     end_step: root_end_step,
                     ..PathRange::default()
@@ -11819,16 +11874,16 @@ P\talt\t1+,3+,4+\t*
                 PathRange {
                     path_idx: 7,
                     source_path_name: Some("HG001#2#chr6:10-20 full defline".to_string()),
-                    source_start: 2,
-                    source_end: 6,
+                    source_begin_bp: 2,
+                    source_end_bp: 6,
                     sequence: b"ACGT".to_vec(),
                     ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 8,
-                    source_path_name: Some("HG002#1#chr6".to_string()),
-                    source_start: 30,
-                    source_end: 34,
+                    source_path_name: Some("HG002#1#chr6:30-34".to_string()),
+                    source_begin_bp: 0,
+                    source_end_bp: 4,
                     sequence: b"ACGA".to_vec(),
                     ..PathRange::default()
                 },
@@ -11881,16 +11936,16 @@ P\talt\t1+,3+,4+\t*
                 PathRange {
                     path_idx: 0,
                     source_path_name: Some("HG001#1#chr6:100-200".to_string()),
-                    source_start: 10,
-                    source_end: 14,
+                    source_begin_bp: 10,
+                    source_end_bp: 14,
                     sequence: b"ACGT".to_vec(),
                     ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 1,
                     source_path_name: Some("HG001#1#chr6:100-200".to_string()),
-                    source_start: 10,
-                    source_end: 14,
+                    source_begin_bp: 10,
+                    source_end_bp: 14,
                     sequence: b"ACGA".to_vec(),
                     ..PathRange::default()
                 },
@@ -11930,8 +11985,8 @@ P\talt\t1+,3+,4+\t*
             ranges: vec![PathRange {
                 path_idx: 0,
                 source_path_name: Some("sample#0#chr1:100-220".to_string()),
-                source_start: 5,
-                source_end: 17,
+                source_begin_bp: 5,
+                source_end_bp: 17,
                 sequence: b"ACGTACGTACGT".to_vec(),
                 ..PathRange::default()
             }],
@@ -11948,6 +12003,31 @@ P\talt\t1+,3+,4+\t*
         let headers = candidate_sequence_headers(&candidate).unwrap();
         let query_fasta_header_for_same_interval = "sample#0#chr1:105-117";
         assert_eq!(headers, vec![query_fasta_header_for_same_interval]);
+    }
+
+    #[test]
+    fn local_replacement_visible_names_adjust_only_ranges() {
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500", 20, 60).as_deref(),
+            Some("HG001#1#chr6:120-160")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500(+)", 20, 60).as_deref(),
+            Some("HG001#1#chr6:120-160(+)")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500(-)", 20, 60).as_deref(),
+            Some("HG001#1#chr6:440-480(-)")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6:100-500(+):50-150", 10, 30)
+                .as_deref(),
+            Some("HG001#1#chr6:100-500(+):60-80")
+        );
+        assert_eq!(
+            local_replacement_visible_source_name("HG001#1#chr6", 20, 60),
+            None
+        );
     }
 
     #[test]
@@ -12040,16 +12120,16 @@ P\talt\t1+,3+,4+\t*
                 PathRange {
                     path_idx: 0,
                     source_path_name: Some("HG001#1#chr6:100-120".to_string()),
-                    source_start: 2,
-                    source_end: 10,
+                    source_begin_bp: 2,
+                    source_end_bp: 10,
                     sequence: b"ACGTACGT".to_vec(),
                     ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 1,
                     source_path_name: Some("HG002#2#chr6:200-220".to_string()),
-                    source_start: 3,
-                    source_end: 11,
+                    source_begin_bp: 3,
+                    source_end_bp: 11,
                     sequence: b"ACGTTCGT".to_vec(),
                     ..PathRange::default()
                 },
@@ -12081,16 +12161,16 @@ P\talt\t1+,3+,4+\t*
                 PathRange {
                     path_idx: 0,
                     source_path_name: Some("HG001#1#chr6:100-120".to_string()),
-                    source_start: 4,
-                    source_end: 12,
+                    source_begin_bp: 4,
+                    source_end_bp: 12,
                     sequence: b"ACGTACGT".to_vec(),
                     ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 1,
                     source_path_name: Some("HG002#2#chr6:200-220".to_string()),
-                    source_start: 5,
-                    source_end: 13,
+                    source_begin_bp: 5,
+                    source_end_bp: 13,
                     sequence: b"ACGTTCGT".to_vec(),
                     ..PathRange::default()
                 },
@@ -13745,8 +13825,8 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
             .map(|&path_idx| PathRange {
                 path_idx,
                 source_path_name: Some(graph.paths[path_idx].name.clone()),
-                source_start: positions[path_idx][1],
-                source_end: positions[path_idx][3],
+                source_begin_bp: positions[path_idx][1],
+                source_end_bp: positions[path_idx][3],
                 begin_step: 1,
                 end_step: 3,
                 sequence: Vec::new(),

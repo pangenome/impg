@@ -10,13 +10,13 @@ The exact fixed C4 compound-region failure was primarily raw local wfmash covera
 
 There was, however, a separate local replacement naming contract bug. The actual debug `combined.fa` from the reproduced fixed region used synthetic names such as `__impg_bubble_path8_0`, and `path_spellings.tsv` only recorded synthetic ID plus length. That drops original PanSN/source path identity before wfmash/SweepGA sees the local records. For the exact C4 region below, this did not explain the measured coverage result because the filter retained all canonical records. As a general local replacement contract, it is wrong: PanSN/haplotype grouping is no longer recoverable from local FASTA/PAF names.
 
-This task fixes that contract in `src/resolution.rs`: local replacement records now carry the source graph path name when available and append the old synthetic suffix for uniqueness, for example:
+This task fixes that contract in `src/resolution.rs`: local replacement records now keep source/query-compatible visible path names when available. For local subsets, only the range portion of the name is adjusted to the selected interval; no synthetic local suffix is appended. For example, a selected sub-interval of `HG001#1#chr6:100-103` can be emitted as:
 
 ```text
-HG001#1#chr6:100-103|__impg_bubble_path0_0
+HG001#1#chr6:101-102
 ```
 
-That preserves unique seqwish path IDs while keeping the PanSN prefix recoverable by SweepGA-style name parsing. The old synthetic name remains the fallback when a source path name is not available.
+That keeps PanSN/source identity recoverable by SweepGA-style name parsing and keeps local FASTA/PAF/GFA path names semantically compatible with `impg query -o fasta` / `impg query -o gfa` output names.
 
 Poasta is not the main blocker. The residual windows being handed to Poasta late in the C4 after-fix run are heterogeneous repeat/CNV residuals, not clean coherent homologous intervals. The extracted final residual `>272218192>272218467` has 333 traversals, median traversal length 366 bp, max 6,734 bp, and total traversal sequence 987,793 bp. A standalone one-round Poasta pass on that saved subgraph did compress it from 446 segments / 15,819 bp to 102 segments / 6,763 bp while preserving paths, so the writer/global/two-piece affine machinery is mechanically functional. The near-identity late full-run Poasta rounds are better explained by stage/scale/selection: after prior replacement, the frontier repeatedly selects already-fragmented residual child windows with little remaining coherent shared structure.
 
@@ -105,11 +105,12 @@ Fix:
 
 - `PathRange` now carries `source_path_name: Option<String>`.
 - All production candidate constructors that have access to `graph.paths[path_idx].name` populate that field.
-- `candidate_named_sequences()` now emits `source_path_name|__impg_bubble_path{path_idx}_{ordinal}` when possible.
+- `candidate_named_sequences()` now emits the source/query-compatible visible name, adjusting only the range specification for the selected local interval when possible.
 - The in-memory BiWFA path was moved to the same header helper so replacement methods stay consistent.
 - Tests added:
   - `resolution::tests::candidate_sequence_headers_preserve_source_path_names_when_available`
   - `resolution::tests::candidate_from_root_interval_carries_graph_path_names`
+  - `resolution::tests::local_replacement_visible_names_adjust_only_ranges`
 
 ## Contract Answers
 
