@@ -88,6 +88,29 @@ gfasort -i <graph.gfa> -o sorted/<label>.Ygs.gfa -p Ygs -t 32 -v 1
 gfalook -i sorted/<label>.Ygs.gfa -o renders/<label>.Ygs.mean-depth.png -m -x 3200 -y 1800 -a 3 -t 32 -v 1
 ```
 
+After `one_many_scaffold0.initial` was selected as the best initial graph, I
+ran the missing SPOA-only small-bubble pass. This deliberately used
+`--method poa`, not POASTA:
+
+```bash
+impg crush \
+  --gfa /home/erikg/impg/data/c4_whole_region_sweepga_seed_20260603T092921Z/graphs/one_many_scaffold0.initial.gfa \
+  --output /home/erikg/impg/data/c4_whole_region_sweepga_seed_20260603T092921Z/graphs/one_many_scaffold0.spoa5.gfa \
+  --method poa \
+  --max-iterations 5 \
+  --max-traversal-len 10k \
+  --max-median-traversal-len 1k \
+  --max-total-sequence 1m \
+  --max-traversals 10k \
+  --threads 32 \
+  -v 1
+```
+
+The SPOA pass reached the fifth configured round and then stopped changing:
+rounds 1-4 resolved 759, 618, 157, and 1 sites, and round 5 found no eligible
+candidates. The full log is
+`logs/one_many_scaffold0.spoa5.crush.log`.
+
 Complete command and timing logs are in `commands.md`, `runtime_summary.tsv`,
 and `logs/` under the output directory.
 
@@ -104,10 +127,11 @@ Major commands, from `/usr/bin/time -v`:
 | POASTA `many_many_scaffold0` | 0:15.59 | 1.32 | 0 |
 | POASTA `one_many_scaffold0` | 0:15.24 | 1.31 | 0 |
 | POASTA `ninety_ninety_scaffold0` | 0:15.70 | 1.32 | 0 |
+| SPOA `one_many_scaffold0.spoa5` | 0:36.45 | 1.54 | 0 |
 
 All graph-report, sort, and render commands exited 0. Their timings are in
-`runtime_summary.tsv`; each graph-report took about 7 seconds, each Ygs sort
-about 10-11 seconds, and each gfalook render about 2 seconds.
+`runtime_summary.tsv`; the SPOA graph-report took 7.51 seconds, the Ygs sort
+took 11.77 seconds, and the gfalook render took 1.84 seconds.
 
 ## Metrics
 
@@ -119,6 +143,7 @@ Key `impg graph-report --format tsv` metrics:
 | `many_many_scaffold0.poasta2` | 7,886 | 248,237 | 429.79 | 4,038 | 3,427 | 110,838 | 223,826 |
 | `one_many_scaffold0.initial` | 7,411 | 234,828 | 454.33 | 2,922 | 5 | 66 | 8,790 |
 | `one_many_scaffold0.poasta2` | 7,860 | 248,941 | 428.57 | 4,152 | 3,564 | 113,389 | 214,252 |
+| `one_many_scaffold0.spoa5` | 8,387 | 250,010 | 426.74 | 4,609 | 3,445 | 112,207 | 214,719 |
 | `ninety_ninety_scaffold0.initial` | 7,431 | 234,157 | 455.63 | 2,921 | 23 | 144 | 26,157 |
 | `ninety_ninety_scaffold0.poasta2` | 7,886 | 248,237 | 429.79 | 4,038 | 3,427 | 110,838 | 223,826 |
 
@@ -131,6 +156,16 @@ The POASTA polish preserved path spelling but made this graph-report objective
 worse: it increased segments, singleton bp, path jump p99, white-space p99, and
 long white-space bridge counts in all three modes. The configured small-bubble
 pass should therefore not be accepted as an improvement for this run.
+
+The SPOA-only pass also preserved path spelling, and it did exhaust the small
+local candidate queue by round 5, but it did not fix the local-loop concern
+without reproducing the long-jump regression. Relative to
+`one_many_scaffold0.initial`, SPOA increased path jump p99 from 5 to 3,445,
+white-space p99 from 66 bp to 112,207 bp, and >=1 kb white-space bridges from
+8,790 to 214,719. Relative to `one_many_scaffold0.poasta2`, SPOA is only
+slightly lower on path jump p99 and white-space p99, while singleton bp and
+long white-space bridge count are higher. The result is therefore
+path-preserving but not quality-improving.
 
 ## Validation
 
@@ -157,19 +192,22 @@ on these exact names, I used the documented fallback:
 ```bash
 /home/erikg/impg/target/release/examples/compare_gfa_paths \
   graphs/<label>.initial.gfa \
-  graphs/<label>.poasta2.gfa
+  graphs/<label>.polished.gfa
 ```
 
-All three initial-vs-polished comparisons passed:
+All three initial-vs-POASTA comparisons passed, and the required
+initial-vs-SPOA comparison also passed:
 
 | mode | expected paths | observed paths | missing | extra | spelling mismatches |
 |---|---:|---:|---:|---:|---:|
 | `many_many_scaffold0` | 465 | 465 | 0 | 0 | 0 |
 | `one_many_scaffold0` | 465 | 465 | 0 | 0 | 0 |
 | `ninety_ninety_scaffold0` | 465 | 465 | 0 | 0 | 0 |
+| `one_many_scaffold0.spoa5` | 465 | 465 | 0 | 0 | 0 |
 
 I also compared exact GFA P-line path-name sets against the collected FASTA
-headers. Every initial and polished graph had `missing=0` and `extra=0`.
+headers. Every initial, POASTA-polished, and SPOA-polished graph had
+`missing=0` and `extra=0`.
 
 Validation limitation: exact path names are validated against the collected
 FASTA headers, and exact path spellings are validated from each initial GFA to
@@ -179,19 +217,20 @@ directly against the collected FASTA because it does not parse the preserved
 
 ## Renders
 
-All six completed graphs were sorted with `gfasort -p Ygs -t 32` and rendered
+All seven completed graphs were sorted with `gfasort -p Ygs -t 32` and rendered
 with `gfalook -m`.
 
 Uploaded stable HyperVolume render URLs:
 
 - https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-initial.png
 - https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-poasta2.png
+- https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-spoa5.png
 
 Visual judgment from the mean-depth renders and the report metrics is that the
 unpolished `one_many_scaffold0.initial` graph is the cleanest product from this
 run. The polished one-many render is path-preserving, but the long-jump and
-white-space metrics show that the POASTA pass stretched/disconnected the
-layout relative to the initial seed graph.
+white-space metrics show that both the POASTA and SPOA passes
+stretched/disconnected the layout relative to the initial seed graph.
 
 ## Baseline comparison
 
@@ -206,6 +245,7 @@ WG FastGA 8-round report:
 | WG FastGA 8-round `/home/erikg/impg/data/c4_blocker_05b_fastga_wg_20260603T084706Z/graph-report.tsv` | 15,521 | 371,375 | 287.28 | 29,704 | 423,508 |
 | this run: `one_many_scaffold0.initial` | 7,411 | 234,828 | 454.33 | 2,922 | 8,790 |
 | this run: `one_many_scaffold0.poasta2` | 7,860 | 248,941 | 428.57 | 4,152 | 214,252 |
+| this run: `one_many_scaffold0.spoa5` | 8,387 | 250,010 | 426.74 | 4,609 | 214,719 |
 
 `one_many_scaffold0.initial` beats the current syng-derived C4 path on the
 main stress indicators: fewer segments, much lower singleton bp, higher
@@ -226,10 +266,13 @@ the first local graph from the whole collected region with FastGA/SweepGA plus
 seqwish. The best graph here is `one_many_scaffold0.initial`, not any
 syng-topology seed and not the small-bubble-polished derivative.
 
-The configured two-iteration POASTA polish is path-preserving but not
-quality-improving for this graph. It should be treated as a failed polish
-choice for this specific C4 whole-region seed rather than as evidence against
-the whole-region FastGA/seqwish seed itself.
+The configured two-iteration POASTA polish and the five-iteration SPOA polish
+are path-preserving but not quality-improving for this graph. SPOA exhausted
+eligible small-bubble candidates by round 5, but it did not repair local loops
+without introducing the POASTA-style long-jump and white-space regression. Both
+polish choices should be treated as failed polish choices for this specific C4
+whole-region seed rather than as evidence against the whole-region
+FastGA/seqwish seed itself.
 
 No SweepGA upstream filtering behavior was changed for this task, and no code
 changes were required.
