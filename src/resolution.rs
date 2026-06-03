@@ -6802,6 +6802,9 @@ fn finalize_frontier(
     leaves_seen: usize,
 ) -> io::Result<CandidateFrontier> {
     let select_start = Instant::now();
+    let direct_limit_filtered = candidates.len();
+    candidates.retain(|candidate| direct_poa_candidate_within_limits(candidate, config));
+    let direct_limit_filtered = direct_limit_filtered.saturating_sub(candidates.len());
     candidates.sort_by(|a, b| {
         candidate_selection_priority(a, config)
             .cmp(&candidate_selection_priority(b, config))
@@ -6853,9 +6856,41 @@ fn finalize_frontier(
             materialize_elapsed,
             leaves_seen
         );
+        if direct_limit_filtered > 0 {
+            log::info!(
+                "crush discovery detail: skipped {} explicit SPOA candidate(s) outside direct length budgets",
+                direct_limit_filtered
+            );
+        }
     }
 
     Ok(frontier)
+}
+
+fn direct_poa_candidate_within_limits(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> bool {
+    if config.method != ResolutionMethod::Poa {
+        return true;
+    }
+    let stats = candidate.traversal_stats;
+    if config.max_bubble_span > 0 && candidate.root_span > config.max_bubble_span {
+        return false;
+    }
+    if config.max_traversals > 0 && stats.count > config.max_traversals {
+        return false;
+    }
+    if config.max_traversal_len > 0 && stats.max_len > config.max_traversal_len {
+        return false;
+    }
+    if config.max_median_traversal_len > 0 && stats.median_len > config.max_median_traversal_len {
+        return false;
+    }
+    if config.max_total_sequence > 0 && stats.total_len > config.max_total_sequence {
+        return false;
+    }
+    true
 }
 
 impl BubbleCandidate {
@@ -12587,7 +12622,7 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn direct_poa_processes_candidate_regardless_of_median_traversal_budget() {
+    fn direct_poa_processes_candidate_within_median_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -12604,13 +12639,77 @@ P\tins\t1+,2+,3+\t*
             gfa,
             &ResolutionConfig {
                 method: ResolutionMethod::Poa,
-                max_median_traversal_len: 4,
+                max_median_traversal_len: 100,
                 ..ResolutionConfig::default()
             },
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn direct_poa_respects_median_traversal_budget() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tTTTTTTTTTT
+S\t4\tGGGGGGGGGG
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t2\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t2\t+\t0M
+P\tp0\t1+,3+,2+\t*
+P\tp1\t1+,4+,2+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Poa,
+                max_median_traversal_len: 4,
+                max_traversal_len: 100,
+                max_total_sequence: 1_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn direct_poa_respects_max_traversal_budget() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tTTTTTTTTTT
+S\t4\tGGGGGGGGGG
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t2\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t2\t+\t0M
+P\tp0\t1+,3+,2+\t*
+P\tp1\t1+,4+,2+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Poa,
+                max_traversal_len: 4,
+                max_median_traversal_len: 100,
+                max_total_sequence: 1_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
         assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
@@ -13888,7 +13987,7 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
-    fn direct_poa_processes_candidate_regardless_of_max_traversal_len() {
+    fn direct_poa_processes_candidate_within_max_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -13903,7 +14002,7 @@ P\tins\t1+,2+,3+\t*
         let before = seq_map(gfa);
         let config = ResolutionConfig {
             method: ResolutionMethod::Poa,
-            max_traversal_len: 4,
+            max_traversal_len: 100,
             ..ResolutionConfig::default()
         };
         let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
