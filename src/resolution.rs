@@ -2235,7 +2235,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-or-broad-residual-scalable/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
@@ -4000,17 +4000,46 @@ fn multi_level_window_replacement_method(
     window: &MultiLevelWindowCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
-    if window.source_sites > 1 {
-        match candidate_replacement_method(&window.candidate, config) {
-            // Multi-site windows should not go through the tiny-bubble SPOA
-            // path: POASTA is the direct aligner tier that can handle these
-            // larger local structures without invoking pairwise graph induction.
-            ResolutionMethod::Poa => ResolutionMethod::Poasta,
-            method => method,
-        }
+    let method = candidate_replacement_method(&window.candidate, config);
+    if method == ResolutionMethod::Poa
+        && (window.source_sites > 1
+            || broad_residual_overflows_small_poa_tier(&window.candidate, config))
+    {
+        // Multi-site and broad residual windows should not go through the
+        // tiny-bubble SPOA path. Prefer POASTA when its auto tier is enabled;
+        // otherwise fall through to the scalable pairwise graph builder.
+        scalable_multi_level_direct_method(config)
     } else {
-        candidate_replacement_method(&window.candidate, config)
+        method
     }
+}
+
+fn scalable_multi_level_direct_method(config: &ResolutionConfig) -> ResolutionMethod {
+    if config.auto_poasta_max_traversal_len > 0 {
+        ResolutionMethod::Poasta
+    } else {
+        ResolutionMethod::Sweepga
+    }
+}
+
+fn broad_residual_overflows_small_poa_tier(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> bool {
+    let stats = candidate.traversal_stats;
+    if auto_method_by_median(stats, config) != ResolutionMethod::Poa {
+        return false;
+    }
+
+    let scalable_len_floor = config
+        .auto_poasta_max_traversal_len
+        .max(config.auto_spoa_max_traversal_len.saturating_mul(10))
+        .max(1);
+    let long_outlier = stats.max_len >= scalable_len_floor;
+    let broad_bp = candidate.root_span >= scalable_len_floor || stats.total_len >= 50_000;
+    let residual_step_mass = candidate.unique_steps >= stats.count.saturating_mul(3).max(64);
+
+    long_outlier && broad_bp && residual_step_mass
 }
 
 fn replacement_objective_delta(
@@ -9970,6 +9999,36 @@ P\tp1\t1+,3+,4+\t*
             source: MultiLevelCandidateSource::TopLevel,
             source_sites: 1,
         }
+    }
+
+    #[test]
+    fn iterative_multi_level_routes_broad_residual_away_from_small_poa() {
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            ..ResolutionConfig::default()
+        };
+        let residual = c4_like_residual_window(
+            "full-c4-broad-residual",
+            4_827,
+            6_071,
+            32_776,
+            1_111,
+            143,
+            38,
+            26_408,
+            348_244,
+        );
+
+        assert_eq!(
+            auto_method_by_median(residual.candidate.traversal_stats, &config),
+            ResolutionMethod::Poa,
+            "the regression shape still demonstrates why median-only routing is too small"
+        );
+        assert_eq!(
+            multi_level_window_replacement_method(&residual, &config),
+            ResolutionMethod::Poasta,
+            "broad residual windows must route to the scalable direct tier by default"
+        );
     }
 
     #[test]
