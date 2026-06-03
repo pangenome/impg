@@ -1,0 +1,42 @@
+[gfasort] reading /home/erikg/impg/.wg-worktrees/agent-450/data/c4_threshold_sweep_20260603T154441Z/poa_median2000/poa_median2000.gfa
+[gfasort] loaded 9079 nodes, 12339 edges, 465 paths
+[gfasort] [1/3] SGD
+[path_sgd] iteration 10/100, updates this iter: 4888000
+[path_sgd] iteration 20/100, updates this iter: 4895000
+[path_sgd] iteration 30/100, updates this iter: 4879000
+[path_sgd] iteration 40/100, updates this iter: 4865000
+[path_sgd] iteration 50/100, updates this iter: 4881000
+[path_sgd] iteration 60/100, updates this iter: 4876000
+[path_sgd] iteration 70/100, updates this iter: 4857000
+[path_sgd] iteration 80/100, updates this iter: 4883000
+[path_sgd] iteration 90/100, updates this iter: 4869000
+[path_sgd] iteration 100/100, updates this iter: 4889000
+[path_sgd] Completed 101 iterations
+[path_sgd] Checker thread exiting, final iteration: 101
+[gfasort] [2/3] groom
+[gfasort] [3/3] topo-sort
+[gfasort] writing /home/erikg/impg/.wg-worktrees/agent-450/data/c4_threshold_sweep_20260603T154441Z/poa_median2000/poa_median2000.Ygs.gfa
+[gfasort] done
+	Command being timed: "gfasort -i /home/erikg/impg/.wg-worktrees/agent-450/data/c4_threshold_sweep_20260603T154441Z/poa_median2000/poa_median2000.gfa -o /home/erikg/impg/.wg-worktrees/agent-450/data/c4_threshold_sweep_20260603T154441Z/poa_median2000/poa_median2000.Ygs.gfa -p Ygs -t 32"
+	User time (seconds): 334.41
+	System time (seconds): 1.27
+	Percent of CPU this job got: 2014%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:16.66
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 264176
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 264609
+	Voluntary context switches: 10214
+	Involuntary context switches: 413
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 56904
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -1,0 +1,50 @@
+{
+  "created_utc": "2026-06-03T15:47:09.035953+00:00",
+  "expected_paths": 465,
+  "fasta": "/home/erikg/impg/data/c4_whole_region_sweepga_seed_20260603T092921Z/c4_whole_region.fa",
+  "impg": "/home/erikg/.cargo/bin/impg",
+  "matrix": [
+    {
+      "method": "poa",
+      "threshold": 100
+    },
+    {
+      "method": "poa",
+      "threshold": 500
+    },
+    {
+      "method": "poa",
+      "threshold": 1000
+    },
+    {
+      "method": "poa",
+      "threshold": 2000
+    },
+    {
+      "method": "poasta",
+      "threshold": 1000
+    },
+    {
+      "method": "poasta",
+      "threshold": 2500
+    },
+    {
+      "method": "poasta",
+      "threshold": 5000
+    }
+  ],
+  "root": "/home/erikg/impg/.wg-worktrees/agent-450/data/c4_threshold_sweep_20260603T154441Z",
+  "seed": "/home/erikg/impg/data/c4_whole_region_sweepga_seed_20260603T092921Z/graphs/one_many_minmatch1_scaffold0.initial.gfa",
+  "seed_path_validation": {
+    "extra_path_names": "",
+    "fasta_name_set_ok": "true",
+    "fasta_spelling_mismatches": "0",
+    "missing_path_names": "",
+    "path_count": "465",
+    "path_count_ok": "true",
+    "path_names_match_seed": "true",
+    "path_spelling_mismatches_vs_seed": "0",
+    "path_validation_status": "ok"
+  },
+  "threads": 32
+}

@@ -1,0 +1,8 @@
+name	method	max_median_traversal_len	path_validation_status	path_count	path_count_ok	path_names_match_seed	path_spelling_mismatches_vs_seed	missing_path_names	extra_path_names	fasta_name_set_ok	fasta_spelling_mismatches
+poa_median100	poa	100	ok	465	true	true	0			true	0
+poa_median500	poa	500	ok	465	true	true	0			true	0
+poa_median1000	poa	1000	ok	465	true	true	0			true	0
+poa_median2000	poa	2000	ok	465	true	true	0			true	0
+poasta_median1000	poasta	1000	ok	465	true	true	0			true	0
+poasta_median2500	poasta	2500	ok	465	true	true	0			true	0
+poasta_median5000	poasta	5000	ok	465	true	true	0			true	0
