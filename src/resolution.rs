@@ -13014,7 +13014,7 @@ P\touter_alt\t1+,7+,6+\t*
     }
 
     #[test]
-    fn all_candidates_processed_regardless_of_budget() {
+    fn direct_poa_skips_over_budget_candidate_but_processes_eligible_candidate() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -13048,7 +13048,7 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert!(resolved.stats.resolved >= 2, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
         assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
