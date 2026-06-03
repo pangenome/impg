@@ -2232,6 +2232,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
     let mut per_round_accepted = Vec::new();
     let objective_mode = effective_multi_level_objective(config);
     let repeat_aware_boundaries = effective_repeat_aware_boundaries(config);
+    let mut residual_novelty_memory = ResidualNoveltyMemory::default();
 
     if emit_logs {
         log::info!(
@@ -2259,8 +2260,13 @@ fn resolve_graph_bubbles_iterative_multi_level(
         let discovery_start = Instant::now();
         let (all_discovered, sites_seen, timings) =
             discover_all_candidates(&graph, config, emit_logs)?;
-        let generated =
-            generate_multi_level_candidates(&graph, config, &all_discovered, &resolved_signatures);
+        let generated = generate_multi_level_candidates_with_residual_novelty(
+            &graph,
+            config,
+            &all_discovered,
+            &resolved_signatures,
+            Some(&residual_novelty_memory),
+        );
         let discovery_elapsed = discovery_start.elapsed();
 
         if generated.candidates.is_empty() {
@@ -2282,7 +2288,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after novelty/cap in {:.2?}; sources {}; residual-novelty compared={}, deferred={} (diagnostic keyed by root interval/source ancestry/traversals/root-span); repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2290,6 +2296,8 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 generated.candidates.len(),
                 discovery_elapsed,
                 format_multi_level_source_counts(&generated.source_counts),
+                generated.residual_novelty.compared,
+                generated.residual_novelty.deferred,
                 generated.repeat_boundary_rejected,
                 generated.total_bp_cap_exceeded,
                 generated.max_len_cap_exceeded,
@@ -2317,6 +2325,13 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 round + 1,
                 format_multi_level_candidate_details(&graph, &generated.candidates, 24)
             );
+            if !generated.residual_novelty.details.is_empty() {
+                log::info!(
+                    "crush iterative-multi-level round {} residual-novelty detail: {}",
+                    round + 1,
+                    format_residual_novelty_report(&generated.residual_novelty, 16)
+                );
+            }
         }
 
         if config.multi_level_admission_only {
@@ -2515,6 +2530,15 @@ fn resolve_graph_bubbles_iterative_multi_level(
         for plan in &plans {
             resolved_signatures.insert(plan.candidate.signature.clone());
         }
+        residual_novelty_memory.advance_after_accepted(&graph, round + 1, &accepted);
+        if emit_logs && !residual_novelty_memory.records.is_empty() {
+            log::info!(
+                "crush iterative-multi-level round {} residual-novelty memory: {} broad top-level residual guard(s) retained for continuing churn detection: {}",
+                round + 1,
+                residual_novelty_memory.records.len(),
+                format_residual_novelty_memory(&residual_novelty_memory, 8)
+            );
+        }
         graph = next_graph;
         changed = true;
         stats.resolved += plans.len();
@@ -2580,6 +2604,7 @@ struct MultiLevelWindowCandidate {
     candidate: BubbleCandidate,
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    source_ancestry: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -2616,6 +2641,7 @@ struct MultiLevelGeneratedCandidates {
     total_bp_cap_exceeded: usize,
     max_len_cap_exceeded: usize,
     median_len_cap_exceeded: usize,
+    residual_novelty: ResidualNoveltyReport,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2639,9 +2665,59 @@ struct ReplacementObjectiveDelta {
 struct MultiLevelBuiltCandidate {
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    source_ancestry: Vec<String>,
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResidualNoveltyMemory {
+    previous_round: usize,
+    records: Vec<ResidualNoveltyRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct ResidualNoveltyRecord {
+    round: usize,
+    source: MultiLevelCandidateSource,
+    source_sites: usize,
+    source_ancestry: Vec<String>,
+    root_path_name: String,
+    root_bp_begin: usize,
+    root_bp_end: usize,
+    root_start_step: usize,
+    root_end_step: usize,
+    root_start_label: String,
+    root_end_label: String,
+    traversal_count: usize,
+    median_len: usize,
+    total_len: usize,
+    root_span: usize,
+    unique_steps: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResidualNoveltyReport {
+    compared: usize,
+    deferred: usize,
+    retained: usize,
+    details: Vec<ResidualNoveltyDecision>,
+}
+
+#[derive(Clone, Debug)]
+struct ResidualNoveltyDecision {
+    deferred: bool,
+    reason: &'static str,
+    candidate: ResidualNoveltyRecord,
+    previous: ResidualNoveltyRecord,
+    overlap_bp: usize,
+    overlap_permille: usize,
+    span_delta: usize,
+    traversal_delta: usize,
+    median_delta: usize,
+    total_len_delta: usize,
+    unique_step_delta: usize,
 }
 
 fn compare_multi_level_built_candidate_priority(
@@ -2874,12 +2950,13 @@ fn build_multi_level_window_candidate(
     if emit_logs && selected_count <= 128 {
         let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
         log::info!(
-            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
+            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} ancestry={} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
             round_number,
             started,
             selected_count,
             window.source.as_str(),
             window.source_sites,
+            format_source_ancestry(&window.source_ancestry, 4),
             method,
             window.candidate.traversal_stats.count,
             window.candidate.traversal_stats.max_len,
@@ -2890,6 +2967,7 @@ fn build_multi_level_window_candidate(
     }
     let source = window.source;
     let source_sites = window.source_sites;
+    let source_ancestry = window.source_ancestry.clone();
     let candidate_boundary = if emit_logs && selected_count <= 128 {
         format_candidate_boundary(graph, &window.candidate)
     } else {
@@ -2910,6 +2988,7 @@ fn build_multi_level_window_candidate(
         Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(MultiLevelBuiltCandidate {
             source,
             source_sites,
+            source_ancestry: source_ancestry.clone(),
             plan: ReplacementPlan {
                 candidate: window.candidate,
                 replacement,
@@ -2942,10 +3021,11 @@ fn build_multi_level_window_candidate(
                     .map(format_sweepga_evidence)
                     .unwrap_or_else(|| "alignment_evidence=not-applicable".to_string());
                 log::info!(
-                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
+                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} ancestry={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
                     round_number,
                     candidate.source.as_str(),
                     candidate.source_sites,
+                    format_source_ancestry(&candidate.source_ancestry, 4),
                     method,
                     format_candidate_boundary(graph, &candidate.plan.candidate),
                     format_candidate_repeat_summary(graph, &candidate.plan.candidate),
@@ -2961,20 +3041,22 @@ fn build_multi_level_window_candidate(
             }
             Ok(None) if selected_count <= 128 => {
                 log::info!(
-                    "crush iterative-multi-level round {}: candidate returned empty replacement source={} sites={} method={:?} {}; reason=empty-replacement",
+                    "crush iterative-multi-level round {}: candidate returned empty replacement source={} sites={} ancestry={} method={:?} {}; reason=empty-replacement",
                     round_number,
                     source.as_str(),
                     source_sites,
+                    format_source_ancestry(&source_ancestry, 4),
                     method,
                     candidate_boundary
                 );
             }
             Err(err) if selected_count <= 128 => {
                 log::info!(
-                    "crush iterative-multi-level round {}: candidate failed source={} sites={} method={:?} {}; reason={}",
+                    "crush iterative-multi-level round {}: candidate failed source={} sites={} ancestry={} method={:?} {}; reason={}",
                     round_number,
                     source.as_str(),
                     source_sites,
+                    format_source_ancestry(&source_ancestry, 4),
                     method,
                     candidate_boundary,
                     err
@@ -3051,6 +3133,22 @@ fn generate_multi_level_candidates(
     discovered: &[DiscoveredCandidate],
     resolved_signatures: &FxHashSet<String>,
 ) -> MultiLevelGeneratedCandidates {
+    generate_multi_level_candidates_with_residual_novelty(
+        graph,
+        config,
+        discovered,
+        resolved_signatures,
+        None,
+    )
+}
+
+fn generate_multi_level_candidates_with_residual_novelty(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    discovered: &[DiscoveredCandidate],
+    resolved_signatures: &FxHashSet<String>,
+    residual_novelty_memory: Option<&ResidualNoveltyMemory>,
+) -> MultiLevelGeneratedCandidates {
     let mut generated = MultiLevelGeneratedCandidates::default();
     if discovered.is_empty() {
         return generated;
@@ -3114,6 +3212,7 @@ fn generate_multi_level_candidates(
                 d.candidate.clone(),
                 MultiLevelCandidateSource::TopLevel,
                 1,
+                vec![source_ancestry_from_discovered(d)],
                 config,
             );
         }
@@ -3211,6 +3310,9 @@ fn generate_multi_level_candidates(
     generated
         .candidates
         .sort_by(|a, b| compare_multi_level_candidate_priority(a, b, window_mode));
+    if let Some(memory) = residual_novelty_memory {
+        apply_residual_novelty_filter(graph, &mut generated, memory);
+    }
     let candidate_limit = multi_level_candidate_limit_for_mode(config, window_mode);
     if candidate_limit > 0 && generated.candidates.len() > candidate_limit {
         generated.candidates.truncate(candidate_limit);
@@ -3304,6 +3406,309 @@ fn multi_level_residual_scale_score(candidate: &BubbleCandidate) -> u128 {
     (candidate.root_span as u128).saturating_mul(candidate.unique_steps.max(1) as u128)
 }
 
+const RESIDUAL_NOVELTY_MIN_ROOT_SPAN: usize = 10_000;
+const RESIDUAL_NOVELTY_MIN_TOTAL_BP: usize = 50_000;
+const RESIDUAL_NOVELTY_OVERLAP_PERMILLE: usize = 950;
+const RESIDUAL_NOVELTY_SPAN_PCT: usize = 5;
+const RESIDUAL_NOVELTY_EXPANSION_PCT: usize = 10;
+const RESIDUAL_NOVELTY_MIN_EXPANSION_BP: usize = 2_048;
+
+impl ResidualNoveltyMemory {
+    fn advance_after_accepted(
+        &mut self,
+        graph: &Graph,
+        round: usize,
+        accepted: &[MultiLevelBuiltCandidate],
+    ) {
+        let accepted_broad_records = Self::records_from_accepted(graph, round, accepted);
+        self.previous_round = round;
+        if !accepted_broad_records.is_empty() {
+            self.records = accepted_broad_records;
+        }
+    }
+
+    fn records_from_accepted(
+        graph: &Graph,
+        round: usize,
+        accepted: &[MultiLevelBuiltCandidate],
+    ) -> Vec<ResidualNoveltyRecord> {
+        accepted
+            .iter()
+            .filter(|built| {
+                built.source == MultiLevelCandidateSource::TopLevel && built.source_sites == 1
+            })
+            .filter_map(|built| {
+                ResidualNoveltyRecord::from_parts(
+                    graph,
+                    round,
+                    built.source,
+                    built.source_sites,
+                    built.source_ancestry.clone(),
+                    &built.plan.candidate,
+                )
+            })
+            .filter(is_broad_residual_record)
+            .collect::<Vec<_>>()
+    }
+}
+
+impl ResidualNoveltyRecord {
+    fn from_window(
+        graph: &Graph,
+        round: usize,
+        window: &MultiLevelWindowCandidate,
+    ) -> Option<Self> {
+        Self::from_parts(
+            graph,
+            round,
+            window.source,
+            window.source_sites,
+            window.source_ancestry.clone(),
+            &window.candidate,
+        )
+    }
+
+    fn from_parts(
+        graph: &Graph,
+        round: usize,
+        source: MultiLevelCandidateSource,
+        source_sites: usize,
+        source_ancestry: Vec<String>,
+        candidate: &BubbleCandidate,
+    ) -> Option<Self> {
+        let (root_path_name, root_bp_begin, root_bp_end) = candidate_root_bp_interval(candidate)?;
+        let (root_start_label, root_end_label) = candidate_root_boundary_labels(graph, candidate);
+        Some(Self {
+            round,
+            source,
+            source_sites,
+            source_ancestry,
+            root_path_name,
+            root_bp_begin,
+            root_bp_end,
+            root_start_step: candidate.root_start_step,
+            root_end_step: candidate.root_end_step,
+            root_start_label,
+            root_end_label,
+            traversal_count: candidate.traversal_stats.count,
+            median_len: candidate.traversal_stats.median_len,
+            total_len: candidate.traversal_stats.total_len,
+            root_span: candidate.root_span,
+            unique_steps: candidate.unique_steps,
+        })
+    }
+
+    fn semantic_key(&self) -> String {
+        format!(
+            "round={} source={} sites={} ancestry={} root={}:[{}-{}] boundary={}..{} root_steps={}..{} traversals={} median={} total={} root_span={} unique_steps={}",
+            self.round,
+            self.source.as_str(),
+            self.source_sites,
+            format_source_ancestry(&self.source_ancestry, 4),
+            self.root_path_name,
+            self.root_bp_begin,
+            self.root_bp_end,
+            self.root_start_label,
+            self.root_end_label,
+            self.root_start_step,
+            self.root_end_step,
+            self.traversal_count,
+            self.median_len,
+            self.total_len,
+            self.root_span,
+            self.unique_steps
+        )
+    }
+}
+
+fn candidate_root_bp_interval(candidate: &BubbleCandidate) -> Option<(String, usize, usize)> {
+    let root_range = candidate
+        .ranges
+        .iter()
+        .find(|range| range.path_idx == 0)
+        .or_else(|| candidate.ranges.first())?;
+    let name = root_range
+        .source_path_name
+        .clone()
+        .unwrap_or_else(|| format!("path{}", root_range.path_idx));
+    Some((name, root_range.source_start, root_range.source_end))
+}
+
+fn candidate_root_boundary_labels(graph: &Graph, candidate: &BubbleCandidate) -> (String, String) {
+    let root_path = graph.paths.first();
+    let start = root_path
+        .and_then(|path| path.steps.get(candidate.root_start_step).copied())
+        .map(|step| format_step_label(graph, step))
+        .unwrap_or_else(|| "?".to_string());
+    let end = root_path
+        .and_then(|path| path.steps.get(candidate.root_end_step).copied())
+        .map(|step| format_step_label(graph, step))
+        .unwrap_or_else(|| "?".to_string());
+    (start, end)
+}
+
+fn is_broad_residual_record(record: &ResidualNoveltyRecord) -> bool {
+    record.root_span >= RESIDUAL_NOVELTY_MIN_ROOT_SPAN
+        && record.total_len >= RESIDUAL_NOVELTY_MIN_TOTAL_BP
+        && record.traversal_count >= 2
+}
+
+fn apply_residual_novelty_filter(
+    graph: &Graph,
+    generated: &mut MultiLevelGeneratedCandidates,
+    memory: &ResidualNoveltyMemory,
+) {
+    if memory.records.is_empty() || generated.candidates.is_empty() {
+        return;
+    }
+
+    let mut retained = Vec::with_capacity(generated.candidates.len());
+    let mut report = ResidualNoveltyReport::default();
+    for window in generated.candidates.drain(..) {
+        let Some(candidate_record) = ResidualNoveltyRecord::from_window(
+            graph,
+            memory.previous_round.saturating_add(1),
+            &window,
+        ) else {
+            retained.push(window);
+            continue;
+        };
+
+        if window.source != MultiLevelCandidateSource::TopLevel
+            || window.source_sites != 1
+            || !is_broad_residual_record(&candidate_record)
+        {
+            retained.push(window);
+            report.retained += 1;
+            continue;
+        }
+
+        let mut deferred = None;
+        for previous in &memory.records {
+            let decision = compare_residual_novelty(&candidate_record, previous);
+            report.compared += 1;
+            if decision.deferred {
+                deferred = Some(decision);
+                break;
+            } else if decision.overlap_bp > 0 && report.details.len() < 8 {
+                report.details.push(decision);
+            }
+        }
+
+        if let Some(decision) = deferred {
+            report.deferred += 1;
+            report.details.push(decision);
+        } else {
+            report.retained += 1;
+            retained.push(window);
+        }
+    }
+    generated.candidates = retained;
+    generated.residual_novelty = report;
+}
+
+fn compare_residual_novelty(
+    candidate: &ResidualNoveltyRecord,
+    previous: &ResidualNoveltyRecord,
+) -> ResidualNoveltyDecision {
+    let overlap_bp = if candidate.root_path_name == previous.root_path_name {
+        interval_overlap(
+            candidate.root_bp_begin,
+            candidate.root_bp_end,
+            previous.root_bp_begin,
+            previous.root_bp_end,
+        )
+    } else {
+        0
+    };
+    let min_interval = candidate
+        .root_bp_end
+        .saturating_sub(candidate.root_bp_begin)
+        .min(previous.root_bp_end.saturating_sub(previous.root_bp_begin));
+    let overlap_permille = if min_interval == 0 {
+        0
+    } else {
+        overlap_bp.saturating_mul(1000) / min_interval
+    };
+    let span_delta = candidate.root_span.abs_diff(previous.root_span);
+    let traversal_delta = candidate.traversal_count.abs_diff(previous.traversal_count);
+    let median_delta = candidate.median_len.abs_diff(previous.median_len);
+    let total_len_delta = candidate.total_len.abs_diff(previous.total_len);
+    let unique_step_delta = candidate.unique_steps.abs_diff(previous.unique_steps);
+
+    let expanded = residual_interval_expanded(candidate, previous);
+    let structurally_similar =
+        similar_within_percent(
+            candidate.root_span,
+            previous.root_span,
+            RESIDUAL_NOVELTY_SPAN_PCT,
+        ) && ratio_within_factor_two(candidate.traversal_count, previous.traversal_count)
+            && ratio_within_factor_two(candidate.median_len, previous.median_len)
+            && ratio_within_factor_two(candidate.total_len, previous.total_len)
+            && ratio_within_factor_two(candidate.unique_steps, previous.unique_steps);
+    let deferred =
+        overlap_permille >= RESIDUAL_NOVELTY_OVERLAP_PERMILLE && structurally_similar && !expanded;
+    let reason = if deferred {
+        "near-identical-immediate-broad-residual"
+    } else if expanded {
+        "expanded-residual-allowed"
+    } else if overlap_permille < RESIDUAL_NOVELTY_OVERLAP_PERMILLE {
+        "root-interval-novel"
+    } else {
+        "structure-novel"
+    };
+
+    ResidualNoveltyDecision {
+        deferred,
+        reason,
+        candidate: candidate.clone(),
+        previous: previous.clone(),
+        overlap_bp,
+        overlap_permille,
+        span_delta,
+        traversal_delta,
+        median_delta,
+        total_len_delta,
+        unique_step_delta,
+    }
+}
+
+fn interval_overlap(a_begin: usize, a_end: usize, b_begin: usize, b_end: usize) -> usize {
+    a_end.min(b_end).saturating_sub(a_begin.max(b_begin))
+}
+
+fn similar_within_percent(a: usize, b: usize, percent: usize) -> bool {
+    let allowed = a.max(b).saturating_mul(percent).div_ceil(100).max(1);
+    a.abs_diff(b) <= allowed
+}
+
+fn ratio_within_factor_two(a: usize, b: usize) -> bool {
+    let min = a.min(b);
+    let max = a.max(b);
+    if min == 0 {
+        max == 0
+    } else {
+        max <= min.saturating_mul(2)
+    }
+}
+
+fn residual_interval_expanded(
+    candidate: &ResidualNoveltyRecord,
+    previous: &ResidualNoveltyRecord,
+) -> bool {
+    if candidate.root_path_name != previous.root_path_name {
+        return true;
+    }
+    let expansion_bp = previous
+        .root_span
+        .saturating_mul(RESIDUAL_NOVELTY_EXPANSION_PCT)
+        .div_ceil(100)
+        .max(RESIDUAL_NOVELTY_MIN_EXPANSION_BP);
+    candidate.root_bp_begin.saturating_add(expansion_bp) < previous.root_bp_begin
+        || candidate.root_bp_end > previous.root_bp_end.saturating_add(expansion_bp)
+        || candidate.root_span > previous.root_span.saturating_add(expansion_bp)
+}
+
 fn multi_level_parent_frontier_span_score(candidate: &BubbleCandidate) -> usize {
     let traversal_span = candidate
         .traversal_stats
@@ -3319,6 +3724,7 @@ fn insert_multi_level_candidate(
     candidate: BubbleCandidate,
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    mut source_ancestry: Vec<String>,
     config: &ResolutionConfig,
 ) {
     if resolved_signatures.contains(&candidate.signature) {
@@ -3345,11 +3751,14 @@ fn insert_multi_level_candidate(
     if !emitted.insert(candidate.signature.clone()) {
         return;
     }
+    source_ancestry.sort();
+    source_ancestry.dedup();
     *generated.source_counts.entry(source).or_insert(0) += 1;
     generated.candidates.push(MultiLevelWindowCandidate {
         candidate,
         source,
         source_sites,
+        source_ancestry,
     });
 }
 
@@ -3414,6 +3823,7 @@ fn add_parent_descendant_windows(
 ) {
     for parent in discovered {
         let mut descendants = 0usize;
+        let mut source_ancestry = vec![source_ancestry_from_discovered(parent)];
         for child in discovered {
             if child.povu_site_id == parent.povu_site_id {
                 continue;
@@ -3423,6 +3833,7 @@ fn add_parent_descendant_windows(
                 && child.povu_level > parent.povu_level
             {
                 descendants += 1;
+                source_ancestry.push(source_ancestry_from_discovered(child));
             }
         }
         if descendants == 0 || chain_povu_block_bp(&parent.candidate) > target_bp {
@@ -3435,6 +3846,7 @@ fn add_parent_descendant_windows(
             parent.candidate.clone(),
             MultiLevelCandidateSource::ParentDescendants,
             descendants + 1,
+            source_ancestry,
             config,
         );
     }
@@ -3588,6 +4000,7 @@ fn add_outward_residual_windows(
                 site.candidate.clone(),
                 MultiLevelCandidateSource::OutwardResidualWindow,
                 1,
+                vec![source_ancestry_from_discovered(site)],
                 config,
             );
         }
@@ -3746,6 +4159,7 @@ fn add_specific_index_window(
         candidate,
         source,
         indexes.len(),
+        source_ancestry_from_indexes(discovered, indexes),
         config,
     );
 }
@@ -4238,6 +4652,41 @@ fn format_multi_level_source_counts(
         .join(", ")
 }
 
+fn source_ancestry_from_discovered(site: &DiscoveredCandidate) -> String {
+    format!(
+        "site={} parent={} level={} leaf={}",
+        site.povu_site_id,
+        site.povu_parent_id.as_deref().unwrap_or("."),
+        site.povu_level,
+        site.is_leaf
+    )
+}
+
+fn source_ancestry_from_indexes(
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+) -> Vec<String> {
+    indexes
+        .iter()
+        .filter_map(|&idx| discovered.get(idx).map(source_ancestry_from_discovered))
+        .collect()
+}
+
+fn format_source_ancestry(ancestry: &[String], limit: usize) -> String {
+    if ancestry.is_empty() {
+        return ".".to_string();
+    }
+    let mut items = ancestry
+        .iter()
+        .take(limit)
+        .map(|item| item.replace(' ', "_"))
+        .collect::<Vec<_>>();
+    if ancestry.len() > limit {
+        items.push(format!("+{}more", ancestry.len() - limit));
+    }
+    items.join("|")
+}
+
 fn multi_level_window_source_counts(
     candidates: &[MultiLevelWindowCandidate],
 ) -> FxHashMap<MultiLevelCandidateSource, usize> {
@@ -4371,10 +4820,11 @@ fn format_multi_level_candidate_details(
         .enumerate()
         .map(|(idx, window)| {
             format!(
-                "#{} source={} sites={} level={} {} traversals={} max={} median={} total={} unique_steps={} step_savings={}",
+                "#{} source={} sites={} ancestry={} level={} {} traversals={} max={} median={} total={} unique_steps={} step_savings={}",
                 idx + 1,
                 window.source.as_str(),
                 window.source_sites,
+                format_source_ancestry(&window.source_ancestry, 4),
                 window.candidate.level,
                 format_candidate_boundary(graph, &window.candidate),
                 window.candidate.traversal_stats.count,
@@ -4383,6 +4833,45 @@ fn format_multi_level_candidate_details(
                 window.candidate.traversal_stats.total_len,
                 window.candidate.unique_steps,
                 window.candidate.estimated_step_savings()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_residual_novelty_memory(memory: &ResidualNoveltyMemory, limit: usize) -> String {
+    let details = memory
+        .records
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(idx, record)| format!("#{} {}", idx + 1, record.semantic_key()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("previous_round={}; {}", memory.previous_round, details)
+}
+
+fn format_residual_novelty_report(report: &ResidualNoveltyReport, limit: usize) -> String {
+    report
+        .details
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(idx, decision)| {
+            format!(
+                "#{} decision={} reason={} overlap={}bp({}/1000) span_delta={} traversal_delta={} median_delta={} total_len_delta={} unique_step_delta={} candidate=[{}] previous=[{}]",
+                idx + 1,
+                if decision.deferred { "defer" } else { "keep" },
+                decision.reason,
+                decision.overlap_bp,
+                decision.overlap_permille,
+                decision.span_delta,
+                decision.traversal_delta,
+                decision.median_delta,
+                decision.total_len_delta,
+                decision.unique_step_delta,
+                decision.candidate.semantic_key(),
+                decision.previous.semantic_key()
             )
         })
         .collect::<Vec<_>>()
@@ -9193,6 +9682,7 @@ mod tests {
             },
             source,
             source_sites: 4,
+            source_ancestry: vec!["budget-test".to_string()],
         }
     }
 
@@ -9942,11 +10432,13 @@ P\tp1\t1+,3+,4+\t*
                 candidate: tiny_root_repeat,
                 source: MultiLevelCandidateSource::TopLevel,
                 source_sites: 1,
+                source_ancestry: vec!["tiny-root-repeat".to_string()],
             },
             MultiLevelWindowCandidate {
                 candidate: balanced_parent,
                 source: MultiLevelCandidateSource::TopLevel,
                 source_sites: 1,
+                source_ancestry: vec!["balanced-parent".to_string()],
             },
         ];
         candidates.sort_by(|a, b| {
@@ -9998,6 +10490,24 @@ P\tp1\t1+,3+,4+\t*
             },
             source: MultiLevelCandidateSource::TopLevel,
             source_sites: 1,
+            source_ancestry: vec![format!("site={signature}")],
+        }
+    }
+
+    fn built_test_candidate(window: MultiLevelWindowCandidate) -> MultiLevelBuiltCandidate {
+        MultiLevelBuiltCandidate {
+            source: window.source,
+            source_sites: window.source_sites,
+            source_ancestry: window.source_ancestry,
+            plan: ReplacementPlan {
+                candidate: window.candidate,
+                replacement: Graph {
+                    segments: Vec::new(),
+                    paths: Vec::new(),
+                },
+            },
+            objective: ReplacementObjectiveDelta::default(),
+            evidence: None,
         }
     }
 
@@ -10133,6 +10643,7 @@ P\tp1\t1+,3+,4+\t*
         let mk_built = |candidate: BubbleCandidate| MultiLevelBuiltCandidate {
             source: MultiLevelCandidateSource::TopLevel,
             source_sites: 1,
+            source_ancestry: vec!["built-test".to_string()],
             plan: ReplacementPlan {
                 candidate,
                 replacement: Graph {
@@ -10157,6 +10668,211 @@ P\tp1\t1+,3+,4+\t*
             built[0].plan.candidate.signature,
             "enclosing-residual",
             "equivalent local objectives should schedule the broader residual before a child-scale no-op"
+        );
+    }
+
+    #[test]
+    fn residual_novelty_defers_immediate_near_identical_broad_top_level() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let previous = c4_like_residual_window(
+            "round5-broad-residual",
+            5_101,
+            5_732,
+            33_120,
+            1_506,
+            388,
+            26_752,
+            33_240,
+            7_301_649,
+        );
+        let near_duplicate = c4_like_residual_window(
+            "round6-near-duplicate",
+            5_100,
+            5_732,
+            33_168,
+            899,
+            388,
+            26_800,
+            33_288,
+            7_320_273,
+        );
+        let novel_elsewhere = c4_like_residual_window(
+            "different-root-interval",
+            100_000,
+            100_420,
+            12_000,
+            420,
+            96,
+            4_000,
+            9_500,
+            120_000,
+        );
+        let memory = ResidualNoveltyMemory {
+            previous_round: 5,
+            records: vec![ResidualNoveltyRecord::from_window(&graph, 5, &previous).unwrap()],
+        };
+        let mut generated = MultiLevelGeneratedCandidates {
+            candidates: vec![near_duplicate.clone(), novel_elsewhere.clone()],
+            generated_total: 2,
+            ..MultiLevelGeneratedCandidates::default()
+        };
+
+        apply_residual_novelty_filter(&graph, &mut generated, &memory);
+
+        assert_eq!(generated.residual_novelty.deferred, 1);
+        assert_eq!(generated.candidates.len(), 1);
+        assert_eq!(
+            generated.candidates[0].candidate.signature,
+            novel_elsewhere.candidate.signature
+        );
+        assert!(
+            generated
+                .residual_novelty
+                .details
+                .iter()
+                .any(|decision| decision.deferred
+                    && decision.reason == "near-identical-immediate-broad-residual"
+                    && decision.candidate.traversal_count == 388
+                    && decision.candidate.root_span == 33_168),
+            "{:?}",
+            generated.residual_novelty
+        );
+    }
+
+    #[test]
+    fn residual_novelty_guard_survives_intervening_small_acceptance() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let previous_broad = c4_like_residual_window(
+            "round4-broad-residual",
+            5_102,
+            5_708,
+            32_999,
+            902,
+            269,
+            26_631,
+            32_999,
+            7_243_526,
+        );
+        let intervening_small = c4_like_residual_window(
+            "round5-small-top-level",
+            511,
+            927,
+            7_737,
+            743,
+            95,
+            120,
+            7_933,
+            40_000,
+        );
+        let returning_broad = c4_like_residual_window(
+            "round6-returning-broad-residual",
+            5_101,
+            5_732,
+            33_120,
+            1_506,
+            388,
+            26_752,
+            33_240,
+            7_301_649,
+        );
+        let mut memory = ResidualNoveltyMemory {
+            previous_round: 4,
+            records: vec![ResidualNoveltyRecord::from_window(&graph, 4, &previous_broad).unwrap()],
+        };
+        let accepted = vec![built_test_candidate(intervening_small)];
+
+        memory.advance_after_accepted(&graph, 5, &accepted);
+        assert_eq!(memory.previous_round, 5);
+        assert_eq!(memory.records.len(), 1);
+        assert_eq!(memory.records[0].round, 4);
+
+        let mut generated = MultiLevelGeneratedCandidates {
+            candidates: vec![returning_broad],
+            generated_total: 1,
+            ..MultiLevelGeneratedCandidates::default()
+        };
+
+        apply_residual_novelty_filter(&graph, &mut generated, &memory);
+
+        assert_eq!(generated.residual_novelty.deferred, 1);
+        assert!(
+            generated.candidates.is_empty(),
+            "{:?}",
+            generated.candidates
+        );
+        assert!(
+            generated
+                .residual_novelty
+                .details
+                .iter()
+                .any(|decision| decision.deferred
+                    && decision.reason == "near-identical-immediate-broad-residual"
+                    && decision.candidate.root_span == 33_120),
+            "{:?}",
+            generated.residual_novelty
+        );
+    }
+
+    #[test]
+    fn residual_novelty_retains_same_interval_when_structure_changes() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let previous = c4_like_residual_window(
+            "round1-broad-residual",
+            5_092,
+            6_336,
+            32_787,
+            1_696,
+            117,
+            26_418,
+            32_787,
+            2_363_564,
+        );
+        let structurally_novel = c4_like_residual_window(
+            "round2-residual-different-traversal-profile",
+            5_097,
+            6_341,
+            32_776,
+            1_111,
+            143,
+            38,
+            26_408,
+            348_244,
+        );
+        let memory = ResidualNoveltyMemory {
+            previous_round: 1,
+            records: vec![ResidualNoveltyRecord::from_window(&graph, 1, &previous).unwrap()],
+        };
+        let mut generated = MultiLevelGeneratedCandidates {
+            candidates: vec![structurally_novel.clone()],
+            generated_total: 1,
+            ..MultiLevelGeneratedCandidates::default()
+        };
+
+        apply_residual_novelty_filter(&graph, &mut generated, &memory);
+
+        assert_eq!(generated.residual_novelty.deferred, 0);
+        assert_eq!(generated.candidates.len(), 1);
+        assert_eq!(
+            generated.candidates[0].candidate.signature,
+            structurally_novel.candidate.signature
+        );
+        assert!(
+            generated
+                .residual_novelty
+                .details
+                .iter()
+                .any(|decision| !decision.deferred && decision.reason == "structure-novel"),
+            "{:?}",
+            generated.residual_novelty
         );
     }
 
