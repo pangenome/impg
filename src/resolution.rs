@@ -2453,29 +2453,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
             .filter(|candidate| candidate.objective.score_delta < objective_floor)
             .count();
         let objective_passing_count = built_count.saturating_sub(local_objective_below_floor);
-        built.sort_by(|a, b| {
-            b.objective
-                .score_delta
-                .cmp(&a.objective.score_delta)
-                .then_with(|| {
-                    b.objective
-                        .segment_bp_delta
-                        .cmp(&a.objective.segment_bp_delta)
-                })
-                .then_with(|| b.objective.segment_delta.cmp(&a.objective.segment_delta))
-                .then_with(|| {
-                    a.plan
-                        .candidate
-                        .root_start_step
-                        .cmp(&b.plan.candidate.root_start_step)
-                })
-                .then_with(|| {
-                    a.plan
-                        .candidate
-                        .root_end_step
-                        .cmp(&b.plan.candidate.root_end_step)
-                })
-        });
+        built.sort_by(compare_multi_level_built_candidate_priority);
 
         let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
         let mut accepted = Vec::new();
@@ -2664,6 +2642,37 @@ struct MultiLevelBuiltCandidate {
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
+}
+
+fn compare_multi_level_built_candidate_priority(
+    a: &MultiLevelBuiltCandidate,
+    b: &MultiLevelBuiltCandidate,
+) -> std::cmp::Ordering {
+    b.objective
+        .score_delta
+        .cmp(&a.objective.score_delta)
+        .then_with(|| {
+            b.objective
+                .segment_bp_delta
+                .cmp(&a.objective.segment_bp_delta)
+        })
+        .then_with(|| b.objective.segment_delta.cmp(&a.objective.segment_delta))
+        .then_with(|| {
+            multi_level_residual_scale_score(&b.plan.candidate)
+                .cmp(&multi_level_residual_scale_score(&a.plan.candidate))
+        })
+        .then_with(|| {
+            a.plan
+                .candidate
+                .root_start_step
+                .cmp(&b.plan.candidate.root_start_step)
+        })
+        .then_with(|| {
+            a.plan
+                .candidate
+                .root_end_step
+                .cmp(&b.plan.candidate.root_end_step)
+        })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3199,24 +3208,9 @@ fn generate_multi_level_candidates(
     }
 
     generated.generated_total = generated.candidates.len();
-    generated.candidates.sort_by(|a, b| {
-        multi_level_source_priority(a.source)
-            .cmp(&multi_level_source_priority(b.source))
-            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
-            .then_with(|| {
-                b.candidate
-                    .estimated_step_savings()
-                    .cmp(&a.candidate.estimated_step_savings())
-            })
-            .then_with(|| b.candidate.unique_steps.cmp(&a.candidate.unique_steps))
-            .then_with(|| a.candidate.root_span.cmp(&b.candidate.root_span))
-            .then_with(|| {
-                a.candidate
-                    .root_start_step
-                    .cmp(&b.candidate.root_start_step)
-            })
-            .then_with(|| a.candidate.root_end_step.cmp(&b.candidate.root_end_step))
-    });
+    generated
+        .candidates
+        .sort_by(|a, b| compare_multi_level_candidate_priority(a, b, window_mode));
     let candidate_limit = multi_level_candidate_limit_for_mode(config, window_mode);
     if candidate_limit > 0 && generated.candidates.len() > candidate_limit {
         generated.candidates.truncate(candidate_limit);
@@ -3265,6 +3259,49 @@ fn compare_same_source_window_priority(
     } else {
         std::cmp::Ordering::Equal
     }
+}
+
+fn compare_multi_level_candidate_priority(
+    a: &MultiLevelWindowCandidate,
+    b: &MultiLevelWindowCandidate,
+    window_mode: MultiLevelWindowMode,
+) -> std::cmp::Ordering {
+    let mode_priority = if matches!(window_mode, MultiLevelWindowMode::Largest) {
+        // Largest mode builds one candidate per round. For residual C4 sites,
+        // median traversal length can be tiny even when the enclosing interval
+        // carries a broad high-entropy path-space block, so rank the capped
+        // candidate by broad root span plus unique path-step mass before the
+        // older balanced-frontier proxy.
+        multi_level_residual_scale_score(&b.candidate)
+            .cmp(&multi_level_residual_scale_score(&a.candidate))
+            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
+            .then_with(|| {
+                multi_level_source_priority(a.source).cmp(&multi_level_source_priority(b.source))
+            })
+    } else {
+        multi_level_source_priority(a.source)
+            .cmp(&multi_level_source_priority(b.source))
+            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
+    };
+
+    mode_priority
+        .then_with(|| {
+            b.candidate
+                .estimated_step_savings()
+                .cmp(&a.candidate.estimated_step_savings())
+        })
+        .then_with(|| b.candidate.unique_steps.cmp(&a.candidate.unique_steps))
+        .then_with(|| a.candidate.root_span.cmp(&b.candidate.root_span))
+        .then_with(|| {
+            a.candidate
+                .root_start_step
+                .cmp(&b.candidate.root_start_step)
+        })
+        .then_with(|| a.candidate.root_end_step.cmp(&b.candidate.root_end_step))
+}
+
+fn multi_level_residual_scale_score(candidate: &BubbleCandidate) -> u128 {
+    (candidate.root_span as u128).saturating_mul(candidate.unique_steps.max(1) as u128)
 }
 
 fn multi_level_parent_frontier_span_score(candidate: &BubbleCandidate) -> usize {
@@ -6887,7 +6924,9 @@ fn candidate_sequence_name(range: &PathRange) -> io::Result<String> {
         .source_path_name
         .as_deref()
         .and_then(primary_sequence_name_token)
-        .ok_or_else(|| io::Error::other("crush replacement traversal is missing source path name"))?;
+        .ok_or_else(|| {
+            io::Error::other("crush replacement traversal is missing source path name")
+        })?;
     let (source_base, source_offset) = split_path_coordinate_suffix(source_path_name)
         .map(|(base, start, _)| (base, start))
         .unwrap_or((source_path_name, 0));
@@ -9888,6 +9927,180 @@ P\tp1\t1+,3+,4+\t*
         assert_eq!(candidates[0].candidate.root_span, 32_787);
     }
 
+    fn c4_like_residual_window(
+        signature: &str,
+        root_start_step: usize,
+        root_end_step: usize,
+        root_span: usize,
+        unique_steps: usize,
+        count: usize,
+        median_len: usize,
+        max_len: usize,
+        total_len: usize,
+    ) -> MultiLevelWindowCandidate {
+        MultiLevelWindowCandidate {
+            candidate: BubbleCandidate {
+                ranges: vec![PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(
+                        "GRCh38#0#chr6:31891045-32123783 source haplotype".to_string(),
+                    ),
+                    source_start: root_start_step,
+                    source_end: root_start_step + root_span,
+                    begin_step: root_start_step,
+                    end_step: root_end_step,
+                    ..PathRange::default()
+                }],
+                signature: signature.to_string(),
+                root_start_step,
+                root_end_step,
+                root_span,
+                total_steps: unique_steps.saturating_mul(2),
+                unique_steps,
+                traversal_stats: TraversalStats {
+                    count,
+                    min_len: median_len.min(max_len),
+                    median_len,
+                    p90_len: max_len,
+                    max_len,
+                    total_len,
+                },
+                level: 0,
+            },
+            source: MultiLevelCandidateSource::TopLevel,
+            source_sites: 1,
+        }
+    }
+
+    #[test]
+    fn largest_mode_prefers_broad_residual_scale_over_near_identity_child() {
+        let low_entropy_broad = c4_like_residual_window(
+            "low-entropy-broad",
+            4_763,
+            6_007,
+            32_834,
+            2,
+            13,
+            96,
+            96,
+            1_248,
+        );
+        let enclosing_residual = c4_like_residual_window(
+            "enclosing-residual",
+            5_097,
+            6_341,
+            32_776,
+            1_111,
+            58,
+            38,
+            26_408,
+            345_014,
+        );
+        let near_identity_child = c4_like_residual_window(
+            "near-identity-child",
+            4_051,
+            4_326,
+            6_733,
+            111,
+            132,
+            6_734,
+            6_734,
+            825_193,
+        );
+
+        assert!(
+            multi_level_residual_scale_score(&enclosing_residual.candidate)
+                > multi_level_residual_scale_score(&near_identity_child.candidate)
+        );
+
+        let mut candidates = vec![
+            low_entropy_broad,
+            near_identity_child.clone(),
+            enclosing_residual.clone(),
+        ];
+        candidates.sort_by(|a, b| {
+            compare_multi_level_candidate_priority(a, b, MultiLevelWindowMode::Largest)
+        });
+
+        assert_eq!(candidates[0].candidate.signature, "enclosing-residual");
+        assert_ne!(
+            candidates[0].candidate.signature,
+            near_identity_child.candidate.signature
+        );
+        assert_eq!(candidates[2].candidate.signature, "low-entropy-broad");
+
+        let headers = candidate_sequence_headers(&candidates[0].candidate).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert!(
+            headers[0].starts_with("GRCh38#0#chr6:"),
+            "semantic source range should be preserved: {:?}",
+            headers
+        );
+        assert!(
+            !headers[0].contains("__impg")
+                && !headers[0].contains("candidate_")
+                && !headers[0].contains("path0"),
+            "largest-mode residual ranking must not introduce synthetic local names: {:?}",
+            headers
+        );
+    }
+
+    #[test]
+    fn built_candidate_tie_break_prefers_broader_residual_scale() {
+        let enclosing_residual = c4_like_residual_window(
+            "enclosing-residual",
+            5_097,
+            6_341,
+            32_776,
+            1_111,
+            58,
+            38,
+            26_408,
+            345_014,
+        )
+        .candidate;
+        let near_identity_child = c4_like_residual_window(
+            "near-identity-child",
+            4_051,
+            4_326,
+            6_733,
+            111,
+            132,
+            6_734,
+            6_734,
+            825_193,
+        )
+        .candidate;
+        let mk_built = |candidate: BubbleCandidate| MultiLevelBuiltCandidate {
+            source: MultiLevelCandidateSource::TopLevel,
+            source_sites: 1,
+            plan: ReplacementPlan {
+                candidate,
+                replacement: Graph {
+                    segments: Vec::new(),
+                    paths: Vec::new(),
+                },
+            },
+            objective: ReplacementObjectiveDelta {
+                score_delta: 0,
+                segment_delta: 0,
+                segment_bp_delta: 0,
+                singleton_bp_delta: 0,
+                ..ReplacementObjectiveDelta::default()
+            },
+            evidence: None,
+        };
+
+        let mut built = vec![mk_built(near_identity_child), mk_built(enclosing_residual)];
+        built.sort_by(compare_multi_level_built_candidate_priority);
+
+        assert_eq!(
+            built[0].plan.candidate.signature,
+            "enclosing-residual",
+            "equivalent local objectives should schedule the broader residual before a child-scale no-op"
+        );
+    }
+
     #[test]
     fn iterative_multi_level_largest_mode_forces_one_parent_frontier_candidate() {
         let gfa = "\
@@ -10531,10 +10744,9 @@ P\talt\t1+,3+,4+\t*
         };
 
         let (headers, seqs) = candidate_named_sequences(&candidate).unwrap();
-        let paf = crate::syng_graph::pairwise_biwfa_paf(
-            &seqs[1].0, &seqs[1].1, &seqs[0].0, &seqs[0].1,
-        )
-        .expect("BiWFA should emit a PAF row for non-empty local replacement sequences");
+        let paf =
+            crate::syng_graph::pairwise_biwfa_paf(&seqs[1].0, &seqs[1].1, &seqs[0].0, &seqs[0].1)
+                .expect("BiWFA should emit a PAF row for non-empty local replacement sequences");
         let fields = paf.trim_end().split('\t').collect::<Vec<_>>();
 
         assert_eq!(fields[0], headers[1]);
