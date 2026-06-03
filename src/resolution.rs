@@ -2288,7 +2288,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after novelty/cap in {:.2?}; sources {}; residual-novelty compared={}, deferred={} (diagnostic keyed by root interval/source ancestry/traversals/root-span); repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after novelty/cap in {:.2?}; sources {}; complete-homologous-aggregated={}; residual-novelty compared={}, deferred={} (diagnostic keyed by root interval/source ancestry/traversals/root-span); repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2296,6 +2296,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 generated.candidates.len(),
                 discovery_elapsed,
                 format_multi_level_source_counts(&generated.source_counts),
+                generated.complete_homologous_aggregated,
                 generated.residual_novelty.compared,
                 generated.residual_novelty.deferred,
                 generated.repeat_boundary_rejected,
@@ -2609,6 +2610,7 @@ struct MultiLevelWindowCandidate {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum MultiLevelCandidateSource {
+    CompleteHomologousWindow,
     TopLevel,
     SiblingRun,
     ParentDescendants,
@@ -2621,6 +2623,7 @@ enum MultiLevelCandidateSource {
 impl MultiLevelCandidateSource {
     fn as_str(self) -> &'static str {
         match self {
+            Self::CompleteHomologousWindow => "complete-homologous-window",
             Self::TopLevel => "top-level",
             Self::SiblingRun => "sibling-run",
             Self::ParentDescendants => "parent-descendants",
@@ -2638,6 +2641,7 @@ struct MultiLevelGeneratedCandidates {
     generated_total: usize,
     source_counts: FxHashMap<MultiLevelCandidateSource, usize>,
     repeat_boundary_rejected: usize,
+    complete_homologous_aggregated: usize,
     total_bp_cap_exceeded: usize,
     max_len_cap_exceeded: usize,
     median_len_cap_exceeded: usize,
@@ -2950,7 +2954,7 @@ fn build_multi_level_window_candidate(
     if emit_logs && selected_count <= 128 {
         let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
         log::info!(
-            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} ancestry={} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
+            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} ancestry={} with {:?}; traversals={}, path-coverage={}, min-len={}, median-len={}, p90-len={}, max-len={}, total-len={}, root-span={}",
             round_number,
             started,
             selected_count,
@@ -2959,8 +2963,11 @@ fn build_multi_level_window_candidate(
             format_source_ancestry(&window.source_ancestry, 4),
             method,
             window.candidate.traversal_stats.count,
-            window.candidate.traversal_stats.max_len,
+            format_candidate_path_coverage(graph, &window.candidate),
+            window.candidate.traversal_stats.min_len,
             window.candidate.traversal_stats.median_len,
+            window.candidate.traversal_stats.p90_len,
+            window.candidate.traversal_stats.max_len,
             window.candidate.traversal_stats.total_len,
             window.candidate.root_span
         );
@@ -3021,15 +3028,25 @@ fn build_multi_level_window_candidate(
                     .map(format_sweepga_evidence)
                     .unwrap_or_else(|| "alignment_evidence=not-applicable".to_string());
                 log::info!(
-                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} ancestry={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
+                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} ancestry={} method={:?} {}; path_coverage={}; lengths=min/median/p90/max/total={}/{}/{}/{}/{}; {}; {}; input_segments={}, input_bp={}, output_segments={}, output_bp={}, replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
                     round_number,
                     candidate.source.as_str(),
                     candidate.source_sites,
                     format_source_ancestry(&candidate.source_ancestry, 4),
                     method,
                     format_candidate_boundary(graph, &candidate.plan.candidate),
+                    format_candidate_path_coverage(graph, &candidate.plan.candidate),
+                    candidate.plan.candidate.traversal_stats.min_len,
+                    candidate.plan.candidate.traversal_stats.median_len,
+                    candidate.plan.candidate.traversal_stats.p90_len,
+                    candidate.plan.candidate.traversal_stats.max_len,
+                    candidate.plan.candidate.traversal_stats.total_len,
                     format_candidate_repeat_summary(graph, &candidate.plan.candidate),
                     evidence,
+                    candidate.objective.input_segments,
+                    candidate.objective.input_segment_bp,
+                    candidate.objective.output_segments,
+                    candidate.objective.output_segment_bp,
                     candidate.plan.replacement.segments.len(),
                     replacement_segment_bp(&candidate.plan.replacement),
                     candidate.objective.score_delta,
@@ -3218,6 +3235,19 @@ fn generate_multi_level_candidates_with_residual_novelty(
         }
     }
 
+    if use_parent || use_sibling || use_sliding || use_outward {
+        add_complete_homologous_windows(
+            graph,
+            discovered,
+            target_bp,
+            &path_positions_by_path,
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
+
     if use_parent || use_sibling {
         add_parent_descendant_windows(
             discovered,
@@ -3374,8 +3404,11 @@ fn compare_multi_level_candidate_priority(
         // carries a broad high-entropy path-space block, so rank the capped
         // candidate by broad root span plus unique path-step mass before the
         // older balanced-frontier proxy.
-        multi_level_residual_scale_score(&b.candidate)
-            .cmp(&multi_level_residual_scale_score(&a.candidate))
+        complete_homologous_window_priority(a, b)
+            .then_with(|| {
+                multi_level_residual_scale_score(&b.candidate)
+                    .cmp(&multi_level_residual_scale_score(&a.candidate))
+            })
             .then_with(|| compare_same_source_window_priority(a, b, window_mode))
             .then_with(|| {
                 multi_level_source_priority(a.source).cmp(&multi_level_source_priority(b.source))
@@ -3400,6 +3433,20 @@ fn compare_multi_level_candidate_priority(
                 .cmp(&b.candidate.root_start_step)
         })
         .then_with(|| a.candidate.root_end_step.cmp(&b.candidate.root_end_step))
+}
+
+fn complete_homologous_window_priority(
+    a: &MultiLevelWindowCandidate,
+    b: &MultiLevelWindowCandidate,
+) -> std::cmp::Ordering {
+    match (
+        a.source == MultiLevelCandidateSource::CompleteHomologousWindow,
+        b.source == MultiLevelCandidateSource::CompleteHomologousWindow,
+    ) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 fn multi_level_residual_scale_score(candidate: &BubbleCandidate) -> u128 {
@@ -4051,6 +4098,411 @@ fn add_outward_residual_windows(
     }
 }
 
+fn add_complete_homologous_windows(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    target_bp: usize,
+    path_positions_by_path: &[Vec<usize>],
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if discovered.is_empty() || graph.paths.len() < 2 || path_positions_by_path.is_empty() {
+        return;
+    }
+    let path_count = graph.paths.len();
+    for (seed_idx, seed) in discovered.iter().enumerate() {
+        if !is_complete_homologous_seed(seed, target_bp, path_count) {
+            continue;
+        }
+        let cluster = complete_homologous_cluster_indexes(
+            discovered,
+            seed_idx,
+            &path_positions_by_path[0],
+            target_bp,
+        );
+        if cluster.is_empty() {
+            continue;
+        }
+        let max_candidate_span =
+            complete_homologous_max_cluster_span_bp(target_bp, seed.candidate.root_span);
+        let range_only_candidate = candidate_from_complete_homologous_cluster(
+            graph,
+            discovered,
+            &cluster,
+            path_positions_by_path,
+            false,
+        );
+        let expanded_candidate = candidate_from_complete_homologous_cluster(
+            graph,
+            discovered,
+            &cluster,
+            path_positions_by_path,
+            true,
+        );
+        let candidate = range_only_candidate
+            .filter(|candidate| {
+                candidate.ranges.len() >= path_count && candidate.root_span <= max_candidate_span
+            })
+            .or_else(|| {
+                expanded_candidate.filter(|candidate| {
+                    candidate.ranges.len() >= path_count
+                        && candidate.root_span <= max_candidate_span
+                })
+            });
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        let max_member_paths = cluster
+            .iter()
+            .filter_map(|&idx| discovered.get(idx))
+            .map(|site| site.candidate.ranges.len())
+            .max()
+            .unwrap_or(0);
+        let max_member_span = cluster
+            .iter()
+            .filter_map(|&idx| discovered.get(idx))
+            .map(|site| site.candidate.root_span)
+            .max()
+            .unwrap_or(0);
+        if candidate.ranges.len() <= max_member_paths && candidate.root_span <= max_member_span {
+            continue;
+        }
+        let before = generated.candidates.len();
+        insert_multi_level_candidate(
+            generated,
+            emitted,
+            resolved_signatures,
+            candidate,
+            MultiLevelCandidateSource::CompleteHomologousWindow,
+            cluster.len(),
+            source_ancestry_from_indexes(discovered, &cluster),
+            config,
+        );
+        if generated.candidates.len() > before {
+            generated.complete_homologous_aggregated += 1;
+        }
+    }
+}
+
+fn is_complete_homologous_seed(
+    site: &DiscoveredCandidate,
+    target_bp: usize,
+    path_count: usize,
+) -> bool {
+    if site.povu_level != 0 {
+        return false;
+    }
+    let candidate = &site.candidate;
+    if candidate.ranges.len() >= path_count {
+        return false;
+    }
+    let broad_support = candidate.ranges.len() >= path_count.saturating_div(4).max(2);
+    if target_bp > 0
+        && candidate.root_span
+            > target_bp.saturating_add(complete_homologous_neighbor_gap_bp(
+                target_bp,
+                candidate.root_span,
+            ))
+    {
+        return false;
+    }
+    let target_span_floor = target_bp.saturating_div(2).max(1);
+    let broad_root_span = candidate.root_span >= target_span_floor || candidate.root_span >= 10_000;
+    broad_support && (broad_root_span || is_outward_residual_seed(candidate, path_count))
+}
+
+fn complete_homologous_cluster_indexes(
+    discovered: &[DiscoveredCandidate],
+    seed_idx: usize,
+    root_positions: &[usize],
+    target_bp: usize,
+) -> Vec<usize> {
+    let Some(seed) = discovered.get(seed_idx) else {
+        return Vec::new();
+    };
+    let Some((mut cluster_begin, mut cluster_end)) =
+        candidate_root_step_bp_bounds(&seed.candidate, root_positions)
+    else {
+        return Vec::new();
+    };
+    let gap_bp = complete_homologous_neighbor_gap_bp(target_bp, seed.candidate.root_span);
+    let max_cluster_span =
+        complete_homologous_max_cluster_span_bp(target_bp, seed.candidate.root_span);
+    let mut selected = vec![false; discovered.len()];
+    selected[seed_idx] = true;
+
+    loop {
+        let mut changed = false;
+        for (idx, site) in discovered.iter().enumerate() {
+            if selected[idx] || site.candidate.ranges.len() < 2 {
+                continue;
+            }
+            let Some((begin, end)) = candidate_root_step_bp_bounds(&site.candidate, root_positions)
+            else {
+                continue;
+            };
+            if !intervals_touch_with_gap(cluster_begin, cluster_end, begin, end, gap_bp) {
+                continue;
+            }
+            let expanded_begin = cluster_begin.min(begin);
+            let expanded_end = cluster_end.max(end);
+            if expanded_end.saturating_sub(expanded_begin) > max_cluster_span {
+                continue;
+            }
+            selected[idx] = true;
+            cluster_begin = expanded_begin;
+            cluster_end = expanded_end;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut indexes = selected
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, is_selected)| is_selected.then_some(idx))
+        .collect::<Vec<_>>();
+    indexes.sort_by(|&a, &b| {
+        discovered[a]
+            .candidate
+            .root_start_step
+            .cmp(&discovered[b].candidate.root_start_step)
+            .then_with(|| {
+                discovered[a]
+                    .candidate
+                    .root_end_step
+                    .cmp(&discovered[b].candidate.root_end_step)
+            })
+            .then_with(|| discovered[a].povu_site_id.cmp(&discovered[b].povu_site_id))
+    });
+    indexes
+}
+
+fn complete_homologous_neighbor_gap_bp(target_bp: usize, seed_span: usize) -> usize {
+    target_bp
+        .max(seed_span)
+        .saturating_div(8)
+        .max(256)
+        .min(4_096)
+}
+
+fn complete_homologous_max_cluster_span_bp(target_bp: usize, seed_span: usize) -> usize {
+    let gap_bp = complete_homologous_neighbor_gap_bp(target_bp, seed_span);
+    target_bp
+        .saturating_add(gap_bp.saturating_mul(2))
+        .max(seed_span.saturating_add(gap_bp))
+}
+
+fn candidate_root_step_bp_bounds(
+    candidate: &BubbleCandidate,
+    root_positions: &[usize],
+) -> Option<(usize, usize)> {
+    let begin = root_positions.get(candidate.root_start_step).copied()?;
+    let end = candidate
+        .root_end_step
+        .checked_add(1)
+        .and_then(|idx| root_positions.get(idx).copied())?;
+    Some((begin, end))
+}
+
+fn intervals_touch_with_gap(
+    a_begin: usize,
+    a_end: usize,
+    b_begin: usize,
+    b_end: usize,
+    gap_bp: usize,
+) -> bool {
+    if interval_overlap(a_begin, a_end, b_begin, b_end) > 0 {
+        return true;
+    }
+    if a_end <= b_begin {
+        b_begin.saturating_sub(a_end) <= gap_bp
+    } else {
+        a_begin.saturating_sub(b_end) <= gap_bp
+    }
+}
+
+fn candidate_from_complete_homologous_cluster(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+    path_positions_by_path: &[Vec<usize>],
+    include_homologous_node_expansion: bool,
+) -> Option<BubbleCandidate> {
+    let mut range_by_path = FxHashMap::<usize, (usize, usize)>::default();
+    let mut level = usize::MAX;
+    for &idx in indexes {
+        let site = discovered.get(idx)?;
+        level = level.min(site.povu_level);
+        for range in &site.candidate.ranges {
+            merge_step_range(
+                &mut range_by_path,
+                range.path_idx,
+                range.begin_step,
+                range.end_step,
+            );
+        }
+    }
+
+    let homologous_nodes = if include_homologous_node_expansion {
+        complete_homologous_nodes(graph, discovered, indexes)
+    } else {
+        FxHashSet::default()
+    };
+    if include_homologous_node_expansion && !homologous_nodes.is_empty() {
+        for (path_idx, path) in graph.paths.iter().enumerate() {
+            let mut begin = usize::MAX;
+            let mut end = 0usize;
+            for (step_idx, step) in path.steps.iter().enumerate() {
+                if homologous_nodes.contains(&step.node) {
+                    begin = begin.min(step_idx);
+                    end = end.max(step_idx + 1);
+                }
+            }
+            if begin != usize::MAX && begin < end {
+                merge_step_range(&mut range_by_path, path_idx, begin, end);
+            }
+        }
+    }
+
+    let mut ranges = range_by_path
+        .into_iter()
+        .filter_map(|(path_idx, (begin_step, end_step))| {
+            if begin_step >= end_step {
+                return None;
+            }
+            let path = graph.paths.get(path_idx)?;
+            let positions = path_positions_by_path.get(path_idx)?;
+            let source_start = positions.get(begin_step).copied()?;
+            let source_end = positions.get(end_step).copied()?;
+            Some(PathRange {
+                path_idx,
+                source_path_name: Some(path.name.clone()),
+                source_start,
+                source_end,
+                begin_step,
+                end_step,
+                sequence: Vec::new(),
+                extended_sequence: Vec::new(),
+                left_flank_bp: 0,
+                right_flank_bp: 0,
+            })
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.path_idx);
+    if ranges.len() < 2 {
+        return None;
+    }
+
+    let root_range = ranges
+        .iter()
+        .find(|range| range.path_idx == 0)
+        .or_else(|| ranges.first())?;
+    let root_start_step = root_range.begin_step;
+    let root_end_step = root_range.end_step.checked_sub(1)?;
+    let root_positions = path_positions_by_path.get(0)?;
+    let root_span = root_positions
+        .get(root_range.end_step)
+        .copied()?
+        .saturating_sub(root_positions.get(root_start_step).copied()?);
+
+    let lengths = ranges
+        .iter()
+        .filter_map(|range| {
+            let positions = path_positions_by_path.get(range.path_idx)?;
+            Some(positions.get(range.end_step)? - positions.get(range.begin_step)?)
+        })
+        .collect::<Vec<_>>();
+    let traversal_stats = traversal_stats_from_lengths(lengths);
+    let total_steps = ranges
+        .iter()
+        .map(|range| range.end_step.saturating_sub(range.begin_step))
+        .sum::<usize>();
+    let mut unique_steps = FxHashSet::default();
+    for range in &ranges {
+        let path = &graph.paths[range.path_idx];
+        for step_idx in range.begin_step..range.end_step {
+            unique_steps.insert(path.steps[step_idx]);
+        }
+    }
+    let signature = candidate_signature(
+        graph,
+        0,
+        root_positions,
+        root_start_step,
+        root_end_step,
+        &ranges,
+        path_positions_by_path,
+    );
+
+    Some(BubbleCandidate {
+        ranges,
+        signature,
+        root_start_step,
+        root_end_step,
+        root_span,
+        total_steps,
+        unique_steps: unique_steps.len(),
+        traversal_stats,
+        level: if level == usize::MAX { 0 } else { level },
+    })
+}
+
+fn merge_step_range(
+    range_by_path: &mut FxHashMap<usize, (usize, usize)>,
+    path_idx: usize,
+    begin_step: usize,
+    end_step: usize,
+) {
+    if begin_step >= end_step {
+        return;
+    }
+    range_by_path
+        .entry(path_idx)
+        .and_modify(|(begin, end)| {
+            *begin = (*begin).min(begin_step);
+            *end = (*end).max(end_step);
+        })
+        .or_insert((begin_step, end_step));
+}
+
+fn complete_homologous_nodes(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+) -> FxHashSet<usize> {
+    let mut nodes = FxHashSet::<usize>::default();
+    for &idx in indexes {
+        let Some(site) = discovered.get(idx) else {
+            continue;
+        };
+        for range in &site.candidate.ranges {
+            let Some(path) = graph.paths.get(range.path_idx) else {
+                continue;
+            };
+            let span = range.end_step.saturating_sub(range.begin_step);
+            let begin = if span > 2 {
+                range.begin_step + 1
+            } else {
+                range.begin_step
+            };
+            let end = if span > 2 {
+                range.end_step.saturating_sub(1)
+            } else {
+                range.end_step
+            };
+            for step_idx in begin..end.min(path.steps.len()) {
+                nodes.insert(path.steps[step_idx].node);
+            }
+        }
+    }
+    nodes
+}
+
 fn add_index_windows(
     graph: &Graph,
     discovered: &[DiscoveredCandidate],
@@ -4400,13 +4852,14 @@ fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> b
 
 fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     match source {
-        MultiLevelCandidateSource::TopLevel => 0,
-        MultiLevelCandidateSource::ParentDescendants => 1,
-        MultiLevelCandidateSource::OutwardResidualWindow => 2,
-        MultiLevelCandidateSource::LevelWindow => 3,
-        MultiLevelCandidateSource::SiblingRun => 4,
-        MultiLevelCandidateSource::SlidingWindow => 5,
-        MultiLevelCandidateSource::StringyNeighborhood => 6,
+        MultiLevelCandidateSource::CompleteHomologousWindow => 0,
+        MultiLevelCandidateSource::TopLevel => 1,
+        MultiLevelCandidateSource::ParentDescendants => 2,
+        MultiLevelCandidateSource::OutwardResidualWindow => 3,
+        MultiLevelCandidateSource::LevelWindow => 4,
+        MultiLevelCandidateSource::SiblingRun => 5,
+        MultiLevelCandidateSource::SlidingWindow => 6,
+        MultiLevelCandidateSource::StringyNeighborhood => 7,
     }
 }
 
@@ -4631,6 +5084,7 @@ fn format_multi_level_source_counts(
     counts: &FxHashMap<MultiLevelCandidateSource, usize>,
 ) -> String {
     let ordered = [
+        MultiLevelCandidateSource::CompleteHomologousWindow,
         MultiLevelCandidateSource::TopLevel,
         MultiLevelCandidateSource::SiblingRun,
         MultiLevelCandidateSource::ParentDescendants,
@@ -4757,6 +5211,16 @@ fn format_candidate_boundary(graph: &Graph, candidate: &BubbleCandidate) -> Stri
     )
 }
 
+fn format_candidate_path_coverage(graph: &Graph, candidate: &BubbleCandidate) -> String {
+    let covered_paths = candidate
+        .ranges
+        .iter()
+        .map(|range| range.path_idx)
+        .collect::<FxHashSet<_>>()
+        .len();
+    format!("{}/{}", covered_paths, graph.paths.len())
+}
+
 fn format_candidate_repeat_summary(graph: &Graph, candidate: &BubbleCandidate) -> String {
     let node_visits = graph_node_visit_counts(graph);
     let mut nodes = FxHashSet::<usize>::default();
@@ -4820,7 +5284,7 @@ fn format_multi_level_candidate_details(
         .enumerate()
         .map(|(idx, window)| {
             format!(
-                "#{} source={} sites={} ancestry={} level={} {} traversals={} max={} median={} total={} unique_steps={} step_savings={}",
+                "#{} source={} sites={} ancestry={} level={} {} traversals={} path_coverage={} min={} median={} p90={} max={} total={} unique_steps={} step_savings={}",
                 idx + 1,
                 window.source.as_str(),
                 window.source_sites,
@@ -4828,8 +5292,11 @@ fn format_multi_level_candidate_details(
                 window.candidate.level,
                 format_candidate_boundary(graph, &window.candidate),
                 window.candidate.traversal_stats.count,
-                window.candidate.traversal_stats.max_len,
+                format_candidate_path_coverage(graph, &window.candidate),
+                window.candidate.traversal_stats.min_len,
                 window.candidate.traversal_stats.median_len,
+                window.candidate.traversal_stats.p90_len,
+                window.candidate.traversal_stats.max_len,
                 window.candidate.traversal_stats.total_len,
                 window.candidate.unique_steps,
                 window.candidate.estimated_step_savings()
@@ -10494,6 +10961,50 @@ P\tp1\t1+,3+,4+\t*
         }
     }
 
+    #[test]
+    fn largest_mode_prioritizes_complete_homologous_before_partial_top_level_scale() {
+        let partial_top_level = c4_like_residual_window(
+            "partial-c4-fragment",
+            3_315,
+            4_559,
+            32_787,
+            1_696,
+            117,
+            26_418,
+            32_787,
+            2_363_564,
+        );
+        let mut complete_window = c4_like_residual_window(
+            "complete-lower-scale",
+            100,
+            200,
+            10_000,
+            100,
+            465,
+            10_000,
+            10_000,
+            4_650_000,
+        );
+        complete_window.source = MultiLevelCandidateSource::CompleteHomologousWindow;
+        complete_window.source_sites = 12;
+
+        assert!(
+            multi_level_residual_scale_score(&partial_top_level.candidate)
+                > multi_level_residual_scale_score(&complete_window.candidate),
+            "fixture must reproduce the round-6 priority hazard"
+        );
+
+        let mut candidates = [partial_top_level, complete_window];
+        candidates.sort_by(|a, b| {
+            compare_multi_level_candidate_priority(a, b, MultiLevelWindowMode::Largest)
+        });
+
+        assert_eq!(
+            candidates[0].source,
+            MultiLevelCandidateSource::CompleteHomologousWindow
+        );
+    }
+
     fn built_test_candidate(window: MultiLevelWindowCandidate) -> MultiLevelBuiltCandidate {
         MultiLevelBuiltCandidate {
             source: window.source,
@@ -13003,6 +13514,377 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
             "{:?}",
             resolved.stats
         );
+    }
+
+    fn incomplete_homologous_fixture_graph() -> Graph {
+        Graph {
+            segments: vec![
+                Segment {
+                    id: "1".to_string(),
+                    seq: b"A".to_vec(),
+                },
+                Segment {
+                    id: "2".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "3".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "4".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "5".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "6".to_string(),
+                    seq: b"T".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "GRCh38#0#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00001#1#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step {
+                            node: 4,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00002#1#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00003#1#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step {
+                            node: 4,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+    fn homologous_candidate_for_paths(
+        graph: &Graph,
+        path_indexes: &[usize],
+        signature: &str,
+    ) -> BubbleCandidate {
+        let positions = (0..graph.paths.len())
+            .map(|path_idx| path_positions(graph, path_idx))
+            .collect::<Vec<_>>();
+        let ranges = path_indexes
+            .iter()
+            .map(|&path_idx| PathRange {
+                path_idx,
+                source_path_name: Some(graph.paths[path_idx].name.clone()),
+                source_start: positions[path_idx][1],
+                source_end: positions[path_idx][3],
+                begin_step: 1,
+                end_step: 3,
+                sequence: Vec::new(),
+                extended_sequence: Vec::new(),
+                left_flank_bp: 0,
+                right_flank_bp: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut unique_steps = FxHashSet::default();
+        for range in &ranges {
+            let path = &graph.paths[range.path_idx];
+            for step_idx in range.begin_step..range.end_step {
+                unique_steps.insert(path.steps[step_idx]);
+            }
+        }
+        BubbleCandidate {
+            ranges,
+            signature: signature.to_string(),
+            root_start_step: 1,
+            root_end_step: 2,
+            root_span: positions[0][3] - positions[0][1],
+            total_steps: path_indexes.len() * 2,
+            unique_steps: unique_steps.len(),
+            traversal_stats: TraversalStats {
+                count: path_indexes.len(),
+                min_len: 2,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: path_indexes.len() * 2,
+            },
+            level: 0,
+        }
+    }
+
+    fn two_node_homologous_replacement(path_count: usize) -> Graph {
+        Graph {
+            segments: vec![
+                Segment {
+                    id: "r1".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "r2".to_string(),
+                    seq: b"G".to_vec(),
+                },
+            ],
+            paths: (0..path_count)
+                .map(|idx| Path {
+                    name: format!("replacement_path_{idx}"),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                    ],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn partial_homologous_lacing_can_improve_locally_but_grow_globally() {
+        let graph = incomplete_homologous_fixture_graph();
+        let partial = homologous_candidate_for_paths(&graph, &[0, 1], "partial-homologous");
+        let replacement = two_node_homologous_replacement(partial.ranges.len());
+        let local_delta = replacement_objective_delta(
+            &graph,
+            &partial,
+            &replacement,
+            MultiLevelObjectiveMode::Size,
+        );
+        assert!(
+            local_delta.segment_delta > 0,
+            "fixture must reproduce blocker-04 local improvement: {:?}",
+            local_delta
+        );
+
+        let before_quality = graph_quality(&graph);
+        let mut next_id = 100;
+        let partial_after = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan {
+                candidate: partial,
+                replacement,
+            }],
+            &mut next_id,
+        )
+        .unwrap();
+        let partial_after_quality = graph_quality(&partial_after);
+        assert!(
+            partial_after_quality.segments > before_quality.segments,
+            "partial lacing should preserve old homologous nodes and add replacement nodes: before {}, after {}",
+            before_quality.summary(),
+            partial_after_quality.summary()
+        );
+
+        let complete = homologous_candidate_for_paths(&graph, &[0, 1, 2, 3], "complete-homologous");
+        let replacement = two_node_homologous_replacement(complete.ranges.len());
+        let local_delta = replacement_objective_delta(
+            &graph,
+            &complete,
+            &replacement,
+            MultiLevelObjectiveMode::Size,
+        );
+        assert!(
+            local_delta.segment_delta > 0,
+            "complete fixture should still improve locally: {:?}",
+            local_delta
+        );
+
+        let mut next_id = 200;
+        let complete_after = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan {
+                candidate: complete,
+                replacement,
+            }],
+            &mut next_id,
+        )
+        .unwrap();
+        let complete_after_quality = graph_quality(&complete_after);
+        assert!(
+            complete_after_quality.segments < before_quality.segments,
+            "complete lacing should remove the old homologous structure: before {}, after {}",
+            before_quality.summary(),
+            complete_after_quality.summary()
+        );
+        assert!(path_sequences_equal(&graph, &complete_after).unwrap());
+    }
+
+    #[test]
+    fn iterative_multi_level_aggregates_complete_homologous_traversal_set_before_cap() {
+        let graph = incomplete_homologous_fixture_graph();
+        let partial = homologous_candidate_for_paths(&graph, &[0, 1], "partial-homologous");
+        let discovered = vec![DiscoveredCandidate {
+            candidate: partial,
+            povu_site_id: "site-partial".to_string(),
+            povu_parent_id: None,
+            povu_level: 0,
+            is_leaf: true,
+        }];
+        let path_positions_by_path = (0..graph.paths.len())
+            .map(|path_idx| path_positions(&graph, path_idx))
+            .collect::<Vec<_>>();
+        assert!(is_complete_homologous_seed(
+            &discovered[0],
+            2,
+            graph.paths.len()
+        ));
+        let cluster =
+            complete_homologous_cluster_indexes(&discovered, 0, &path_positions_by_path[0], 2);
+        assert_eq!(cluster, vec![0]);
+        let range_only = candidate_from_complete_homologous_cluster(
+            &graph,
+            &discovered,
+            &cluster,
+            &path_positions_by_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(range_only.ranges.len(), 2, "{range_only:?}");
+
+        let aggregate = candidate_from_complete_homologous_cluster(
+            &graph,
+            &discovered,
+            &cluster,
+            &path_positions_by_path,
+            true,
+        )
+        .unwrap();
+        assert_eq!(aggregate.ranges.len(), graph.paths.len(), "{aggregate:?}");
+        assert_ne!(aggregate.signature, discovered[0].candidate.signature);
+
+        let mut manual_generated = MultiLevelGeneratedCandidates::default();
+        let mut manual_emitted = FxHashSet::default();
+        insert_multi_level_candidate(
+            &mut manual_generated,
+            &mut manual_emitted,
+            &FxHashSet::default(),
+            discovered[0].candidate.clone(),
+            MultiLevelCandidateSource::TopLevel,
+            1,
+            vec![source_ancestry_from_discovered(&discovered[0])],
+            &ResolutionConfig::default(),
+        );
+        add_complete_homologous_windows(
+            &graph,
+            &discovered,
+            2,
+            &path_positions_by_path,
+            &mut manual_generated,
+            &mut manual_emitted,
+            &FxHashSet::default(),
+            &ResolutionConfig::default(),
+        );
+        assert_eq!(
+            manual_generated.complete_homologous_aggregated, 1,
+            "{manual_generated:?}"
+        );
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 2,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+
+        assert_eq!(generated.complete_homologous_aggregated, 1, "{generated:?}");
+        assert_eq!(generated.candidates.len(), 1, "{generated:?}");
+        let candidate = &generated.candidates[0];
+        assert_eq!(
+            candidate.source,
+            MultiLevelCandidateSource::CompleteHomologousWindow
+        );
+        assert_eq!(candidate.candidate.ranges.len(), graph.paths.len());
+        assert_eq!(
+            format_candidate_path_coverage(&graph, &candidate.candidate),
+            "4/4"
+        );
+        assert!(
+            candidate
+                .source_ancestry
+                .iter()
+                .any(|entry| entry.contains("site=site-partial")),
+            "{candidate:?}"
+        );
+        let headers = candidate_sequence_headers(&candidate.candidate).unwrap();
+        assert!(headers.iter().all(|header| !header.contains("__impg")));
+        assert!(headers.iter().all(|header| !header.contains("candidate_")));
     }
 
     #[test]
