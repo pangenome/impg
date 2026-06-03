@@ -111,6 +111,37 @@ rounds 1-4 resolved 759, 618, 157, and 1 sites, and round 5 found no eligible
 candidates. The full log is
 `logs/one_many_scaffold0.spoa5.crush.log`.
 
+The follow-up low-min-match seed graphs used the same collected FASTA and the
+same FastGA/seqwish path, with only `--min-match-len 1` added:
+
+```bash
+impg graph \
+  --sequence-files c4_whole_region.fa \
+  --gfa-engine seqwish \
+  --fastga \
+  --num-mappings <MODE> \
+  --scaffold-filter <MODE> \
+  --scaffold-jump 0 \
+  --min-match-len 1 \
+  -g graphs/<label>.initial.gfa \
+  -t 32 -v 1
+```
+
+Follow-up modes run:
+
+- `one_many_minmatch1_scaffold0`: `<MODE>=1:many`
+- `many_many_minmatch1_scaffold0`: `<MODE>=many:many`
+
+The first low-min-match attempt was launched from the output directory and
+failed before alignment: `FAtoGDB` aborted with `*** buffer overflow detected
+***` while preparing the temporary GDB from
+`/home/erikg/impg/data/c4_whole_region_sweepga_seed_20260603T092921Z/.tmp6YkA6c.fa`.
+The captured stderr is
+`logs/one_many_minmatch1_scaffold0.graph.attempt1.stderr.log`; the timed exit
+status was 1. This was not a parser rejection of `--min-match-len 1`. Rerunning
+from the WG worktree, so the temporary FastGA paths lived under the shorter
+`/home/erikg/impg/.wg-worktrees/agent-447`, succeeded for both modes.
+
 Complete command and timing logs are in `commands.md`, `runtime_summary.tsv`,
 and `logs/` under the output directory.
 
@@ -128,10 +159,16 @@ Major commands, from `/usr/bin/time -v`:
 | POASTA `one_many_scaffold0` | 0:15.24 | 1.31 | 0 |
 | POASTA `ninety_ninety_scaffold0` | 0:15.70 | 1.32 | 0 |
 | SPOA `one_many_scaffold0.spoa5` | 0:36.45 | 1.54 | 0 |
+| graph `one_many_minmatch1_scaffold0` attempt 1 | 0:01.40 | 0.01 | 1 |
+| graph `one_many_minmatch1_scaffold0` rerun | 5:35.78 | 10.58 | 0 |
+| graph `many_many_minmatch1_scaffold0` | 6:17.99 | 11.25 | 0 |
 
 All graph-report, sort, and render commands exited 0. Their timings are in
 `runtime_summary.tsv`; the SPOA graph-report took 7.51 seconds, the Ygs sort
-took 11.77 seconds, and the gfalook render took 1.84 seconds.
+took 11.77 seconds, and the gfalook render took 1.84 seconds. The two
+min-match-1 graph-report commands took 9.99 and 10.95 seconds, their Ygs sorts
+took 15.67 and 20.86 seconds, and their gfalook renders took 1.97 and 2.01
+seconds.
 
 ## Metrics
 
@@ -146,6 +183,8 @@ Key `impg graph-report --format tsv` metrics:
 | `one_many_scaffold0.spoa5` | 8,387 | 250,010 | 426.74 | 4,609 | 3,445 | 112,207 | 214,719 |
 | `ninety_ninety_scaffold0.initial` | 7,431 | 234,157 | 455.63 | 2,921 | 23 | 144 | 26,157 |
 | `ninety_ninety_scaffold0.poasta2` | 7,886 | 248,237 | 429.79 | 4,038 | 3,427 | 110,838 | 223,826 |
+| `one_many_minmatch1_scaffold0.initial` | 8,186 | 232,093 | 459.68 | 2,808 | 6,687 | 189,754 | 256,597 |
+| `many_many_minmatch1_scaffold0.initial` | 8,154 | 230,664 | 462.53 | 2,795 | 19 | 24 | 34,018 |
 
 The best run by the graph-report stress metrics is
 `one_many_scaffold0.initial`: it has the lowest path jump p99, lowest
@@ -166,6 +205,20 @@ white-space p99 from 66 bp to 112,207 bp, and >=1 kb white-space bridges from
 slightly lower on path jump p99 and white-space p99, while singleton bp and
 long white-space bridge count are higher. The result is therefore
 path-preserving but not quality-improving.
+
+The low-min-match follow-up did not improve the seed choice. Lowering
+`--min-match-len` to 1 changed graph topology and increased segment count in
+both modes. `one_many_minmatch1_scaffold0.initial` has slightly lower stored
+segment bp than `one_many_scaffold0.initial`, but it regresses the topology
+metrics badly: path jump p99 rises from 5 to 6,687, white-space p99 rises from
+66 bp to 189,754 bp, and >=1 kb white-space bridges rise from 8,790 to 256,597.
+`many_many_minmatch1_scaffold0.initial` has the best white-space p99 in the
+table at 24 bp and lower singleton bp than the current best, but it still has
+more segments, higher path jump p99, and 34,018 long white-space bridges. Its
+render also shows more large bottom jump structure than
+`one_many_scaffold0.initial`. Since neither min-match-1 graph is visibly and
+topologically better than the current best seed, no SPOA polish was run for
+either follow-up graph.
 
 ## Validation
 
@@ -206,8 +259,14 @@ initial-vs-SPOA comparison also passed:
 | `one_many_scaffold0.spoa5` | 465 | 465 | 0 | 0 | 0 |
 
 I also compared exact GFA P-line path-name sets against the collected FASTA
-headers. Every initial, POASTA-polished, and SPOA-polished graph had
-`missing=0` and `extra=0`.
+headers. Every initial, POASTA-polished, SPOA-polished, and min-match-1 graph
+had `missing=0` and `extra=0`; the two min-match-1 graphs each had exactly 465
+P-line path names.
+
+| graph | P-line path names | missing FASTA names | extra GFA names |
+|---|---:|---:|---:|
+| `one_many_minmatch1_scaffold0.initial` | 465 | 0 | 0 |
+| `many_many_minmatch1_scaffold0.initial` | 465 | 0 | 0 |
 
 Validation limitation: exact path names are validated against the collected
 FASTA headers, and exact path spellings are validated from each initial GFA to
@@ -217,20 +276,26 @@ directly against the collected FASTA because it does not parse the preserved
 
 ## Renders
 
-All seven completed graphs were sorted with `gfasort -p Ygs -t 32` and rendered
-with `gfalook -m`.
+All original seven graphs and both min-match-1 follow-up graphs were sorted
+with `gfasort -p Ygs -t 32` and rendered with `gfalook -m`.
 
 Uploaded stable HyperVolume render URLs:
 
 - https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-initial.png
 - https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-poasta2.png
 - https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-spoa5.png
+- https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-many-many-initial.png
+- https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-one-many-minmatch1-scaffold0-initial.png
+- https://hypervolu.me/~erik/impg/c4-whole-region-sweepga-seed-many-many-minmatch1-scaffold0-initial.png
 
 Visual judgment from the mean-depth renders and the report metrics is that the
 unpolished `one_many_scaffold0.initial` graph is the cleanest product from this
-run. The polished one-many render is path-preserving, but the long-jump and
-white-space metrics show that both the POASTA and SPOA passes
-stretched/disconnected the layout relative to the initial seed graph.
+run. The existing `many_many_scaffold0.initial` render is close, but its path
+jump p99 and long white-space bridge count are worse than one-many. The
+min-match-1 renders do not overturn that result: one-many min-match-1 has a
+large long-jump regression, and many-many min-match-1 adds enough bottom jump
+structure and long bridge count that it is not a safer seed for small-loop
+polish.
 
 ## Baseline comparison
 
@@ -246,6 +311,8 @@ WG FastGA 8-round report:
 | this run: `one_many_scaffold0.initial` | 7,411 | 234,828 | 454.33 | 2,922 | 8,790 |
 | this run: `one_many_scaffold0.poasta2` | 7,860 | 248,941 | 428.57 | 4,152 | 214,252 |
 | this run: `one_many_scaffold0.spoa5` | 8,387 | 250,010 | 426.74 | 4,609 | 214,719 |
+| this run: `one_many_minmatch1_scaffold0.initial` | 8,186 | 232,093 | 459.68 | 2,808 | 256,597 |
+| this run: `many_many_minmatch1_scaffold0.initial` | 8,154 | 230,664 | 462.53 | 2,795 | 34,018 |
 
 `one_many_scaffold0.initial` beats the current syng-derived C4 path on the
 main stress indicators: fewer segments, much lower singleton bp, higher
@@ -264,7 +331,8 @@ local-syng sweep table.
 The experiment supports using syng only for C4 sequence collection and building
 the first local graph from the whole collected region with FastGA/SweepGA plus
 seqwish. The best graph here is `one_many_scaffold0.initial`, not any
-syng-topology seed and not the small-bubble-polished derivative.
+syng-topology seed, not a many-many seed, not a lower-min-match seed, and not a
+small-bubble-polished derivative.
 
 The configured two-iteration POASTA polish and the five-iteration SPOA polish
 are path-preserving but not quality-improving for this graph. SPOA exhausted
