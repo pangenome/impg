@@ -25,6 +25,7 @@ use std::time::Instant;
 const GRAPH_QUALITY_LONG_BRIDGE_BP: usize = 10_000;
 const GRAPH_QUALITY_WHITE_SPACE_FLOOR_BP: usize = 1_000;
 static DEBUG_REPLACEMENT_ID: AtomicUsize = AtomicUsize::new(0);
+static DEBUG_APPLIED_FRONTIER_ID: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_SMOOTH_USED: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_EMPTY: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_SMOOTH_FAILURE: AtomicUsize = AtomicUsize::new(0);
@@ -786,6 +787,47 @@ struct TraversalStats {
 struct ReplacementPlan {
     candidate: BubbleCandidate,
     replacement: Graph,
+    method: ResolutionMethod,
+    debug_source: Option<ReplacementPlanSource>,
+    debug_objective: Option<ReplacementObjectiveDelta>,
+}
+
+impl ReplacementPlan {
+    fn new(candidate: BubbleCandidate, replacement: Graph, method: ResolutionMethod) -> Self {
+        Self {
+            candidate,
+            replacement,
+            method,
+            debug_source: None,
+            debug_objective: None,
+        }
+    }
+
+    fn with_debug_source(
+        mut self,
+        source: MultiLevelCandidateSource,
+        source_sites: usize,
+        source_ancestry: Vec<String>,
+    ) -> Self {
+        self.debug_source = Some(ReplacementPlanSource {
+            source,
+            source_sites,
+            source_ancestry,
+        });
+        self
+    }
+
+    fn with_debug_objective(mut self, objective: ReplacementObjectiveDelta) -> Self {
+        self.debug_objective = Some(objective);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ReplacementPlanSource {
+    source: MultiLevelCandidateSource,
+    source_sites: usize,
+    source_ancestry: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1201,10 +1243,11 @@ fn resolve_graph_bubbles(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
                         candidate,
                         replacement,
-                    }))
+                        method,
+                    )))
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1592,10 +1635,11 @@ fn resolve_graph_bubble_chains(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
                         candidate,
                         replacement,
-                    }))
+                        ResolutionMethod::ChainGreedy,
+                    )))
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1840,10 +1884,11 @@ fn resolve_graph_bubbles_chain_povu(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
                         candidate,
                         replacement,
-                    }))
+                        ResolutionMethod::ChainPovu,
+                    )))
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2154,9 +2199,12 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
         .collect::<Vec<_>>();
     let plans = builds
         .into_iter()
-        .map(|build| ReplacementPlan {
-            candidate: build.candidate,
-            replacement: build.replacement,
+        .map(|build| {
+            ReplacementPlan::new(
+                build.candidate,
+                build.replacement,
+                ResolutionMethod::TopFlubbleSweepga,
+            )
         })
         .collect::<Vec<_>>();
 
@@ -3038,10 +3086,9 @@ fn build_multi_level_window_candidate(
             source_sites,
             source_ancestry: source_ancestry.clone(),
             method,
-            plan: ReplacementPlan {
-                candidate: window.candidate,
-                replacement,
-            },
+            plan: ReplacementPlan::new(window.candidate, replacement, method)
+                .with_debug_source(source, source_sites, source_ancestry.clone())
+                .with_debug_objective(objective),
             objective,
             evidence: report.evidence,
         }))
@@ -7675,6 +7722,7 @@ fn apply_replacement_frontier(
             "resolved graph failed exact path-sequence validation",
         ));
     }
+    debug_write_applied_frontier(graph, plans, &rendered, &next);
     Ok(next)
 }
 
@@ -9090,6 +9138,7 @@ fn build_poasta_replacement(
         &weights,
     )?;
 
+    let debug_dir = debug_replacement_build_dir("poasta");
     let mut gfa = Vec::new();
     graph_to_gfa(&mut gfa, &graph).map_err(|err| {
         io::Error::other(format!("POASTA replacement GFA generation failed: {err}"))
@@ -9100,9 +9149,31 @@ fn build_poasta_replacement(
             format!("POASTA replacement GFA is not UTF-8: {err}"),
         )
     })?;
+    if let Some(dir) = &debug_dir {
+        debug_write_file(&dir.join("raw.graph_to_gfa.gfa"), &gfa);
+    }
     let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
     let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
     order_replacement_paths(&mut replacement, &headers)?;
+    if let Some(dir) = &debug_dir {
+        let exact_gfa = render_graph(&replacement);
+        debug_write_file(&dir.join("exact.normalized.gfa"), &exact_gfa);
+        debug_write_file(
+            &dir.join("poasta-build.tsv"),
+            format!(
+                "input_paths\tinput_bp\traw_segments\traw_links\traw_walks\texact_segments\texact_links\texact_paths\texact_bp\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                headers.len(),
+                expected_paths.iter().map(|(_, seq)| seq.len()).sum::<usize>(),
+                debug_gfa_record_count(&gfa, 'S'),
+                debug_gfa_record_count(&gfa, 'L'),
+                debug_gfa_record_count(&gfa, 'W'),
+                replacement.segments.len(),
+                debug_gfa_record_count(&exact_gfa, 'L'),
+                replacement.paths.len(),
+                replacement_segment_bp(&replacement)
+            ),
+        );
+    }
     validate_replacement_paths(&replacement, candidate, "POASTA")?;
 
     Ok(replacement)
@@ -10140,6 +10211,266 @@ fn path_sequence_map(graph: &Graph) -> io::Result<FxHashMap<String, Vec<u8>>> {
     Ok(map)
 }
 
+fn crush_debug_root() -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("IMPG_CRUSH_DEBUG_DIR")?;
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(root))
+}
+
+fn debug_sanitize_token(raw: &str) -> String {
+    let token = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if token.is_empty() {
+        "unknown".to_string()
+    } else {
+        token
+    }
+}
+
+fn debug_write_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            log::debug!(
+                "crush debug: failed to create debug dir {}: {}",
+                parent.display(),
+                err
+            );
+            return;
+        }
+    }
+    if let Err(err) = std::fs::write(path, contents) {
+        log::debug!(
+            "crush debug: failed to write debug file {}: {}",
+            path.display(),
+            err
+        );
+    }
+}
+
+fn debug_replacement_build_dir(method: &str) -> Option<std::path::PathBuf> {
+    let root = crush_debug_root()?;
+    let id = DEBUG_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed);
+    let method = debug_sanitize_token(method);
+    let dir = root.join(format!("replacement_{id:04}_{method}"));
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
+fn debug_method_label(method: ResolutionMethod) -> &'static str {
+    match method {
+        ResolutionMethod::Poa => "Poa",
+        ResolutionMethod::Poasta | ResolutionMethod::ChainGreedy | ResolutionMethod::ChainPovu => {
+            "Poasta"
+        }
+        ResolutionMethod::Allwave => "Allwave",
+        ResolutionMethod::Sweepga
+        | ResolutionMethod::Wfmash
+        | ResolutionMethod::TopFlubbleSweepga => "Sweepga",
+        ResolutionMethod::StarBiwfa => "Biwfa",
+        ResolutionMethod::Auto => "Auto",
+        ResolutionMethod::Hierarchical => "Hierarchical",
+        ResolutionMethod::IterativeMultiLevel => "IterativeMultiLevel",
+        ResolutionMethod::CoverageMultiBubble => "CoverageMultiBubble",
+    }
+}
+
+fn debug_source_short(source: Option<MultiLevelCandidateSource>) -> String {
+    match source {
+        Some(MultiLevelCandidateSource::CompleteHomologousWindow) => "chw".to_string(),
+        Some(MultiLevelCandidateSource::TopLevel) => "top".to_string(),
+        Some(MultiLevelCandidateSource::SiblingRun) => "sibling".to_string(),
+        Some(MultiLevelCandidateSource::ParentDescendants) => "parent".to_string(),
+        Some(MultiLevelCandidateSource::SlidingWindow) => "sliding".to_string(),
+        Some(MultiLevelCandidateSource::LevelWindow) => "level".to_string(),
+        Some(MultiLevelCandidateSource::StringyNeighborhood) => "stringy".to_string(),
+        Some(MultiLevelCandidateSource::OutwardResidualWindow) => "outward".to_string(),
+        None => "candidate".to_string(),
+    }
+}
+
+fn candidate_covered_path_count(candidate: &BubbleCandidate) -> usize {
+    candidate
+        .ranges
+        .iter()
+        .map(|range| range.path_idx)
+        .collect::<FxHashSet<_>>()
+        .len()
+}
+
+fn debug_applied_candidate_label(graph: &Graph, rank: usize, plan: &ReplacementPlan) -> String {
+    let method = debug_method_label(plan.method);
+    let source = debug_source_short(plan.debug_source.as_ref().map(|source| source.source));
+    let covered_paths = candidate_covered_path_count(&plan.candidate);
+    let source_sites = plan
+        .debug_source
+        .as_ref()
+        .map(|source| source.source_sites)
+        .unwrap_or(plan.candidate.ranges.len());
+    format!(
+        "{method}_crush{rank:02}_{source}_span{}bp_med{}bp_cov{}of{}_sites{}_steps{}-{}",
+        plan.candidate.root_span,
+        plan.candidate.traversal_stats.median_len,
+        covered_paths,
+        graph.paths.len(),
+        source_sites,
+        plan.candidate.root_start_step,
+        plan.candidate.root_end_step
+    )
+}
+
+fn debug_tsv_field(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+}
+
+fn debug_gfa_record_count(gfa: &str, record: char) -> usize {
+    gfa.lines()
+        .filter(|line| line.as_bytes().first().copied() == Some(record as u8))
+        .count()
+}
+
+fn debug_write_replacement_path_lengths(dir: &std::path::Path, plan: &ReplacementPlan) {
+    let mut out = String::from(
+        "path_index\treplacement_path\tsource_path\texpected_bp\tobserved_bp\tpreserved\n",
+    );
+    for (idx, range) in plan.candidate.ranges.iter().enumerate() {
+        let expected = range_aligner_sequence(range);
+        let source_path = range.source_path_name.as_deref().unwrap_or("");
+        let (path_name, observed_len, preserved) = match plan.replacement.paths.get(idx) {
+            Some(path) => match path_sequence(&plan.replacement, path) {
+                Ok(observed) => (
+                    path.name.as_str(),
+                    observed.len().to_string(),
+                    (observed == expected).to_string(),
+                ),
+                Err(err) => (
+                    path.name.as_str(),
+                    format!("error:{err}"),
+                    "false".to_string(),
+                ),
+            },
+            None => ("", "missing".to_string(), "false".to_string()),
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            idx,
+            debug_tsv_field(path_name),
+            debug_tsv_field(source_path),
+            expected.len(),
+            debug_tsv_field(observed_len),
+            preserved
+        ));
+    }
+    debug_write_file(&dir.join("path-lengths.tsv"), out);
+}
+
+fn debug_write_applied_frontier(
+    graph: &Graph,
+    plans: &[ReplacementPlan],
+    rendered: &str,
+    parsed: &Graph,
+) {
+    if plans.is_empty() {
+        return;
+    }
+    let Some(root) = crush_debug_root() else {
+        return;
+    };
+    let frontier_id = DEBUG_APPLIED_FRONTIER_ID.fetch_add(1, Ordering::Relaxed);
+    let dir = root.join(format!("applied_frontier_{frontier_id:04}"));
+    debug_write_file(&dir.join("final_laced.gfa"), rendered);
+    debug_write_file(
+        &dir.join("frontier-summary.tsv"),
+        format!(
+            "frontier_id\tplans\tfinal_segments\tfinal_links\tfinal_paths\n{}\t{}\t{}\t{}\t{}\n",
+            frontier_id,
+            plans.len(),
+            parsed.segments.len(),
+            debug_gfa_record_count(rendered, 'L'),
+            parsed.paths.len()
+        ),
+    );
+
+    let mut metadata = String::from(
+        "rank\tlabel\tmethod\tsource\tsource_sites\tsource_ancestry\tboundary\tpath_coverage\ttraversals\tmin_len\tmedian_len\tp90_len\tmax_len\ttotal_len\troot_span\treplacement_segments\treplacement_links\treplacement_paths\treplacement_bp\tinput_segments\tinput_bp\toutput_segments\toutput_bp\tobjective_score_delta\tcoverage_delta_scaled\tsingleton_bp_delta\tsegment_delta\tsegment_bp_delta\tsignature\treplacement_gfa\n",
+    );
+    for (idx, plan) in plans.iter().enumerate() {
+        let rank = idx + 1;
+        let label = debug_applied_candidate_label(graph, rank, plan);
+        let plan_dir = dir.join(&label);
+        let replacement_gfa = render_graph(&plan.replacement);
+        debug_write_file(&plan_dir.join("replacement.gfa"), &replacement_gfa);
+        debug_write_replacement_path_lengths(&plan_dir, plan);
+
+        let source = plan.debug_source.as_ref();
+        let objective = plan.debug_objective;
+        let source_name = source
+            .map(|source| source.source.as_str())
+            .unwrap_or("unknown");
+        let source_sites = source
+            .map(|source| source.source_sites.to_string())
+            .unwrap_or_default();
+        let source_ancestry = source
+            .map(|source| format_source_ancestry(&source.source_ancestry, usize::MAX))
+            .unwrap_or_default();
+        let replacement_links = debug_gfa_record_count(&replacement_gfa, 'L');
+        let replacement_bp = replacement_segment_bp(&plan.replacement);
+        let objective_field =
+            |value: Option<i128>| value.map(|v| v.to_string()).unwrap_or_default();
+        let objective_usize =
+            |value: Option<usize>| value.map(|v| v.to_string()).unwrap_or_default();
+        metadata.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            rank,
+            debug_tsv_field(&label),
+            debug_tsv_field(debug_method_label(plan.method)),
+            debug_tsv_field(source_name),
+            source_sites,
+            debug_tsv_field(source_ancestry),
+            debug_tsv_field(format_candidate_boundary(graph, &plan.candidate)),
+            debug_tsv_field(format_candidate_path_coverage(graph, &plan.candidate)),
+            plan.candidate.traversal_stats.count,
+            plan.candidate.traversal_stats.min_len,
+            plan.candidate.traversal_stats.median_len,
+            plan.candidate.traversal_stats.p90_len,
+            plan.candidate.traversal_stats.max_len,
+            plan.candidate.traversal_stats.total_len,
+            plan.candidate.root_span,
+            plan.replacement.segments.len(),
+            replacement_links,
+            plan.replacement.paths.len(),
+            replacement_bp,
+            objective_usize(objective.map(|o| o.input_segments)),
+            objective_usize(objective.map(|o| o.input_segment_bp)),
+            objective_usize(objective.map(|o| o.output_segments)),
+            objective_usize(objective.map(|o| o.output_segment_bp)),
+            objective_field(objective.map(|o| o.score_delta)),
+            objective_field(objective.map(|o| o.bp_weighted_coverage_delta_scaled)),
+            objective_field(objective.map(|o| o.singleton_bp_delta)),
+            objective_field(objective.map(|o| o.segment_delta)),
+            objective_field(objective.map(|o| o.segment_bp_delta)),
+            debug_tsv_field(&plan.candidate.signature),
+            debug_tsv_field(format!("{}/replacement.gfa", label))
+        ));
+    }
+    debug_write_file(&dir.join("applied-candidates.tsv"), metadata);
+}
+
 fn render_rewritten_graph(
     original: &Graph,
     replacements: &[Graph],
@@ -10536,10 +10867,11 @@ PY
     #[test]
     fn replacement_at_path_start_is_ordered_before_first_surviving_original() {
         let graph = parse_gfa("H\tVN:Z:1.0\nS\t1\tA\nS\t2\tC\nP\tpath0\t1+,2+\t*\n").unwrap();
-        let plan = ReplacementPlan {
-            candidate: one_range_candidate(0, 0, 1, b"A"),
-            replacement: single_path_replacement_gfa("path0", "A"),
-        };
+        let plan = ReplacementPlan::new(
+            one_range_candidate(0, 0, 1, b"A"),
+            single_path_replacement_gfa("path0", "A"),
+            ResolutionMethod::Poa,
+        );
         let mut next_id = 3;
         let resolved = apply_replacement_frontier(&graph, &[plan], &mut next_id).unwrap();
         let segment_sequences = resolved
@@ -11545,13 +11877,14 @@ P\tp1\t1+,3+,4+\t*
             source_sites: window.source_sites,
             source_ancestry: window.source_ancestry,
             method: ResolutionMethod::Poa,
-            plan: ReplacementPlan {
-                candidate: window.candidate,
-                replacement: Graph {
+            plan: ReplacementPlan::new(
+                window.candidate,
+                Graph {
                     segments: Vec::new(),
                     paths: Vec::new(),
                 },
-            },
+                ResolutionMethod::Poa,
+            ),
             objective: ReplacementObjectiveDelta::default(),
             evidence: None,
         }
@@ -11691,13 +12024,14 @@ P\tp1\t1+,3+,4+\t*
             source_sites: 1,
             source_ancestry: vec!["built-test".to_string()],
             method: ResolutionMethod::Poa,
-            plan: ReplacementPlan {
+            plan: ReplacementPlan::new(
                 candidate,
-                replacement: Graph {
+                Graph {
                     segments: Vec::new(),
                     paths: Vec::new(),
                 },
-            },
+                ResolutionMethod::Poa,
+            ),
             objective: ReplacementObjectiveDelta {
                 score_delta: 0,
                 segment_delta: 0,
@@ -14359,10 +14693,11 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         let mut next_id = 100;
         let partial_after = apply_replacement_frontier(
             &graph,
-            &[ReplacementPlan {
-                candidate: partial,
+            &[ReplacementPlan::new(
+                partial,
                 replacement,
-            }],
+                ResolutionMethod::Poa,
+            )],
             &mut next_id,
         )
         .unwrap();
@@ -14391,10 +14726,11 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         let mut next_id = 200;
         let complete_after = apply_replacement_frontier(
             &graph,
-            &[ReplacementPlan {
-                candidate: complete,
+            &[ReplacementPlan::new(
+                complete,
                 replacement,
-            }],
+                ResolutionMethod::Poa,
+            )],
             &mut next_id,
         )
         .unwrap();
