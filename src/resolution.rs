@@ -4958,16 +4958,23 @@ fn multi_level_window_replacement_method(
 ) -> ResolutionMethod {
     let method = candidate_replacement_method(&window.candidate, config);
     if method == ResolutionMethod::Poa
+        && !poa_tier_covers_poasta_tier(config)
         && (window.source_sites > 1
             || broad_residual_overflows_small_poa_tier(&window.candidate, config))
     {
-        // Multi-site and broad residual windows should not go through the
-        // tiny-bubble SPOA path. Prefer POASTA when its auto tier is enabled;
-        // otherwise fall through to the scalable pairwise graph builder.
+        // Under normal three-tier routing, multi-site and broad residual
+        // windows should not go through the tiny-bubble SPOA path. Equal or
+        // inverted POA/POASTA ceilings intentionally collapse the middle tier.
         scalable_multi_level_direct_method(config)
     } else {
         method
     }
+}
+
+fn poa_tier_covers_poasta_tier(config: &ResolutionConfig) -> bool {
+    config.auto_spoa_max_traversal_len > 0
+        && config.auto_poasta_max_traversal_len > 0
+        && config.auto_spoa_max_traversal_len >= config.auto_poasta_max_traversal_len
 }
 
 fn scalable_multi_level_direct_method(config: &ResolutionConfig) -> ResolutionMethod {
@@ -10271,6 +10278,7 @@ fn debug_replacement_build_dir(method: &str) -> Option<std::path::PathBuf> {
 fn debug_method_label(method: ResolutionMethod) -> &'static str {
     match method {
         ResolutionMethod::Poa => "Poa",
+        ResolutionMethod::Abpoa => "abPOA",
         ResolutionMethod::Poasta | ResolutionMethod::ChainGreedy | ResolutionMethod::ChainPovu => {
             "Poasta"
         }
@@ -14244,6 +14252,21 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         assert_eq!(
             multi_level_window_replacement_method(window, &config),
             ResolutionMethod::Poasta
+        );
+
+        let global_poa = ResolutionConfig {
+            auto_spoa_max_traversal_len: 1_000,
+            auto_poasta_max_traversal_len: 1_000,
+            ..config.clone()
+        };
+        assert_eq!(
+            auto_method_by_median(window.candidate.traversal_stats, &global_poa),
+            ResolutionMethod::Poa
+        );
+        assert_eq!(
+            multi_level_window_replacement_method(window, &global_poa),
+            ResolutionMethod::Poa,
+            "equal POA/POASTA ceilings collapse the middle tier instead of promoting to POASTA"
         );
 
         let forced_sweepga = ResolutionConfig {
