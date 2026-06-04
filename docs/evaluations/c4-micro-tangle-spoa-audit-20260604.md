@@ -119,34 +119,87 @@ This is only a small local improvement and still introduces local white-space.
 
 ## Interpretation
 
-Direct SPOA is not the missing C4 cleanup pass in its current form.
+Direct SPOA is not a no-op and should not be rejected because global
+white-space/layout metrics increase. In these repetitive C4 micro-sites,
+increased white-space is an expected rendering/layout effect when previously
+compact repeated sequence is unfolded into lower-coverage local POA structure.
+White-space is diagnostic only; it is not a correctness gate.
 
-For micro-sites that are already compact in the syng/SweepGA seed, SPOA can
-decompact them into per-base or near-per-base POA structure. For other small
-sites, it can make a modest local improvement, but this does not translate into
-better full-graph structure. On full C4, applying hundreds of these replacements
-preserves path spellings but severely worsens path-order and white-space
-metrics.
+The hard correctness gate is path spelling. On this gate, direct SPOA is clean.
+An accept-all C4 run with wide budgets preserved every path sequence while
+accepting every replacement it could materialize.
+
+## Accept-All SPOA Run
+
+Command class:
+
+```text
+impg crush --method poa --max-iterations 20 \
+  --max-traversal-len 50k --max-median-traversal-len 50k \
+  --max-total-sequence 2g --max-traversals 100k
+```
+
+Output directory:
+
+```text
+data/c4_micro_tangle_accept_all_20260604T102704Z/
+```
+
+This run accepted all path-valid, non-overlapping frontiers until convergence:
+
+```text
+initial POVU: 2849 sites, 2550 polymorphic candidates, 1747 level-0 roots
+round 1: 1786 candidates, 759 selected, 759/759 accepted
+round 2: 897 candidates, 618 selected, 618/618 accepted
+round 3: 254 candidates, 157 selected, 157/157 accepted
+round 4: 97 candidates, 1 selected, 1/1 accepted
+round 5: 2934 POVU sites, 0 eligible candidates
+total: 1535 resolved, 0 bailed
+runtime: 5:43.19
+max RSS: 1.6 GB
+```
+
+Path validation against the seed graph:
+
+```text
+expected_paths    465
+observed_paths    465
+missing_paths     0
+extra_paths       0
+spelling_mismatches 0
+```
+
+Metrics, diagnostic only:
+
+| graph | segments | bp | bp-weighted coverage | singleton bp | path-jump p99 | white p99 | white max | long white bridges |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| seed | 7411 | 234828 | 454.330293 | 2922 | 5 | 66 | 33624 | 8790 |
+| accept-all SPOA | 8387 | 250010 | 426.740826 | 4609 | 3445 | 112207 | 249452 | 214719 |
+
+The increase in white-space/path-jump should be interpreted as a rendering and
+local-unfolding signal, not as a reason to reject the replacements.
 
 The sharper diagnosis is:
 
 - POVU sees many micro-tangles.
-- The current unique-anchor candidate model loses many high-depth micro-sites.
-- The micro-sites it does collect are not necessarily the right replacement
-  unit for full-graph cleanup.
-- SPOA should not be applied blindly to every 100s-bp candidate. It needs either
-  a stricter “actually tangled/underaligned” target definition or a different
-  context-aware larger-block pass before any small-site polish.
+- The current direct-SPOA loop accepts all materializable, non-overlapping,
+  path-valid candidates.
+- Many high-depth micro-sites remain visible to POVU but do not become eligible
+  candidates after the descent converges.
+- Therefore the remaining gap is not a quality/rejection gate. It is the mapping
+  from POVU sites to active materializable replacement units, especially around
+  repeated boundary nodes and nested/reused local sites.
 
 ## Next Step
 
 The next useful experiment is not another median threshold sweep. It is a
-candidate-classifier audit:
+candidate-admission audit:
 
-1. classify POVU sites into unique-anchor resolvable vs non-resolvable;
-2. identify which class corresponds to visible white-space/tangle artifacts;
-3. apply larger context-aware SweepGA/seqwish replacement to the surrounding
-   block first;
-4. run small-site POA only on residual sites that are not already compact and
-   whose local replacement reduces path steps without increasing white-space.
-
+1. classify all final POVU sites into materializable vs non-materializable;
+2. for non-materializable sites, record why: non-unique entry/exit, no active
+   tree key, nested site already consumed, repeated boundary, or path range
+   ambiguity;
+3. extend the replacement-unit builder so repeated-boundary micro-sites can be
+   grouped into a larger safe unit instead of disappearing from the active
+   frontier;
+4. keep path spelling as the only hard acceptance gate.
