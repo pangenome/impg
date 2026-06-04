@@ -2483,6 +2483,38 @@ fn resolve_graph_bubbles_iterative_multi_level(
             accepted.push(candidate);
         }
 
+        if emit_logs && accepted.len() <= 256 {
+            for (rank, candidate) in accepted.iter().enumerate() {
+                log::info!(
+                    "crush iterative-multi-level round {}: applied candidate detail #{} source={} sites={} ancestry={} method={:?} {}; path_coverage={}; lengths=min/median/p90/max/total={}/{}/{}/{}/{}; input_segments={}, input_bp={}, output_segments={}, output_bp={}, replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
+                    round + 1,
+                    rank + 1,
+                    candidate.source.as_str(),
+                    candidate.source_sites,
+                    format_source_ancestry(&candidate.source_ancestry, 4),
+                    candidate.method,
+                    format_candidate_boundary(&graph, &candidate.plan.candidate),
+                    format_candidate_path_coverage(&graph, &candidate.plan.candidate),
+                    candidate.plan.candidate.traversal_stats.min_len,
+                    candidate.plan.candidate.traversal_stats.median_len,
+                    candidate.plan.candidate.traversal_stats.p90_len,
+                    candidate.plan.candidate.traversal_stats.max_len,
+                    candidate.plan.candidate.traversal_stats.total_len,
+                    candidate.objective.input_segments,
+                    candidate.objective.input_segment_bp,
+                    candidate.objective.output_segments,
+                    candidate.objective.output_segment_bp,
+                    candidate.plan.replacement.segments.len(),
+                    replacement_segment_bp(&candidate.plan.replacement),
+                    candidate.objective.score_delta,
+                    candidate.objective.bp_weighted_coverage_delta_scaled,
+                    candidate.objective.singleton_bp_delta,
+                    candidate.objective.segment_delta,
+                    candidate.objective.segment_bp_delta
+                );
+            }
+        }
+
         if accepted.is_empty() {
             if emit_logs {
                 log::info!(
@@ -2670,6 +2702,7 @@ struct MultiLevelBuiltCandidate {
     source: MultiLevelCandidateSource,
     source_sites: usize,
     source_ancestry: Vec<String>,
+    method: ResolutionMethod,
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
@@ -2996,6 +3029,7 @@ fn build_multi_level_window_candidate(
             source,
             source_sites,
             source_ancestry: source_ancestry.clone(),
+            method,
             plan: ReplacementPlan {
                 candidate: window.candidate,
                 replacement,
@@ -11181,6 +11215,7 @@ P\tp1\t1+,3+,4+\t*
             source: window.source,
             source_sites: window.source_sites,
             source_ancestry: window.source_ancestry,
+            method: ResolutionMethod::Poa,
             plan: ReplacementPlan {
                 candidate: window.candidate,
                 replacement: Graph {
@@ -11326,6 +11361,7 @@ P\tp1\t1+,3+,4+\t*
             source: MultiLevelCandidateSource::TopLevel,
             source_sites: 1,
             source_ancestry: vec!["built-test".to_string()],
+            method: ResolutionMethod::Poa,
             plan: ReplacementPlan {
                 candidate,
                 replacement: Graph {
