@@ -3578,11 +3578,7 @@ fn candidate_root_bp_interval(candidate: &BubbleCandidate) -> Option<(String, us
         .source_path_name
         .clone()
         .unwrap_or_else(|| format!("path{}", root_range.path_idx));
-    Some((
-        name,
-        root_range.source_begin_bp,
-        root_range.source_end_bp,
-    ))
+    Some((name, root_range.source_begin_bp, root_range.source_end_bp))
 }
 
 fn candidate_root_boundary_labels(graph: &Graph, candidate: &BubbleCandidate) -> (String, String) {
@@ -10008,40 +10004,61 @@ fn render_rewritten_graph(
             }
         }
 
-        let mut insertions: Vec<(usize, OutNode)> = Vec::new();
+        let original_node_count = ordered_nodes.len();
+        let mut insertions: Vec<(usize, usize, OutNode)> = Vec::new();
         let mut seen_replacement = FxHashSet::<(usize, usize)>::default();
+        let mut insertion_order = 0usize;
         for (_, steps) in out_paths {
-            let mut last_original_position = usize::MAX;
+            let mut last_original_position: Option<usize> = None;
+            let mut pending_replacements: Vec<OutNode> = Vec::new();
             for step in steps {
                 match step.node {
                     OutNode::Original(idx) => {
                         let position = original_position[idx];
                         if position != usize::MAX {
-                            last_original_position = position;
+                            if !pending_replacements.is_empty() {
+                                let slot = last_original_position
+                                    .map(|pos| pos.saturating_add(1))
+                                    .unwrap_or(position);
+                                for node in pending_replacements.drain(..) {
+                                    insertions.push((slot, insertion_order, node));
+                                    insertion_order = insertion_order.saturating_add(1);
+                                }
+                            }
+                            last_original_position = Some(position);
                         }
                     }
                     OutNode::Replacement(replacement_idx, replacement_node_idx) => {
                         if seen_replacement.insert((replacement_idx, replacement_node_idx)) {
-                            insertions.push((last_original_position, step.node));
+                            pending_replacements.push(step.node);
                         }
                     }
                 }
             }
+            if !pending_replacements.is_empty() {
+                let slot = last_original_position
+                    .map(|pos| pos.saturating_add(1))
+                    .unwrap_or(original_node_count);
+                for node in pending_replacements.drain(..) {
+                    insertions.push((slot, insertion_order, node));
+                    insertion_order = insertion_order.saturating_add(1);
+                }
+            }
         }
 
-        insertions.sort_by_key(|&(position, _)| position);
+        insertions.sort_by_key(|&(slot, order, _)| (slot, order));
         let original_ordered = std::mem::take(&mut ordered_nodes);
         ordered_nodes.reserve(original_ordered.len() + insertions.len());
         let mut insertion_idx = 0usize;
         for (position, node) in original_ordered.iter().enumerate() {
-            ordered_nodes.push(*node);
             while insertion_idx < insertions.len() && insertions[insertion_idx].0 == position {
-                ordered_nodes.push(insertions[insertion_idx].1);
+                ordered_nodes.push(insertions[insertion_idx].2);
                 insertion_idx += 1;
             }
+            ordered_nodes.push(*node);
         }
         while insertion_idx < insertions.len() {
-            ordered_nodes.push(insertions[insertion_idx].1);
+            ordered_nodes.push(insertions[insertion_idx].2);
             insertion_idx += 1;
         }
     }
@@ -10061,13 +10078,10 @@ fn render_rewritten_graph(
                 let replacement = replacements
                     .get(replacement_idx)
                     .expect("used replacement index must refer to an emitted replacement graph");
+                let seq = &replacement.segments[replacement_node_idx].seq;
                 let id = next_unused_segment_id(&mut used_ids, next_id);
                 id_by_node.insert(node, id.clone());
-                out.push_str(&format!(
-                    "S\t{}\t{}\n",
-                    id,
-                    String::from_utf8_lossy(&replacement.segments[replacement_node_idx].seq)
-                ));
+                out.push_str(&format!("S\t{}\t{}\n", id, String::from_utf8_lossy(seq)));
             }
         }
     }
@@ -10215,6 +10229,73 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    fn one_range_candidate(
+        path_idx: usize,
+        begin_step: usize,
+        end_step: usize,
+        sequence: &[u8],
+    ) -> BubbleCandidate {
+        BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx,
+                source_path_name: Some(format!("path{path_idx}")),
+                source_begin_bp: 0,
+                source_end_bp: sequence.len(),
+                begin_step,
+                end_step,
+                sequence: sequence.to_vec(),
+                extended_sequence: Vec::new(),
+                left_flank_bp: 0,
+                right_flank_bp: 0,
+            }],
+            signature: format!("candidate-{path_idx}-{begin_step}-{end_step}"),
+            root_start_step: begin_step,
+            root_end_step: end_step.saturating_sub(1),
+            root_span: end_step.saturating_sub(begin_step),
+            total_steps: end_step.saturating_sub(begin_step),
+            unique_steps: end_step.saturating_sub(begin_step),
+            traversal_stats: TraversalStats {
+                count: 1,
+                min_len: sequence.len(),
+                median_len: sequence.len(),
+                p90_len: sequence.len(),
+                max_len: sequence.len(),
+                total_len: sequence.len(),
+            },
+            level: 0,
+        }
+    }
+
+    fn single_path_replacement_gfa(name: &str, seq: &str) -> Graph {
+        parse_gfa(&format!("H\tVN:Z:1.0\nS\tr\t{seq}\nP\t{name}\tr+\t*\n")).unwrap()
+    }
+
+    #[test]
+    fn replacement_at_path_start_is_ordered_before_first_surviving_original() {
+        let graph = parse_gfa("H\tVN:Z:1.0\nS\t1\tA\nS\t2\tC\nP\tpath0\t1+,2+\t*\n").unwrap();
+        let plan = ReplacementPlan {
+            candidate: one_range_candidate(0, 0, 1, b"A"),
+            replacement: single_path_replacement_gfa("path0", "A"),
+        };
+        let mut next_id = 3;
+        let resolved = apply_replacement_frontier(&graph, &[plan], &mut next_id).unwrap();
+        let segment_sequences = resolved
+            .segments
+            .iter()
+            .map(|segment| String::from_utf8(segment.seq.clone()).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            segment_sequences,
+            vec!["A".to_string(), "C".to_string()],
+            "path-start replacements must not be appended after all surviving original nodes"
+        );
+        assert_eq!(
+            String::from_utf8(path_sequence(&resolved, &resolved.paths[0]).unwrap()).unwrap(),
+            "AC"
+        );
     }
 
     fn budget_test_window(source: MultiLevelCandidateSource) -> MultiLevelWindowCandidate {

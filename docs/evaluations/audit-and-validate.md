@@ -1,134 +1,103 @@
-# Audit and Validate: C4 SPOA Replacement Lacing Dedup
+# Audit and Validate: C4 SPOA Replacement Lacing
 
 Task: `audit-and-validate`
 Date: 2026-06-04
 
 ## Verdict
 
-The audited failure mode is confirmed: the replacement graphs were built and
-carried into `apply_replacement_frontier`, but the old render/lace-in path
-treated each `OutNode::Replacement(plan_idx, node_idx)` as identity-distinct and
-therefore minted duplicate segment IDs for byte-identical replacement segment
-sequences.
+The first hypothesis was only partly right. SPOA replacement graphs are built
+and laced into the graph; the failure is not that the aligner never runs. The
+full C4 reruns show that direct SPOA is resolving hundreds of small flubbles,
+but those replacements do not improve the visible graph and substantially worsen
+path-order/white-space metrics.
 
-The current chat-agent patch addresses that mechanism. `render_rewritten_graph`
-now projects replacement segment sequence bytes through a sequence-to-ID map,
-reuses an already emitted ID when the sequence is already present, and only mints
-a fresh ID for the first occurrence of a sequence. Targeted tests and a saved C4
-slice rerun pass the hard path-sequence preservation gate.
+A global `sequence -> segment id` projection for replacement nodes was tested
+and rejected as a default. It reduced segment count on small slices, but on full
+C4 it over-collapsed short identical replacement segments across distant local
+contexts and made long white-space bridges worse. That patch was removed from
+the working tree.
 
-Calibrated patch-readiness grade: `0.86` with `0.82` confidence. The core
-renderer bug is fixed and validated on the right path, but I am not assigning a
-higher score because the full C4 true-SPOA visual rerun did not complete during
-this audit and the output can still contain duplicate segment sequences inherited
-from surviving original nodes. That residual duplication is not a failure of the
-replacement seq-to-ID projection and was not treated as a hard gate.
+The retained code change is narrower: replacement nodes that occur before the
+first surviving original node on a path are inserted before that original node
+instead of being appended after all originals. This is a real renderer/lacing
+corner-case fix, but it does not change the current C4 SPOA result. The C4
+problem remains algorithmic: direct SPOA is polishing tiny local flubbles rather
+than resolving the larger underaligned structures visible in the SweepGA seed
+render.
 
-Rubric underspecification flag: `false` for the engineering decision, because
-the task gives one hard gate (path-sequence preservation) and one specific
-mechanism to audit (seq-to-ID replacement projection). There is no detailed
-numeric rubric, so the grade above is calibrated against the stated acceptance
-criteria rather than against a formal point schedule.
+Hard gate status: exact path spelling is preserved. No quality or metric gate
+was added.
 
-## Code Evidence
+## Evidence
 
-Replacement graphs are built and laced in as replacement nodes:
+Baseline seed:
 
-- `src/resolution.rs:7509-7522` maps each accepted replacement path step to
-  `OutNode::Replacement(plan_idx, step.node)`.
-- `src/resolution.rs:7548-7581` rewrites each affected path by splicing those
-  replacement steps into the path sequence.
-- `src/resolution.rs:7584-7609` passes the replacement graphs and rewritten
-  paths into `render_rewritten_graph`.
-- `src/resolution.rs:7630-7634` keeps exact path-sequence validation as the hard
-  post-render gate.
+```text
+segments=7411 links=10072 bp=234828 bp_weighted_cov=454.330293
+singleton_bp=2922 path_jump_p99=5 white_p99=66 bridges>=1kb=8790
+duplicate_sequence_frac=0.669950
+```
 
-The seq-to-ID projection is present in the renderer:
+Original true SPOA median100:
 
-- `src/resolution.rs:9968-9969` creates `id_by_node` and the
-  `id_by_replacement_seq` sequence projection map.
-- `src/resolution.rs:10069-10079` emits surviving original nodes and seeds the
-  sequence projection map with their sequences.
-- `src/resolution.rs:10081-10093` handles replacement nodes: if the replacement
-  segment sequence already has an ID, the renderer reuses it and skips emitting a
-  duplicate `S` line; otherwise it mints the next fresh ID.
-- `src/resolution.rs:10098-10124` reconstructs links from the projected IDs, so
-  paths point at the canonical emitted segment IDs.
+```text
+segments=8119 links=10904 bp=239264 bp_weighted_cov=445.906923
+singleton_bp=3895 path_jump_p99=3454 white_p99=111591 bridges>=1kb=212876
+duplicate_sequence_frac=0.714127
+```
 
-The patch also covers the insertion-order corner case needed for path-start
-replacement lacing:
+Anchor-only patch rerun:
 
-- `src/resolution.rs:10008-10064` tracks pending replacements and inserts them
-  before the first surviving original node when a replacement starts a path.
-- `src/resolution.rs:10294-10318` tests that path-start replacement ordering
-  preserves path spelling.
-- `src/resolution.rs:10320-10355` tests that independent replacements with the
-  same sequence share one emitted segment while preserving both path spellings.
+```text
+segments=8119 links=10904 bp=239264 bp_weighted_cov=445.906923
+singleton_bp=3895 path_jump_p99=3454 white_p99=111591 bridges>=1kb=212876
+duplicate_sequence_frac=0.714127
+```
+
+The anchor-only rerun is metric-identical to the original true SPOA median100
+output. Therefore the path-start insertion fix is correct but not the limiting
+C4 issue.
+
+The full C4 median100 run confirms the direct SPOA budget is applied correctly
+when the binary is rebuilt:
+
+```text
+crush discovery detail: skipped 1112 explicit SPOA candidate(s) outside direct length budgets
+crush round 1 traversal stats: selected n=353, max-len median/max=61/100,
+median-len median/max=61/100
+```
+
+Across the full run, direct SPOA resolved 523 candidates across three rounds and
+preserved all path spellings, but the result was worse than the seed.
 
 ## Validation
 
-Initial validation found one compile blocker in the uncommitted patch:
-`cargo check` failed with `E0425` because the renderer referenced
-`original_ordered` before declaration. The current working tree fixes that by
-using `original_node_count` before `ordered_nodes` is moved.
-
-Passed validation commands:
+Validated commands:
 
 ```bash
-cargo check
-cargo test --lib replacement_at_path_start_is_ordered_before_first_surviving_original
-cargo test --lib independent_replacements_with_same_sequence_share_one_emitted_segment
-cargo test --test test_crush_integration c4_slice_auto_crush_preserves_path_sequences -- --nocapture
-cargo run --bin impg -- crush --gfa tests/test_data/crush/c4_slice_1500_3000.gfa --method auto --max-iterations 1 --output /tmp/audit-and-validate/c4_slice_auto1_seqdedup.gfa
-cargo run --example compare_gfa_paths -- tests/test_data/crush/c4_slice_1500_3000.gfa /tmp/audit-and-validate/c4_slice_auto1_seqdedup.gfa
+cargo test replacement_at_path_start_is_ordered_before_first_surviving_original --lib
+cargo test direct_poa_respects_median_traversal_budget --lib
 cargo build
 cargo test --lib
+target/debug/impg crush --gfa data/c4_whole_region_sweepga_seed_20260603T092921Z/graphs/one_many_scaffold0.initial.gfa \
+  --output data/c4_spoa_anchor_probe_20260604T090500Z/graphs/spoa_median100.anchor.gfa \
+  --method poa --max-iterations 20 --max-span 0 --max-traversal-len 50k \
+  --max-median-traversal-len 100 --max-total-sequence 2g --max-traversals 100k \
+  --poa-scoring 1,4,6,2,26,1 --threads 32 -v 1
+target/debug/impg graph-report \
+  -g data/c4_spoa_anchor_probe_20260604T090500Z/graphs/spoa_median100.anchor.gfa \
+  -o data/c4_spoa_anchor_probe_20260604T090500Z/reports/spoa_median100.anchor.graph-report.tsv \
+  --format tsv
 ```
 
-Results:
+The full library test suite passed with `376` tests and `0` failures.
 
-- `cargo check`: passed, with pre-existing warnings.
-- Targeted path-start ordering test: passed.
-- Targeted duplicate replacement projection test: passed.
-- C4 slice integration test: passed; `465` paths preserved, `147` resolved,
-  `0` bailed, segments `2942 -> 2366`, segment bp `64348 -> 57281`.
-- Saved one-round C4 slice CLI rerun: completed; `147` resolved, `0` bailed,
-  IDs minted `272213933..272214520`.
-- Path comparison for the saved rerun: `465` expected paths, `465` observed
-  paths, `0` missing, `0` extra, `0` spelling mismatches.
-- Duplicate-sequence count, audit-only: input slice had `2942` segments,
-  `2241` unique sequences, `701` duplicate extras across `242` duplicate
-  groups; the saved one-round output had `2366` segments, `2036` unique
-  sequences, `330` duplicate extras across `76` duplicate groups.
-- `cargo build`: passed, with pre-existing warnings.
-- `cargo test --lib`: passed, `377` passed, `0` failed.
+## Recommendation
 
-## C4 Interpretation
+Do not use direct SPOA as a polishing pass over the current C4 SweepGA seed.
+Also do not add global sequence-deduplication as a default renderer behavior.
 
-The small C4 rerun supports the seq-to-ID hypothesis. Earlier audit material
-reported the pre-projection slice-auto one-round output as `2984` segments and
-`58003` segment bp with substantial duplicate replacement emission. The current
-patch emits `2366` segments and `57281` segment bp for the same slice while
-preserving all path spellings. That is not a quality-gate claim; it is evidence
-that the old visual/no-op symptom was at least partly caused by duplicate
-replacement segment lacing, and that projecting `sequence -> emitted segment ID`
-removes that specific no-op mechanism.
-
-A full true-SPOA C4 visual rerun was not used as final evidence in this audit.
-The directory `data/c4_spoa_dedup_probe_20260604T000000Z` existed during the
-audit but contained only logs and no graph/report/render artifacts at inspection
-time. The small committed C4 slice and targeted renderer tests were therefore
-the practical validation surface.
-
-## Dimension Scores
-
-| Dimension | Score | Rationale |
-| --- | ---: | --- |
-| Root-cause audit | 0.95 | The code path from replacement graph construction to render/lace-in was traced with line references, and the old failure mode matches prior C4 audit evidence. |
-| Patch mechanism | 0.90 | The seq-to-ID projection is implemented in the renderer and reconnects paths/links through canonical emitted IDs. |
-| Targeted tests | 0.90 | Focused tests cover both duplicate replacement sequences and path-start insertion ordering. |
-| C4 validation | 0.78 | A real C4 slice rerun validates path preservation and shows reduced duplicate extras; full true-SPOA visual validation remains pending. |
-| Constraint fidelity | 0.92 | No quality/metric gate was added; path spelling remained the only hard C4 acceptance gate. |
-| Reporting transparency | 0.90 | Commands, counts, residual risks, and the incomplete full-rerun evidence are recorded explicitly. |
-
-Overall: `0.86`.
+Next useful work should target the actual missing operation: build larger,
+context-aware replacement blocks from the residual flubble/bubble structure and
+induce those blocks with SweepGA/seqwish or another many-to-many aligner before
+optionally applying bounded POA to small residual tangles.
