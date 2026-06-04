@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -88,6 +89,8 @@ pub struct ResolutionConfig {
     pub polish_max_traversals: usize,
     /// Local cleanup method after pairwise graph induction.
     pub polish_method: ResolutionPolishMethod,
+    /// abPOA executable used by `method=abpoa`.
+    pub abpoa_bin: String,
     /// Pair-sampling nearest-neighbor count for many-sequence pairwise engines.
     pub pair_k_nearest: usize,
     /// Pair-sampling farthest-neighbor count for diversity/stranger joins.
@@ -261,6 +264,8 @@ pub enum ResolutionMethod {
     Poa,
     /// Direct POASTA replacement.
     Poasta,
+    /// Direct external abPOA replacement.
+    Abpoa,
     /// Debug/diagnostic resolver: align every traversal to one root with BiWFA
     /// and build a star-column graph. This is path-preserving but intentionally
     /// not the graph-quality default.
@@ -403,6 +408,7 @@ impl ResolutionMethod {
             Self::Auto => "auto",
             Self::Poa => "SPOA",
             Self::Poasta => "POASTA",
+            Self::Abpoa => "abPOA",
             Self::StarBiwfa => "BiWFA/in-memory",
             Self::Allwave => "AllWave/seqwish",
             Self::Sweepga => "SweepGA/seqwish",
@@ -421,6 +427,7 @@ impl ResolutionMethod {
             "auto" => Some(Self::Auto),
             "poa" | "spoa" => Some(Self::Poa),
             "poasta" => Some(Self::Poasta),
+            "abpoa" | "ab-poa" | "adaptive-banded-poa" => Some(Self::Abpoa),
             "star-biwfa" | "biwfa-star" | "biwfa" | "wfa" => Some(Self::StarBiwfa),
             "allwave" | "aw" => Some(Self::Allwave),
             "sweepga" | "sw" => Some(Self::Sweepga),
@@ -550,6 +557,7 @@ impl Default for ResolutionConfig {
             polish_max_total_sequence: DEFAULT_POLISH_MAX_TOTAL_SEQUENCE,
             polish_max_traversals: DEFAULT_POLISH_MAX_TRAVERSALS,
             polish_method: ResolutionPolishMethod::Poa,
+            abpoa_bin: "abpoa".to_string(),
             pair_k_nearest: DEFAULT_PAIR_K_NEAREST,
             pair_k_farthest: DEFAULT_PAIR_K_FARTHEST,
             pair_tree_count: DEFAULT_PAIR_TREE_COUNT,
@@ -5867,6 +5875,7 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         ResolutionMethod::Allwave | ResolutionMethod::Sweepga | ResolutionMethod::Wfmash => 0,
         ResolutionMethod::Poa
         | ResolutionMethod::Poasta
+        | ResolutionMethod::Abpoa
         | ResolutionMethod::StarBiwfa
         | ResolutionMethod::ChainGreedy => 1,
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
@@ -7801,6 +7810,7 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::TopFlubbleSweepga => build_sweepga_seqwish_replacement(candidate, config),
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
         ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
+        ResolutionMethod::Abpoa => build_abpoa_replacement(candidate, config),
         ResolutionMethod::ChainGreedy => build_chain_greedy_replacement(candidate, config),
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
@@ -8079,6 +8089,57 @@ fn candidate_named_sequences_longest_first(
     let mut sorted = seqs;
     sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
     Ok((headers, sorted))
+}
+
+fn candidate_external_named_sequences_longest_first(
+    candidate: &BubbleCandidate,
+    method: &str,
+) -> io::Result<(Vec<String>, Vec<(String, Vec<u8>)>)> {
+    let names = candidate
+        .ranges
+        .iter()
+        .map(candidate_external_sequence_name)
+        .collect::<io::Result<Vec<_>>>()?;
+    let mut seen = FxHashSet::<String>::default();
+    let mut duplicates = Vec::new();
+    for name in &names {
+        if !seen.insert(name.clone()) {
+            duplicates.push(name.clone());
+        }
+    }
+    if !duplicates.is_empty() {
+        duplicates.sort();
+        duplicates.dedup();
+        return Err(io::Error::other(format!(
+            "{method} replacement would require synthetic FASTA IDs for duplicate semantic path name(s): {}",
+            duplicates.join(", ")
+        )));
+    }
+
+    let seqs = names
+        .iter()
+        .cloned()
+        .zip(
+            candidate
+                .ranges
+                .iter()
+                .map(|range| range_aligner_sequence(range).to_vec()),
+        )
+        .collect::<Vec<_>>();
+    let mut sorted = seqs;
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    Ok((names, sorted))
+}
+
+fn candidate_external_sequence_name(range: &PathRange) -> io::Result<String> {
+    let source_path_name = range
+        .source_path_name
+        .as_deref()
+        .and_then(primary_sequence_name_token)
+        .ok_or_else(|| {
+            io::Error::other("crush replacement traversal is missing source path name")
+        })?;
+    Ok(source_path_name.to_string())
 }
 
 fn seqwish_replacement_config(
@@ -8930,6 +8991,71 @@ fn build_chain_greedy_replacement(
     build_poasta_replacement(candidate, config)
 }
 
+fn build_abpoa_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let (headers, sorted_sequences) =
+        candidate_external_named_sequences_longest_first(candidate, "abPOA")?;
+    if let Some((name, _)) = sorted_sequences
+        .iter()
+        .find(|(_, sequence)| sequence.is_empty())
+    {
+        return Err(io::Error::other(format!(
+            "abPOA replacement cannot encode empty traversal '{name}' without a synthetic sentinel"
+        )));
+    }
+
+    let mut input = tempfile::Builder::new()
+        .prefix("impg-crush-abpoa-")
+        .suffix(".fa")
+        .tempfile()?;
+    write_fasta_records(&mut input, &sorted_sequences)?;
+
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
+        config.scoring_params;
+    let output = Command::new(&config.abpoa_bin)
+        .arg("-m")
+        .arg("0")
+        .arg("-M")
+        .arg(match_score.to_string())
+        .arg("-X")
+        .arg(mismatch.to_string())
+        .arg("-O")
+        .arg(format!("{gap_open1},{gap_open2}"))
+        .arg("-E")
+        .arg(format!("{gap_extend1},{gap_extend2}"))
+        .arg("-r")
+        .arg("3")
+        .arg(input.path())
+        .output()
+        .map_err(|err| {
+            io::Error::other(format!(
+                "failed to run abPOA binary '{}': {err}",
+                config.abpoa_bin
+            ))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "abPOA replacement failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+    let gfa = String::from_utf8(output.stdout).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("abPOA replacement GFA is not UTF-8: {err}"),
+        )
+    })?;
+    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let mut replacement = abpoa_gfa_to_exact_graph(&gfa, &expected_paths)?;
+    order_replacement_paths(&mut replacement, &headers)?;
+    validate_replacement_paths(&replacement, candidate, "abPOA")?;
+    Ok(replacement)
+}
+
 fn build_poasta_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
@@ -9149,6 +9275,31 @@ fn poasta_gfa_to_exact_graph(gfa: &str, expected_paths: &[(String, Vec<u8>)]) ->
     }
 
     poasta_gfa_walks_to_exact_graph(gfa, expected_paths)
+}
+
+fn abpoa_gfa_to_exact_graph(gfa: &str, expected_paths: &[(String, Vec<u8>)]) -> io::Result<Graph> {
+    let headers = expected_paths
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut graph = parse_gfa(gfa).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("abPOA replacement GFA parse failed: {err}"),
+        )
+    })?;
+    order_replacement_paths(&mut graph, &headers)?;
+    validate_expected_paths(&graph, expected_paths, "abPOA")?;
+    Ok(graph)
+}
+
+fn write_fasta_records<W: Write>(writer: &mut W, records: &[(String, Vec<u8>)]) -> io::Result<()> {
+    for (name, sequence) in records {
+        writeln!(writer, ">{name}")?;
+        writer.write_all(sequence)?;
+        writeln!(writer)?;
+    }
+    writer.flush()
 }
 
 #[derive(Clone, Debug)]
@@ -10237,6 +10388,82 @@ mod tests {
         sequences
     }
 
+    fn fake_abpoa_bin(
+        dir: &tempfile::TempDir,
+        expected_headers: &[&str],
+        corrupt_first_path: bool,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.path().join(if corrupt_first_path {
+            "fake-abpoa-corrupt"
+        } else {
+            "fake-abpoa"
+        });
+        let expected = expected_headers
+            .iter()
+            .map(|header| format!("{header:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let corrupt = if corrupt_first_path { "True" } else { "False" };
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+input="${{@: -1}}"
+python3 - "$input" <<'PY'
+import sys
+
+expected = [{expected}]
+corrupt = {corrupt}
+records = []
+name = None
+seq = []
+with open(sys.argv[1], "r", encoding="ascii") as handle:
+    for raw in handle:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if name is not None:
+                records.append((name, "".join(seq)))
+            name = line[1:]
+            seq = []
+        else:
+            seq.append(line)
+    if name is not None:
+        records.append((name, "".join(seq)))
+
+names = [name for name, _ in records]
+if names != expected:
+    sys.stderr.write("unexpected FASTA headers: " + repr(names) + "\n")
+    sys.exit(7)
+bad = [name for name in names if name.startswith("__impg") or name.startswith("local_") or "duplicate-source-interval-copy" in name]
+if bad:
+    sys.stderr.write("synthetic FASTA header(s): " + repr(bad) + "\n")
+    sys.exit(8)
+if corrupt and records:
+    name, seq = records[0]
+    replacement = "A" if not seq or seq[-1] != "A" else "C"
+    records[0] = (name, seq[:-1] + replacement)
+
+print("H\tVN:Z:1.0")
+for idx, (_, seq) in enumerate(records, 1):
+    print(f"S\t{{idx}}\t{{seq}}")
+for idx, (name, _) in enumerate(records, 1):
+    print(f"P\t{{name}}\t{{idx}}+\t*")
+PY
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        script
+    }
+
     fn tiny_boundary_graph() -> Graph {
         Graph {
             segments: vec![
@@ -10510,6 +10737,86 @@ P\tref\t1+,3+\t*
 P\tins\t1+,2+,3+\t*
 ";
         assert_poasta_resolves_exact(gfa, poasta_resolution_config());
+    }
+
+    #[test]
+    fn abpoa_replacement_preserves_semantic_path_names_without_synthetic_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake_abpoa_bin(
+            &dir,
+            &["HG001#1#chr6:100-103", "HG002#2#chr6:100-103"],
+            false,
+        );
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tHG001#1#chr6:100-103\t1+,2+,4+\t*
+P\tHG002#2#chr6:100-103\t1+,3+,4+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Abpoa,
+                abpoa_bin: fake.display().to_string(),
+                max_traversal_len: 100_000,
+                max_median_traversal_len: 100_000,
+                max_total_sequence: 10_000_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn abpoa_replacement_corruption_is_hard_gated() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake_abpoa_bin(
+            &dir,
+            &["HG001#1#chr6:100-103", "HG002#2#chr6:100-103"],
+            true,
+        );
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tHG001#1#chr6:100-103\t1+,2+,4+\t*
+P\tHG002#2#chr6:100-103\t1+,3+,4+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Abpoa,
+                abpoa_bin: fake.display().to_string(),
+                max_traversal_len: 100_000,
+                max_median_traversal_len: 100_000,
+                max_total_sequence: 10_000_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 1, "{:?}", resolved.stats);
     }
 
     #[test]
@@ -10890,6 +11197,16 @@ P\tp1\t1+,3+,4+\t*
             ResolutionMethod::Poasta,
             "explicit method=poasta must still pin every bubble to poasta"
         );
+
+        let abpoa = ResolutionConfig {
+            method: ResolutionMethod::Abpoa,
+            ..ResolutionConfig::default()
+        };
+        assert_eq!(
+            candidate_replacement_method(&large, &abpoa),
+            ResolutionMethod::Abpoa,
+            "explicit method=abpoa must still pin every bubble to abpoa"
+        );
     }
 
     /// Hierarchical routing: level 0 (top-level) → sweepga, level ≥ 1 (every
@@ -10961,6 +11278,18 @@ P\tp1\t1+,3+,4+\t*
         let child = routing_candidate_at_level(1);
         assert_eq!(candidate_selection_priority(&root, &config), 0);
         assert_eq!(candidate_selection_priority(&child, &config), 1);
+    }
+
+    #[test]
+    fn abpoa_parse_name_accepts_aliases() {
+        assert_eq!(
+            ResolutionMethod::parse_name("abpoa"),
+            Some(ResolutionMethod::Abpoa)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("ab-poa"),
+            Some(ResolutionMethod::Abpoa)
+        );
     }
 
     #[test]

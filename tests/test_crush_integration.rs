@@ -1077,6 +1077,68 @@ fn c4_slice_auto_crush_preserves_path_sequences() {
     );
 }
 
+#[test]
+fn c4_slice_abpoa_crush_preserves_path_sequences_when_configured() {
+    let Ok(abpoa_bin) = std::env::var("IMPG_ABPOA_BIN") else {
+        eprintln!("SKIP: IMPG_ABPOA_BIN is not set; abPOA C4 slice smoke not run");
+        return;
+    };
+    if Command::new(&abpoa_bin).arg("-v").output().is_err() {
+        eprintln!("SKIP: configured IMPG_ABPOA_BIN is not runnable: {abpoa_bin}");
+        return;
+    }
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let gfa_path = manifest_dir.join("tests/test_data/crush/c4_slice_1500_3000.gfa");
+    if !gfa_path.exists() {
+        eprintln!("SKIP: test data slice not found at {:?}", gfa_path);
+        return;
+    }
+
+    let gfa = std::fs::read_to_string(&gfa_path).expect("failed to read C4 slice GFA");
+    let before_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&gfa).unwrap().into_iter().collect();
+
+    let resolved = resolve_gfa_bubbles(
+        &gfa,
+        &ResolutionConfig {
+            method: ResolutionMethod::Abpoa,
+            abpoa_bin,
+            max_iterations: 1,
+            max_traversal_len: 10_000,
+            max_median_traversal_len: 10_000,
+            max_total_sequence: 1_000_000,
+            ..ResolutionConfig::default()
+        },
+    )
+    .expect("resolve_gfa_bubbles failed on C4 slice with abPOA");
+
+    let after_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&resolved.gfa).unwrap().into_iter().collect();
+    for (name, before_seq) in &before_seqs {
+        let after_seq = after_seqs
+            .get(name)
+            .unwrap_or_else(|| panic!("path {name} disappeared after abPOA crush"));
+        assert_eq!(
+            before_seq, after_seq,
+            "path {} changed sequence after abPOA crush",
+            name
+        );
+    }
+
+    assert!(
+        resolved.stats.resolved > 0,
+        "abPOA C4 slice smoke reached candidates but accepted no replacements: {:?}",
+        resolved.stats
+    );
+    eprintln!(
+        "abPOA slice crush: {} paths preserved, {} resolved, {} bailed",
+        before_seqs.len(),
+        resolved.stats.resolved,
+        resolved.stats.bailed
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Wider-context bubble resolution — see docs/crush-wider-context-bubbles.md.
 // Verifies that enabling `replacement_flank_bp` on the canonical C4 slice still

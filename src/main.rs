@@ -2753,6 +2753,9 @@ fn parse_crush_stage(
                 config.auto_poasta_max_traversal_len =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "abpoa-bin" | "abpoa-path" | "abpoa" => {
+                config.abpoa_bin = param.value.clone();
+            }
             "auto-allwave-max-total-sequence"
             | "auto-allwave-max-total-seq"
             | "auto-allwave-max-sequence"
@@ -3021,7 +3024,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble)",
                             raw, param.value
                         ),
                     ));
@@ -4922,8 +4925,8 @@ GFA engine shorthand:
   Add `cut-n=<bp>` before the engine, e.g. `-o gfa:cut-n=100:pggb`, to clip
   terminal N-runs of at least that length from extracted query sequences before
   graph construction; internal N-runs and shorter terminal runs are preserved.
-  Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,
-  hierarchical, chain-povu, top-flubble-sweepga; e.g.
+  Crush methods include allwave, poa, poasta, abpoa, star-biwfa, sweepga,
+  wfmash, hierarchical, chain-povu, top-flubble-sweepga; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
@@ -5489,9 +5492,18 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble
+        /// Resolver method: auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
+
+        /// abPOA executable for --method abpoa
+        #[clap(
+            long = "abpoa-bin",
+            alias = "abpoa-path",
+            value_parser,
+            default_value = "abpoa"
+        )]
+        abpoa_bin: String,
 
         /// POA/SPOA/POASTA scoring as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
         #[clap(long = "poa-scoring", value_parser, default_value = "1,4,6,2,26,1")]
@@ -8763,6 +8775,7 @@ fn run() -> io::Result<()> {
             polish_max_total_sequence,
             polish_max_traversals,
             method,
+            abpoa_bin,
             poa_scoring,
             k_nearest,
             k_farthest,
@@ -8819,7 +8832,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble",
+                    "--method must be one of: auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble",
                 ));
             };
             let Some(multi_level_window_mode) =
@@ -8946,6 +8959,7 @@ fn run() -> io::Result<()> {
                 polish_max_median_traversal_len,
                 polish_max_total_sequence,
                 polish_max_traversals,
+                abpoa_bin,
                 pair_k_nearest: k_nearest,
                 pair_k_farthest: k_farthest,
                 pair_tree_count,
@@ -13582,7 +13596,7 @@ mod tests {
             "-o gfa:cut-n=100:pggb",
             "terminal N-runs of at least that length",
             "internal N-runs and shorter terminal runs are preserved",
-            "Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,",
+            "Crush methods include allwave, poa, poasta, abpoa, star-biwfa, sweepga,",
             "chain-povu",
             "top-flubble-sweepga",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
@@ -14578,6 +14592,35 @@ mod tests {
                 assert_eq!(crush.replacement_scaffold_filter, "1:many");
                 assert!(!crush.sweepga_no_filter);
                 assert!(crush.sweepga_sparse_pairs);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_abpoa_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=abpoa,abpoa-bin=/tmp/abpoa",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Abpoa);
+                assert_eq!(crush.abpoa_bin, "/tmp/abpoa");
             }
             _ => panic!("expected query command"),
         }
