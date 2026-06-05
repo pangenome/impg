@@ -659,6 +659,79 @@ fn c4_fragment_lacing_uses_pairwise_induced_graphs() {
     }
 }
 
+#[test]
+fn c4_motif_zero_paf_fastga_seqwish_variant_is_rejected_without_replacement() {
+    let gfa = "\
+H\tVN:Z:1.0
+S\tleft\tAA
+S\tshared\tC
+S\tright\tTT
+S\tf00\tG
+S\tf01\tG
+S\tf02\tG
+S\tf03\tG
+S\tf04\tG
+S\tf05\tG
+S\tf06\tG
+S\tf07\tG
+S\tf08\tG
+S\tf09\tG
+S\tf10\tG
+S\tf11\tG
+S\tf12\tG
+S\tf13\tG
+S\tf14\tG
+S\tf15\tG
+S\tprivate\tG
+L\tleft\t+\tshared\t+\t0M
+L\tshared\t+\tright\t+\t0M
+L\tleft\t+\tprivate\t+\t0M
+L\tprivate\t+\tright\t+\t0M
+P\tHG00001#1#chr6:100-105\tleft+,shared+,right+\t*
+P\tHG00002#1#chr6:200-205\tleft+,shared+,right+\t*
+P\tHG00003#1#chr6:300-305\tleft+,shared+,right+\t*
+P\tHG00004#1#chr6:400-405\tleft+,shared+,right+\t*
+P\tHG00005#1#chr6:500-505\tleft+,shared+,right+\t*
+P\tHG00006#1#chr6:600-605\tleft+,private+,right+\t*
+";
+    let before_paths = seq_map(gfa);
+    let resolved = resolve_gfa_bubbles(
+        gfa,
+        &ResolutionConfig {
+            max_iterations: 1,
+            method: ResolutionMethod::MotifLocal,
+            auto_spoa_max_traversal_len: 0,
+            auto_poasta_max_traversal_len: 0,
+            motif_max_sparse_paths: 1,
+            motif_min_flank_paths: 4,
+            motif_min_order_jump: 8,
+            motif_max_window_bp: 100,
+            sweepga_aligner: "fastga".to_string(),
+            sweepga_min_aln_length: 1_000,
+            polish_iterations: 0,
+            ..ResolutionConfig::default()
+        },
+    )
+    .expect("motif-local zero-PAF candidate should be rejected, not fatal");
+
+    assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
+    assert!(
+        resolved.stats.candidates_seen > 0,
+        "synthetic motif should be admitted before FastGA rejects it: {:?}",
+        resolved.stats
+    );
+    assert!(
+        resolved.stats.bailed > 0,
+        "zero-PAF FastGA/seqwish variant should count as a rejected build: {:?}",
+        resolved.stats
+    );
+    assert_eq!(
+        resolved.gfa, gfa,
+        "zero-PAF motif-local variant must not replace the graph"
+    );
+    assert_eq!(seq_map(&resolved.gfa), before_paths);
+}
+
 // ---------------------------------------------------------------------------
 // Failure 2 — No round-level quality gate: rounds that grow score are accepted
 //

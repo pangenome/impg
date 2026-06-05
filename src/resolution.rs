@@ -250,6 +250,18 @@ pub struct ResolutionConfig {
     /// This is diagnostic only. Repeat-like boundaries must not veto a
     /// candidate; exact path preservation is the only correctness gate.
     pub multi_level_repeat_aware_boundaries: bool,
+    /// Maximum number of paths allowed to support the sparse core of a
+    /// motif-local singleton/offshoot candidate.
+    pub motif_max_sparse_paths: usize,
+    /// Minimum number of paths that must support both motif-local anchor
+    /// flanks. A value of 0 chooses a graph-size-aware default.
+    pub motif_min_flank_paths: usize,
+    /// Minimum graph-order jump between a high-support flank and a sparse core
+    /// for sparse offshoot discovery.
+    pub motif_min_order_jump: usize,
+    /// Maximum bp length for one anchor-pair window materialized for a
+    /// motif-local candidate.
+    pub motif_max_window_bp: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -317,6 +329,11 @@ pub enum ResolutionMethod {
     /// windows through SweepGA/seqwish, and report bp-weighted node path
     /// coverage / singleton-bp deltas diagnostically.
     CoverageMultiBubble,
+    /// Motif-local residual pass: discover sparse singleton/offshoot and
+    /// adjacent self-loop repeat motifs directly from path-step support rather
+    /// than from clean POVU flubble boundaries, then materialize anchor-pair
+    /// windows with original source path names.
+    MotifLocal,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -332,6 +349,8 @@ pub enum MultiLevelWindowMode {
     Sliding,
     /// Windows expanded outward from residual stringy/high-bp sites.
     Outward,
+    /// Path-support motif windows discovered independent of POVU boundaries.
+    MotifLocal,
     /// Legacy combined search: sibling, sliding, cross-level, and local stringy windows.
     #[default]
     Combined,
@@ -359,6 +378,8 @@ impl MultiLevelWindowMode {
                 Some(Self::Sliding)
             }
             "outward" | "outward-expanded" | "residual" | "residual-outward" => Some(Self::Outward),
+            "motif" | "motifs" | "motif-local" | "local-motif" | "residual-motif"
+            | "residual-motifs" | "c4-motif" => Some(Self::MotifLocal),
             "combined" | "all" | "multi" | "multi-level" | "both" => Some(Self::Combined),
             _ => None,
         }
@@ -420,6 +441,7 @@ impl ResolutionMethod {
             Self::TopFlubbleSweepga => "top-flubble-sweepga",
             Self::IterativeMultiLevel => "iterative-multi-level",
             Self::CoverageMultiBubble => "coverage-multi-bubble",
+            Self::MotifLocal => "motif-local",
         }
     }
 
@@ -471,6 +493,8 @@ impl ResolutionMethod {
             | "path-coverage"
             | "coverage-repeat"
             | "repeat-aware-coverage" => Some(Self::CoverageMultiBubble),
+            "motif-local" | "local-motif" | "motif" | "motifs" | "residual-motif"
+            | "residual-motifs" | "c4-motif" | "c4-motif-local" => Some(Self::MotifLocal),
             _ => None,
         }
     }
@@ -537,6 +561,12 @@ pub const DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES: usize = 8;
 pub const DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT: usize = 192;
 pub const DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA: i128 = 1;
 pub const DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES: bool = false;
+pub const DEFAULT_MOTIF_MAX_SPARSE_PATHS: usize = 5;
+pub const DEFAULT_MOTIF_MIN_FLANK_PATHS: usize = 0;
+pub const DEFAULT_MOTIF_MIN_ORDER_JUMP: usize = 1_000;
+pub const DEFAULT_MOTIF_MAX_WINDOW_BP: usize = 10_000;
+const DEFAULT_MOTIF_MAX_ANCHOR_STEPS: usize = 120;
+const DEFAULT_MOTIF_MIN_WHITE_SPACE_BP: usize = 10_000;
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
@@ -594,6 +624,10 @@ impl Default for ResolutionConfig {
             multi_level_min_objective_delta: DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA,
             multi_level_objective: MultiLevelObjectiveMode::Size,
             multi_level_repeat_aware_boundaries: DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES,
+            motif_max_sparse_paths: DEFAULT_MOTIF_MAX_SPARSE_PATHS,
+            motif_min_flank_paths: DEFAULT_MOTIF_MIN_FLANK_PATHS,
+            motif_min_order_jump: DEFAULT_MOTIF_MIN_ORDER_JUMP,
+            motif_max_window_bp: DEFAULT_MOTIF_MAX_WINDOW_BP,
         }
     }
 }
@@ -937,10 +971,7 @@ fn resolve_graph_bubbles(
             initial_next_id,
         );
     }
-    if matches!(
-        config.method,
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble
-    ) {
+    if uses_iterative_window_resolver(config) {
         return resolve_graph_bubbles_iterative_multi_level(
             graph,
             original_gfa,
@@ -1526,6 +1557,15 @@ fn resolve_graph_bubbles(
         gfa: final_gfa,
         stats,
     })
+}
+
+fn uses_iterative_window_resolver(config: &ResolutionConfig) -> bool {
+    matches!(
+        config.method,
+        ResolutionMethod::IterativeMultiLevel
+            | ResolutionMethod::CoverageMultiBubble
+            | ResolutionMethod::MotifLocal
+    ) || config.multi_level_window_mode == MultiLevelWindowMode::MotifLocal
 }
 
 /// Greedy path-walk chain mode.
@@ -2706,6 +2746,7 @@ enum MultiLevelCandidateSource {
     LevelWindow,
     StringyNeighborhood,
     OutwardResidualWindow,
+    MotifLocal,
 }
 
 impl MultiLevelCandidateSource {
@@ -2719,6 +2760,7 @@ impl MultiLevelCandidateSource {
             Self::LevelWindow => "level-window",
             Self::StringyNeighborhood => "stringy-neighborhood",
             Self::OutwardResidualWindow => "outward-residual-window",
+            Self::MotifLocal => "motif-local",
         }
     }
 }
@@ -3081,6 +3123,14 @@ fn build_multi_level_window_candidate(
         }
         let objective =
             replacement_objective_delta(graph, &window.candidate, &replacement, objective_mode);
+        if source == MultiLevelCandidateSource::MotifLocal
+            && motif_replacement_has_singleton_bp_explosion(&objective)
+        {
+            return Err(io::Error::other(format!(
+                "motif-local replacement rejected singleton-bp explosion: input_singleton_bp={} output_singleton_bp={}",
+                objective.input_singleton_bp, objective.output_singleton_bp
+            )));
+        }
         Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(MultiLevelBuiltCandidate {
             source,
             source_sites,
@@ -3194,7 +3244,9 @@ fn multi_level_window_total_bp_cap(config: &ResolutionConfig) -> usize {
 }
 
 fn effective_multi_level_objective(config: &ResolutionConfig) -> MultiLevelObjectiveMode {
-    if config.method == ResolutionMethod::CoverageMultiBubble {
+    if config.method == ResolutionMethod::CoverageMultiBubble
+        || config.method == ResolutionMethod::MotifLocal
+    {
         MultiLevelObjectiveMode::Coverage
     } else {
         config.multi_level_objective
@@ -3204,10 +3256,15 @@ fn effective_multi_level_objective(config: &ResolutionConfig) -> MultiLevelObjec
 fn effective_repeat_aware_boundaries(config: &ResolutionConfig) -> bool {
     config.multi_level_repeat_aware_boundaries
         || config.method == ResolutionMethod::CoverageMultiBubble
+        || config.method == ResolutionMethod::MotifLocal
 }
 
 fn effective_multi_level_window_mode(config: &ResolutionConfig) -> MultiLevelWindowMode {
-    config.multi_level_window_mode
+    if config.method == ResolutionMethod::MotifLocal {
+        MultiLevelWindowMode::MotifLocal
+    } else {
+        config.multi_level_window_mode
+    }
 }
 
 fn effective_multi_level_candidate_limit(config: &ResolutionConfig) -> usize {
@@ -3256,7 +3313,11 @@ fn generate_multi_level_candidates_with_residual_novelty(
     residual_novelty_memory: Option<&ResidualNoveltyMemory>,
 ) -> MultiLevelGeneratedCandidates {
     let mut generated = MultiLevelGeneratedCandidates::default();
-    if discovered.is_empty() {
+    let window_mode = effective_multi_level_window_mode(config);
+    if discovered.is_empty() && !matches!(window_mode, MultiLevelWindowMode::MotifLocal) {
+        return generated;
+    }
+    if graph.paths.is_empty() {
         return generated;
     }
 
@@ -3273,8 +3334,6 @@ fn generate_multi_level_candidates_with_residual_novelty(
     } else {
         None
     };
-    let window_mode = effective_multi_level_window_mode(config);
-
     let use_parent = matches!(
         window_mode,
         MultiLevelWindowMode::Largest
@@ -3292,6 +3351,18 @@ fn generate_multi_level_candidates_with_residual_novelty(
     let use_outward = matches!(window_mode, MultiLevelWindowMode::Outward)
         || coverage_mode_includes_outward(config);
     let add_outward_first = coverage_mode_includes_outward(config);
+    let use_motif = matches!(window_mode, MultiLevelWindowMode::MotifLocal);
+
+    if use_motif {
+        add_motif_local_candidates(
+            graph,
+            &path_positions_by_path,
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
 
     if use_outward && add_outward_first {
         add_outward_residual_windows(
@@ -3477,6 +3548,23 @@ fn compare_same_source_window_priority(
             .cmp(&a.candidate.traversal_stats.total_len)
             .then_with(|| b.candidate.root_span.cmp(&a.candidate.root_span))
             .then_with(|| b.source_sites.cmp(&a.source_sites))
+    } else if a.source == MultiLevelCandidateSource::MotifLocal
+        && b.source == MultiLevelCandidateSource::MotifLocal
+    {
+        b.candidate
+            .estimated_step_savings()
+            .cmp(&a.candidate.estimated_step_savings())
+            .then_with(|| {
+                b.candidate
+                    .traversal_stats
+                    .total_len
+                    .cmp(&a.candidate.traversal_stats.total_len)
+            })
+            .then_with(|| {
+                a.candidate
+                    .root_start_step
+                    .cmp(&b.candidate.root_start_step)
+            })
     } else {
         std::cmp::Ordering::Equal
     }
@@ -4185,6 +4273,381 @@ fn add_outward_residual_windows(
             }
         }
     }
+}
+
+fn add_motif_local_candidates(
+    graph: &Graph,
+    path_positions_by_path: &[Vec<usize>],
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if graph.paths.len() < 2 || graph.segments.is_empty() {
+        return;
+    }
+    let path_support = graph_node_path_support_sets(graph);
+    let path_support_counts = path_support.iter().map(FxHashSet::len).collect::<Vec<_>>();
+    let node_visits = graph_node_visit_counts(graph);
+    let order_bp = graph_segment_order_bp_offsets(graph);
+    let min_flank_paths = effective_motif_min_flank_paths(config, graph.paths.len());
+    let max_sparse_paths = config.motif_max_sparse_paths.max(1);
+    let max_window_bp = config.motif_max_window_bp.max(1);
+    let mut seen_sparse_cores = FxHashSet::<String>::default();
+
+    for path in &graph.paths {
+        if path.steps.len() < 3 {
+            continue;
+        }
+        let mut i = 1usize;
+        while i + 1 < path.steps.len() {
+            if step_path_support(&path_support_counts, path.steps[i]) > max_sparse_paths {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i + 1 < path.steps.len()
+                && step_path_support(&path_support_counts, path.steps[i]) <= max_sparse_paths
+            {
+                i += 1;
+            }
+            let end = i;
+            let left = path.steps[start - 1];
+            let right = path.steps[end];
+            if step_path_support(&path_support_counts, left) < min_flank_paths
+                || step_path_support(&path_support_counts, right) < min_flank_paths
+            {
+                continue;
+            }
+            let core = &path.steps[start..end];
+            let core_key = motif_core_key(core);
+            if !seen_sparse_cores.insert(core_key) {
+                continue;
+            }
+            let involved_paths = motif_core_involved_paths(&path_support, core);
+            if involved_paths > max_sparse_paths {
+                continue;
+            }
+            let left_jump = graph_order_jump(left, core[0]);
+            let right_jump = graph_order_jump(*core.last().unwrap(), right);
+            let left_space = graph_order_white_space_bp(graph, &order_bp, left, core[0]);
+            let right_space =
+                graph_order_white_space_bp(graph, &order_bp, *core.last().unwrap(), right);
+            if left_jump.max(right_jump) < config.motif_min_order_jump
+                && left_space.max(right_space) < DEFAULT_MOTIF_MIN_WHITE_SPACE_BP
+            {
+                continue;
+            }
+
+            let Some(candidate) = motif_anchor_pair_candidate(
+                graph,
+                path_positions_by_path,
+                left,
+                right,
+                max_window_bp,
+            ) else {
+                continue;
+            };
+            let source_ancestry = vec![format!(
+                "motif=sparse-offshoot path={} core_steps={}..{} sparse_paths={} anchors={}..{} order_jump={} white_space_bp={}",
+                path.name,
+                start,
+                end.saturating_sub(1),
+                involved_paths,
+                format_step_label(graph, left),
+                format_step_label(graph, right),
+                left_jump.max(right_jump),
+                left_space.max(right_space)
+            )];
+            insert_multi_level_candidate(
+                generated,
+                emitted,
+                resolved_signatures,
+                candidate,
+                MultiLevelCandidateSource::MotifLocal,
+                1,
+                source_ancestry,
+                config,
+            );
+        }
+    }
+
+    let mut best_repeat_by_step = FxHashMap::<Step, (usize, usize, usize, usize)>::default();
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let mut i = 0usize;
+        while i < path.steps.len() {
+            let step = path.steps[i];
+            let mut j = i + 1;
+            while j < path.steps.len() && path.steps[j] == step {
+                j += 1;
+            }
+            let run_len = j - i;
+            if run_len >= 2 && i > 0 && j < path.steps.len() {
+                best_repeat_by_step
+                    .entry(step)
+                    .and_modify(|best| {
+                        if run_len > best.0 {
+                            *best = (run_len, path_idx, i, j);
+                        }
+                    })
+                    .or_insert((run_len, path_idx, i, j));
+            }
+            i = j;
+        }
+    }
+
+    let mut repeats = best_repeat_by_step
+        .into_iter()
+        .collect::<Vec<(Step, (usize, usize, usize, usize))>>();
+    repeats.sort_by(|(step_a, a), (step_b, b)| {
+        b.0.cmp(&a.0)
+            .then_with(|| node_visits[step_b.node].cmp(&node_visits[step_a.node]))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    for (step, (run_len, path_idx, start, end)) in repeats {
+        let path = &graph.paths[path_idx];
+        let left = path.steps[start - 1];
+        let right = path.steps[end];
+        if step_path_support(&path_support_counts, left) < min_flank_paths
+            || step_path_support(&path_support_counts, right) < min_flank_paths
+        {
+            continue;
+        }
+        let Some(candidate) =
+            motif_anchor_pair_candidate(graph, path_positions_by_path, left, right, max_window_bp)
+        else {
+            continue;
+        };
+        let source_ancestry = vec![format!(
+            "motif=self-loop-repeat path={} repeated_step={} run_len={} core_steps={}..{} anchors={}..{} visits={}",
+            path.name,
+            format_step_label(graph, step),
+            run_len,
+            start,
+            end.saturating_sub(1),
+            format_step_label(graph, left),
+            format_step_label(graph, right),
+            node_visits[step.node]
+        )];
+        insert_multi_level_candidate(
+            generated,
+            emitted,
+            resolved_signatures,
+            candidate,
+            MultiLevelCandidateSource::MotifLocal,
+            1,
+            source_ancestry,
+            config,
+        );
+    }
+}
+
+fn graph_node_path_support_sets(graph: &Graph) -> Vec<FxHashSet<usize>> {
+    let mut support = vec![FxHashSet::<usize>::default(); graph.segments.len()];
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let mut seen_on_path = FxHashSet::<usize>::default();
+        for step in &path.steps {
+            if step.node < support.len() && seen_on_path.insert(step.node) {
+                support[step.node].insert(path_idx);
+            }
+        }
+    }
+    support
+}
+
+fn effective_motif_min_flank_paths(config: &ResolutionConfig, path_count: usize) -> usize {
+    if config.motif_min_flank_paths > 0 {
+        return config.motif_min_flank_paths;
+    }
+    path_count.saturating_div(4).max(2).min(path_count.max(1))
+}
+
+fn step_path_support(path_support_counts: &[usize], step: Step) -> usize {
+    path_support_counts.get(step.node).copied().unwrap_or(0)
+}
+
+fn motif_core_involved_paths(path_support: &[FxHashSet<usize>], core: &[Step]) -> usize {
+    let mut paths = FxHashSet::<usize>::default();
+    for step in core {
+        if let Some(support) = path_support.get(step.node) {
+            paths.extend(support.iter().copied());
+        }
+    }
+    paths.len()
+}
+
+fn motif_core_key(core: &[Step]) -> String {
+    core.iter()
+        .map(|step| format!("{}{}", step.node, if step.rev { '-' } else { '+' }))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn graph_segment_order_bp_offsets(graph: &Graph) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(graph.segments.len());
+    let mut bp = 0usize;
+    for segment in &graph.segments {
+        offsets.push(bp);
+        bp = bp.saturating_add(segment.seq.len());
+    }
+    offsets
+}
+
+fn graph_order_jump(a: Step, b: Step) -> usize {
+    a.node.abs_diff(b.node)
+}
+
+fn graph_order_white_space_bp(graph: &Graph, order_bp: &[usize], a: Step, b: Step) -> usize {
+    let Some(a_start) = order_bp.get(a.node).copied() else {
+        return 0;
+    };
+    let Some(b_start) = order_bp.get(b.node).copied() else {
+        return 0;
+    };
+    let a_end = a_start.saturating_add(
+        graph
+            .segments
+            .get(a.node)
+            .map(|segment| segment.seq.len())
+            .unwrap_or(0),
+    );
+    let b_end = b_start.saturating_add(
+        graph
+            .segments
+            .get(b.node)
+            .map(|segment| segment.seq.len())
+            .unwrap_or(0),
+    );
+    let lo_end = a_end.min(b_end);
+    let hi_start = a_start.max(b_start);
+    hi_start.saturating_sub(lo_end)
+}
+
+fn motif_anchor_pair_candidate(
+    graph: &Graph,
+    path_positions_by_path: &[Vec<usize>],
+    left: Step,
+    right: Step,
+    max_window_bp: usize,
+) -> Option<BubbleCandidate> {
+    let mut ranges = Vec::new();
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let Some((begin_step, end_step)) =
+            shortest_anchor_pair_range(path, left, right, DEFAULT_MOTIF_MAX_ANCHOR_STEPS)
+        else {
+            continue;
+        };
+        let Some(positions) = path_positions_by_path.get(path_idx) else {
+            continue;
+        };
+        let Some(source_begin_bp) = positions.get(begin_step).copied() else {
+            continue;
+        };
+        let Some(source_end_bp) = positions.get(end_step).copied() else {
+            continue;
+        };
+        let span_bp = source_end_bp.saturating_sub(source_begin_bp);
+        if span_bp == 0 || span_bp > max_window_bp {
+            continue;
+        }
+        ranges.push(PathRange {
+            path_idx,
+            source_path_name: Some(path.name.clone()),
+            source_begin_bp,
+            source_end_bp,
+            begin_step,
+            end_step,
+            sequence: Vec::new(),
+            extended_sequence: Vec::new(),
+            left_flank_bp: 0,
+            right_flank_bp: 0,
+        });
+    }
+    ranges.sort_by_key(|range| range.path_idx);
+    if ranges.len() < 2 {
+        return None;
+    }
+    let root_range = ranges.iter().find(|range| range.path_idx == 0)?;
+    let root_start_step = root_range.begin_step;
+    let root_end_step = root_range.end_step.checked_sub(1)?;
+    let root_positions = path_positions_by_path.first()?;
+    let root_span = root_positions
+        .get(root_range.end_step)
+        .copied()?
+        .saturating_sub(root_positions.get(root_range.begin_step).copied()?);
+    let lengths = ranges
+        .iter()
+        .filter_map(|range| {
+            let positions = path_positions_by_path.get(range.path_idx)?;
+            Some(positions.get(range.end_step)? - positions.get(range.begin_step)?)
+        })
+        .collect::<Vec<_>>();
+    let traversal_stats = traversal_stats_from_lengths(lengths);
+    let total_steps = ranges
+        .iter()
+        .map(|range| range.end_step.saturating_sub(range.begin_step))
+        .sum::<usize>();
+    let mut unique_steps = FxHashSet::default();
+    for range in &ranges {
+        let path = &graph.paths[range.path_idx];
+        for step_idx in range.begin_step..range.end_step {
+            unique_steps.insert(path.steps[step_idx]);
+        }
+    }
+    let signature = candidate_signature(
+        graph,
+        0,
+        root_positions,
+        root_start_step,
+        root_end_step,
+        &ranges,
+        path_positions_by_path,
+    );
+    Some(BubbleCandidate {
+        ranges,
+        signature,
+        root_start_step,
+        root_end_step,
+        root_span,
+        total_steps,
+        unique_steps: unique_steps.len(),
+        traversal_stats,
+        level: 0,
+    })
+}
+
+fn shortest_anchor_pair_range(
+    path: &Path,
+    left: Step,
+    right: Step,
+    max_anchor_steps: usize,
+) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize, usize)> = None;
+    for (left_idx, &left_step) in path.steps.iter().enumerate() {
+        if left_step != left {
+            continue;
+        }
+        for right_idx in left_idx + 1..path.steps.len() {
+            if path.steps[right_idx] != right {
+                continue;
+            }
+            let span = right_idx - left_idx + 1;
+            if span > max_anchor_steps {
+                break;
+            }
+            let replace = best
+                .map(|(best_span, best_left, _)| {
+                    span < best_span || (span == best_span && left_idx < best_left)
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((span, left_idx, right_idx + 1));
+            }
+            break;
+        }
+    }
+    best.map(|(_, begin, end)| (begin, end))
 }
 
 fn add_complete_homologous_windows(
@@ -4942,13 +5405,14 @@ fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> b
 fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     match source {
         MultiLevelCandidateSource::CompleteHomologousWindow => 0,
-        MultiLevelCandidateSource::TopLevel => 1,
-        MultiLevelCandidateSource::ParentDescendants => 2,
-        MultiLevelCandidateSource::OutwardResidualWindow => 3,
-        MultiLevelCandidateSource::LevelWindow => 4,
-        MultiLevelCandidateSource::SiblingRun => 5,
-        MultiLevelCandidateSource::SlidingWindow => 6,
-        MultiLevelCandidateSource::StringyNeighborhood => 7,
+        MultiLevelCandidateSource::MotifLocal => 1,
+        MultiLevelCandidateSource::TopLevel => 2,
+        MultiLevelCandidateSource::ParentDescendants => 3,
+        MultiLevelCandidateSource::OutwardResidualWindow => 4,
+        MultiLevelCandidateSource::LevelWindow => 5,
+        MultiLevelCandidateSource::SiblingRun => 6,
+        MultiLevelCandidateSource::SlidingWindow => 7,
+        MultiLevelCandidateSource::StringyNeighborhood => 8,
     }
 }
 
@@ -4956,6 +5420,9 @@ fn multi_level_window_replacement_method(
     window: &MultiLevelWindowCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
+    if window.source == MultiLevelCandidateSource::MotifLocal {
+        return motif_local_replacement_method(&window.candidate, config);
+    }
     let method = candidate_replacement_method(&window.candidate, config);
     if method == ResolutionMethod::Poa
         && !poa_tier_covers_poasta_tier(config)
@@ -4969,6 +5436,36 @@ fn multi_level_window_replacement_method(
     } else {
         method
     }
+}
+
+fn motif_local_replacement_method(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    match config.method {
+        ResolutionMethod::Poa
+        | ResolutionMethod::Poasta
+        | ResolutionMethod::Abpoa
+        | ResolutionMethod::StarBiwfa
+        | ResolutionMethod::Allwave
+        | ResolutionMethod::Sweepga
+        | ResolutionMethod::Wfmash => return config.method,
+        _ => {}
+    }
+    let stats = candidate.traversal_stats;
+    if config.auto_poasta_max_traversal_len > 0
+        && stats.median_len < config.auto_poasta_max_traversal_len
+    {
+        // Motif windows are deliberately path-name preserving, so route even
+        // sub-sPOA-scale motifs through POASTA first.
+        ResolutionMethod::Poasta
+    } else {
+        ResolutionMethod::Sweepga
+    }
+}
+
+fn motif_replacement_has_singleton_bp_explosion(objective: &ReplacementObjectiveDelta) -> bool {
+    objective.output_singleton_bp > objective.input_singleton_bp
 }
 
 fn poa_tier_covers_poasta_tier(config: &ResolutionConfig) -> bool {
@@ -5181,6 +5678,7 @@ fn format_multi_level_source_counts(
 ) -> String {
     let ordered = [
         MultiLevelCandidateSource::CompleteHomologousWindow,
+        MultiLevelCandidateSource::MotifLocal,
         MultiLevelCandidateSource::TopLevel,
         MultiLevelCandidateSource::SiblingRun,
         MultiLevelCandidateSource::ParentDescendants,
@@ -5853,9 +6351,9 @@ fn candidate_selection_method(
     match config.method {
         ResolutionMethod::Auto => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
-            auto_method_by_median(candidate.traversal_stats, config)
-        }
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::ChainPovu => ResolutionMethod::Poasta,
         ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
@@ -5942,8 +6440,10 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         ResolutionMethod::TopFlubbleSweepga => {
             unreachable!("top-flubble-sweepga candidate method should be resolved")
         }
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
-            unreachable!("iterative/coverage multi-level candidate method should be resolved")
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal => {
+            unreachable!("iterative/coverage/motif candidate method should be resolved")
         }
     }
 }
@@ -6512,7 +7012,8 @@ fn discover_all_candidates(
                 ResolutionMethod::ChainPovu
                 | ResolutionMethod::TopFlubbleSweepga
                 | ResolutionMethod::IterativeMultiLevel
-                | ResolutionMethod::CoverageMultiBubble => false,
+                | ResolutionMethod::CoverageMultiBubble
+                | ResolutionMethod::MotifLocal => false,
                 _ => true,
             };
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
@@ -7856,8 +8357,8 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::IterativeMultiLevel => {
             unreachable!("iterative multi-level is resolved before replacement dispatch")
         }
-        ResolutionMethod::CoverageMultiBubble => {
-            unreachable!("coverage multi-bubble is resolved before replacement dispatch")
+        ResolutionMethod::CoverageMultiBubble | ResolutionMethod::MotifLocal => {
+            unreachable!("coverage/motif multi-level is resolved before replacement dispatch")
         }
         ResolutionMethod::ChainPovu => {
             build_chain_povu_smooth_poasta_replacement(candidate, config)
@@ -7881,9 +8382,9 @@ fn candidate_replacement_method(
     match config.method {
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
-            auto_replacement_method(candidate, config)
-        }
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal => auto_replacement_method(candidate, config),
         ResolutionMethod::ChainPovu => ResolutionMethod::ChainPovu,
         ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
@@ -10430,6 +10931,7 @@ fn debug_method_label(method: ResolutionMethod) -> &'static str {
         ResolutionMethod::Hierarchical => "Hierarchical",
         ResolutionMethod::IterativeMultiLevel => "IterativeMultiLevel",
         ResolutionMethod::CoverageMultiBubble => "CoverageMultiBubble",
+        ResolutionMethod::MotifLocal => "MotifLocal",
     }
 }
 
@@ -10443,6 +10945,7 @@ fn debug_source_short(source: Option<MultiLevelCandidateSource>) -> String {
         Some(MultiLevelCandidateSource::LevelWindow) => "level".to_string(),
         Some(MultiLevelCandidateSource::StringyNeighborhood) => "stringy".to_string(),
         Some(MultiLevelCandidateSource::OutwardResidualWindow) => "outward".to_string(),
+        Some(MultiLevelCandidateSource::MotifLocal) => "motif".to_string(),
         None => "candidate".to_string(),
     }
 }
@@ -14364,6 +14867,201 @@ P\talt\t1+,12+,13+,24+,25+,36+,37+\t*
             "admission-only mode should still report admitted candidates: {:?}",
             dry_run.stats
         );
+    }
+
+    #[test]
+    fn motif_local_discovers_sparse_offshoot_with_original_path_names_without_povu() {
+        let mut segments = vec![
+            Segment {
+                id: "left".to_string(),
+                seq: b"AA".to_vec(),
+            },
+            Segment {
+                id: "shared".to_string(),
+                seq: b"C".to_vec(),
+            },
+            Segment {
+                id: "right".to_string(),
+                seq: b"TT".to_vec(),
+            },
+        ];
+        for idx in 0..16 {
+            segments.push(Segment {
+                id: format!("filler{idx}"),
+                seq: b"G".to_vec(),
+            });
+        }
+        let private_node = segments.len();
+        segments.push(Segment {
+            id: "private".to_string(),
+            seq: b"G".to_vec(),
+        });
+        let graph = Graph {
+            segments,
+            paths: vec![
+                Path {
+                    name: "HG00001#1#chr6:100-105".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00002#1#chr6:200-205".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00003#1#chr6:300-305".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00004#1#chr6:400-405".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00005#1#chr6:500-505".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00006#1#chr6:600-605".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: private_node,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let config = ResolutionConfig {
+            method: ResolutionMethod::MotifLocal,
+            motif_max_sparse_paths: 1,
+            motif_min_flank_paths: 4,
+            motif_min_order_jump: 8,
+            motif_max_window_bp: 100,
+            ..ResolutionConfig::default()
+        };
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &[], &FxHashSet::default());
+        let candidate = generated
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source == MultiLevelCandidateSource::MotifLocal)
+            .expect("motif-local sparse offshoot should be discovered without POVU input");
+
+        assert_eq!(candidate.candidate.ranges.len(), graph.paths.len());
+        assert_eq!(
+            format_candidate_path_coverage(&graph, &candidate.candidate),
+            "6/6"
+        );
+        assert!(
+            candidate
+                .source_ancestry
+                .iter()
+                .any(|entry| entry.contains("motif=sparse-offshoot")),
+            "{candidate:?}"
+        );
+        let source_names = candidate
+            .candidate
+            .ranges
+            .iter()
+            .map(|range| range.source_path_name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_names,
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let headers = candidate_sequence_headers(&candidate.candidate).unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                "HG00001#1#chr6:100-105",
+                "HG00002#1#chr6:200-205",
+                "HG00003#1#chr6:300-305",
+                "HG00004#1#chr6:400-405",
+                "HG00005#1#chr6:500-505",
+                "HG00006#1#chr6:600-605",
+            ]
+        );
+        assert!(headers.iter().all(|header| {
+            !header.contains("__impg")
+                && !header.contains("candidate_")
+                && !header.contains("path0")
+        }));
     }
 
     #[test]

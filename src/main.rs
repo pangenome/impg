@@ -2941,12 +2941,28 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': multi-level window mode '{}' is unsupported (expected sibling, sliding, or combined)",
+                            "Invalid --gfa-engine '{}': multi-level window mode '{}' is unsupported (expected largest, parent, sibling, sliding, outward, motif, or combined)",
                             raw, param.value
                         ),
                     ));
                 };
                 config.multi_level_window_mode = mode;
+            }
+            "motif-max-sparse-paths" | "motif-sparse-paths" | "max-sparse-paths" => {
+                config.motif_max_sparse_paths =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "motif-min-flank-paths" | "motif-flank-paths" | "min-flank-paths" => {
+                config.motif_min_flank_paths =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "motif-min-order-jump" | "min-order-jump" => {
+                config.motif_min_order_jump =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "motif-max-window-bp" | "motif-window-bp" | "motif-max-window-len" => {
+                config.motif_max_window_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
             "window-target-bp"
             | "window-target-len"
@@ -3024,7 +3040,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble, or motif-local)",
                             raw, param.value
                         ),
                     ));
@@ -3155,6 +3171,24 @@ fn parse_crush_stage(
             io::ErrorKind::InvalidInput,
             format!(
                 "Invalid --gfa-engine '{}': multi-level max-window-sites must be > 0",
+                raw
+            ),
+        ));
+    }
+    if config.motif_max_sparse_paths == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': motif-max-sparse-paths must be > 0",
+                raw
+            ),
+        ));
+    }
+    if config.motif_max_window_bp == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': motif-max-window-bp must be > 0",
                 raw
             ),
         ));
@@ -4926,7 +4960,7 @@ GFA engine shorthand:
   terminal N-runs of at least that length from extracted query sequences before
   graph construction; internal N-runs and shorter terminal runs are preserved.
   Crush methods include allwave, poa, poasta, abpoa, star-biwfa, sweepga,
-  wfmash, hierarchical, chain-povu, top-flubble-sweepga; e.g.
+  wfmash, hierarchical, chain-povu, top-flubble-sweepga, motif-local; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
@@ -5511,7 +5545,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, or coverage-multi-bubble
+        /// Resolver method: auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble, or motif-local
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -5661,7 +5695,7 @@ GFA engine shorthand:
         )]
         chain_greedy_target_bp: usize,
 
-        /// Candidate source set for --method iterative-multi-level: largest, parent, sibling, sliding, outward, or combined
+        /// Candidate source set for --method iterative-multi-level: largest, parent, sibling, sliding, outward, motif, or combined
         #[clap(
             long = "window-mode",
             alias = "multi-level-window-mode",
@@ -5670,6 +5704,22 @@ GFA engine shorthand:
             default_value = "combined"
         )]
         multi_level_window_mode: String,
+
+        /// Maximum paths supporting a sparse motif-local offshoot core
+        #[clap(long = "motif-max-sparse-paths", value_parser = parse_usize_size, default_value = "5")]
+        motif_max_sparse_paths: usize,
+
+        /// Minimum paths supporting motif-local anchor flanks; 0 auto-scales to path count
+        #[clap(long = "motif-min-flank-paths", value_parser = parse_usize_size, default_value = "0")]
+        motif_min_flank_paths: usize,
+
+        /// Minimum graph-order jump for motif-local sparse offshoot discovery
+        #[clap(long = "motif-min-order-jump", value_parser = parse_usize_size, default_value = "1k")]
+        motif_min_order_jump: usize,
+
+        /// Maximum bp length for one motif-local anchor-pair window
+        #[clap(long = "motif-max-window-bp", value_parser = parse_usize_size, default_value = "10k")]
+        motif_max_window_bp: usize,
 
         /// Maximum root-path span for generated iterative-multi-level windows; 0 reuses --chain-target-bp
         #[clap(long = "window-target-bp", alias = "multi-level-window-target-bp", value_parser = parse_usize_size, default_value = "0")]
@@ -8865,6 +8915,10 @@ fn run() -> io::Result<()> {
             replacement_flank_bp,
             chain_greedy_target_bp,
             multi_level_window_mode,
+            motif_max_sparse_paths,
+            motif_min_flank_paths,
+            motif_min_order_jump,
+            motif_max_window_bp,
             multi_level_window_target_bp,
             multi_level_max_window_sites,
             multi_level_candidate_limit,
@@ -8898,7 +8952,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble",
+                    "--method must be one of: auto, allwave, poa, poasta, abpoa, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga, iterative-multi-level/multi-bubble, coverage-multi-bubble, motif-local",
                 ));
             };
             let Some(multi_level_window_mode) =
@@ -8906,7 +8960,7 @@ fn run() -> io::Result<()> {
             else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--window-mode must be one of: largest, parent, sibling, sliding, outward, combined",
+                    "--window-mode must be one of: largest, parent, sibling, sliding, outward, motif, combined",
                 ));
             };
             let Some(multi_level_objective) =
@@ -8985,6 +9039,18 @@ fn run() -> io::Result<()> {
                     "--max-window-sites must be > 0",
                 ));
             }
+            if motif_max_sparse_paths == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--motif-max-sparse-paths must be > 0",
+                ));
+            }
+            if motif_max_window_bp == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--motif-max-window-bp must be > 0",
+                ));
+            }
             let replacement_num_mappings = normalize_filter_mode_value(&replacement_num_mappings)
                 .ok_or_else(|| {
                     io::Error::new(
@@ -9048,6 +9114,10 @@ fn run() -> io::Result<()> {
                 replacement_flank_bp,
                 chain_greedy_target_bp,
                 multi_level_window_mode,
+                motif_max_sparse_paths,
+                motif_min_flank_paths,
+                motif_min_order_jump,
+                motif_max_window_bp,
                 multi_level_window_target_bp,
                 multi_level_max_window_sites,
                 multi_level_candidate_limit,
@@ -14322,6 +14392,43 @@ mod tests {
                 assert!(crush.multi_level_repeat_aware_boundaries);
                 assert_eq!(crush.multi_level_max_window_sites, 12);
                 assert_eq!(crush.max_iterations, 3);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_motif_local_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=motif-local,motif-max-sparse-paths=3,motif-min-flank-paths=12,motif-min-order-jump=2k,motif-max-window-bp=9k,max-rounds=2",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::MotifLocal);
+                assert_eq!(
+                    crush.multi_level_window_mode,
+                    impg::resolution::MultiLevelWindowMode::Combined
+                );
+                assert_eq!(crush.motif_max_sparse_paths, 3);
+                assert_eq!(crush.motif_min_flank_paths, 12);
+                assert_eq!(crush.motif_min_order_jump, 2_000);
+                assert_eq!(crush.motif_max_window_bp, 9_000);
+                assert_eq!(crush.max_iterations, 2);
             }
             _ => panic!("expected query command"),
         }

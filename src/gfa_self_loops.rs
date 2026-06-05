@@ -1094,4 +1094,39 @@ P\tp\t1+,1+,2+\t*
             result.gfa
         );
     }
+
+    #[test]
+    fn c4_like_direct_loop_repeat_metrics_drop_to_zero_and_paths_compare() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t7067\tAC
+S\t7068\tG
+S\t7069\tTT
+L\t7067\t+\t7068\t+\t0M
+L\t7068\t+\t7068\t+\t0M
+L\t7068\t+\t7069\t+\t0M
+P\tHG01358#2#CM089068.1:31846088-32072428(+)\t7067+,7068+,7068+,7068+,7068+,7069+\t*
+P\tHG02055#1#CM088166.1:31846088-32072428(+)\t7067+,7068+,7068+,7069+\t*
+P\tGRCh38#0#chr6:31846088-32072428(+)\t7067+,7068+,7069+\t*
+";
+        let before_report = diagnose_gfa(gfa).unwrap();
+        assert_eq!(before_report.direct_self_loop_edges, 1);
+        assert_eq!(before_report.repeated_path_runs, 2);
+        assert_eq!(before_report.adjacent_same_step_path_steps, 4);
+
+        let result =
+            normalize_repeat_self_loops(gfa, &NormalizeSelfLoopsConfig::default()).unwrap();
+        let after_report = diagnose_gfa(&result.gfa).unwrap();
+
+        assert_eq!(path_map(gfa), path_map(&result.gfa));
+        assert_eq!(result.stats.input_direct_self_loop_edges, 1);
+        assert_eq!(result.stats.output_direct_self_loop_edges, 0);
+        assert_eq!(after_report.direct_self_loop_edges, 0);
+        assert_eq!(after_report.repeated_path_runs, 0);
+        assert_eq!(after_report.adjacent_same_step_path_steps, 0);
+        assert!(
+            path_map(gfa) == path_map(&result.gfa),
+            "compare_gfa_paths-style path spelling check must pass"
+        );
+    }
 }
