@@ -1421,6 +1421,25 @@ fn merge_nearby_on_same_path(
     use std::collections::HashMap;
     let prof = std::env::var("SYNG_PROFILE").is_ok();
     let input_count = hits.len();
+    if merge_distance < 0 {
+        let mut out = hits;
+        out.sort_by(|a, b| {
+            a.genome
+                .cmp(&b.genome)
+                .then(a.start.cmp(&b.start))
+                .then(a.end.cmp(&b.end))
+                .then(a.strand.cmp(&b.strand))
+        });
+        if prof {
+            eprintln!(
+                "PROF merge_same_path input={} output={} merged_groups=0 gap={} examples=",
+                input_count,
+                out.len(),
+                merge_distance
+            );
+        }
+        return out;
+    }
     let gap = merge_distance.max(0) as u64;
     // Merging loses CIGAR alignment context since merged coordinates
     // don't map back to either source CIGAR. Group by (genome, strand)
@@ -1451,11 +1470,7 @@ fn merge_nearby_on_same_path(
             Vec::new()
         };
         for next in iter {
-            let should_merge = if merge_distance >= 0 {
-                next.0 <= cur.1.saturating_add(gap)
-            } else {
-                next.0 < cur.1
-            };
+            let should_merge = next.0 <= cur.1.saturating_add(gap);
             if should_merge {
                 if prof && merge_examples.len() < 20 {
                     group_example_parts.push(format!("{}-{}~{}-{}", cur.0, cur.1, next.0, next.1));
@@ -1780,7 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_nearby_on_same_path_no_merge_keeps_gapped_intervals() {
+    fn merge_nearby_on_same_path_no_merge_keeps_touching_and_overlapping_intervals() {
         let hits = vec![
             HomologousInterval {
                 genome: "g".into(),
@@ -1805,9 +1820,10 @@ mod tests {
             },
         ];
         let out = merge_nearby_on_same_path(hits, -1);
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!((out[0].start, out[0].end), (0, 100));
-        assert_eq!((out[1].start, out[1].end), (100, 250));
+        assert_eq!((out[1].start, out[1].end), (100, 200));
+        assert_eq!((out[2].start, out[2].end), (190, 250));
     }
 
     #[test]
