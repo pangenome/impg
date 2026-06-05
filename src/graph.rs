@@ -18,6 +18,7 @@ pub struct SequenceMetadata {
     pub size: i32,
     pub strand: char,
     pub total_length: usize,
+    pub path_name_override: Option<String>,
 }
 
 impl SequenceMetadata {
@@ -27,6 +28,10 @@ impl SequenceMetadata {
     /// For `-` strand this converts from MAF-style RC-frame coordinates back to
     /// forward-strand: `name:(total-start-size)-(total-start)`.
     pub fn path_name(&self) -> String {
+        if let Some(path_name) = &self.path_name_override {
+            return path_name.clone();
+        }
+
         let (fwd_start, fwd_end) = if self.strand == '+' {
             (self.start, self.start + self.size)
         } else {
@@ -544,6 +549,7 @@ pub fn prepare_sequences(
                 size: seq_size,
                 strand,
                 total_length,
+                path_name_override: None,
             };
 
             Ok((sequence_str, meta))

@@ -481,8 +481,19 @@ pub fn run_graph_build_poa<W: Write>(
         return Ok(());
     }
 
-    // Build SPOA graph
-    let (mut graph, mut engine) = crate::graph::build_spoa_engine(scoring_params);
+    let unchopped = build_poa_unchopped_gfa(&sequences, scoring_params)?;
+    let final_gfa = crate::graph::normalize_and_sort(unchopped, config.num_threads)?;
+    output.write_all(final_gfa.as_bytes())?;
+
+    Ok(())
+}
+
+fn build_poa_unchopped_gfa(
+    sequences: &[(String, crate::graph::SequenceMetadata)],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<String> {
+    // Build SPOA graph with end-to-end alignment for whole-sequence graph induction.
+    let (mut graph, mut engine) = build_graph_poa_spoa_engine(scoring_params);
     let metadata: Vec<crate::graph::SequenceMetadata> =
         sequences.iter().map(|(_, m)| m.clone()).collect();
     crate::graph::feed_sequences_to_graph(
@@ -491,12 +502,13 @@ pub fn run_graph_build_poa<W: Write>(
         sequences.iter().map(|(s, _)| s.as_str()),
     );
 
-    // Generate GFA, post-process strands, unchop, then gfaffix+sort
-    let unchopped = crate::graph::spoa_graph_to_unchoped_gfa(graph, &metadata)?;
-    let final_gfa = crate::graph::normalize_and_sort(unchopped, config.num_threads)?;
-    output.write_all(final_gfa.as_bytes())?;
+    crate::graph::spoa_graph_to_unchoped_gfa(graph, &metadata)
+}
 
-    Ok(())
+fn build_graph_poa_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (spoa_rs::Graph, spoa_rs::AlignmentEngine) {
+    crate::graph::build_global_spoa_engine(scoring_params)
 }
 
 /// Build a pangenome graph using the PGGB pipeline: sweepga + seqwish + smoothxg + gfaffix.
@@ -1167,11 +1179,13 @@ pub fn run_graph_build_partitioned(
 
 /// Parse a FASTA header into SequenceMetadata.
 ///
-/// If the header contains a `name:start-end` suffix (e.g. from a prior
-/// `impg query -o fasta`), parse the coordinates so that `path_name()`
-/// reproduces the original name without double-encoding.
-/// Otherwise, treat the whole header as the name with start=0.
+/// Direct FASTA graph builds must preserve the input record name exactly in the
+/// emitted GFA `P` line. We still parse a trailing `name:start-end` suffix when
+/// present so ancillary metadata remains useful, but `path_name()` returns the
+/// original FASTA record name via `path_name_override`.
 fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::SequenceMetadata {
+    let path_name_override = Some(header.to_string());
+
     // Try to parse trailing :start-end
     if let Some(last_colon) = header.rfind(':') {
         let (key, range_str) = header.split_at(last_colon);
@@ -1185,6 +1199,7 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
                         size: seq_len as i32,
                         strand: '+',
                         total_length: (start + seq_len as i32) as usize,
+                        path_name_override,
                     };
                 }
             }
@@ -1197,12 +1212,41 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
         size: seq_len as i32,
         strand: '+',
         total_length: seq_len,
+        path_name_override,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_build_poa_uses_global_spoa_alignment() {
+        let scoring = (1, 4, 6, 2, 26, 1);
+        let first = "AAAACCCC";
+        let second = "CCCCGGGG";
+
+        let (mut poa_graph, mut poa_engine) = build_graph_poa_spoa_engine(scoring);
+        let (_, poa_alignment) = poa_engine.align(first, &poa_graph);
+        poa_graph.add_alignment(poa_alignment, first);
+        let (poa_score, _) = poa_engine.align(second, &poa_graph);
+
+        let (mut local_graph, mut local_engine) = crate::graph::build_spoa_engine(scoring);
+        let (_, local_alignment) = local_engine.align(first, &local_graph);
+        local_graph.add_alignment(local_alignment, first);
+        let (local_score, _) = local_engine.align(second, &local_graph);
+
+        let (mut global_graph, mut global_engine) = crate::graph::build_global_spoa_engine(scoring);
+        let (_, global_alignment) = global_engine.align(first, &global_graph);
+        global_graph.add_alignment(global_alignment, first);
+        let (global_score, _) = global_engine.align(second, &global_graph);
+
+        assert_eq!(poa_score, global_score);
+        assert_ne!(
+            poa_score, local_score,
+            "test fixture should distinguish global and local SPOA alignment scores"
+        );
+    }
 
     #[test]
     fn wfmash_raw_mapping_multiplicity_matches_local_filter_mode() {
