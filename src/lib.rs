@@ -7,6 +7,7 @@ pub mod commands;
 pub mod faidx;
 pub mod forest_map;
 pub mod genotyping;
+pub mod gfa_self_loops;
 pub mod graph;
 pub mod graph_pipeline;
 pub mod graph_report;

@@ -5408,6 +5408,25 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
+    /// Collapse path-local repeat-unit self-loop runs in a blunt GFA
+    NormalizeSelfLoops {
+        /// Input blunt GFA path, or '-' for stdin
+        #[clap(short = 'g', long, value_parser)]
+        gfa: String,
+
+        /// Output normalized GFA path, or '-' for stdout
+        #[clap(short = 'o', long, value_parser, default_value = "-")]
+        output: String,
+
+        /// Maximum self-loop segment length to normalize; 0 means unlimited
+        #[clap(long, value_parser = parse_usize_size, default_value = "0")]
+        max_unit_len: usize,
+
+        /// Optional JSON report path for normalization counts
+        #[clap(long, value_parser)]
+        report: Option<String>,
+    },
+
     /// Resolve bounded bubbles in an existing blunt GFA
     Crush {
         /// Input blunt GFA path, or '-' for stdin
@@ -8752,6 +8771,53 @@ fn run() -> io::Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Args::NormalizeSelfLoops {
+            gfa,
+            output,
+            max_unit_len,
+            report,
+        } => {
+            let mut gfa_text = String::new();
+            if gfa == "-" {
+                io::stdin().read_to_string(&mut gfa_text)?;
+            } else {
+                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
+            }
+            let result = impg::gfa_self_loops::normalize_repeat_self_loops(
+                &gfa_text,
+                &impg::gfa_self_loops::NormalizeSelfLoopsConfig { max_unit_len },
+            )?;
+            info!(
+                "normalize-self-loops: direct self-loop edges {} -> {}, adjacent same-step repeats {} -> {}, collapsed {} run(s), created {} segment(s)",
+                result.stats.input_direct_self_loop_edges,
+                result.stats.output_direct_self_loop_edges,
+                result.stats.input_adjacent_same_step_path_steps,
+                result.stats.output_adjacent_same_step_path_steps,
+                result.stats.collapsed_runs,
+                result.stats.created_segments
+            );
+
+            if let Some(report) = report {
+                let json = serde_json::to_string_pretty(&result.stats).map_err(|err| {
+                    io::Error::other(format!("failed to serialize report: {err}"))
+                })?;
+                let mut out = BufWriter::with_capacity(64 * 1024, File::create(report)?);
+                out.write_all(json.as_bytes())?;
+                out.write_all(b"\n")?;
+                out.flush()?;
+            }
+
+            if output == "-" {
+                let stdout = io::stdout();
+                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                out.write_all(result.gfa.as_bytes())?;
+                out.flush()?;
+            } else {
+                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                out.write_all(result.gfa.as_bytes())?;
+                out.flush()?;
             }
         }
         Args::Crush {
@@ -13434,6 +13500,37 @@ mod tests {
                 assert_eq!(reference_names, vec!["ref"]);
             }
             _ => panic!("expected graph-report command"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_self_loops_cli_parse() {
+        let args = Args::try_parse_from([
+            "impg",
+            "normalize-self-loops",
+            "-g",
+            "in.gfa",
+            "-o",
+            "out.gfa",
+            "--max-unit-len",
+            "2",
+            "--report",
+            "stats.json",
+        ])
+        .unwrap();
+        match args {
+            Args::NormalizeSelfLoops {
+                gfa,
+                output,
+                max_unit_len,
+                report,
+            } => {
+                assert_eq!(gfa, "in.gfa");
+                assert_eq!(output, "out.gfa");
+                assert_eq!(max_unit_len, 2);
+                assert_eq!(report.as_deref(), Some("stats.json"));
+            }
+            _ => panic!("expected normalize-self-loops command"),
         }
     }
 
