@@ -2555,6 +2555,84 @@ P\talt\t1+,3+\t*
     }
 
     #[test]
+    fn star_segments_use_ln_tags_for_candidate_intervals_and_weights() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\t*\tLN:i:4
+S\t2\t*\tLN:i:6
+S\t3\tA
+P\tref\t1+,2+,3+\t*
+P\talt\t1+,3+\t*
+";
+        let graph = parse_normalized_gfa(
+            gfa,
+            "test",
+            None,
+            None,
+            FeatureSpace::GfaSegment.as_str(),
+            GraphFeatureIdMode::SegmentName,
+        )
+        .unwrap();
+        assert_eq!(graph.segments[0].length, 4);
+        assert_eq!(graph.segments[1].length, 6);
+        assert_eq!(graph.paths[graph.path_name_to_index["ref"]].length, 11);
+
+        let (candidates, region, target) = collect_graph_candidates(
+            &graph,
+            Some("ref:3-7"),
+            GraphContributionModel::LengthNormalized,
+        )
+        .unwrap();
+        assert_eq!(region, "ref:3-7");
+        assert_eq!(target.as_deref(), Some("ref"));
+
+        let ref_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.path_name == "ref")
+            .unwrap();
+        assert_eq!(ref_candidate.features, vec![(1, 1), (2, 1)]);
+        assert_eq!(ref_candidate.anchors, 2);
+        assert_eq!(ref_candidate.scoring_features.len(), 2);
+        assert!((ref_candidate.scoring_features[0].1 - 0.25).abs() < 1e-12);
+        assert!((ref_candidate.scoring_features[1].1 - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn repeated_gfa_path_steps_are_counted_in_candidate_vectors() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tCC
+S\t3\tG
+P\tsingle\t1+,2+,3+\t*
+P\tduplicated\t1+,2+,2+,3+\t*
+";
+        let graph = parse_normalized_gfa(
+            gfa,
+            "test",
+            None,
+            None,
+            FeatureSpace::GfaSegment.as_str(),
+            GraphFeatureIdMode::SegmentName,
+        )
+        .unwrap();
+
+        let (candidates, _, _) =
+            collect_graph_candidates(&graph, None, GraphContributionModel::Raw).unwrap();
+        let duplicated = candidates
+            .iter()
+            .find(|candidate| candidate.path_name == "duplicated")
+            .unwrap();
+
+        assert_eq!(duplicated.features, vec![(1, 1), (2, 2), (3, 1)]);
+        assert_eq!(
+            duplicated.scoring_features,
+            vec![(1, 1.0), (2, 2.0), (3, 1.0)]
+        );
+        assert_eq!(duplicated.anchors, 4);
+    }
+
+    #[test]
     fn parses_w_line_walks_as_pansn_paths() {
         let gfa = "\
 H\tVN:Z:1.1
