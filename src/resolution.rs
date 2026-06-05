@@ -9197,36 +9197,49 @@ pub fn poasta_sequences_to_gfa(
     sequences: &[Vec<u8>],
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<String> {
+    validate_sequence_inputs("POASTA block", headers, sequences)?;
+    let mut insertion_order = (0..headers.len()).collect::<Vec<_>>();
+    insertion_order.sort_by(|&a, &b| {
+        sequences[b]
+            .len()
+            .cmp(&sequences[a].len())
+            .then_with(|| headers[a].cmp(&headers[b]))
+    });
+    poasta_sequences_to_gfa_in_order(headers, sequences, &insertion_order, scoring_params)
+}
+
+/// Build an exact path-preserving POASTA graph for already-extracted local
+/// sequences using an explicit progressive insertion order.
+///
+/// `insertion_order` is a permutation of `0..headers.len()`. Path records in
+/// the returned GFA are still ordered as `headers`, so callers can compare
+/// insertion-order effects without changing path identity or output path order.
+pub fn poasta_sequences_to_gfa_in_order(
+    headers: &[String],
+    sequences: &[Vec<u8>],
+    insertion_order: &[usize],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<String> {
     use poasta::aligner::config::Affine2PieceMinGapCost;
     use poasta::aligner::PoastaAligner;
     use poasta::graphs::poa::POAGraph;
     use poasta::io::graph::graph_to_gfa;
 
-    if headers.len() != sequences.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "POASTA block got {} header(s) for {} sequence(s)",
-                headers.len(),
-                sequences.len()
-            ),
-        ));
-    }
+    validate_sequence_inputs("POASTA block", headers, sequences)?;
+    validate_insertion_order("POASTA block", insertion_order, headers.len())?;
     if headers.is_empty() {
         return Ok(String::new());
     }
 
-    let mut sorted_sequences = headers
+    let ordered_sequences = insertion_order
         .iter()
-        .cloned()
-        .zip(sequences.iter().cloned())
+        .map(|&idx| (headers[idx].clone(), sequences[idx].clone()))
         .collect::<Vec<_>>();
-    sorted_sequences.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-    let sorted_headers = sorted_sequences
+    let ordered_headers = ordered_sequences
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
-    let sequence_refs = sorted_sequences
+    let sequence_refs = ordered_sequences
         .iter()
         .map(|(_, sequence)| sequence.as_slice())
         .collect::<Vec<_>>();
@@ -9241,7 +9254,7 @@ pub fn poasta_sequences_to_gfa(
     add_poasta_sequences(
         &mut graph,
         &mut aligner,
-        &sorted_headers,
+        &ordered_headers,
         &sequence_refs,
         &weights,
     )?;
@@ -9256,7 +9269,7 @@ pub fn poasta_sequences_to_gfa(
         )
     })?;
 
-    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let expected_paths = ordered_sequences.into_iter().collect::<Vec<_>>();
     let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
     order_replacement_paths(&mut replacement, headers)?;
     let expected_in_header_order = headers
@@ -9266,6 +9279,132 @@ pub fn poasta_sequences_to_gfa(
         .collect::<Vec<_>>();
     validate_expected_paths(&replacement, &expected_in_header_order, "POASTA block")?;
     Ok(render_numeric_graph(&replacement))
+}
+
+/// Build an exact path-preserving abPOA graph for already-extracted local
+/// sequences using an explicit FASTA/progressive insertion order.
+pub fn abpoa_sequences_to_gfa_in_order(
+    headers: &[String],
+    sequences: &[Vec<u8>],
+    insertion_order: &[usize],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    abpoa_bin: &str,
+) -> io::Result<String> {
+    validate_sequence_inputs("abPOA block", headers, sequences)?;
+    validate_insertion_order("abPOA block", insertion_order, headers.len())?;
+    if headers.is_empty() {
+        return Ok(String::new());
+    }
+    if let Some(&idx) = insertion_order
+        .iter()
+        .find(|&&idx| sequences[idx].is_empty())
+    {
+        return Err(io::Error::other(format!(
+            "abPOA block cannot encode empty traversal '{}' without a synthetic sentinel",
+            headers[idx]
+        )));
+    }
+
+    let ordered_sequences = insertion_order
+        .iter()
+        .map(|&idx| (headers[idx].clone(), sequences[idx].clone()))
+        .collect::<Vec<_>>();
+    let mut input = tempfile::Builder::new()
+        .prefix("impg-abpoa-order-")
+        .suffix(".fa")
+        .tempfile()?;
+    write_fasta_records(&mut input, &ordered_sequences)?;
+
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+    let output = Command::new(abpoa_bin)
+        .arg("-m")
+        .arg("0")
+        .arg("-M")
+        .arg(match_score.to_string())
+        .arg("-X")
+        .arg(mismatch.to_string())
+        .arg("-O")
+        .arg(format!("{gap_open1},{gap_open2}"))
+        .arg("-E")
+        .arg(format!("{gap_extend1},{gap_extend2}"))
+        .arg("-r")
+        .arg("3")
+        .arg(input.path())
+        .output()
+        .map_err(|err| {
+            io::Error::other(format!("failed to run abPOA binary '{abpoa_bin}': {err}"))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "abPOA block failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+    let gfa = String::from_utf8(output.stdout).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("abPOA block GFA is not UTF-8: {err}"),
+        )
+    })?;
+    let mut replacement = abpoa_gfa_to_exact_graph(&gfa, &ordered_sequences)?;
+    order_replacement_paths(&mut replacement, headers)?;
+    let expected_in_header_order = headers
+        .iter()
+        .cloned()
+        .zip(sequences.iter().cloned())
+        .collect::<Vec<_>>();
+    validate_expected_paths(&replacement, &expected_in_header_order, "abPOA block")?;
+    Ok(render_numeric_graph(&replacement))
+}
+
+fn validate_sequence_inputs(
+    method: &str,
+    headers: &[String],
+    sequences: &[Vec<u8>],
+) -> io::Result<()> {
+    if headers.len() != sequences.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{method} got {} header(s) for {} sequence(s)",
+                headers.len(),
+                sequences.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_insertion_order(method: &str, insertion_order: &[usize], len: usize) -> io::Result<()> {
+    if insertion_order.len() != len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{method} insertion order has {} index(es) for {len} sequence(s)",
+                insertion_order.len()
+            ),
+        ));
+    }
+    let mut seen = vec![false; len];
+    for &idx in insertion_order {
+        if idx >= len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{method} insertion order index {idx} is out of range for {len} sequence(s)"
+                ),
+            ));
+        }
+        if std::mem::replace(&mut seen[idx], true) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{method} insertion order repeats index {idx}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn render_numeric_graph(graph: &Graph) -> String {
@@ -11018,6 +11157,75 @@ W\t*\t0\tpath0\t2\t4\t>s0
             String::from_utf8(path_sequence(&graph, &graph.paths[0]).unwrap()).unwrap(),
             "CC"
         );
+    }
+
+    #[test]
+    fn poasta_ordered_sequence_helper_preserves_exact_paths_in_header_order() {
+        let headers = vec![
+            "sample_short".to_string(),
+            "sample_long".to_string(),
+            "sample_mid".to_string(),
+        ];
+        let sequences = vec![b"ACGT".to_vec(), b"AACCGGTT".to_vec(), b"ACGTT".to_vec()];
+        let gfa =
+            poasta_sequences_to_gfa_in_order(&headers, &sequences, &[1, 2, 0], (1, 4, 6, 2, 26, 1))
+                .unwrap();
+        let graph = parse_gfa(&gfa).unwrap();
+
+        assert_eq!(
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sample_short", "sample_long", "sample_mid"]
+        );
+        for (path, expected) in graph.paths.iter().zip(sequences.iter()) {
+            assert_eq!(path_sequence(&graph, path).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn poasta_ordered_sequence_helper_rejects_non_permutation_orders() {
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let sequences = vec![b"A".to_vec(), b"C".to_vec()];
+        let repeated =
+            poasta_sequences_to_gfa_in_order(&headers, &sequences, &[0, 0], (1, 4, 6, 2, 26, 1))
+                .unwrap_err();
+        assert!(repeated.to_string().contains("repeats index 0"));
+        let short =
+            poasta_sequences_to_gfa_in_order(&headers, &sequences, &[0], (1, 4, 6, 2, 26, 1))
+                .unwrap_err();
+        assert!(short.to_string().contains("1 index(es) for 2 sequence(s)"));
+    }
+
+    #[test]
+    fn abpoa_ordered_sequence_helper_preserves_exact_paths_in_header_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake_abpoa_bin(&dir, &["sample_long", "sample_short"], false);
+        let headers = vec!["sample_short".to_string(), "sample_long".to_string()];
+        let sequences = vec![b"ACG".to_vec(), b"ATG".to_vec()];
+        let gfa = abpoa_sequences_to_gfa_in_order(
+            &headers,
+            &sequences,
+            &[1, 0],
+            (1, 4, 6, 2, 26, 1),
+            fake.to_str().unwrap(),
+        )
+        .unwrap();
+        let graph = parse_gfa(&gfa).unwrap();
+
+        assert_eq!(
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sample_short", "sample_long"]
+        );
+        for (path, expected) in graph.paths.iter().zip(sequences.iter()) {
+            assert_eq!(path_sequence(&graph, path).unwrap(), *expected);
+        }
     }
 
     #[test]
