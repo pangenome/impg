@@ -1,0 +1,119 @@
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling zstd-safe v7.2.4
+   Compiling fastga-rs v0.1.2 (https://github.com/pangenome/fastga-rs?rev=e5037d5#e5037d5e)
+   Compiling hts-sys v2.2.0
+   Compiling impg v0.4.1 (/home/erikg/impg/.wg-worktrees/agent-551)
+   Compiling statrs v0.16.1
+   Compiling seqwish v0.1.3 (https://github.com/pangenome/seqwish?branch=rust-2#15aee559)
+   Compiling zstd v0.13.3
+   Compiling rust-htslib v1.0.0
+   Compiling ragc-common v0.1.1 (https://github.com/AndreaGuarracino/ragc?rev=ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0#ebfa5eb2)
+   Compiling niffler v3.0.0
+   Compiling tpa v0.1.0 (https://github.com/AndreaGuarracino/tpa?rev=49f1801f9e0108c211571fa2614e517009446afe#49f1801f)
+   Compiling bio v1.6.0
+   Compiling ragc-core v0.1.1 (https://github.com/AndreaGuarracino/ragc?rev=ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0#ebfa5eb2)
+   Compiling allwave v0.1.0 (https://github.com/pangenome/allwave?rev=6b2798aa9fd405abe680cfb1e644331eff9d58e0#6b2798aa)
+   Compiling sweepga v0.1.1 (https://github.com/pangenome/sweepga?rev=ddd31d39b6a68fc972025b048076032341b66835#ddd31d39)
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:753:5
+    |
+750 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+753 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:775:16
+    |
+775 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:776:14
+    |
+776 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `generate_multi_level_candidates` is never used
+    --> src/resolution.rs:3293:4
+     |
+3293 | fn generate_multi_level_candidates(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7075:4
+     |
+7075 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10311:4
+      |
+10311 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib) generated 6 warnings
+warning: constant `EXPLORE_NEIGHBORHOOD` is never used
+  --> vendor/gfaffix/src/main.rs:40:7
+   |
+40 | const EXPLORE_NEIGHBORHOOD: usize = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `find_walk_preserving_shared_affixes` is never used
+   --> vendor/gfaffix/src/main.rs:515:4
+    |
+515 | fn find_walk_preserving_shared_affixes(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_affected_nodes` is never used
+   --> vendor/gfaffix/src/main.rs:533:4
+    |
+533 | fn find_affected_nodes(graph: &HashGraph, del_subg: &DeletedSubGraph, v: Handle) -> Vec<Handle> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `get_locus_tags`, `get_collapsed_nodes`, `decollapse`, `decollapse_prefix`, and `decollapse_blunt_node` are never used
+   --> vendor/gfaffix/src/collapse_event_tracker.rs:255:12
+    |
+ 52 | impl<'a> CollapseEventTracker<'a> {
+    | --------------------------------- methods in this implementation
+...
+255 |     pub fn get_locus_tags(&self) -> FxHashMap<Node, Vec<Node>> {
+    |            ^^^^^^^^^^^^^^
+...
+279 |     pub fn get_collapsed_nodes(&self) -> Vec<(Node, Node)> {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+374 |     pub fn decollapse(
+    |            ^^^^^^^^^^
+...
+558 |     fn decollapse_prefix(
+    |        ^^^^^^^^^^^^^^^^^
+...
+608 |     pub fn decollapse_blunt_node(
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `add_edge` is never used
+  --> vendor/gfaffix/src/deleted_sub_graph.rs:19:12
+   |
+10 | impl DeletedSubGraph {
+   | -------------------- method in this implementation
+...
+19 |     pub fn add_edge(&mut self, e: Edge) -> bool {
+   |            ^^^^^^^^
+
+warning: `impg` (bin "gfaffix") generated 5 warnings
+    Finished `release` profile [optimized] target(s) in 43.15s

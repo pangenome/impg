@@ -1,0 +1,2 @@
+C4SMOKE_A#0#chr6:0-226
+C4SMOKE_B#0#chr6:0-226

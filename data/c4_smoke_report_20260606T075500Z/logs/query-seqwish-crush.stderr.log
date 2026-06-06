@@ -1,0 +1,14 @@
+[2026-06-06T07:57:34Z INFO  impg] Found 1 alignment file(s)
+[2026-06-06T07:57:34Z INFO  impg] Reading IMPG index from data/c4_smoke_report_20260606T075500Z/outputs/easy_shared_flank.impg
+[2026-06-06T07:57:34Z INFO  impg] Building FASTA index for 1 file
+[2026-06-06T07:57:34Z INFO  impg] Querying target ranges
+[2026-06-06T07:57:34Z INFO  impg] Query: C4FIXTURE#0#easy_shared_flank:14-240:0-226 (C4FIXTURE#0#easy_shared_flank:14-240:0-226)
+[2026-06-06T07:57:34Z INFO  impg] Collected 10 results (excluding input range)
+[2026-06-06T07:57:34Z INFO  impg] [temp] Using temp directory: /home/erikg/impg/.wg-worktrees/agent-551/data/c4_smoke_report_20260606T075500Z/tmp
+[2026-06-06T07:57:34Z INFO  impg] Collected 6 merged intervals
+[2026-06-06T07:57:34Z INFO  impg::commands::graph] [graph::debug] Saved combined FASTA to data/c4_smoke_report_20260606T075500Z/debug/query-seqwish-crush/combined.fa
+[FastGA] prepare_gdb: Converting "/home/erikg/impg/.wg-worktrees/agent-551/data/c4_smoke_report_20260606T075500Z/tmp/.tmpJoI5ks.fa" to GDB
+[FastGA] Calling FAtoGDB: /home/erikg/impg/.wg-worktrees/agent-551/target/release/FAtoGDB /home/erikg/impg/.wg-worktrees/agent-551/data/c4_smoke_report_20260606T075500Z/tmp/.tmpJoI5ks.fa (TMPDIR=/home/erikg/impg/.wg-worktrees/agent-551/data/c4_smoke_report_20260606T075500Z/tmp)
+[2026-06-06T07:57:35Z ERROR impg] fastga alignment failed: Failed to prepare GDB: FAtoGDB failed with code None
+    stdout:
+    stderr:

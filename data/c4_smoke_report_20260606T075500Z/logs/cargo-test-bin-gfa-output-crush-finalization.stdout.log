@@ -1,0 +1,5 @@
+
+running 1 test
+test tests::test_gfa_output_format_accepts_alignment_crush_stage_with_finalization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.01s

@@ -1,0 +1,19 @@
+[2026-06-06T07:59:01Z INFO  impg] [temp] Using temp directory: /home/erikg/impg/.wg-worktrees/agent-551/data/c4_smoke_report_20260606T075500Z/tmp
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] Building graph from 1 FASTA file(s)
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::count] 0.000s Counting sequences in 1 FASTA file(s)
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::count] 0.000s Found 6 sequences in 1 genomes, using k-mer frequency 1
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::combine] 0.000s Combined FASTA files for alignment (avg seq len: 226 bp)
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::debug] Saved combined FASTA to data/c4_smoke_report_20260606T075500Z/debug/easy_shared_flank.seqwish.control/combined.fa
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::align] 0.000s Using provided PAF file: tests/test_data/crush/c4_fragments/easy_shared_flank.paf
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::debug] Saved raw PAF to data/c4_smoke_report_20260606T075500Z/debug/easy_shared_flank.seqwish.control/raw.paf
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering disabled (--no-filter)
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::debug] Saved filtered PAF to data/c4_smoke_report_20260606T075500Z/debug/easy_shared_flank.seqwish.control/filtered.paf
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::seqindex] 0.000s Building sequence index
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::seqindex] 0.000s Indexed 6 sequences
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::alignments] 0.000s Loading and indexing alignments
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::alignments] 0.001s Alignments indexed
+[2026-06-06T07:59:01Z INFO  impg::commands::graph] [graph::transclosure] 0.001s Computing transitive closures
+[transclosure] Starting transitive closure computation
+[transclosure] Using 1 threads
+[transclosure] Spanning tree: 5 edges from 15 total pairs (3x reduction)
+[transclosure] 0.000s 0.00% 0-1356 overlap_collect

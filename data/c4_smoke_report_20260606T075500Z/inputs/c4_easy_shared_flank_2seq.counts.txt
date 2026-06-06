@@ -1,0 +1,3 @@
+  4 data/c4_smoke_report_20260606T075500Z/inputs/c4_easy_shared_flank_2seq.fa
+  2 data/c4_smoke_report_20260606T075500Z/inputs/c4_easy_shared_flank_2seq.paf
+  6 total
