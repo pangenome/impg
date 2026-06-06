@@ -35,6 +35,8 @@ use seqwish::transclosure::compute_transitive_closures;
 
 static SEQWISH_INDUCTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+const SINGLE_PAF_TRANSCLOSURE_FALLBACK_MAX_TOTAL_BP: u64 = 10_000;
+
 /// Configuration for graph building.
 #[derive(Clone)]
 pub struct GraphBuildConfig {
@@ -210,6 +212,19 @@ pub fn induce_graph_from_alignment<W: Write>(
         );
     }
 
+    let filtered_paf_records = count_paf_records(filtered_paf.path())?;
+    if filtered_paf_records == 0 {
+        if config.show_progress {
+            info!(
+                "[graph::transclosure] {:.3}s Empty filtered PAF; emitting source-sequence GFA without seqwish transitive closure",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        let node_count = emit_source_sequence_gfa(&seqidx, output)?;
+        seqwish::tempfile::cleanup();
+        return Ok(node_count);
+    }
+
     // 5) Index alignments into interval tree
     if config.show_progress {
         info!(
@@ -252,6 +267,20 @@ pub fn induce_graph_from_alignment<W: Write>(
             .into_inner()
             .unwrap(),
     );
+
+    if should_skip_tiny_single_paf_transclosure(&seqidx, filtered_paf_records) {
+        if config.show_progress {
+            info!(
+                "[graph::transclosure] {:.3}s Single-row tiny PAF ({} seqs, {} bp); emitting source-sequence GFA without seqwish transitive closure",
+                start_time.elapsed().as_secs_f64(),
+                seqidx.n_seqs(),
+                seqidx.seq_length()
+            );
+        }
+        let node_count = emit_source_sequence_gfa(&seqidx, output)?;
+        seqwish::tempfile::cleanup();
+        return Ok(node_count);
+    }
 
     // 6) Compute transitive closures
     if config.show_progress {
@@ -415,6 +444,68 @@ pub fn induce_graph_from_alignment<W: Write>(
     seqwish::tempfile::cleanup();
 
     Ok(node_count)
+}
+
+fn count_paf_records(path: &Path) -> io::Result<usize> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut records = 0usize;
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        records += 1;
+    }
+
+    Ok(records)
+}
+
+fn should_skip_tiny_single_paf_transclosure(seqidx: &SeqIndex, paf_records: usize) -> bool {
+    paf_records == 1
+        && seqidx.n_seqs() == 2
+        && seqidx.seq_length() <= SINGLE_PAF_TRANSCLOSURE_FALLBACK_MAX_TOTAL_BP
+}
+
+fn emit_source_sequence_gfa<W: Write>(seqidx: &SeqIndex, output: &mut W) -> io::Result<usize> {
+    writeln!(output, "H\tVN:Z:1.0")?;
+
+    for seq_id in 1..=seqidx.n_seqs() {
+        write!(output, "S\t{seq_id}\t")?;
+        let seq_start = seqidx.nth_seq_offset(seq_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("seqwish sequence index is missing offset for sequence {seq_id}"),
+            )
+        })?;
+        let seq_len = seqidx.nth_seq_length(seq_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("seqwish sequence index is missing length for sequence {seq_id}"),
+            )
+        })?;
+        for pos in seq_start..seq_start + seq_len {
+            let base = seqidx.at(pos).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("seqwish sequence index is missing base at offset {pos}"),
+                )
+            })?;
+            write!(output, "{base}")?;
+        }
+        writeln!(output)?;
+    }
+
+    for seq_id in 1..=seqidx.n_seqs() {
+        let seq_name = seqidx
+            .nth_name(seq_id)
+            .unwrap_or_else(|| format!("seq{seq_id}"));
+        writeln!(output, "P\t{seq_name}\t{seq_id}+\t*")?;
+    }
+
+    Ok(seqidx.n_seqs())
 }
 
 /// Run the graph building command
