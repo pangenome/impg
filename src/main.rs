@@ -9138,15 +9138,16 @@ fn run() -> io::Result<()> {
                 resolved.stats.candidates_seen,
                 resolved.stats.iterations
             );
+            let gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
 
             if output == "-" {
                 let stdout = io::stdout();
                 let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(resolved.gfa.as_bytes())?;
+                out.write_all(gfa.as_bytes())?;
                 out.flush()?;
             } else {
                 let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                out.write_all(resolved.gfa.as_bytes())?;
+                out.write_all(gfa.as_bytes())?;
                 out.flush()?;
             }
         }

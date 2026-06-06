@@ -909,6 +909,7 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
 
     if let Some(pipeline) = &engine_opts.graph_sort_pipeline {
         let t0 = std::time::Instant::now();
+        let gfa = graph::normalize_self_loop_runs(gfa)?;
         let sorted = graph::sort_gfa_pipeline(&gfa, pipeline, engine_opts.pipeline.num_threads)?;
         log::info!(
             "gfasort: pipeline '{}' sorted graph in {:.3}s",

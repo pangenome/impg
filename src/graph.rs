@@ -861,7 +861,33 @@ pub(crate) fn unchop_gfa(gfa_content: &str) -> io::Result<String> {
 /// found or exits non-zero — callers must ensure the binary is available.
 pub fn normalize_and_sort(gfa: String, num_threads: usize) -> io::Result<String> {
     let normalized = run_gfaffix(&gfa, num_threads)?;
+    let normalized = normalize_self_loop_runs(normalized)?;
     sort_gfa(&normalized, num_threads)
+}
+
+/// Collapse path-local repeat-unit self-loop runs while preserving path
+/// spellings exactly.
+pub fn normalize_self_loop_runs(gfa: String) -> io::Result<String> {
+    let result = crate::gfa_self_loops::normalize_repeat_self_loops(
+        &gfa,
+        &crate::gfa_self_loops::NormalizeSelfLoopsConfig::default(),
+    )?;
+    if result.stats.collapsed_runs > 0
+        || result.stats.input_direct_self_loop_edges != result.stats.output_direct_self_loop_edges
+        || result.stats.input_adjacent_same_step_path_steps
+            != result.stats.output_adjacent_same_step_path_steps
+    {
+        log::info!(
+            "self-loop normalization: direct self-loop edges {} -> {}, adjacent same-step repeats {} -> {}, collapsed {} run(s), created {} segment(s)",
+            result.stats.input_direct_self_loop_edges,
+            result.stats.output_direct_self_loop_edges,
+            result.stats.input_adjacent_same_step_path_steps,
+            result.stats.output_adjacent_same_step_path_steps,
+            result.stats.collapsed_runs,
+            result.stats.created_segments
+        );
+    }
+    Ok(result.gfa)
 }
 
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
