@@ -682,27 +682,131 @@ struct Graph {
     paths: Vec<Path>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum OccurrenceOrientation {
+    #[default]
+    Forward,
+    Reverse,
+}
+
+impl OccurrenceOrientation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Reverse => "reverse",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlankSide {
+    Left,
+    Right,
+}
+
+impl FlankSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FlankTruncationReason {
+    #[default]
+    NotRequested,
+    RequestedLength,
+    PathBoundary,
+}
+
+impl FlankTruncationReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not-requested",
+            Self::RequestedLength => "requested-length",
+            Self::PathBoundary => "path-boundary",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FlankContext {
+    requested_bp: usize,
+    actual_bp_path_orientation: usize,
+    actual_bp_canonical: usize,
+    path_side: FlankSide,
+    canonical_side: FlankSide,
+    path_step_range: Option<(usize, usize)>,
+    path_bp_range: Option<(usize, usize)>,
+    truncation: FlankTruncationReason,
+    sequence_path_orientation: Vec<u8>,
+    sequence_canonical: Vec<u8>,
+}
+
+impl FlankContext {
+    fn empty(path_side: FlankSide) -> Self {
+        Self {
+            requested_bp: 0,
+            actual_bp_path_orientation: 0,
+            actual_bp_canonical: 0,
+            path_side,
+            canonical_side: path_side,
+            path_step_range: None,
+            path_bp_range: None,
+            truncation: FlankTruncationReason::NotRequested,
+            sequence_path_orientation: Vec::new(),
+            sequence_canonical: Vec::new(),
+        }
+    }
+}
+
+impl Default for FlankContext {
+    fn default() -> Self {
+        Self::empty(FlankSide::Left)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TrimPlan {
+    canonical_left_trim_bp: usize,
+    canonical_right_trim_bp: usize,
+    expected_flanked_sequence_canonical: Vec<u8>,
+    expected_target_sequence_path_orientation: Vec<u8>,
+    restore_orientation: OccurrenceOrientation,
+}
+
 #[derive(Clone, Debug, Default)]
 struct PathRange {
     path_idx: usize,
     source_path_name: Option<String>,
+    original_path_name: Option<String>,
     source_begin_bp: usize,
     source_end_bp: usize,
     begin_step: usize,
     end_step: usize,
+    occurrence_orientation: OccurrenceOrientation,
     /// Bubble interior sequence (the bytes between `begin_step` and `end_step`
     /// on this path). This is what the integration code substitutes.
     sequence: Vec<u8>,
+    /// Canonical-orientation sequence presented to the resolver. For forward
+    /// occurrences this is the path-orientation sequence; for reverse
+    /// occurrences this is reverse-complemented and later restored for lacing.
+    resolver_sequence: Vec<u8>,
     /// Flank-extended sequence presented to the replacement aligner:
     /// `<left_flank><interior><right_flank>`. Empty when flanking is disabled;
     /// in that case the aligner sees `sequence` directly. The flank lengths
     /// are tracked in `left_flank_bp` / `right_flank_bp` so the aligner's
     /// output graph can be clipped back to the interior before substitution.
     extended_sequence: Vec<u8>,
-    /// Left-flank length in bp (0 when no flank was added).
+    /// Canonical left trim length in bp (0 when no flank was added).
     left_flank_bp: usize,
-    /// Right-flank length in bp (0 when no flank was added).
+    /// Canonical right trim length in bp (0 when no flank was added).
     right_flank_bp: usize,
+    left_flank: FlankContext,
+    right_flank: FlankContext,
+    trim_plan: TrimPlan,
 }
 
 #[derive(Clone, Debug)]
@@ -4554,14 +4658,12 @@ fn motif_anchor_pair_candidate(
         ranges.push(PathRange {
             path_idx,
             source_path_name: Some(path.name.clone()),
+            original_path_name: Some(path.name.clone()),
             source_begin_bp,
             source_end_bp,
             begin_step,
             end_step,
-            sequence: Vec::new(),
-            extended_sequence: Vec::new(),
-            left_flank_bp: 0,
-            right_flank_bp: 0,
+            ..PathRange::default()
         });
     }
     ranges.sort_by_key(|range| range.path_idx);
@@ -4934,14 +5036,12 @@ fn candidate_from_complete_homologous_cluster(
             Some(PathRange {
                 path_idx,
                 source_path_name: Some(path.name.clone()),
+                original_path_name: Some(path.name.clone()),
                 source_begin_bp: source_start,
                 source_end_bp: source_end,
                 begin_step,
                 end_step,
-                sequence: Vec::new(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             })
         })
         .collect::<Vec<_>>();
@@ -5188,14 +5288,12 @@ fn candidate_from_root_interval(
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                original_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
                 source_begin_bp: positions[begin_step],
                 source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
-                sequence: Vec::new(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             });
         }
     }
@@ -6967,14 +7065,12 @@ fn discover_all_candidates(
                     ranges.push(PathRange {
                         path_idx,
                         source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                        original_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
                         source_begin_bp: positions[range_begin],
                         source_end_bp: positions[range_end],
                         begin_step: range_begin,
                         end_step: range_end,
-                        sequence: Vec::new(),
-                        extended_sequence: Vec::new(),
-                        left_flank_bp: 0,
-                        right_flank_bp: 0,
+                        ..PathRange::default()
                     });
                 }
             }
@@ -7269,14 +7365,12 @@ fn chain_candidate_from_group(
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                original_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
                 source_begin_bp: positions[begin_step],
                 source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
-                sequence: Vec::new(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             });
         }
     }
@@ -7970,12 +8064,25 @@ fn materialize_candidate_sequences(
 ) -> bool {
     for range in &mut candidate.ranges {
         range.sequence = range_sequence(graph, range);
-        range.extended_sequence = Vec::new();
-        range.left_flank_bp = 0;
-        range.right_flank_bp = 0;
+        if let Some(path) = graph.paths.get(range.path_idx) {
+            let path_name = path.name.clone();
+            range
+                .source_path_name
+                .get_or_insert_with(|| path_name.clone());
+            range.original_path_name = Some(path_name);
+        }
+        reset_range_resolution_context(range);
     }
     if config.replacement_flank_bp > 0 {
         materialize_flanked_sequences(graph, candidate, config.replacement_flank_bp);
+    } else {
+        materialize_unflanked_sequences(candidate);
+    }
+    if config.replacement_flank_bp > 0 || candidate_has_reverse_orientation(candidate) {
+        log::info!(
+            "crush flank-aware candidate: {}",
+            format_flank_aware_candidate_diagnostic(candidate, config.replacement_flank_bp)
+        );
     }
     // Flanks are aligner context only; skip candidates whose substituted
     // interiors spell the same sequence on every path.
@@ -8000,28 +8107,60 @@ fn materialize_candidate_sequences(
 /// just the interior before the path-step substitution.
 fn materialize_flanked_sequences(graph: &Graph, candidate: &mut BubbleCandidate, flank_bp: usize) {
     for range in &mut candidate.ranges {
-        let path = &graph.paths[range.path_idx];
-        let left_flank = collect_flank_left(graph, path, range.begin_step, flank_bp);
-        let right_flank = collect_flank_right(graph, path, range.end_step, flank_bp);
-        if left_flank.is_empty() && right_flank.is_empty() {
-            continue;
-        }
-        let mut extended =
-            Vec::with_capacity(left_flank.len() + range.sequence.len() + right_flank.len());
-        extended.extend_from_slice(&left_flank);
-        extended.extend_from_slice(&range.sequence);
-        extended.extend_from_slice(&right_flank);
-        range.left_flank_bp = left_flank.len();
-        range.right_flank_bp = right_flank.len();
-        range.extended_sequence = extended;
+        range.left_flank = collect_flank_left(graph, range.path_idx, range.begin_step, flank_bp);
+        range.right_flank = collect_flank_right(graph, range.path_idx, range.end_step, flank_bp);
+        normalize_range_for_resolution(range);
     }
 }
 
+fn materialize_unflanked_sequences(candidate: &mut BubbleCandidate) {
+    for range in &mut candidate.ranges {
+        normalize_range_for_resolution(range);
+    }
+}
+
+fn reset_range_resolution_context(range: &mut PathRange) {
+    range.resolver_sequence = Vec::new();
+    range.extended_sequence = Vec::new();
+    range.left_flank_bp = 0;
+    range.right_flank_bp = 0;
+    range.left_flank = FlankContext::empty(FlankSide::Left);
+    range.right_flank = FlankContext::empty(FlankSide::Right);
+    range.trim_plan = TrimPlan {
+        expected_target_sequence_path_orientation: range.sequence.clone(),
+        restore_orientation: range.occurrence_orientation,
+        ..TrimPlan::default()
+    };
+}
+
 /// Walk path steps from `begin_step - 1` toward the path start, accumulating
-/// step-aligned sequence until at least `flank_bp` bp is collected (the last
-/// step included may overshoot — we don't split mid-segment for flanks because
-/// the aligner reads bp, not step structure).
-fn collect_flank_left(graph: &Graph, path: &Path, begin_step: usize, flank_bp: usize) -> Vec<u8> {
+/// occurrence-local path sequence until `flank_bp` bp is collected or the path
+/// begins. If the nearest whole-step collection overshoots, drop bases from the
+/// far end so the flank remains adjacent to the target boundary.
+fn collect_flank_left(
+    graph: &Graph,
+    path_idx: usize,
+    begin_step: usize,
+    flank_bp: usize,
+) -> FlankContext {
+    let mut context = FlankContext {
+        requested_bp: flank_bp,
+        path_side: FlankSide::Left,
+        canonical_side: FlankSide::Left,
+        truncation: if flank_bp == 0 {
+            FlankTruncationReason::NotRequested
+        } else {
+            FlankTruncationReason::PathBoundary
+        },
+        ..FlankContext::empty(FlankSide::Left)
+    };
+    if flank_bp == 0 {
+        return context;
+    }
+    let Some(path) = graph.paths.get(path_idx) else {
+        return context;
+    };
+    let positions = path_positions(graph, path_idx);
     let mut collected: Vec<u8> = Vec::new();
     let mut step_idx = begin_step;
     while step_idx > 0 && collected.len() < flank_bp {
@@ -8040,11 +8179,48 @@ fn collect_flank_left(graph: &Graph, path: &Path, begin_step: usize, flank_bp: u
     if collected.len() > flank_bp {
         let drop = collected.len() - flank_bp;
         collected.drain(..drop);
+        context.truncation = FlankTruncationReason::RequestedLength;
+    } else if collected.len() == flank_bp {
+        context.truncation = FlankTruncationReason::RequestedLength;
     }
-    collected
+    let actual = collected.len();
+    if actual > 0 {
+        let path_bp_end = positions.get(begin_step).copied().unwrap_or_default();
+        let path_bp_begin = path_bp_end.saturating_sub(actual);
+        context.path_step_range = Some((step_idx, begin_step));
+        context.path_bp_range = Some((path_bp_begin, path_bp_end));
+    }
+    context.actual_bp_path_orientation = actual;
+    context.actual_bp_canonical = actual;
+    context.sequence_path_orientation = collected.clone();
+    context.sequence_canonical = collected;
+    context
 }
 
-fn collect_flank_right(graph: &Graph, path: &Path, end_step: usize, flank_bp: usize) -> Vec<u8> {
+fn collect_flank_right(
+    graph: &Graph,
+    path_idx: usize,
+    end_step: usize,
+    flank_bp: usize,
+) -> FlankContext {
+    let mut context = FlankContext {
+        requested_bp: flank_bp,
+        path_side: FlankSide::Right,
+        canonical_side: FlankSide::Right,
+        truncation: if flank_bp == 0 {
+            FlankTruncationReason::NotRequested
+        } else {
+            FlankTruncationReason::PathBoundary
+        },
+        ..FlankContext::empty(FlankSide::Right)
+    };
+    if flank_bp == 0 {
+        return context;
+    }
+    let Some(path) = graph.paths.get(path_idx) else {
+        return context;
+    };
+    let positions = path_positions(graph, path_idx);
     let mut collected: Vec<u8> = Vec::new();
     let mut step_idx = end_step;
     while step_idx < path.steps.len() && collected.len() < flank_bp {
@@ -8059,8 +8235,107 @@ fn collect_flank_right(graph: &Graph, path: &Path, end_step: usize, flank_bp: us
     }
     if collected.len() > flank_bp {
         collected.truncate(flank_bp);
+        context.truncation = FlankTruncationReason::RequestedLength;
+    } else if collected.len() == flank_bp {
+        context.truncation = FlankTruncationReason::RequestedLength;
     }
-    collected
+    let actual = collected.len();
+    if actual > 0 {
+        let path_bp_begin = positions.get(end_step).copied().unwrap_or_default();
+        let path_bp_end = path_bp_begin.saturating_add(actual);
+        context.path_step_range = Some((end_step, step_idx));
+        context.path_bp_range = Some((path_bp_begin, path_bp_end));
+    }
+    context.actual_bp_path_orientation = actual;
+    context.actual_bp_canonical = actual;
+    context.sequence_path_orientation = collected.clone();
+    context.sequence_canonical = collected;
+    context
+}
+
+fn normalize_range_for_resolution(range: &mut PathRange) {
+    match range.occurrence_orientation {
+        OccurrenceOrientation::Forward => {
+            range.left_flank.canonical_side = FlankSide::Left;
+            range.left_flank.sequence_canonical =
+                range.left_flank.sequence_path_orientation.clone();
+            range.left_flank.actual_bp_canonical = range.left_flank.sequence_canonical.len();
+            range.right_flank.canonical_side = FlankSide::Right;
+            range.right_flank.sequence_canonical =
+                range.right_flank.sequence_path_orientation.clone();
+            range.right_flank.actual_bp_canonical = range.right_flank.sequence_canonical.len();
+            let mut resolver = Vec::with_capacity(
+                range.left_flank.sequence_canonical.len()
+                    + range.sequence.len()
+                    + range.right_flank.sequence_canonical.len(),
+            );
+            resolver.extend_from_slice(&range.left_flank.sequence_canonical);
+            resolver.extend_from_slice(&range.sequence);
+            resolver.extend_from_slice(&range.right_flank.sequence_canonical);
+            let canonical_left_trim = range.left_flank.actual_bp_canonical;
+            let canonical_right_trim = range.right_flank.actual_bp_canonical;
+            finish_range_resolution_context(
+                range,
+                resolver,
+                canonical_left_trim,
+                canonical_right_trim,
+            );
+        }
+        OccurrenceOrientation::Reverse => {
+            range.left_flank.canonical_side = FlankSide::Right;
+            range.left_flank.sequence_canonical =
+                reverse_complement(&range.left_flank.sequence_path_orientation);
+            range.left_flank.actual_bp_canonical = range.left_flank.sequence_canonical.len();
+            range.right_flank.canonical_side = FlankSide::Left;
+            range.right_flank.sequence_canonical =
+                reverse_complement(&range.right_flank.sequence_path_orientation);
+            range.right_flank.actual_bp_canonical = range.right_flank.sequence_canonical.len();
+            let target_canonical = reverse_complement(&range.sequence);
+            let mut resolver = Vec::with_capacity(
+                range.right_flank.sequence_canonical.len()
+                    + target_canonical.len()
+                    + range.left_flank.sequence_canonical.len(),
+            );
+            resolver.extend_from_slice(&range.right_flank.sequence_canonical);
+            resolver.extend_from_slice(&target_canonical);
+            resolver.extend_from_slice(&range.left_flank.sequence_canonical);
+            let canonical_left_trim = range.right_flank.actual_bp_canonical;
+            let canonical_right_trim = range.left_flank.actual_bp_canonical;
+            finish_range_resolution_context(
+                range,
+                resolver,
+                canonical_left_trim,
+                canonical_right_trim,
+            );
+        }
+    }
+}
+
+fn finish_range_resolution_context(
+    range: &mut PathRange,
+    resolver: Vec<u8>,
+    canonical_left_trim: usize,
+    canonical_right_trim: usize,
+) {
+    range.left_flank_bp = canonical_left_trim;
+    range.right_flank_bp = canonical_right_trim;
+    if range.left_flank_bp > 0 || range.right_flank_bp > 0 {
+        range.extended_sequence = resolver.clone();
+    } else {
+        range.extended_sequence = Vec::new();
+    }
+    range.resolver_sequence = if resolver != range.sequence {
+        resolver.clone()
+    } else {
+        Vec::new()
+    };
+    range.trim_plan = TrimPlan {
+        canonical_left_trim_bp: range.left_flank_bp,
+        canonical_right_trim_bp: range.right_flank_bp,
+        expected_flanked_sequence_canonical: resolver,
+        expected_target_sequence_path_orientation: range.sequence.clone(),
+        restore_orientation: range.occurrence_orientation,
+    };
 }
 
 fn candidate_signature(
@@ -8102,6 +8377,10 @@ fn apply_replacement_frontier(
     plans: &[ReplacementPlan],
     next_id: &mut usize,
 ) -> io::Result<Graph> {
+    let flank_aware_plan_count = plans
+        .iter()
+        .filter(|plan| candidate_needs_trim_or_restore(&plan.candidate))
+        .count();
     let mut replacements_by_path: FxHashMap<usize, Vec<PathReplacement>> = FxHashMap::default();
 
     for (plan_idx, plan) in plans.iter().enumerate() {
@@ -8206,6 +8485,15 @@ fn apply_replacement_frontier(
         next_id,
     );
     let next = parse_gfa(&rendered)?;
+    if flank_aware_plan_count > 0 {
+        log::info!(
+            "crush flank-aware lacing: plan_count={} flank_aware_plan_count={} lacing_result=parsed output_segments={} output_paths={}",
+            plans.len(),
+            flank_aware_plan_count,
+            next.segments.len(),
+            next.paths.len()
+        );
+    }
     if log::log_enabled!(log::Level::Debug) {
         let mut sequence_counts: FxHashMap<&[u8], usize> = FxHashMap::default();
         for segment in &next.segments {
@@ -8225,7 +8513,14 @@ fn apply_replacement_frontier(
             duplicate_segments
         );
     }
-    if !path_sequences_equal(graph, &next)? {
+    let path_preserved = path_sequences_equal(graph, &next)?;
+    if flank_aware_plan_count > 0 {
+        log::info!(
+            "crush flank-aware path-preservation: outcome={} checked_by=full_path_name_and_spelling_equality",
+            if path_preserved { "pass" } else { "fail" }
+        );
+    }
+    if !path_preserved {
         return Err(io::Error::other(
             "resolved graph failed exact path-sequence validation",
         ));
@@ -8239,9 +8534,10 @@ fn build_replacement_with_method(
     config: &ResolutionConfig,
     method: ResolutionMethod,
 ) -> io::Result<Graph> {
+    log_flank_aware_build_start(candidate, config, method);
     let replacement = build_replacement_with_method_inner(candidate, config, method)?;
-    if candidate_has_flank(candidate) {
-        let clipped = clip_replacement_to_interior(replacement, candidate)?;
+    if candidate_needs_trim_or_restore(candidate) {
+        let clipped = clip_replacement_to_interior(replacement, candidate, method.method_name())?;
         validate_interior_replacement_paths(&clipped, candidate, method.method_name())?;
         Ok(clipped)
     } else {
@@ -8260,6 +8556,7 @@ fn build_replacement_with_method_report(
     config: &ResolutionConfig,
     method: ResolutionMethod,
 ) -> io::Result<ReplacementBuildReport> {
+    log_flank_aware_build_start(candidate, config, method);
     let (replacement, evidence) = match method {
         ResolutionMethod::Sweepga => {
             let (replacement, evidence) =
@@ -8276,8 +8573,8 @@ fn build_replacement_with_method_report(
             None,
         ),
     };
-    let replacement = if candidate_has_flank(candidate) {
-        let clipped = clip_replacement_to_interior(replacement, candidate)?;
+    let replacement = if candidate_needs_trim_or_restore(candidate) {
+        let clipped = clip_replacement_to_interior(replacement, candidate, method.method_name())?;
         validate_interior_replacement_paths(&clipped, candidate, method.method_name())?;
         clipped
     } else {
@@ -8315,6 +8612,22 @@ fn build_replacement_with_method_catching_unwind_report(
                 panic_message
             )))
         }
+    }
+}
+
+fn log_flank_aware_build_start(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    method: ResolutionMethod,
+) {
+    if candidate_needs_trim_or_restore(candidate) {
+        log::info!(
+            "crush flank-aware build: candidate_id={} resolver={} mode=global/end-to-end requested_flank_bp={} occurrences={}",
+            candidate.signature,
+            method.method_name(),
+            config.replacement_flank_bp,
+            format_flank_aware_occurrence_summary(candidate)
+        );
     }
 }
 
@@ -8506,10 +8819,12 @@ fn auto_replacement_method(
 /// flanking context is active this is `<left_flank><interior><right_flank>`;
 /// otherwise it is the bubble interior alone.
 fn range_aligner_sequence(range: &PathRange) -> &[u8] {
-    if range.extended_sequence.is_empty() {
-        &range.sequence
-    } else {
+    if !range.resolver_sequence.is_empty() {
+        &range.resolver_sequence
+    } else if !range.extended_sequence.is_empty() {
         &range.extended_sequence
+    } else {
+        &range.sequence
     }
 }
 
@@ -8636,6 +8951,87 @@ fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
         .ranges
         .iter()
         .any(|range| !range.extended_sequence.is_empty())
+}
+
+fn candidate_has_reverse_orientation(candidate: &BubbleCandidate) -> bool {
+    candidate
+        .ranges
+        .iter()
+        .any(|range| range.occurrence_orientation == OccurrenceOrientation::Reverse)
+}
+
+fn candidate_needs_trim_or_restore(candidate: &BubbleCandidate) -> bool {
+    candidate_has_flank(candidate) || candidate_has_reverse_orientation(candidate)
+}
+
+fn format_flank_aware_candidate_diagnostic(
+    candidate: &BubbleCandidate,
+    requested_flank_bp: usize,
+) -> String {
+    format!(
+        "candidate_id={} target_span=root_steps:{}..{} root_span={}bp requested_flank_bp={} occurrences=[{}]",
+        candidate.signature,
+        candidate.root_start_step,
+        candidate.root_end_step,
+        candidate.root_span,
+        requested_flank_bp,
+        format_flank_aware_occurrence_summary(candidate)
+    )
+}
+
+fn format_flank_aware_occurrence_summary(candidate: &BubbleCandidate) -> String {
+    candidate
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(idx, range)| {
+            let name = range
+                .original_path_name
+                .as_deref()
+                .or(range.source_path_name.as_deref())
+                .unwrap_or("<missing-path-name>");
+            format!(
+                "#{} path={} target_steps={}..{} target_bp={}..{} orientation={} left(path_side={},path_req={},path_actual={},canonical_side={},canonical_actual={},step_range={},bp_range={},trunc={}) right(path_side={},path_req={},path_actual={},canonical_side={},canonical_actual={},step_range={},bp_range={},trunc={}) trim(left={},right={},expected_flanked_bp={},expected_target_bp={},restore={}) resolver_bp={}",
+                idx,
+                name,
+                range.begin_step,
+                range.end_step,
+                range.source_begin_bp,
+                range.source_end_bp,
+                range.occurrence_orientation.as_str(),
+                range.left_flank.path_side.as_str(),
+                range.left_flank.requested_bp,
+                range.left_flank.actual_bp_path_orientation,
+                range.left_flank.canonical_side.as_str(),
+                range.left_flank.actual_bp_canonical,
+                format_optional_range(range.left_flank.path_step_range),
+                format_optional_range(range.left_flank.path_bp_range),
+                range.left_flank.truncation.as_str(),
+                range.right_flank.path_side.as_str(),
+                range.right_flank.requested_bp,
+                range.right_flank.actual_bp_path_orientation,
+                range.right_flank.canonical_side.as_str(),
+                range.right_flank.actual_bp_canonical,
+                format_optional_range(range.right_flank.path_step_range),
+                format_optional_range(range.right_flank.path_bp_range),
+                range.right_flank.truncation.as_str(),
+                range.trim_plan.canonical_left_trim_bp,
+                range.trim_plan.canonical_right_trim_bp,
+                range.trim_plan.expected_flanked_sequence_canonical.len(),
+                range.trim_plan.expected_target_sequence_path_orientation.len(),
+                range.trim_plan.restore_orientation.as_str(),
+                range_aligner_sequence(range).len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_optional_range(range: Option<(usize, usize)>) -> String {
+    match range {
+        Some((begin, end)) => format!("{begin}..{end}"),
+        None => "none".to_string(),
+    }
 }
 
 fn candidate_named_sequences_longest_first(
@@ -10035,10 +10431,10 @@ fn build_biwfa_inmemory_replacement(
         .ranges
         .iter()
         .enumerate()
-        .max_by_key(|(_, range)| range.sequence.len())
+        .max_by_key(|(_, range)| range_aligner_sequence(range).len())
         .map(|(idx, _)| idx)
         .ok_or_else(|| io::Error::other("BiWFA replacement has no traversals"))?;
-    let root = &candidate.ranges[root_idx].sequence;
+    let root = range_aligner_sequence(&candidate.ranges[root_idx]);
     let root_len = root.len();
 
     let rows = candidate
@@ -10049,7 +10445,12 @@ fn build_biwfa_inmemory_replacement(
             if idx == root_idx {
                 Ok(root_alignment_row(root))
             } else {
-                align_to_root_row(&headers[idx], &range.sequence, &headers[root_idx], root)
+                align_to_root_row(
+                    &headers[idx],
+                    range_aligner_sequence(range),
+                    &headers[root_idx],
+                    root,
+                )
             }
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -10354,6 +10755,7 @@ fn validate_replacement_paths(
 fn clip_replacement_to_interior(
     replacement: Graph,
     candidate: &BubbleCandidate,
+    method: &str,
 ) -> io::Result<Graph> {
     if replacement.paths.len() != candidate.ranges.len() {
         return Err(io::Error::other(format!(
@@ -10370,12 +10772,14 @@ fn clip_replacement_to_interior(
         let path = &replacement.paths[range_idx];
         let pieces = replacement_path_pieces(&replacement, path)?;
         let raw_len: usize = pieces.iter().map(|p| p.end - p.start).sum();
-        let interior_start = range.left_flank_bp;
-        let interior_end = raw_len.checked_sub(range.right_flank_bp).ok_or_else(|| {
-            io::Error::other(
-                "clip_replacement_to_interior: right flank exceeds replacement path length",
-            )
-        })?;
+        let interior_start = range.trim_plan.canonical_left_trim_bp;
+        let interior_end = raw_len
+            .checked_sub(range.trim_plan.canonical_right_trim_bp)
+            .ok_or_else(|| {
+                io::Error::other(
+                    "clip_replacement_to_interior: right flank exceeds replacement path length",
+                )
+            })?;
         if interior_start > interior_end {
             return Err(io::Error::other(
                 "clip_replacement_to_interior: interior bounds inverted",
@@ -10389,6 +10793,25 @@ fn clip_replacement_to_interior(
                 range_idx
             )));
         }
+        log::info!(
+            "crush flank-aware trim: candidate_id={} method={} path={} orientation={} trim_boundary_mapping=canonical:{}..{} of {}bp left_trim={} right_trim={} expected_target_bp={} requested_flanks=({},{}) actual_path_flanks=({},{}) canonical_flanks=({},{})",
+            candidate.signature,
+            method,
+            range.original_path_name.as_deref().or(range.source_path_name.as_deref()).unwrap_or("<missing-path-name>"),
+            range.occurrence_orientation.as_str(),
+            interior_start,
+            interior_end,
+            raw_len,
+            range.trim_plan.canonical_left_trim_bp,
+            range.trim_plan.canonical_right_trim_bp,
+            range.sequence.len(),
+            range.left_flank.requested_bp,
+            range.right_flank.requested_bp,
+            range.left_flank.actual_bp_path_orientation,
+            range.right_flank.actual_bp_path_orientation,
+            range.left_flank.actual_bp_canonical,
+            range.right_flank.actual_bp_canonical
+        );
         let mut new_steps = Vec::new();
         for piece in pieces {
             let from = piece.start.max(interior_start);
@@ -10409,6 +10832,9 @@ fn clip_replacement_to_interior(
             )?;
             new_steps.push(Step { node, rev: false });
         }
+        if range.trim_plan.restore_orientation == OccurrenceOrientation::Reverse {
+            new_steps = restore_reverse_lacing_steps(new_steps);
+        }
         output_paths.push(Path {
             name: path.name.clone(),
             steps: new_steps,
@@ -10419,6 +10845,14 @@ fn clip_replacement_to_interior(
         segments: output_segments,
         paths: output_paths,
     })
+}
+
+fn restore_reverse_lacing_steps(mut steps: Vec<Step>) -> Vec<Step> {
+    steps.reverse();
+    for step in &mut steps {
+        step.rev = !step.rev;
+    }
+    steps
 }
 
 fn replacement_build_status<T>(result: &io::Result<Option<T>>) -> &'static str {
@@ -11483,14 +11917,13 @@ PY
             ranges: vec![PathRange {
                 path_idx,
                 source_path_name: Some(format!("path{path_idx}")),
+                original_path_name: Some(format!("path{path_idx}")),
                 source_begin_bp: 0,
                 source_end_bp: sequence.len(),
                 begin_step,
                 end_step,
                 sequence: sequence.to_vec(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             }],
             signature: format!("candidate-{path_idx}-{begin_step}-{end_step}"),
             root_start_step: begin_step,
@@ -14201,6 +14634,643 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
+    fn flank_aware_context_is_taken_from_the_same_repeated_occurrence() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "first_left".to_string(),
+                    seq: b"AA".to_vec(),
+                },
+                Segment {
+                    id: "first_target".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "first_right".to_string(),
+                    seq: b"TT".to_vec(),
+                },
+                Segment {
+                    id: "second_left".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "second_target".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "second_right".to_string(),
+                    seq: b"CC".to_vec(),
+                },
+            ],
+            paths: vec![Path {
+                name: "HG001#1#chr6:0-10 repeated motif occurrence".to_string(),
+                steps: vec![
+                    Step {
+                        node: 0,
+                        rev: false,
+                    },
+                    Step {
+                        node: 1,
+                        rev: false,
+                    },
+                    Step {
+                        node: 2,
+                        rev: false,
+                    },
+                    Step {
+                        node: 3,
+                        rev: false,
+                    },
+                    Step {
+                        node: 4,
+                        rev: false,
+                    },
+                    Step {
+                        node: 5,
+                        rev: false,
+                    },
+                ],
+            }],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                source_path_name: Some(graph.paths[0].name.clone()),
+                source_begin_bp: 7,
+                source_end_bp: 8,
+                begin_step: 4,
+                end_step: 5,
+                ..PathRange::default()
+            }],
+            signature: "repeated-occurrence-local-flank".to_string(),
+            root_start_step: 4,
+            root_end_step: 4,
+            root_span: 1,
+            total_steps: 1,
+            unique_steps: 1,
+            traversal_stats: TraversalStats {
+                count: 1,
+                min_len: 1,
+                median_len: 1,
+                p90_len: 1,
+                max_len: 1,
+                total_len: 1,
+            },
+            level: 0,
+        };
+
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 2,
+                ..ResolutionConfig::default()
+            },
+        );
+
+        let range = &candidate.ranges[0];
+        assert_eq!(range.sequence, b"G");
+        assert_eq!(range.left_flank.sequence_path_orientation, b"GG");
+        assert_eq!(range.right_flank.sequence_path_orientation, b"CC");
+        assert_eq!(range.left_flank.path_step_range, Some((3, 4)));
+        assert_eq!(range.right_flank.path_step_range, Some((5, 6)));
+        assert_eq!(range.left_flank.path_bp_range, Some((5, 7)));
+        assert_eq!(range.right_flank.path_bp_range, Some((8, 10)));
+        assert_eq!(range.resolver_sequence, b"GGGCC");
+    }
+
+    #[test]
+    fn flank_aware_context_records_requested_and_short_path_boundary_flanks() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "left_target".to_string(),
+                    seq: b"AAA".to_vec(),
+                },
+                Segment {
+                    id: "left_right".to_string(),
+                    seq: b"CCC".to_vec(),
+                },
+                Segment {
+                    id: "right_left".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "right_target".to_string(),
+                    seq: b"TTT".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "HG001#1#chr6:0-6".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG002#2#chr6:0-5".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(graph.paths[0].name.clone()),
+                    source_begin_bp: 0,
+                    source_end_bp: 3,
+                    begin_step: 0,
+                    end_step: 1,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some(graph.paths[1].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 5,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "path-boundary-short-flanks".to_string(),
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 3,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 3,
+                median_len: 3,
+                p90_len: 3,
+                max_len: 3,
+                total_len: 6,
+            },
+            level: 0,
+        };
+
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 10,
+                ..ResolutionConfig::default()
+            },
+        );
+
+        let at_start = &candidate.ranges[0];
+        assert_eq!(at_start.left_flank.requested_bp, 10);
+        assert_eq!(at_start.left_flank.actual_bp_path_orientation, 0);
+        assert_eq!(at_start.right_flank.actual_bp_path_orientation, 3);
+        assert_eq!(at_start.right_flank.sequence_path_orientation, b"CCC");
+        assert_eq!(at_start.trim_plan.canonical_left_trim_bp, 0);
+        assert_eq!(at_start.trim_plan.canonical_right_trim_bp, 3);
+
+        let at_end = &candidate.ranges[1];
+        assert_eq!(at_end.left_flank.requested_bp, 10);
+        assert_eq!(at_end.left_flank.actual_bp_path_orientation, 2);
+        assert_eq!(at_end.left_flank.sequence_path_orientation, b"GG");
+        assert_eq!(at_end.right_flank.actual_bp_path_orientation, 0);
+        assert_eq!(at_end.trim_plan.canonical_left_trim_bp, 2);
+        assert_eq!(at_end.trim_plan.canonical_right_trim_bp, 0);
+    }
+
+    #[test]
+    fn flank_aware_reverse_occurrence_trims_and_laces_in_original_orientation() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "f_left".to_string(),
+                    seq: b"AA".to_vec(),
+                },
+                Segment {
+                    id: "f_target".to_string(),
+                    seq: b"CC".to_vec(),
+                },
+                Segment {
+                    id: "f_right".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "r_left".to_string(),
+                    seq: b"TT".to_vec(),
+                },
+                Segment {
+                    id: "r_target_canonical".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "r_right".to_string(),
+                    seq: b"AA".to_vec(),
+                },
+                Segment {
+                    id: "unaffected".to_string(),
+                    seq: b"ACGT".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "HG001#1#chr6:100-106 decorated forward".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG002#2#chr6:200-206 decorated reverse".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step { node: 4, rev: true },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG003#1#chr6:300-304 unaffected".to_string(),
+                    steps: vec![Step {
+                        node: 6,
+                        rev: false,
+                    }],
+                },
+            ],
+        };
+        let before = path_sequence_map(&graph).unwrap();
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(graph.paths[0].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 4,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some(graph.paths[1].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 4,
+                    begin_step: 1,
+                    end_step: 2,
+                    occurrence_orientation: OccurrenceOrientation::Reverse,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "reverse-flank-aware".to_string(),
+            root_start_step: 1,
+            root_end_step: 1,
+            root_span: 2,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 2,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: 4,
+            },
+            level: 0,
+        };
+
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 2,
+                ..ResolutionConfig::default()
+            },
+        );
+        let (_headers, seqs) = candidate_named_sequences(&candidate).unwrap();
+        assert_eq!(seqs[0].1, b"AACCGG");
+        assert_eq!(seqs[1].1, b"TTGGAA");
+        assert_eq!(
+            candidate.ranges[1].left_flank.sequence_path_orientation,
+            b"TT"
+        );
+        assert_eq!(
+            candidate.ranges[1].right_flank.sequence_path_orientation,
+            b"AA"
+        );
+        assert_eq!(candidate.ranges[1].trim_plan.canonical_left_trim_bp, 2);
+        assert_eq!(candidate.ranges[1].trim_plan.canonical_right_trim_bp, 2);
+
+        let replacement = parse_gfa(&linear_candidate_sequences_gfa(&seqs).unwrap()).unwrap();
+        let clipped =
+            clip_replacement_to_interior(replacement, &candidate, "unit-test-global").unwrap();
+        assert_eq!(
+            String::from_utf8(path_sequence(&clipped, &clipped.paths[0]).unwrap()).unwrap(),
+            "CC"
+        );
+        assert_eq!(
+            String::from_utf8(path_sequence(&clipped, &clipped.paths[1]).unwrap()).unwrap(),
+            "CC"
+        );
+        assert_eq!(
+            clipped.paths[1].steps,
+            vec![Step { node: 1, rev: true }],
+            "reverse occurrence should lace as a reversed replacement walk"
+        );
+        for path in &clipped.paths {
+            let seq = path_sequence(&clipped, path).unwrap();
+            assert!(
+                !seq.windows(2)
+                    .any(|window| window == b"AA" || window == b"TT"),
+                "trimmed replacement path must not contain flank context"
+            );
+        }
+
+        let plan = ReplacementPlan::new(candidate, clipped, ResolutionMethod::Poa);
+        let mut next_id = initial_next_segment_id(&graph);
+        let laced = apply_replacement_frontier(&graph, &[plan], &mut next_id).unwrap();
+        assert_eq!(
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.clone())
+                .collect::<Vec<_>>(),
+            laced
+                .paths
+                .iter()
+                .map(|path| path.name.clone())
+                .collect::<Vec<_>>(),
+            "full path names must remain stable after lacing"
+        );
+        assert_eq!(before, path_sequence_map(&laced).unwrap());
+    }
+
+    #[test]
+    fn flank_aware_global_direct_resolvers_trim_simple_indel_context() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "left".to_string(),
+                    seq: b"AC".to_vec(),
+                },
+                Segment {
+                    id: "ref_target".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "alt_target".to_string(),
+                    seq: b"GT".to_vec(),
+                },
+                Segment {
+                    id: "right".to_string(),
+                    seq: b"TA".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "HG001#1#chr6:0-5".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG002#2#chr6:0-6".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(graph.paths[0].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 3,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some(graph.paths[1].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 4,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "simple-indel-with-common-flanks".to_string(),
+            root_start_step: 1,
+            root_end_step: 1,
+            root_span: 2,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 1,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: 3,
+            },
+            level: 0,
+        };
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 2,
+                ..ResolutionConfig::default()
+            },
+        );
+        assert_eq!(candidate.ranges[0].resolver_sequence, b"ACGTA");
+        assert_eq!(candidate.ranges[1].resolver_sequence, b"ACGTTA");
+
+        for method in [
+            ResolutionMethod::Poa,
+            ResolutionMethod::Poasta,
+            ResolutionMethod::StarBiwfa,
+        ] {
+            let replacement =
+                build_replacement_with_method(&candidate, &ResolutionConfig::default(), method)
+                    .unwrap_or_else(|err| panic!("{method:?} failed: {err}"));
+            let replacement_paths = replacement
+                .paths
+                .iter()
+                .map(|path| path_sequence(&replacement, path).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(replacement_paths, vec![b"G".to_vec(), b"GT".to_vec()]);
+            assert!(
+                replacement_paths
+                    .iter()
+                    .all(|seq| !seq.starts_with(b"AC") && !seq.ends_with(b"TA")),
+                "{method:?} replacement must not reinsert flank context"
+            );
+        }
+    }
+
+    #[test]
+    fn flank_aware_trim_rejects_inconsistent_boundaries_as_path_corruption_risk() {
+        let mut candidate = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                source_path_name: Some("HG001#1#chr6:0-2".to_string()),
+                source_begin_bp: 0,
+                source_end_bp: 2,
+                begin_step: 0,
+                end_step: 1,
+                sequence: b"CC".to_vec(),
+                resolver_sequence: b"AACC".to_vec(),
+                extended_sequence: b"AACC".to_vec(),
+                left_flank_bp: 2,
+                right_flank_bp: 2,
+                trim_plan: TrimPlan {
+                    canonical_left_trim_bp: 2,
+                    canonical_right_trim_bp: 2,
+                    expected_flanked_sequence_canonical: b"AACC".to_vec(),
+                    expected_target_sequence_path_orientation: b"CC".to_vec(),
+                    restore_orientation: OccurrenceOrientation::Forward,
+                },
+                ..PathRange::default()
+            }],
+            signature: "bad-trim-boundary".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 2,
+            total_steps: 1,
+            unique_steps: 1,
+            traversal_stats: TraversalStats {
+                count: 1,
+                min_len: 2,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: 2,
+            },
+            level: 0,
+        };
+        candidate.ranges[0].left_flank.requested_bp = 2;
+        candidate.ranges[0].right_flank.requested_bp = 2;
+        let too_short = single_path_replacement_gfa("HG001#1#chr6:0-2", "AAC");
+        let err = clip_replacement_to_interior(too_short, &candidate, "unit-test-global")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("interior bounds inverted") || err.contains("interior span"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn flank_aware_diagnostics_expose_span_flanks_trim_and_orientation() {
+        let mut candidate = one_range_candidate(0, 1, 2, b"CC");
+        candidate.signature = "diagnostic-candidate".to_string();
+        candidate.ranges[0].source_path_name = Some("HG001#1#chr6:100-106 full name".to_string());
+        candidate.ranges[0].original_path_name = Some("HG001#1#chr6:100-106 full name".to_string());
+        candidate.ranges[0].source_begin_bp = 2;
+        candidate.ranges[0].source_end_bp = 4;
+        candidate.ranges[0].occurrence_orientation = OccurrenceOrientation::Reverse;
+        candidate.ranges[0].left_flank = FlankContext {
+            requested_bp: 5,
+            actual_bp_path_orientation: 2,
+            actual_bp_canonical: 2,
+            path_side: FlankSide::Left,
+            canonical_side: FlankSide::Right,
+            path_step_range: Some((0, 1)),
+            path_bp_range: Some((0, 2)),
+            truncation: FlankTruncationReason::PathBoundary,
+            sequence_path_orientation: b"TT".to_vec(),
+            sequence_canonical: b"AA".to_vec(),
+        };
+        candidate.ranges[0].right_flank = FlankContext {
+            requested_bp: 5,
+            actual_bp_path_orientation: 1,
+            actual_bp_canonical: 1,
+            path_side: FlankSide::Right,
+            canonical_side: FlankSide::Left,
+            path_step_range: Some((2, 3)),
+            path_bp_range: Some((4, 5)),
+            truncation: FlankTruncationReason::PathBoundary,
+            sequence_path_orientation: b"A".to_vec(),
+            sequence_canonical: b"T".to_vec(),
+        };
+        candidate.ranges[0].trim_plan = TrimPlan {
+            canonical_left_trim_bp: 1,
+            canonical_right_trim_bp: 2,
+            expected_flanked_sequence_canonical: b"TGGAA".to_vec(),
+            expected_target_sequence_path_orientation: b"CC".to_vec(),
+            restore_orientation: OccurrenceOrientation::Reverse,
+        };
+        candidate.ranges[0].resolver_sequence = b"TGGAA".to_vec();
+
+        let line = format_flank_aware_candidate_diagnostic(&candidate, 5);
+        assert!(line.contains("candidate_id=diagnostic-candidate"), "{line}");
+        assert!(line.contains("target_span=root_steps:1..1"), "{line}");
+        assert!(
+            line.contains("path=HG001#1#chr6:100-106 full name"),
+            "{line}"
+        );
+        assert!(line.contains("orientation=reverse"), "{line}");
+        assert!(line.contains("path_actual=2"), "{line}");
+        assert!(line.contains("canonical_side=right"), "{line}");
+        assert!(line.contains("trim(left=1,right=2,"), "{line}");
+        assert!(line.contains("resolver_bp=5"), "{line}");
+    }
+
+    #[test]
     fn direct_poa_processes_candidate_within_median_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -15534,14 +16604,12 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
             .map(|&path_idx| PathRange {
                 path_idx,
                 source_path_name: Some(graph.paths[path_idx].name.clone()),
+                original_path_name: Some(graph.paths[path_idx].name.clone()),
                 source_begin_bp: positions[path_idx][1],
                 source_end_bp: positions[path_idx][3],
                 begin_step: 1,
                 end_step: 3,
-                sequence: Vec::new(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             })
             .collect::<Vec<_>>();
         let mut unique_steps = FxHashSet::default();
