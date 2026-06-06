@@ -206,7 +206,10 @@ The `-o gfa:<spec>` shorthand is generic. `-o gfa:pggb`, `-o gfa:seqwish`,
 `-o gfa:poa`, and `-o gfa:syng` are equivalent to `-o gfa --gfa-engine
 <engine>`. For alignment-backed engines, the spec can also name the alignment
 backend: `-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
-`-o gfa:sweepga:seqwish`.
+`-o gfa:sweepga:seqwish`. Add `:crush` after the graph engine to induce the
+GFA, run the shared exact path-preserving crush pass, and then emit the default
+self-loop-normalized plus `Ygs`-sorted final graph; supported spellings include
+`-o gfa:pggb:crush` and `-o gfa:seqwish:crush`.
 
 The shorthand is parsed as a staged graph pipeline:
 

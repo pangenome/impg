@@ -3945,6 +3945,9 @@ impl EngineCliOpts {
                 ),
             ));
         }
+        if !is_syng && crush_config.is_some() {
+            graph_sort_pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
+        }
 
         let syng_params = if saw_syng_param {
             Some(resolve_syng_syncmer_params(
@@ -4955,7 +4958,8 @@ GFA engine shorthand:
   `-o <format> --gfa-engine <engine>`. Alignment-backed graph builds can also
   name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
-  exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
+  exact path-preserving blunt-graph resolution and default final cleanup, e.g.
+  `-o gfa:pggb:crush`, `-o gfa:seqwish:crush`, or `-o gfa:syng:crush`.
   Add `cut-n=<bp>` before the engine, e.g. `-o gfa:cut-n=100:pggb`, to clip
   terminal N-runs of at least that length from extracted query sequences before
   graph construction; internal N-runs and shorter terminal runs are preserved.
@@ -13758,6 +13762,8 @@ mod tests {
             "`--render-graph-depth`",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
             "-o gfa:syng:crush",
+            "-o gfa:pggb:crush",
+            "-o gfa:seqwish:crush",
             "-o gfa:syng:crush:sort,pipeline=Ygs",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
@@ -14058,6 +14064,41 @@ mod tests {
                 assert_eq!(crush.polish_iterations, 1);
             }
             _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_alignment_crush_stage_with_finalization() {
+        for (spec, expected_engine) in [
+            ("gfa:pggb:crush", GfaEngine::Pggb),
+            ("gfa:seqwish:crush", GfaEngine::Seqwish),
+        ] {
+            let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", spec]).unwrap();
+            match args {
+                Args::Query {
+                    output_format,
+                    mut engine_cli,
+                    ..
+                } => {
+                    let output_format =
+                        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                    assert_eq!(output_format, "gfa");
+                    assert_eq!(engine_cli.engine_raw, spec.strip_prefix("gfa:").unwrap());
+                    let parsed = engine_cli.parse_engine().unwrap();
+                    assert_eq!(parsed.engine, expected_engine);
+                    assert!(parsed.crush_config.is_some());
+                    assert_eq!(
+                        parsed.graph_sort_pipeline.as_deref(),
+                        Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE),
+                        "{spec} should run default self-loop normalization and Ygs sorting after crush"
+                    );
+                    assert_eq!(
+                        parsed.syng_gfa_frequency_mask,
+                        SyngGfaFrequencyMask::disabled()
+                    );
+                }
+                _ => panic!("expected query command"),
+            }
         }
     }
 

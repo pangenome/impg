@@ -110,6 +110,18 @@ gfa:seqwish:20k
 gfa:sweepga:fastga:pggb,window=20k
 ```
 
+The same staged spelling can ask an alignment-derived graph engine to run the
+path-preserving crush machinery after graph induction:
+
+```text
+gfa:pggb:crush
+gfa:seqwish:crush
+```
+
+For these alignment engines, `crush` runs on the induced blunt GFA and the final
+graph is emitted with the default self-loop run normalization plus `Ygs`
+sorting/finalization.
+
 `crush` is a generic blunt-graph transform:
 
 ```text

@@ -500,7 +500,10 @@ The same shorthand works for the other engines: `-o gfa:pggb`,
 builds may also include the aligner prefix, for example
 `-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
 `-o gfa:sweepga:seqwish`; this is equivalent to setting `--aligner` and
-`--gfa-engine` separately.
+`--gfa-engine` separately. Add a generic `:crush` stage to run exact
+path-preserving flubble/motif crush resolution over the induced blunt GFA,
+then emit the finalized graph with default self-loop normalization and `Ygs`
+sorting, for example `-o gfa:pggb:crush` or `-o gfa:seqwish:crush`.
 
 For a C4/HPRCv2-style local render where terminal assembly N blocks would
 otherwise become noisy graph tips:
