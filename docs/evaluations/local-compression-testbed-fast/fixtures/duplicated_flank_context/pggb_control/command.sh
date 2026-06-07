@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' 'skipped duplicated_flank_context pggb_control: profile_excludes_optional'
+/usr/bin/time -v /usr/bin/timeout 120s /home/erikg/impg/.wg-worktrees/agent-603/target/debug/impg graph --sequence-files tests/test_data/local_compression/duplicated_flank_context/input.fa --gfa-engine pggb --fastga --threads 1 --min-match-len 1 --min-map-length 1 --target-poa-length 64 --max-node-length 64 --poa-padding-fraction 0 -g docs/evaluations/local-compression-testbed-fast/fixtures/duplicated_flank_context/pggb_control/output.gfa --scaffold-jump 0 --scaffold-mass 1
 
-# expected_exit_code=not_run
-# command_status=skipped
+# expected_exit_code=0
+# command_status=path_corrupt

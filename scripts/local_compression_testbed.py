@@ -14,7 +14,10 @@ import csv
 import json
 import math
 import os
+import re
+import shlex
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -58,6 +61,16 @@ OPTIONAL_METHOD_IDS = [
 ]
 
 
+CONTROL_TIMEOUT_SECONDS = 120
+CONTROL_IMPG_PGGB_TARGET_POA_LENGTHS = {
+    "pggb_control": "64",
+    "smoothxg_control": "64",
+    "pggb_plus_smoothxg_control": "32,64",
+}
+CONTROL_MAX_NODE_LENGTH = 64
+CONTROL_MAX_RSS_RE = re.compile(r"Maximum resident set size \(kbytes\):\s+(\d+)")
+
+
 @dataclass(frozen=True)
 class MethodSpec:
     method_id: str
@@ -65,6 +78,14 @@ class MethodSpec:
     strategy: str
     optional: bool
     parameters: str
+
+
+@dataclass(frozen=True)
+class ControlAvailability:
+    available: bool
+    provider: str
+    detail: str
+    paths: Dict[str, str]
 
 
 METHODS = [
@@ -126,24 +147,24 @@ METHODS = [
     ),
     MethodSpec(
         "pggb_control",
-        "PGGB-style whole-region control",
+        "Bounded PGGB-style whole-region control",
         "optional_external",
         True,
-        "external-control;pggb;threads=1;profile=fast;path_guard=record",
+        "control=bounded;provider=local_impg_graph_pggb;aligner=fastga;threads=1;timeout=120s;target-poa-length=64;max-node-length=64;path_guard=record",
     ),
     MethodSpec(
         "smoothxg_control",
-        "External SmoothXG control",
+        "Bounded SmoothXG-style local control",
         "optional_external",
         True,
-        "external-control;smoothxg;threads=1;profile=fast;path_guard=record",
+        "control=bounded;provider=local_impg_smoothxg_stage_via_pggb_engine;input-paf=empty;threads=1;timeout=120s;target-poa-length=64;max-node-length=64;path_guard=record",
     ),
     MethodSpec(
         "pggb_plus_smoothxg_control",
-        "Full PGGB/SmoothXG-style external control",
+        "Bounded PGGB/SmoothXG-style local control",
         "optional_external",
         True,
-        "external-control;pggb+smoothxg;threads=1;profile=fast;path_guard=record",
+        "control=bounded;provider=local_impg_graph_pggb;aligner=fastga;threads=1;timeout=120s;target-poa-length=32,64;max-node-length=64;path_guard=record",
     ),
 ]
 
@@ -155,6 +176,7 @@ TSV_FIELDS = [
     "method_id",
     "method_family",
     "method_parameters",
+    "command_line",
     "profile",
     "input_manifest_path",
     "metadata_path",
@@ -1142,6 +1164,7 @@ def base_row(
         "method_id": method.method_id,
         "method_family": method.family,
         "method_parameters": method.parameters,
+        "command_line": "",
         "profile": profile,
         "input_manifest_path": rel(manifest_path),
         "metadata_path": entry["metadata_path"],
@@ -1220,8 +1243,10 @@ def skip_row(
     optional_reason: str = "",
     tool_available: str = "",
 ) -> Dict[str, Any]:
+    command = f"printf '%s\\n' 'skipped {row['fixture_id']} {row['method_id']}: {reason}'"
     row.update(
         {
+            "command_line": command,
             "command_status": "skipped",
             "skip_reason": reason,
             "skipped_optional_tool_reason": optional_reason,
@@ -1232,8 +1257,8 @@ def skip_row(
     )
     write_command_logs(
         method_dir,
-        f"printf '%s\\n' 'skipped {row['fixture_id']} {row['method_id']}: {reason}'",
-        f"skipped: {reason}\n",
+        command,
+        f"skipped: {reason}\n{optional_reason}\n" if optional_reason else f"skipped: {reason}\n",
         "",
         None,
         "skipped",
@@ -1250,6 +1275,320 @@ def generate_method_graph(metadata: Dict[str, Any], method: MethodSpec) -> str:
     raise ValueError(f"{method.method_id}: cannot generate graph for strategy {method.strategy}")
 
 
+def shell_join(args: Sequence[object]) -> str:
+    return shlex.join(str(arg) for arg in args)
+
+
+def is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def executable_candidates(name: str, adjacent_to: Optional[Path] = None) -> List[Path]:
+    candidates: List[Path] = []
+    if adjacent_to is not None:
+        candidates.append(adjacent_to / name)
+
+    env_path = os.environ.get(f"CARGO_BIN_EXE_{name}")
+    if env_path:
+        candidates.append(Path(env_path))
+
+    root = repo_root()
+    candidates.extend([root / "target" / "debug" / name, root / "target" / "release" / name])
+
+    which_path = shutil.which(name)
+    if which_path:
+        candidates.append(Path(which_path))
+
+    unique: List[Path] = []
+    seen = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
+def resolve_executable(name: str, adjacent_to: Optional[Path] = None) -> Optional[Path]:
+    for candidate in executable_candidates(name, adjacent_to=adjacent_to):
+        if is_executable(candidate):
+            return candidate
+    return None
+
+
+def control_availability(method_id: str) -> ControlAvailability:
+    if method_id not in OPTIONAL_METHOD_IDS:
+        return ControlAvailability(False, "unsupported", f"{method_id}: not an optional control method", {})
+
+    provider = (
+        "local_impg_smoothxg_stage_via_pggb_engine"
+        if method_id == "smoothxg_control"
+        else "local_impg_graph_pggb"
+    )
+    paths: Dict[str, str] = {}
+    missing: List[str] = []
+
+    time_bin = Path("/usr/bin/time")
+    if is_executable(time_bin):
+        paths["time"] = str(time_bin)
+    else:
+        missing.append("/usr/bin/time")
+
+    timeout_bin = resolve_executable("timeout")
+    if timeout_bin is not None:
+        paths["timeout"] = str(timeout_bin)
+    else:
+        missing.append("timeout")
+
+    impg = resolve_executable("impg")
+    if impg is None:
+        missing.append("impg")
+    else:
+        paths["impg"] = str(impg)
+        gfaffix = impg.parent / "gfaffix"
+        if is_executable(gfaffix):
+            paths["gfaffix"] = str(gfaffix)
+        else:
+            missing.append(f"gfaffix sibling next to {impg}")
+
+        if method_id in {"pggb_control", "pggb_plus_smoothxg_control"}:
+            for helper in ["FastGA", "FAtoGDB", "GIXmake"]:
+                helper_path = resolve_executable(helper, adjacent_to=impg.parent)
+                if helper_path is None:
+                    missing.append(helper)
+                else:
+                    paths[helper] = str(helper_path)
+
+    standalone_pggb = shutil.which("pggb")
+    standalone_smoothxg = shutil.which("smoothxg")
+    detail_parts = [
+        f"provider={provider}",
+        f"standalone_pggb={standalone_pggb or 'not_found'}",
+        f"standalone_smoothxg={standalone_smoothxg or 'not_found'}",
+    ]
+    if method_id == "smoothxg_control":
+        detail_parts.append(
+            "smoothxg_path=local impg smoothxg-style stage exposed through `impg graph --gfa-engine pggb` with an explicit empty PAF"
+        )
+    if missing:
+        detail_parts.append("missing=" + ",".join(missing))
+        return ControlAvailability(False, provider, ";".join(detail_parts), paths)
+    detail_parts.extend(f"{name}={path}" for name, path in sorted(paths.items()))
+    return ControlAvailability(True, provider, ";".join(detail_parts), paths)
+
+
+def control_command(
+    fixture: Dict[str, Any],
+    method: MethodSpec,
+    method_dir: Path,
+    availability: ControlAvailability,
+) -> Tuple[List[str], Path]:
+    method_dir.mkdir(parents=True, exist_ok=True)
+    output_gfa = method_dir / "output.gfa"
+    target_poa_lengths = CONTROL_IMPG_PGGB_TARGET_POA_LENGTHS[method.method_id]
+
+    args: List[str] = [
+        availability.paths["time"],
+        "-v",
+        availability.paths["timeout"],
+        f"{CONTROL_TIMEOUT_SECONDS}s",
+        availability.paths["impg"],
+        "graph",
+        "--sequence-files",
+        fixture["entry"]["input_fasta_path"],
+        "--gfa-engine",
+        "pggb",
+        "--threads",
+        "1",
+        "--min-match-len",
+        "1",
+        "--min-map-length",
+        "1",
+        "--target-poa-length",
+        target_poa_lengths,
+        "--max-node-length",
+        str(CONTROL_MAX_NODE_LENGTH),
+        "--poa-padding-fraction",
+        "0",
+        "-g",
+        rel(output_gfa),
+    ]
+
+    if method.method_id == "smoothxg_control":
+        empty_paf = method_dir / "empty.paf"
+        empty_paf.write_text("", encoding="utf-8")
+        insert_at = args.index("--gfa-engine")
+        args[insert_at:insert_at] = ["--paf-file", rel(empty_paf)]
+    else:
+        insert_at = args.index("--threads")
+        args[insert_at:insert_at] = ["--fastga"]
+        args.extend(["--scaffold-jump", "0", "--scaffold-mass", "1"])
+
+    return args, output_gfa
+
+
+def parse_max_rss_kb(stderr: str) -> Optional[int]:
+    match = CONTROL_MAX_RSS_RE.search(stderr)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def control_env(availability: ControlAvailability) -> Dict[str, str]:
+    env = os.environ.copy()
+    impg_dir = Path(availability.paths["impg"]).parent
+    env["PATH"] = str(impg_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def produce_control_row(
+    row: Dict[str, Any],
+    fixture: Dict[str, Any],
+    method: MethodSpec,
+    method_dir: Path,
+) -> Dict[str, Any]:
+    metadata = fixture["metadata"]
+    availability = control_availability(method.method_id)
+    row["tool_available"] = "true" if availability.available else "false"
+    if not availability.available:
+        return skip_row(
+            row,
+            method_dir,
+            "optional_control_unavailable",
+            optional_reason=availability.detail,
+            tool_available="false",
+        )
+
+    command_args, output_gfa = control_command(fixture, method, method_dir, availability)
+    command = shell_join(command_args)
+    row["command_line"] = command
+    normalized_gfa = method_dir / "output.normalized.gfa"
+
+    start = time.perf_counter()
+    try:
+        result = subprocess.run(
+            command_args,
+            cwd=repo_root(),
+            env=control_env(availability),
+            text=True,
+            capture_output=True,
+            timeout=CONTROL_TIMEOUT_SECONDS + 30,
+            check=False,
+        )
+        stdout = result.stdout
+        stderr = result.stderr
+        exit_code = result.returncode
+    except subprocess.TimeoutExpired as exc:
+        runtime = round(time.perf_counter() - start, 6)
+        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
+        stderr += f"\npython subprocess timeout after {CONTROL_TIMEOUT_SECONDS + 30}s\n"
+        row.update(
+            {
+                "runtime_seconds": runtime,
+                "command_status": "error",
+                "exit_code": 124,
+                "expected_topology_message": "control command timed out",
+                "tool_available": "true",
+                "max_rss_kb": parse_max_rss_kb(stderr),
+                "candidate_count": 1,
+            }
+        )
+        write_command_logs(method_dir, command, stdout, stderr, 124, "error")
+        write_json(method_dir / "metrics.json", {"status": "error", "error": "control command timed out"})
+        return row
+
+    runtime = round(time.perf_counter() - start, 6)
+    max_rss_kb = parse_max_rss_kb(stderr)
+    if exit_code != 0:
+        row.update(
+            {
+                "runtime_seconds": runtime,
+                "max_rss_kb": max_rss_kb,
+                "command_status": "error",
+                "exit_code": exit_code,
+                "expected_topology_message": f"control command exited {exit_code}",
+                "tool_available": "true",
+                "candidate_count": 1,
+            }
+        )
+        write_command_logs(method_dir, command, stdout, stderr, exit_code, "error")
+        write_json(method_dir / "metrics.json", {"status": "error", "exit_code": exit_code})
+        return row
+
+    if not output_gfa.exists() or output_gfa.stat().st_size == 0:
+        row.update(
+            {
+                "runtime_seconds": runtime,
+                "max_rss_kb": max_rss_kb,
+                "command_status": "error",
+                "exit_code": 1,
+                "expected_topology_message": "control command succeeded but did not write a non-empty GFA",
+                "tool_available": "true",
+                "candidate_count": 1,
+            }
+        )
+        write_command_logs(method_dir, command, stdout, stderr + "\nmissing or empty output.gfa\n", 1, "error")
+        write_json(method_dir / "metrics.json", {"status": "error", "error": "missing or empty output.gfa"})
+        return row
+
+    shutil.copyfile(output_gfa, normalized_gfa)
+    actual_spellings = path_spellings_from_gfa(normalized_gfa)
+    exact_status, hard_corrupt, missing_count, extra_count, path_names_stable, detail = compare_path_spellings(
+        metadata["expected_path_spellings"], actual_spellings
+    )
+    metrics = graph_metrics(normalized_gfa)
+    topology_status, assertion_id, topology_message = score_topology(metadata, metrics, exact_status)
+
+    row.update(metrics)
+    row.update(
+        {
+            "output_gfa_path": rel(output_gfa),
+            "normalized_gfa_path": rel(normalized_gfa),
+            "exact_path_preservation": exact_status,
+            "hard_path_corruption": hard_corrupt,
+            "path_corruption_detail": detail,
+            "expected_topology_status": topology_status,
+            "expected_topology_assertion_id": assertion_id,
+            "expected_topology_message": topology_message,
+            "missing_path_count": missing_count,
+            "extra_path_count": extra_count,
+            "path_name_stable": path_names_stable,
+            "runtime_seconds": runtime,
+            "max_rss_kb": max_rss_kb,
+            "command_status": "path_corrupt" if hard_corrupt else "pass",
+            "exit_code": 0,
+            "candidate_count": 1,
+            "candidate_skipped_count": 0,
+            "candidate_skip_reasons": "",
+            "tool_available": "true",
+        }
+    )
+    write_json(
+        method_dir / "metrics.json",
+        {
+            **metrics,
+            "topology_status": topology_status,
+            "path_status": exact_status,
+            "control_provider": availability.provider,
+            "availability": availability.detail,
+        },
+    )
+    summary = "\n".join(
+        [
+            stdout.rstrip(),
+            f"control_provider={availability.provider}",
+            f"availability={availability.detail}",
+            f"exact_path_preservation={exact_status}",
+            f"expected_topology_status={topology_status}",
+            f"normalized_gfa_path={rel(normalized_gfa)}",
+            "",
+        ]
+    )
+    write_command_logs(method_dir, command, summary, stderr if not hard_corrupt else stderr + detail + "\n", 0, row["command_status"])
+    return row
+
+
 def produce_row(
     profile: str,
     manifest_path: Path,
@@ -1264,25 +1603,24 @@ def produce_row(
     metadata = fixture["metadata"]
 
     if profile == "fast" and entry["tier"] == "local":
-        optional_reason = "profile_excludes_local_fixture" if method.optional else ""
-        tool_available = "true" if method.optional and optional_tools_available(method.method_id) else "false" if method.optional else ""
+        if method.optional:
+            availability = control_availability(method.method_id)
+            optional_reason = f"profile_excludes_local_fixture;{availability.detail}"
+            tool_available = "true" if availability.available else "false"
+        else:
+            optional_reason = ""
+            tool_available = ""
         return skip_row(row, method_dir, "profile_excludes_local_fixture", optional_reason=optional_reason, tool_available=tool_available)
 
     if method.optional:
-        tool_available = "true" if optional_tools_available(method.method_id) else "false"
-        return skip_row(
-            row,
-            method_dir,
-            "profile_excludes_optional",
-            optional_reason="profile_excludes_optional",
-            tool_available=tool_available,
-        )
+        return produce_control_row(row, fixture, method, method_dir)
 
     command = (
         "python3 scripts/local_compression_testbed.py run "
         f"--profile {profile} --manifest {rel(manifest_path)} --fixtures {entry['fixture_id']} "
         f"--methods {method.method_id} --out-dir {rel(method_dir.parent.parent.parent)}"
     )
+    row["command_line"] = command
     start = time.perf_counter()
     try:
         gfa = generate_method_graph(metadata, method)
@@ -1357,13 +1695,7 @@ def produce_row(
 
 
 def optional_tools_available(method_id: str) -> bool:
-    if method_id == "pggb_control":
-        return shutil.which("pggb") is not None
-    if method_id == "smoothxg_control":
-        return shutil.which("smoothxg") is not None
-    if method_id == "pggb_plus_smoothxg_control":
-        return shutil.which("pggb") is not None and shutil.which("smoothxg") is not None
-    return False
+    return control_availability(method_id).available
 
 
 def tsv_value(value: Any) -> str:
@@ -1416,6 +1748,77 @@ def write_fixture_notes(out_dir: Path, fixture: Dict[str, Any], rows: List[Dict[
     return path
 
 
+def value_counts(rows: Iterable[Dict[str, Any]], key: str) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key, ""))
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def format_counts(counts: Dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+
+
+def control_report_lines(rows: List[Dict[str, Any]]) -> List[str]:
+    lines = [
+        "## Control Execution",
+        "",
+        f"- Control timeout: {CONTROL_TIMEOUT_SECONDS}s per row, one thread, no hidden topology gate.",
+        "- Exact path corruption is the only hard rejection; graph-quality and topology failures remain visible rows.",
+        "- Standalone binary discovery is recorded in command logs. This bounded profile uses the repository `impg graph --gfa-engine pggb` path when available; `smoothxg_control` uses that local smoothxg-style stage with an explicit empty PAF because this repo does not expose a standalone smooth-only CLI path.",
+    ]
+
+    for method in [method for method in METHODS if method.optional]:
+        method_rows = [row for row in rows if row["method_id"] == method.method_id]
+        skip_reasons = sorted({row["skip_reason"] for row in method_rows if row["skip_reason"]})
+        optional_reasons = sorted(
+            {
+                row["skipped_optional_tool_reason"]
+                for row in method_rows
+                if row["skipped_optional_tool_reason"]
+            }
+        )
+        lines.append(
+            f"- `{method.method_id}`: command_status {format_counts(value_counts(method_rows, 'command_status'))}; "
+            f"exact_paths {format_counts(value_counts(method_rows, 'exact_path_preservation'))}; "
+            f"topology {format_counts(value_counts(method_rows, 'expected_topology_status'))}; "
+            f"tool_available {format_counts(value_counts(method_rows, 'tool_available'))}."
+        )
+        if skip_reasons:
+            lines.append(f"  Skips: {', '.join(f'`{reason}`' for reason in skip_reasons)}.")
+        if optional_reasons:
+            summarized = optional_reasons[:3]
+            suffix = " ..." if len(optional_reasons) > len(summarized) else ""
+            lines.append(f"  Availability detail: {' | '.join(summarized)}{suffix}")
+
+    def included(method_ids: Sequence[str]) -> List[Dict[str, Any]]:
+        wanted = set(method_ids)
+        return [
+            row
+            for row in rows
+            if row["method_id"] in wanted and row["profile_fixture_included"] and row["command_status"] != "skipped"
+        ]
+
+    raw_rows = included(["local_syng_raw"])
+    compact_rows = included([method.method_id for method in METHODS if not method.optional and method.method_id != "local_syng_raw"])
+    control_rows = included(OPTIONAL_METHOD_IDS)
+    lines.extend(
+        [
+            "",
+            "### Control Comparison",
+            "",
+            f"- Raw SYNG graph-producing rows: {len(raw_rows)}; exact paths {format_counts(value_counts(raw_rows, 'exact_path_preservation'))}; topology {format_counts(value_counts(raw_rows, 'expected_topology_status'))}.",
+            f"- Compact/window graph-producing rows: {len(compact_rows)}; exact paths {format_counts(value_counts(compact_rows, 'exact_path_preservation'))}; topology {format_counts(value_counts(compact_rows, 'expected_topology_status'))}.",
+            f"- PGGB/SmoothXG control graph-producing rows: {len(control_rows)}; exact paths {format_counts(value_counts(control_rows, 'exact_path_preservation'))}; topology {format_counts(value_counts(control_rows, 'expected_topology_status'))}.",
+            "",
+        ]
+    )
+    return lines
+
+
 def write_report(out_dir: Path, profile: str, manifest_path: Path, rows: List[Dict[str, Any]]) -> None:
     status_counts: Dict[str, int] = {}
     topology_counts: Dict[str, int] = {}
@@ -1459,6 +1862,8 @@ def write_report(out_dir: Path, profile: str, manifest_path: Path, rows: List[Di
         f"- Rows: {len(rows)}",
         f"- Command statuses: {', '.join(f'{key}={value}' for key, value in sorted(status_counts.items()))}",
         f"- Topology statuses: {', '.join(f'{key}={value}' for key, value in sorted(topology_counts.items()))}",
+        "",
+        *control_report_lines(rows),
         "",
         "## Output Roots",
         "",

@@ -1,48 +1,47 @@
 # Local Compression Testbed Fast Validation
 
-Task: `follow-up-produce`
 Date: 2026-06-07
 
-## Native Build Environment
+This artifact records the validation used for the PGGB and SmoothXG control
+runner update.
 
-The Rust build in this worktree needs the local htslib and jemalloc paths used
-by earlier C4 validation tasks:
+## Commands
 
-```bash
-export C_INCLUDE_PATH=/home/erikg/htslib-local/include
-export CPLUS_INCLUDE_PATH=/home/erikg/htslib-local/include
-export CPATH=/home/erikg/htslib-local/include
-export LIBRARY_PATH=/home/erikg/htslib-local/lib:/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0/lib:/usr/lib/x86_64-linux-gnu
-export LD_LIBRARY_PATH=/home/erikg/htslib-local/lib:/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0/lib:/home/erikg/.cargo/lib:${LD_LIBRARY_PATH:-}
-export PKG_CONFIG_PATH=/home/erikg/htslib-local/lib/pkgconfig:/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0/lib/pkgconfig
-export CFLAGS=-I/home/erikg/htslib-local/include
-export CXXFLAGS=-I/home/erikg/htslib-local/include
-export LDFLAGS='-L/home/erikg/htslib-local/lib -Wl,-rpath,/home/erikg/htslib-local/lib -L/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0/lib -Wl,-rpath,/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0/lib -L/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu -lcurl -L/home/erikg/.cargo/lib -Wl,-rpath,/home/erikg/.cargo/lib'
-export CMAKE_PREFIX_PATH=/home/erikg/htslib-local
-export CMAKE_INCLUDE_PATH=/home/erikg/htslib-local/include
-export CMAKE_LIBRARY_PATH=/home/erikg/htslib-local/lib:/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0/lib:/usr/lib/x86_64-linux-gnu
-```
+- `python3 -m py_compile scripts/local_compression_testbed.py`: passed.
+- `python3 scripts/local_compression_testbed.py write-fixtures --root tests/test_data/local_compression`: passed.
+- `python3 scripts/local_compression_testbed.py run --profile fast --manifest tests/test_data/local_compression/manifest.json --out-dir docs/evaluations/local-compression-testbed-fast`: passed after installing the current worktree binary; wrote 143 rows.
+- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo test --test test_local_compression_testbed`: passed, 2 tests.
+- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo build`: passed.
+- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo test`: passed.
+- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo install --path .`: passed and replaced the local `impg` and `gfaffix` binaries from this worktree.
 
-## Commands Run
+The first unconfigured targeted cargo test attempt failed before running tests
+because the default build environment could not find the vendored htslib faidx
+header. After sourcing `env.sh`, exporting the CMake compiler paths, and
+initializing `vendor/syng` and `vendor/gfaffix`, the targeted test, build, full
+test suite, install, and profile rerun all passed.
 
-```bash
-git submodule update --init --recursive vendor/syng vendor/gfaffix
-python3 scripts/local_compression_testbed.py write-fixtures --root tests/test_data/local_compression
-python3 scripts/local_compression_testbed.py validate-fixtures --manifest tests/test_data/local_compression/manifest.json
-python3 scripts/local_compression_testbed.py run --profile fast --manifest tests/test_data/local_compression/manifest.json --out-dir docs/evaluations/local-compression-testbed-fast
-cargo build
-cargo test --test test_local_compression_testbed
-cargo test
-cargo install --path .
-```
+## Scoreboard Summary
 
-## Results
+- Rows: 143.
+- Command status counts: `pass=80`, `path_corrupt=30`, `skipped=33`.
+- Topology status counts: `pass=70`, `fail=10`, `not_run=63`.
+- Control methods represented: `pggb_control`, `smoothxg_control`, and `pggb_plus_smoothxg_control`.
+- Included CI fixtures executed 30 real control commands: 10 rows for each control method.
+- Local-tier fixtures skipped 9 control rows by profile policy: 3 rows for each control method.
 
-- Fixture validation passed: 13 fixtures validated from `tests/test_data/local_compression/manifest.json`.
-- Fast profile passed: wrote 143 rows to `docs/evaluations/local-compression-testbed-fast/scoreboard.tsv` and `docs/evaluations/local-compression-testbed-fast/scoreboard.json`.
-- Scoreboard coverage: 13 fixtures, 11 methods, 80 produced graph rows, 63 skipped rows.
-- Optional control skip reasons are explicit for every optional-control row: `profile_excludes_optional` for CI fixtures and `profile_excludes_local_fixture` for local-only fixtures in the fast profile.
-- `cargo build` passed with existing warnings.
-- `cargo test --test test_local_compression_testbed` passed: 2 tests passed.
-- `cargo test` passed: full unit, integration, and doc-test suite passed; known C4 tests remained ignored.
-- `cargo install --path .` passed and replaced `/home/erikg/.cargo/bin/impg` and `/home/erikg/.cargo/bin/gfaffix` from this worktree.
+## Control Interpretation
+
+All included PGGB/SmoothXG controls executed bounded local commands and wrote
+command logs, stdout/stderr logs, output GFAs, normalized GFAs, metrics, and
+scoreboard rows. The control rows are visible as `path_corrupt`, not hidden or
+filtered: exact path preservation failed because the local PGGB path rewrote
+PanSN interval-name ends from the expected fixture coordinates. Since exact
+path corruption is the only hard rejection, topology checks were left
+`not_run` for those rows and the failures remain present in the scoreboard.
+
+Standalone `pggb` and `smoothxg` binaries were not found in the local PATH.
+The bounded profile therefore uses the repository-supported local
+`impg graph --gfa-engine pggb` path. `smoothxg_control` uses the same local
+engine with an explicit empty PAF because the repository does not expose a
+standalone smooth-only CLI path.

@@ -1,0 +1,9 @@
+H	VN:Z:1.0
+S	1	TTCGAACAGCAGGGTTAACCGG
+S	2	TTCGAACAGCAGCAGTAGGGTTAACCGG
+S	3	TTCGAACAGCAGCAGCAGGGTTAACCGG
+S	4	TTCGAACAGCAGCAGGGTTAACCGG
+P	hapC#0#microtangle_repeat_motif:1-29	2+	*
+P	ref#0#microtangle_repeat_motif:1-26	4+	*
+P	hapA#0#microtangle_repeat_motif:1-29	3+	*
+P	hapB#0#microtangle_repeat_motif:1-23	1+	*

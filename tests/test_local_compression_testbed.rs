@@ -219,6 +219,7 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
     for required_column in [
         "expected_topology_status",
         "graph_size_bytes",
+        "command_line",
         "command_log_path",
         "output_gfa_path",
         "render_status",
@@ -240,17 +241,44 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
         assert!(root.join(row["command_log_path"].as_str().unwrap()).exists());
         assert!(root.join(row["stdout_log_path"].as_str().unwrap()).exists());
         assert!(root.join(row["stderr_log_path"].as_str().unwrap()).exists());
+        assert!(!row["command_line"].as_str().unwrap().is_empty());
         assert_eq!(row["render_status"].as_str(), Some("skipped"));
         assert!(!row["render_skip_reason"].as_str().unwrap().is_empty());
 
         let method = row["method_id"].as_str().unwrap();
         if method.ends_with("_control") {
-            assert_eq!(row["command_status"].as_str(), Some("skipped"));
-            assert_eq!(
-                row["skipped_optional_tool_reason"].as_str(),
-                Some("profile_excludes_optional")
-            );
-            assert_eq!(row["exact_path_preservation"].as_str(), Some("not_run"));
+            match row["command_status"].as_str().unwrap() {
+                "skipped" => {
+                    assert_eq!(row["skip_reason"].as_str(), Some("optional_control_unavailable"));
+                    assert!(
+                        !row["skipped_optional_tool_reason"].as_str().unwrap().is_empty(),
+                        "optional control skips must record precise availability"
+                    );
+                    assert_eq!(row["tool_available"].as_str(), Some("false"));
+                    assert_eq!(row["exact_path_preservation"].as_str(), Some("not_run"));
+                }
+                "pass" | "path_corrupt" => {
+                    assert_eq!(row["tool_available"].as_str(), Some("true"));
+                    assert!(root.join(row["output_gfa_path"].as_str().unwrap()).exists());
+                    assert!(root.join(row["normalized_gfa_path"].as_str().unwrap()).exists());
+                    assert!(root.join(row["metrics_json_path"].as_str().unwrap()).exists());
+                    assert!(
+                        matches!(
+                            row["exact_path_preservation"].as_str(),
+                            Some("pass") | Some("fail")
+                        ),
+                        "control rows that produce graphs must run path preservation"
+                    );
+                    assert!(row["expected_topology_assertion_id"].as_str().is_some());
+                    assert!(row["expected_topology_message"].as_str().is_some());
+                }
+                "error" => {
+                    assert_eq!(row["tool_available"].as_str(), Some("true"));
+                    assert!(row["expected_topology_message"].as_str().is_some());
+                    assert!(row["exit_code"].as_i64().is_some());
+                }
+                status => panic!("unexpected control command status {status}"),
+            }
         } else {
             assert_eq!(row["command_status"].as_str(), Some("pass"));
             assert_eq!(row["exact_path_preservation"].as_str(), Some("pass"));

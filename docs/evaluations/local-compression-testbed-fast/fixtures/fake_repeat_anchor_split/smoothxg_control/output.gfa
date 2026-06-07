@@ -1,0 +1,9 @@
+H	VN:Z:1.0
+S	1	GGGAAAGTTATATATGGCGGGTTTAAA
+S	2	GGGAAACTTATATATCCCGGGTTTAAA
+S	3	GGGAAAGTTATATATACCGGGTTTAAA
+S	4	GGGAAACTTATATATGGCGGGTTTAAA
+P	ref#0#fake_repeat_anchor_split:1-28	2+	*
+P	hapB#0#fake_repeat_anchor_split:1-28	4+	*
+P	hapA#0#fake_repeat_anchor_split:1-28	3+	*
+P	hapC#0#fake_repeat_anchor_split:1-28	1+	*

@@ -1,1 +1,6 @@
-skipped: profile_excludes_optional
+
+control_provider=local_impg_smoothxg_stage_via_pggb_engine
+availability=provider=local_impg_smoothxg_stage_via_pggb_engine;standalone_pggb=not_found;standalone_smoothxg=not_found;smoothxg_path=local impg smoothxg-style stage exposed through `impg graph --gfa-engine pggb` with an explicit empty PAF;gfaffix=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+exact_path_preservation=fail
+expected_topology_status=not_run
+normalized_gfa_path=docs/evaluations/local-compression-testbed-fast/fixtures/snp_bubble_3path/smoothxg_control/output.normalized.gfa

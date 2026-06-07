@@ -1,0 +1,60 @@
+[2026-06-07T06:20:12Z INFO  impg] [temp] Using temp directory: /home/erikg/impg/.wg-worktrees/agent-603
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [pggb] Building graph from 1 FASTA file(s)
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::count] 0.000s Counting sequences in 1 FASTA file(s)
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::count] 0.000s Found 3 sequences in 3 genomes, using k-mer frequency 3
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::combine] 0.000s Combined FASTA files for alignment (avg seq len: 29 bp)
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::align] 0.000s Using provided PAF file: docs/evaluations/local-compression-testbed-fast/fixtures/duplicated_flank_context/smoothxg_control/empty.paf
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering alignments with sweepga (n=many:many, scaffold_filter=many:many)
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering complete
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::seqindex] 0.000s Building sequence index
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::seqindex] 0.001s Indexed 3 sequences
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [graph::transclosure] 0.001s Empty filtered PAF; emitting source-sequence GFA without seqwish transitive closure
+[path_sgd] No paths with multiple steps found
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [pggb] 0.002s Seqwish done, smoothing (n_haps=3, target_poa_lengths=[64])
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] Pass 1/1 (target_poa_length=64bp)
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] Parsed sorted GFA: 3 nodes, 3 paths
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] Chopped: 3 → 3 nodes (max 64bp)
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] Decomposed into 3 path-overlap blocks
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] After breaking: 3 blocks, 3 total path ranges
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] Smoothed 3 blocks (0 gap passthrough)
+[2026-06-07T06:20:12Z INFO  impg::smooth] [smooth] Lacing complete
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [pggb] 0.005s Smoothing done
+[2026-06-07T06:20:12Z INFO  gfaffix] running gfaffix on 1 threads
+[2026-06-07T06:20:12Z INFO  gfaffix] loading graph from /home/erikg/impg/.wg-worktrees/agent-603/.tmpLakWDy.gfa
+[2026-06-07T06:20:12Z INFO  gfaffix] constructing handle graph
+[2026-06-07T06:20:12Z INFO  gfaffix] handlegraph has 3 nodes and 0 edges
+[2026-06-07T06:20:12Z INFO  gfaffix] storing length of original nodes for bookkeeping
+[2026-06-07T06:20:12Z INFO  gfaffix] identifying walk-preserving shared affixes
+[2026-06-07T06:20:12Z INFO  gfaffix] found and collapsed 0 shared prefixes, 0 of which are overlapping, and 0 of which are bubbles
+[2026-06-07T06:20:12Z INFO  gfaffix] identifying walk-preserving blunt ends
+[2026-06-07T06:20:12Z INFO  gfaffix] found and collapsed 0 blunt ends
+[2026-06-07T06:20:12Z INFO  gfaffix] expand transformation table
+[2026-06-07T06:20:12Z INFO  gfaffix] writing refined graph to /home/erikg/impg/.wg-worktrees/agent-603/.tmpqjwp6M.gfa
+[2026-06-07T06:20:12Z INFO  gfaffix] transforming paths+walks
+[2026-06-07T06:20:12Z INFO  gfaffix] done
+[path_sgd] No paths with multiple steps found
+[2026-06-07T06:20:12Z INFO  impg::commands::graph] [pggb] 0.011s Done
+	Command being timed: "/usr/bin/timeout 120s /home/erikg/impg/.wg-worktrees/agent-603/target/debug/impg graph --sequence-files tests/test_data/local_compression/duplicated_flank_context/input.fa --paf-file docs/evaluations/local-compression-testbed-fast/fixtures/duplicated_flank_context/smoothxg_control/empty.paf --gfa-engine pggb --threads 1 --min-match-len 1 --min-map-length 1 --target-poa-length 64 --max-node-length 64 --poa-padding-fraction 0 -g docs/evaluations/local-compression-testbed-fast/fixtures/duplicated_flank_context/smoothxg_control/output.gfa"
+	User time (seconds): 0.00
+	System time (seconds): 0.01
+	Percent of CPU this job got: 92%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.02
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 28672
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1940
+	Voluntary context switches: 22
+	Involuntary context switches: 0
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 48
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+missing=hapA#0#duplicated_flank_context:1-29,hapB#0#duplicated_flank_context:1-29,ref#0#duplicated_flank_context:1-29 | extra=hapA#0#duplicated_flank_context:1-30,hapB#0#duplicated_flank_context:1-30,ref#0#duplicated_flank_context:1-30

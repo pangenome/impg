@@ -1,1 +1,6 @@
-skipped: profile_excludes_optional
+
+control_provider=local_impg_graph_pggb
+availability=provider=local_impg_graph_pggb;standalone_pggb=not_found;standalone_smoothxg=not_found;FAtoGDB=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/FAtoGDB;FastGA=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/FastGA;GIXmake=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/GIXmake;gfaffix=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-603/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+exact_path_preservation=fail
+expected_topology_status=not_run
+normalized_gfa_path=docs/evaluations/local-compression-testbed-fast/fixtures/fake_repeat_anchor_split/pggb_plus_smoothxg_control/output.normalized.gfa
