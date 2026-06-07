@@ -1,0 +1,8 @@
+H	VN:Z:1.0
+#	testbed_metrics	bubble_count=0	flubble_count=0	repeat_loop_count=0	long_link_count=0	long_link_max_span_bp=0
+S	raw1	AACCGGGGATCCCTTAAGGATCCGGAATT
+S	raw2	AACCGGGGATCCCTTACGGATCCGGAATT
+S	raw3	AACCGGGGATCCCTTAAGGATCCCTAATT
+P	ref#0#duplicated_flank_context:1-29	raw1+	*
+P	hapA#0#duplicated_flank_context:1-29	raw2+	*
+P	hapB#0#duplicated_flank_context:1-29	raw3+	*

@@ -1,0 +1,107 @@
+{
+  "fixture_id": "duplicated_flank_context",
+  "fixture_class": "duplicated_flank_requires_path_context",
+  "title": "Duplicated flank requiring path context",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#duplicated_flank_context:1-29",
+      "file": "input.fa",
+      "expected_spelling": "AACCGGGGATCCCTTAAGGATCCGGAATT"
+    },
+    {
+      "name": "hapA#0#duplicated_flank_context:1-29",
+      "file": "input.fa",
+      "expected_spelling": "AACCGGGGATCCCTTACGGATCCGGAATT"
+    },
+    {
+      "name": "hapB#0#duplicated_flank_context:1-29",
+      "file": "input.fa",
+      "expected_spelling": "AACCGGGGATCCCTTAAGGATCCCTAATT"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#duplicated_flank_context:1-29",
+    "hapA#0#duplicated_flank_context:1-29",
+    "hapB#0#duplicated_flank_context:1-29"
+  ],
+  "expected_path_spellings": {
+    "ref#0#duplicated_flank_context:1-29": "AACCGGGGATCCCTTAAGGATCCGGAATT",
+    "hapA#0#duplicated_flank_context:1-29": "AACCGGGGATCCCTTACGGATCCGGAATT",
+    "hapB#0#duplicated_flank_context:1-29": "AACCGGGGATCCCTTAAGGATCCCTAATT"
+  },
+  "expected_topology": {
+    "assertion_id": "duplicated_flank_context_required",
+    "description": "The replacement uses path context to select the correct duplicate flank occurrence.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 18
+    },
+    "link_count": {
+      "min": 1,
+      "max": 28
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Replacement laces into the wrong duplicate flank or merges distinct occurrences.",
+  "render_hints": {
+    "reference_path": "ref#0#duplicated_flank_context:1-29",
+    "highlight_paths": [
+      "hapA#0#duplicated_flank_context:1-29",
+      "hapB#0#duplicated_flank_context:1-29"
+    ],
+    "expected_shape": "variant near a duplicated flank"
+  }
+}

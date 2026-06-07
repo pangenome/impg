@@ -1,0 +1,107 @@
+{
+  "fixture_id": "snp_bubble_3path",
+  "fixture_class": "snp_bubble",
+  "title": "Three-path SNP bubble",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#snp_bubble_3path:1-27",
+      "file": "input.fa",
+      "expected_spelling": "ACGTACGTACGTCGATTACAGATTACA"
+    },
+    {
+      "name": "hapA#0#snp_bubble_3path:1-27",
+      "file": "input.fa",
+      "expected_spelling": "ACGTACGTACGTTGATTACAGATTACA"
+    },
+    {
+      "name": "hapB#0#snp_bubble_3path:1-27",
+      "file": "input.fa",
+      "expected_spelling": "ACGTACGTACGTGGATTACAGATTACA"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#snp_bubble_3path:1-27",
+    "hapA#0#snp_bubble_3path:1-27",
+    "hapB#0#snp_bubble_3path:1-27"
+  ],
+  "expected_path_spellings": {
+    "ref#0#snp_bubble_3path:1-27": "ACGTACGTACGTCGATTACAGATTACA",
+    "hapA#0#snp_bubble_3path:1-27": "ACGTACGTACGTTGATTACAGATTACA",
+    "hapB#0#snp_bubble_3path:1-27": "ACGTACGTACGTGGATTACAGATTACA"
+  },
+  "expected_topology": {
+    "assertion_id": "single_ordered_snp_bubble",
+    "description": "One source-to-sink SNP bubble with no loop and no long links.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 12
+    },
+    "link_count": {
+      "min": 1,
+      "max": 18
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Branch path spellings get swapped or the SNP remains as path-specific singleton nodes.",
+  "render_hints": {
+    "reference_path": "ref#0#snp_bubble_3path:1-27",
+    "highlight_paths": [
+      "hapA#0#snp_bubble_3path:1-27",
+      "hapB#0#snp_bubble_3path:1-27"
+    ],
+    "expected_shape": "single small ordered bubble"
+  }
+}

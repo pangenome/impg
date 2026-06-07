@@ -1,0 +1,4 @@
+generated raw_paths graph
+exact_path_preservation=pass
+expected_topology_status=fail
+normalized_gfa_path=docs/evaluations/local-compression-testbed-fast/fixtures/mid_insertion_200bp/local_syng_raw/output.normalized.gfa

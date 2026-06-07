@@ -1,0 +1,10 @@
+H	VN:Z:1.0
+#	testbed_metrics	bubble_count=0	flubble_count=0	repeat_loop_count=0	long_link_count=0	long_link_max_span_bp=0
+S	raw1	TTCGAACAGCAGCAGGGTTAACCGG
+S	raw2	TTCGAACAGCAGCAGCAGGGTTAACCGG
+S	raw3	TTCGAACAGCAGGGTTAACCGG
+S	raw4	TTCGAACAGCAGCAGTAGGGTTAACCGG
+P	ref#0#microtangle_repeat_motif:1-25	raw1+	*
+P	hapA#0#microtangle_repeat_motif:1-28	raw2+	*
+P	hapB#0#microtangle_repeat_motif:1-22	raw3+	*
+P	hapC#0#microtangle_repeat_motif:1-28	raw4+	*
