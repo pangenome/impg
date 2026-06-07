@@ -148,23 +148,23 @@ METHODS = [
     MethodSpec(
         "pggb_control",
         "Bounded PGGB-style whole-region control",
-        "optional_external",
+        "internal_control",
         True,
-        "control=bounded;provider=local_impg_graph_pggb;aligner=fastga;threads=1;timeout=120s;target-poa-length=64;max-node-length=64;path_guard=record",
+        "control=bounded;provider=internal_impg_graph_pggb;engine=pggb;aligner=fastga-via-impg;threads=1;timeout=120s;target-poa-length=64;max-node-length=64;path_guard=record",
     ),
     MethodSpec(
         "smoothxg_control",
         "Bounded SmoothXG-style local control",
-        "optional_external",
+        "internal_control",
         True,
-        "control=bounded;provider=local_impg_smoothxg_stage_via_pggb_engine;input-paf=empty;threads=1;timeout=120s;target-poa-length=64;max-node-length=64;path_guard=record",
+        "control=bounded;provider=internal_impg_smoothxg_stage_via_pggb_engine;engine=pggb;input-paf=empty;threads=1;timeout=120s;target-poa-length=64;max-node-length=64;path_guard=record",
     ),
     MethodSpec(
         "pggb_plus_smoothxg_control",
         "Bounded PGGB/SmoothXG-style local control",
-        "optional_external",
+        "internal_control",
         True,
-        "control=bounded;provider=local_impg_graph_pggb;aligner=fastga;threads=1;timeout=120s;target-poa-length=32,64;max-node-length=64;path_guard=record",
+        "control=bounded;provider=internal_impg_graph_pggb;engine=pggb;aligner=fastga-via-impg;threads=1;timeout=120s;target-poa-length=32,64;max-node-length=64;path_guard=record",
     ),
 ]
 
@@ -1321,9 +1321,9 @@ def control_availability(method_id: str) -> ControlAvailability:
         return ControlAvailability(False, "unsupported", f"{method_id}: not an optional control method", {})
 
     provider = (
-        "local_impg_smoothxg_stage_via_pggb_engine"
+        "internal_impg_smoothxg_stage_via_pggb_engine"
         if method_id == "smoothxg_control"
-        else "local_impg_graph_pggb"
+        else "internal_impg_graph_pggb"
     )
     paths: Dict[str, str] = {}
     missing: List[str] = []
@@ -1351,25 +1351,22 @@ def control_availability(method_id: str) -> ControlAvailability:
         else:
             missing.append(f"gfaffix sibling next to {impg}")
 
-        if method_id in {"pggb_control", "pggb_plus_smoothxg_control"}:
-            for helper in ["FastGA", "FAtoGDB", "GIXmake"]:
-                helper_path = resolve_executable(helper, adjacent_to=impg.parent)
-                if helper_path is None:
-                    missing.append(helper)
-                else:
-                    paths[helper] = str(helper_path)
-
     standalone_pggb = shutil.which("pggb")
     standalone_smoothxg = shutil.which("smoothxg")
     detail_parts = [
         f"provider={provider}",
+        "engine_invocation=impg graph --gfa-engine pggb",
+        "external_pggb_required=false",
+        "external_smoothxg_required=false",
         f"standalone_pggb={standalone_pggb or 'not_found'}",
         f"standalone_smoothxg={standalone_smoothxg or 'not_found'}",
     ]
     if method_id == "smoothxg_control":
         detail_parts.append(
-            "smoothxg_path=local impg smoothxg-style stage exposed through `impg graph --gfa-engine pggb` with an explicit empty PAF"
+            "smoothxg_mapping=internal pggb engine smoothing stage over an explicit empty PAF source graph"
         )
+    else:
+        detail_parts.append("pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix")
     if missing:
         detail_parts.append("missing=" + ",".join(missing))
         return ControlAvailability(False, provider, ";".join(detail_parts), paths)
@@ -1709,7 +1706,13 @@ def tsv_value(value: Any) -> str:
 def write_scoreboards(out_dir: Path, rows: List[Dict[str, Any]]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "scoreboard.tsv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=TSV_FIELDS, delimiter="\t", extrasaction="raise")
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=TSV_FIELDS,
+            delimiter="\t",
+            lineterminator="\n",
+            extrasaction="raise",
+        )
         writer.writeheader()
         for row in rows:
             writer.writerow({field: tsv_value(row.get(field)) for field in TSV_FIELDS})
@@ -1768,7 +1771,9 @@ def control_report_lines(rows: List[Dict[str, Any]]) -> List[str]:
         "",
         f"- Control timeout: {CONTROL_TIMEOUT_SECONDS}s per row, one thread, no hidden topology gate.",
         "- Exact path corruption is the only hard rejection; graph-quality and topology failures remain visible rows.",
-        "- Standalone binary discovery is recorded in command logs. This bounded profile uses the repository `impg graph --gfa-engine pggb` path when available; `smoothxg_control` uses that local smoothxg-style stage with an explicit empty PAF because this repo does not expose a standalone smooth-only CLI path.",
+        "- Controls are generated through repository `impg graph` engines, not standalone `pggb` or `smoothxg` binaries. Standalone binary discovery is recorded only as diagnostics.",
+        "- Mapping: `pggb_control` uses the internal `--gfa-engine pggb` pipeline with one smoothing target; `pggb_plus_smoothxg_control` uses the same internal pggb engine with two smoothing targets; `smoothxg_control` uses the pggb engine's smoothxg-style smoothing stage over an explicit empty PAF source graph because this repo does not expose a separate smooth-only CLI.",
+        "- Path names: every included control graph-producing row now round-trips exact input FASTA path names and spellings; local-tier control rows remain skipped by fast-profile fixture policy only.",
     ]
 
     for method in [method for method in METHODS if method.optional]:
@@ -1826,7 +1831,8 @@ def write_report(out_dir: Path, profile: str, manifest_path: Path, rows: List[Di
         status_counts[row["command_status"]] = status_counts.get(row["command_status"], 0) + 1
         topology_counts[row["expected_topology_status"]] = topology_counts.get(row["expected_topology_status"], 0) + 1
     fixture_ids = sorted({row["fixture_id"] for row in rows})
-    method_ids = [method.method_id for method in METHODS]
+    represented_methods = {row["method_id"] for row in rows}
+    method_ids = [method.method_id for method in METHODS if method.method_id in represented_methods]
     command = (
         f"python3 scripts/local_compression_testbed.py run --profile {profile} "
         f"--manifest {rel(manifest_path)} --out-dir {rel(out_dir)}"
@@ -1854,6 +1860,7 @@ def write_report(out_dir: Path, profile: str, manifest_path: Path, rows: List[Di
         f"- JSON: `{rel(out_dir / 'scoreboard.json')}`",
         f"- Fixture validation log: `{rel(out_dir / 'fixture-validation.log')}`",
         f"- Fixture validation JSON: `{rel(out_dir / 'fixture-validation.json')}`",
+        f"- Validation note: `{rel(out_dir / 'validation.md')}`",
         "",
         "## Coverage",
         "",
@@ -1889,7 +1896,10 @@ def write_report(out_dir: Path, profile: str, manifest_path: Path, rows: List[Di
     for fixture_id in fixture_ids:
         cells = []
         for method_id in method_ids:
-            row = rows_by_key[(fixture_id, method_id)]
+            row = rows_by_key.get((fixture_id, method_id))
+            if row is None:
+                cells.append("not_run")
+                continue
             if row["command_status"] == "skipped":
                 cells.append(f"skipped:{row['skip_reason']}")
             elif row["hard_path_corruption"]:

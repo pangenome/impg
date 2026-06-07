@@ -4,6 +4,7 @@
 // by combining sweepga (for alignment) and seqwish (for graph induction).
 
 use log::info;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -668,11 +669,183 @@ pub fn run_graph_build_pggb<W: Write>(
 
     // Step 3: gfaffix normalization + final sort
     let sorted = crate::graph::normalize_and_sort(smoothed, config.num_threads)?;
+    let sorted = restore_direct_fasta_path_names(&sorted, &fasta_files)?;
 
     info!("[pggb] {:.3}s Done", start_time.elapsed().as_secs_f64());
 
     output.write_all(sorted.as_bytes())?;
     Ok(())
+}
+
+fn restore_direct_fasta_path_names(gfa: &str, fasta_files: &[String]) -> io::Result<String> {
+    let mut expected_by_name: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut names_by_sequence: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
+    let mut exact_full_range_name: HashMap<String, String> = HashMap::new();
+
+    for fasta_path in fasta_files {
+        for (name, sequence) in read_sequences_from_fasta(Path::new(fasta_path))? {
+            if let Some((key, start, _end)) = split_numeric_path_range(&name) {
+                let generated = format!("{key}:{start}-{}", start + sequence.len());
+                exact_full_range_name
+                    .entry(generated)
+                    .or_insert_with(|| name.clone());
+            }
+            names_by_sequence
+                .entry(sequence.clone())
+                .or_default()
+                .push(name.clone());
+            expected_by_name.insert(name, sequence);
+        }
+    }
+
+    if expected_by_name.is_empty() {
+        return Ok(gfa.to_string());
+    }
+
+    let path_sequences = gfa_path_sequences(gfa)?;
+    let mut used_names = HashSet::new();
+    let mut rename: HashMap<String, String> = HashMap::new();
+
+    for (observed_name, observed_sequence) in path_sequences {
+        if expected_by_name
+            .get(&observed_name)
+            .is_some_and(|expected| expected == &observed_sequence)
+        {
+            used_names.insert(observed_name);
+            continue;
+        }
+
+        if let Some(original_name) = exact_full_range_name.get(&observed_name) {
+            if !used_names.contains(original_name)
+                && expected_by_name
+                    .get(original_name)
+                    .is_some_and(|expected| expected == &observed_sequence)
+            {
+                used_names.insert(original_name.clone());
+                rename.insert(observed_name, original_name.clone());
+                continue;
+            }
+        }
+
+        if let Some(candidates) = names_by_sequence.get(&observed_sequence) {
+            let available: Vec<&String> = candidates
+                .iter()
+                .filter(|name| !used_names.contains(*name))
+                .collect();
+            if available.len() == 1 {
+                let original_name = (*available[0]).clone();
+                used_names.insert(original_name.clone());
+                rename.insert(observed_name, original_name);
+            }
+        }
+    }
+
+    if rename.is_empty() {
+        return Ok(gfa.to_string());
+    }
+
+    let mut rewritten = String::with_capacity(gfa.len());
+    for line in gfa.lines() {
+        if let Some(rest) = line.strip_prefix("P\t") {
+            let mut parts = rest.splitn(3, '\t');
+            if let (Some(name), Some(steps), Some(overlaps)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                let replacement = rename.get(name).map(String::as_str).unwrap_or(name);
+                rewritten.push_str("P\t");
+                rewritten.push_str(replacement);
+                rewritten.push('\t');
+                rewritten.push_str(steps);
+                rewritten.push('\t');
+                rewritten.push_str(overlaps);
+                rewritten.push('\n');
+                continue;
+            }
+        }
+        rewritten.push_str(line);
+        rewritten.push('\n');
+    }
+    if !gfa.ends_with('\n') {
+        rewritten.pop();
+    }
+    Ok(rewritten)
+}
+
+fn split_numeric_path_range(name: &str) -> Option<(&str, usize, usize)> {
+    let last_colon = name.rfind(':')?;
+    let (key, range_str) = name.split_at(last_colon);
+    let range_str = &range_str[1..];
+    let (start, end) = range_str.split_once('-')?;
+    Some((key, start.parse().ok()?, end.parse().ok()?))
+}
+
+fn gfa_path_sequences(gfa: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let mut segments: HashMap<&str, &[u8]> = HashMap::new();
+    let mut paths = Vec::new();
+
+    for line in gfa.lines() {
+        let mut fields = line.split('\t');
+        match fields.next() {
+            Some("S") => {
+                if let (Some(id), Some(sequence)) = (fields.next(), fields.next()) {
+                    segments.insert(id, sequence.as_bytes());
+                }
+            }
+            Some("P") => {
+                let Some(name) = fields.next() else {
+                    continue;
+                };
+                let Some(steps) = fields.next() else {
+                    continue;
+                };
+                let mut sequence = Vec::new();
+                if steps != "*" {
+                    for step in steps.split(',').filter(|step| !step.is_empty()) {
+                        let (id, reverse) = if let Some(id) = step.strip_suffix('-') {
+                            (id, true)
+                        } else if let Some(id) = step.strip_suffix('+') {
+                            (id, false)
+                        } else {
+                            (step, false)
+                        };
+                        let Some(segment) = segments.get(id) else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("GFA path '{name}' references missing segment '{id}'"),
+                            ));
+                        };
+                        if reverse {
+                            sequence.extend(reverse_complement_bases(segment));
+                        } else {
+                            sequence.extend_from_slice(segment);
+                        }
+                    }
+                }
+                paths.push((name.to_string(), sequence));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(paths)
+}
+
+fn reverse_complement_bases(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|base| match base {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            b'a' => b't',
+            b'c' => b'g',
+            b'g' => b'c',
+            b't' => b'a',
+            b'N' | b'n' => *base,
+            other => *other,
+        })
+        .collect()
 }
 
 /// Read sequences from a FASTA file path into `(name, sequence_bytes)` pairs.
@@ -1360,5 +1533,33 @@ mod tests {
 
         config.aligner = "fastga".to_string();
         assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), None);
+    }
+
+    #[test]
+    fn restores_direct_fasta_coordinate_like_path_names_after_pggb_smoothing() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fasta_path = dir.path().join("input.fa");
+        std::fs::write(
+            &fasta_path,
+            ">ref#0#fixture:1-27\nACGTACGTACGTCGATTACAGATTACA\n",
+        )
+        .expect("write FASTA");
+
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGTACGTACGTCGATTACAGATTACA
+P\tref#0#fixture:1-28\t1+\t*
+";
+        let restored = restore_direct_fasta_path_names(
+            gfa,
+            &[fasta_path
+                .to_str()
+                .expect("temp FASTA path is UTF-8")
+                .to_string()],
+        )
+        .expect("restore path names");
+
+        assert!(restored.contains("P\tref#0#fixture:1-27\t1+\t*"));
+        assert!(!restored.contains("ref#0#fixture:1-28"));
     }
 }

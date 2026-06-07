@@ -1,64 +1,64 @@
-[2026-06-07T06:20:00Z INFO  impg] [temp] Using temp directory: /home/erikg/impg/.wg-worktrees/agent-603
-[2026-06-07T06:20:00Z INFO  impg::commands::graph] [pggb] Building graph from 1 FASTA file(s)
-[2026-06-07T06:20:00Z INFO  impg::commands::graph] [graph::count] 0.000s Counting sequences in 1 FASTA file(s)
-[2026-06-07T06:20:00Z INFO  impg::commands::graph] [graph::count] 0.000s Found 3 sequences in 3 genomes, using k-mer frequency 3
-[2026-06-07T06:20:00Z INFO  impg::commands::graph] [graph::combine] 0.000s Combined FASTA files for alignment (avg seq len: 180 bp)
-[2026-06-07T06:20:00Z INFO  impg::commands::graph] [graph::align] 0.000s Running fastga alignment (f=3)
-[FastGA] prepare_gdb: Converting "/home/erikg/impg/.wg-worktrees/agent-603/.tmphXISQW.fa" to GDB
-[FastGA] Calling FAtoGDB: /home/erikg/impg/.wg-worktrees/agent-603/target/debug/FAtoGDB /home/erikg/impg/.wg-worktrees/agent-603/.tmphXISQW.fa (TMPDIR=/home/erikg/impg/.wg-worktrees/agent-603)
+[2026-06-07T08:48:24Z INFO  impg] [temp] Using temp directory: /home/erikg/impg/.wg-worktrees/agent-606
+[2026-06-07T08:48:24Z INFO  impg::commands::graph] [pggb] Building graph from 1 FASTA file(s)
+[2026-06-07T08:48:24Z INFO  impg::commands::graph] [graph::count] 0.000s Counting sequences in 1 FASTA file(s)
+[2026-06-07T08:48:24Z INFO  impg::commands::graph] [graph::count] 0.000s Found 3 sequences in 3 genomes, using k-mer frequency 3
+[2026-06-07T08:48:24Z INFO  impg::commands::graph] [graph::combine] 0.000s Combined FASTA files for alignment (avg seq len: 180 bp)
+[2026-06-07T08:48:24Z INFO  impg::commands::graph] [graph::align] 0.000s Running fastga alignment (f=3)
+[FastGA] prepare_gdb: Converting "/home/erikg/impg/.wg-worktrees/agent-606/.tmpIj07BG.fa" to GDB
+[FastGA] Calling FAtoGDB: /home/erikg/impg/.wg-worktrees/agent-606/target/debug/FAtoGDB /home/erikg/impg/.wg-worktrees/agent-606/.tmpIj07BG.fa (TMPDIR=/home/erikg/impg/.wg-worktrees/agent-606)
 [FastGA] FAtoGDB completed successfully
-[FastGA] create_index: Creating index for /home/erikg/impg/.wg-worktrees/agent-603/.tmphXISQW
-[FastGA] Calling GIXmake: /home/erikg/impg/.wg-worktrees/agent-603/target/debug/GIXmake -T1 -P/home/erikg/impg/.wg-worktrees/agent-603 /home/erikg/impg/.wg-worktrees/agent-603/.tmphXISQW
+[FastGA] create_index: Creating index for /home/erikg/impg/.wg-worktrees/agent-606/.tmpIj07BG
+[FastGA] Calling GIXmake: /home/erikg/impg/.wg-worktrees/agent-606/target/debug/GIXmake -T1 -P/home/erikg/impg/.wg-worktrees/agent-606 /home/erikg/impg/.wg-worktrees/agent-606/.tmpIj07BG
 [FastGA] GIXmake completed successfully
-[FastGA] run_alignment: Aligning /home/erikg/impg/.wg-worktrees/agent-603/.tmphXISQW.fa vs /home/erikg/impg/.wg-worktrees/agent-603/.tmphXISQW.fa
-[FastGA] Calling FastGA: /home/erikg/impg/.wg-worktrees/agent-603/target/debug/FastGA -1:_tmp_1594483_0.1aln -T1 -f3 .tmphXISQW.fa .tmphXISQW.fa (in dir: /home/erikg/impg/.wg-worktrees/agent-603, TMPDIR=/home/erikg/impg/.wg-worktrees/agent-603)
+[FastGA] run_alignment: Aligning /home/erikg/impg/.wg-worktrees/agent-606/.tmpIj07BG.fa vs /home/erikg/impg/.wg-worktrees/agent-606/.tmpIj07BG.fa
+[FastGA] Calling FastGA: /home/erikg/impg/.wg-worktrees/agent-606/target/debug/FastGA -1:_tmp_3381195_0.1aln -T1 -f3 .tmpIj07BG.fa .tmpIj07BG.fa (in dir: /home/erikg/impg/.wg-worktrees/agent-606, TMPDIR=/home/erikg/impg/.wg-worktrees/agent-606)
 [FastGA] FastGA completed, converting .1aln to PAF
 [FastGA] Conversion completed successfully, output size: 258 bytes
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [graph::align] 1.413s Alignment complete
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering alignments with sweepga (n=many:many, scaffold_filter=many:many)
-[2026-06-07T06:20:01Z INFO  sweepga::paf_filter] [sweepga] Plane sweep filtering (no scaffolding)
-[2026-06-07T06:20:01Z INFO  sweepga::paf_filter] [sweepga] Summary: 0 → 0 mappings (0.0% kept)
-[2026-06-07T06:20:01Z INFO  sweepga::paf_filter] [sweepga]   Output: 0.0 Mb total, 0.0% avg identity
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering complete
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [graph::seqindex] 0.000s Building sequence index
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [graph::seqindex] 0.001s Indexed 3 sequences
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [graph::transclosure] 0.001s Empty filtered PAF; emitting source-sequence GFA without seqwish transitive closure
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [graph::align] 1.403s Alignment complete
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering alignments with sweepga (n=many:many, scaffold_filter=many:many)
+[2026-06-07T08:48:25Z INFO  sweepga::paf_filter] [sweepga] Plane sweep filtering (no scaffolding)
+[2026-06-07T08:48:25Z INFO  sweepga::paf_filter] [sweepga] Summary: 0 → 0 mappings (0.0% kept)
+[2026-06-07T08:48:25Z INFO  sweepga::paf_filter] [sweepga]   Output: 0.0 Mb total, 0.0% avg identity
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [graph::filter] 0.000s Filtering complete
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [graph::seqindex] 0.000s Building sequence index
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [graph::seqindex] 0.001s Indexed 3 sequences
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [graph::transclosure] 0.001s Empty filtered PAF; emitting source-sequence GFA without seqwish transitive closure
 [path_sgd] No paths with multiple steps found
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [pggb] 1.415s Seqwish done, smoothing (n_haps=3, target_poa_lengths=[32, 64])
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Pass 1/2 (target_poa_length=32bp)
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Parsed sorted GFA: 3 nodes, 3 paths
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Chopped: 3 → 9 nodes (max 64bp)
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Decomposed into 9 path-overlap blocks
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] After breaking: 9 blocks, 9 total path ranges
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Smoothed 9 blocks (0 gap passthrough)
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Lacing complete
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Pass 2/2 (target_poa_length=64bp)
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [pggb] 1.406s Seqwish done, smoothing (n_haps=3, target_poa_lengths=[32, 64])
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Pass 1/2 (target_poa_length=32bp)
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Parsed sorted GFA: 3 nodes, 3 paths
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Chopped: 3 → 9 nodes (max 64bp)
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Decomposed into 9 path-overlap blocks
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] After breaking: 9 blocks, 9 total path ranges
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Smoothed 9 blocks (0 gap passthrough)
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Lacing complete
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Pass 2/2 (target_poa_length=64bp)
 [path_sgd] No paths with multiple steps found
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Parsed sorted GFA: 3 nodes, 3 paths
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Chopped: 3 → 9 nodes (max 64bp)
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Decomposed into 7 path-overlap blocks
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] After breaking: 7 blocks, 7 total path ranges
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Smoothed 7 blocks (0 gap passthrough)
-[2026-06-07T06:20:01Z INFO  impg::smooth] [smooth] Lacing complete
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [pggb] 1.444s Smoothing done
-[2026-06-07T06:20:01Z INFO  gfaffix] running gfaffix on 1 threads
-[2026-06-07T06:20:01Z INFO  gfaffix] loading graph from /home/erikg/impg/.wg-worktrees/agent-603/.tmpnHtpFu.gfa
-[2026-06-07T06:20:01Z INFO  gfaffix] constructing handle graph
-[2026-06-07T06:20:01Z INFO  gfaffix] handlegraph has 7 nodes and 4 edges
-[2026-06-07T06:20:01Z INFO  gfaffix] storing length of original nodes for bookkeeping
-[2026-06-07T06:20:01Z INFO  gfaffix] identifying walk-preserving shared affixes
-[2026-06-07T06:20:01Z INFO  gfaffix] found and collapsed 0 shared prefixes, 0 of which are overlapping, and 0 of which are bubbles
-[2026-06-07T06:20:01Z INFO  gfaffix] identifying walk-preserving blunt ends
-[2026-06-07T06:20:01Z INFO  gfaffix] found and collapsed 0 blunt ends
-[2026-06-07T06:20:01Z INFO  gfaffix] expand transformation table
-[2026-06-07T06:20:01Z INFO  gfaffix] writing refined graph to /home/erikg/impg/.wg-worktrees/agent-603/.tmpuoTnB3.gfa
-[2026-06-07T06:20:01Z INFO  gfaffix] transforming paths+walks
-[2026-06-07T06:20:01Z INFO  gfaffix] done
-[2026-06-07T06:20:01Z INFO  impg::commands::graph] [pggb] 1.453s Done
-	Command being timed: "/usr/bin/timeout 120s /home/erikg/impg/.wg-worktrees/agent-603/target/debug/impg graph --sequence-files tests/test_data/local_compression/mid_insertion_200bp/input.fa --gfa-engine pggb --fastga --threads 1 --min-match-len 1 --min-map-length 1 --target-poa-length 32,64 --max-node-length 64 --poa-padding-fraction 0 -g docs/evaluations/local-compression-testbed-fast/fixtures/mid_insertion_200bp/pggb_plus_smoothxg_control/output.gfa --scaffold-jump 0 --scaffold-mass 1"
-	User time (seconds): 0.13
-	System time (seconds): 0.66
-	Percent of CPU this job got: 54%
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Parsed sorted GFA: 3 nodes, 3 paths
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Chopped: 3 → 9 nodes (max 64bp)
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Decomposed into 7 path-overlap blocks
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] After breaking: 7 blocks, 7 total path ranges
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Smoothed 7 blocks (0 gap passthrough)
+[2026-06-07T08:48:25Z INFO  impg::smooth] [smooth] Lacing complete
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [pggb] 1.436s Smoothing done
+[2026-06-07T08:48:25Z INFO  gfaffix] running gfaffix on 1 threads
+[2026-06-07T08:48:25Z INFO  gfaffix] loading graph from /home/erikg/impg/.wg-worktrees/agent-606/.tmpkKKFqM.gfa
+[2026-06-07T08:48:25Z INFO  gfaffix] constructing handle graph
+[2026-06-07T08:48:25Z INFO  gfaffix] handlegraph has 7 nodes and 4 edges
+[2026-06-07T08:48:25Z INFO  gfaffix] storing length of original nodes for bookkeeping
+[2026-06-07T08:48:25Z INFO  gfaffix] identifying walk-preserving shared affixes
+[2026-06-07T08:48:25Z INFO  gfaffix] found and collapsed 0 shared prefixes, 0 of which are overlapping, and 0 of which are bubbles
+[2026-06-07T08:48:25Z INFO  gfaffix] identifying walk-preserving blunt ends
+[2026-06-07T08:48:25Z INFO  gfaffix] found and collapsed 0 blunt ends
+[2026-06-07T08:48:25Z INFO  gfaffix] expand transformation table
+[2026-06-07T08:48:25Z INFO  gfaffix] writing refined graph to /home/erikg/impg/.wg-worktrees/agent-606/.tmp0nyyIt.gfa
+[2026-06-07T08:48:25Z INFO  gfaffix] transforming paths+walks
+[2026-06-07T08:48:25Z INFO  gfaffix] done
+[2026-06-07T08:48:25Z INFO  impg::commands::graph] [pggb] 1.444s Done
+	Command being timed: "/usr/bin/timeout 120s /home/erikg/impg/.wg-worktrees/agent-606/target/debug/impg graph --sequence-files tests/test_data/local_compression/mid_insertion_200bp/input.fa --gfa-engine pggb --fastga --threads 1 --min-match-len 1 --min-map-length 1 --target-poa-length 32,64 --max-node-length 64 --poa-padding-fraction 0 -g docs/evaluations/local-compression-testbed-fast/fixtures/mid_insertion_200bp/pggb_plus_smoothxg_control/output.gfa --scaffold-jump 0 --scaffold-mass 1"
+	User time (seconds): 0.12
+	System time (seconds): 0.60
+	Percent of CPU this job got: 50%
 	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:01.46
 	Average shared text size (kbytes): 0
 	Average unshared data size (kbytes): 0
@@ -67,9 +67,9 @@
 	Maximum resident set size (kbytes): 266240
 	Average resident set size (kbytes): 0
 	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 108379
-	Voluntary context switches: 1456
-	Involuntary context switches: 8
+	Minor (reclaiming a frame) page faults: 108389
+	Voluntary context switches: 1240
+	Involuntary context switches: 9
 	Swaps: 0
 	File system inputs: 0
 	File system outputs: 262736
@@ -78,4 +78,3 @@
 	Signals delivered: 0
 	Page size (bytes): 4096
 	Exit status: 0
-missing=hapA#0#mid_insertion_200bp:1-248,hapB#0#mid_insertion_200bp:1-246,ref#0#mid_insertion_200bp:1-48 | extra=hapA#0#mid_insertion_200bp:1-249,hapB#0#mid_insertion_200bp:1-247,ref#0#mid_insertion_200bp:1-49

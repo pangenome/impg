@@ -6,7 +6,7 @@
 - Assertion: `inversion_like_orientation_preserved`
 - Known failure mode: Resolver reverse-complements the wrong interval or creates long links between inverted anchors.
 - Render status: skipped for fast profile rows; reason `render_tool_not_configured_for_fast_profile`.
-- Method status counts: pass=8, path_corrupt=3
+- Method status counts: pass=11
 
 | Method | Command status | Exact paths | Topology | Graph | Render |
 | --- | --- | --- | --- | --- | --- |
@@ -18,6 +18,6 @@
 | `top_flubble_nonoverlap_sweepga` | pass | pass | pass | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/top_flubble_nonoverlap_sweepga/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
 | `chunk_window_smooth_or_crush` | pass | pass | pass | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/chunk_window_smooth_or_crush/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
 | `whole_region_sweepga_seqwish` | pass | pass | pass | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/whole_region_sweepga_seqwish/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
-| `pggb_control` | path_corrupt | fail | not_run | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/pggb_control/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
-| `smoothxg_control` | path_corrupt | fail | not_run | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/smoothxg_control/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
-| `pggb_plus_smoothxg_control` | path_corrupt | fail | not_run | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/pggb_plus_smoothxg_control/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
+| `pggb_control` | pass | pass | fail | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/pggb_control/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
+| `smoothxg_control` | pass | pass | fail | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/smoothxg_control/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |
+| `pggb_plus_smoothxg_control` | pass | pass | fail | `docs/evaluations/local-compression-testbed-fast/fixtures/inversion_like_case/pggb_plus_smoothxg_control/output.normalized.gfa` | skipped: render_tool_not_configured_for_fast_profile |

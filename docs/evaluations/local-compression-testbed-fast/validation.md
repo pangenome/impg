@@ -2,46 +2,33 @@
 
 Date: 2026-06-07
 
-This artifact records the validation used for the PGGB and SmoothXG control
-runner update.
+This artifact records validation for the internal impg control runner update.
 
 ## Commands
 
+- `git submodule update --init vendor/syng vendor/gfaffix`: passed.
+- `source ./env.sh && cargo build`: passed with existing warnings.
 - `python3 -m py_compile scripts/local_compression_testbed.py`: passed.
-- `python3 scripts/local_compression_testbed.py write-fixtures --root tests/test_data/local_compression`: passed.
-- `python3 scripts/local_compression_testbed.py run --profile fast --manifest tests/test_data/local_compression/manifest.json --out-dir docs/evaluations/local-compression-testbed-fast`: passed after installing the current worktree binary; wrote 143 rows.
-- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo test --test test_local_compression_testbed`: passed, 2 tests.
-- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo build`: passed.
-- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo test`: passed.
-- `source ./env.sh && export CMAKE_C_COMPILER="$CC" CMAKE_CXX_COMPILER="$CXX" && cargo install --path .`: passed and replaced the local `impg` and `gfaffix` binaries from this worktree.
-
-The first unconfigured targeted cargo test attempt failed before running tests
-because the default build environment could not find the vendored htslib faidx
-header. After sourcing `env.sh`, exporting the CMake compiler paths, and
-initializing `vendor/syng` and `vendor/gfaffix`, the targeted test, build, full
-test suite, install, and profile rerun all passed.
+- `source ./env.sh && cargo test -p impg commands::graph::tests::restores_direct_fasta_coordinate_like_path_names_after_pggb_smoothing`: passed.
+- `source ./env.sh && cargo test --test test_graph_poa graph_pggb_cli_preserves_direct_fasta_coordinate_headers_after_smoothing`: passed.
+- `source ./env.sh && cargo test --test test_local_compression_testbed`: passed, 3 tests.
+- `python3 scripts/local_compression_testbed.py run --profile fast --manifest tests/test_data/local_compression/manifest.json --out-dir docs/evaluations/local-compression-testbed-fast`: passed, wrote 143 rows.
+- `source ./env.sh && cargo test`: passed.
+- `source ./env.sh && cargo install --path .`: passed and replaced the global `impg` and `gfaffix` executables with this worktree build.
 
 ## Scoreboard Summary
 
 - Rows: 143.
-- Command status counts: `pass=80`, `path_corrupt=30`, `skipped=33`.
-- Topology status counts: `pass=70`, `fail=10`, `not_run=63`.
-- Control methods represented: `pggb_control`, `smoothxg_control`, and `pggb_plus_smoothxg_control`.
-- Included CI fixtures executed 30 real control commands: 10 rows for each control method.
-- Local-tier fixtures skipped 9 control rows by profile policy: 3 rows for each control method.
+- Control rows: 39 total.
+- Included control graph rows: 30 command passes.
+- Included control graph rows: 30 exact path-preservation passes.
+- Fast-profile local-tier control skips: 9 `profile_excludes_local_fixture` rows.
+- Control topology statuses: 30 `fail` and 9 `not_run`; these remain visible topology assertions in the scoreboard and are not path-preservation failures.
 
 ## Control Interpretation
 
-All included PGGB/SmoothXG controls executed bounded local commands and wrote
-command logs, stdout/stderr logs, output GFAs, normalized GFAs, metrics, and
-scoreboard rows. The control rows are visible as `path_corrupt`, not hidden or
-filtered: exact path preservation failed because the local PGGB path rewrote
-PanSN interval-name ends from the expected fixture coordinates. Since exact
-path corruption is the only hard rejection, topology checks were left
-`not_run` for those rows and the failures remain present in the scoreboard.
-
-Standalone `pggb` and `smoothxg` binaries were not found in the local PATH.
-The bounded profile therefore uses the repository-supported local
-`impg graph --gfa-engine pggb` path. `smoothxg_control` uses the same local
-engine with an explicit empty PAF because the repository does not expose a
-standalone smooth-only CLI path.
+- Control rows are generated through `impg graph --gfa-engine pggb`, not standalone `pggb` or `smoothxg`.
+- `pggb_control` maps to the internal pggb engine with one smoothing target.
+- `pggb_plus_smoothxg_control` maps to the internal pggb engine with two smoothing targets.
+- `smoothxg_control` maps to the internal pggb engine's smoothxg-style smoothing stage over an explicit empty PAF, because this CLI does not expose a separate smooth-only graph command.
+- The previous PanSN/interval `:1-N` to `:1-(N+1)` path-name rewrite was localized to the internal pggb smoothing/lacing path for direct FASTA headers. The graph builder now restores exact direct FASTA path names after smoothing when the output path spelling matches the original input record, so included control outputs round-trip the input FASTA path names and spellings exactly.

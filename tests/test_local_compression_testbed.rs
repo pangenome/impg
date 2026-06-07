@@ -238,7 +238,9 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
             row["input_manifest_path"].as_str(),
             Some("tests/test_data/local_compression/manifest.json")
         );
-        assert!(root.join(row["command_log_path"].as_str().unwrap()).exists());
+        assert!(root
+            .join(row["command_log_path"].as_str().unwrap())
+            .exists());
         assert!(root.join(row["stdout_log_path"].as_str().unwrap()).exists());
         assert!(root.join(row["stderr_log_path"].as_str().unwrap()).exists());
         assert!(!row["command_line"].as_str().unwrap().is_empty());
@@ -247,28 +249,40 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
 
         let method = row["method_id"].as_str().unwrap();
         if method.ends_with("_control") {
+            let command_line = row["command_line"].as_str().unwrap();
+            assert!(
+                command_line.contains("impg graph"),
+                "control {method} must run through the internal impg graph CLI: {command_line}"
+            );
+            assert!(
+                command_line.contains("--gfa-engine pggb"),
+                "control {method} must select an internal impg GFA engine: {command_line}"
+            );
+            assert!(
+                !command_line.contains(" smoothxg "),
+                "control {method} must not invoke standalone smoothxg: {command_line}"
+            );
+            assert_ne!(
+                row["command_status"].as_str(),
+                Some("skipped"),
+                "CI control {method} should execute through impg, not skip on external pggb/smoothxg discovery"
+            );
             match row["command_status"].as_str().unwrap() {
-                "skipped" => {
-                    assert_eq!(row["skip_reason"].as_str(), Some("optional_control_unavailable"));
-                    assert!(
-                        !row["skipped_optional_tool_reason"].as_str().unwrap().is_empty(),
-                        "optional control skips must record precise availability"
-                    );
-                    assert_eq!(row["tool_available"].as_str(), Some("false"));
-                    assert_eq!(row["exact_path_preservation"].as_str(), Some("not_run"));
-                }
                 "pass" | "path_corrupt" => {
                     assert_eq!(row["tool_available"].as_str(), Some("true"));
                     assert!(root.join(row["output_gfa_path"].as_str().unwrap()).exists());
-                    assert!(root.join(row["normalized_gfa_path"].as_str().unwrap()).exists());
-                    assert!(root.join(row["metrics_json_path"].as_str().unwrap()).exists());
-                    assert!(
-                        matches!(
-                            row["exact_path_preservation"].as_str(),
-                            Some("pass") | Some("fail")
-                        ),
-                        "control rows that produce graphs must run path preservation"
+                    assert!(root
+                        .join(row["normalized_gfa_path"].as_str().unwrap())
+                        .exists());
+                    assert!(root
+                        .join(row["metrics_json_path"].as_str().unwrap())
+                        .exists());
+                    assert_eq!(
+                        row["exact_path_preservation"].as_str(),
+                        Some("pass"),
+                        "control {method} should preserve exact input FASTA path names"
                     );
+                    assert_eq!(row["hard_path_corruption"].as_bool(), Some(false));
                     assert!(row["expected_topology_assertion_id"].as_str().is_some());
                     assert!(row["expected_topology_message"].as_str().is_some());
                 }
@@ -284,12 +298,61 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
             assert_eq!(row["exact_path_preservation"].as_str(), Some("pass"));
             assert_eq!(row["hard_path_corruption"].as_bool(), Some(false));
             assert!(root.join(row["output_gfa_path"].as_str().unwrap()).exists());
-            assert!(root.join(row["normalized_gfa_path"].as_str().unwrap()).exists());
-            assert!(root.join(row["metrics_json_path"].as_str().unwrap()).exists());
+            assert!(root
+                .join(row["normalized_gfa_path"].as_str().unwrap())
+                .exists());
+            assert!(root
+                .join(row["metrics_json_path"].as_str().unwrap())
+                .exists());
             assert!(row["expected_topology_assertion_id"].as_str().is_some());
             assert!(row["expected_topology_message"].as_str().is_some());
             assert!(row["graph_size_bytes"].as_u64().unwrap() > 0);
             assert!(row["path_count"].as_u64().unwrap() > 0);
         }
     }
+}
+
+#[test]
+fn local_compression_fast_runner_supports_filtered_control_methods() {
+    let root = repo_root();
+    let out_dir = root.join("target/local-compression-testbed/cargo-test-filtered-control");
+    let _ = fs::remove_dir_all(&out_dir);
+
+    let output = Command::new("python3")
+        .current_dir(&root)
+        .args([
+            "scripts/local_compression_testbed.py",
+            "run",
+            "--profile",
+            "fast",
+            "--manifest",
+            "tests/test_data/local_compression/manifest.json",
+            "--fixtures",
+            "snp_bubble_3path",
+            "--methods",
+            "smoothxg_control",
+            "--out-dir",
+            "target/local-compression-testbed/cargo-test-filtered-control",
+        ])
+        .output()
+        .expect("run filtered local compression testbed runner");
+
+    assert!(
+        output.status.success(),
+        "filtered runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = read_json(out_dir.join("scoreboard.json"));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["method_id"].as_str(), Some("smoothxg_control"));
+    assert_eq!(row["command_status"].as_str(), Some("pass"));
+    assert_eq!(row["exact_path_preservation"].as_str(), Some("pass"));
+
+    let report = fs::read_to_string(out_dir.join("report.md")).unwrap();
+    assert!(report.contains("`smoothxg_control`"));
+    assert!(!report.contains("`local_syng_raw` |"));
 }

@@ -3,7 +3,7 @@ S	1	TTCGAACAGCAGCAGTAGGGTTAACCGG
 S	2	TTCGAACAGCAGCAGGGTTAACCGG
 S	3	TTCGAACAGCAGCAGCAGGGTTAACCGG
 S	4	TTCGAACAGCAGGGTTAACCGG
-P	ref#0#microtangle_repeat_motif:1-26	2+	*
-P	hapB#0#microtangle_repeat_motif:1-23	4+	*
-P	hapA#0#microtangle_repeat_motif:1-29	3+	*
-P	hapC#0#microtangle_repeat_motif:1-29	1+	*
+P	ref#0#microtangle_repeat_motif:1-25	2+	*
+P	hapB#0#microtangle_repeat_motif:1-22	4+	*
+P	hapA#0#microtangle_repeat_motif:1-28	3+	*
+P	hapC#0#microtangle_repeat_motif:1-28	1+	*

@@ -2,6 +2,6 @@ H	VN:Z:1.0
 S	1	GTTACCGGAATTACACACACTTAACCGGTTAA
 S	2	GTTACCGGAATTACACACACACACACACTTAACCGGTTAA
 S	3	GTTACCGGAATTACACACACACACTTAACCGGTTAA
-P	ref#0#tandem_copy_loop_keep:1-33	1+	*
-P	hapA#0#tandem_copy_loop_keep:1-37	3+	*
-P	hapB#0#tandem_copy_loop_keep:1-41	2+	*
+P	ref#0#tandem_copy_loop_keep:1-32	1+	*
+P	hapA#0#tandem_copy_loop_keep:1-36	3+	*
+P	hapB#0#tandem_copy_loop_keep:1-40	2+	*
