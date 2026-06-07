@@ -356,3 +356,67 @@ fn local_compression_fast_runner_supports_filtered_control_methods() {
     assert!(report.contains("`smoothxg_control`"));
     assert!(!report.contains("`local_syng_raw` |"));
 }
+
+#[test]
+fn local_compression_chunk_window_exposes_nested_parent_overmerge() {
+    let root = repo_root();
+    let out_dir = root.join("target/local-compression-testbed/cargo-test-nested-overmerge");
+    let _ = fs::remove_dir_all(&out_dir);
+
+    let output = Command::new("python3")
+        .current_dir(&root)
+        .args([
+            "scripts/local_compression_testbed.py",
+            "run",
+            "--profile",
+            "fast",
+            "--manifest",
+            "tests/test_data/local_compression/manifest.json",
+            "--fixtures",
+            "nested_top_level_wrong",
+            "--methods",
+            "top_flubble_nonoverlap_sweepga,chunk_window_smooth_or_crush",
+            "--out-dir",
+            "target/local-compression-testbed/cargo-test-nested-overmerge",
+        ])
+        .output()
+        .expect("run nested overmerge local compression testbed case");
+
+    assert!(
+        output.status.success(),
+        "nested overmerge runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = read_json(out_dir.join("scoreboard.json"));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let by_method: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row["method_id"].as_str().unwrap(), row))
+        .collect();
+
+    let chunk = by_method["chunk_window_smooth_or_crush"];
+    assert_eq!(chunk["exact_path_preservation"].as_str(), Some("pass"));
+    assert_eq!(chunk["hard_path_corruption"].as_bool(), Some(false));
+    assert_eq!(chunk["expected_topology_status"].as_str(), Some("pass"));
+    assert_eq!(chunk["candidate_count"].as_u64(), Some(2));
+    assert_eq!(chunk["bubble_count"].as_u64(), Some(2));
+    assert_eq!(chunk["flubble_count"].as_u64(), Some(2));
+
+    let top_flubble = by_method["top_flubble_nonoverlap_sweepga"];
+    assert_eq!(
+        top_flubble["exact_path_preservation"].as_str(),
+        Some("pass")
+    );
+    assert_eq!(
+        top_flubble["expected_topology_status"].as_str(),
+        Some("fail")
+    );
+    assert!(top_flubble["expected_topology_message"]
+        .as_str()
+        .unwrap()
+        .contains("bubble_count: observed 1 below min 2"));
+}

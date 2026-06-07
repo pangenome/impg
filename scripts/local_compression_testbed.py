@@ -69,6 +69,7 @@ CONTROL_IMPG_PGGB_TARGET_POA_LENGTHS = {
 }
 CONTROL_MAX_NODE_LENGTH = 64
 CONTROL_MAX_RSS_RE = re.compile(r"Maximum resident set size \(kbytes\):\s+(\d+)")
+CHUNK_WINDOW_MIN_INVARIANT_GAP_BP = 5
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,7 @@ METHODS = [
         "SmoothXG-style sorted/chunk-window smoothing or crush",
         "compact_bubble",
         False,
-        "fixture-local;strategy=compact_bubble;threads=1;window_policy=sorted_chunk;chunk_bp=512;resolver=local_smooth_or_crush;path_guard=record",
+        "fixture-local;strategy=compact_bubble;threads=1;window_policy=sorted_chunk;chunk_bp=512;min_invariant_gap_bp=5;resolver=local_smooth_or_crush;path_guard=record",
     ),
     MethodSpec(
         "whole_region_sweepga_seqwish",
@@ -304,6 +305,7 @@ def make_fixture(
     messy: bool = False,
     loop_required: bool = False,
     graph_hints: Optional[Dict[str, Any]] = None,
+    range_overrides: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> Dict[str, Any]:
     input_sequences = []
     input_sequence_names = []
@@ -339,6 +341,10 @@ def make_fixture(
     if graph_hints:
         render_hints.update(graph_hints)
 
+    allowed_ranges = generic_ranges(loop_required=loop_required, messy=messy)
+    if range_overrides:
+        allowed_ranges.update(range_overrides)
+
     return {
         "fixture_id": fixture_id,
         "fixture_class": fixture_class,
@@ -352,7 +358,7 @@ def make_fixture(
             "description": topology_description,
             "exact": exact,
         },
-        "allowed_ranges": generic_ranges(loop_required=loop_required, messy=messy),
+        "allowed_ranges": allowed_ranges,
         "long_link_policy": {
             "max_count": 0,
             "max_span_bp": 0,
@@ -569,7 +575,7 @@ def fixture_specs() -> List[Dict[str, Any]]:
             "nested_top_level_wrong",
             "nested_bubbles_top_level_wrong",
             "Nested bubbles where top-level boundary over-merges",
-            "local",
+            "ci",
             [
                 ("ref", "GGCCAATTCCGGTTAAAACCGGTTCCAATTGG"),
                 ("hapA", "GGCCAATTCCGGAATAAACCGGTTCCAATTGG"),
@@ -581,6 +587,10 @@ def fixture_specs() -> List[Dict[str, Any]]:
             "Top-level selection over-merges independent events and creates bad loops, long links, or excess path depth.",
             "two independent events inside an overbroad parent",
             messy=True,
+            range_overrides={
+                "bubble_count": {"min": 2, "max": 3},
+                "flubble_count": {"min": 2, "max": 3},
+            },
         ),
     ]
 
@@ -912,6 +922,139 @@ def tandem_loop_gfa(metadata: Dict[str, Any]) -> str:
         copy_count = len(mid) // len(motif)
         lines.append(gfa_line_for_path(name, ["left"] + ["copy"] * copy_count + ["right"]))
     return "\n".join(lines) + "\n"
+
+
+def variant_runs(seqs: Sequence[str]) -> List[Tuple[int, int]]:
+    if not seqs or len({len(seq) for seq in seqs}) != 1:
+        return []
+    runs: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    previous: Optional[int] = None
+    for idx, column in enumerate(zip(*seqs)):
+        if len(set(column)) == 1:
+            continue
+        if start is None:
+            start = idx
+            previous = idx
+        elif previous is not None and idx == previous + 1:
+            previous = idx
+        else:
+            runs.append((start, previous if previous is not None else start))
+            start = idx
+            previous = idx
+    if start is not None:
+        runs.append((start, previous if previous is not None else start))
+    return runs
+
+
+def merge_runs_by_invariant_gap(runs: Sequence[Tuple[int, int]], min_gap_bp: int) -> List[Tuple[int, int]]:
+    if not runs:
+        return []
+    merged: List[Tuple[int, int]] = []
+    start, end = runs[0]
+    for next_start, next_end in runs[1:]:
+        invariant_gap = next_start - end - 1
+        if invariant_gap < min_gap_bp:
+            end = next_end
+        else:
+            merged.append((start, end))
+            start, end = next_start, next_end
+    merged.append((start, end))
+    return merged
+
+
+def chunk_window_ranges(metadata: Dict[str, Any]) -> List[Tuple[int, int]]:
+    seqs = list(metadata["expected_path_spellings"].values())
+    runs = variant_runs(seqs)
+    return merge_runs_by_invariant_gap(runs, CHUNK_WINDOW_MIN_INVARIANT_GAP_BP)
+
+
+def sorted_chunk_window_gfa(metadata: Dict[str, Any]) -> str:
+    spellings = metadata["expected_path_spellings"]
+    names = list(spellings.keys())
+    seqs = list(spellings.values())
+    windows = chunk_window_ranges(metadata)
+    if len(windows) <= 1:
+        return compact_bubble_gfa(metadata)
+
+    lines = ["H\tVN:Z:1.0"]
+    segments: Dict[str, str] = {}
+    path_steps: Dict[str, List[str]] = {name: [] for name in names}
+    edges = set()
+
+    def add_shared(seq: str, ordinal: int) -> Optional[str]:
+        if not seq:
+            return None
+        segment = f"shared{ordinal}"
+        segments[segment] = seq
+        return segment
+
+    cursor = 0
+    shared_ordinal = 1
+    branch_ordinal = 1
+    bubble_count = 0
+    for window_ordinal, (start, end) in enumerate(windows, start=1):
+        shared_segment = add_shared(seqs[0][cursor:start], shared_ordinal)
+        shared_ordinal += 1
+        if shared_segment is not None:
+            for steps in path_steps.values():
+                steps.append(shared_segment)
+
+        branch_for_seq: Dict[str, str] = {}
+        for seq in seqs:
+            branch_seq = seq[start : end + 1]
+            if branch_seq not in branch_for_seq:
+                segment = f"window{window_ordinal}_branch{branch_ordinal}"
+                branch_ordinal += 1
+                branch_for_seq[branch_seq] = segment
+                segments[segment] = branch_seq
+        if len(branch_for_seq) > 1:
+            bubble_count += 1
+        for name, seq in zip(names, seqs):
+            path_steps[name].append(branch_for_seq[seq[start : end + 1]])
+        cursor = end + 1
+
+    shared_segment = add_shared(seqs[0][cursor:], shared_ordinal)
+    if shared_segment is not None:
+        for steps in path_steps.values():
+            steps.append(shared_segment)
+
+    lines.append(
+        metric_comment(
+            bubble_count=bubble_count,
+            flubble_count=bubble_count,
+            repeat_loop_count=0,
+            long_link_count=0,
+            long_link_max_span_bp=0,
+        )
+    )
+    for segment, seq in segments.items():
+        lines.append(f"S\t{segment}\t{seq}")
+
+    for steps in path_steps.values():
+        for left, right in zip(steps, steps[1:]):
+            edges.add((left, right))
+    for left, right in sorted(edges):
+        lines.append(f"L\t{left}\t+\t{right}\t+\t0M")
+    for name, steps in path_steps.items():
+        lines.append(gfa_line_for_path(name, steps))
+    return "\n".join(lines) + "\n"
+
+
+def method_candidate_count(metadata: Dict[str, Any], method: MethodSpec) -> int:
+    if method.strategy == "raw_paths":
+        return 0
+    if method.method_id == "chunk_window_smooth_or_crush":
+        return max(1, len(chunk_window_ranges(metadata)))
+    return 1
+
+
+def method_generation_label(metadata: Dict[str, Any], method: MethodSpec) -> str:
+    if method.method_id == "chunk_window_smooth_or_crush":
+        if len(chunk_window_ranges(metadata)) > 1:
+            return "sorted_chunk_window"
+        return "compact_bubble"
+    return method.strategy
 
 
 def reverse_complement(seq: str) -> str:
@@ -1270,6 +1413,8 @@ def skip_row(
 def generate_method_graph(metadata: Dict[str, Any], method: MethodSpec) -> str:
     if method.strategy == "raw_paths":
         return raw_path_gfa(metadata)
+    if method.method_id == "chunk_window_smooth_or_crush":
+        return sorted_chunk_window_gfa(metadata)
     if method.strategy == "compact_bubble":
         return compact_bubble_gfa(metadata)
     raise ValueError(f"{method.method_id}: cannot generate graph for strategy {method.strategy}")
@@ -1652,7 +1797,7 @@ def produce_row(
                 "runtime_seconds": runtime,
                 "command_status": "path_corrupt" if hard_corrupt else "pass",
                 "exit_code": 0,
-                "candidate_count": 0 if method.strategy == "raw_paths" else 1,
+                "candidate_count": method_candidate_count(metadata, method),
                 "candidate_skipped_count": 0,
                 "candidate_skip_reasons": "",
             }
@@ -1663,7 +1808,7 @@ def produce_row(
             command,
             "\n".join(
                 [
-                    f"generated {method.strategy} graph",
+                    f"generated {method_generation_label(metadata, method)} graph",
                     f"exact_path_preservation={exact_status}",
                     f"expected_topology_status={topology_status}",
                     f"normalized_gfa_path={rel(normalized_gfa)}",

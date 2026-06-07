@@ -2,7 +2,7 @@
   "fixture_id": "nested_top_level_wrong",
   "fixture_class": "nested_bubbles_top_level_wrong",
   "title": "Nested bubbles where top-level boundary over-merges",
-  "tier": "local",
+  "tier": "ci",
   "input_sequences": [
     {
       "name": "ref#0#nested_top_level_wrong:1-32",
@@ -74,11 +74,11 @@
       "max": 8
     },
     "bubble_count": {
-      "min": 1,
+      "min": 2,
       "max": 3
     },
     "flubble_count": {
-      "min": 1,
+      "min": 2,
       "max": 3
     },
     "long_link_count": {

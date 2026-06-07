@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' 'skipped nested_top_level_wrong local_syng_crush_auto: profile_excludes_local_fixture'
+python3 scripts/local_compression_testbed.py run --profile fast --manifest tests/test_data/local_compression/manifest.json --fixtures nested_top_level_wrong --methods local_syng_crush_auto --out-dir docs/evaluations/local-compression-testbed-fast
 
-# expected_exit_code=not_run
-# command_status=skipped
+# expected_exit_code=0
+# command_status=pass

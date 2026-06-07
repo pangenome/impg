@@ -27,8 +27,8 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 - Fixtures represented: 13 (`adjacent_bubbles_joint`, `alu_like_insertion`, `dispersed_repeat_glue_break`, `duplicated_flank_context`, `fake_repeat_anchor_split`, `inversion_like_case`, `microtangle_repeat_motif`, `mid_insertion_200bp`, `nested_top_level_right`, `nested_top_level_wrong`, `short_indel_3path`, `snp_bubble_3path`, `tandem_copy_loop_keep`)
 - Methods represented: 11 (`local_syng_raw`, `local_syng_crush_auto`, `local_syng_crush_poa`, `local_syng_crush_poasta`, `local_syng_crush_sweepga`, `top_flubble_nonoverlap_sweepga`, `chunk_window_smooth_or_crush`, `whole_region_sweepga_seqwish`, `pggb_control`, `smoothxg_control`, `pggb_plus_smoothxg_control`)
 - Rows: 143
-- Command statuses: pass=110, skipped=33
-- Topology statuses: fail=40, not_run=33, pass=70
+- Command statuses: pass=121, skipped=22
+- Topology statuses: fail=50, not_run=22, pass=71
 
 ## Control Execution
 
@@ -37,21 +37,21 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 - Controls are generated through repository `impg graph` engines, not standalone `pggb` or `smoothxg` binaries. Standalone binary discovery is recorded only as diagnostics.
 - Mapping: `pggb_control` uses the internal `--gfa-engine pggb` pipeline with one smoothing target; `pggb_plus_smoothxg_control` uses the same internal pggb engine with two smoothing targets; `smoothxg_control` uses the pggb engine's smoothxg-style smoothing stage over an explicit empty PAF source graph because this repo does not expose a separate smooth-only CLI.
 - Path names: every included control graph-producing row now round-trips exact input FASTA path names and spellings; local-tier control rows remain skipped by fast-profile fixture policy only.
-- `pggb_control`: command_status pass=10, skipped=3; exact_paths not_run=3, pass=10; topology fail=10, not_run=3; tool_available true=13.
+- `pggb_control`: command_status pass=11, skipped=2; exact_paths not_run=2, pass=11; topology fail=11, not_run=2; tool_available true=13.
   Skips: `profile_excludes_local_fixture`.
-  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-606/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-606/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
-- `smoothxg_control`: command_status pass=10, skipped=3; exact_paths not_run=3, pass=10; topology fail=10, not_run=3; tool_available true=13.
+  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+- `smoothxg_control`: command_status pass=11, skipped=2; exact_paths not_run=2, pass=11; topology fail=11, not_run=2; tool_available true=13.
   Skips: `profile_excludes_local_fixture`.
-  Availability detail: profile_excludes_local_fixture;provider=internal_impg_smoothxg_stage_via_pggb_engine;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;smoothxg_mapping=internal pggb engine smoothing stage over an explicit empty PAF source graph;gfaffix=/home/erikg/impg/.wg-worktrees/agent-606/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-606/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
-- `pggb_plus_smoothxg_control`: command_status pass=10, skipped=3; exact_paths not_run=3, pass=10; topology fail=10, not_run=3; tool_available true=13.
+  Availability detail: profile_excludes_local_fixture;provider=internal_impg_smoothxg_stage_via_pggb_engine;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;smoothxg_mapping=internal pggb engine smoothing stage over an explicit empty PAF source graph;gfaffix=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+- `pggb_plus_smoothxg_control`: command_status pass=11, skipped=2; exact_paths not_run=2, pass=11; topology fail=11, not_run=2; tool_available true=13.
   Skips: `profile_excludes_local_fixture`.
-  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-606/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-606/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
 
 ### Control Comparison
 
-- Raw SYNG graph-producing rows: 10; exact paths pass=10; topology fail=10.
-- Compact/window graph-producing rows: 70; exact paths pass=70; topology pass=70.
-- PGGB/SmoothXG control graph-producing rows: 30; exact paths pass=30; topology fail=30.
+- Raw SYNG graph-producing rows: 11; exact paths pass=11; topology fail=11.
+- Compact/window graph-producing rows: 77; exact paths pass=77; topology fail=6, pass=71.
+- PGGB/SmoothXG control graph-producing rows: 33; exact paths pass=33; topology fail=33.
 
 
 ## Output Roots
@@ -89,7 +89,7 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 | `microtangle_repeat_motif` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
 | `mid_insertion_200bp` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
 | `nested_top_level_right` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `nested_top_level_wrong` | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture |
+| `nested_top_level_wrong` | pass/fail | pass/fail | pass/fail | pass/fail | pass/fail | pass/fail | pass/pass | pass/fail | pass/fail | pass/fail | pass/fail |
 | `short_indel_3path` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
 | `snp_bubble_3path` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
 | `tandem_copy_loop_keep` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |

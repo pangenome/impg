@@ -1,0 +1,10 @@
+H	VN:Z:1.0
+#	testbed_metrics	bubble_count=0	flubble_count=0	repeat_loop_count=0	long_link_count=0	long_link_max_span_bp=0
+S	raw1	GGCCAATTCCGGTTAAAACCGGTTCCAATTGG
+S	raw2	GGCCAATTCCGGAATAAACCGGTTCCAATTGG
+S	raw3	GGCCAATTCCGGTTAAAACCAATTCCAATTGG
+S	raw4	GGCCAATTCCGGAATAAACCAATTCCAATTGG
+P	ref#0#nested_top_level_wrong:1-32	raw1+	*
+P	hapA#0#nested_top_level_wrong:1-32	raw2+	*
+P	hapB#0#nested_top_level_wrong:1-32	raw3+	*
+P	hapC#0#nested_top_level_wrong:1-32	raw4+	*

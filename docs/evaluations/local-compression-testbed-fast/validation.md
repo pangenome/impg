@@ -2,33 +2,54 @@
 
 Date: 2026-06-07
 
-This artifact records validation for the internal impg control runner update.
-
 ## Commands
 
-- `git submodule update --init vendor/syng vendor/gfaffix`: passed.
-- `source ./env.sh && cargo build`: passed with existing warnings.
 - `python3 -m py_compile scripts/local_compression_testbed.py`: passed.
-- `source ./env.sh && cargo test -p impg commands::graph::tests::restores_direct_fasta_coordinate_like_path_names_after_pggb_smoothing`: passed.
-- `source ./env.sh && cargo test --test test_graph_poa graph_pggb_cli_preserves_direct_fasta_coordinate_headers_after_smoothing`: passed.
-- `source ./env.sh && cargo test --test test_local_compression_testbed`: passed, 3 tests.
+- `python3 scripts/local_compression_testbed.py write-fixtures --root tests/test_data/local_compression`: passed; regenerated the manifest and fixture metadata after promoting `nested_top_level_wrong`.
+- `cargo test --test test_local_compression_testbed local_compression_chunk_window_exposes_nested_parent_overmerge -- --nocapture`: passed, 1 selected test.
 - `python3 scripts/local_compression_testbed.py run --profile fast --manifest tests/test_data/local_compression/manifest.json --out-dir docs/evaluations/local-compression-testbed-fast`: passed, wrote 143 rows.
-- `source ./env.sh && cargo test`: passed.
-- `source ./env.sh && cargo install --path .`: passed and replaced the global `impg` and `gfaffix` executables with this worktree build.
+- `cargo build`: passed with existing warnings.
+- `cargo test`: passed, including `tests/test_local_compression_testbed.rs` with 4 tests.
+- `cargo install --path .`: passed; replaced `/home/erikg/.cargo/bin/impg` and `/home/erikg/.cargo/bin/gfaffix` with this worktree build.
 
-## Scoreboard Summary
+The cargo commands required the project-local native validation environment used by prior C4 tasks:
+
+```bash
+export HTS=/home/erikg/wfmash/build/vendored_htslib
+export JEM=/gnu_old/store/wg716bmhd47nxnspc8m0lnmhc1an12n5-jemalloc-5.3.0
+export C_INCLUDE_PATH=$HTS/include:${C_INCLUDE_PATH:-}
+export CPLUS_INCLUDE_PATH=$HTS/include:${CPLUS_INCLUDE_PATH:-}
+export CPATH=$HTS/include:${CPATH:-}
+export LIBRARY_PATH=$HTS/lib:$JEM/lib:${LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HTS/lib:$JEM/lib:${LD_LIBRARY_PATH:-}
+export PKG_CONFIG_PATH=$HTS/lib/pkgconfig:${PKG_CONFIG_PATH:-}
+export CFLAGS="-I$HTS/include ${CFLAGS:-}"
+export CXXFLAGS="-I$HTS/include ${CXXFLAGS:-}"
+export LDFLAGS="-L$HTS/lib -L$JEM/lib ${LDFLAGS:-}"
+export CMAKE_PREFIX_PATH=$HTS:${CMAKE_PREFIX_PATH:-}
+export CMAKE_INCLUDE_PATH=$HTS/include:${CMAKE_INCLUDE_PATH:-}
+export CMAKE_LIBRARY_PATH=$HTS/lib:$JEM/lib:${CMAKE_LIBRARY_PATH:-}
+export CARGO_BUILD_JOBS=8
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+```
+
+`git submodule update --init --recursive vendor/syng vendor/gfaffix` was also required before cargo validation because this WG worktree initially had uninitialized submodules.
+
+## Fast Scoreboard Checks
 
 - Rows: 143.
-- Control rows: 39 total.
-- Included control graph rows: 30 command passes.
-- Included control graph rows: 30 exact path-preservation passes.
-- Fast-profile local-tier control skips: 9 `profile_excludes_local_fixture` rows.
-- Control topology statuses: 30 `fail` and 9 `not_run`; these remain visible topology assertions in the scoreboard and are not path-preservation failures.
+- Command statuses: 121 `pass`, 22 `skipped`.
+- Topology statuses: 71 `pass`, 50 `fail`, 22 `not_run`.
+- Exact path preservation: 121 `pass`, 22 `not_run`.
+- Hard path corruption rows: 0.
+- Internal controls are present and graph-producing for all 11 CI fixtures; the two remaining local-tier fixtures are skipped by fast-profile policy only.
 
-## Control Interpretation
+## Iteration-Specific Check
 
-- Control rows are generated through `impg graph --gfa-engine pggb`, not standalone `pggb` or `smoothxg`.
-- `pggb_control` maps to the internal pggb engine with one smoothing target.
-- `pggb_plus_smoothxg_control` maps to the internal pggb engine with two smoothing targets.
-- `smoothxg_control` maps to the internal pggb engine's smoothxg-style smoothing stage over an explicit empty PAF, because this CLI does not expose a separate smooth-only graph command.
-- The previous PanSN/interval `:1-N` to `:1-(N+1)` path-name rewrite was localized to the internal pggb smoothing/lacing path for direct FASTA headers. The graph builder now restores exact direct FASTA path names after smoothing when the output path spelling matches the original input record, so included control outputs round-trip the input FASTA path names and spellings exactly.
+`nested_top_level_wrong` is now a fast-profile CI fixture. Its exact-path rows remain visible:
+
+- `chunk_window_smooth_or_crush`: `pass/pass`, `candidate_count=2`, `bubble_count=2`, `flubble_count=2`.
+- Existing one-parent compact placeholders: `pass/fail`, `candidate_count=1`, `bubble_count=1`, `flubble_count=1`.
+- Raw and internal-control rows: `pass/fail`; they preserve paths but do not satisfy the two-bubble topology assertion.
+
+No hidden graph-quality acceptance gate was added. The runner still writes rows for topology failures, control failures, skips, and exact-path failures; exact path corruption remains the only hard-fail status.
