@@ -454,7 +454,8 @@ one set of engine implementations, selected via `--gfa-engine`:
 | `poa` | single-pass SPOA | small regions, quick MSA-based output |
 | `syng` / `syng:blunt` | regional syng syncmer graph with exact zero-overlap path materialization | source-spelling syng graph output from syng indexes |
 | `syng:raw` | regional syng syncmer overlap graph | explicit native overlap graph for debugging or overlap-aware consumers |
-| `syng-local` / `syng-local:blunt` | extract query-selected sequences, build a fresh local syng graph, then exact zero-overlap materialization | experimental regional syncmer parameter sweeps |
+| `syng-local` | extract query-selected sequences, then induce an explicit whole-region SweepGA/FastGA + seqwish seed graph | local seed graph construction for smoothing/polishing pipelines |
+| `syng-local:blunt` / `syng-local:raw` | extract query-selected sequences, build a fresh local syng graph, then materialize blunt or native topology | experimental regional syncmer parameter sweeps |
 
 For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
 The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
@@ -466,12 +467,14 @@ by `syng-local`. Without source sequence files, missing gap DNA is emitted as
 `N`, and those paths are explicitly not source-preserving. Use `syng:raw` when
 you want the native syng overlap graph; raw path spelling requires an
 overlap-aware parser and is not the same as concatenating S-line DNA.
-Use `syng-local` when the local graph should be rebuilt from the extracted
-regional sequences with its own syncmer scheme, for example
-`-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`; in this mode `k/s/seed`
-select the local rebuild parameters rather than asserting the global index.
-Unlike `syng`, `syng-local` does not apply the syng frequency mask unless
-`:mask` is requested explicitly.
+Use plain `syng-local` when the selected local haplotype sequences should be
+collected with the SYNG/query machinery and then induced through the current
+whole-region SweepGA/FastGA + seqwish seed route. Use `syng-local:blunt` or
+`syng-local:raw` when the local graph should instead be rebuilt from the
+extracted regional sequences with its own syncmer scheme, for example
+`-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`; in these explicit topology
+modes `k/s/seed` select the local rebuild parameters rather than asserting the
+global index.
 Syng GFA extraction selects the top 0.05% most frequent local syncmer nodes and
 private-splits unsupported high-frequency occurrences before raw or blunt graph
 materialization. Occurrences in supported high-frequency runs or exact spans
