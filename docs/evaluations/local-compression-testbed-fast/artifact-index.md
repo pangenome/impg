@@ -25,10 +25,10 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 ## Coverage
 
 - Fixtures represented: 13 (`adjacent_bubbles_joint`, `alu_like_insertion`, `dispersed_repeat_glue_break`, `duplicated_flank_context`, `fake_repeat_anchor_split`, `inversion_like_case`, `microtangle_repeat_motif`, `mid_insertion_200bp`, `nested_top_level_right`, `nested_top_level_wrong`, `short_indel_3path`, `snp_bubble_3path`, `tandem_copy_loop_keep`)
-- Methods represented: 11 (`local_syng_raw`, `local_syng_crush_auto`, `local_syng_crush_poa`, `local_syng_crush_poasta`, `local_syng_crush_sweepga`, `top_flubble_nonoverlap_sweepga`, `chunk_window_smooth_or_crush`, `whole_region_sweepga_seqwish`, `pggb_control`, `smoothxg_control`, `pggb_plus_smoothxg_control`)
-- Rows: 143
-- Command statuses: pass=121, skipped=22
-- Topology statuses: fail=50, not_run=22, pass=71
+- Methods represented: 12 (`local_syng_raw`, `local_syng_crush_auto`, `local_syng_crush_poa`, `local_syng_crush_poasta`, `local_syng_crush_sweepga`, `top_flubble_nonoverlap_sweepga`, `chunk_window_smooth_or_crush`, `chunk_window_sweepga_seqwish`, `whole_region_sweepga_seqwish`, `pggb_control`, `smoothxg_control`, `pggb_plus_smoothxg_control`)
+- Rows: 156
+- Command statuses: pass=132, skipped=24
+- Topology statuses: fail=50, not_run=24, pass=82
 
 ## Control Execution
 
@@ -39,18 +39,18 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 - Path names: every included control graph-producing row now round-trips exact input FASTA path names and spellings; local-tier control rows remain skipped by fast-profile fixture policy only.
 - `pggb_control`: command_status pass=11, skipped=2; exact_paths not_run=2, pass=11; topology fail=11, not_run=2; tool_available true=13.
   Skips: `profile_excludes_local_fixture`.
-  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
 - `smoothxg_control`: command_status pass=11, skipped=2; exact_paths not_run=2, pass=11; topology fail=11, not_run=2; tool_available true=13.
   Skips: `profile_excludes_local_fixture`.
-  Availability detail: profile_excludes_local_fixture;provider=internal_impg_smoothxg_stage_via_pggb_engine;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;smoothxg_mapping=internal pggb engine smoothing stage over an explicit empty PAF source graph;gfaffix=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+  Availability detail: profile_excludes_local_fixture;provider=internal_impg_smoothxg_stage_via_pggb_engine;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;smoothxg_mapping=internal pggb engine smoothing stage over an explicit empty PAF source graph;gfaffix=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
 - `pggb_plus_smoothxg_control`: command_status pass=11, skipped=2; exact_paths not_run=2, pass=11; topology fail=11, not_run=2; tool_available true=13.
   Skips: `profile_excludes_local_fixture`.
-  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-609/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
+  Availability detail: profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout
 
 ### Control Comparison
 
 - Raw SYNG graph-producing rows: 11; exact paths pass=11; topology fail=11.
-- Compact/window graph-producing rows: 77; exact paths pass=77; topology fail=6, pass=71.
+- Compact/window graph-producing rows: 88; exact paths pass=88; topology fail=6, pass=82.
 - PGGB/SmoothXG control graph-producing rows: 33; exact paths pass=33; topology fail=33.
 
 
@@ -78,18 +78,18 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 
 ## Method Matrix
 
-| Fixture | `local_syng_raw` | `local_syng_crush_auto` | `local_syng_crush_poa` | `local_syng_crush_poasta` | `local_syng_crush_sweepga` | `top_flubble_nonoverlap_sweepga` | `chunk_window_smooth_or_crush` | `whole_region_sweepga_seqwish` | `pggb_control` | `smoothxg_control` | `pggb_plus_smoothxg_control` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `adjacent_bubbles_joint` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `alu_like_insertion` | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture |
-| `dispersed_repeat_glue_break` | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture |
-| `duplicated_flank_context` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `fake_repeat_anchor_split` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `inversion_like_case` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `microtangle_repeat_motif` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `mid_insertion_200bp` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `nested_top_level_right` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `nested_top_level_wrong` | pass/fail | pass/fail | pass/fail | pass/fail | pass/fail | pass/fail | pass/pass | pass/fail | pass/fail | pass/fail | pass/fail |
-| `short_indel_3path` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `snp_bubble_3path` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
-| `tandem_copy_loop_keep` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| Fixture | `local_syng_raw` | `local_syng_crush_auto` | `local_syng_crush_poa` | `local_syng_crush_poasta` | `local_syng_crush_sweepga` | `top_flubble_nonoverlap_sweepga` | `chunk_window_smooth_or_crush` | `chunk_window_sweepga_seqwish` | `whole_region_sweepga_seqwish` | `pggb_control` | `smoothxg_control` | `pggb_plus_smoothxg_control` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `adjacent_bubbles_joint` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `alu_like_insertion` | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture |
+| `dispersed_repeat_glue_break` | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture | skipped:profile_excludes_local_fixture |
+| `duplicated_flank_context` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `fake_repeat_anchor_split` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `inversion_like_case` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `microtangle_repeat_motif` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `mid_insertion_200bp` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `nested_top_level_right` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `nested_top_level_wrong` | pass/fail | pass/fail | pass/fail | pass/fail | pass/fail | pass/fail | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail | pass/fail |
+| `short_indel_3path` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `snp_bubble_3path` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |
+| `tandem_copy_loop_keep` | pass/fail | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/pass | pass/fail | pass/fail | pass/fail |

@@ -20,7 +20,7 @@ const REQUIRED_CLASSES: [&str; 13] = [
     "nested_bubbles_top_level_wrong",
 ];
 
-const REQUIRED_METHODS: [&str; 11] = [
+const REQUIRED_METHODS: [&str; 12] = [
     "local_syng_raw",
     "local_syng_crush_auto",
     "local_syng_crush_poa",
@@ -28,6 +28,7 @@ const REQUIRED_METHODS: [&str; 11] = [
     "local_syng_crush_sweepga",
     "top_flubble_nonoverlap_sweepga",
     "chunk_window_smooth_or_crush",
+    "chunk_window_sweepga_seqwish",
     "whole_region_sweepga_seqwish",
     "pggb_control",
     "smoothxg_control",
@@ -219,6 +220,7 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
     for required_column in [
         "expected_topology_status",
         "graph_size_bytes",
+        "path_replay_compression_ratio",
         "command_line",
         "command_log_path",
         "output_gfa_path",
@@ -308,6 +310,7 @@ fn local_compression_fast_runner_emits_complete_scoreboard_rows() {
             assert!(row["expected_topology_message"].as_str().is_some());
             assert!(row["graph_size_bytes"].as_u64().unwrap() > 0);
             assert!(row["path_count"].as_u64().unwrap() > 0);
+            assert!(row["path_replay_compression_ratio"].as_f64().unwrap() >= 1.0);
         }
     }
 }
@@ -419,4 +422,151 @@ fn local_compression_chunk_window_exposes_nested_parent_overmerge() {
         .as_str()
         .unwrap()
         .contains("bubble_count: observed 1 below min 2"));
+}
+
+#[test]
+fn local_compression_path_replay_compression_ratio() {
+    let root = repo_root();
+    let out_dir = root.join("target/local-compression-testbed/cargo-test-replay-ratio");
+    let _ = fs::remove_dir_all(&out_dir);
+
+    let output = Command::new("python3")
+        .current_dir(&root)
+        .args([
+            "scripts/local_compression_testbed.py",
+            "run",
+            "--profile",
+            "fast",
+            "--manifest",
+            "tests/test_data/local_compression/manifest.json",
+            "--fixtures",
+            "nested_top_level_wrong",
+            "--methods",
+            "local_syng_raw,chunk_window_smooth_or_crush",
+            "--out-dir",
+            "target/local-compression-testbed/cargo-test-replay-ratio",
+        ])
+        .output()
+        .expect("run replay compression ratio local compression testbed case");
+
+    assert!(
+        output.status.success(),
+        "replay ratio runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = read_json(out_dir.join("scoreboard.json"));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let by_method: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row["method_id"].as_str().unwrap(), row))
+        .collect();
+
+    let raw = by_method["local_syng_raw"];
+    let chunk = by_method["chunk_window_smooth_or_crush"];
+    assert_eq!(raw["exact_path_preservation"].as_str(), Some("pass"));
+    assert_eq!(chunk["exact_path_preservation"].as_str(), Some("pass"));
+
+    let raw_ratio = raw["path_replay_compression_ratio"].as_f64().unwrap();
+    let chunk_ratio = chunk["path_replay_compression_ratio"].as_f64().unwrap();
+    assert!(
+        (raw_ratio - 1.0).abs() < 0.000001,
+        "raw path-copy graph should have replay ratio 1.0, got {raw_ratio}"
+    );
+    assert!(
+        chunk_ratio > raw_ratio,
+        "chunk graph should show more replay compression than raw graph: raw={raw_ratio} chunk={chunk_ratio}"
+    );
+    assert_eq!(chunk["total_segment_bp"].as_u64(), Some(37));
+    assert!(
+        (chunk_ratio - (128.0 / 37.0)).abs() < 0.000001,
+        "unexpected chunk replay ratio {chunk_ratio}"
+    );
+
+    let scoreboard_tsv = fs::read_to_string(out_dir.join("scoreboard.tsv")).unwrap();
+    let header = scoreboard_tsv.lines().next().unwrap();
+    assert!(header
+        .split('\t')
+        .any(|column| column == "path_replay_compression_ratio"));
+}
+
+#[test]
+fn local_compression_chunk_window_sweepga_seqwish_nested_top_level_wrong() {
+    let root = repo_root();
+    let out_dir = root.join("target/local-compression-testbed/cargo-test-chunk-window-sweepga");
+    let _ = fs::remove_dir_all(&out_dir);
+
+    let output = Command::new("python3")
+        .current_dir(&root)
+        .args([
+            "scripts/local_compression_testbed.py",
+            "run",
+            "--profile",
+            "fast",
+            "--manifest",
+            "tests/test_data/local_compression/manifest.json",
+            "--fixtures",
+            "nested_top_level_wrong",
+            "--methods",
+            "chunk_window_sweepga_seqwish,pggb_control,smoothxg_control,pggb_plus_smoothxg_control",
+            "--out-dir",
+            "target/local-compression-testbed/cargo-test-chunk-window-sweepga",
+        ])
+        .output()
+        .expect("run chunk-window SweepGA/seqwish local compression testbed case");
+
+    assert!(
+        output.status.success(),
+        "chunk-window SweepGA/seqwish runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = read_json(out_dir.join("scoreboard.json"));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+
+    let by_method: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row["method_id"].as_str().unwrap(), row))
+        .collect();
+
+    let chunk = by_method["chunk_window_sweepga_seqwish"];
+    assert_eq!(chunk["exact_path_preservation"].as_str(), Some("pass"));
+    assert_eq!(chunk["hard_path_corruption"].as_bool(), Some(false));
+    assert_eq!(chunk["expected_topology_status"].as_str(), Some("pass"));
+    assert_eq!(chunk["candidate_count"].as_u64(), Some(2));
+    assert_eq!(chunk["bubble_count"].as_u64(), Some(2));
+    assert_eq!(chunk["flubble_count"].as_u64(), Some(2));
+    assert!(chunk["path_replay_compression_ratio"].as_f64().unwrap() > 1.0);
+
+    for control_id in [
+        "pggb_control",
+        "smoothxg_control",
+        "pggb_plus_smoothxg_control",
+    ] {
+        let control = by_method[control_id];
+        assert_eq!(
+            control["exact_path_preservation"].as_str(),
+            Some("pass"),
+            "{control_id} should preserve exact paths"
+        );
+        assert_eq!(
+            control["hard_path_corruption"].as_bool(),
+            Some(false),
+            "{control_id} should not corrupt paths"
+        );
+        assert_eq!(
+            control["expected_topology_status"].as_str(),
+            Some("fail"),
+            "{control_id} remains a visible diagnostic topology-fail control row"
+        );
+        assert!(
+            control["path_replay_compression_ratio"].as_f64().unwrap() >= 1.0,
+            "{control_id} should report replay compression diagnostics"
+        );
+    }
 }

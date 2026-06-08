@@ -50,6 +50,7 @@ MANDATORY_METHOD_IDS = [
     "local_syng_crush_sweepga",
     "top_flubble_nonoverlap_sweepga",
     "chunk_window_smooth_or_crush",
+    "chunk_window_sweepga_seqwish",
     "whole_region_sweepga_seqwish",
 ]
 
@@ -140,6 +141,13 @@ METHODS = [
         "fixture-local;strategy=compact_bubble;threads=1;window_policy=sorted_chunk;chunk_bp=512;min_invariant_gap_bp=5;resolver=local_smooth_or_crush;path_guard=record",
     ),
     MethodSpec(
+        "chunk_window_sweepga_seqwish",
+        "Sorted chunk-window SweepGA/seqwish local crush",
+        "compact_bubble",
+        False,
+        "fixture-local;strategy=compact_bubble;threads=1;window_policy=sorted_chunk;chunk_bp=512;min_invariant_gap_bp=5;resolver=sweepga_seqwish;seqwish_k=19;filter=off;path_guard=record",
+    ),
+    MethodSpec(
         "whole_region_sweepga_seqwish",
         "Whole-region SweepGA/seqwish induction",
         "compact_bubble",
@@ -205,6 +213,7 @@ TSV_FIELDS = [
     "path_count",
     "total_segment_bp",
     "total_path_steps",
+    "path_replay_compression_ratio",
     "node_depth_min",
     "node_depth_p05",
     "node_depth_median",
@@ -1044,13 +1053,13 @@ def sorted_chunk_window_gfa(metadata: Dict[str, Any]) -> str:
 def method_candidate_count(metadata: Dict[str, Any], method: MethodSpec) -> int:
     if method.strategy == "raw_paths":
         return 0
-    if method.method_id == "chunk_window_smooth_or_crush":
+    if method.method_id in {"chunk_window_smooth_or_crush", "chunk_window_sweepga_seqwish"}:
         return max(1, len(chunk_window_ranges(metadata)))
     return 1
 
 
 def method_generation_label(metadata: Dict[str, Any], method: MethodSpec) -> str:
-    if method.method_id == "chunk_window_smooth_or_crush":
+    if method.method_id in {"chunk_window_smooth_or_crush", "chunk_window_sweepga_seqwish"}:
         if len(chunk_window_ranges(metadata)) > 1:
             return "sorted_chunk_window"
         return "compact_bubble"
@@ -1152,21 +1161,27 @@ def graph_metrics(path: Path) -> Dict[str, Any]:
     node_depths = {segment: 0 for segment in segments}
     path_step_counts = []
     white_spaces = []
+    total_spelled_path_bp = 0
     for steps in paths.values():
         path_step_counts.append(len(steps))
         white_spaces.append(max(0, len(steps) - 3))
         for step in steps:
             segment = step[:-1] if step.endswith("+") or step.endswith("-") else step
+            total_spelled_path_bp += len(segments.get(segment, ""))
             node_depths[segment] = node_depths.get(segment, 0) + 1
     node_values = list(node_depths.values())
     path_values = path_step_counts
+    total_segment_bp = sum(len(seq) for seq in segments.values())
     metrics = {
         "graph_size_bytes": path.stat().st_size,
         "segment_count": len(segments),
         "link_count": comment_metrics.get("link_count", 0),
         "path_count": len(paths),
-        "total_segment_bp": sum(len(seq) for seq in segments.values()),
+        "total_segment_bp": total_segment_bp,
         "total_path_steps": sum(path_step_counts),
+        "path_replay_compression_ratio": (
+            round(total_spelled_path_bp / total_segment_bp, 6) if total_segment_bp else None
+        ),
         "node_depth_min": numeric_or_none(min(node_values) if node_values else None),
         "node_depth_p05": numeric_or_none(percentile(node_values, 0.05)),
         "node_depth_median": numeric_or_none(percentile(node_values, 0.50)),
@@ -1262,6 +1277,7 @@ def empty_metric_values() -> Dict[str, Any]:
         "path_count",
         "total_segment_bp",
         "total_path_steps",
+        "path_replay_compression_ratio",
         "node_depth_min",
         "node_depth_p05",
         "node_depth_median",
@@ -1413,7 +1429,7 @@ def skip_row(
 def generate_method_graph(metadata: Dict[str, Any], method: MethodSpec) -> str:
     if method.strategy == "raw_paths":
         return raw_path_gfa(metadata)
-    if method.method_id == "chunk_window_smooth_or_crush":
+    if method.method_id in {"chunk_window_smooth_or_crush", "chunk_window_sweepga_seqwish"}:
         return sorted_chunk_window_gfa(metadata)
     if method.strategy == "compact_bubble":
         return compact_bubble_gfa(metadata)
