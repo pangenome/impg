@@ -1,7 +1,0 @@
-H	VN:Z:1.0
-S	1	TTGACCTTGACCAACCGTAACCGTAA
-S	2	TTGACCTTGACCAAGGCCGTAACCGTAA
-S	3	TTGACCTTGACCCCGTAACCGTAA
-P	ref#0#short_indel_3path:1-26	1+	*
-P	hapB#0#short_indel_3path:1-24	3+	*
-P	hapA#0#short_indel_3path:1-28	2+	*

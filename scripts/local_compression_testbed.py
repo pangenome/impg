@@ -1050,6 +1050,85 @@ def sorted_chunk_window_gfa(metadata: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def chunk_window_sweepga_seqwish_gfa(metadata: Dict[str, Any]) -> str:
+    spellings = metadata["expected_path_spellings"]
+    names = list(spellings.keys())
+    seqs = list(spellings.values())
+    windows = chunk_window_ranges(metadata)
+    if len(windows) <= 1:
+        return compact_bubble_gfa(metadata)
+
+    lines = ["H\tVN:Z:1.0"]
+    segments: Dict[str, str] = {}
+    path_steps: Dict[str, List[str]] = {name: [] for name in names}
+    edges = set()
+
+    def add_shared(seq: str, ordinal: int) -> Optional[str]:
+        if not seq:
+            return None
+        segment = f"s{ordinal}"
+        segments[segment] = seq
+        return segment
+
+    def branch_pieces(seq: str) -> List[str]:
+        if len(seq) <= 2:
+            return [seq]
+        return [seq[:-1], seq[-1]]
+
+    cursor = 0
+    shared_ordinal = 1
+    branch_ordinal = 1
+    branch_for_piece: Dict[str, str] = {}
+    bubble_count = 0
+    for start, end in windows:
+        shared_segment = add_shared(seqs[0][cursor:start], shared_ordinal)
+        shared_ordinal += 1
+        if shared_segment is not None:
+            for steps in path_steps.values():
+                steps.append(shared_segment)
+
+        window_branch_seqs = [seq[start : end + 1] for seq in seqs]
+        if len(set(window_branch_seqs)) > 1:
+            bubble_count += 1
+        for branch_seq in window_branch_seqs:
+            for piece in branch_pieces(branch_seq):
+                if piece in branch_for_piece:
+                    continue
+                segment = f"v{branch_ordinal}"
+                branch_ordinal += 1
+                branch_for_piece[piece] = segment
+                segments[segment] = piece
+        for name, branch_seq in zip(names, window_branch_seqs):
+            path_steps[name].extend(branch_for_piece[piece] for piece in branch_pieces(branch_seq))
+        cursor = end + 1
+
+    shared_segment = add_shared(seqs[0][cursor:], shared_ordinal)
+    if shared_segment is not None:
+        for steps in path_steps.values():
+            steps.append(shared_segment)
+
+    lines.append(
+        metric_comment(
+            bubble_count=bubble_count,
+            flubble_count=bubble_count,
+            repeat_loop_count=0,
+            long_link_count=0,
+            long_link_max_span_bp=0,
+        )
+    )
+    for segment, seq in segments.items():
+        lines.append(f"S\t{segment}\t{seq}")
+
+    for steps in path_steps.values():
+        for left, right in zip(steps, steps[1:]):
+            edges.add((left, right))
+    for left, right in sorted(edges):
+        lines.append(f"L\t{left}\t+\t{right}\t+\t0M")
+    for name, steps in path_steps.items():
+        lines.append(gfa_line_for_path(name, steps))
+    return "\n".join(lines) + "\n"
+
+
 def method_candidate_count(metadata: Dict[str, Any], method: MethodSpec) -> int:
     if method.strategy == "raw_paths":
         return 0
@@ -1059,7 +1138,11 @@ def method_candidate_count(metadata: Dict[str, Any], method: MethodSpec) -> int:
 
 
 def method_generation_label(metadata: Dict[str, Any], method: MethodSpec) -> str:
-    if method.method_id in {"chunk_window_smooth_or_crush", "chunk_window_sweepga_seqwish"}:
+    if method.method_id == "chunk_window_sweepga_seqwish":
+        if len(chunk_window_ranges(metadata)) > 1:
+            return "sorted_chunk_window_sweepga_seqwish"
+        return "compact_bubble"
+    if method.method_id == "chunk_window_smooth_or_crush":
         if len(chunk_window_ranges(metadata)) > 1:
             return "sorted_chunk_window"
         return "compact_bubble"
@@ -1429,7 +1512,9 @@ def skip_row(
 def generate_method_graph(metadata: Dict[str, Any], method: MethodSpec) -> str:
     if method.strategy == "raw_paths":
         return raw_path_gfa(metadata)
-    if method.method_id in {"chunk_window_smooth_or_crush", "chunk_window_sweepga_seqwish"}:
+    if method.method_id == "chunk_window_sweepga_seqwish":
+        return chunk_window_sweepga_seqwish_gfa(metadata)
+    if method.method_id == "chunk_window_smooth_or_crush":
         return sorted_chunk_window_gfa(metadata)
     if method.strategy == "compact_bubble":
         return compact_bubble_gfa(metadata)

@@ -1,2 +1,0 @@
-skipped: profile_excludes_local_fixture
-profile_excludes_local_fixture;provider=internal_impg_graph_pggb;engine_invocation=impg graph --gfa-engine pggb;external_pggb_required=false;external_smoothxg_required=false;standalone_pggb=not_found;standalone_smoothxg=not_found;pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix;gfaffix=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/gfaffix;impg=/home/erikg/impg/.wg-worktrees/agent-626/target/debug/impg;time=/usr/bin/time;timeout=/usr/bin/timeout

@@ -1,7 +1,0 @@
-H	VN:Z:1.0
-S	1	AACCGGGGATCCCTTAAGGATCCGGAATT
-S	2	AACCGGGGATCCCTTACGGATCCGGAATT
-S	3	AACCGGGGATCCCTTAAGGATCCCTAATT
-P	ref#0#duplicated_flank_context:1-29	1+	*
-P	hapB#0#duplicated_flank_context:1-29	3+	*
-P	hapA#0#duplicated_flank_context:1-29	2+	*

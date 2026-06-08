@@ -1,3 +1,0 @@
-  4 data/c4_smoke_report_20260606T075500Z/inputs/c4_easy_shared_flank_2seq.renamed.fa
-  1 data/c4_smoke_report_20260606T075500Z/inputs/c4_easy_shared_flank_2seq.renamed.paf
-  5 total

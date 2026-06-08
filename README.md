@@ -517,6 +517,18 @@ impg query -a ~/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
   -O c4.cutn100.pggb.gfa
 ```
 
+For a C4/HPRCv2-style local render where terminal assembly N blocks would
+otherwise become noisy graph tips:
+
+```bash
+impg query -a ~/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
+  -r GRCh38#0#chr6:<C4-range> \
+  --sequence-files ~/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
+  -d 100000 \
+  -o gfa:cut-n=100:pggb \
+  -O c4.cutn100.pggb.gfa
+```
+
 VCF output uses the same graph engines and then converts the resulting local
 GFA through POVU. Use `-o vcf --gfa-engine <engine>` or the shorthand
 `-o vcf:<engine>`, for example `-o vcf:syng`.

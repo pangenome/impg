@@ -1,8 +1,0 @@
-P 3 seq                     SEQUENCE
-D u 0                       global: upper case when displayed
-O s 2 3 INT 6 STRING        length and id for group of sequences = a scaffold
-G S                         scaffolds (s) group sequence objects (S)
-D n 2 4 CHAR 3 INT          non-acgt chars outside (between) sequences within scaffold
-O S 1 3 DNA                 sequence
-D I 1 6 STRING              identifier of sequence
-D M 1 8 INT_LIST            soft-mask list for a sequence

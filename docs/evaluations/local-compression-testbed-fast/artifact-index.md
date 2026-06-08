@@ -2,6 +2,19 @@
 
 Profile: `fast`
 
+## Merge Payload Note
+
+The `resolve-merge-for` merge keeps the validated runner changes, reports,
+scoreboards, fixture notes, and row-level `metrics.json` files, but intentionally
+omits bulky generated artifacts from the merge payload. The full validated
+fast-profile artifact tree remains recoverable from
+`wg/agent-626/continue-local-compression` at commit `9464fef`, including:
+
+- `docs/evaluations/local-compression-testbed-fast/fixtures/**/output.gfa`
+- `docs/evaluations/local-compression-testbed-fast/fixtures/**/output.normalized.gfa`
+- `docs/evaluations/local-compression-testbed-fast/fixtures/**/{command.sh,stdout.log,stderr.log,empty.paf}`
+- historical generated C4/local run payloads under `data/**`
+
 ## Reproduction
 
 ```bash
@@ -56,8 +69,11 @@ python3 scripts/local_compression_testbed.py run --profile fast --manifest tests
 
 ## Output Roots
 
-- Per-fixture notes, command logs, graph outputs, normalized graphs, and metrics JSON:
+- Committed per-fixture payload is limited to notes and metrics JSON:
   `docs/evaluations/local-compression-testbed-fast/fixtures/<fixture-id>/<method-id>/`
+- Per-fixture command logs, graph outputs, normalized graphs, and empty PAF files
+  were validated on the source branch and are intentionally omitted here by the
+  generated-artifact policy described above.
 - Renders are explicitly skipped in the fast profile with row-level `render_skip_reason` values.
 
 ## Fixture Notes

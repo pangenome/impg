@@ -1,8 +1,0 @@
-H	VN:Z:1.0
-#	testbed_metrics	bubble_count=0	flubble_count=0	repeat_loop_count=0	long_link_count=0	long_link_max_span_bp=0
-S	raw1	GTTACCGGAATTACACACACTTAACCGGTTAA
-S	raw2	GTTACCGGAATTACACACACACACTTAACCGGTTAA
-S	raw3	GTTACCGGAATTACACACACACACACACTTAACCGGTTAA
-P	ref#0#tandem_copy_loop_keep:1-32	raw1+	*
-P	hapA#0#tandem_copy_loop_keep:1-36	raw2+	*
-P	hapB#0#tandem_copy_loop_keep:1-40	raw3+	*

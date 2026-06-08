@@ -1,9 +1,0 @@
-H	VN:Z:1.0
-S	1	AATTCCGGGGAAGGTTGGCCAATT
-S	2	AATTCCGGGGAACCTTGGCCAATT
-S	3	AATTCCGGTTAACTTTGGCCAATT
-S	4	AATTCCGGTTAACTTAGGCCAATT
-P	ref#0#nested_top_level_right:1-24	2+	*
-P	hapC#0#nested_top_level_right:1-24	4+	*
-P	hapA#0#nested_top_level_right:1-24	3+	*
-P	hapB#0#nested_top_level_right:1-24	1+	*

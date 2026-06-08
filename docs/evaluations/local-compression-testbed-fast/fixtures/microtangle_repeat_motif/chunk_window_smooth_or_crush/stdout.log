@@ -1,4 +1,0 @@
-generated compact_bubble graph
-exact_path_preservation=pass
-expected_topology_status=pass
-normalized_gfa_path=docs/evaluations/local-compression-testbed-fast/fixtures/microtangle_repeat_motif/chunk_window_smooth_or_crush/output.normalized.gfa

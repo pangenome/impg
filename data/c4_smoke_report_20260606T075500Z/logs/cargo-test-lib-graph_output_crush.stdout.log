@@ -1,6 +1,0 @@
-
-running 2 tests
-test tests::graph_output_crush_finalization_normalizes_self_loop_runs ... ok
-test tests::graph_output_crush_preserves_path_names_and_spellings_through_finalization ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 393 filtered out; finished in 0.02s

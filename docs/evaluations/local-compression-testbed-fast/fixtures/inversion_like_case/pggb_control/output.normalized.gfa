@@ -1,7 +1,0 @@
-H	VN:Z:1.0
-S	1	CCGGAATTAACCGGTTTTAACCGG
-S	2	CCGGAATTTTGGCCAATTAACCGG
-S	3	CCGGAATTAACCGGAATTAACCGG
-P	ref#0#inversion_like_case:1-24	1+	*
-P	hapB#0#inversion_like_case:1-24	3+	*
-P	hapA#0#inversion_like_case:1-24	2+	*

@@ -1,7 +1,0 @@
-H	VN:Z:1.0
-S	1	AACCGGTTAACCGGTTACCGGAATTCCGG
-S	2	AACCGGTTAATCGGATACCGGAATTCCGG
-S	3	AACCGGTTAAACGGCTACCGGAATTCCGG
-P	ref#0#adjacent_bubbles_joint:1-29	1+	*
-P	hapB#0#adjacent_bubbles_joint:1-29	3+	*
-P	hapA#0#adjacent_bubbles_joint:1-29	2+	*

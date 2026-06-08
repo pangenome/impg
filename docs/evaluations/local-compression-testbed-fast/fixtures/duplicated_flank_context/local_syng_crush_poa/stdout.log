@@ -1,4 +1,0 @@
-generated compact_bubble graph
-exact_path_preservation=pass
-expected_topology_status=pass
-normalized_gfa_path=docs/evaluations/local-compression-testbed-fast/fixtures/duplicated_flank_context/local_syng_crush_poa/output.normalized.gfa

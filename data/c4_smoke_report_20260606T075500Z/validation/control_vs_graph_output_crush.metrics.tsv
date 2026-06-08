@@ -1,4 +1,0 @@
-label	source	status	segments	links	paths	path_steps	total_segment_bp	direct_self_loop_edges	self_loop_repeat_runs	path_depth_median	path_depth_p95	path_depth_max	duplicate_sequence_frac
-source	data/c4_smoke_report_20260606T075500Z/validation/c4_2seq_renamed.source_interval.gfa	REVIEW	2	0	2	2	452	0	0	1	1	1	0.000000
-control_poa	data/c4_smoke_report_20260606T075500Z/outputs/c4_2seq_renamed.query-poa-control.gfa	REVIEW	4	4	2	6	227	0	0	1	2	2	0.000000
-graph_output_crush	data/c4_smoke_report_20260606T075500Z/outputs/c4_2seq_renamed.query-poa-crush.gfa	REVIEW	4	4	2	6	227	0	0	1	2	2	0.000000

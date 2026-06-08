@@ -1,2 +1,0 @@
-segments	links	paths	path_steps	total_segment_bp	node_coverage_bp_weighted_mean	singleton_bp	path_white_space_bp_p99	path_white_space_bp_max	path_white_space_bridges_ge_threshold	duplicate_sequence_frac	local_repeat_context_nodes
-3	0	2	4	16	1.25	12	0	0	0	0	0
