@@ -2,7 +2,8 @@
 
 Date: 2026-06-08
 Task: `design-localized-smoothxg`
-Status: design proposal over existing implementation pieces
+Status: design proposal over existing implementation pieces; integrated
+production caller available as `gfa:syng-local:localized`
 
 ## Scope
 
@@ -27,6 +28,28 @@ Graph-quality metrics are diagnostic and prioritization signals. The only hard
 acceptance gate for replacing graph content is exact path corruption: a
 replacement that changes any required path spelling or final path name is
 rejected or left unchanged.
+
+## Current Implementation
+
+The integrated production path is `--gfa-engine syng-local:localized` (or the
+compact output form `-o gfa:syng-local:localized,...`). It keeps the existing
+query/partition graph-output conventions: SYNG collects the local sequence set,
+plain `syng-local` builds the explicit whole-region SweepGA/FastGA + seqwish
+seed graph, and `src/localized_polish.rs` iterates dirty-region detection plus
+localized resolver tiers over selected flanked chunks.
+
+The defaults are conservative and reproducible: three iterations, one chunk per
+iteration, sixteen total chunks, a 500 kbp total chunk budget, detector defaults
+from `DirtyRegionOptions`, and resolver defaults from `LocalizedResolverConfig`.
+CLI parameters on the `:localized` stage expose iteration count, merge distance,
+flank length, detector thresholds, resolver method/thresholds, chunk budgets,
+wall-clock budget, and debug report directory.
+
+Path preservation is the hard gate. The loop validates seed paths before work,
+rejects any resolver `PathInvalid` report, revalidates after each applied batch,
+and revalidates the final graph against the original local sequence set. Metrics
+and dirty-region reports are logged and optionally written under the configured
+debug directory; they are diagnostic only and never acceptance gates.
 
 ## Implemented Pieces
 

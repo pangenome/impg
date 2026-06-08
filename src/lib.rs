@@ -15,6 +15,7 @@ pub mod graph_report;
 pub mod impg;
 pub mod impg_index;
 pub mod local_seed;
+pub mod localized_polish;
 pub mod multi_impg;
 pub mod onealn;
 pub mod pack;
@@ -114,6 +115,9 @@ pub struct EngineOpts {
     pub partition_size: Option<usize>,
     /// Optional exact path-preserving blunt-graph resolution pass.
     pub crush_config: Option<resolution::ResolutionConfig>,
+    /// Optional iterative localized dirty-region polishing over a SYNG-collected
+    /// local sequence set and explicit local seed graph.
+    pub localized_polish_config: Option<localized_polish::LocalizedPolishConfig>,
     /// Optional post-crush smoothxg pass on the whole graph.
     pub smooth_after_crush: Option<SmoothPipelineConfig>,
     /// Optional final gfasort pipeline, e.g. `Yg` or `Ygs`. Currently enabled
@@ -1206,12 +1210,26 @@ fn dispatch_gfa_engine_inner(
                     local_seed::LocalSeedInductionConfig::whole_region_sweepga_seqwish(
                         engine_opts.pipeline.clone(),
                     );
-                let seed = local_seed::induce_seed_graph(
-                    &sequence_set,
-                    &seed_config,
-                    impg.syng_index_ref(),
-                )?;
-                Ok(seed.gfa)
+                if let Some(config) = &engine_opts.localized_polish_config {
+                    let mut config = config.clone();
+                    if config.debug_dir.is_none() {
+                        config.debug_dir = engine_opts.pipeline.debug_dir.clone();
+                    }
+                    let run = localized_polish::polish_local_sequences(
+                        &sequence_set,
+                        &seed_config,
+                        impg.syng_index_ref(),
+                        &config,
+                    )?;
+                    Ok(run.gfa)
+                } else {
+                    let seed = local_seed::induce_seed_graph(
+                        &sequence_set,
+                        &seed_config,
+                        impg.syng_index_ref(),
+                    )?;
+                    Ok(seed.gfa)
+                }
             }
         },
     }
@@ -1397,6 +1415,7 @@ mod tests {
             poa_padding_fraction: 0.001,
             partition_size: None,
             crush_config: Some(resolution::ResolutionConfig::default()),
+            localized_polish_config: None,
             smooth_after_crush: None,
             graph_sort_pipeline: graph_sort_pipeline.map(str::to_string),
         }
@@ -1695,6 +1714,7 @@ P\talt\t1+,3+,4+\t*
             poa_padding_fraction: 0.001,
             partition_size: None,
             crush_config: Some(resolution::ResolutionConfig::default()),
+            localized_polish_config: None,
             smooth_after_crush: None,
             graph_sort_pipeline: None,
         };
@@ -1815,6 +1835,7 @@ P\tHG002#1#chr6:20-25(+)\tstart+,a+,end+\t*
             poa_padding_fraction: 0.001,
             partition_size: Some(1),
             crush_config: None,
+            localized_polish_config: None,
             smooth_after_crush: None,
             graph_sort_pipeline: None,
         }
@@ -1914,6 +1935,7 @@ P\tHG002#1#chr6:20-25(+)\tstart+,a+,end+\t*
             poa_padding_fraction: 0.001,
             partition_size: None,
             crush_config: None,
+            localized_polish_config: None,
             smooth_after_crush: None,
             graph_sort_pipeline: None,
         };
