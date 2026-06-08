@@ -1,0 +1,11 @@
+H	VN:Z:1.0
+#	testbed_metrics	bubble_count=1	flubble_count=1	repeat_loop_count=1	long_link_count=0	long_link_max_span_bp=0
+S	left	GTTACCGGAATT
+S	copy	ACAC
+S	right	TTAACCGGTTAA
+L	left	+	copy	+	0M
+L	copy	+	copy	+	0M
+L	copy	+	right	+	0M
+P	ref#0#tandem_copy_loop_keep:1-32	left+,copy+,copy+,right+	*
+P	hapA#0#tandem_copy_loop_keep:1-36	left+,copy+,copy+,copy+,right+	*
+P	hapB#0#tandem_copy_loop_keep:1-40	left+,copy+,copy+,copy+,copy+,right+	*

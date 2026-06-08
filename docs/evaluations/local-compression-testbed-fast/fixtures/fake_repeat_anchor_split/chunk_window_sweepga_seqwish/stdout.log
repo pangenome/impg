@@ -1,0 +1,4 @@
+generated sorted_chunk_window graph
+exact_path_preservation=pass
+expected_topology_status=pass
+normalized_gfa_path=docs/evaluations/local-compression-testbed-fast/fixtures/fake_repeat_anchor_split/chunk_window_sweepga_seqwish/output.normalized.gfa

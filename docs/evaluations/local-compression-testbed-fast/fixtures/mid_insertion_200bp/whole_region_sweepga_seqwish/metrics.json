@@ -5,6 +5,7 @@
   "path_count": 3,
   "total_segment_bp": 446,
   "total_path_steps": 8,
+  "path_replay_compression_ratio": 1.215247,
   "node_depth_min": 1,
   "node_depth_p05": 1,
   "node_depth_median": 2,
