@@ -658,6 +658,95 @@ pub struct ResolvedGfa {
     pub stats: ResolutionStats,
 }
 
+/// Configuration for resolving detector-selected dirty chunks directly.
+///
+/// This adapter is deliberately narrower than `resolve_gfa_bubbles`: chunk
+/// discovery is owned by `graph_badness`, while this layer only maps a dirty
+/// path-coordinate interval to shared-flank path ranges, runs one resolver tier,
+/// trims resolver flanks back to the requested interval, and laces the result
+/// through the existing exact path-preserving replacement machinery.
+#[derive(Clone, Debug)]
+pub struct LocalizedResolverConfig {
+    pub resolution: ResolutionConfig,
+    /// Optional hard budget for one localized replacement interval. Exceeded
+    /// chunks are reported as explicit skips rather than disappearing from the
+    /// run. This is independent of graph-quality metrics.
+    pub max_chunk_bp: Option<usize>,
+    /// Minimum number of paths that must be bounded by the dirty chunk's
+    /// shared flank anchors before a replacement is attempted.
+    pub min_shared_paths: usize,
+    /// Treat detector budget-capped chunks as explicit skips. The caller can
+    /// disable this to attempt them anyway.
+    pub skip_capped_chunks: bool,
+}
+
+impl Default for LocalizedResolverConfig {
+    fn default() -> Self {
+        Self {
+            resolution: ResolutionConfig::default(),
+            max_chunk_bp: None,
+            min_shared_paths: 2,
+            skip_capped_chunks: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalizedResolutionStatus {
+    Applied,
+    Skipped,
+    Failed,
+    PathInvalid,
+}
+
+impl LocalizedResolutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+            Self::PathInvalid => "path-invalid",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalizedGraphMetrics {
+    pub segments: usize,
+    pub segment_bp: usize,
+    pub links: usize,
+    pub paths: usize,
+    pub path_steps: usize,
+    pub spelled_path_bp: usize,
+    pub path_replay_compression_ratio: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalizedResolverReport {
+    pub chunk_id: String,
+    pub status: LocalizedResolutionStatus,
+    pub method: Option<ResolutionMethod>,
+    pub reason: String,
+    pub path_validation: String,
+    pub hard_rejection_gate: String,
+    pub quality_gate_used: bool,
+    pub requested_flank_bp: usize,
+    pub trimmed_back: bool,
+    pub input_paths: usize,
+    pub input_bp: usize,
+    pub replacement_segments: Option<usize>,
+    pub replacement_bp: Option<usize>,
+    pub before: LocalizedGraphMetrics,
+    pub after: Option<LocalizedGraphMetrics>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalizedResolveResult {
+    pub gfa: String,
+    pub reports: Vec<LocalizedResolverReport>,
+    pub stats: ResolutionStats,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct Step {
     node: usize,
@@ -1008,6 +1097,160 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         parse_start.elapsed()
     );
     resolve_graph_bubbles(graph, Some(gfa), config, true)
+}
+
+/// Resolve detector-selected dirty chunks with shared-flank local graph
+/// induction.
+///
+/// `DirtyChunk::core_path_start_bp..core_path_end_bp` is interpreted as the
+/// original replacement interval on `DirtyChunk::path_name`; older chunks that
+/// do not carry core coordinates fall back to
+/// `DirtyChunk::path_start_bp..path_end_bp`. Resolver flank context is then
+/// added from `LocalizedResolverConfig::resolution.replacement_flank_bp`; when
+/// that value is zero, the detector chunk's `flank_bp` is used. The added flank
+/// sequence is aligner context only: accepted replacements are clipped back to
+/// the original interval before lacing.
+pub fn resolve_gfa_dirty_chunks(
+    gfa: &str,
+    chunks: &[crate::graph_badness::DirtyChunk],
+    config: &LocalizedResolverConfig,
+) -> io::Result<LocalizedResolveResult> {
+    let mut graph = parse_gfa(gfa)?;
+    let mut next_id = initial_next_segment_id(&graph);
+    let mut reports = Vec::with_capacity(chunks.len());
+    let mut stats = ResolutionStats {
+        iterations: usize::from(!chunks.is_empty()),
+        ..ResolutionStats::default()
+    };
+    let mut changed = false;
+
+    for chunk in chunks {
+        stats.candidates_seen += 1;
+        let before = localized_graph_metrics(&graph);
+        let mut report = localized_report_base(chunk, before.clone());
+
+        if config.skip_capped_chunks && chunk.capped_by_budget {
+            report.status = LocalizedResolutionStatus::Skipped;
+            report.reason = "dirty chunk was capped by detector budget".to_string();
+            log_localized_report(&report);
+            reports.push(report);
+            stats.bailed += 1;
+            continue;
+        }
+
+        let mut local_config = config.resolution.clone();
+        let requested_flank_bp = if local_config.replacement_flank_bp == 0 {
+            chunk.flank_bp
+        } else {
+            local_config.replacement_flank_bp
+        };
+        local_config.replacement_flank_bp = requested_flank_bp;
+        report.requested_flank_bp = requested_flank_bp;
+
+        let mut candidate = match localized_candidate_from_dirty_chunk(&graph, chunk, config) {
+            Ok(candidate) => candidate,
+            Err(err) => {
+                report.status = LocalizedResolutionStatus::Skipped;
+                report.reason = err.to_string();
+                log_localized_report(&report);
+                reports.push(report);
+                stats.bailed += 1;
+                continue;
+            }
+        };
+
+        materialize_candidate_sequences(&graph, &mut candidate, &local_config);
+        report.input_paths = candidate.ranges.len();
+        report.input_bp = candidate.traversal_stats.total_len;
+        report.trimmed_back = candidate_needs_trim_or_restore(&candidate);
+
+        if let Some(max_chunk_bp) = config.max_chunk_bp {
+            let chunk_bp = candidate.traversal_stats.max_len;
+            if chunk_bp > max_chunk_bp {
+                report.status = LocalizedResolutionStatus::Skipped;
+                report.reason = format!(
+                    "dirty chunk max traversal length {chunk_bp} bp exceeds localized budget {max_chunk_bp} bp"
+                );
+                log_localized_report(&report);
+                reports.push(report);
+                stats.bailed += 1;
+                continue;
+            }
+        }
+
+        let method = localized_replacement_method(&candidate, &local_config);
+        report.method = Some(method);
+        log::info!(
+            "localized resolver: chunk={} paths={} input_bp={} max_len={} median_len={} method={} flank_bp={} hard_gate=exact-path-spelling quality_gate=false",
+            chunk.id,
+            candidate.ranges.len(),
+            candidate.traversal_stats.total_len,
+            candidate.traversal_stats.max_len,
+            candidate.traversal_stats.median_len,
+            method.method_name(),
+            requested_flank_bp,
+        );
+
+        let build =
+            build_replacement_with_method_catching_unwind_report(&candidate, &local_config, method);
+        let build = match build {
+            Ok(build) => build,
+            Err(err) => {
+                report.status = if replacement_failure_is_path_invalid(&err) {
+                    LocalizedResolutionStatus::PathInvalid
+                } else {
+                    LocalizedResolutionStatus::Failed
+                };
+                report.reason = err.to_string();
+                report.path_validation = report.status.as_str().to_string();
+                log_localized_report(&report);
+                reports.push(report);
+                stats.bailed += 1;
+                continue;
+            }
+        };
+
+        report.replacement_segments = Some(build.replacement.segments.len());
+        report.replacement_bp = Some(replacement_segment_bp(&build.replacement));
+        let plan = ReplacementPlan::new(candidate, build.replacement, method);
+        match apply_replacement_frontier(&graph, &[plan], &mut next_id) {
+            Ok(next_graph) => {
+                let after = localized_graph_metrics(&next_graph);
+                report.status = LocalizedResolutionStatus::Applied;
+                report.reason =
+                    "replacement accepted after exact path-name and path-spelling validation"
+                        .to_string();
+                report.path_validation = "pass".to_string();
+                report.after = Some(after);
+                graph = next_graph;
+                changed = true;
+                stats.resolved += 1;
+            }
+            Err(err) => {
+                report.status = if replacement_failure_is_path_invalid(&err) {
+                    LocalizedResolutionStatus::PathInvalid
+                } else {
+                    LocalizedResolutionStatus::Failed
+                };
+                report.reason = err.to_string();
+                report.path_validation = report.status.as_str().to_string();
+                stats.bailed += 1;
+            }
+        }
+        log_localized_report(&report);
+        reports.push(report);
+    }
+
+    let gfa = if changed {
+        render_graph(&graph)
+    } else {
+        gfa.to_string()
+    };
+    Ok(LocalizedResolveResult {
+        gfa,
+        reports,
+        stats,
+    })
 }
 
 fn resolve_graph_bubbles(
@@ -6963,6 +7206,326 @@ fn path_positions(graph: &Graph, path_idx: usize) -> Vec<usize> {
         positions.push(next);
     }
     positions
+}
+
+fn localized_graph_metrics(graph: &Graph) -> LocalizedGraphMetrics {
+    let segments = graph.segments.len();
+    let segment_bp = graph
+        .segments
+        .iter()
+        .map(|segment| segment.seq.len())
+        .sum::<usize>();
+    let paths = graph.paths.len();
+    let path_steps = graph
+        .paths
+        .iter()
+        .map(|path| path.steps.len())
+        .sum::<usize>();
+    let spelled_path_bp = graph
+        .paths
+        .iter()
+        .flat_map(|path| path.steps.iter())
+        .map(|step| graph.segments[step.node].seq.len())
+        .sum::<usize>();
+    let mut links = FxHashSet::<(Step, Step)>::default();
+    for path in &graph.paths {
+        for pair in path.steps.windows(2) {
+            links.insert((pair[0], pair[1]));
+        }
+    }
+    LocalizedGraphMetrics {
+        segments,
+        segment_bp,
+        links: links.len(),
+        paths,
+        path_steps,
+        spelled_path_bp,
+        path_replay_compression_ratio: (segment_bp > 0)
+            .then_some(spelled_path_bp as f64 / segment_bp as f64),
+    }
+}
+
+fn localized_report_base(
+    chunk: &crate::graph_badness::DirtyChunk,
+    before: LocalizedGraphMetrics,
+) -> LocalizedResolverReport {
+    LocalizedResolverReport {
+        chunk_id: chunk.id.clone(),
+        status: LocalizedResolutionStatus::Skipped,
+        method: None,
+        reason: "not attempted".to_string(),
+        path_validation: "not-run".to_string(),
+        hard_rejection_gate: "exact_path_corruption".to_string(),
+        quality_gate_used: false,
+        requested_flank_bp: 0,
+        trimmed_back: false,
+        input_paths: 0,
+        input_bp: 0,
+        replacement_segments: None,
+        replacement_bp: None,
+        before,
+        after: None,
+    }
+}
+
+fn localized_candidate_from_dirty_chunk(
+    graph: &Graph,
+    chunk: &crate::graph_badness::DirtyChunk,
+    config: &LocalizedResolverConfig,
+) -> io::Result<BubbleCandidate> {
+    let path_name = chunk.path_name.as_deref().ok_or_else(|| {
+        io::Error::other(format!(
+            "dirty chunk '{}' has no path_name; graph-coordinate-only chunks need an explicit path interval",
+            chunk.id
+        ))
+    })?;
+    let path_start_bp = chunk
+        .core_path_start_bp
+        .or(chunk.path_start_bp)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "dirty chunk '{}' has no core_path_start_bp or path_start_bp coordinate",
+                chunk.id
+            ))
+        })?;
+    let path_end_bp = chunk
+        .core_path_end_bp
+        .or(chunk.path_end_bp)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "dirty chunk '{}' has no core_path_end_bp or path_end_bp coordinate",
+                chunk.id
+            ))
+        })?;
+    if path_start_bp > path_end_bp {
+        return Err(io::Error::other(format!(
+            "dirty chunk '{}' has inverted path interval {}..{}",
+            chunk.id, path_start_bp, path_end_bp
+        )));
+    }
+
+    let root_path_idx = graph
+        .paths
+        .iter()
+        .position(|path| path.name == path_name)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "dirty chunk '{}' path '{}' is not present in the GFA",
+                chunk.id, path_name
+            ))
+        })?;
+    let root_positions = path_positions(graph, root_path_idx);
+    let root_begin_step =
+        exact_path_step_boundary(&root_positions, path_start_bp).ok_or_else(|| {
+            io::Error::other(format!(
+                "dirty chunk '{}' start {} bp is not on a path-step boundary for path '{}'",
+                chunk.id, path_start_bp, path_name
+            ))
+        })?;
+    let root_end_step =
+        exact_path_step_boundary(&root_positions, path_end_bp).ok_or_else(|| {
+            io::Error::other(format!(
+                "dirty chunk '{}' end {} bp is not on a path-step boundary for path '{}'",
+                chunk.id, path_end_bp, path_name
+            ))
+        })?;
+    if root_begin_step > root_end_step {
+        return Err(io::Error::other(format!(
+            "dirty chunk '{}' maps to inverted step interval {}..{}",
+            chunk.id, root_begin_step, root_end_step
+        )));
+    }
+    let root_path = &graph.paths[root_path_idx];
+    if root_begin_step == 0 || root_end_step >= root_path.steps.len() {
+        return Err(io::Error::other(format!(
+            "dirty chunk '{}' lacks both shared flank anchors on path '{}'",
+            chunk.id, path_name
+        )));
+    }
+
+    let left_anchor = root_path.steps[root_begin_step - 1];
+    let right_anchor = root_path.steps[root_end_step];
+    let mut ranges = Vec::new();
+    let mut lengths = Vec::new();
+    let mut unique_steps = FxHashSet::<Step>::default();
+
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let (begin_step, end_step) = if path_idx == root_path_idx {
+            (root_begin_step, root_end_step)
+        } else {
+            match unique_between_shared_flanks(path, left_anchor, right_anchor)? {
+                Some(range) => range,
+                None => continue,
+            }
+        };
+        if begin_step > end_step || end_step > path.steps.len() {
+            continue;
+        }
+        let positions = path_positions(graph, path_idx);
+        let Some(source_begin_bp) = positions.get(begin_step).copied() else {
+            continue;
+        };
+        let Some(source_end_bp) = positions.get(end_step).copied() else {
+            continue;
+        };
+        lengths.push(source_end_bp.saturating_sub(source_begin_bp));
+        for step_idx in begin_step..end_step {
+            unique_steps.insert(path.steps[step_idx]);
+        }
+        ranges.push(PathRange {
+            path_idx,
+            source_path_name: Some(path.name.clone()),
+            original_path_name: Some(path.name.clone()),
+            source_begin_bp,
+            source_end_bp,
+            begin_step,
+            end_step,
+            ..PathRange::default()
+        });
+    }
+
+    ranges.sort_by_key(|range| range.path_idx);
+    if ranges.len() < config.min_shared_paths.max(1) {
+        return Err(io::Error::other(format!(
+            "dirty chunk '{}' shared flank anchors {}..{} bound {} path(s), below min_shared_paths={}",
+            chunk.id,
+            format_step_label(graph, left_anchor),
+            format_step_label(graph, right_anchor),
+            ranges.len(),
+            config.min_shared_paths.max(1)
+        )));
+    }
+    let traversal_stats = traversal_stats_from_lengths(lengths);
+    if traversal_stats.total_len == 0 {
+        return Err(io::Error::other(format!(
+            "dirty chunk '{}' has zero bp across every shared-flank traversal",
+            chunk.id
+        )));
+    }
+    let total_steps = ranges
+        .iter()
+        .map(|range| range.end_step.saturating_sub(range.begin_step))
+        .sum::<usize>();
+    let root_span = root_positions[root_end_step].saturating_sub(root_positions[root_begin_step]);
+    let root_last_step = if root_end_step > root_begin_step {
+        root_end_step - 1
+    } else {
+        root_begin_step
+    };
+    let signature = format!(
+        "localized:{}:{}:{}-{}:{}..{}",
+        chunk.id,
+        path_name,
+        path_start_bp,
+        path_end_bp,
+        format_step_label(graph, left_anchor),
+        format_step_label(graph, right_anchor)
+    );
+
+    Ok(BubbleCandidate {
+        ranges,
+        signature,
+        root_start_step: root_begin_step,
+        root_end_step: root_last_step,
+        root_span,
+        total_steps,
+        unique_steps: unique_steps.len(),
+        traversal_stats,
+        level: 0,
+    })
+}
+
+fn exact_path_step_boundary(positions: &[usize], bp: usize) -> Option<usize> {
+    positions.binary_search(&bp).ok()
+}
+
+fn unique_between_shared_flanks(
+    path: &Path,
+    left_anchor: Step,
+    right_anchor: Step,
+) -> io::Result<Option<(usize, usize)>> {
+    let mut found = None;
+    for (left_idx, &step) in path.steps.iter().enumerate() {
+        if step != left_anchor {
+            continue;
+        }
+        for right_idx in left_idx + 1..path.steps.len() {
+            if path.steps[right_idx] != right_anchor {
+                continue;
+            }
+            let range = (left_idx + 1, right_idx);
+            if found.replace(range).is_some() {
+                return Err(io::Error::other(format!(
+                    "shared flank anchors are ambiguous on path '{}'",
+                    path.name
+                )));
+            }
+            break;
+        }
+    }
+    Ok(found)
+}
+
+fn localized_replacement_method(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    match config.method {
+        ResolutionMethod::Auto | ResolutionMethod::Hierarchical => {
+            if config.auto_spoa_max_traversal_len > 0
+                && candidate.traversal_stats.median_len < config.auto_spoa_max_traversal_len
+            {
+                ResolutionMethod::Poa
+            } else {
+                ResolutionMethod::Sweepga
+            }
+        }
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal
+        | ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
+        ResolutionMethod::ChainGreedy | ResolutionMethod::ChainPovu => ResolutionMethod::Poasta,
+        method => method,
+    }
+}
+
+fn log_localized_report(report: &LocalizedResolverReport) {
+    let after = report
+        .after
+        .as_ref()
+        .map(localized_metrics_summary)
+        .unwrap_or_else(|| "n/a".to_string());
+    log::info!(
+        "localized resolver report: chunk={} status={} method={} reason={} path_validation={} hard_gate={} quality_gate_used={} before={} after={}",
+        report.chunk_id,
+        report.status.as_str(),
+        report
+            .method
+            .map(|method| method.method_name())
+            .unwrap_or("n/a"),
+        report.reason,
+        report.path_validation,
+        report.hard_rejection_gate,
+        report.quality_gate_used,
+        localized_metrics_summary(&report.before),
+        after
+    );
+}
+
+fn localized_metrics_summary(metrics: &LocalizedGraphMetrics) -> String {
+    format!(
+        "segments={},segment_bp={},links={},paths={},path_steps={},spelled_path_bp={},path_replay_compression_ratio={}",
+        metrics.segments,
+        metrics.segment_bp,
+        metrics.links,
+        metrics.paths,
+        metrics.path_steps,
+        metrics.spelled_path_bp,
+        metrics
+            .path_replay_compression_ratio
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "n/a".to_string())
+    )
 }
 
 /// One candidate discovered from a POVU pass, before non-overlap selection.

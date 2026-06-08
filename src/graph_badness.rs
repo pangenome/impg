@@ -186,6 +186,8 @@ pub struct DirtyChunk {
     pub path_name: Option<String>,
     pub path_start_bp: Option<usize>,
     pub path_end_bp: Option<usize>,
+    pub core_path_start_bp: Option<usize>,
+    pub core_path_end_bp: Option<usize>,
     pub path_length_bp: Option<usize>,
     pub graph_start_bp: Option<usize>,
     pub graph_end_bp: Option<usize>,
@@ -1518,8 +1520,10 @@ fn finalize_chunk(
         .path_length_bp
         .or(path_length_from_graph)
         .or_else(|| (graph_total_bp > 0).then_some(graph_total_bp));
-    let mut start = acc.raw_path_start_bp.unwrap_or(0);
-    let mut end = acc.raw_path_end_bp.unwrap_or(start);
+    let core_start = acc.raw_path_start_bp.unwrap_or(0);
+    let core_end = acc.raw_path_end_bp.unwrap_or(core_start);
+    let mut start = core_start;
+    let mut end = core_end;
     start = start.saturating_sub(options.flank_bp);
     end = end.saturating_add(options.flank_bp);
     if let Some(limit) = coordinate_limit {
@@ -1549,6 +1553,14 @@ fn finalize_chunk(
         path_name: acc.path_name,
         path_start_bp: acc.path_length_bp.or(path_length_from_graph).map(|_| start),
         path_end_bp: acc.path_length_bp.or(path_length_from_graph).map(|_| end),
+        core_path_start_bp: acc
+            .path_length_bp
+            .or(path_length_from_graph)
+            .map(|_| core_start),
+        core_path_end_bp: acc
+            .path_length_bp
+            .or(path_length_from_graph)
+            .map(|_| core_end),
         path_length_bp: acc.path_length_bp.or(path_length_from_graph),
         graph_start_bp: acc.graph_start_bp,
         graph_end_bp: acc.graph_end_bp,
