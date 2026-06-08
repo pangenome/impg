@@ -297,7 +297,7 @@ pub fn induce_seed_graph(
         report.path_validation,
         report.elapsed_secs,
     );
-    write_debug_report(&config.graph_config, &report)?;
+    write_debug_report(&config.graph_config, &report, &gfa)?;
     Ok(LocalSeedGraph { gfa, report })
 }
 
@@ -575,6 +575,7 @@ fn command_config(
 fn write_debug_report(
     graph_config: &commands::graph::GraphBuildConfig,
     report: &LocalSeedReport,
+    gfa: &str,
 ) -> io::Result<()> {
     let Some(debug_dir) = graph_config.debug_dir.as_deref() else {
         return Ok(());
@@ -604,7 +605,37 @@ fn write_debug_report(
         report.path_validation,
         report.elapsed_secs,
     );
-    std::fs::write(path, content)
+    std::fs::write(path, content)?;
+    write_dirty_region_debug_reports(debug_dir, gfa);
+    Ok(())
+}
+
+fn write_dirty_region_debug_reports(debug_dir: &str, gfa: &str) {
+    let options = crate::graph_badness::DirtyRegionOptions::default();
+    let report = match crate::graph_badness::analyze_gfa("local_seed", gfa, &options) {
+        Ok(report) => report,
+        Err(err) => {
+            log::warn!("[local seed] dirty-region diagnostics failed: {err}");
+            return;
+        }
+    };
+    let debug_dir = Path::new(debug_dir);
+    for format in ["json", "tsv"] {
+        let text = match crate::graph_badness::format_dirty_report(&report, format) {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("[local seed] dirty-region {format} formatting failed: {err}");
+                continue;
+            }
+        };
+        let path = debug_dir.join(format!("local_seed_dirty_regions.{format}"));
+        if let Err(err) = std::fs::write(&path, text) {
+            log::warn!(
+                "[local seed] failed to write dirty-region report {}: {err}",
+                path.display()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
