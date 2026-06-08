@@ -2296,6 +2296,7 @@ struct ParsedGfaEngine {
     syng_gfa_frequency_mask: SyngGfaFrequencyMask,
     terminal_n_clip: Option<impg::graph::TerminalNRunClip>,
     crush_config: Option<impg::resolution::ResolutionConfig>,
+    localized_polish_config: Option<impg::localized_polish::LocalizedPolishConfig>,
     smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
 }
@@ -2350,6 +2351,20 @@ fn parse_usize_size_engine_param(raw: &str, key: &str, value: &str) -> io::Resul
             ),
         )
     })
+}
+
+fn parse_optional_usize_size_engine_param(
+    raw: &str,
+    key: &str,
+    value: &str,
+) -> io::Result<Option<usize>> {
+    if matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "none" | "disabled" | "disable" | "unlimited"
+    ) {
+        return Ok(None);
+    }
+    parse_usize_size_engine_param(raw, key, value).map(Some)
 }
 
 fn parse_replacement_min_match_len_policy(
@@ -3196,6 +3211,387 @@ fn parse_crush_stage(
     Ok(config)
 }
 
+fn parse_localized_polish_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<impg::localized_polish::LocalizedPolishConfig> {
+    let mut config = impg::localized_polish::LocalizedPolishConfig::default();
+    for param in &stage.params {
+        match param.key.as_str() {
+            "max-iterations" | "iterations" | "max-rounds" | "rounds" => {
+                config.max_iterations =
+                    parse_round_count_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-chunks-per-iteration"
+            | "max-chunks-per-round"
+            | "chunks-per-iteration"
+            | "chunks-per-round" => {
+                config.max_chunks_per_iteration =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-total-chunks" | "total-chunks" | "chunk-budget" => {
+                config.max_total_chunks =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-total-chunk-bp" | "max-total-bp" | "total-chunk-bp" | "bp-budget" => {
+                config.max_total_chunk_bp =
+                    parse_optional_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-runtime-secs"
+            | "max-runtime-seconds"
+            | "max-seconds"
+            | "max-wall-seconds"
+            | "wall-seconds" => {
+                config.max_runtime_secs =
+                    Some(parse_f64_engine_param(raw, &param.key, &param.value)?);
+            }
+            "debug-dir" | "report-dir" => {
+                config.debug_dir = Some(param.value.clone());
+            }
+            "chunk-merge-distance"
+            | "merge-distance"
+            | "merge-distance-bp"
+            | "merge-bp"
+            | "chunk-merge-bp" => {
+                config.dirty_options.merge_distance_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "flank" | "flank-bp" | "chunk-flank" | "chunk-flank-bp" => {
+                let flank = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                config.dirty_options.flank_bp = flank;
+                config.resolver.resolution.replacement_flank_bp = flank;
+            }
+            "detector-flank" | "detector-flank-bp" => {
+                config.dirty_options.flank_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "resolver-flank"
+            | "resolver-flank-bp"
+            | "replacement-flank"
+            | "replacement-flank-bp" => {
+                config.resolver.resolution.replacement_flank_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-chunk-bp" | "chunk-max-bp" | "chunk-bp" => {
+                let max_chunk_bp =
+                    parse_optional_usize_size_engine_param(raw, &param.key, &param.value)?;
+                config.dirty_options.max_chunk_bp = max_chunk_bp;
+                config.resolver.max_chunk_bp = max_chunk_bp;
+            }
+            "detector-max-chunk-bp" => {
+                config.dirty_options.max_chunk_bp =
+                    parse_optional_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "resolver-max-chunk-bp" => {
+                config.resolver.max_chunk_bp =
+                    parse_optional_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "top-n" | "max-dirty-sites" => {
+                let top_n = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                config.dirty_options.top_n = top_n;
+                config.dirty_options.graph_report.top_n = top_n;
+            }
+            "min-white-space-gap-bp" | "min-white-space" | "white-space-bp" => {
+                let value = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                config.dirty_options.min_white_space_gap_bp = value;
+                config.dirty_options.graph_report.min_white_space_gap_bp = value;
+            }
+            "min-sparse-run-bp" | "min-sparse-run" | "sparse-run-bp" => {
+                config.dirty_options.min_sparse_run_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-sparse-coverage-path-fraction"
+            | "max-sparse-path-fraction"
+            | "sparse-fraction" => {
+                let value = parse_f64_engine_param(raw, &param.key, &param.value)?;
+                config.dirty_options.max_sparse_coverage_path_fraction = value;
+                config
+                    .dirty_options
+                    .graph_report
+                    .max_sparse_coverage_path_fraction = value;
+            }
+            "min-path-jump" | "path-jump" | "path-jump-bp" => {
+                config.dirty_options.min_path_jump =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "min-link-jump" | "link-jump" | "link-jump-bp" => {
+                config.dirty_options.min_link_jump =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "low-depth-max-visits" | "max-low-depth-visits" => {
+                config.dirty_options.low_depth_max_visits =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "min-low-depth-run-bp" | "low-depth-run-bp" => {
+                config.dirty_options.min_low_depth_run_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "small-loop-max-steps" | "loop-max-steps" => {
+                config.dirty_options.small_loop_max_steps =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "min-shared-paths" | "shared-paths" => {
+                config.resolver.min_shared_paths =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "skip-capped-chunks" | "skip-capped" => {
+                config.resolver.skip_capped_chunks =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            "method" => {
+                let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
+                else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': localized method '{}' is unsupported",
+                            raw, param.value
+                        ),
+                    ));
+                };
+                config.resolver.resolution.method = method;
+            }
+            "max-traversal-len" | "max-traversal-length" | "max-traversal" => {
+                config.resolver.resolution.max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-median-traversal-len"
+            | "max-median-traversal-length"
+            | "median-traversal-len"
+            | "median-traversal-length" => {
+                config.resolver.resolution.max_median_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-total-sequence" | "max-total-seq" | "max-sequence" => {
+                config.resolver.resolution.max_total_sequence =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-traversals" => {
+                config.resolver.resolution.max_traversals =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "auto-spoa-max-traversal-len"
+            | "auto-spoa-max-traversal-length"
+            | "auto-spoa-max-len" => {
+                config.resolver.resolution.auto_spoa_max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "auto-poasta-max-traversal-len"
+            | "auto-poasta-max-traversal-length"
+            | "auto-poasta-max-len" => {
+                config.resolver.resolution.auto_poasta_max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-rounds" | "polish-iterations" => {
+                config.resolver.resolution.polish_iterations =
+                    parse_round_count_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-traversal-len" | "polish-max-traversal-length" => {
+                config.resolver.resolution.polish_max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-median-traversal-len" | "polish-max-median-traversal-length" => {
+                config.resolver.resolution.polish_max_median_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-total-sequence" | "polish-max-total-seq" | "polish-max-sequence" => {
+                config.resolver.resolution.polish_max_total_sequence =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-traversals" => {
+                config.resolver.resolution.polish_max_traversals =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-method" | "polish" => {
+                let Some(method) =
+                    impg::resolution::ResolutionPolishMethod::parse_name(&param.value)
+                else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': localized polish method '{}' is unsupported",
+                            raw, param.value
+                        ),
+                    ));
+                };
+                config.resolver.resolution.polish_method = method;
+            }
+            "k-nearest" | "k-near" | "near" => {
+                config.resolver.resolution.pair_k_nearest =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "k-farthest" | "k-far" | "far" => {
+                config.resolver.resolution.pair_k_farthest =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "pair-trees" | "tree-count" | "trees" => {
+                config.resolver.resolution.pair_tree_count =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "random-fraction" | "random" => {
+                config.resolver.resolution.pair_random_fraction =
+                    parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "mash-k" | "mash-kmer" | "kmer-size" => {
+                config.resolver.resolution.pair_mash_k =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "seqwish-k"
+            | "seqwish-min-match-len"
+            | "seqwish-min-match-length"
+            | "replacement-seqwish-k"
+            | "replacement-min-match-len"
+            | "replacement-min-match-length" => {
+                config.resolver.resolution.replacement_seqwish_min_match_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "min-match-length"
+            | "min-match-len"
+            | "local-min-match-length"
+            | "local-min-match-len" => {
+                config.resolver.resolution.replacement_min_match_len_policy =
+                    parse_replacement_min_match_len_policy_engine_param(
+                        raw,
+                        &param.key,
+                        &param.value,
+                    )?;
+            }
+            "replacement-min-map-length"
+            | "replacement-min-map-len"
+            | "min-map-length"
+            | "min-map-len" => {
+                config.resolver.resolution.replacement_min_map_length =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "replacement-min-identity" | "min-identity" | "min-id" => {
+                config.resolver.resolution.replacement_min_identity =
+                    parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "replacement-num-mappings" | "replacement-mappings" | "num-mappings" => {
+                config.resolver.resolution.replacement_num_mappings =
+                    parse_filter_mode_engine_param(raw, &param.key, &param.value)?;
+            }
+            "replacement-scaffold-filter" | "scaffold-filter" => {
+                config.resolver.resolution.replacement_scaffold_filter =
+                    parse_filter_mode_engine_param(raw, &param.key, &param.value)?;
+            }
+            "replacement-scaffold-mass" | "scaffold-mass" => {
+                config.resolver.resolution.replacement_scaffold_mass =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "poa-scoring" | "spoa-scoring" | "poasta-scoring" | "scoring" => {
+                config.resolver.resolution.scoring_params = parse_poa_scoring_string(&param.value)
+                    .map_err(|err| {
+                        io::Error::new(
+                            err.kind(),
+                            format!(
+                                "Invalid --gfa-engine '{}': {}='{}': {}",
+                                raw, param.key, param.value, err
+                            ),
+                        )
+                    })?;
+            }
+            "sweepga-aligner" | "aligner" => {
+                config.resolver.resolution.sweepga_aligner = param.value.clone();
+            }
+            "sweepga-kmer-frequency" | "kmer-frequency" | "fastga-frequency" => {
+                config.resolver.resolution.sweepga_kmer_frequency =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "sweepga-min-aln-length" | "min-aln-length" => {
+                config.resolver.resolution.sweepga_min_aln_length =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "sweepga-map-pct-identity" | "map-pct-identity" => {
+                config.resolver.resolution.sweepga_map_pct_identity = Some(param.value.clone());
+            }
+            "max-pair-alignments" | "max-pairs" | "max-alignments" => {
+                config.resolver.resolution.max_pair_alignments =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-replacement-paf-bytes" | "max-paf-bytes" | "max-paf" => {
+                config.resolver.resolution.max_replacement_paf_bytes =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "sweepga-no-filter" | "no-filter" => {
+                config.resolver.resolution.sweepga_no_filter =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            "sweepga-sparse-pairs" | "sparse-pairs" => {
+                config.resolver.resolution.sweepga_sparse_pairs =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown localized polish parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+
+    if config.max_iterations == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': localized polish iterations must be > 0",
+                raw
+            ),
+        ));
+    }
+    if config.max_chunks_per_iteration == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': localized max-chunks-per-iteration must be > 0",
+                raw
+            ),
+        ));
+    }
+    if config.max_total_chunks == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': localized max-total-chunks must be > 0",
+                raw
+            ),
+        ));
+    }
+    if config.resolver.min_shared_paths == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': localized min-shared-paths must be > 0",
+                raw
+            ),
+        ));
+    }
+    if let Some(max_runtime_secs) = config.max_runtime_secs {
+        if max_runtime_secs <= 0.0 || !max_runtime_secs.is_finite() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': localized max runtime seconds must be positive and finite",
+                    raw
+                ),
+            ));
+        }
+    }
+    if !(0.0..=1.0).contains(&config.dirty_options.max_sparse_coverage_path_fraction) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': localized sparse-fraction must be between 0 and 1",
+                raw
+            ),
+        ));
+    }
+    Ok(config)
+}
+
 fn engine_raw_has_crush_scoring_param(raw: &str) -> bool {
     GraphPipelineSpec::parse(raw).is_ok_and(|spec| {
         spec.stages.iter().any(|stage| {
@@ -3817,6 +4213,8 @@ impl EngineCliOpts {
         let mut syncmer_seed: Option<u32> = None;
         let mut saw_syng_param = false;
         let mut crush_config = None;
+        let mut localized_polish_config: Option<impg::localized_polish::LocalizedPolishConfig> =
+            None;
         let mut smooth_after_crush: Option<impg::SmoothPipelineConfig> = None;
         let mut syng_gfa_frequency_mask = match engine {
             GfaEngine::SyngNative | GfaEngine::SyngLocal => SyngGfaFrequencyMask::local_default(),
@@ -3869,6 +4267,19 @@ impl EngineCliOpts {
                         ));
                     }
                     crush_config = Some(parse_crush_stage(raw, stage)?);
+                }
+                "localized" | "local-polish" | "localized-polish" | "dirty-polish"
+                | "local-smooth" | "localized-smooth" => {
+                    if localized_polish_config.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "Invalid --gfa-engine '{}': duplicate localized polish stage",
+                                raw
+                            ),
+                        ));
+                    }
+                    localized_polish_config = Some(parse_localized_polish_stage(raw, stage)?);
                 }
                 "smooth"
                 | "smoothxg"
@@ -3936,6 +4347,24 @@ impl EngineCliOpts {
         if is_syng && syng_gfa_mode.is_none() && engine != GfaEngine::SyngLocal {
             syng_gfa_mode = Some(SyngGfaMode::Blunt);
         }
+        if localized_polish_config.is_some() && engine != GfaEngine::SyngLocal {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': localized polish requires plain syng-local local seed induction",
+                    raw
+                ),
+            ));
+        }
+        if localized_polish_config.is_some() && syng_gfa_mode.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': localized polish requires plain syng-local; explicit raw/blunt syng-local modes bypass local seed induction",
+                    raw
+                ),
+            ));
+        }
         if is_syng && crush_config.is_some() && matches!(syng_gfa_mode, Some(SyngGfaMode::Raw)) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -3978,6 +4407,7 @@ impl EngineCliOpts {
             syng_gfa_frequency_mask,
             terminal_n_clip,
             crush_config,
+            localized_polish_config,
             smooth_after_crush,
             graph_sort_pipeline,
         })
@@ -4065,6 +4495,7 @@ impl EngineCliOpts {
             parsed.syng_gfa_frequency_mask,
             parsed.terminal_n_clip,
             parsed.crush_config,
+            parsed.localized_polish_config,
             parsed.smooth_after_crush,
             parsed.graph_sort_pipeline,
         )
@@ -4933,6 +5364,9 @@ Syng notes:
   native overlaps and `:nosort` to skip final ordering. Plain
   `--gfa-engine syng-local` collects query-selected local sequences and builds
   an explicit whole-region SweepGA/FastGA + seqwish seed graph. Add
+  `:localized` to iteratively detect dirty regions in that seed graph and run
+  exact path-preserving localized resolver tiers over flanked chunks until
+  convergence or budget. Add
   `syng-local:blunt` or `syng-local:raw` to rebuild a fresh regional syng
   topology instead; in those explicit topology modes k/s/seed parameters select
   the local rebuild scheme rather than asserting the global index. Syng and
@@ -4959,6 +5393,7 @@ Syng notes:
   graph paths at those breaks.
   The compact forms
   `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
+  `-o gfa:syng-local:localized,iterations=3,flank=1k`,
   `-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush`,
   `-o gfa:syng:crush:sort,pipeline=Ygs`, and `-o vcf:syng` are accepted
   as shorthand. Use
@@ -10327,6 +10762,7 @@ fn build_engine_opts(
     syng_gfa_frequency_mask: SyngGfaFrequencyMask,
     terminal_n_clip: Option<impg::graph::TerminalNRunClip>,
     crush_config: Option<impg::resolution::ResolutionConfig>,
+    localized_polish_config: Option<impg::localized_polish::LocalizedPolishConfig>,
     smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
 ) -> io::Result<EngineOpts> {
@@ -10370,6 +10806,7 @@ fn build_engine_opts(
         pipeline,
         partition_size,
         crush_config,
+        localized_polish_config,
         smooth_after_crush,
         graph_sort_pipeline,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
@@ -13788,6 +14225,7 @@ mod tests {
             "`impg syng2gfa` to dump the whole syng syncmer graph",
             "syng-local",
             "explicit whole-region SweepGA/FastGA + seqwish seed graph",
+            "syng-local:localized",
             "syng-local:blunt",
             "-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush",
         ] {
@@ -13945,6 +14383,96 @@ mod tests {
                 assert_eq!(
                     parsed.syng_gfa_frequency_mask,
                     impg::commands::syng2gfa::SyngGfaFrequencyMask::local_default()
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_engine_accepts_syng_local_localized_polish_stage() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local:localized,iterations=4,merge-distance=12,flank=3,method=poa,max-chunks-per-iteration=2,max-total-chunks=5,max-total-bp=20k,min-white-space=10,min-shared-paths=2,max-traversal-len=1k,auto-spoa-max-len=20,polish-rounds=0:nosort",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngLocal);
+                assert_eq!(parsed.syng_gfa_mode, None);
+                assert_eq!(parsed.graph_sort_pipeline, None);
+                let config = parsed
+                    .localized_polish_config
+                    .expect(":localized should populate localized polish config");
+                assert_eq!(config.max_iterations, 4);
+                assert_eq!(config.max_chunks_per_iteration, 2);
+                assert_eq!(config.max_total_chunks, 5);
+                assert_eq!(config.max_total_chunk_bp, Some(20_000));
+                assert_eq!(config.dirty_options.merge_distance_bp, 12);
+                assert_eq!(config.dirty_options.flank_bp, 3);
+                assert_eq!(config.dirty_options.min_white_space_gap_bp, 10);
+                assert_eq!(config.resolver.resolution.replacement_flank_bp, 3);
+                assert_eq!(config.resolver.min_shared_paths, 2);
+                assert_eq!(
+                    config.resolver.resolution.method,
+                    impg::resolution::ResolutionMethod::Poa
+                );
+                assert_eq!(config.resolver.resolution.max_traversal_len, 1_000);
+                assert_eq!(config.resolver.resolution.auto_spoa_max_traversal_len, 20);
+                assert_eq!(config.resolver.resolution.polish_iterations, 0);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_engine_rejects_localized_polish_without_plain_syng_local_seed() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng:localized",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let err = engine_cli.parse_engine().unwrap_err();
+                assert!(
+                    err.to_string().contains("requires plain syng-local"),
+                    "{err}"
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local:blunt:localized",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let err = engine_cli.parse_engine().unwrap_err();
+                assert!(
+                    err.to_string().contains("requires plain syng-local"),
+                    "{err}"
                 );
             }
             _ => panic!("expected query command"),
