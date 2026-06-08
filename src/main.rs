@@ -3933,7 +3933,7 @@ impl EngineCliOpts {
                 }
             }
         }
-        if is_syng && syng_gfa_mode.is_none() {
+        if is_syng && syng_gfa_mode.is_none() && engine != GfaEngine::SyngLocal {
             syng_gfa_mode = Some(SyngGfaMode::Blunt);
         }
         if is_syng && crush_config.is_some() && matches!(syng_gfa_mode, Some(SyngGfaMode::Raw)) {
@@ -3960,6 +3960,15 @@ impl EngineCliOpts {
         } else {
             None
         };
+        if engine == GfaEngine::SyngLocal && syng_gfa_mode.is_none() && syng_params.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': plain syng-local uses explicit local seed induction; k/s/seed parameters require syng-local:blunt or syng-local:raw",
+                    raw
+                ),
+            ));
+        }
 
         Ok(ParsedGfaEngine {
             engine,
@@ -4921,10 +4930,13 @@ Syng notes:
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
   query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
   defaults to syng:blunt plus gfasort pipeline Ygs; use syng:raw to preserve
-  native overlaps and `:nosort` to skip final ordering. `--gfa-engine syng-local`
-  rebuilds a fresh regional syng index from query-selected sequences; its
-  k/s/seed parameters select the local rebuild scheme rather than asserting the
-  global index. Syng and syng-local GFA extraction
+  native overlaps and `:nosort` to skip final ordering. Plain
+  `--gfa-engine syng-local` collects query-selected local sequences and builds
+  an explicit whole-region SweepGA/FastGA + seqwish seed graph. Add
+  `syng-local:blunt` or `syng-local:raw` to rebuild a fresh regional syng
+  topology instead; in those explicit topology modes k/s/seed parameters select
+  the local rebuild scheme rather than asserting the global index. Syng and
+  explicit syng-local GFA extraction
   selects the top 0.05% high-frequency local syncmer nodes and private-splits
   unsupported occurrences before bluntification, while rescuing supported
   high-frequency runs by `freq-run` (default 10 syncmers) or exact spans by
@@ -13775,7 +13787,8 @@ mod tests {
             "top-flubble-sweepga",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
             "syng-local",
-            "rebuilds a fresh regional syng index",
+            "explicit whole-region SweepGA/FastGA + seqwish seed graph",
+            "syng-local:blunt",
             "-o gfa:syng-local:blunt,k=127,s=16,seed=7:crush",
         ] {
             assert!(
@@ -13851,6 +13864,55 @@ mod tests {
 
     #[test]
     fn test_gfa_engine_syng_local_mode_and_rebuild_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngLocal);
+                assert_eq!(
+                    parsed.syng_gfa_mode, None,
+                    "plain syng-local should use explicit local seed induction"
+                );
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local,k=127,s=16",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let err = engine_cli.parse_engine().unwrap_err();
+                assert!(
+                    err.to_string()
+                        .contains("require syng-local:blunt or syng-local:raw"),
+                    "plain seed route should reject ignored local syncmer params: {err}"
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+
         let args = Args::try_parse_from([
             "impg",
             "query",

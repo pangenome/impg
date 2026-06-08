@@ -13,6 +13,7 @@ pub mod graph_pipeline;
 pub mod graph_report;
 pub mod impg;
 pub mod impg_index;
+pub mod local_seed;
 pub mod multi_impg;
 pub mod onealn;
 pub mod pack;
@@ -56,9 +57,10 @@ pub enum GfaEngine {
     ///   5. left-align indels in partition-ref frame
     ///   6. emit PAF → seqwish → GFA
     SyngNative,
-    /// Syng-local: extract query-selected sequences, build a fresh regional
-    /// syng syncmer graph with explicit local syncmer parameters, then apply
-    /// the same blunt/crush/sort graph transforms as other GFA engines.
+    /// Syng-local: extract query-selected sequences, then build an explicit
+    /// local seed graph.  Plain `syng-local` uses whole-region
+    /// SweepGA/FastGA + seqwish seed induction; explicit `syng-local:raw` or
+    /// `syng-local:blunt` keeps the direct regional SYNG topology modes.
     SyngLocal,
 }
 
@@ -1165,29 +1167,52 @@ fn dispatch_gfa_engine_inner(
                 }
             }
         }
-        GfaEngine::SyngLocal => {
-            let mode = engine_opts
-                .syng_gfa_mode
-                .unwrap_or(commands::syng2gfa::SyngGfaMode::Blunt);
-            let params = engine_opts
-                .syng_params
-                .or_else(|| impg.syng_index_ref().map(|idx| idx.params))
-                .unwrap_or_default();
-            log::info!(
-                "[syng local gfa] rebuilding query-selected sequences with syncmer k={},s={},seed={}",
-                params.k + params.w,
-                params.k,
-                params.seed
-            );
-            build_syng_local_region_gfa_from_intervals(
-                impg,
-                query_intervals,
-                sequence_index,
-                mode,
-                params,
-                engine_opts.syng_gfa_frequency_mask,
-            )
-        }
+        GfaEngine::SyngLocal => match engine_opts.syng_gfa_mode {
+            Some(mode) => {
+                let params = engine_opts
+                    .syng_params
+                    .or_else(|| impg.syng_index_ref().map(|idx| idx.params))
+                    .unwrap_or_default();
+                log::info!(
+                    "[syng local gfa] rebuilding query-selected sequences with syncmer k={},s={},seed={}",
+                    params.k + params.w,
+                    params.k,
+                    params.seed
+                );
+                build_syng_local_region_gfa_from_intervals(
+                    impg,
+                    query_intervals,
+                    sequence_index,
+                    mode,
+                    params,
+                    engine_opts.syng_gfa_frequency_mask,
+                )
+            }
+            None => {
+                let collect_start = std::time::Instant::now();
+                let sequence_set = local_seed::LocalSequenceSet::collect_from_intervals(
+                    impg,
+                    query_intervals,
+                    sequence_index,
+                )?;
+                log::info!(
+                    "[syng local seed] collected {} local sequence(s), {} bp in {:.3}s",
+                    sequence_set.len(),
+                    sequence_set.total_bp(),
+                    collect_start.elapsed().as_secs_f64()
+                );
+                let seed_config =
+                    local_seed::LocalSeedInductionConfig::whole_region_sweepga_seqwish(
+                        engine_opts.pipeline.clone(),
+                    );
+                let seed = local_seed::induce_seed_graph(
+                    &sequence_set,
+                    &seed_config,
+                    impg.syng_index_ref(),
+                )?;
+                Ok(seed.gfa)
+            }
+        },
     }
 }
 
