@@ -1,21 +1,24 @@
 H	VN:Z:1.0
 #	testbed_metrics	bubble_count=2	flubble_count=2	repeat_loop_count=0	long_link_count=0	long_link_max_span_bp=0
-S	shared1	GGCCAATTCCGG
-S	window1_branch1	TTA
-S	window1_branch2	AAT
-S	shared2	AAACC
-S	window2_branch3	GG
-S	window2_branch4	AA
-S	shared3	TTCCAATTGG
-L	shared1	+	window1_branch1	+	0M
-L	shared1	+	window1_branch2	+	0M
-L	shared2	+	window2_branch3	+	0M
-L	shared2	+	window2_branch4	+	0M
-L	window1_branch1	+	shared2	+	0M
-L	window1_branch2	+	shared2	+	0M
-L	window2_branch3	+	shared3	+	0M
-L	window2_branch4	+	shared3	+	0M
-P	ref#0#nested_top_level_wrong:1-32	shared1+,window1_branch1+,shared2+,window2_branch3+,shared3+	*
-P	hapA#0#nested_top_level_wrong:1-32	shared1+,window1_branch2+,shared2+,window2_branch3+,shared3+	*
-P	hapB#0#nested_top_level_wrong:1-32	shared1+,window1_branch1+,shared2+,window2_branch4+,shared3+	*
-P	hapC#0#nested_top_level_wrong:1-32	shared1+,window1_branch2+,shared2+,window2_branch4+,shared3+	*
+S	s1	GGCCAATTCCGG
+S	v1	TT
+S	v2	A
+S	v3	AA
+S	v4	T
+S	s2	AAACC
+S	v5	GG
+S	s3	TTCCAATTGG
+L	s1	+	v1	+	0M
+L	s1	+	v3	+	0M
+L	s2	+	v3	+	0M
+L	s2	+	v5	+	0M
+L	v1	+	v2	+	0M
+L	v2	+	s2	+	0M
+L	v3	+	s3	+	0M
+L	v3	+	v4	+	0M
+L	v4	+	s2	+	0M
+L	v5	+	s3	+	0M
+P	ref#0#nested_top_level_wrong:1-32	s1+,v1+,v2+,s2+,v5+,s3+	*
+P	hapA#0#nested_top_level_wrong:1-32	s1+,v3+,v4+,s2+,v5+,s3+	*
+P	hapB#0#nested_top_level_wrong:1-32	s1+,v1+,v2+,s2+,v3+,s3+	*
+P	hapC#0#nested_top_level_wrong:1-32	s1+,v3+,v4+,s2+,v3+,s3+	*

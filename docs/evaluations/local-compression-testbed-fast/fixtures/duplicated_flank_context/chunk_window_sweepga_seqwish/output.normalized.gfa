@@ -1,20 +1,20 @@
 H	VN:Z:1.0
 #	testbed_metrics	bubble_count=2	flubble_count=2	repeat_loop_count=0	long_link_count=0	long_link_max_span_bp=0
-S	shared1	AACCGGGGATCCCTTA
-S	window1_branch1	A
-S	window1_branch2	C
-S	shared2	GGATCC
-S	window2_branch3	GG
-S	window2_branch4	CT
-S	shared3	AATT
-L	shared1	+	window1_branch1	+	0M
-L	shared1	+	window1_branch2	+	0M
-L	shared2	+	window2_branch3	+	0M
-L	shared2	+	window2_branch4	+	0M
-L	window1_branch1	+	shared2	+	0M
-L	window1_branch2	+	shared2	+	0M
-L	window2_branch3	+	shared3	+	0M
-L	window2_branch4	+	shared3	+	0M
-P	ref#0#duplicated_flank_context:1-29	shared1+,window1_branch1+,shared2+,window2_branch3+,shared3+	*
-P	hapA#0#duplicated_flank_context:1-29	shared1+,window1_branch2+,shared2+,window2_branch3+,shared3+	*
-P	hapB#0#duplicated_flank_context:1-29	shared1+,window1_branch1+,shared2+,window2_branch4+,shared3+	*
+S	s1	AACCGGGGATCCCTTA
+S	v1	A
+S	v2	C
+S	s2	GGATCC
+S	v3	GG
+S	v4	CT
+S	s3	AATT
+L	s1	+	v1	+	0M
+L	s1	+	v2	+	0M
+L	s2	+	v3	+	0M
+L	s2	+	v4	+	0M
+L	v1	+	s2	+	0M
+L	v2	+	s2	+	0M
+L	v3	+	s3	+	0M
+L	v4	+	s3	+	0M
+P	ref#0#duplicated_flank_context:1-29	s1+,v1+,s2+,v3+,s3+	*
+P	hapA#0#duplicated_flank_context:1-29	s1+,v2+,s2+,v3+,s3+	*
+P	hapB#0#duplicated_flank_context:1-29	s1+,v1+,s2+,v4+,s3+	*

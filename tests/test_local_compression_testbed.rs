@@ -570,3 +570,76 @@ fn local_compression_chunk_window_sweepga_seqwish_nested_top_level_wrong() {
         );
     }
 }
+
+#[test]
+fn local_compression_chunk_window_sweepga_seqwish_is_resolver_distinct() {
+    let root = repo_root();
+    let out_dir = root.join("target/local-compression-testbed/cargo-test-chunk-window-distinct");
+    let _ = fs::remove_dir_all(&out_dir);
+
+    let output = Command::new("python3")
+        .current_dir(&root)
+        .args([
+            "scripts/local_compression_testbed.py",
+            "run",
+            "--profile",
+            "fast",
+            "--manifest",
+            "tests/test_data/local_compression/manifest.json",
+            "--fixtures",
+            "nested_top_level_wrong",
+            "--methods",
+            "chunk_window_smooth_or_crush,chunk_window_sweepga_seqwish",
+            "--out-dir",
+            "target/local-compression-testbed/cargo-test-chunk-window-distinct",
+        ])
+        .output()
+        .expect("run resolver-distinct chunk-window local compression testbed case");
+
+    assert!(
+        output.status.success(),
+        "resolver-distinct chunk-window runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = read_json(out_dir.join("scoreboard.json"));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let by_method: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row["method_id"].as_str().unwrap(), row))
+        .collect();
+    let smooth = by_method["chunk_window_smooth_or_crush"];
+    let sweepga = by_method["chunk_window_sweepga_seqwish"];
+
+    for row in [smooth, sweepga] {
+        assert_eq!(row["exact_path_preservation"].as_str(), Some("pass"));
+        assert_eq!(row["hard_path_corruption"].as_bool(), Some(false));
+        assert_eq!(row["expected_topology_status"].as_str(), Some("pass"));
+        assert_eq!(row["candidate_count"].as_u64(), Some(2));
+        assert_eq!(row["bubble_count"].as_u64(), Some(2));
+        assert_eq!(row["flubble_count"].as_u64(), Some(2));
+    }
+
+    let smooth_gfa = fs::read_to_string(root.join(smooth["normalized_gfa_path"].as_str().unwrap())).unwrap();
+    let sweepga_gfa = fs::read_to_string(root.join(sweepga["normalized_gfa_path"].as_str().unwrap())).unwrap();
+    assert_ne!(
+        smooth_gfa, sweepga_gfa,
+        "SweepGA/seqwish chunk row should exercise a resolver-distinct graph construction"
+    );
+    assert!(
+        sweepga["total_segment_bp"].as_u64().unwrap() < smooth["total_segment_bp"].as_u64().unwrap(),
+        "resolver-distinct row should reuse sequence across windows: smooth={} sweepga={}",
+        smooth["total_segment_bp"],
+        sweepga["total_segment_bp"]
+    );
+    assert!(
+        sweepga["path_replay_compression_ratio"].as_f64().unwrap()
+            > smooth["path_replay_compression_ratio"].as_f64().unwrap(),
+        "resolver-distinct row should improve replay compression diagnostics: smooth={} sweepga={}",
+        smooth["path_replay_compression_ratio"],
+        sweepga["path_replay_compression_ratio"]
+    );
+}
