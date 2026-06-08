@@ -7,6 +7,7 @@ pub mod commands;
 pub mod faidx;
 pub mod forest_map;
 pub mod genotyping;
+pub mod gfa_self_loops;
 pub mod graph;
 pub mod graph_pipeline;
 pub mod graph_report;
@@ -113,8 +114,8 @@ pub struct EngineOpts {
     /// Optional post-crush smoothxg pass on the whole graph.
     pub smooth_after_crush: Option<SmoothPipelineConfig>,
     /// Optional final gfasort pipeline, e.g. `Yg` or `Ygs`. Currently enabled
-    /// by default for syng-native GFA output and disabled for already-normalized
-    /// alignment engines.
+    /// by default for syng-native GFA output and for any graph-output `:crush`
+    /// stage; disabled for already-normalized alignment engines otherwise.
     pub graph_sort_pipeline: Option<String>,
 }
 
@@ -908,6 +909,7 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
 
     if let Some(pipeline) = &engine_opts.graph_sort_pipeline {
         let t0 = std::time::Instant::now();
+        let gfa = graph::normalize_self_loop_runs(gfa)?;
         let sorted = graph::sort_gfa_pipeline(&gfa, pipeline, engine_opts.pipeline.num_threads)?;
         log::info!(
             "gfasort: pipeline '{}' sorted graph in {:.3}s",
@@ -1353,6 +1355,34 @@ mod tests {
         seq
     }
 
+    fn graph_output_crush_opts(graph_sort_pipeline: Option<&str>) -> EngineOpts {
+        EngineOpts {
+            engine: GfaEngine::Pggb,
+            syng_gfa_mode: None,
+            syng_params: None,
+            syng_gfa_frequency_mask: commands::syng2gfa::SyngGfaFrequencyMask::disabled(),
+            pipeline: commands::graph::GraphBuildConfig {
+                num_threads: 1,
+                show_progress: false,
+                ..commands::graph::GraphBuildConfig::default()
+            },
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            partition_size: None,
+            crush_config: Some(resolution::ResolutionConfig::default()),
+            smooth_after_crush: None,
+            graph_sort_pipeline: graph_sort_pipeline.map(str::to_string),
+        }
+    }
+
+    fn graph_output_path_map(gfa: &str) -> std::collections::BTreeMap<String, String> {
+        resolution::path_sequences(gfa)
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
     fn has_multiple_syncmers_and_non_syncmer_span(
         index: &syng::SyngIndex,
         name: &str,
@@ -1646,6 +1676,69 @@ P\talt\t1+,3+,4+\t*
         let after = resolution::path_sequences(&out).unwrap();
         assert_eq!(before, after);
         assert_ne!(gfa, out);
+    }
+
+    #[test]
+    fn graph_output_crush_preserves_path_names_and_spellings_through_finalization() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAA
+S\t2\tC
+S\t3\tG
+S\t4\tTTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tHG001#1#chr6:10-17(+)\t1+,2+,4+\t*
+P\tHG002#2#chr6:11-18(-)\t1+,3+,4+\t*
+";
+        let before = graph_output_path_map(gfa);
+        let opts = graph_output_crush_opts(Some(DEFAULT_SYNG_GFA_SORT_PIPELINE));
+        let out = super::apply_graph_transforms(gfa.to_string(), &opts).unwrap();
+        let after = graph_output_path_map(&out);
+
+        assert_eq!(before, after);
+        assert_eq!(after["HG001#1#chr6:10-17(+)"], "AAACTTT");
+        assert_eq!(after["HG002#2#chr6:11-18(-)"], "AAAGTTT");
+        assert!(
+            out.lines()
+                .any(|line| line.starts_with("P\tHG001#1#chr6:10-17(+)\t")),
+            "graph-output crush should not synthesize replacement path names:\n{out}"
+        );
+    }
+
+    #[test]
+    fn graph_output_crush_finalization_normalizes_self_loop_runs() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\tstart\tGG
+S\ta\tA
+S\tend\tTT
+L\tstart\t+\ta\t+\t0M
+L\ta\t+\ta\t+\t0M
+L\ta\t+\tend\t+\t0M
+P\tHG001#1#chr6:20-27(+)\tstart+,a+,a+,a+,end+\t*
+P\tHG002#1#chr6:20-25(+)\tstart+,a+,end+\t*
+";
+        let before = graph_output_path_map(gfa);
+        let before_loops = gfa_self_loops::diagnose_gfa(gfa).unwrap();
+        assert_eq!(before_loops.direct_self_loop_edges, 1);
+        assert_eq!(before_loops.adjacent_same_step_path_steps, 2);
+
+        let opts = graph_output_crush_opts(Some(DEFAULT_SYNG_GFA_SORT_PIPELINE));
+        let out = super::apply_graph_transforms(gfa.to_string(), &opts).unwrap();
+        let after = graph_output_path_map(&out);
+        let after_loops = gfa_self_loops::diagnose_gfa(&out).unwrap();
+
+        assert_eq!(before, after);
+        assert_eq!(after["HG001#1#chr6:20-27(+)"], "GGAAATT");
+        assert_eq!(after_loops.direct_self_loop_edges, 0);
+        assert_eq!(after_loops.adjacent_same_step_path_steps, 0);
+        assert!(
+            out.contains("a_selfloop_run3") || !out.contains("\nL\ta\t+\ta\t+\t0M\n"),
+            "self-loop normalization should run before final graph output is emitted:\n{out}"
+        );
     }
 
     fn terminal_n_query_fixture() -> std::io::Result<(

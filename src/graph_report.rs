@@ -67,6 +67,7 @@ pub struct GraphReport {
     pub top_depth_nodes: Vec<DepthNode>,
     pub depth_runs: Vec<DepthRun>,
     pub local_repeat_contexts: Vec<LocalRepeatContext>,
+    pub self_loops: crate::gfa_self_loops::SelfLoopReport,
     pub povu: Option<PovuArchitecture>,
     pub povu_error: Option<String>,
 }
@@ -128,6 +129,12 @@ pub struct GraphMetrics {
     pub reused_nodes: usize,
     pub local_repeat_context_nodes: usize,
     pub local_repeat_context_occurrences: usize,
+    pub direct_self_loop_edges: usize,
+    pub direct_self_loop_nodes: usize,
+    pub adjacent_same_node_path_steps: usize,
+    pub adjacent_same_step_path_steps: usize,
+    pub self_loop_repeat_runs: usize,
+    pub self_loop_max_repeat_run_len: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -303,7 +310,8 @@ pub fn describe_gfa(
     options: &GraphReportOptions,
 ) -> io::Result<GraphReport> {
     let parsed = parse_gfa(gfa_text);
-    let metrics = compute_metrics(&parsed, options);
+    let self_loops = crate::gfa_self_loops::diagnose_gfa_with_top_n(gfa_text, options.top_n)?;
+    let metrics = compute_metrics(&parsed, options, &self_loops);
     let bp_starts = segment_bp_starts(&parsed);
     let path_support = path_pair_support(&parsed.paths);
     let top_long_links = top_link_jumps(&parsed, &path_support, options.top_n);
@@ -370,6 +378,12 @@ pub fn describe_gfa(
     if metrics.local_repeat_context_occurrences > 0 {
         warnings.push("local_repeat_contexts".to_string());
     }
+    if self_loops.direct_self_loop_edges > 0 {
+        warnings.push("direct_self_loop_edges".to_string());
+    }
+    if self_loops.adjacent_same_step_path_steps > 0 {
+        warnings.push("adjacent_same_step_path_repeats".to_string());
+    }
     if povu_error.is_some() {
         warnings.push("povu_decomposition_failed".to_string());
     }
@@ -397,6 +411,7 @@ pub fn describe_gfa(
         top_depth_nodes,
         depth_runs,
         local_repeat_contexts,
+        self_loops,
         povu,
         povu_error,
     })
@@ -685,6 +700,51 @@ impl GraphReport {
                 ));
             }
         }
+        out.push_str(&format!(
+            "- Direct self-loop L edges: {} edge(s) on {} node(s); adjacent same-node path steps {}, same-signed repeat steps {}, repeat runs {}, max run {}\n",
+            m.direct_self_loop_edges,
+            m.direct_self_loop_nodes,
+            m.adjacent_same_node_path_steps,
+            m.adjacent_same_step_path_steps,
+            m.self_loop_repeat_runs,
+            m.self_loop_max_repeat_run_len
+        ));
+        if !self.self_loops.length_buckets.is_empty() {
+            let buckets = self
+                .self_loops
+                .length_buckets
+                .iter()
+                .map(|bucket| {
+                    format!(
+                        "{}bp:{} nodes/{} edges",
+                        bucket.sequence_len, bucket.nodes, bucket.direct_self_loop_edges
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("- Direct self-loop node lengths: {buckets}\n"));
+        }
+        if !self.self_loops.top_nodes.is_empty() {
+            out.push_str("- Top direct self-loop nodes:\n");
+            for node in &self.self_loops.top_nodes {
+                out.push_str(&format!(
+                    "  - `{}` order {}: seq_len {}, seq `{}`, self-loop edges {} ({:?}), visits {}, paths {}, adjacent repeats same-node/same-step {}/{}, runs {}, max run {} in `{}`\n",
+                    node.node,
+                    node.order,
+                    node.sequence_len,
+                    node.sequence_preview,
+                    node.direct_self_loop_edges,
+                    node.link_orientations,
+                    node.total_path_visits,
+                    node.distinct_paths,
+                    node.adjacent_same_node_path_steps,
+                    node.adjacent_same_step_path_steps,
+                    node.repeated_path_runs,
+                    node.max_repeat_run_len,
+                    node.max_repeat_run_path
+                ));
+            }
+        }
 
         out.push_str("\n## Interpretation\n\n");
         for line in self.interpretation_lines() {
@@ -751,6 +811,13 @@ impl GraphReport {
             "duplicate_sequence_frac",
             "local_repeat_context_nodes",
             "local_repeat_context_occurrences",
+            "direct_self_loop_edges",
+            "direct_self_loop_nodes",
+            "adjacent_same_node_path_steps",
+            "adjacent_same_step_path_steps",
+            "self_loop_repeat_runs",
+            "self_loop_max_repeat_run_len",
+            "self_loop_length_buckets",
             "povu_sites",
             "povu_leaf_sites",
         ];
@@ -800,6 +867,13 @@ impl GraphReport {
             format!("{:.6}", m.duplicate_sequence_frac),
             m.local_repeat_context_nodes.to_string(),
             m.local_repeat_context_occurrences.to_string(),
+            m.direct_self_loop_edges.to_string(),
+            m.direct_self_loop_nodes.to_string(),
+            m.adjacent_same_node_path_steps.to_string(),
+            m.adjacent_same_step_path_steps.to_string(),
+            m.self_loop_repeat_runs.to_string(),
+            m.self_loop_max_repeat_run_len.to_string(),
+            self.self_loop_length_bucket_tsv(),
             self.povu.as_ref().map(|p| p.sites).unwrap_or(0).to_string(),
             self.povu
                 .as_ref()
@@ -809,6 +883,20 @@ impl GraphReport {
         ];
         debug_assert_eq!(header.len(), values.len());
         format!("{}\n{}\n", header.join("\t"), values.join("\t"))
+    }
+
+    fn self_loop_length_bucket_tsv(&self) -> String {
+        self.self_loops
+            .length_buckets
+            .iter()
+            .map(|bucket| {
+                format!(
+                    "{}bp:{}nodes:{}edges",
+                    bucket.sequence_len, bucket.nodes, bucket.direct_self_loop_edges
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     fn interpretation_lines(&self) -> Vec<String> {
@@ -872,6 +960,12 @@ impl GraphReport {
             lines.push("Rare repeated local contexts remain; these are candidates for single-syncmer repeat-loop glue or local copy-specific boundary artifacts.".to_string());
         } else {
             lines.push("No rare repeated local-context signal was detected under the configured dominance threshold.".to_string());
+        }
+        if m.direct_self_loop_edges > 0 {
+            lines.push(format!(
+                "{} direct self-loop edge(s) are present; if they are dominated by short repeat-unit nodes with same-signed adjacent path repeats, explicit run-node normalization can remove the loop without changing path spellings.",
+                m.direct_self_loop_edges
+            ));
         }
         if m.reused_nodes > 0 {
             lines.push("Some nodes are traversed more times than there are paths, which is a direct signal of collapsed copy-reuse in the local architecture.".to_string());
@@ -1025,7 +1119,11 @@ fn w_line_name(fields: &[&str]) -> String {
     format!("{sample}#{hap}#{seq}:{start}-{end}")
 }
 
-fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMetrics {
+fn compute_metrics(
+    parsed: &ParsedGfa,
+    options: &GraphReportOptions,
+    self_loops: &crate::gfa_self_loops::SelfLoopReport,
+) -> GraphMetrics {
     let segments = parsed.order.len();
     let path_steps = parsed.paths.iter().map(|p| p.steps.len()).sum();
     let component_sizes = component_sizes(&parsed.order, &parsed.links);
@@ -1218,6 +1316,12 @@ fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMet
         reused_nodes,
         local_repeat_context_nodes: repeat_contexts.len(),
         local_repeat_context_occurrences,
+        direct_self_loop_edges: self_loops.direct_self_loop_edges,
+        direct_self_loop_nodes: self_loops.direct_self_loop_nodes,
+        adjacent_same_node_path_steps: self_loops.adjacent_same_node_path_steps,
+        adjacent_same_step_path_steps: self_loops.adjacent_same_step_path_steps,
+        self_loop_repeat_runs: self_loops.repeated_path_runs,
+        self_loop_max_repeat_run_len: self_loops.max_repeat_run_len,
     }
 }
 

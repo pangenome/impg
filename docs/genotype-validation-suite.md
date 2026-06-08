@@ -14,10 +14,14 @@ and simple cases must not silently produce strange assignments.
 | `test_genotype_truth_known_homozygote_heterozygote_and_decoy` | A/B haplotypes with a third unsampled decoy haplotype sharing the same flanks | `impg genotype cos` over independently written pack TSVs | An easy A/A sample ranks A/A first; an A/B sample ranks A/B first; the decoy is available as a candidate but not selected in the top call. |
 | `test_repeated_node_pack_dedup_and_cnv_counting_counterfactual` | Single-copy and duplicated-copy CNV haplotypes, with one full duplicated read | `impg map -o pack-tsv` plus direct cosine scoring over a minimal CNV feature model | Current pack semantics are distinct syng nodes per retained read. Repeated syncmer-node occurrences are present in the read, but the emitted pack vector deduplicates them per read. A counterfactual per-occurrence sample vector flips a one-copy/two-copy ranking, making the semantic choice explicit. |
 | `test_projection_bundle_gaf_read_walk_evidence_rewards_recombinant_stitching` | Four haplotypes A/B plus recombinant C/D across two blocks | `impg map -o proj`, compressed GAF read walks, `impg infer --stitch beam` | Projection bundles contain oriented syng GAF read walks; read-link rewards are nonzero across the second partition; beam stitching selects the sampled recombinant haplotypes C and D. |
+| `star_segments_use_ln_tags_for_candidate_intervals_and_weights` | GFA with `S` records using `*` sequence plus `LN:i` length tags | GFA graph candidate extraction with `length-normalized` contribution model | GFA path coordinates and candidate weights use segment lengths from `LN:i` when sequence is absent. |
+| `repeated_gfa_path_steps_are_counted_in_candidate_vectors` | GFA path that traverses one segment twice | GFA graph candidate extraction with raw contribution model | Repeated GFA path steps increase candidate raw counts and scoring weights. |
+| `genotype_cos_gfa_debug_report_exposes_lengths_repeats_and_scores` | Three-path GFA with unequal segment lengths and one repeated segment path | `impg genotype cos --graph --pack --debug-report` | The graph debug report exposes segment lengths, raw sample counts, repeated candidate segment counts, dot contributions, and the final assignment. |
 
-These tests live in `tests/test_genotype_validation_suite.rs`. They build
+The syng tests live in `tests/test_genotype_validation_suite.rs`. They build
 small syng indexes in-process and then exercise the real CLI for the user-facing
-map, genotype, and infer behavior.
+map, genotype, and infer behavior. The graph tests live in
+`src/commands/genotype.rs` unit tests and `tests/test_genotype_gfa.rs`.
 
 ## Current Counting Semantics
 
@@ -100,6 +104,10 @@ Broader validation commands for this branch:
 
 ```bash
 cargo build
+cargo test -p impg --lib commands::genotype::tests::star_segments_use_ln_tags_for_candidate_intervals_and_weights
+cargo test -p impg --lib commands::genotype::tests::repeated_gfa_path_steps_are_counted_in_candidate_vectors
+cargo test --test test_genotype_gfa -- genotype_cos_gfa_debug_report_exposes_lengths_repeats_and_scores --nocapture
+cargo test --test test_gfa_projection -- --nocapture
 cargo test --test test_genotype_validation_suite -- --test-threads=1
 cargo test --test test_syng_integration -- --test-threads=1
 cargo test --all -- --test-threads=1

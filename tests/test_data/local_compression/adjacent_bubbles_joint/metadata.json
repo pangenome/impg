@@ -1,0 +1,107 @@
+{
+  "fixture_id": "adjacent_bubbles_joint",
+  "fixture_class": "adjacent_bubbles_compress_together",
+  "title": "Adjacent variants that should be joint",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#adjacent_bubbles_joint:1-29",
+      "file": "input.fa",
+      "expected_spelling": "AACCGGTTAACCGGTTACCGGAATTCCGG"
+    },
+    {
+      "name": "hapA#0#adjacent_bubbles_joint:1-29",
+      "file": "input.fa",
+      "expected_spelling": "AACCGGTTAATCGGATACCGGAATTCCGG"
+    },
+    {
+      "name": "hapB#0#adjacent_bubbles_joint:1-29",
+      "file": "input.fa",
+      "expected_spelling": "AACCGGTTAAACGGCTACCGGAATTCCGG"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#adjacent_bubbles_joint:1-29",
+    "hapA#0#adjacent_bubbles_joint:1-29",
+    "hapB#0#adjacent_bubbles_joint:1-29"
+  ],
+  "expected_path_spellings": {
+    "ref#0#adjacent_bubbles_joint:1-29": "AACCGGTTAACCGGTTACCGGAATTCCGG",
+    "hapA#0#adjacent_bubbles_joint:1-29": "AACCGGTTAATCGGATACCGGAATTCCGG",
+    "hapB#0#adjacent_bubbles_joint:1-29": "AACCGGTTAAACGGCTACCGGAATTCCGG"
+  },
+  "expected_topology": {
+    "assertion_id": "adjacent_bubbles_joint_context",
+    "description": "Two adjacent variants are represented as one compact local problem or topology-equivalent joint result.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 12
+    },
+    "link_count": {
+      "min": 1,
+      "max": 18
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Per-leaf flubble boundaries leave two stringy bubbles separated by artificial white-space.",
+  "render_hints": {
+    "reference_path": "ref#0#adjacent_bubbles_joint:1-29",
+    "highlight_paths": [
+      "hapA#0#adjacent_bubbles_joint:1-29",
+      "hapB#0#adjacent_bubbles_joint:1-29"
+    ],
+    "expected_shape": "joint adjacent-bubble event"
+  }
+}

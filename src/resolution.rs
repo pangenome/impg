@@ -18,12 +18,14 @@ use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 const GRAPH_QUALITY_LONG_BRIDGE_BP: usize = 10_000;
 const GRAPH_QUALITY_WHITE_SPACE_FLOOR_BP: usize = 1_000;
 static DEBUG_REPLACEMENT_ID: AtomicUsize = AtomicUsize::new(0);
+static DEBUG_APPLIED_FRONTIER_ID: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_SMOOTH_USED: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_EMPTY: AtomicUsize = AtomicUsize::new(0);
 static CHAIN_POVU_DIRECT_ON_SMOOTH_FAILURE: AtomicUsize = AtomicUsize::new(0);
@@ -88,6 +90,8 @@ pub struct ResolutionConfig {
     pub polish_max_traversals: usize,
     /// Local cleanup method after pairwise graph induction.
     pub polish_method: ResolutionPolishMethod,
+    /// abPOA executable used by `method=abpoa`.
+    pub abpoa_bin: String,
     /// Pair-sampling nearest-neighbor count for many-sequence pairwise engines.
     pub pair_k_nearest: usize,
     /// Pair-sampling farthest-neighbor count for diversity/stranger joins.
@@ -246,6 +250,18 @@ pub struct ResolutionConfig {
     /// This is diagnostic only. Repeat-like boundaries must not veto a
     /// candidate; exact path preservation is the only correctness gate.
     pub multi_level_repeat_aware_boundaries: bool,
+    /// Maximum number of paths allowed to support the sparse core of a
+    /// motif-local singleton/offshoot candidate.
+    pub motif_max_sparse_paths: usize,
+    /// Minimum number of paths that must support both motif-local anchor
+    /// flanks. A value of 0 chooses a graph-size-aware default.
+    pub motif_min_flank_paths: usize,
+    /// Minimum graph-order jump between a high-support flank and a sparse core
+    /// for sparse offshoot discovery.
+    pub motif_min_order_jump: usize,
+    /// Maximum bp length for one anchor-pair window materialized for a
+    /// motif-local candidate.
+    pub motif_max_window_bp: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,6 +277,8 @@ pub enum ResolutionMethod {
     Poa,
     /// Direct POASTA replacement.
     Poasta,
+    /// Direct external abPOA replacement.
+    Abpoa,
     /// Debug/diagnostic resolver: align every traversal to one root with BiWFA
     /// and build a star-column graph. This is path-preserving but intentionally
     /// not the graph-quality default.
@@ -311,6 +329,11 @@ pub enum ResolutionMethod {
     /// windows through SweepGA/seqwish, and report bp-weighted node path
     /// coverage / singleton-bp deltas diagnostically.
     CoverageMultiBubble,
+    /// Motif-local residual pass: discover sparse singleton/offshoot and
+    /// adjacent self-loop repeat motifs directly from path-step support rather
+    /// than from clean POVU flubble boundaries, then materialize anchor-pair
+    /// windows with original source path names.
+    MotifLocal,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -326,6 +349,8 @@ pub enum MultiLevelWindowMode {
     Sliding,
     /// Windows expanded outward from residual stringy/high-bp sites.
     Outward,
+    /// Path-support motif windows discovered independent of POVU boundaries.
+    MotifLocal,
     /// Legacy combined search: sibling, sliding, cross-level, and local stringy windows.
     #[default]
     Combined,
@@ -353,6 +378,8 @@ impl MultiLevelWindowMode {
                 Some(Self::Sliding)
             }
             "outward" | "outward-expanded" | "residual" | "residual-outward" => Some(Self::Outward),
+            "motif" | "motifs" | "motif-local" | "local-motif" | "residual-motif"
+            | "residual-motifs" | "c4-motif" => Some(Self::MotifLocal),
             "combined" | "all" | "multi" | "multi-level" | "both" => Some(Self::Combined),
             _ => None,
         }
@@ -403,6 +430,7 @@ impl ResolutionMethod {
             Self::Auto => "auto",
             Self::Poa => "SPOA",
             Self::Poasta => "POASTA",
+            Self::Abpoa => "abPOA",
             Self::StarBiwfa => "BiWFA/in-memory",
             Self::Allwave => "AllWave/seqwish",
             Self::Sweepga => "SweepGA/seqwish",
@@ -413,6 +441,7 @@ impl ResolutionMethod {
             Self::TopFlubbleSweepga => "top-flubble-sweepga",
             Self::IterativeMultiLevel => "iterative-multi-level",
             Self::CoverageMultiBubble => "coverage-multi-bubble",
+            Self::MotifLocal => "motif-local",
         }
     }
 
@@ -421,6 +450,7 @@ impl ResolutionMethod {
             "auto" => Some(Self::Auto),
             "poa" | "spoa" => Some(Self::Poa),
             "poasta" => Some(Self::Poasta),
+            "abpoa" | "ab-poa" | "adaptive-banded-poa" => Some(Self::Abpoa),
             "star-biwfa" | "biwfa-star" | "biwfa" | "wfa" => Some(Self::StarBiwfa),
             "allwave" | "aw" => Some(Self::Allwave),
             "sweepga" | "sw" => Some(Self::Sweepga),
@@ -463,6 +493,8 @@ impl ResolutionMethod {
             | "path-coverage"
             | "coverage-repeat"
             | "repeat-aware-coverage" => Some(Self::CoverageMultiBubble),
+            "motif-local" | "local-motif" | "motif" | "motifs" | "residual-motif"
+            | "residual-motifs" | "c4-motif" | "c4-motif-local" => Some(Self::MotifLocal),
             _ => None,
         }
     }
@@ -529,6 +561,12 @@ pub const DEFAULT_MULTI_LEVEL_MAX_WINDOW_SITES: usize = 8;
 pub const DEFAULT_MULTI_LEVEL_CANDIDATE_LIMIT: usize = 192;
 pub const DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA: i128 = 1;
 pub const DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES: bool = false;
+pub const DEFAULT_MOTIF_MAX_SPARSE_PATHS: usize = 5;
+pub const DEFAULT_MOTIF_MIN_FLANK_PATHS: usize = 0;
+pub const DEFAULT_MOTIF_MIN_ORDER_JUMP: usize = 1_000;
+pub const DEFAULT_MOTIF_MAX_WINDOW_BP: usize = 10_000;
+const DEFAULT_MOTIF_MAX_ANCHOR_STEPS: usize = 120;
+const DEFAULT_MOTIF_MIN_WHITE_SPACE_BP: usize = 10_000;
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
@@ -550,6 +588,7 @@ impl Default for ResolutionConfig {
             polish_max_total_sequence: DEFAULT_POLISH_MAX_TOTAL_SEQUENCE,
             polish_max_traversals: DEFAULT_POLISH_MAX_TRAVERSALS,
             polish_method: ResolutionPolishMethod::Poa,
+            abpoa_bin: "abpoa".to_string(),
             pair_k_nearest: DEFAULT_PAIR_K_NEAREST,
             pair_k_farthest: DEFAULT_PAIR_K_FARTHEST,
             pair_tree_count: DEFAULT_PAIR_TREE_COUNT,
@@ -585,6 +624,10 @@ impl Default for ResolutionConfig {
             multi_level_min_objective_delta: DEFAULT_MULTI_LEVEL_MIN_OBJECTIVE_DELTA,
             multi_level_objective: MultiLevelObjectiveMode::Size,
             multi_level_repeat_aware_boundaries: DEFAULT_MULTI_LEVEL_REPEAT_AWARE_BOUNDARIES,
+            motif_max_sparse_paths: DEFAULT_MOTIF_MAX_SPARSE_PATHS,
+            motif_min_flank_paths: DEFAULT_MOTIF_MIN_FLANK_PATHS,
+            motif_min_order_jump: DEFAULT_MOTIF_MIN_ORDER_JUMP,
+            motif_max_window_bp: DEFAULT_MOTIF_MAX_WINDOW_BP,
         }
     }
 }
@@ -639,27 +682,131 @@ struct Graph {
     paths: Vec<Path>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum OccurrenceOrientation {
+    #[default]
+    Forward,
+    Reverse,
+}
+
+impl OccurrenceOrientation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Reverse => "reverse",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlankSide {
+    Left,
+    Right,
+}
+
+impl FlankSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FlankTruncationReason {
+    #[default]
+    NotRequested,
+    RequestedLength,
+    PathBoundary,
+}
+
+impl FlankTruncationReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not-requested",
+            Self::RequestedLength => "requested-length",
+            Self::PathBoundary => "path-boundary",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FlankContext {
+    requested_bp: usize,
+    actual_bp_path_orientation: usize,
+    actual_bp_canonical: usize,
+    path_side: FlankSide,
+    canonical_side: FlankSide,
+    path_step_range: Option<(usize, usize)>,
+    path_bp_range: Option<(usize, usize)>,
+    truncation: FlankTruncationReason,
+    sequence_path_orientation: Vec<u8>,
+    sequence_canonical: Vec<u8>,
+}
+
+impl FlankContext {
+    fn empty(path_side: FlankSide) -> Self {
+        Self {
+            requested_bp: 0,
+            actual_bp_path_orientation: 0,
+            actual_bp_canonical: 0,
+            path_side,
+            canonical_side: path_side,
+            path_step_range: None,
+            path_bp_range: None,
+            truncation: FlankTruncationReason::NotRequested,
+            sequence_path_orientation: Vec::new(),
+            sequence_canonical: Vec::new(),
+        }
+    }
+}
+
+impl Default for FlankContext {
+    fn default() -> Self {
+        Self::empty(FlankSide::Left)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TrimPlan {
+    canonical_left_trim_bp: usize,
+    canonical_right_trim_bp: usize,
+    expected_flanked_sequence_canonical: Vec<u8>,
+    expected_target_sequence_path_orientation: Vec<u8>,
+    restore_orientation: OccurrenceOrientation,
+}
+
 #[derive(Clone, Debug, Default)]
 struct PathRange {
     path_idx: usize,
     source_path_name: Option<String>,
+    original_path_name: Option<String>,
     source_begin_bp: usize,
     source_end_bp: usize,
     begin_step: usize,
     end_step: usize,
+    occurrence_orientation: OccurrenceOrientation,
     /// Bubble interior sequence (the bytes between `begin_step` and `end_step`
     /// on this path). This is what the integration code substitutes.
     sequence: Vec<u8>,
+    /// Canonical-orientation sequence presented to the resolver. For forward
+    /// occurrences this is the path-orientation sequence; for reverse
+    /// occurrences this is reverse-complemented and later restored for lacing.
+    resolver_sequence: Vec<u8>,
     /// Flank-extended sequence presented to the replacement aligner:
     /// `<left_flank><interior><right_flank>`. Empty when flanking is disabled;
     /// in that case the aligner sees `sequence` directly. The flank lengths
     /// are tracked in `left_flank_bp` / `right_flank_bp` so the aligner's
     /// output graph can be clipped back to the interior before substitution.
     extended_sequence: Vec<u8>,
-    /// Left-flank length in bp (0 when no flank was added).
+    /// Canonical left trim length in bp (0 when no flank was added).
     left_flank_bp: usize,
-    /// Right-flank length in bp (0 when no flank was added).
+    /// Canonical right trim length in bp (0 when no flank was added).
     right_flank_bp: usize,
+    left_flank: FlankContext,
+    right_flank: FlankContext,
+    trim_plan: TrimPlan,
 }
 
 #[derive(Clone, Debug)]
@@ -778,6 +925,47 @@ struct TraversalStats {
 struct ReplacementPlan {
     candidate: BubbleCandidate,
     replacement: Graph,
+    method: ResolutionMethod,
+    debug_source: Option<ReplacementPlanSource>,
+    debug_objective: Option<ReplacementObjectiveDelta>,
+}
+
+impl ReplacementPlan {
+    fn new(candidate: BubbleCandidate, replacement: Graph, method: ResolutionMethod) -> Self {
+        Self {
+            candidate,
+            replacement,
+            method,
+            debug_source: None,
+            debug_objective: None,
+        }
+    }
+
+    fn with_debug_source(
+        mut self,
+        source: MultiLevelCandidateSource,
+        source_sites: usize,
+        source_ancestry: Vec<String>,
+    ) -> Self {
+        self.debug_source = Some(ReplacementPlanSource {
+            source,
+            source_sites,
+            source_ancestry,
+        });
+        self
+    }
+
+    fn with_debug_objective(mut self, objective: ReplacementObjectiveDelta) -> Self {
+        self.debug_objective = Some(objective);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ReplacementPlanSource {
+    source: MultiLevelCandidateSource,
+    source_sites: usize,
+    source_ancestry: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -887,10 +1075,7 @@ fn resolve_graph_bubbles(
             initial_next_id,
         );
     }
-    if matches!(
-        config.method,
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble
-    ) {
+    if uses_iterative_window_resolver(config) {
         return resolve_graph_bubbles_iterative_multi_level(
             graph,
             original_gfa,
@@ -1193,10 +1378,11 @@ fn resolve_graph_bubbles(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
                         candidate,
                         replacement,
-                    }))
+                        method,
+                    )))
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1477,6 +1663,15 @@ fn resolve_graph_bubbles(
     })
 }
 
+fn uses_iterative_window_resolver(config: &ResolutionConfig) -> bool {
+    matches!(
+        config.method,
+        ResolutionMethod::IterativeMultiLevel
+            | ResolutionMethod::CoverageMultiBubble
+            | ResolutionMethod::MotifLocal
+    ) || config.multi_level_window_mode == MultiLevelWindowMode::MotifLocal
+}
+
 /// Greedy path-walk chain mode.
 ///
 /// This intentionally does not use `build_initial_bubble_tree` or POVU
@@ -1584,10 +1779,11 @@ fn resolve_graph_bubble_chains(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
                         candidate,
                         replacement,
-                    }))
+                        ResolutionMethod::ChainGreedy,
+                    )))
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1832,10 +2028,11 @@ fn resolve_graph_bubbles_chain_povu(
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
                         candidate,
                         replacement,
-                    }))
+                        ResolutionMethod::ChainPovu,
+                    )))
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2146,9 +2343,12 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
         .collect::<Vec<_>>();
     let plans = builds
         .into_iter()
-        .map(|build| ReplacementPlan {
-            candidate: build.candidate,
-            replacement: build.replacement,
+        .map(|build| {
+            ReplacementPlan::new(
+                build.candidate,
+                build.replacement,
+                ResolutionMethod::TopFlubbleSweepga,
+            )
         })
         .collect::<Vec<_>>();
 
@@ -2232,10 +2432,11 @@ fn resolve_graph_bubbles_iterative_multi_level(
     let mut per_round_accepted = Vec::new();
     let objective_mode = effective_multi_level_objective(config);
     let repeat_aware_boundaries = effective_repeat_aware_boundaries(config);
+    let mut residual_novelty_memory = ResidualNoveltyMemory::default();
 
     if emit_logs {
         log::info!(
-            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-auto-poasta-or-sweepga/single-site-auto, application_gate=exact-path-preservation",
+            "crush iterative-multi-level: method={}, mode={:?}, target-bp={}, max-window-sites={}, effective-candidate-limit={}, admission-only={}, window-total-bp-cap={} (diagnostic only), outward-build-diagnostics=max-pair-alignments={},max-paf-bytes={},max-transclosure-cells={},max-poasta-cells={}, objective={:?}, min-objective-delta={} (diagnostic only), repeat-aware-boundaries={} (diagnostic only), replacement-routing=multi-site-or-broad-residual-scalable/single-site-auto, application_gate=exact-path-preservation",
             config.method.method_name(),
             effective_multi_level_window_mode(config),
             multi_level_target_bp(config),
@@ -2259,8 +2460,13 @@ fn resolve_graph_bubbles_iterative_multi_level(
         let discovery_start = Instant::now();
         let (all_discovered, sites_seen, timings) =
             discover_all_candidates(&graph, config, emit_logs)?;
-        let generated =
-            generate_multi_level_candidates(&graph, config, &all_discovered, &resolved_signatures);
+        let generated = generate_multi_level_candidates_with_residual_novelty(
+            &graph,
+            config,
+            &all_discovered,
+            &resolved_signatures,
+            Some(&residual_novelty_memory),
+        );
         let discovery_elapsed = discovery_start.elapsed();
 
         if generated.candidates.is_empty() {
@@ -2282,7 +2488,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         if emit_logs {
             log::info!(
-                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after cap in {:.2?}; sources {}; repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
+                "crush iterative-multi-level round {}: {} POVU site(s), {} polymorphic site(s), {} generated candidate(s), {} considered after novelty/cap in {:.2?}; sources {}; complete-homologous-aggregated={}; residual-novelty compared={}, deferred={} (diagnostic keyed by root interval/source ancestry/traversals/root-span); repeat-boundary-flagged={} (diagnostic only); total-bp-cap-exceeded={} (diagnostic only), max-len-cap-exceeded={} (diagnostic only), median-len-cap-exceeded={} (diagnostic only); discovery detail render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}; before {}",
                 round + 1,
                 sites_seen,
                 all_discovered.len(),
@@ -2290,6 +2496,9 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 generated.candidates.len(),
                 discovery_elapsed,
                 format_multi_level_source_counts(&generated.source_counts),
+                generated.complete_homologous_aggregated,
+                generated.residual_novelty.compared,
+                generated.residual_novelty.deferred,
                 generated.repeat_boundary_rejected,
                 generated.total_bp_cap_exceeded,
                 generated.max_len_cap_exceeded,
@@ -2317,6 +2526,13 @@ fn resolve_graph_bubbles_iterative_multi_level(
                 round + 1,
                 format_multi_level_candidate_details(&graph, &generated.candidates, 24)
             );
+            if !generated.residual_novelty.details.is_empty() {
+                log::info!(
+                    "crush iterative-multi-level round {} residual-novelty detail: {}",
+                    round + 1,
+                    format_residual_novelty_report(&generated.residual_novelty, 16)
+                );
+            }
         }
 
         if config.multi_level_admission_only {
@@ -2453,29 +2669,7 @@ fn resolve_graph_bubbles_iterative_multi_level(
             .filter(|candidate| candidate.objective.score_delta < objective_floor)
             .count();
         let objective_passing_count = built_count.saturating_sub(local_objective_below_floor);
-        built.sort_by(|a, b| {
-            b.objective
-                .score_delta
-                .cmp(&a.objective.score_delta)
-                .then_with(|| {
-                    b.objective
-                        .segment_bp_delta
-                        .cmp(&a.objective.segment_bp_delta)
-                })
-                .then_with(|| b.objective.segment_delta.cmp(&a.objective.segment_delta))
-                .then_with(|| {
-                    a.plan
-                        .candidate
-                        .root_start_step
-                        .cmp(&b.plan.candidate.root_start_step)
-                })
-                .then_with(|| {
-                    a.plan
-                        .candidate
-                        .root_end_step
-                        .cmp(&b.plan.candidate.root_end_step)
-                })
-        });
+        built.sort_by(compare_multi_level_built_candidate_priority);
 
         let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
         let mut accepted = Vec::new();
@@ -2487,6 +2681,38 @@ fn resolve_graph_bubbles_iterative_multi_level(
             }
             mark_candidate_occupied(&mut occupied_by_path, &candidate.plan.candidate);
             accepted.push(candidate);
+        }
+
+        if emit_logs && accepted.len() <= 256 {
+            for (rank, candidate) in accepted.iter().enumerate() {
+                log::info!(
+                    "crush iterative-multi-level round {}: applied candidate detail #{} source={} sites={} ancestry={} method={:?} {}; path_coverage={}; lengths=min/median/p90/max/total={}/{}/{}/{}/{}; input_segments={}, input_bp={}, output_segments={}, output_bp={}, replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
+                    round + 1,
+                    rank + 1,
+                    candidate.source.as_str(),
+                    candidate.source_sites,
+                    format_source_ancestry(&candidate.source_ancestry, 4),
+                    candidate.method,
+                    format_candidate_boundary(&graph, &candidate.plan.candidate),
+                    format_candidate_path_coverage(&graph, &candidate.plan.candidate),
+                    candidate.plan.candidate.traversal_stats.min_len,
+                    candidate.plan.candidate.traversal_stats.median_len,
+                    candidate.plan.candidate.traversal_stats.p90_len,
+                    candidate.plan.candidate.traversal_stats.max_len,
+                    candidate.plan.candidate.traversal_stats.total_len,
+                    candidate.objective.input_segments,
+                    candidate.objective.input_segment_bp,
+                    candidate.objective.output_segments,
+                    candidate.objective.output_segment_bp,
+                    candidate.plan.replacement.segments.len(),
+                    replacement_segment_bp(&candidate.plan.replacement),
+                    candidate.objective.score_delta,
+                    candidate.objective.bp_weighted_coverage_delta_scaled,
+                    candidate.objective.singleton_bp_delta,
+                    candidate.objective.segment_delta,
+                    candidate.objective.segment_bp_delta
+                );
+            }
         }
 
         if accepted.is_empty() {
@@ -2536,6 +2762,15 @@ fn resolve_graph_bubbles_iterative_multi_level(
 
         for plan in &plans {
             resolved_signatures.insert(plan.candidate.signature.clone());
+        }
+        residual_novelty_memory.advance_after_accepted(&graph, round + 1, &accepted);
+        if emit_logs && !residual_novelty_memory.records.is_empty() {
+            log::info!(
+                "crush iterative-multi-level round {} residual-novelty memory: {} broad top-level residual guard(s) retained for continuing churn detection: {}",
+                round + 1,
+                residual_novelty_memory.records.len(),
+                format_residual_novelty_memory(&residual_novelty_memory, 8)
+            );
         }
         graph = next_graph;
         changed = true;
@@ -2602,10 +2837,12 @@ struct MultiLevelWindowCandidate {
     candidate: BubbleCandidate,
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    source_ancestry: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum MultiLevelCandidateSource {
+    CompleteHomologousWindow,
     TopLevel,
     SiblingRun,
     ParentDescendants,
@@ -2613,11 +2850,13 @@ enum MultiLevelCandidateSource {
     LevelWindow,
     StringyNeighborhood,
     OutwardResidualWindow,
+    MotifLocal,
 }
 
 impl MultiLevelCandidateSource {
     fn as_str(self) -> &'static str {
         match self {
+            Self::CompleteHomologousWindow => "complete-homologous-window",
             Self::TopLevel => "top-level",
             Self::SiblingRun => "sibling-run",
             Self::ParentDescendants => "parent-descendants",
@@ -2625,6 +2864,7 @@ impl MultiLevelCandidateSource {
             Self::LevelWindow => "level-window",
             Self::StringyNeighborhood => "stringy-neighborhood",
             Self::OutwardResidualWindow => "outward-residual-window",
+            Self::MotifLocal => "motif-local",
         }
     }
 }
@@ -2635,9 +2875,11 @@ struct MultiLevelGeneratedCandidates {
     generated_total: usize,
     source_counts: FxHashMap<MultiLevelCandidateSource, usize>,
     repeat_boundary_rejected: usize,
+    complete_homologous_aggregated: usize,
     total_bp_cap_exceeded: usize,
     max_len_cap_exceeded: usize,
     median_len_cap_exceeded: usize,
+    residual_novelty: ResidualNoveltyReport,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2661,9 +2903,91 @@ struct ReplacementObjectiveDelta {
 struct MultiLevelBuiltCandidate {
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    source_ancestry: Vec<String>,
+    method: ResolutionMethod,
     plan: ReplacementPlan,
     objective: ReplacementObjectiveDelta,
     evidence: Option<SweepgaReplacementEvidence>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResidualNoveltyMemory {
+    previous_round: usize,
+    records: Vec<ResidualNoveltyRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct ResidualNoveltyRecord {
+    round: usize,
+    source: MultiLevelCandidateSource,
+    source_sites: usize,
+    source_ancestry: Vec<String>,
+    root_path_name: String,
+    root_bp_begin: usize,
+    root_bp_end: usize,
+    root_start_step: usize,
+    root_end_step: usize,
+    root_start_label: String,
+    root_end_label: String,
+    traversal_count: usize,
+    median_len: usize,
+    total_len: usize,
+    root_span: usize,
+    unique_steps: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResidualNoveltyReport {
+    compared: usize,
+    deferred: usize,
+    retained: usize,
+    details: Vec<ResidualNoveltyDecision>,
+}
+
+#[derive(Clone, Debug)]
+struct ResidualNoveltyDecision {
+    deferred: bool,
+    reason: &'static str,
+    candidate: ResidualNoveltyRecord,
+    previous: ResidualNoveltyRecord,
+    overlap_bp: usize,
+    overlap_permille: usize,
+    span_delta: usize,
+    traversal_delta: usize,
+    median_delta: usize,
+    total_len_delta: usize,
+    unique_step_delta: usize,
+}
+
+fn compare_multi_level_built_candidate_priority(
+    a: &MultiLevelBuiltCandidate,
+    b: &MultiLevelBuiltCandidate,
+) -> std::cmp::Ordering {
+    b.objective
+        .score_delta
+        .cmp(&a.objective.score_delta)
+        .then_with(|| {
+            b.objective
+                .segment_bp_delta
+                .cmp(&a.objective.segment_bp_delta)
+        })
+        .then_with(|| b.objective.segment_delta.cmp(&a.objective.segment_delta))
+        .then_with(|| {
+            multi_level_residual_scale_score(&b.plan.candidate)
+                .cmp(&multi_level_residual_scale_score(&a.plan.candidate))
+        })
+        .then_with(|| {
+            a.plan
+                .candidate
+                .root_start_step
+                .cmp(&b.plan.candidate.root_start_step)
+        })
+        .then_with(|| {
+            a.plan
+                .candidate
+                .root_end_step
+                .cmp(&b.plan.candidate.root_end_step)
+        })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2865,22 +3189,27 @@ fn build_multi_level_window_candidate(
     if emit_logs && selected_count <= 128 {
         let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
         log::info!(
-            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
+            "crush iterative-multi-level round {}: building candidate {}/{} source={} sites={} ancestry={} with {:?}; traversals={}, path-coverage={}, min-len={}, median-len={}, p90-len={}, max-len={}, total-len={}, root-span={}",
             round_number,
             started,
             selected_count,
             window.source.as_str(),
             window.source_sites,
+            format_source_ancestry(&window.source_ancestry, 4),
             method,
             window.candidate.traversal_stats.count,
-            window.candidate.traversal_stats.max_len,
+            format_candidate_path_coverage(graph, &window.candidate),
+            window.candidate.traversal_stats.min_len,
             window.candidate.traversal_stats.median_len,
+            window.candidate.traversal_stats.p90_len,
+            window.candidate.traversal_stats.max_len,
             window.candidate.traversal_stats.total_len,
             window.candidate.root_span
         );
     }
     let source = window.source;
     let source_sites = window.source_sites;
+    let source_ancestry = window.source_ancestry.clone();
     let candidate_boundary = if emit_logs && selected_count <= 128 {
         format_candidate_boundary(graph, &window.candidate)
     } else {
@@ -2898,13 +3227,22 @@ fn build_multi_level_window_candidate(
         }
         let objective =
             replacement_objective_delta(graph, &window.candidate, &replacement, objective_mode);
+        if source == MultiLevelCandidateSource::MotifLocal
+            && motif_replacement_has_singleton_bp_explosion(&objective)
+        {
+            return Err(io::Error::other(format!(
+                "motif-local replacement rejected singleton-bp explosion: input_singleton_bp={} output_singleton_bp={}",
+                objective.input_singleton_bp, objective.output_singleton_bp
+            )));
+        }
         Ok::<Option<MultiLevelBuiltCandidate>, io::Error>(Some(MultiLevelBuiltCandidate {
             source,
             source_sites,
-            plan: ReplacementPlan {
-                candidate: window.candidate,
-                replacement,
-            },
+            source_ancestry: source_ancestry.clone(),
+            method,
+            plan: ReplacementPlan::new(window.candidate, replacement, method)
+                .with_debug_source(source, source_sites, source_ancestry.clone())
+                .with_debug_objective(objective),
             objective,
             evidence: report.evidence,
         }))
@@ -2933,14 +3271,25 @@ fn build_multi_level_window_candidate(
                     .map(format_sweepga_evidence)
                     .unwrap_or_else(|| "alignment_evidence=not-applicable".to_string());
                 log::info!(
-                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} method={:?} {}; {}; {}; replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
+                    "crush iterative-multi-level round {}: built candidate detail source={} sites={} ancestry={} method={:?} {}; path_coverage={}; lengths=min/median/p90/max/total={}/{}/{}/{}/{}; {}; {}; input_segments={}, input_bp={}, output_segments={}, output_bp={}, replacement_segments={}, replacement_bp={}, objective_score_delta={}, coverage_delta_scaled={}, singleton_bp_delta={}, segment_delta={}, segment_bp_delta={}",
                     round_number,
                     candidate.source.as_str(),
                     candidate.source_sites,
+                    format_source_ancestry(&candidate.source_ancestry, 4),
                     method,
                     format_candidate_boundary(graph, &candidate.plan.candidate),
+                    format_candidate_path_coverage(graph, &candidate.plan.candidate),
+                    candidate.plan.candidate.traversal_stats.min_len,
+                    candidate.plan.candidate.traversal_stats.median_len,
+                    candidate.plan.candidate.traversal_stats.p90_len,
+                    candidate.plan.candidate.traversal_stats.max_len,
+                    candidate.plan.candidate.traversal_stats.total_len,
                     format_candidate_repeat_summary(graph, &candidate.plan.candidate),
                     evidence,
+                    candidate.objective.input_segments,
+                    candidate.objective.input_segment_bp,
+                    candidate.objective.output_segments,
+                    candidate.objective.output_segment_bp,
                     candidate.plan.replacement.segments.len(),
                     replacement_segment_bp(&candidate.plan.replacement),
                     candidate.objective.score_delta,
@@ -2952,20 +3301,22 @@ fn build_multi_level_window_candidate(
             }
             Ok(None) if selected_count <= 128 => {
                 log::info!(
-                    "crush iterative-multi-level round {}: candidate returned empty replacement source={} sites={} method={:?} {}; reason=empty-replacement",
+                    "crush iterative-multi-level round {}: candidate returned empty replacement source={} sites={} ancestry={} method={:?} {}; reason=empty-replacement",
                     round_number,
                     source.as_str(),
                     source_sites,
+                    format_source_ancestry(&source_ancestry, 4),
                     method,
                     candidate_boundary
                 );
             }
             Err(err) if selected_count <= 128 => {
                 log::info!(
-                    "crush iterative-multi-level round {}: candidate failed source={} sites={} method={:?} {}; reason={}",
+                    "crush iterative-multi-level round {}: candidate failed source={} sites={} ancestry={} method={:?} {}; reason={}",
                     round_number,
                     source.as_str(),
                     source_sites,
+                    format_source_ancestry(&source_ancestry, 4),
                     method,
                     candidate_boundary,
                     err
@@ -2997,7 +3348,9 @@ fn multi_level_window_total_bp_cap(config: &ResolutionConfig) -> usize {
 }
 
 fn effective_multi_level_objective(config: &ResolutionConfig) -> MultiLevelObjectiveMode {
-    if config.method == ResolutionMethod::CoverageMultiBubble {
+    if config.method == ResolutionMethod::CoverageMultiBubble
+        || config.method == ResolutionMethod::MotifLocal
+    {
         MultiLevelObjectiveMode::Coverage
     } else {
         config.multi_level_objective
@@ -3007,10 +3360,15 @@ fn effective_multi_level_objective(config: &ResolutionConfig) -> MultiLevelObjec
 fn effective_repeat_aware_boundaries(config: &ResolutionConfig) -> bool {
     config.multi_level_repeat_aware_boundaries
         || config.method == ResolutionMethod::CoverageMultiBubble
+        || config.method == ResolutionMethod::MotifLocal
 }
 
 fn effective_multi_level_window_mode(config: &ResolutionConfig) -> MultiLevelWindowMode {
-    config.multi_level_window_mode
+    if config.method == ResolutionMethod::MotifLocal {
+        MultiLevelWindowMode::MotifLocal
+    } else {
+        config.multi_level_window_mode
+    }
 }
 
 fn effective_multi_level_candidate_limit(config: &ResolutionConfig) -> usize {
@@ -3042,8 +3400,28 @@ fn generate_multi_level_candidates(
     discovered: &[DiscoveredCandidate],
     resolved_signatures: &FxHashSet<String>,
 ) -> MultiLevelGeneratedCandidates {
+    generate_multi_level_candidates_with_residual_novelty(
+        graph,
+        config,
+        discovered,
+        resolved_signatures,
+        None,
+    )
+}
+
+fn generate_multi_level_candidates_with_residual_novelty(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    discovered: &[DiscoveredCandidate],
+    resolved_signatures: &FxHashSet<String>,
+    residual_novelty_memory: Option<&ResidualNoveltyMemory>,
+) -> MultiLevelGeneratedCandidates {
     let mut generated = MultiLevelGeneratedCandidates::default();
-    if discovered.is_empty() {
+    let window_mode = effective_multi_level_window_mode(config);
+    if discovered.is_empty() && !matches!(window_mode, MultiLevelWindowMode::MotifLocal) {
+        return generated;
+    }
+    if graph.paths.is_empty() {
         return generated;
     }
 
@@ -3060,8 +3438,6 @@ fn generate_multi_level_candidates(
     } else {
         None
     };
-    let window_mode = effective_multi_level_window_mode(config);
-
     let use_parent = matches!(
         window_mode,
         MultiLevelWindowMode::Largest
@@ -3079,6 +3455,18 @@ fn generate_multi_level_candidates(
     let use_outward = matches!(window_mode, MultiLevelWindowMode::Outward)
         || coverage_mode_includes_outward(config);
     let add_outward_first = coverage_mode_includes_outward(config);
+    let use_motif = matches!(window_mode, MultiLevelWindowMode::MotifLocal);
+
+    if use_motif {
+        add_motif_local_candidates(
+            graph,
+            &path_positions_by_path,
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
+    }
 
     if use_outward && add_outward_first {
         add_outward_residual_windows(
@@ -3105,9 +3493,23 @@ fn generate_multi_level_candidates(
                 d.candidate.clone(),
                 MultiLevelCandidateSource::TopLevel,
                 1,
+                vec![source_ancestry_from_discovered(d)],
                 config,
             );
         }
+    }
+
+    if use_parent || use_sibling || use_sliding || use_outward {
+        add_complete_homologous_windows(
+            graph,
+            discovered,
+            target_bp,
+            &path_positions_by_path,
+            &mut generated,
+            &mut emitted,
+            resolved_signatures,
+            config,
+        );
     }
 
     if use_parent || use_sibling {
@@ -3199,24 +3601,12 @@ fn generate_multi_level_candidates(
     }
 
     generated.generated_total = generated.candidates.len();
-    generated.candidates.sort_by(|a, b| {
-        multi_level_source_priority(a.source)
-            .cmp(&multi_level_source_priority(b.source))
-            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
-            .then_with(|| {
-                b.candidate
-                    .estimated_step_savings()
-                    .cmp(&a.candidate.estimated_step_savings())
-            })
-            .then_with(|| b.candidate.unique_steps.cmp(&a.candidate.unique_steps))
-            .then_with(|| a.candidate.root_span.cmp(&b.candidate.root_span))
-            .then_with(|| {
-                a.candidate
-                    .root_start_step
-                    .cmp(&b.candidate.root_start_step)
-            })
-            .then_with(|| a.candidate.root_end_step.cmp(&b.candidate.root_end_step))
-    });
+    generated
+        .candidates
+        .sort_by(|a, b| compare_multi_level_candidate_priority(a, b, window_mode));
+    if let Some(memory) = residual_novelty_memory {
+        apply_residual_novelty_filter(graph, &mut generated, memory);
+    }
     let candidate_limit = multi_level_candidate_limit_for_mode(config, window_mode);
     if candidate_limit > 0 && generated.candidates.len() > candidate_limit {
         generated.candidates.truncate(candidate_limit);
@@ -3262,9 +3652,389 @@ fn compare_same_source_window_priority(
             .cmp(&a.candidate.traversal_stats.total_len)
             .then_with(|| b.candidate.root_span.cmp(&a.candidate.root_span))
             .then_with(|| b.source_sites.cmp(&a.source_sites))
+    } else if a.source == MultiLevelCandidateSource::MotifLocal
+        && b.source == MultiLevelCandidateSource::MotifLocal
+    {
+        b.candidate
+            .estimated_step_savings()
+            .cmp(&a.candidate.estimated_step_savings())
+            .then_with(|| {
+                b.candidate
+                    .traversal_stats
+                    .total_len
+                    .cmp(&a.candidate.traversal_stats.total_len)
+            })
+            .then_with(|| {
+                a.candidate
+                    .root_start_step
+                    .cmp(&b.candidate.root_start_step)
+            })
     } else {
         std::cmp::Ordering::Equal
     }
+}
+
+fn compare_multi_level_candidate_priority(
+    a: &MultiLevelWindowCandidate,
+    b: &MultiLevelWindowCandidate,
+    window_mode: MultiLevelWindowMode,
+) -> std::cmp::Ordering {
+    let mode_priority = if matches!(window_mode, MultiLevelWindowMode::Largest) {
+        // Largest mode builds one candidate per round. For residual C4 sites,
+        // median traversal length can be tiny even when the enclosing interval
+        // carries a broad high-entropy path-space block, so rank the capped
+        // candidate by broad root span plus unique path-step mass before the
+        // older balanced-frontier proxy.
+        complete_homologous_window_priority(a, b)
+            .then_with(|| {
+                multi_level_residual_scale_score(&b.candidate)
+                    .cmp(&multi_level_residual_scale_score(&a.candidate))
+            })
+            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
+            .then_with(|| {
+                multi_level_source_priority(a.source).cmp(&multi_level_source_priority(b.source))
+            })
+    } else {
+        multi_level_source_priority(a.source)
+            .cmp(&multi_level_source_priority(b.source))
+            .then_with(|| compare_same_source_window_priority(a, b, window_mode))
+    };
+
+    mode_priority
+        .then_with(|| {
+            b.candidate
+                .estimated_step_savings()
+                .cmp(&a.candidate.estimated_step_savings())
+        })
+        .then_with(|| b.candidate.unique_steps.cmp(&a.candidate.unique_steps))
+        .then_with(|| a.candidate.root_span.cmp(&b.candidate.root_span))
+        .then_with(|| {
+            a.candidate
+                .root_start_step
+                .cmp(&b.candidate.root_start_step)
+        })
+        .then_with(|| a.candidate.root_end_step.cmp(&b.candidate.root_end_step))
+}
+
+fn complete_homologous_window_priority(
+    a: &MultiLevelWindowCandidate,
+    b: &MultiLevelWindowCandidate,
+) -> std::cmp::Ordering {
+    match (
+        a.source == MultiLevelCandidateSource::CompleteHomologousWindow,
+        b.source == MultiLevelCandidateSource::CompleteHomologousWindow,
+    ) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+fn multi_level_residual_scale_score(candidate: &BubbleCandidate) -> u128 {
+    (candidate.root_span as u128).saturating_mul(candidate.unique_steps.max(1) as u128)
+}
+
+const RESIDUAL_NOVELTY_MIN_ROOT_SPAN: usize = 10_000;
+const RESIDUAL_NOVELTY_MIN_TOTAL_BP: usize = 50_000;
+const RESIDUAL_NOVELTY_OVERLAP_PERMILLE: usize = 950;
+const RESIDUAL_NOVELTY_SPAN_PCT: usize = 5;
+const RESIDUAL_NOVELTY_EXPANSION_PCT: usize = 10;
+const RESIDUAL_NOVELTY_MIN_EXPANSION_BP: usize = 2_048;
+
+impl ResidualNoveltyMemory {
+    fn advance_after_accepted(
+        &mut self,
+        graph: &Graph,
+        round: usize,
+        accepted: &[MultiLevelBuiltCandidate],
+    ) {
+        let accepted_broad_records = Self::records_from_accepted(graph, round, accepted);
+        self.previous_round = round;
+        if !accepted_broad_records.is_empty() {
+            self.records = accepted_broad_records;
+        }
+    }
+
+    fn records_from_accepted(
+        graph: &Graph,
+        round: usize,
+        accepted: &[MultiLevelBuiltCandidate],
+    ) -> Vec<ResidualNoveltyRecord> {
+        accepted
+            .iter()
+            .filter(|built| {
+                built.source == MultiLevelCandidateSource::TopLevel && built.source_sites == 1
+            })
+            .filter_map(|built| {
+                ResidualNoveltyRecord::from_parts(
+                    graph,
+                    round,
+                    built.source,
+                    built.source_sites,
+                    built.source_ancestry.clone(),
+                    &built.plan.candidate,
+                )
+            })
+            .filter(is_broad_residual_record)
+            .collect::<Vec<_>>()
+    }
+}
+
+impl ResidualNoveltyRecord {
+    fn from_window(
+        graph: &Graph,
+        round: usize,
+        window: &MultiLevelWindowCandidate,
+    ) -> Option<Self> {
+        Self::from_parts(
+            graph,
+            round,
+            window.source,
+            window.source_sites,
+            window.source_ancestry.clone(),
+            &window.candidate,
+        )
+    }
+
+    fn from_parts(
+        graph: &Graph,
+        round: usize,
+        source: MultiLevelCandidateSource,
+        source_sites: usize,
+        source_ancestry: Vec<String>,
+        candidate: &BubbleCandidate,
+    ) -> Option<Self> {
+        let (root_path_name, root_bp_begin, root_bp_end) = candidate_root_bp_interval(candidate)?;
+        let (root_start_label, root_end_label) = candidate_root_boundary_labels(graph, candidate);
+        Some(Self {
+            round,
+            source,
+            source_sites,
+            source_ancestry,
+            root_path_name,
+            root_bp_begin,
+            root_bp_end,
+            root_start_step: candidate.root_start_step,
+            root_end_step: candidate.root_end_step,
+            root_start_label,
+            root_end_label,
+            traversal_count: candidate.traversal_stats.count,
+            median_len: candidate.traversal_stats.median_len,
+            total_len: candidate.traversal_stats.total_len,
+            root_span: candidate.root_span,
+            unique_steps: candidate.unique_steps,
+        })
+    }
+
+    fn semantic_key(&self) -> String {
+        format!(
+            "round={} source={} sites={} ancestry={} root={}:[{}-{}] boundary={}..{} root_steps={}..{} traversals={} median={} total={} root_span={} unique_steps={}",
+            self.round,
+            self.source.as_str(),
+            self.source_sites,
+            format_source_ancestry(&self.source_ancestry, 4),
+            self.root_path_name,
+            self.root_bp_begin,
+            self.root_bp_end,
+            self.root_start_label,
+            self.root_end_label,
+            self.root_start_step,
+            self.root_end_step,
+            self.traversal_count,
+            self.median_len,
+            self.total_len,
+            self.root_span,
+            self.unique_steps
+        )
+    }
+}
+
+fn candidate_root_bp_interval(candidate: &BubbleCandidate) -> Option<(String, usize, usize)> {
+    let root_range = candidate
+        .ranges
+        .iter()
+        .find(|range| range.path_idx == 0)
+        .or_else(|| candidate.ranges.first())?;
+    let name = root_range
+        .source_path_name
+        .clone()
+        .unwrap_or_else(|| format!("path{}", root_range.path_idx));
+    Some((name, root_range.source_begin_bp, root_range.source_end_bp))
+}
+
+fn candidate_root_boundary_labels(graph: &Graph, candidate: &BubbleCandidate) -> (String, String) {
+    let root_path = graph.paths.first();
+    let start = root_path
+        .and_then(|path| path.steps.get(candidate.root_start_step).copied())
+        .map(|step| format_step_label(graph, step))
+        .unwrap_or_else(|| "?".to_string());
+    let end = root_path
+        .and_then(|path| path.steps.get(candidate.root_end_step).copied())
+        .map(|step| format_step_label(graph, step))
+        .unwrap_or_else(|| "?".to_string());
+    (start, end)
+}
+
+fn is_broad_residual_record(record: &ResidualNoveltyRecord) -> bool {
+    record.root_span >= RESIDUAL_NOVELTY_MIN_ROOT_SPAN
+        && record.total_len >= RESIDUAL_NOVELTY_MIN_TOTAL_BP
+        && record.traversal_count >= 2
+}
+
+fn apply_residual_novelty_filter(
+    graph: &Graph,
+    generated: &mut MultiLevelGeneratedCandidates,
+    memory: &ResidualNoveltyMemory,
+) {
+    if memory.records.is_empty() || generated.candidates.is_empty() {
+        return;
+    }
+
+    let mut retained = Vec::with_capacity(generated.candidates.len());
+    let mut report = ResidualNoveltyReport::default();
+    for window in generated.candidates.drain(..) {
+        let Some(candidate_record) = ResidualNoveltyRecord::from_window(
+            graph,
+            memory.previous_round.saturating_add(1),
+            &window,
+        ) else {
+            retained.push(window);
+            continue;
+        };
+
+        if window.source != MultiLevelCandidateSource::TopLevel
+            || window.source_sites != 1
+            || !is_broad_residual_record(&candidate_record)
+        {
+            retained.push(window);
+            report.retained += 1;
+            continue;
+        }
+
+        let mut deferred = None;
+        for previous in &memory.records {
+            let decision = compare_residual_novelty(&candidate_record, previous);
+            report.compared += 1;
+            if decision.deferred {
+                deferred = Some(decision);
+                break;
+            } else if decision.overlap_bp > 0 && report.details.len() < 8 {
+                report.details.push(decision);
+            }
+        }
+
+        if let Some(decision) = deferred {
+            report.deferred += 1;
+            report.details.push(decision);
+        } else {
+            report.retained += 1;
+            retained.push(window);
+        }
+    }
+    generated.candidates = retained;
+    generated.residual_novelty = report;
+}
+
+fn compare_residual_novelty(
+    candidate: &ResidualNoveltyRecord,
+    previous: &ResidualNoveltyRecord,
+) -> ResidualNoveltyDecision {
+    let overlap_bp = if candidate.root_path_name == previous.root_path_name {
+        interval_overlap(
+            candidate.root_bp_begin,
+            candidate.root_bp_end,
+            previous.root_bp_begin,
+            previous.root_bp_end,
+        )
+    } else {
+        0
+    };
+    let min_interval = candidate
+        .root_bp_end
+        .saturating_sub(candidate.root_bp_begin)
+        .min(previous.root_bp_end.saturating_sub(previous.root_bp_begin));
+    let overlap_permille = if min_interval == 0 {
+        0
+    } else {
+        overlap_bp.saturating_mul(1000) / min_interval
+    };
+    let span_delta = candidate.root_span.abs_diff(previous.root_span);
+    let traversal_delta = candidate.traversal_count.abs_diff(previous.traversal_count);
+    let median_delta = candidate.median_len.abs_diff(previous.median_len);
+    let total_len_delta = candidate.total_len.abs_diff(previous.total_len);
+    let unique_step_delta = candidate.unique_steps.abs_diff(previous.unique_steps);
+
+    let expanded = residual_interval_expanded(candidate, previous);
+    let structurally_similar =
+        similar_within_percent(
+            candidate.root_span,
+            previous.root_span,
+            RESIDUAL_NOVELTY_SPAN_PCT,
+        ) && ratio_within_factor_two(candidate.traversal_count, previous.traversal_count)
+            && ratio_within_factor_two(candidate.median_len, previous.median_len)
+            && ratio_within_factor_two(candidate.total_len, previous.total_len)
+            && ratio_within_factor_two(candidate.unique_steps, previous.unique_steps);
+    let deferred =
+        overlap_permille >= RESIDUAL_NOVELTY_OVERLAP_PERMILLE && structurally_similar && !expanded;
+    let reason = if deferred {
+        "near-identical-immediate-broad-residual"
+    } else if expanded {
+        "expanded-residual-allowed"
+    } else if overlap_permille < RESIDUAL_NOVELTY_OVERLAP_PERMILLE {
+        "root-interval-novel"
+    } else {
+        "structure-novel"
+    };
+
+    ResidualNoveltyDecision {
+        deferred,
+        reason,
+        candidate: candidate.clone(),
+        previous: previous.clone(),
+        overlap_bp,
+        overlap_permille,
+        span_delta,
+        traversal_delta,
+        median_delta,
+        total_len_delta,
+        unique_step_delta,
+    }
+}
+
+fn interval_overlap(a_begin: usize, a_end: usize, b_begin: usize, b_end: usize) -> usize {
+    a_end.min(b_end).saturating_sub(a_begin.max(b_begin))
+}
+
+fn similar_within_percent(a: usize, b: usize, percent: usize) -> bool {
+    let allowed = a.max(b).saturating_mul(percent).div_ceil(100).max(1);
+    a.abs_diff(b) <= allowed
+}
+
+fn ratio_within_factor_two(a: usize, b: usize) -> bool {
+    let min = a.min(b);
+    let max = a.max(b);
+    if min == 0 {
+        max == 0
+    } else {
+        max <= min.saturating_mul(2)
+    }
+}
+
+fn residual_interval_expanded(
+    candidate: &ResidualNoveltyRecord,
+    previous: &ResidualNoveltyRecord,
+) -> bool {
+    if candidate.root_path_name != previous.root_path_name {
+        return true;
+    }
+    let expansion_bp = previous
+        .root_span
+        .saturating_mul(RESIDUAL_NOVELTY_EXPANSION_PCT)
+        .div_ceil(100)
+        .max(RESIDUAL_NOVELTY_MIN_EXPANSION_BP);
+    candidate.root_bp_begin.saturating_add(expansion_bp) < previous.root_bp_begin
+        || candidate.root_bp_end > previous.root_bp_end.saturating_add(expansion_bp)
+        || candidate.root_span > previous.root_span.saturating_add(expansion_bp)
 }
 
 fn multi_level_parent_frontier_span_score(candidate: &BubbleCandidate) -> usize {
@@ -3282,6 +4052,7 @@ fn insert_multi_level_candidate(
     candidate: BubbleCandidate,
     source: MultiLevelCandidateSource,
     source_sites: usize,
+    mut source_ancestry: Vec<String>,
     config: &ResolutionConfig,
 ) {
     if resolved_signatures.contains(&candidate.signature) {
@@ -3308,11 +4079,14 @@ fn insert_multi_level_candidate(
     if !emitted.insert(candidate.signature.clone()) {
         return;
     }
+    source_ancestry.sort();
+    source_ancestry.dedup();
     *generated.source_counts.entry(source).or_insert(0) += 1;
     generated.candidates.push(MultiLevelWindowCandidate {
         candidate,
         source,
         source_sites,
+        source_ancestry,
     });
 }
 
@@ -3377,6 +4151,7 @@ fn add_parent_descendant_windows(
 ) {
     for parent in discovered {
         let mut descendants = 0usize;
+        let mut source_ancestry = vec![source_ancestry_from_discovered(parent)];
         for child in discovered {
             if child.povu_site_id == parent.povu_site_id {
                 continue;
@@ -3386,6 +4161,7 @@ fn add_parent_descendant_windows(
                 && child.povu_level > parent.povu_level
             {
                 descendants += 1;
+                source_ancestry.push(source_ancestry_from_discovered(child));
             }
         }
         if descendants == 0 || chain_povu_block_bp(&parent.candidate) > target_bp {
@@ -3398,6 +4174,7 @@ fn add_parent_descendant_windows(
             parent.candidate.clone(),
             MultiLevelCandidateSource::ParentDescendants,
             descendants + 1,
+            source_ancestry,
             config,
         );
     }
@@ -3551,6 +4328,7 @@ fn add_outward_residual_windows(
                 site.candidate.clone(),
                 MultiLevelCandidateSource::OutwardResidualWindow,
                 1,
+                vec![source_ancestry_from_discovered(site)],
                 config,
             );
         }
@@ -3599,6 +4377,782 @@ fn add_outward_residual_windows(
             }
         }
     }
+}
+
+fn add_motif_local_candidates(
+    graph: &Graph,
+    path_positions_by_path: &[Vec<usize>],
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if graph.paths.len() < 2 || graph.segments.is_empty() {
+        return;
+    }
+    let path_support = graph_node_path_support_sets(graph);
+    let path_support_counts = path_support.iter().map(FxHashSet::len).collect::<Vec<_>>();
+    let node_visits = graph_node_visit_counts(graph);
+    let order_bp = graph_segment_order_bp_offsets(graph);
+    let min_flank_paths = effective_motif_min_flank_paths(config, graph.paths.len());
+    let max_sparse_paths = config.motif_max_sparse_paths.max(1);
+    let max_window_bp = config.motif_max_window_bp.max(1);
+    let mut seen_sparse_cores = FxHashSet::<String>::default();
+
+    for path in &graph.paths {
+        if path.steps.len() < 3 {
+            continue;
+        }
+        let mut i = 1usize;
+        while i + 1 < path.steps.len() {
+            if step_path_support(&path_support_counts, path.steps[i]) > max_sparse_paths {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i + 1 < path.steps.len()
+                && step_path_support(&path_support_counts, path.steps[i]) <= max_sparse_paths
+            {
+                i += 1;
+            }
+            let end = i;
+            let left = path.steps[start - 1];
+            let right = path.steps[end];
+            if step_path_support(&path_support_counts, left) < min_flank_paths
+                || step_path_support(&path_support_counts, right) < min_flank_paths
+            {
+                continue;
+            }
+            let core = &path.steps[start..end];
+            let core_key = motif_core_key(core);
+            if !seen_sparse_cores.insert(core_key) {
+                continue;
+            }
+            let involved_paths = motif_core_involved_paths(&path_support, core);
+            if involved_paths > max_sparse_paths {
+                continue;
+            }
+            let left_jump = graph_order_jump(left, core[0]);
+            let right_jump = graph_order_jump(*core.last().unwrap(), right);
+            let left_space = graph_order_white_space_bp(graph, &order_bp, left, core[0]);
+            let right_space =
+                graph_order_white_space_bp(graph, &order_bp, *core.last().unwrap(), right);
+            if left_jump.max(right_jump) < config.motif_min_order_jump
+                && left_space.max(right_space) < DEFAULT_MOTIF_MIN_WHITE_SPACE_BP
+            {
+                continue;
+            }
+
+            let Some(candidate) = motif_anchor_pair_candidate(
+                graph,
+                path_positions_by_path,
+                left,
+                right,
+                max_window_bp,
+            ) else {
+                continue;
+            };
+            let source_ancestry = vec![format!(
+                "motif=sparse-offshoot path={} core_steps={}..{} sparse_paths={} anchors={}..{} order_jump={} white_space_bp={}",
+                path.name,
+                start,
+                end.saturating_sub(1),
+                involved_paths,
+                format_step_label(graph, left),
+                format_step_label(graph, right),
+                left_jump.max(right_jump),
+                left_space.max(right_space)
+            )];
+            insert_multi_level_candidate(
+                generated,
+                emitted,
+                resolved_signatures,
+                candidate,
+                MultiLevelCandidateSource::MotifLocal,
+                1,
+                source_ancestry,
+                config,
+            );
+        }
+    }
+
+    let mut best_repeat_by_step = FxHashMap::<Step, (usize, usize, usize, usize)>::default();
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let mut i = 0usize;
+        while i < path.steps.len() {
+            let step = path.steps[i];
+            let mut j = i + 1;
+            while j < path.steps.len() && path.steps[j] == step {
+                j += 1;
+            }
+            let run_len = j - i;
+            if run_len >= 2 && i > 0 && j < path.steps.len() {
+                best_repeat_by_step
+                    .entry(step)
+                    .and_modify(|best| {
+                        if run_len > best.0 {
+                            *best = (run_len, path_idx, i, j);
+                        }
+                    })
+                    .or_insert((run_len, path_idx, i, j));
+            }
+            i = j;
+        }
+    }
+
+    let mut repeats = best_repeat_by_step
+        .into_iter()
+        .collect::<Vec<(Step, (usize, usize, usize, usize))>>();
+    repeats.sort_by(|(step_a, a), (step_b, b)| {
+        b.0.cmp(&a.0)
+            .then_with(|| node_visits[step_b.node].cmp(&node_visits[step_a.node]))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    for (step, (run_len, path_idx, start, end)) in repeats {
+        let path = &graph.paths[path_idx];
+        let left = path.steps[start - 1];
+        let right = path.steps[end];
+        if step_path_support(&path_support_counts, left) < min_flank_paths
+            || step_path_support(&path_support_counts, right) < min_flank_paths
+        {
+            continue;
+        }
+        let Some(candidate) =
+            motif_anchor_pair_candidate(graph, path_positions_by_path, left, right, max_window_bp)
+        else {
+            continue;
+        };
+        let source_ancestry = vec![format!(
+            "motif=self-loop-repeat path={} repeated_step={} run_len={} core_steps={}..{} anchors={}..{} visits={}",
+            path.name,
+            format_step_label(graph, step),
+            run_len,
+            start,
+            end.saturating_sub(1),
+            format_step_label(graph, left),
+            format_step_label(graph, right),
+            node_visits[step.node]
+        )];
+        insert_multi_level_candidate(
+            generated,
+            emitted,
+            resolved_signatures,
+            candidate,
+            MultiLevelCandidateSource::MotifLocal,
+            1,
+            source_ancestry,
+            config,
+        );
+    }
+}
+
+fn graph_node_path_support_sets(graph: &Graph) -> Vec<FxHashSet<usize>> {
+    let mut support = vec![FxHashSet::<usize>::default(); graph.segments.len()];
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let mut seen_on_path = FxHashSet::<usize>::default();
+        for step in &path.steps {
+            if step.node < support.len() && seen_on_path.insert(step.node) {
+                support[step.node].insert(path_idx);
+            }
+        }
+    }
+    support
+}
+
+fn effective_motif_min_flank_paths(config: &ResolutionConfig, path_count: usize) -> usize {
+    if config.motif_min_flank_paths > 0 {
+        return config.motif_min_flank_paths;
+    }
+    path_count.saturating_div(4).max(2).min(path_count.max(1))
+}
+
+fn step_path_support(path_support_counts: &[usize], step: Step) -> usize {
+    path_support_counts.get(step.node).copied().unwrap_or(0)
+}
+
+fn motif_core_involved_paths(path_support: &[FxHashSet<usize>], core: &[Step]) -> usize {
+    let mut paths = FxHashSet::<usize>::default();
+    for step in core {
+        if let Some(support) = path_support.get(step.node) {
+            paths.extend(support.iter().copied());
+        }
+    }
+    paths.len()
+}
+
+fn motif_core_key(core: &[Step]) -> String {
+    core.iter()
+        .map(|step| format!("{}{}", step.node, if step.rev { '-' } else { '+' }))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn graph_segment_order_bp_offsets(graph: &Graph) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(graph.segments.len());
+    let mut bp = 0usize;
+    for segment in &graph.segments {
+        offsets.push(bp);
+        bp = bp.saturating_add(segment.seq.len());
+    }
+    offsets
+}
+
+fn graph_order_jump(a: Step, b: Step) -> usize {
+    a.node.abs_diff(b.node)
+}
+
+fn graph_order_white_space_bp(graph: &Graph, order_bp: &[usize], a: Step, b: Step) -> usize {
+    let Some(a_start) = order_bp.get(a.node).copied() else {
+        return 0;
+    };
+    let Some(b_start) = order_bp.get(b.node).copied() else {
+        return 0;
+    };
+    let a_end = a_start.saturating_add(
+        graph
+            .segments
+            .get(a.node)
+            .map(|segment| segment.seq.len())
+            .unwrap_or(0),
+    );
+    let b_end = b_start.saturating_add(
+        graph
+            .segments
+            .get(b.node)
+            .map(|segment| segment.seq.len())
+            .unwrap_or(0),
+    );
+    let lo_end = a_end.min(b_end);
+    let hi_start = a_start.max(b_start);
+    hi_start.saturating_sub(lo_end)
+}
+
+fn motif_anchor_pair_candidate(
+    graph: &Graph,
+    path_positions_by_path: &[Vec<usize>],
+    left: Step,
+    right: Step,
+    max_window_bp: usize,
+) -> Option<BubbleCandidate> {
+    let mut ranges = Vec::new();
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let Some((begin_step, end_step)) =
+            shortest_anchor_pair_range(path, left, right, DEFAULT_MOTIF_MAX_ANCHOR_STEPS)
+        else {
+            continue;
+        };
+        let Some(positions) = path_positions_by_path.get(path_idx) else {
+            continue;
+        };
+        let Some(source_begin_bp) = positions.get(begin_step).copied() else {
+            continue;
+        };
+        let Some(source_end_bp) = positions.get(end_step).copied() else {
+            continue;
+        };
+        let span_bp = source_end_bp.saturating_sub(source_begin_bp);
+        if span_bp == 0 || span_bp > max_window_bp {
+            continue;
+        }
+        ranges.push(PathRange {
+            path_idx,
+            source_path_name: Some(path.name.clone()),
+            original_path_name: Some(path.name.clone()),
+            source_begin_bp,
+            source_end_bp,
+            begin_step,
+            end_step,
+            ..PathRange::default()
+        });
+    }
+    ranges.sort_by_key(|range| range.path_idx);
+    if ranges.len() < 2 {
+        return None;
+    }
+    let root_range = ranges.iter().find(|range| range.path_idx == 0)?;
+    let root_start_step = root_range.begin_step;
+    let root_end_step = root_range.end_step.checked_sub(1)?;
+    let root_positions = path_positions_by_path.first()?;
+    let root_span = root_positions
+        .get(root_range.end_step)
+        .copied()?
+        .saturating_sub(root_positions.get(root_range.begin_step).copied()?);
+    let lengths = ranges
+        .iter()
+        .filter_map(|range| {
+            let positions = path_positions_by_path.get(range.path_idx)?;
+            Some(positions.get(range.end_step)? - positions.get(range.begin_step)?)
+        })
+        .collect::<Vec<_>>();
+    let traversal_stats = traversal_stats_from_lengths(lengths);
+    let total_steps = ranges
+        .iter()
+        .map(|range| range.end_step.saturating_sub(range.begin_step))
+        .sum::<usize>();
+    let mut unique_steps = FxHashSet::default();
+    for range in &ranges {
+        let path = &graph.paths[range.path_idx];
+        for step_idx in range.begin_step..range.end_step {
+            unique_steps.insert(path.steps[step_idx]);
+        }
+    }
+    let signature = candidate_signature(
+        graph,
+        0,
+        root_positions,
+        root_start_step,
+        root_end_step,
+        &ranges,
+        path_positions_by_path,
+    );
+    Some(BubbleCandidate {
+        ranges,
+        signature,
+        root_start_step,
+        root_end_step,
+        root_span,
+        total_steps,
+        unique_steps: unique_steps.len(),
+        traversal_stats,
+        level: 0,
+    })
+}
+
+fn shortest_anchor_pair_range(
+    path: &Path,
+    left: Step,
+    right: Step,
+    max_anchor_steps: usize,
+) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize, usize)> = None;
+    for (left_idx, &left_step) in path.steps.iter().enumerate() {
+        if left_step != left {
+            continue;
+        }
+        for right_idx in left_idx + 1..path.steps.len() {
+            if path.steps[right_idx] != right {
+                continue;
+            }
+            let span = right_idx - left_idx + 1;
+            if span > max_anchor_steps {
+                break;
+            }
+            let replace = best
+                .map(|(best_span, best_left, _)| {
+                    span < best_span || (span == best_span && left_idx < best_left)
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((span, left_idx, right_idx + 1));
+            }
+            break;
+        }
+    }
+    best.map(|(_, begin, end)| (begin, end))
+}
+
+fn add_complete_homologous_windows(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    target_bp: usize,
+    path_positions_by_path: &[Vec<usize>],
+    generated: &mut MultiLevelGeneratedCandidates,
+    emitted: &mut FxHashSet<String>,
+    resolved_signatures: &FxHashSet<String>,
+    config: &ResolutionConfig,
+) {
+    if discovered.is_empty() || graph.paths.len() < 2 || path_positions_by_path.is_empty() {
+        return;
+    }
+    let path_count = graph.paths.len();
+    for (seed_idx, seed) in discovered.iter().enumerate() {
+        if !is_complete_homologous_seed(seed, target_bp, path_count) {
+            continue;
+        }
+        let cluster = complete_homologous_cluster_indexes(
+            discovered,
+            seed_idx,
+            &path_positions_by_path[0],
+            target_bp,
+        );
+        if cluster.is_empty() {
+            continue;
+        }
+        let max_candidate_span =
+            complete_homologous_max_cluster_span_bp(target_bp, seed.candidate.root_span);
+        let range_only_candidate = candidate_from_complete_homologous_cluster(
+            graph,
+            discovered,
+            &cluster,
+            path_positions_by_path,
+            false,
+        );
+        let expanded_candidate = candidate_from_complete_homologous_cluster(
+            graph,
+            discovered,
+            &cluster,
+            path_positions_by_path,
+            true,
+        );
+        let candidate = range_only_candidate
+            .filter(|candidate| {
+                candidate.ranges.len() >= path_count && candidate.root_span <= max_candidate_span
+            })
+            .or_else(|| {
+                expanded_candidate.filter(|candidate| {
+                    candidate.ranges.len() >= path_count
+                        && candidate.root_span <= max_candidate_span
+                })
+            });
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        let max_member_paths = cluster
+            .iter()
+            .filter_map(|&idx| discovered.get(idx))
+            .map(|site| site.candidate.ranges.len())
+            .max()
+            .unwrap_or(0);
+        let max_member_span = cluster
+            .iter()
+            .filter_map(|&idx| discovered.get(idx))
+            .map(|site| site.candidate.root_span)
+            .max()
+            .unwrap_or(0);
+        if candidate.ranges.len() <= max_member_paths && candidate.root_span <= max_member_span {
+            continue;
+        }
+        let before = generated.candidates.len();
+        insert_multi_level_candidate(
+            generated,
+            emitted,
+            resolved_signatures,
+            candidate,
+            MultiLevelCandidateSource::CompleteHomologousWindow,
+            cluster.len(),
+            source_ancestry_from_indexes(discovered, &cluster),
+            config,
+        );
+        if generated.candidates.len() > before {
+            generated.complete_homologous_aggregated += 1;
+        }
+    }
+}
+
+fn is_complete_homologous_seed(
+    site: &DiscoveredCandidate,
+    target_bp: usize,
+    path_count: usize,
+) -> bool {
+    if site.povu_level != 0 {
+        return false;
+    }
+    let candidate = &site.candidate;
+    if candidate.ranges.len() >= path_count {
+        return false;
+    }
+    let broad_support = candidate.ranges.len() >= path_count.saturating_div(4).max(2);
+    if target_bp > 0
+        && candidate.root_span
+            > target_bp.saturating_add(complete_homologous_neighbor_gap_bp(
+                target_bp,
+                candidate.root_span,
+            ))
+    {
+        return false;
+    }
+    let target_span_floor = target_bp.saturating_div(2).max(1);
+    let broad_root_span = candidate.root_span >= target_span_floor || candidate.root_span >= 10_000;
+    broad_support && (broad_root_span || is_outward_residual_seed(candidate, path_count))
+}
+
+fn complete_homologous_cluster_indexes(
+    discovered: &[DiscoveredCandidate],
+    seed_idx: usize,
+    root_positions: &[usize],
+    target_bp: usize,
+) -> Vec<usize> {
+    let Some(seed) = discovered.get(seed_idx) else {
+        return Vec::new();
+    };
+    let Some((mut cluster_begin, mut cluster_end)) =
+        candidate_root_step_bp_bounds(&seed.candidate, root_positions)
+    else {
+        return Vec::new();
+    };
+    let gap_bp = complete_homologous_neighbor_gap_bp(target_bp, seed.candidate.root_span);
+    let max_cluster_span =
+        complete_homologous_max_cluster_span_bp(target_bp, seed.candidate.root_span);
+    let mut selected = vec![false; discovered.len()];
+    selected[seed_idx] = true;
+
+    loop {
+        let mut changed = false;
+        for (idx, site) in discovered.iter().enumerate() {
+            if selected[idx] || site.candidate.ranges.len() < 2 {
+                continue;
+            }
+            let Some((begin, end)) = candidate_root_step_bp_bounds(&site.candidate, root_positions)
+            else {
+                continue;
+            };
+            if !intervals_touch_with_gap(cluster_begin, cluster_end, begin, end, gap_bp) {
+                continue;
+            }
+            let expanded_begin = cluster_begin.min(begin);
+            let expanded_end = cluster_end.max(end);
+            if expanded_end.saturating_sub(expanded_begin) > max_cluster_span {
+                continue;
+            }
+            selected[idx] = true;
+            cluster_begin = expanded_begin;
+            cluster_end = expanded_end;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut indexes = selected
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, is_selected)| is_selected.then_some(idx))
+        .collect::<Vec<_>>();
+    indexes.sort_by(|&a, &b| {
+        discovered[a]
+            .candidate
+            .root_start_step
+            .cmp(&discovered[b].candidate.root_start_step)
+            .then_with(|| {
+                discovered[a]
+                    .candidate
+                    .root_end_step
+                    .cmp(&discovered[b].candidate.root_end_step)
+            })
+            .then_with(|| discovered[a].povu_site_id.cmp(&discovered[b].povu_site_id))
+    });
+    indexes
+}
+
+fn complete_homologous_neighbor_gap_bp(target_bp: usize, seed_span: usize) -> usize {
+    target_bp
+        .max(seed_span)
+        .saturating_div(8)
+        .max(256)
+        .min(4_096)
+}
+
+fn complete_homologous_max_cluster_span_bp(target_bp: usize, seed_span: usize) -> usize {
+    let gap_bp = complete_homologous_neighbor_gap_bp(target_bp, seed_span);
+    target_bp
+        .saturating_add(gap_bp.saturating_mul(2))
+        .max(seed_span.saturating_add(gap_bp))
+}
+
+fn candidate_root_step_bp_bounds(
+    candidate: &BubbleCandidate,
+    root_positions: &[usize],
+) -> Option<(usize, usize)> {
+    let begin = root_positions.get(candidate.root_start_step).copied()?;
+    let end = candidate
+        .root_end_step
+        .checked_add(1)
+        .and_then(|idx| root_positions.get(idx).copied())?;
+    Some((begin, end))
+}
+
+fn intervals_touch_with_gap(
+    a_begin: usize,
+    a_end: usize,
+    b_begin: usize,
+    b_end: usize,
+    gap_bp: usize,
+) -> bool {
+    if interval_overlap(a_begin, a_end, b_begin, b_end) > 0 {
+        return true;
+    }
+    if a_end <= b_begin {
+        b_begin.saturating_sub(a_end) <= gap_bp
+    } else {
+        a_begin.saturating_sub(b_end) <= gap_bp
+    }
+}
+
+fn candidate_from_complete_homologous_cluster(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+    path_positions_by_path: &[Vec<usize>],
+    include_homologous_node_expansion: bool,
+) -> Option<BubbleCandidate> {
+    let mut range_by_path = FxHashMap::<usize, (usize, usize)>::default();
+    let mut level = usize::MAX;
+    for &idx in indexes {
+        let site = discovered.get(idx)?;
+        level = level.min(site.povu_level);
+        for range in &site.candidate.ranges {
+            merge_step_range(
+                &mut range_by_path,
+                range.path_idx,
+                range.begin_step,
+                range.end_step,
+            );
+        }
+    }
+
+    let homologous_nodes = if include_homologous_node_expansion {
+        complete_homologous_nodes(graph, discovered, indexes)
+    } else {
+        FxHashSet::default()
+    };
+    if include_homologous_node_expansion && !homologous_nodes.is_empty() {
+        for (path_idx, path) in graph.paths.iter().enumerate() {
+            let mut begin = usize::MAX;
+            let mut end = 0usize;
+            for (step_idx, step) in path.steps.iter().enumerate() {
+                if homologous_nodes.contains(&step.node) {
+                    begin = begin.min(step_idx);
+                    end = end.max(step_idx + 1);
+                }
+            }
+            if begin != usize::MAX && begin < end {
+                merge_step_range(&mut range_by_path, path_idx, begin, end);
+            }
+        }
+    }
+
+    let mut ranges = range_by_path
+        .into_iter()
+        .filter_map(|(path_idx, (begin_step, end_step))| {
+            if begin_step >= end_step {
+                return None;
+            }
+            let path = graph.paths.get(path_idx)?;
+            let positions = path_positions_by_path.get(path_idx)?;
+            let source_start = positions.get(begin_step).copied()?;
+            let source_end = positions.get(end_step).copied()?;
+            Some(PathRange {
+                path_idx,
+                source_path_name: Some(path.name.clone()),
+                original_path_name: Some(path.name.clone()),
+                source_begin_bp: source_start,
+                source_end_bp: source_end,
+                begin_step,
+                end_step,
+                ..PathRange::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.path_idx);
+    if ranges.len() < 2 {
+        return None;
+    }
+
+    let root_range = ranges
+        .iter()
+        .find(|range| range.path_idx == 0)
+        .or_else(|| ranges.first())?;
+    let root_start_step = root_range.begin_step;
+    let root_end_step = root_range.end_step.checked_sub(1)?;
+    let root_positions = path_positions_by_path.get(0)?;
+    let root_span = root_positions
+        .get(root_range.end_step)
+        .copied()?
+        .saturating_sub(root_positions.get(root_start_step).copied()?);
+
+    let lengths = ranges
+        .iter()
+        .filter_map(|range| {
+            let positions = path_positions_by_path.get(range.path_idx)?;
+            Some(positions.get(range.end_step)? - positions.get(range.begin_step)?)
+        })
+        .collect::<Vec<_>>();
+    let traversal_stats = traversal_stats_from_lengths(lengths);
+    let total_steps = ranges
+        .iter()
+        .map(|range| range.end_step.saturating_sub(range.begin_step))
+        .sum::<usize>();
+    let mut unique_steps = FxHashSet::default();
+    for range in &ranges {
+        let path = &graph.paths[range.path_idx];
+        for step_idx in range.begin_step..range.end_step {
+            unique_steps.insert(path.steps[step_idx]);
+        }
+    }
+    let signature = candidate_signature(
+        graph,
+        0,
+        root_positions,
+        root_start_step,
+        root_end_step,
+        &ranges,
+        path_positions_by_path,
+    );
+
+    Some(BubbleCandidate {
+        ranges,
+        signature,
+        root_start_step,
+        root_end_step,
+        root_span,
+        total_steps,
+        unique_steps: unique_steps.len(),
+        traversal_stats,
+        level: if level == usize::MAX { 0 } else { level },
+    })
+}
+
+fn merge_step_range(
+    range_by_path: &mut FxHashMap<usize, (usize, usize)>,
+    path_idx: usize,
+    begin_step: usize,
+    end_step: usize,
+) {
+    if begin_step >= end_step {
+        return;
+    }
+    range_by_path
+        .entry(path_idx)
+        .and_modify(|(begin, end)| {
+            *begin = (*begin).min(begin_step);
+            *end = (*end).max(end_step);
+        })
+        .or_insert((begin_step, end_step));
+}
+
+fn complete_homologous_nodes(
+    graph: &Graph,
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+) -> FxHashSet<usize> {
+    let mut nodes = FxHashSet::<usize>::default();
+    for &idx in indexes {
+        let Some(site) = discovered.get(idx) else {
+            continue;
+        };
+        for range in &site.candidate.ranges {
+            let Some(path) = graph.paths.get(range.path_idx) else {
+                continue;
+            };
+            let span = range.end_step.saturating_sub(range.begin_step);
+            let begin = if span > 2 {
+                range.begin_step + 1
+            } else {
+                range.begin_step
+            };
+            let end = if span > 2 {
+                range.end_step.saturating_sub(1)
+            } else {
+                range.end_step
+            };
+            for step_idx in begin..end.min(path.steps.len()) {
+                nodes.insert(path.steps[step_idx].node);
+            }
+        }
+    }
+    nodes
 }
 
 fn add_index_windows(
@@ -3709,6 +5263,7 @@ fn add_specific_index_window(
         candidate,
         source,
         indexes.len(),
+        source_ancestry_from_indexes(discovered, indexes),
         config,
     );
 }
@@ -3733,14 +5288,12 @@ fn candidate_from_root_interval(
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                original_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
                 source_begin_bp: positions[begin_step],
                 source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
-                sequence: Vec::new(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             });
         }
     }
@@ -3949,13 +5502,15 @@ fn is_outward_residual_seed(candidate: &BubbleCandidate, path_count: usize) -> b
 
 fn multi_level_source_priority(source: MultiLevelCandidateSource) -> u8 {
     match source {
-        MultiLevelCandidateSource::TopLevel => 0,
-        MultiLevelCandidateSource::ParentDescendants => 1,
-        MultiLevelCandidateSource::OutwardResidualWindow => 2,
-        MultiLevelCandidateSource::LevelWindow => 3,
-        MultiLevelCandidateSource::SiblingRun => 4,
-        MultiLevelCandidateSource::SlidingWindow => 5,
-        MultiLevelCandidateSource::StringyNeighborhood => 6,
+        MultiLevelCandidateSource::CompleteHomologousWindow => 0,
+        MultiLevelCandidateSource::MotifLocal => 1,
+        MultiLevelCandidateSource::TopLevel => 2,
+        MultiLevelCandidateSource::ParentDescendants => 3,
+        MultiLevelCandidateSource::OutwardResidualWindow => 4,
+        MultiLevelCandidateSource::LevelWindow => 5,
+        MultiLevelCandidateSource::SiblingRun => 6,
+        MultiLevelCandidateSource::SlidingWindow => 7,
+        MultiLevelCandidateSource::StringyNeighborhood => 8,
     }
 }
 
@@ -3963,17 +5518,86 @@ fn multi_level_window_replacement_method(
     window: &MultiLevelWindowCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
-    if window.source_sites > 1 {
-        match candidate_replacement_method(&window.candidate, config) {
-            // Multi-site windows should not go through the tiny-bubble SPOA
-            // path: POASTA is the direct aligner tier that can handle these
-            // larger local structures without invoking pairwise graph induction.
-            ResolutionMethod::Poa => ResolutionMethod::Poasta,
-            method => method,
-        }
-    } else {
-        candidate_replacement_method(&window.candidate, config)
+    if window.source == MultiLevelCandidateSource::MotifLocal {
+        return motif_local_replacement_method(&window.candidate, config);
     }
+    let method = candidate_replacement_method(&window.candidate, config);
+    if method == ResolutionMethod::Poa
+        && !poa_tier_covers_poasta_tier(config)
+        && (window.source_sites > 1
+            || broad_residual_overflows_small_poa_tier(&window.candidate, config))
+    {
+        // Under normal three-tier routing, multi-site and broad residual
+        // windows should not go through the tiny-bubble SPOA path. Equal or
+        // inverted POA/POASTA ceilings intentionally collapse the middle tier.
+        scalable_multi_level_direct_method(config)
+    } else {
+        method
+    }
+}
+
+fn motif_local_replacement_method(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    match config.method {
+        ResolutionMethod::Poa
+        | ResolutionMethod::Poasta
+        | ResolutionMethod::Abpoa
+        | ResolutionMethod::StarBiwfa
+        | ResolutionMethod::Allwave
+        | ResolutionMethod::Sweepga
+        | ResolutionMethod::Wfmash => return config.method,
+        _ => {}
+    }
+    let stats = candidate.traversal_stats;
+    if config.auto_poasta_max_traversal_len > 0
+        && stats.median_len < config.auto_poasta_max_traversal_len
+    {
+        // Motif windows are deliberately path-name preserving, so route even
+        // sub-sPOA-scale motifs through POASTA first.
+        ResolutionMethod::Poasta
+    } else {
+        ResolutionMethod::Sweepga
+    }
+}
+
+fn motif_replacement_has_singleton_bp_explosion(objective: &ReplacementObjectiveDelta) -> bool {
+    objective.output_singleton_bp > objective.input_singleton_bp
+}
+
+fn poa_tier_covers_poasta_tier(config: &ResolutionConfig) -> bool {
+    config.auto_spoa_max_traversal_len > 0
+        && config.auto_poasta_max_traversal_len > 0
+        && config.auto_spoa_max_traversal_len >= config.auto_poasta_max_traversal_len
+}
+
+fn scalable_multi_level_direct_method(config: &ResolutionConfig) -> ResolutionMethod {
+    if config.auto_poasta_max_traversal_len > 0 {
+        ResolutionMethod::Poasta
+    } else {
+        ResolutionMethod::Sweepga
+    }
+}
+
+fn broad_residual_overflows_small_poa_tier(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> bool {
+    let stats = candidate.traversal_stats;
+    if auto_method_by_median(stats, config) != ResolutionMethod::Poa {
+        return false;
+    }
+
+    let scalable_len_floor = config
+        .auto_poasta_max_traversal_len
+        .max(config.auto_spoa_max_traversal_len.saturating_mul(10))
+        .max(1);
+    let long_outlier = stats.max_len >= scalable_len_floor;
+    let broad_bp = candidate.root_span >= scalable_len_floor || stats.total_len >= 50_000;
+    let residual_step_mass = candidate.unique_steps >= stats.count.saturating_mul(3).max(64);
+
+    long_outlier && broad_bp && residual_step_mass
 }
 
 fn replacement_objective_delta(
@@ -4151,6 +5775,8 @@ fn format_multi_level_source_counts(
     counts: &FxHashMap<MultiLevelCandidateSource, usize>,
 ) -> String {
     let ordered = [
+        MultiLevelCandidateSource::CompleteHomologousWindow,
+        MultiLevelCandidateSource::MotifLocal,
         MultiLevelCandidateSource::TopLevel,
         MultiLevelCandidateSource::SiblingRun,
         MultiLevelCandidateSource::ParentDescendants,
@@ -4170,6 +5796,41 @@ fn format_multi_level_source_counts(
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn source_ancestry_from_discovered(site: &DiscoveredCandidate) -> String {
+    format!(
+        "site={} parent={} level={} leaf={}",
+        site.povu_site_id,
+        site.povu_parent_id.as_deref().unwrap_or("."),
+        site.povu_level,
+        site.is_leaf
+    )
+}
+
+fn source_ancestry_from_indexes(
+    discovered: &[DiscoveredCandidate],
+    indexes: &[usize],
+) -> Vec<String> {
+    indexes
+        .iter()
+        .filter_map(|&idx| discovered.get(idx).map(source_ancestry_from_discovered))
+        .collect()
+}
+
+fn format_source_ancestry(ancestry: &[String], limit: usize) -> String {
+    if ancestry.is_empty() {
+        return ".".to_string();
+    }
+    let mut items = ancestry
+        .iter()
+        .take(limit)
+        .map(|item| item.replace(' ', "_"))
+        .collect::<Vec<_>>();
+    if ancestry.len() > limit {
+        items.push(format!("+{}more", ancestry.len() - limit));
+    }
+    items.join("|")
 }
 
 fn multi_level_window_source_counts(
@@ -4242,6 +5903,16 @@ fn format_candidate_boundary(graph: &Graph, candidate: &BubbleCandidate) -> Stri
     )
 }
 
+fn format_candidate_path_coverage(graph: &Graph, candidate: &BubbleCandidate) -> String {
+    let covered_paths = candidate
+        .ranges
+        .iter()
+        .map(|range| range.path_idx)
+        .collect::<FxHashSet<_>>()
+        .len();
+    format!("{}/{}", covered_paths, graph.paths.len())
+}
+
 fn format_candidate_repeat_summary(graph: &Graph, candidate: &BubbleCandidate) -> String {
     let node_visits = graph_node_visit_counts(graph);
     let mut nodes = FxHashSet::<usize>::default();
@@ -4305,18 +5976,61 @@ fn format_multi_level_candidate_details(
         .enumerate()
         .map(|(idx, window)| {
             format!(
-                "#{} source={} sites={} level={} {} traversals={} max={} median={} total={} unique_steps={} step_savings={}",
+                "#{} source={} sites={} ancestry={} level={} {} traversals={} path_coverage={} min={} median={} p90={} max={} total={} unique_steps={} step_savings={}",
                 idx + 1,
                 window.source.as_str(),
                 window.source_sites,
+                format_source_ancestry(&window.source_ancestry, 4),
                 window.candidate.level,
                 format_candidate_boundary(graph, &window.candidate),
                 window.candidate.traversal_stats.count,
-                window.candidate.traversal_stats.max_len,
+                format_candidate_path_coverage(graph, &window.candidate),
+                window.candidate.traversal_stats.min_len,
                 window.candidate.traversal_stats.median_len,
+                window.candidate.traversal_stats.p90_len,
+                window.candidate.traversal_stats.max_len,
                 window.candidate.traversal_stats.total_len,
                 window.candidate.unique_steps,
                 window.candidate.estimated_step_savings()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_residual_novelty_memory(memory: &ResidualNoveltyMemory, limit: usize) -> String {
+    let details = memory
+        .records
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(idx, record)| format!("#{} {}", idx + 1, record.semantic_key()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("previous_round={}; {}", memory.previous_round, details)
+}
+
+fn format_residual_novelty_report(report: &ResidualNoveltyReport, limit: usize) -> String {
+    report
+        .details
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(idx, decision)| {
+            format!(
+                "#{} decision={} reason={} overlap={}bp({}/1000) span_delta={} traversal_delta={} median_delta={} total_len_delta={} unique_step_delta={} candidate=[{}] previous=[{}]",
+                idx + 1,
+                if decision.deferred { "defer" } else { "keep" },
+                decision.reason,
+                decision.overlap_bp,
+                decision.overlap_permille,
+                decision.span_delta,
+                decision.traversal_delta,
+                decision.median_delta,
+                decision.total_len_delta,
+                decision.unique_step_delta,
+                decision.candidate.semantic_key(),
+                decision.previous.semantic_key()
             )
         })
         .collect::<Vec<_>>()
@@ -4735,9 +6449,9 @@ fn candidate_selection_method(
     match config.method {
         ResolutionMethod::Auto => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
-            auto_method_by_median(candidate.traversal_stats, config)
-        }
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::ChainPovu => ResolutionMethod::Poasta,
         ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
@@ -4811,6 +6525,7 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         ResolutionMethod::Allwave | ResolutionMethod::Sweepga | ResolutionMethod::Wfmash => 0,
         ResolutionMethod::Poa
         | ResolutionMethod::Poasta
+        | ResolutionMethod::Abpoa
         | ResolutionMethod::StarBiwfa
         | ResolutionMethod::ChainGreedy => 1,
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
@@ -4823,8 +6538,10 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         ResolutionMethod::TopFlubbleSweepga => {
             unreachable!("top-flubble-sweepga candidate method should be resolved")
         }
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
-            unreachable!("iterative/coverage multi-level candidate method should be resolved")
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal => {
+            unreachable!("iterative/coverage/motif candidate method should be resolved")
         }
     }
 }
@@ -5348,14 +7065,12 @@ fn discover_all_candidates(
                     ranges.push(PathRange {
                         path_idx,
                         source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                        original_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
                         source_begin_bp: positions[range_begin],
                         source_end_bp: positions[range_end],
                         begin_step: range_begin,
                         end_step: range_end,
-                        sequence: Vec::new(),
-                        extended_sequence: Vec::new(),
-                        left_flank_bp: 0,
-                        right_flank_bp: 0,
+                        ..PathRange::default()
                     });
                 }
             }
@@ -5393,7 +7108,8 @@ fn discover_all_candidates(
                 ResolutionMethod::ChainPovu
                 | ResolutionMethod::TopFlubbleSweepga
                 | ResolutionMethod::IterativeMultiLevel
-                | ResolutionMethod::CoverageMultiBubble => false,
+                | ResolutionMethod::CoverageMultiBubble
+                | ResolutionMethod::MotifLocal => false,
                 _ => true,
             };
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
@@ -5649,14 +7365,12 @@ fn chain_candidate_from_group(
             ranges.push(PathRange {
                 path_idx,
                 source_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
+                original_path_name: graph.paths.get(path_idx).map(|path| path.name.clone()),
                 source_begin_bp: positions[begin_step],
                 source_end_bp: positions[end_step],
                 begin_step,
                 end_step,
-                sequence: Vec::new(),
-                extended_sequence: Vec::new(),
-                left_flank_bp: 0,
-                right_flank_bp: 0,
+                ..PathRange::default()
             });
         }
     }
@@ -5780,6 +7494,9 @@ fn finalize_frontier(
     leaves_seen: usize,
 ) -> io::Result<CandidateFrontier> {
     let select_start = Instant::now();
+    let direct_limit_filtered = candidates.len();
+    candidates.retain(|candidate| direct_poa_candidate_within_limits(candidate, config));
+    let direct_limit_filtered = direct_limit_filtered.saturating_sub(candidates.len());
     candidates.sort_by(|a, b| {
         candidate_selection_priority(a, config)
             .cmp(&candidate_selection_priority(b, config))
@@ -5831,9 +7548,41 @@ fn finalize_frontier(
             materialize_elapsed,
             leaves_seen
         );
+        if direct_limit_filtered > 0 {
+            log::info!(
+                "crush discovery detail: skipped {} explicit SPOA candidate(s) outside direct length budgets",
+                direct_limit_filtered
+            );
+        }
     }
 
     Ok(frontier)
+}
+
+fn direct_poa_candidate_within_limits(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> bool {
+    if config.method != ResolutionMethod::Poa {
+        return true;
+    }
+    let stats = candidate.traversal_stats;
+    if config.max_bubble_span > 0 && candidate.root_span > config.max_bubble_span {
+        return false;
+    }
+    if config.max_traversals > 0 && stats.count > config.max_traversals {
+        return false;
+    }
+    if config.max_traversal_len > 0 && stats.max_len > config.max_traversal_len {
+        return false;
+    }
+    if config.max_median_traversal_len > 0 && stats.median_len > config.max_median_traversal_len {
+        return false;
+    }
+    if config.max_total_sequence > 0 && stats.total_len > config.max_total_sequence {
+        return false;
+    }
+    true
 }
 
 impl BubbleCandidate {
@@ -6315,12 +8064,25 @@ fn materialize_candidate_sequences(
 ) -> bool {
     for range in &mut candidate.ranges {
         range.sequence = range_sequence(graph, range);
-        range.extended_sequence = Vec::new();
-        range.left_flank_bp = 0;
-        range.right_flank_bp = 0;
+        if let Some(path) = graph.paths.get(range.path_idx) {
+            let path_name = path.name.clone();
+            range
+                .source_path_name
+                .get_or_insert_with(|| path_name.clone());
+            range.original_path_name = Some(path_name);
+        }
+        reset_range_resolution_context(range);
     }
     if config.replacement_flank_bp > 0 {
         materialize_flanked_sequences(graph, candidate, config.replacement_flank_bp);
+    } else {
+        materialize_unflanked_sequences(candidate);
+    }
+    if config.replacement_flank_bp > 0 || candidate_has_reverse_orientation(candidate) {
+        log::info!(
+            "crush flank-aware candidate: {}",
+            format_flank_aware_candidate_diagnostic(candidate, config.replacement_flank_bp)
+        );
     }
     // Flanks are aligner context only; skip candidates whose substituted
     // interiors spell the same sequence on every path.
@@ -6345,28 +8107,60 @@ fn materialize_candidate_sequences(
 /// just the interior before the path-step substitution.
 fn materialize_flanked_sequences(graph: &Graph, candidate: &mut BubbleCandidate, flank_bp: usize) {
     for range in &mut candidate.ranges {
-        let path = &graph.paths[range.path_idx];
-        let left_flank = collect_flank_left(graph, path, range.begin_step, flank_bp);
-        let right_flank = collect_flank_right(graph, path, range.end_step, flank_bp);
-        if left_flank.is_empty() && right_flank.is_empty() {
-            continue;
-        }
-        let mut extended =
-            Vec::with_capacity(left_flank.len() + range.sequence.len() + right_flank.len());
-        extended.extend_from_slice(&left_flank);
-        extended.extend_from_slice(&range.sequence);
-        extended.extend_from_slice(&right_flank);
-        range.left_flank_bp = left_flank.len();
-        range.right_flank_bp = right_flank.len();
-        range.extended_sequence = extended;
+        range.left_flank = collect_flank_left(graph, range.path_idx, range.begin_step, flank_bp);
+        range.right_flank = collect_flank_right(graph, range.path_idx, range.end_step, flank_bp);
+        normalize_range_for_resolution(range);
     }
 }
 
+fn materialize_unflanked_sequences(candidate: &mut BubbleCandidate) {
+    for range in &mut candidate.ranges {
+        normalize_range_for_resolution(range);
+    }
+}
+
+fn reset_range_resolution_context(range: &mut PathRange) {
+    range.resolver_sequence = Vec::new();
+    range.extended_sequence = Vec::new();
+    range.left_flank_bp = 0;
+    range.right_flank_bp = 0;
+    range.left_flank = FlankContext::empty(FlankSide::Left);
+    range.right_flank = FlankContext::empty(FlankSide::Right);
+    range.trim_plan = TrimPlan {
+        expected_target_sequence_path_orientation: range.sequence.clone(),
+        restore_orientation: range.occurrence_orientation,
+        ..TrimPlan::default()
+    };
+}
+
 /// Walk path steps from `begin_step - 1` toward the path start, accumulating
-/// step-aligned sequence until at least `flank_bp` bp is collected (the last
-/// step included may overshoot — we don't split mid-segment for flanks because
-/// the aligner reads bp, not step structure).
-fn collect_flank_left(graph: &Graph, path: &Path, begin_step: usize, flank_bp: usize) -> Vec<u8> {
+/// occurrence-local path sequence until `flank_bp` bp is collected or the path
+/// begins. If the nearest whole-step collection overshoots, drop bases from the
+/// far end so the flank remains adjacent to the target boundary.
+fn collect_flank_left(
+    graph: &Graph,
+    path_idx: usize,
+    begin_step: usize,
+    flank_bp: usize,
+) -> FlankContext {
+    let mut context = FlankContext {
+        requested_bp: flank_bp,
+        path_side: FlankSide::Left,
+        canonical_side: FlankSide::Left,
+        truncation: if flank_bp == 0 {
+            FlankTruncationReason::NotRequested
+        } else {
+            FlankTruncationReason::PathBoundary
+        },
+        ..FlankContext::empty(FlankSide::Left)
+    };
+    if flank_bp == 0 {
+        return context;
+    }
+    let Some(path) = graph.paths.get(path_idx) else {
+        return context;
+    };
+    let positions = path_positions(graph, path_idx);
     let mut collected: Vec<u8> = Vec::new();
     let mut step_idx = begin_step;
     while step_idx > 0 && collected.len() < flank_bp {
@@ -6385,11 +8179,48 @@ fn collect_flank_left(graph: &Graph, path: &Path, begin_step: usize, flank_bp: u
     if collected.len() > flank_bp {
         let drop = collected.len() - flank_bp;
         collected.drain(..drop);
+        context.truncation = FlankTruncationReason::RequestedLength;
+    } else if collected.len() == flank_bp {
+        context.truncation = FlankTruncationReason::RequestedLength;
     }
-    collected
+    let actual = collected.len();
+    if actual > 0 {
+        let path_bp_end = positions.get(begin_step).copied().unwrap_or_default();
+        let path_bp_begin = path_bp_end.saturating_sub(actual);
+        context.path_step_range = Some((step_idx, begin_step));
+        context.path_bp_range = Some((path_bp_begin, path_bp_end));
+    }
+    context.actual_bp_path_orientation = actual;
+    context.actual_bp_canonical = actual;
+    context.sequence_path_orientation = collected.clone();
+    context.sequence_canonical = collected;
+    context
 }
 
-fn collect_flank_right(graph: &Graph, path: &Path, end_step: usize, flank_bp: usize) -> Vec<u8> {
+fn collect_flank_right(
+    graph: &Graph,
+    path_idx: usize,
+    end_step: usize,
+    flank_bp: usize,
+) -> FlankContext {
+    let mut context = FlankContext {
+        requested_bp: flank_bp,
+        path_side: FlankSide::Right,
+        canonical_side: FlankSide::Right,
+        truncation: if flank_bp == 0 {
+            FlankTruncationReason::NotRequested
+        } else {
+            FlankTruncationReason::PathBoundary
+        },
+        ..FlankContext::empty(FlankSide::Right)
+    };
+    if flank_bp == 0 {
+        return context;
+    }
+    let Some(path) = graph.paths.get(path_idx) else {
+        return context;
+    };
+    let positions = path_positions(graph, path_idx);
     let mut collected: Vec<u8> = Vec::new();
     let mut step_idx = end_step;
     while step_idx < path.steps.len() && collected.len() < flank_bp {
@@ -6404,8 +8235,107 @@ fn collect_flank_right(graph: &Graph, path: &Path, end_step: usize, flank_bp: us
     }
     if collected.len() > flank_bp {
         collected.truncate(flank_bp);
+        context.truncation = FlankTruncationReason::RequestedLength;
+    } else if collected.len() == flank_bp {
+        context.truncation = FlankTruncationReason::RequestedLength;
     }
-    collected
+    let actual = collected.len();
+    if actual > 0 {
+        let path_bp_begin = positions.get(end_step).copied().unwrap_or_default();
+        let path_bp_end = path_bp_begin.saturating_add(actual);
+        context.path_step_range = Some((end_step, step_idx));
+        context.path_bp_range = Some((path_bp_begin, path_bp_end));
+    }
+    context.actual_bp_path_orientation = actual;
+    context.actual_bp_canonical = actual;
+    context.sequence_path_orientation = collected.clone();
+    context.sequence_canonical = collected;
+    context
+}
+
+fn normalize_range_for_resolution(range: &mut PathRange) {
+    match range.occurrence_orientation {
+        OccurrenceOrientation::Forward => {
+            range.left_flank.canonical_side = FlankSide::Left;
+            range.left_flank.sequence_canonical =
+                range.left_flank.sequence_path_orientation.clone();
+            range.left_flank.actual_bp_canonical = range.left_flank.sequence_canonical.len();
+            range.right_flank.canonical_side = FlankSide::Right;
+            range.right_flank.sequence_canonical =
+                range.right_flank.sequence_path_orientation.clone();
+            range.right_flank.actual_bp_canonical = range.right_flank.sequence_canonical.len();
+            let mut resolver = Vec::with_capacity(
+                range.left_flank.sequence_canonical.len()
+                    + range.sequence.len()
+                    + range.right_flank.sequence_canonical.len(),
+            );
+            resolver.extend_from_slice(&range.left_flank.sequence_canonical);
+            resolver.extend_from_slice(&range.sequence);
+            resolver.extend_from_slice(&range.right_flank.sequence_canonical);
+            let canonical_left_trim = range.left_flank.actual_bp_canonical;
+            let canonical_right_trim = range.right_flank.actual_bp_canonical;
+            finish_range_resolution_context(
+                range,
+                resolver,
+                canonical_left_trim,
+                canonical_right_trim,
+            );
+        }
+        OccurrenceOrientation::Reverse => {
+            range.left_flank.canonical_side = FlankSide::Right;
+            range.left_flank.sequence_canonical =
+                reverse_complement(&range.left_flank.sequence_path_orientation);
+            range.left_flank.actual_bp_canonical = range.left_flank.sequence_canonical.len();
+            range.right_flank.canonical_side = FlankSide::Left;
+            range.right_flank.sequence_canonical =
+                reverse_complement(&range.right_flank.sequence_path_orientation);
+            range.right_flank.actual_bp_canonical = range.right_flank.sequence_canonical.len();
+            let target_canonical = reverse_complement(&range.sequence);
+            let mut resolver = Vec::with_capacity(
+                range.right_flank.sequence_canonical.len()
+                    + target_canonical.len()
+                    + range.left_flank.sequence_canonical.len(),
+            );
+            resolver.extend_from_slice(&range.right_flank.sequence_canonical);
+            resolver.extend_from_slice(&target_canonical);
+            resolver.extend_from_slice(&range.left_flank.sequence_canonical);
+            let canonical_left_trim = range.right_flank.actual_bp_canonical;
+            let canonical_right_trim = range.left_flank.actual_bp_canonical;
+            finish_range_resolution_context(
+                range,
+                resolver,
+                canonical_left_trim,
+                canonical_right_trim,
+            );
+        }
+    }
+}
+
+fn finish_range_resolution_context(
+    range: &mut PathRange,
+    resolver: Vec<u8>,
+    canonical_left_trim: usize,
+    canonical_right_trim: usize,
+) {
+    range.left_flank_bp = canonical_left_trim;
+    range.right_flank_bp = canonical_right_trim;
+    if range.left_flank_bp > 0 || range.right_flank_bp > 0 {
+        range.extended_sequence = resolver.clone();
+    } else {
+        range.extended_sequence = Vec::new();
+    }
+    range.resolver_sequence = if resolver != range.sequence {
+        resolver.clone()
+    } else {
+        Vec::new()
+    };
+    range.trim_plan = TrimPlan {
+        canonical_left_trim_bp: range.left_flank_bp,
+        canonical_right_trim_bp: range.right_flank_bp,
+        expected_flanked_sequence_canonical: resolver,
+        expected_target_sequence_path_orientation: range.sequence.clone(),
+        restore_orientation: range.occurrence_orientation,
+    };
 }
 
 fn candidate_signature(
@@ -6447,6 +8377,10 @@ fn apply_replacement_frontier(
     plans: &[ReplacementPlan],
     next_id: &mut usize,
 ) -> io::Result<Graph> {
+    let flank_aware_plan_count = plans
+        .iter()
+        .filter(|plan| candidate_needs_trim_or_restore(&plan.candidate))
+        .count();
     let mut replacements_by_path: FxHashMap<usize, Vec<PathReplacement>> = FxHashMap::default();
 
     for (plan_idx, plan) in plans.iter().enumerate() {
@@ -6551,6 +8485,15 @@ fn apply_replacement_frontier(
         next_id,
     );
     let next = parse_gfa(&rendered)?;
+    if flank_aware_plan_count > 0 {
+        log::info!(
+            "crush flank-aware lacing: plan_count={} flank_aware_plan_count={} lacing_result=parsed output_segments={} output_paths={}",
+            plans.len(),
+            flank_aware_plan_count,
+            next.segments.len(),
+            next.paths.len()
+        );
+    }
     if log::log_enabled!(log::Level::Debug) {
         let mut sequence_counts: FxHashMap<&[u8], usize> = FxHashMap::default();
         for segment in &next.segments {
@@ -6570,11 +8513,19 @@ fn apply_replacement_frontier(
             duplicate_segments
         );
     }
-    if !path_sequences_equal(graph, &next)? {
+    let path_preserved = path_sequences_equal(graph, &next)?;
+    if flank_aware_plan_count > 0 {
+        log::info!(
+            "crush flank-aware path-preservation: outcome={} checked_by=full_path_name_and_spelling_equality",
+            if path_preserved { "pass" } else { "fail" }
+        );
+    }
+    if !path_preserved {
         return Err(io::Error::other(
             "resolved graph failed exact path-sequence validation",
         ));
     }
+    debug_write_applied_frontier(graph, plans, &rendered, &next);
     Ok(next)
 }
 
@@ -6583,9 +8534,10 @@ fn build_replacement_with_method(
     config: &ResolutionConfig,
     method: ResolutionMethod,
 ) -> io::Result<Graph> {
+    log_flank_aware_build_start(candidate, config, method);
     let replacement = build_replacement_with_method_inner(candidate, config, method)?;
-    if candidate_has_flank(candidate) {
-        let clipped = clip_replacement_to_interior(replacement, candidate)?;
+    if candidate_needs_trim_or_restore(candidate) {
+        let clipped = clip_replacement_to_interior(replacement, candidate, method.method_name())?;
         validate_interior_replacement_paths(&clipped, candidate, method.method_name())?;
         Ok(clipped)
     } else {
@@ -6604,6 +8556,7 @@ fn build_replacement_with_method_report(
     config: &ResolutionConfig,
     method: ResolutionMethod,
 ) -> io::Result<ReplacementBuildReport> {
+    log_flank_aware_build_start(candidate, config, method);
     let (replacement, evidence) = match method {
         ResolutionMethod::Sweepga => {
             let (replacement, evidence) =
@@ -6620,8 +8573,8 @@ fn build_replacement_with_method_report(
             None,
         ),
     };
-    let replacement = if candidate_has_flank(candidate) {
-        let clipped = clip_replacement_to_interior(replacement, candidate)?;
+    let replacement = if candidate_needs_trim_or_restore(candidate) {
+        let clipped = clip_replacement_to_interior(replacement, candidate, method.method_name())?;
         validate_interior_replacement_paths(&clipped, candidate, method.method_name())?;
         clipped
     } else {
@@ -6659,6 +8612,22 @@ fn build_replacement_with_method_catching_unwind_report(
                 panic_message
             )))
         }
+    }
+}
+
+fn log_flank_aware_build_start(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    method: ResolutionMethod,
+) {
+    if candidate_needs_trim_or_restore(candidate) {
+        log::info!(
+            "crush flank-aware build: candidate_id={} resolver={} mode=global/end-to-end requested_flank_bp={} occurrences={}",
+            candidate.signature,
+            method.method_name(),
+            config.replacement_flank_bp,
+            format_flank_aware_occurrence_summary(candidate)
+        );
     }
 }
 
@@ -6701,8 +8670,8 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::IterativeMultiLevel => {
             unreachable!("iterative multi-level is resolved before replacement dispatch")
         }
-        ResolutionMethod::CoverageMultiBubble => {
-            unreachable!("coverage multi-bubble is resolved before replacement dispatch")
+        ResolutionMethod::CoverageMultiBubble | ResolutionMethod::MotifLocal => {
+            unreachable!("coverage/motif multi-level is resolved before replacement dispatch")
         }
         ResolutionMethod::ChainPovu => {
             build_chain_povu_smooth_poasta_replacement(candidate, config)
@@ -6710,6 +8679,7 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::TopFlubbleSweepga => build_sweepga_seqwish_replacement(candidate, config),
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
         ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
+        ResolutionMethod::Abpoa => build_abpoa_replacement(candidate, config),
         ResolutionMethod::ChainGreedy => build_chain_greedy_replacement(candidate, config),
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
@@ -6725,9 +8695,9 @@ fn candidate_replacement_method(
     match config.method {
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
-        ResolutionMethod::IterativeMultiLevel | ResolutionMethod::CoverageMultiBubble => {
-            auto_replacement_method(candidate, config)
-        }
+        ResolutionMethod::IterativeMultiLevel
+        | ResolutionMethod::CoverageMultiBubble
+        | ResolutionMethod::MotifLocal => auto_replacement_method(candidate, config),
         ResolutionMethod::ChainPovu => ResolutionMethod::ChainPovu,
         ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
@@ -6849,15 +8819,19 @@ fn auto_replacement_method(
 /// flanking context is active this is `<left_flank><interior><right_flank>`;
 /// otherwise it is the bubble interior alone.
 fn range_aligner_sequence(range: &PathRange) -> &[u8] {
-    if range.extended_sequence.is_empty() {
-        &range.sequence
-    } else {
+    if !range.resolver_sequence.is_empty() {
+        &range.resolver_sequence
+    } else if !range.extended_sequence.is_empty() {
         &range.extended_sequence
+    } else {
+        &range.sequence
     }
 }
 
-fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
-    let headers = candidate_sequence_headers(candidate);
+fn candidate_named_sequences(
+    candidate: &BubbleCandidate,
+) -> io::Result<(Vec<String>, Vec<(String, Vec<u8>)>)> {
+    let headers = candidate_sequence_headers(candidate)?;
     let seqs = headers
         .iter()
         .cloned()
@@ -6868,30 +8842,59 @@ fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(
                 .map(|range| range_aligner_sequence(range).to_vec()),
         )
         .collect();
-    (headers, seqs)
+    Ok((headers, seqs))
 }
 
-fn candidate_sequence_headers(candidate: &BubbleCandidate) -> Vec<String> {
-    candidate
+fn candidate_sequence_headers(candidate: &BubbleCandidate) -> io::Result<Vec<String>> {
+    let names = candidate
         .ranges
         .iter()
-        .enumerate()
         .map(candidate_sequence_name)
-        .collect()
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(uniquify_candidate_sequence_names(names))
 }
 
-fn candidate_sequence_name((_, range): (usize, &PathRange)) -> String {
+fn candidate_sequence_name(range: &PathRange) -> io::Result<String> {
     let source_path_name = range
         .source_path_name
         .as_deref()
-        .filter(|name| !name.is_empty())
-        .expect("local replacement ranges must preserve source path names");
-    local_replacement_visible_source_name(
+        .and_then(primary_sequence_name_token)
+        .ok_or_else(|| {
+            io::Error::other("crush replacement traversal is missing source path name")
+        })?;
+    Ok(local_replacement_visible_source_name(
         source_path_name,
         range.source_begin_bp,
         range.source_end_bp,
     )
-    .unwrap_or_else(|| source_path_name.to_string())
+    .unwrap_or_else(|| {
+        format!(
+            "{}:{}-{}",
+            source_path_name, range.source_begin_bp, range.source_end_bp
+        )
+    }))
+}
+
+fn primary_sequence_name_token(name: &str) -> Option<&str> {
+    name.split_ascii_whitespace()
+        .next()
+        .filter(|token| !token.is_empty())
+}
+
+fn uniquify_candidate_sequence_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = FxHashMap::<String, usize>::default();
+    names
+        .into_iter()
+        .map(|name| {
+            let copy = seen.entry(name.clone()).or_insert(0);
+            *copy += 1;
+            if *copy == 1 {
+                name
+            } else {
+                format!("{name}|duplicate-source-interval-copy{copy}")
+            }
+        })
+        .collect()
 }
 
 fn local_replacement_visible_source_name(
@@ -6950,13 +8953,145 @@ fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
         .any(|range| !range.extended_sequence.is_empty())
 }
 
+fn candidate_has_reverse_orientation(candidate: &BubbleCandidate) -> bool {
+    candidate
+        .ranges
+        .iter()
+        .any(|range| range.occurrence_orientation == OccurrenceOrientation::Reverse)
+}
+
+fn candidate_needs_trim_or_restore(candidate: &BubbleCandidate) -> bool {
+    candidate_has_flank(candidate) || candidate_has_reverse_orientation(candidate)
+}
+
+fn format_flank_aware_candidate_diagnostic(
+    candidate: &BubbleCandidate,
+    requested_flank_bp: usize,
+) -> String {
+    format!(
+        "candidate_id={} target_span=root_steps:{}..{} root_span={}bp requested_flank_bp={} occurrences=[{}]",
+        candidate.signature,
+        candidate.root_start_step,
+        candidate.root_end_step,
+        candidate.root_span,
+        requested_flank_bp,
+        format_flank_aware_occurrence_summary(candidate)
+    )
+}
+
+fn format_flank_aware_occurrence_summary(candidate: &BubbleCandidate) -> String {
+    candidate
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(idx, range)| {
+            let name = range
+                .original_path_name
+                .as_deref()
+                .or(range.source_path_name.as_deref())
+                .unwrap_or("<missing-path-name>");
+            format!(
+                "#{} path={} target_steps={}..{} target_bp={}..{} orientation={} left(path_side={},path_req={},path_actual={},canonical_side={},canonical_actual={},step_range={},bp_range={},trunc={}) right(path_side={},path_req={},path_actual={},canonical_side={},canonical_actual={},step_range={},bp_range={},trunc={}) trim(left={},right={},expected_flanked_bp={},expected_target_bp={},restore={}) resolver_bp={}",
+                idx,
+                name,
+                range.begin_step,
+                range.end_step,
+                range.source_begin_bp,
+                range.source_end_bp,
+                range.occurrence_orientation.as_str(),
+                range.left_flank.path_side.as_str(),
+                range.left_flank.requested_bp,
+                range.left_flank.actual_bp_path_orientation,
+                range.left_flank.canonical_side.as_str(),
+                range.left_flank.actual_bp_canonical,
+                format_optional_range(range.left_flank.path_step_range),
+                format_optional_range(range.left_flank.path_bp_range),
+                range.left_flank.truncation.as_str(),
+                range.right_flank.path_side.as_str(),
+                range.right_flank.requested_bp,
+                range.right_flank.actual_bp_path_orientation,
+                range.right_flank.canonical_side.as_str(),
+                range.right_flank.actual_bp_canonical,
+                format_optional_range(range.right_flank.path_step_range),
+                format_optional_range(range.right_flank.path_bp_range),
+                range.right_flank.truncation.as_str(),
+                range.trim_plan.canonical_left_trim_bp,
+                range.trim_plan.canonical_right_trim_bp,
+                range.trim_plan.expected_flanked_sequence_canonical.len(),
+                range.trim_plan.expected_target_sequence_path_orientation.len(),
+                range.trim_plan.restore_orientation.as_str(),
+                range_aligner_sequence(range).len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_optional_range(range: Option<(usize, usize)>) -> String {
+    match range {
+        Some((begin, end)) => format!("{begin}..{end}"),
+        None => "none".to_string(),
+    }
+}
+
 fn candidate_named_sequences_longest_first(
     candidate: &BubbleCandidate,
-) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+) -> io::Result<(Vec<String>, Vec<(String, Vec<u8>)>)> {
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     let mut sorted = seqs;
     sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-    (headers, sorted)
+    Ok((headers, sorted))
+}
+
+fn candidate_external_named_sequences_longest_first(
+    candidate: &BubbleCandidate,
+    method: &str,
+) -> io::Result<(Vec<String>, Vec<(String, Vec<u8>)>)> {
+    let names = candidate
+        .ranges
+        .iter()
+        .map(candidate_external_sequence_name)
+        .collect::<io::Result<Vec<_>>>()?;
+    let mut seen = FxHashSet::<String>::default();
+    let mut duplicates = Vec::new();
+    for name in &names {
+        if !seen.insert(name.clone()) {
+            duplicates.push(name.clone());
+        }
+    }
+    if !duplicates.is_empty() {
+        duplicates.sort();
+        duplicates.dedup();
+        return Err(io::Error::other(format!(
+            "{method} replacement would require synthetic FASTA IDs for duplicate semantic path name(s): {}",
+            duplicates.join(", ")
+        )));
+    }
+
+    let seqs = names
+        .iter()
+        .cloned()
+        .zip(
+            candidate
+                .ranges
+                .iter()
+                .map(|range| range_aligner_sequence(range).to_vec()),
+        )
+        .collect::<Vec<_>>();
+    let mut sorted = seqs;
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    Ok((names, sorted))
+}
+
+fn candidate_external_sequence_name(range: &PathRange) -> io::Result<String> {
+    let source_path_name = range
+        .source_path_name
+        .as_deref()
+        .and_then(primary_sequence_name_token)
+        .ok_or_else(|| {
+            io::Error::other("crush replacement traversal is missing source path name")
+        })?;
+    Ok(source_path_name.to_string())
 }
 
 fn seqwish_replacement_config(
@@ -7198,7 +9333,7 @@ fn build_chain_povu_smooth_poasta_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     if seqs.iter().any(|(_, seq)| seq.is_empty()) {
         return Err(io::Error::other(
             "crush chain-povu: empty traversal present; refusing direct POASTA fallback",
@@ -7218,7 +9353,6 @@ fn build_chain_povu_smooth_poasta_replacement(
         };
         let smoothed = crate::smooth::smooth_gfa(&seed_gfa, &smooth_config)?;
         let smoothed = unchop_gfa(&smoothed)?;
-        let smoothed = strip_full_range_path_names(&smoothed)?;
         let mut poasta_config = config.clone();
         poasta_config.method = ResolutionMethod::Poasta;
         poasta_config.max_iterations = DEFAULT_CHAIN_POVU_POASTA_ITERATIONS;
@@ -7298,7 +9432,7 @@ fn build_allwave_seqwish_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     let non_empty = seqs.iter().filter(|(_, seq)| !seq.is_empty()).count();
     if non_empty < 2 {
         return Err(io::Error::other(format!(
@@ -7461,7 +9595,7 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     config: &ResolutionConfig,
     tail_mode: SweepgaSeqwishTailMode,
 ) -> io::Result<(Graph, SweepgaReplacementEvidence)> {
-    let (headers, seqs) = candidate_named_sequences(candidate);
+    let (headers, seqs) = candidate_named_sequences(candidate)?;
     let min_aligner_sequence_len = sweepga_backend_min_sequence_len(&config.sweepga_aligner);
     let named: Vec<(String, &[u8])> = seqs
         .iter()
@@ -7778,7 +9912,7 @@ fn build_poa_replacement(
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
     let (mut graph, mut engine) = build_global_spoa_engine(config.scoring_params);
-    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate);
+    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate)?;
     let sorted_headers = sorted_sequences
         .iter()
         .map(|(name, _)| name.clone())
@@ -7809,6 +9943,71 @@ fn build_chain_greedy_replacement(
     build_poasta_replacement(candidate, config)
 }
 
+fn build_abpoa_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let (headers, sorted_sequences) =
+        candidate_external_named_sequences_longest_first(candidate, "abPOA")?;
+    if let Some((name, _)) = sorted_sequences
+        .iter()
+        .find(|(_, sequence)| sequence.is_empty())
+    {
+        return Err(io::Error::other(format!(
+            "abPOA replacement cannot encode empty traversal '{name}' without a synthetic sentinel"
+        )));
+    }
+
+    let mut input = tempfile::Builder::new()
+        .prefix("impg-crush-abpoa-")
+        .suffix(".fa")
+        .tempfile()?;
+    write_fasta_records(&mut input, &sorted_sequences)?;
+
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
+        config.scoring_params;
+    let output = Command::new(&config.abpoa_bin)
+        .arg("-m")
+        .arg("0")
+        .arg("-M")
+        .arg(match_score.to_string())
+        .arg("-X")
+        .arg(mismatch.to_string())
+        .arg("-O")
+        .arg(format!("{gap_open1},{gap_open2}"))
+        .arg("-E")
+        .arg(format!("{gap_extend1},{gap_extend2}"))
+        .arg("-r")
+        .arg("3")
+        .arg(input.path())
+        .output()
+        .map_err(|err| {
+            io::Error::other(format!(
+                "failed to run abPOA binary '{}': {err}",
+                config.abpoa_bin
+            ))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "abPOA replacement failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+    let gfa = String::from_utf8(output.stdout).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("abPOA replacement GFA is not UTF-8: {err}"),
+        )
+    })?;
+    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let mut replacement = abpoa_gfa_to_exact_graph(&gfa, &expected_paths)?;
+    order_replacement_paths(&mut replacement, &headers)?;
+    validate_replacement_paths(&replacement, candidate, "abPOA")?;
+    Ok(replacement)
+}
+
 fn build_poasta_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
@@ -7818,7 +10017,7 @@ fn build_poasta_replacement(
     use poasta::graphs::poa::POAGraph;
     use poasta::io::graph::graph_to_gfa;
 
-    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate);
+    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate)?;
     let sorted_headers = sorted_sequences
         .iter()
         .map(|(name, _)| name.clone())
@@ -7843,6 +10042,7 @@ fn build_poasta_replacement(
         &weights,
     )?;
 
+    let debug_dir = debug_replacement_build_dir("poasta");
     let mut gfa = Vec::new();
     graph_to_gfa(&mut gfa, &graph).map_err(|err| {
         io::Error::other(format!("POASTA replacement GFA generation failed: {err}"))
@@ -7853,9 +10053,31 @@ fn build_poasta_replacement(
             format!("POASTA replacement GFA is not UTF-8: {err}"),
         )
     })?;
+    if let Some(dir) = &debug_dir {
+        debug_write_file(&dir.join("raw.graph_to_gfa.gfa"), &gfa);
+    }
     let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
     let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
     order_replacement_paths(&mut replacement, &headers)?;
+    if let Some(dir) = &debug_dir {
+        let exact_gfa = render_graph(&replacement);
+        debug_write_file(&dir.join("exact.normalized.gfa"), &exact_gfa);
+        debug_write_file(
+            &dir.join("poasta-build.tsv"),
+            format!(
+                "input_paths\tinput_bp\traw_segments\traw_links\traw_walks\texact_segments\texact_links\texact_paths\texact_bp\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                headers.len(),
+                expected_paths.iter().map(|(_, seq)| seq.len()).sum::<usize>(),
+                debug_gfa_record_count(&gfa, 'S'),
+                debug_gfa_record_count(&gfa, 'L'),
+                debug_gfa_record_count(&gfa, 'W'),
+                replacement.segments.len(),
+                debug_gfa_record_count(&exact_gfa, 'L'),
+                replacement.paths.len(),
+                replacement_segment_bp(&replacement)
+            ),
+        );
+    }
     validate_replacement_paths(&replacement, candidate, "POASTA")?;
 
     Ok(replacement)
@@ -7872,36 +10094,49 @@ pub fn poasta_sequences_to_gfa(
     sequences: &[Vec<u8>],
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<String> {
+    validate_sequence_inputs("POASTA block", headers, sequences)?;
+    let mut insertion_order = (0..headers.len()).collect::<Vec<_>>();
+    insertion_order.sort_by(|&a, &b| {
+        sequences[b]
+            .len()
+            .cmp(&sequences[a].len())
+            .then_with(|| headers[a].cmp(&headers[b]))
+    });
+    poasta_sequences_to_gfa_in_order(headers, sequences, &insertion_order, scoring_params)
+}
+
+/// Build an exact path-preserving POASTA graph for already-extracted local
+/// sequences using an explicit progressive insertion order.
+///
+/// `insertion_order` is a permutation of `0..headers.len()`. Path records in
+/// the returned GFA are still ordered as `headers`, so callers can compare
+/// insertion-order effects without changing path identity or output path order.
+pub fn poasta_sequences_to_gfa_in_order(
+    headers: &[String],
+    sequences: &[Vec<u8>],
+    insertion_order: &[usize],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<String> {
     use poasta::aligner::config::Affine2PieceMinGapCost;
     use poasta::aligner::PoastaAligner;
     use poasta::graphs::poa::POAGraph;
     use poasta::io::graph::graph_to_gfa;
 
-    if headers.len() != sequences.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "POASTA block got {} header(s) for {} sequence(s)",
-                headers.len(),
-                sequences.len()
-            ),
-        ));
-    }
+    validate_sequence_inputs("POASTA block", headers, sequences)?;
+    validate_insertion_order("POASTA block", insertion_order, headers.len())?;
     if headers.is_empty() {
         return Ok(String::new());
     }
 
-    let mut sorted_sequences = headers
+    let ordered_sequences = insertion_order
         .iter()
-        .cloned()
-        .zip(sequences.iter().cloned())
+        .map(|&idx| (headers[idx].clone(), sequences[idx].clone()))
         .collect::<Vec<_>>();
-    sorted_sequences.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-    let sorted_headers = sorted_sequences
+    let ordered_headers = ordered_sequences
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
-    let sequence_refs = sorted_sequences
+    let sequence_refs = ordered_sequences
         .iter()
         .map(|(_, sequence)| sequence.as_slice())
         .collect::<Vec<_>>();
@@ -7916,7 +10151,7 @@ pub fn poasta_sequences_to_gfa(
     add_poasta_sequences(
         &mut graph,
         &mut aligner,
-        &sorted_headers,
+        &ordered_headers,
         &sequence_refs,
         &weights,
     )?;
@@ -7931,7 +10166,7 @@ pub fn poasta_sequences_to_gfa(
         )
     })?;
 
-    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let expected_paths = ordered_sequences.into_iter().collect::<Vec<_>>();
     let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
     order_replacement_paths(&mut replacement, headers)?;
     let expected_in_header_order = headers
@@ -7941,6 +10176,132 @@ pub fn poasta_sequences_to_gfa(
         .collect::<Vec<_>>();
     validate_expected_paths(&replacement, &expected_in_header_order, "POASTA block")?;
     Ok(render_numeric_graph(&replacement))
+}
+
+/// Build an exact path-preserving abPOA graph for already-extracted local
+/// sequences using an explicit FASTA/progressive insertion order.
+pub fn abpoa_sequences_to_gfa_in_order(
+    headers: &[String],
+    sequences: &[Vec<u8>],
+    insertion_order: &[usize],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    abpoa_bin: &str,
+) -> io::Result<String> {
+    validate_sequence_inputs("abPOA block", headers, sequences)?;
+    validate_insertion_order("abPOA block", insertion_order, headers.len())?;
+    if headers.is_empty() {
+        return Ok(String::new());
+    }
+    if let Some(&idx) = insertion_order
+        .iter()
+        .find(|&&idx| sequences[idx].is_empty())
+    {
+        return Err(io::Error::other(format!(
+            "abPOA block cannot encode empty traversal '{}' without a synthetic sentinel",
+            headers[idx]
+        )));
+    }
+
+    let ordered_sequences = insertion_order
+        .iter()
+        .map(|&idx| (headers[idx].clone(), sequences[idx].clone()))
+        .collect::<Vec<_>>();
+    let mut input = tempfile::Builder::new()
+        .prefix("impg-abpoa-order-")
+        .suffix(".fa")
+        .tempfile()?;
+    write_fasta_records(&mut input, &ordered_sequences)?;
+
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+    let output = Command::new(abpoa_bin)
+        .arg("-m")
+        .arg("0")
+        .arg("-M")
+        .arg(match_score.to_string())
+        .arg("-X")
+        .arg(mismatch.to_string())
+        .arg("-O")
+        .arg(format!("{gap_open1},{gap_open2}"))
+        .arg("-E")
+        .arg(format!("{gap_extend1},{gap_extend2}"))
+        .arg("-r")
+        .arg("3")
+        .arg(input.path())
+        .output()
+        .map_err(|err| {
+            io::Error::other(format!("failed to run abPOA binary '{abpoa_bin}': {err}"))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "abPOA block failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+    let gfa = String::from_utf8(output.stdout).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("abPOA block GFA is not UTF-8: {err}"),
+        )
+    })?;
+    let mut replacement = abpoa_gfa_to_exact_graph(&gfa, &ordered_sequences)?;
+    order_replacement_paths(&mut replacement, headers)?;
+    let expected_in_header_order = headers
+        .iter()
+        .cloned()
+        .zip(sequences.iter().cloned())
+        .collect::<Vec<_>>();
+    validate_expected_paths(&replacement, &expected_in_header_order, "abPOA block")?;
+    Ok(render_numeric_graph(&replacement))
+}
+
+fn validate_sequence_inputs(
+    method: &str,
+    headers: &[String],
+    sequences: &[Vec<u8>],
+) -> io::Result<()> {
+    if headers.len() != sequences.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{method} got {} header(s) for {} sequence(s)",
+                headers.len(),
+                sequences.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_insertion_order(method: &str, insertion_order: &[usize], len: usize) -> io::Result<()> {
+    if insertion_order.len() != len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{method} insertion order has {} index(es) for {len} sequence(s)",
+                insertion_order.len()
+            ),
+        ));
+    }
+    let mut seen = vec![false; len];
+    for &idx in insertion_order {
+        if idx >= len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{method} insertion order index {idx} is out of range for {len} sequence(s)"
+                ),
+            ));
+        }
+        if std::mem::replace(&mut seen[idx], true) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{method} insertion order repeats index {idx}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn render_numeric_graph(graph: &Graph) -> String {
@@ -8030,6 +10391,31 @@ fn poasta_gfa_to_exact_graph(gfa: &str, expected_paths: &[(String, Vec<u8>)]) ->
     poasta_gfa_walks_to_exact_graph(gfa, expected_paths)
 }
 
+fn abpoa_gfa_to_exact_graph(gfa: &str, expected_paths: &[(String, Vec<u8>)]) -> io::Result<Graph> {
+    let headers = expected_paths
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut graph = parse_gfa(gfa).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("abPOA replacement GFA parse failed: {err}"),
+        )
+    })?;
+    order_replacement_paths(&mut graph, &headers)?;
+    validate_expected_paths(&graph, expected_paths, "abPOA")?;
+    Ok(graph)
+}
+
+fn write_fasta_records<W: Write>(writer: &mut W, records: &[(String, Vec<u8>)]) -> io::Result<()> {
+    for (name, sequence) in records {
+        writeln!(writer, ">{name}")?;
+        writer.write_all(sequence)?;
+        writeln!(writer)?;
+    }
+    writer.flush()
+}
+
 #[derive(Clone, Debug)]
 struct StarAlignmentRow {
     inserts: Vec<Vec<u8>>,
@@ -8040,15 +10426,15 @@ fn build_biwfa_inmemory_replacement(
     candidate: &BubbleCandidate,
     _config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let headers = candidate_sequence_headers(candidate);
+    let headers = candidate_sequence_headers(candidate)?;
     let root_idx = candidate
         .ranges
         .iter()
         .enumerate()
-        .max_by_key(|(_, range)| range.sequence.len())
+        .max_by_key(|(_, range)| range_aligner_sequence(range).len())
         .map(|(idx, _)| idx)
         .ok_or_else(|| io::Error::other("BiWFA replacement has no traversals"))?;
-    let root = &candidate.ranges[root_idx].sequence;
+    let root = range_aligner_sequence(&candidate.ranges[root_idx]);
     let root_len = root.len();
 
     let rows = candidate
@@ -8059,7 +10445,12 @@ fn build_biwfa_inmemory_replacement(
             if idx == root_idx {
                 Ok(root_alignment_row(root))
             } else {
-                align_to_root_row(&headers[idx], &range.sequence, &headers[root_idx], root)
+                align_to_root_row(
+                    &headers[idx],
+                    range_aligner_sequence(range),
+                    &headers[root_idx],
+                    root,
+                )
             }
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -8308,7 +10699,6 @@ fn polish_replacement_gfa_with_smooth(
         ..crate::smooth::SmoothConfig::new(n_haps.max(1))
     };
     let smoothed = crate::smooth::smooth_gfa(gfa, &smooth_config)?;
-    let smoothed = strip_full_range_path_names(&smoothed)?;
     let after = parse_gfa(&smoothed)?;
     let after_quality = graph_quality(&after);
     log::debug!(
@@ -8317,47 +10707,6 @@ fn polish_replacement_gfa_with_smooth(
         after_quality.summary()
     );
     Ok(smoothed)
-}
-
-fn strip_full_range_path_names(gfa: &str) -> io::Result<String> {
-    let graph = parse_gfa(gfa)?;
-    let mut rename = FxHashMap::default();
-    for path in &graph.paths {
-        let Some((base, start, end)) = split_path_coordinate_suffix(&path.name) else {
-            continue;
-        };
-        let sequence_len = path_sequence(&graph, path)?.len();
-        if start == 0 && end == sequence_len {
-            rename.insert(path.name.clone(), base.to_string());
-        }
-    }
-    if rename.is_empty() {
-        return Ok(gfa.to_string());
-    }
-
-    let mut out = String::with_capacity(gfa.len());
-    for line in gfa.lines() {
-        if let Some(rest) = line.strip_prefix("P\t") {
-            let mut fields = rest.splitn(3, '\t');
-            if let (Some(name), Some(walk), Some(overlaps)) =
-                (fields.next(), fields.next(), fields.next())
-            {
-                if let Some(new_name) = rename.get(name) {
-                    out.push_str("P\t");
-                    out.push_str(new_name);
-                    out.push('\t');
-                    out.push_str(walk);
-                    out.push('\t');
-                    out.push_str(overlaps);
-                    out.push('\n');
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    Ok(out)
 }
 
 fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
@@ -8406,6 +10755,7 @@ fn validate_replacement_paths(
 fn clip_replacement_to_interior(
     replacement: Graph,
     candidate: &BubbleCandidate,
+    method: &str,
 ) -> io::Result<Graph> {
     if replacement.paths.len() != candidate.ranges.len() {
         return Err(io::Error::other(format!(
@@ -8422,12 +10772,14 @@ fn clip_replacement_to_interior(
         let path = &replacement.paths[range_idx];
         let pieces = replacement_path_pieces(&replacement, path)?;
         let raw_len: usize = pieces.iter().map(|p| p.end - p.start).sum();
-        let interior_start = range.left_flank_bp;
-        let interior_end = raw_len.checked_sub(range.right_flank_bp).ok_or_else(|| {
-            io::Error::other(
-                "clip_replacement_to_interior: right flank exceeds replacement path length",
-            )
-        })?;
+        let interior_start = range.trim_plan.canonical_left_trim_bp;
+        let interior_end = raw_len
+            .checked_sub(range.trim_plan.canonical_right_trim_bp)
+            .ok_or_else(|| {
+                io::Error::other(
+                    "clip_replacement_to_interior: right flank exceeds replacement path length",
+                )
+            })?;
         if interior_start > interior_end {
             return Err(io::Error::other(
                 "clip_replacement_to_interior: interior bounds inverted",
@@ -8441,6 +10793,25 @@ fn clip_replacement_to_interior(
                 range_idx
             )));
         }
+        log::info!(
+            "crush flank-aware trim: candidate_id={} method={} path={} orientation={} trim_boundary_mapping=canonical:{}..{} of {}bp left_trim={} right_trim={} expected_target_bp={} requested_flanks=({},{}) actual_path_flanks=({},{}) canonical_flanks=({},{})",
+            candidate.signature,
+            method,
+            range.original_path_name.as_deref().or(range.source_path_name.as_deref()).unwrap_or("<missing-path-name>"),
+            range.occurrence_orientation.as_str(),
+            interior_start,
+            interior_end,
+            raw_len,
+            range.trim_plan.canonical_left_trim_bp,
+            range.trim_plan.canonical_right_trim_bp,
+            range.sequence.len(),
+            range.left_flank.requested_bp,
+            range.right_flank.requested_bp,
+            range.left_flank.actual_bp_path_orientation,
+            range.right_flank.actual_bp_path_orientation,
+            range.left_flank.actual_bp_canonical,
+            range.right_flank.actual_bp_canonical
+        );
         let mut new_steps = Vec::new();
         for piece in pieces {
             let from = piece.start.max(interior_start);
@@ -8461,6 +10832,9 @@ fn clip_replacement_to_interior(
             )?;
             new_steps.push(Step { node, rev: false });
         }
+        if range.trim_plan.restore_orientation == OccurrenceOrientation::Reverse {
+            new_steps = restore_reverse_lacing_steps(new_steps);
+        }
         output_paths.push(Path {
             name: path.name.clone(),
             steps: new_steps,
@@ -8471,6 +10845,14 @@ fn clip_replacement_to_interior(
         segments: output_segments,
         paths: output_paths,
     })
+}
+
+fn restore_reverse_lacing_steps(mut steps: Vec<Step>) -> Vec<Step> {
+    steps.reverse();
+    for step in &mut steps {
+        step.rev = !step.rev;
+    }
+    steps
 }
 
 fn replacement_build_status<T>(result: &io::Result<Option<T>>) -> &'static str {
@@ -8910,6 +11292,269 @@ fn path_sequence_map(graph: &Graph) -> io::Result<FxHashMap<String, Vec<u8>>> {
     Ok(map)
 }
 
+fn crush_debug_root() -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("IMPG_CRUSH_DEBUG_DIR")?;
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(root))
+}
+
+fn debug_sanitize_token(raw: &str) -> String {
+    let token = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if token.is_empty() {
+        "unknown".to_string()
+    } else {
+        token
+    }
+}
+
+fn debug_write_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            log::debug!(
+                "crush debug: failed to create debug dir {}: {}",
+                parent.display(),
+                err
+            );
+            return;
+        }
+    }
+    if let Err(err) = std::fs::write(path, contents) {
+        log::debug!(
+            "crush debug: failed to write debug file {}: {}",
+            path.display(),
+            err
+        );
+    }
+}
+
+fn debug_replacement_build_dir(method: &str) -> Option<std::path::PathBuf> {
+    let root = crush_debug_root()?;
+    let id = DEBUG_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed);
+    let method = debug_sanitize_token(method);
+    let dir = root.join(format!("replacement_{id:04}_{method}"));
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
+fn debug_method_label(method: ResolutionMethod) -> &'static str {
+    match method {
+        ResolutionMethod::Poa => "Poa",
+        ResolutionMethod::Abpoa => "abPOA",
+        ResolutionMethod::Poasta | ResolutionMethod::ChainGreedy | ResolutionMethod::ChainPovu => {
+            "Poasta"
+        }
+        ResolutionMethod::Allwave => "Allwave",
+        ResolutionMethod::Sweepga
+        | ResolutionMethod::Wfmash
+        | ResolutionMethod::TopFlubbleSweepga => "Sweepga",
+        ResolutionMethod::StarBiwfa => "Biwfa",
+        ResolutionMethod::Auto => "Auto",
+        ResolutionMethod::Hierarchical => "Hierarchical",
+        ResolutionMethod::IterativeMultiLevel => "IterativeMultiLevel",
+        ResolutionMethod::CoverageMultiBubble => "CoverageMultiBubble",
+        ResolutionMethod::MotifLocal => "MotifLocal",
+    }
+}
+
+fn debug_source_short(source: Option<MultiLevelCandidateSource>) -> String {
+    match source {
+        Some(MultiLevelCandidateSource::CompleteHomologousWindow) => "chw".to_string(),
+        Some(MultiLevelCandidateSource::TopLevel) => "top".to_string(),
+        Some(MultiLevelCandidateSource::SiblingRun) => "sibling".to_string(),
+        Some(MultiLevelCandidateSource::ParentDescendants) => "parent".to_string(),
+        Some(MultiLevelCandidateSource::SlidingWindow) => "sliding".to_string(),
+        Some(MultiLevelCandidateSource::LevelWindow) => "level".to_string(),
+        Some(MultiLevelCandidateSource::StringyNeighborhood) => "stringy".to_string(),
+        Some(MultiLevelCandidateSource::OutwardResidualWindow) => "outward".to_string(),
+        Some(MultiLevelCandidateSource::MotifLocal) => "motif".to_string(),
+        None => "candidate".to_string(),
+    }
+}
+
+fn candidate_covered_path_count(candidate: &BubbleCandidate) -> usize {
+    candidate
+        .ranges
+        .iter()
+        .map(|range| range.path_idx)
+        .collect::<FxHashSet<_>>()
+        .len()
+}
+
+fn debug_applied_candidate_label(graph: &Graph, rank: usize, plan: &ReplacementPlan) -> String {
+    let method = debug_method_label(plan.method);
+    let source = debug_source_short(plan.debug_source.as_ref().map(|source| source.source));
+    let covered_paths = candidate_covered_path_count(&plan.candidate);
+    let source_sites = plan
+        .debug_source
+        .as_ref()
+        .map(|source| source.source_sites)
+        .unwrap_or(plan.candidate.ranges.len());
+    format!(
+        "{method}_crush{rank:02}_{source}_span{}bp_med{}bp_cov{}of{}_sites{}_steps{}-{}",
+        plan.candidate.root_span,
+        plan.candidate.traversal_stats.median_len,
+        covered_paths,
+        graph.paths.len(),
+        source_sites,
+        plan.candidate.root_start_step,
+        plan.candidate.root_end_step
+    )
+}
+
+fn debug_tsv_field(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+}
+
+fn debug_gfa_record_count(gfa: &str, record: char) -> usize {
+    gfa.lines()
+        .filter(|line| line.as_bytes().first().copied() == Some(record as u8))
+        .count()
+}
+
+fn debug_write_replacement_path_lengths(dir: &std::path::Path, plan: &ReplacementPlan) {
+    let mut out = String::from(
+        "path_index\treplacement_path\tsource_path\texpected_bp\tobserved_bp\tpreserved\n",
+    );
+    for (idx, range) in plan.candidate.ranges.iter().enumerate() {
+        let expected = range_aligner_sequence(range);
+        let source_path = range.source_path_name.as_deref().unwrap_or("");
+        let (path_name, observed_len, preserved) = match plan.replacement.paths.get(idx) {
+            Some(path) => match path_sequence(&plan.replacement, path) {
+                Ok(observed) => (
+                    path.name.as_str(),
+                    observed.len().to_string(),
+                    (observed == expected).to_string(),
+                ),
+                Err(err) => (
+                    path.name.as_str(),
+                    format!("error:{err}"),
+                    "false".to_string(),
+                ),
+            },
+            None => ("", "missing".to_string(), "false".to_string()),
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            idx,
+            debug_tsv_field(path_name),
+            debug_tsv_field(source_path),
+            expected.len(),
+            debug_tsv_field(observed_len),
+            preserved
+        ));
+    }
+    debug_write_file(&dir.join("path-lengths.tsv"), out);
+}
+
+fn debug_write_applied_frontier(
+    graph: &Graph,
+    plans: &[ReplacementPlan],
+    rendered: &str,
+    parsed: &Graph,
+) {
+    if plans.is_empty() {
+        return;
+    }
+    let Some(root) = crush_debug_root() else {
+        return;
+    };
+    let frontier_id = DEBUG_APPLIED_FRONTIER_ID.fetch_add(1, Ordering::Relaxed);
+    let dir = root.join(format!("applied_frontier_{frontier_id:04}"));
+    debug_write_file(&dir.join("final_laced.gfa"), rendered);
+    debug_write_file(
+        &dir.join("frontier-summary.tsv"),
+        format!(
+            "frontier_id\tplans\tfinal_segments\tfinal_links\tfinal_paths\n{}\t{}\t{}\t{}\t{}\n",
+            frontier_id,
+            plans.len(),
+            parsed.segments.len(),
+            debug_gfa_record_count(rendered, 'L'),
+            parsed.paths.len()
+        ),
+    );
+
+    let mut metadata = String::from(
+        "rank\tlabel\tmethod\tsource\tsource_sites\tsource_ancestry\tboundary\tpath_coverage\ttraversals\tmin_len\tmedian_len\tp90_len\tmax_len\ttotal_len\troot_span\treplacement_segments\treplacement_links\treplacement_paths\treplacement_bp\tinput_segments\tinput_bp\toutput_segments\toutput_bp\tobjective_score_delta\tcoverage_delta_scaled\tsingleton_bp_delta\tsegment_delta\tsegment_bp_delta\tsignature\treplacement_gfa\n",
+    );
+    for (idx, plan) in plans.iter().enumerate() {
+        let rank = idx + 1;
+        let label = debug_applied_candidate_label(graph, rank, plan);
+        let plan_dir = dir.join(&label);
+        let replacement_gfa = render_graph(&plan.replacement);
+        debug_write_file(&plan_dir.join("replacement.gfa"), &replacement_gfa);
+        debug_write_replacement_path_lengths(&plan_dir, plan);
+
+        let source = plan.debug_source.as_ref();
+        let objective = plan.debug_objective;
+        let source_name = source
+            .map(|source| source.source.as_str())
+            .unwrap_or("unknown");
+        let source_sites = source
+            .map(|source| source.source_sites.to_string())
+            .unwrap_or_default();
+        let source_ancestry = source
+            .map(|source| format_source_ancestry(&source.source_ancestry, usize::MAX))
+            .unwrap_or_default();
+        let replacement_links = debug_gfa_record_count(&replacement_gfa, 'L');
+        let replacement_bp = replacement_segment_bp(&plan.replacement);
+        let objective_field =
+            |value: Option<i128>| value.map(|v| v.to_string()).unwrap_or_default();
+        let objective_usize =
+            |value: Option<usize>| value.map(|v| v.to_string()).unwrap_or_default();
+        metadata.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            rank,
+            debug_tsv_field(&label),
+            debug_tsv_field(debug_method_label(plan.method)),
+            debug_tsv_field(source_name),
+            source_sites,
+            debug_tsv_field(source_ancestry),
+            debug_tsv_field(format_candidate_boundary(graph, &plan.candidate)),
+            debug_tsv_field(format_candidate_path_coverage(graph, &plan.candidate)),
+            plan.candidate.traversal_stats.count,
+            plan.candidate.traversal_stats.min_len,
+            plan.candidate.traversal_stats.median_len,
+            plan.candidate.traversal_stats.p90_len,
+            plan.candidate.traversal_stats.max_len,
+            plan.candidate.traversal_stats.total_len,
+            plan.candidate.root_span,
+            plan.replacement.segments.len(),
+            replacement_links,
+            plan.replacement.paths.len(),
+            replacement_bp,
+            objective_usize(objective.map(|o| o.input_segments)),
+            objective_usize(objective.map(|o| o.input_segment_bp)),
+            objective_usize(objective.map(|o| o.output_segments)),
+            objective_usize(objective.map(|o| o.output_segment_bp)),
+            objective_field(objective.map(|o| o.score_delta)),
+            objective_field(objective.map(|o| o.bp_weighted_coverage_delta_scaled)),
+            objective_field(objective.map(|o| o.singleton_bp_delta)),
+            objective_field(objective.map(|o| o.segment_delta)),
+            objective_field(objective.map(|o| o.segment_bp_delta)),
+            debug_tsv_field(&plan.candidate.signature),
+            debug_tsv_field(format!("{}/replacement.gfa", label))
+        ));
+    }
+    debug_write_file(&dir.join("applied-candidates.tsv"), metadata);
+}
+
 fn render_rewritten_graph(
     original: &Graph,
     replacements: &[Graph],
@@ -8959,40 +11604,61 @@ fn render_rewritten_graph(
             }
         }
 
-        let mut insertions: Vec<(usize, OutNode)> = Vec::new();
+        let original_node_count = ordered_nodes.len();
+        let mut insertions: Vec<(usize, usize, OutNode)> = Vec::new();
         let mut seen_replacement = FxHashSet::<(usize, usize)>::default();
+        let mut insertion_order = 0usize;
         for (_, steps) in out_paths {
-            let mut last_original_position = usize::MAX;
+            let mut last_original_position: Option<usize> = None;
+            let mut pending_replacements: Vec<OutNode> = Vec::new();
             for step in steps {
                 match step.node {
                     OutNode::Original(idx) => {
                         let position = original_position[idx];
                         if position != usize::MAX {
-                            last_original_position = position;
+                            if !pending_replacements.is_empty() {
+                                let slot = last_original_position
+                                    .map(|pos| pos.saturating_add(1))
+                                    .unwrap_or(position);
+                                for node in pending_replacements.drain(..) {
+                                    insertions.push((slot, insertion_order, node));
+                                    insertion_order = insertion_order.saturating_add(1);
+                                }
+                            }
+                            last_original_position = Some(position);
                         }
                     }
                     OutNode::Replacement(replacement_idx, replacement_node_idx) => {
                         if seen_replacement.insert((replacement_idx, replacement_node_idx)) {
-                            insertions.push((last_original_position, step.node));
+                            pending_replacements.push(step.node);
                         }
                     }
                 }
             }
+            if !pending_replacements.is_empty() {
+                let slot = last_original_position
+                    .map(|pos| pos.saturating_add(1))
+                    .unwrap_or(original_node_count);
+                for node in pending_replacements.drain(..) {
+                    insertions.push((slot, insertion_order, node));
+                    insertion_order = insertion_order.saturating_add(1);
+                }
+            }
         }
 
-        insertions.sort_by_key(|&(position, _)| position);
+        insertions.sort_by_key(|&(slot, order, _)| (slot, order));
         let original_ordered = std::mem::take(&mut ordered_nodes);
         ordered_nodes.reserve(original_ordered.len() + insertions.len());
         let mut insertion_idx = 0usize;
         for (position, node) in original_ordered.iter().enumerate() {
-            ordered_nodes.push(*node);
             while insertion_idx < insertions.len() && insertions[insertion_idx].0 == position {
-                ordered_nodes.push(insertions[insertion_idx].1);
+                ordered_nodes.push(insertions[insertion_idx].2);
                 insertion_idx += 1;
             }
+            ordered_nodes.push(*node);
         }
         while insertion_idx < insertions.len() {
-            ordered_nodes.push(insertions[insertion_idx].1);
+            ordered_nodes.push(insertions[insertion_idx].2);
             insertion_idx += 1;
         }
     }
@@ -9012,13 +11678,10 @@ fn render_rewritten_graph(
                 let replacement = replacements
                     .get(replacement_idx)
                     .expect("used replacement index must refer to an emitted replacement graph");
+                let seq = &replacement.segments[replacement_node_idx].seq;
                 let id = next_unused_segment_id(&mut used_ids, next_id);
                 id_by_node.insert(node, id.clone());
-                out.push_str(&format!(
-                    "S\t{}\t{}\n",
-                    id,
-                    String::from_utf8_lossy(&replacement.segments[replacement_node_idx].seq)
-                ));
+                out.push_str(&format!("S\t{}\t{}\n", id, String::from_utf8_lossy(seq)));
             }
         }
     }
@@ -9140,6 +11803,82 @@ mod tests {
         sequences
     }
 
+    fn fake_abpoa_bin(
+        dir: &tempfile::TempDir,
+        expected_headers: &[&str],
+        corrupt_first_path: bool,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.path().join(if corrupt_first_path {
+            "fake-abpoa-corrupt"
+        } else {
+            "fake-abpoa"
+        });
+        let expected = expected_headers
+            .iter()
+            .map(|header| format!("{header:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let corrupt = if corrupt_first_path { "True" } else { "False" };
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+input="${{@: -1}}"
+python3 - "$input" <<'PY'
+import sys
+
+expected = [{expected}]
+corrupt = {corrupt}
+records = []
+name = None
+seq = []
+with open(sys.argv[1], "r", encoding="ascii") as handle:
+    for raw in handle:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if name is not None:
+                records.append((name, "".join(seq)))
+            name = line[1:]
+            seq = []
+        else:
+            seq.append(line)
+    if name is not None:
+        records.append((name, "".join(seq)))
+
+names = [name for name, _ in records]
+if names != expected:
+    sys.stderr.write("unexpected FASTA headers: " + repr(names) + "\n")
+    sys.exit(7)
+bad = [name for name in names if name.startswith("__impg") or name.startswith("local_") or "duplicate-source-interval-copy" in name]
+if bad:
+    sys.stderr.write("synthetic FASTA header(s): " + repr(bad) + "\n")
+    sys.exit(8)
+if corrupt and records:
+    name, seq = records[0]
+    replacement = "A" if not seq or seq[-1] != "A" else "C"
+    records[0] = (name, seq[:-1] + replacement)
+
+print("H\tVN:Z:1.0")
+for idx, (_, seq) in enumerate(records, 1):
+    print(f"S\t{{idx}}\t{{seq}}")
+for idx, (name, _) in enumerate(records, 1):
+    print(f"P\t{{name}}\t{{idx}}+\t*")
+PY
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        script
+    }
+
     fn tiny_boundary_graph() -> Graph {
         Graph {
             segments: vec![
@@ -9168,6 +11907,73 @@ mod tests {
         }
     }
 
+    fn one_range_candidate(
+        path_idx: usize,
+        begin_step: usize,
+        end_step: usize,
+        sequence: &[u8],
+    ) -> BubbleCandidate {
+        BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx,
+                source_path_name: Some(format!("path{path_idx}")),
+                original_path_name: Some(format!("path{path_idx}")),
+                source_begin_bp: 0,
+                source_end_bp: sequence.len(),
+                begin_step,
+                end_step,
+                sequence: sequence.to_vec(),
+                ..PathRange::default()
+            }],
+            signature: format!("candidate-{path_idx}-{begin_step}-{end_step}"),
+            root_start_step: begin_step,
+            root_end_step: end_step.saturating_sub(1),
+            root_span: end_step.saturating_sub(begin_step),
+            total_steps: end_step.saturating_sub(begin_step),
+            unique_steps: end_step.saturating_sub(begin_step),
+            traversal_stats: TraversalStats {
+                count: 1,
+                min_len: sequence.len(),
+                median_len: sequence.len(),
+                p90_len: sequence.len(),
+                max_len: sequence.len(),
+                total_len: sequence.len(),
+            },
+            level: 0,
+        }
+    }
+
+    fn single_path_replacement_gfa(name: &str, seq: &str) -> Graph {
+        parse_gfa(&format!("H\tVN:Z:1.0\nS\tr\t{seq}\nP\t{name}\tr+\t*\n")).unwrap()
+    }
+
+    #[test]
+    fn replacement_at_path_start_is_ordered_before_first_surviving_original() {
+        let graph = parse_gfa("H\tVN:Z:1.0\nS\t1\tA\nS\t2\tC\nP\tpath0\t1+,2+\t*\n").unwrap();
+        let plan = ReplacementPlan::new(
+            one_range_candidate(0, 0, 1, b"A"),
+            single_path_replacement_gfa("path0", "A"),
+            ResolutionMethod::Poa,
+        );
+        let mut next_id = 3;
+        let resolved = apply_replacement_frontier(&graph, &[plan], &mut next_id).unwrap();
+        let segment_sequences = resolved
+            .segments
+            .iter()
+            .map(|segment| String::from_utf8(segment.seq.clone()).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            segment_sequences,
+            vec!["A".to_string(), "C".to_string()],
+            "path-start replacements must not be appended after all surviving original nodes"
+        );
+        assert_eq!(
+            String::from_utf8(path_sequence(&resolved, &resolved.paths[0]).unwrap()).unwrap(),
+            "AC"
+        );
+    }
+
     fn budget_test_window(source: MultiLevelCandidateSource) -> MultiLevelWindowCandidate {
         MultiLevelWindowCandidate {
             candidate: BubbleCandidate {
@@ -9190,6 +11996,7 @@ mod tests {
             },
             source,
             source_sites: 4,
+            source_ancestry: vec!["budget-test".to_string()],
         }
     }
 
@@ -9289,6 +12096,75 @@ W\t*\t0\tpath0\t2\t4\t>s0
     }
 
     #[test]
+    fn poasta_ordered_sequence_helper_preserves_exact_paths_in_header_order() {
+        let headers = vec![
+            "sample_short".to_string(),
+            "sample_long".to_string(),
+            "sample_mid".to_string(),
+        ];
+        let sequences = vec![b"ACGT".to_vec(), b"AACCGGTT".to_vec(), b"ACGTT".to_vec()];
+        let gfa =
+            poasta_sequences_to_gfa_in_order(&headers, &sequences, &[1, 2, 0], (1, 4, 6, 2, 26, 1))
+                .unwrap();
+        let graph = parse_gfa(&gfa).unwrap();
+
+        assert_eq!(
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sample_short", "sample_long", "sample_mid"]
+        );
+        for (path, expected) in graph.paths.iter().zip(sequences.iter()) {
+            assert_eq!(path_sequence(&graph, path).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn poasta_ordered_sequence_helper_rejects_non_permutation_orders() {
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let sequences = vec![b"A".to_vec(), b"C".to_vec()];
+        let repeated =
+            poasta_sequences_to_gfa_in_order(&headers, &sequences, &[0, 0], (1, 4, 6, 2, 26, 1))
+                .unwrap_err();
+        assert!(repeated.to_string().contains("repeats index 0"));
+        let short =
+            poasta_sequences_to_gfa_in_order(&headers, &sequences, &[0], (1, 4, 6, 2, 26, 1))
+                .unwrap_err();
+        assert!(short.to_string().contains("1 index(es) for 2 sequence(s)"));
+    }
+
+    #[test]
+    fn abpoa_ordered_sequence_helper_preserves_exact_paths_in_header_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake_abpoa_bin(&dir, &["sample_long", "sample_short"], false);
+        let headers = vec!["sample_short".to_string(), "sample_long".to_string()];
+        let sequences = vec![b"ACG".to_vec(), b"ATG".to_vec()];
+        let gfa = abpoa_sequences_to_gfa_in_order(
+            &headers,
+            &sequences,
+            &[1, 0],
+            (1, 4, 6, 2, 26, 1),
+            fake.to_str().unwrap(),
+        )
+        .unwrap();
+        let graph = parse_gfa(&gfa).unwrap();
+
+        assert_eq!(
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sample_short", "sample_long"]
+        );
+        for (path, expected) in graph.paths.iter().zip(sequences.iter()) {
+            assert_eq!(path_sequence(&graph, path).unwrap(), *expected);
+        }
+    }
+
+    #[test]
     fn resolves_simple_snp_bubble_without_changing_path_sequences() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -9345,6 +12221,86 @@ P\tref\t1+,3+\t*
 P\tins\t1+,2+,3+\t*
 ";
         assert_poasta_resolves_exact(gfa, poasta_resolution_config());
+    }
+
+    #[test]
+    fn abpoa_replacement_preserves_semantic_path_names_without_synthetic_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake_abpoa_bin(
+            &dir,
+            &["HG001#1#chr6:100-103", "HG002#2#chr6:100-103"],
+            false,
+        );
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tHG001#1#chr6:100-103\t1+,2+,4+\t*
+P\tHG002#2#chr6:100-103\t1+,3+,4+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Abpoa,
+                abpoa_bin: fake.display().to_string(),
+                max_traversal_len: 100_000,
+                max_median_traversal_len: 100_000,
+                max_total_sequence: 10_000_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn abpoa_replacement_corruption_is_hard_gated() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake_abpoa_bin(
+            &dir,
+            &["HG001#1#chr6:100-103", "HG002#2#chr6:100-103"],
+            true,
+        );
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tHG001#1#chr6:100-103\t1+,2+,4+\t*
+P\tHG002#2#chr6:100-103\t1+,3+,4+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Abpoa,
+                abpoa_bin: fake.display().to_string(),
+                max_traversal_len: 100_000,
+                max_median_traversal_len: 100_000,
+                max_total_sequence: 10_000_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 1, "{:?}", resolved.stats);
     }
 
     #[test]
@@ -9725,6 +12681,16 @@ P\tp1\t1+,3+,4+\t*
             ResolutionMethod::Poasta,
             "explicit method=poasta must still pin every bubble to poasta"
         );
+
+        let abpoa = ResolutionConfig {
+            method: ResolutionMethod::Abpoa,
+            ..ResolutionConfig::default()
+        };
+        assert_eq!(
+            candidate_replacement_method(&large, &abpoa),
+            ResolutionMethod::Abpoa,
+            "explicit method=abpoa must still pin every bubble to abpoa"
+        );
     }
 
     /// Hierarchical routing: level 0 (top-level) → sweepga, level ≥ 1 (every
@@ -9796,6 +12762,18 @@ P\tp1\t1+,3+,4+\t*
         let child = routing_candidate_at_level(1);
         assert_eq!(candidate_selection_priority(&root, &config), 0);
         assert_eq!(candidate_selection_priority(&child, &config), 1);
+    }
+
+    #[test]
+    fn abpoa_parse_name_accepts_aliases() {
+        assert_eq!(
+            ResolutionMethod::parse_name("abpoa"),
+            Some(ResolutionMethod::Abpoa)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("ab-poa"),
+            Some(ResolutionMethod::Abpoa)
+        );
     }
 
     #[test]
@@ -9939,11 +12917,13 @@ P\tp1\t1+,3+,4+\t*
                 candidate: tiny_root_repeat,
                 source: MultiLevelCandidateSource::TopLevel,
                 source_sites: 1,
+                source_ancestry: vec!["tiny-root-repeat".to_string()],
             },
             MultiLevelWindowCandidate {
                 candidate: balanced_parent,
                 source: MultiLevelCandidateSource::TopLevel,
                 source_sites: 1,
+                source_ancestry: vec!["balanced-parent".to_string()],
             },
         ];
         candidates.sort_by(|a, b| {
@@ -9951,6 +12931,482 @@ P\tp1\t1+,3+,4+\t*
         });
 
         assert_eq!(candidates[0].candidate.root_span, 32_787);
+    }
+
+    fn c4_like_residual_window(
+        signature: &str,
+        root_start_step: usize,
+        root_end_step: usize,
+        root_span: usize,
+        unique_steps: usize,
+        count: usize,
+        median_len: usize,
+        max_len: usize,
+        total_len: usize,
+    ) -> MultiLevelWindowCandidate {
+        MultiLevelWindowCandidate {
+            candidate: BubbleCandidate {
+                ranges: vec![PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(
+                        "GRCh38#0#chr6:31891045-32123783 source haplotype".to_string(),
+                    ),
+                    source_begin_bp: root_start_step,
+                    source_end_bp: root_start_step + root_span,
+                    begin_step: root_start_step,
+                    end_step: root_end_step,
+                    ..PathRange::default()
+                }],
+                signature: signature.to_string(),
+                root_start_step,
+                root_end_step,
+                root_span,
+                total_steps: unique_steps.saturating_mul(2),
+                unique_steps,
+                traversal_stats: TraversalStats {
+                    count,
+                    min_len: median_len.min(max_len),
+                    median_len,
+                    p90_len: max_len,
+                    max_len,
+                    total_len,
+                },
+                level: 0,
+            },
+            source: MultiLevelCandidateSource::TopLevel,
+            source_sites: 1,
+            source_ancestry: vec![format!("site={signature}")],
+        }
+    }
+
+    #[test]
+    fn largest_mode_prioritizes_complete_homologous_before_partial_top_level_scale() {
+        let partial_top_level = c4_like_residual_window(
+            "partial-c4-fragment",
+            3_315,
+            4_559,
+            32_787,
+            1_696,
+            117,
+            26_418,
+            32_787,
+            2_363_564,
+        );
+        let mut complete_window = c4_like_residual_window(
+            "complete-lower-scale",
+            100,
+            200,
+            10_000,
+            100,
+            465,
+            10_000,
+            10_000,
+            4_650_000,
+        );
+        complete_window.source = MultiLevelCandidateSource::CompleteHomologousWindow;
+        complete_window.source_sites = 12;
+
+        assert!(
+            multi_level_residual_scale_score(&partial_top_level.candidate)
+                > multi_level_residual_scale_score(&complete_window.candidate),
+            "fixture must reproduce the round-6 priority hazard"
+        );
+
+        let mut candidates = [partial_top_level, complete_window];
+        candidates.sort_by(|a, b| {
+            compare_multi_level_candidate_priority(a, b, MultiLevelWindowMode::Largest)
+        });
+
+        assert_eq!(
+            candidates[0].source,
+            MultiLevelCandidateSource::CompleteHomologousWindow
+        );
+    }
+
+    fn built_test_candidate(window: MultiLevelWindowCandidate) -> MultiLevelBuiltCandidate {
+        MultiLevelBuiltCandidate {
+            source: window.source,
+            source_sites: window.source_sites,
+            source_ancestry: window.source_ancestry,
+            method: ResolutionMethod::Poa,
+            plan: ReplacementPlan::new(
+                window.candidate,
+                Graph {
+                    segments: Vec::new(),
+                    paths: Vec::new(),
+                },
+                ResolutionMethod::Poa,
+            ),
+            objective: ReplacementObjectiveDelta::default(),
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn iterative_multi_level_routes_broad_residual_away_from_small_poa() {
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            ..ResolutionConfig::default()
+        };
+        let residual = c4_like_residual_window(
+            "full-c4-broad-residual",
+            4_827,
+            6_071,
+            32_776,
+            1_111,
+            143,
+            38,
+            26_408,
+            348_244,
+        );
+
+        assert_eq!(
+            auto_method_by_median(residual.candidate.traversal_stats, &config),
+            ResolutionMethod::Poa,
+            "the regression shape still demonstrates why median-only routing is too small"
+        );
+        assert_eq!(
+            multi_level_window_replacement_method(&residual, &config),
+            ResolutionMethod::Poasta,
+            "broad residual windows must route to the scalable direct tier by default"
+        );
+    }
+
+    #[test]
+    fn largest_mode_prefers_broad_residual_scale_over_near_identity_child() {
+        let low_entropy_broad = c4_like_residual_window(
+            "low-entropy-broad",
+            4_763,
+            6_007,
+            32_834,
+            2,
+            13,
+            96,
+            96,
+            1_248,
+        );
+        let enclosing_residual = c4_like_residual_window(
+            "enclosing-residual",
+            5_097,
+            6_341,
+            32_776,
+            1_111,
+            58,
+            38,
+            26_408,
+            345_014,
+        );
+        let near_identity_child = c4_like_residual_window(
+            "near-identity-child",
+            4_051,
+            4_326,
+            6_733,
+            111,
+            132,
+            6_734,
+            6_734,
+            825_193,
+        );
+
+        assert!(
+            multi_level_residual_scale_score(&enclosing_residual.candidate)
+                > multi_level_residual_scale_score(&near_identity_child.candidate)
+        );
+
+        let mut candidates = vec![
+            low_entropy_broad,
+            near_identity_child.clone(),
+            enclosing_residual.clone(),
+        ];
+        candidates.sort_by(|a, b| {
+            compare_multi_level_candidate_priority(a, b, MultiLevelWindowMode::Largest)
+        });
+
+        assert_eq!(candidates[0].candidate.signature, "enclosing-residual");
+        assert_ne!(
+            candidates[0].candidate.signature,
+            near_identity_child.candidate.signature
+        );
+        assert_eq!(candidates[2].candidate.signature, "low-entropy-broad");
+
+        let headers = candidate_sequence_headers(&candidates[0].candidate).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert!(
+            headers[0].starts_with("GRCh38#0#chr6:"),
+            "semantic source range should be preserved: {:?}",
+            headers
+        );
+        assert!(
+            !headers[0].contains("__impg")
+                && !headers[0].contains("candidate_")
+                && !headers[0].contains("path0"),
+            "largest-mode residual ranking must not introduce synthetic local names: {:?}",
+            headers
+        );
+    }
+
+    #[test]
+    fn built_candidate_tie_break_prefers_broader_residual_scale() {
+        let enclosing_residual = c4_like_residual_window(
+            "enclosing-residual",
+            5_097,
+            6_341,
+            32_776,
+            1_111,
+            58,
+            38,
+            26_408,
+            345_014,
+        )
+        .candidate;
+        let near_identity_child = c4_like_residual_window(
+            "near-identity-child",
+            4_051,
+            4_326,
+            6_733,
+            111,
+            132,
+            6_734,
+            6_734,
+            825_193,
+        )
+        .candidate;
+        let mk_built = |candidate: BubbleCandidate| MultiLevelBuiltCandidate {
+            source: MultiLevelCandidateSource::TopLevel,
+            source_sites: 1,
+            source_ancestry: vec!["built-test".to_string()],
+            method: ResolutionMethod::Poa,
+            plan: ReplacementPlan::new(
+                candidate,
+                Graph {
+                    segments: Vec::new(),
+                    paths: Vec::new(),
+                },
+                ResolutionMethod::Poa,
+            ),
+            objective: ReplacementObjectiveDelta {
+                score_delta: 0,
+                segment_delta: 0,
+                segment_bp_delta: 0,
+                singleton_bp_delta: 0,
+                ..ReplacementObjectiveDelta::default()
+            },
+            evidence: None,
+        };
+
+        let mut built = vec![mk_built(near_identity_child), mk_built(enclosing_residual)];
+        built.sort_by(compare_multi_level_built_candidate_priority);
+
+        assert_eq!(
+            built[0].plan.candidate.signature,
+            "enclosing-residual",
+            "equivalent local objectives should schedule the broader residual before a child-scale no-op"
+        );
+    }
+
+    #[test]
+    fn residual_novelty_defers_immediate_near_identical_broad_top_level() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let previous = c4_like_residual_window(
+            "round5-broad-residual",
+            5_101,
+            5_732,
+            33_120,
+            1_506,
+            388,
+            26_752,
+            33_240,
+            7_301_649,
+        );
+        let near_duplicate = c4_like_residual_window(
+            "round6-near-duplicate",
+            5_100,
+            5_732,
+            33_168,
+            899,
+            388,
+            26_800,
+            33_288,
+            7_320_273,
+        );
+        let novel_elsewhere = c4_like_residual_window(
+            "different-root-interval",
+            100_000,
+            100_420,
+            12_000,
+            420,
+            96,
+            4_000,
+            9_500,
+            120_000,
+        );
+        let memory = ResidualNoveltyMemory {
+            previous_round: 5,
+            records: vec![ResidualNoveltyRecord::from_window(&graph, 5, &previous).unwrap()],
+        };
+        let mut generated = MultiLevelGeneratedCandidates {
+            candidates: vec![near_duplicate.clone(), novel_elsewhere.clone()],
+            generated_total: 2,
+            ..MultiLevelGeneratedCandidates::default()
+        };
+
+        apply_residual_novelty_filter(&graph, &mut generated, &memory);
+
+        assert_eq!(generated.residual_novelty.deferred, 1);
+        assert_eq!(generated.candidates.len(), 1);
+        assert_eq!(
+            generated.candidates[0].candidate.signature,
+            novel_elsewhere.candidate.signature
+        );
+        assert!(
+            generated
+                .residual_novelty
+                .details
+                .iter()
+                .any(|decision| decision.deferred
+                    && decision.reason == "near-identical-immediate-broad-residual"
+                    && decision.candidate.traversal_count == 388
+                    && decision.candidate.root_span == 33_168),
+            "{:?}",
+            generated.residual_novelty
+        );
+    }
+
+    #[test]
+    fn residual_novelty_guard_survives_intervening_small_acceptance() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let previous_broad = c4_like_residual_window(
+            "round4-broad-residual",
+            5_102,
+            5_708,
+            32_999,
+            902,
+            269,
+            26_631,
+            32_999,
+            7_243_526,
+        );
+        let intervening_small = c4_like_residual_window(
+            "round5-small-top-level",
+            511,
+            927,
+            7_737,
+            743,
+            95,
+            120,
+            7_933,
+            40_000,
+        );
+        let returning_broad = c4_like_residual_window(
+            "round6-returning-broad-residual",
+            5_101,
+            5_732,
+            33_120,
+            1_506,
+            388,
+            26_752,
+            33_240,
+            7_301_649,
+        );
+        let mut memory = ResidualNoveltyMemory {
+            previous_round: 4,
+            records: vec![ResidualNoveltyRecord::from_window(&graph, 4, &previous_broad).unwrap()],
+        };
+        let accepted = vec![built_test_candidate(intervening_small)];
+
+        memory.advance_after_accepted(&graph, 5, &accepted);
+        assert_eq!(memory.previous_round, 5);
+        assert_eq!(memory.records.len(), 1);
+        assert_eq!(memory.records[0].round, 4);
+
+        let mut generated = MultiLevelGeneratedCandidates {
+            candidates: vec![returning_broad],
+            generated_total: 1,
+            ..MultiLevelGeneratedCandidates::default()
+        };
+
+        apply_residual_novelty_filter(&graph, &mut generated, &memory);
+
+        assert_eq!(generated.residual_novelty.deferred, 1);
+        assert!(
+            generated.candidates.is_empty(),
+            "{:?}",
+            generated.candidates
+        );
+        assert!(
+            generated
+                .residual_novelty
+                .details
+                .iter()
+                .any(|decision| decision.deferred
+                    && decision.reason == "near-identical-immediate-broad-residual"
+                    && decision.candidate.root_span == 33_120),
+            "{:?}",
+            generated.residual_novelty
+        );
+    }
+
+    #[test]
+    fn residual_novelty_retains_same_interval_when_structure_changes() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let previous = c4_like_residual_window(
+            "round1-broad-residual",
+            5_092,
+            6_336,
+            32_787,
+            1_696,
+            117,
+            26_418,
+            32_787,
+            2_363_564,
+        );
+        let structurally_novel = c4_like_residual_window(
+            "round2-residual-different-traversal-profile",
+            5_097,
+            6_341,
+            32_776,
+            1_111,
+            143,
+            38,
+            26_408,
+            348_244,
+        );
+        let memory = ResidualNoveltyMemory {
+            previous_round: 1,
+            records: vec![ResidualNoveltyRecord::from_window(&graph, 1, &previous).unwrap()],
+        };
+        let mut generated = MultiLevelGeneratedCandidates {
+            candidates: vec![structurally_novel.clone()],
+            generated_total: 1,
+            ..MultiLevelGeneratedCandidates::default()
+        };
+
+        apply_residual_novelty_filter(&graph, &mut generated, &memory);
+
+        assert_eq!(generated.residual_novelty.deferred, 0);
+        assert_eq!(generated.candidates.len(), 1);
+        assert_eq!(
+            generated.candidates[0].candidate.signature,
+            structurally_novel.candidate.signature
+        );
+        assert!(
+            generated
+                .residual_novelty
+                .details
+                .iter()
+                .any(|decision| !decision.deferred && decision.reason == "structure-novel"),
+            "{:?}",
+            generated.residual_novelty
+        );
     }
 
     #[test]
@@ -10349,7 +13805,7 @@ P\talt\t1+,3+,4+\t*
             ranges: vec![
                 PathRange {
                     path_idx: 7,
-                    source_path_name: Some("HG001#2#chr6:10-20".to_string()),
+                    source_path_name: Some("HG001#2#chr6:10-20 full defline".to_string()),
                     source_begin_bp: 2,
                     source_end_bp: 6,
                     sequence: b"ACGT".to_vec(),
@@ -10374,19 +13830,111 @@ P\talt\t1+,3+,4+\t*
             level: 0,
         };
 
-        let (headers, seqs) = candidate_named_sequences(&candidate);
+        let (headers, seqs) = candidate_named_sequences(&candidate).unwrap();
         assert_eq!(
-            headers[0], "HG001#2#chr6:12-16",
-            "local replacement FASTA IDs should adjust only the source interval"
+            headers,
+            vec![
+                "HG001#2#chr6:12-16".to_string(),
+                "HG002#1#chr6:30-34".to_string(),
+            ],
+            "local replacement FASTA IDs should use query-compatible source ranges"
         );
         assert_eq!(
             sweepga::pansn::extract_pansn_key(&headers[0], sweepga::pansn::PanSnLevel::Haplotype),
             Some("HG001#2".to_string()),
             "PanSN grouping remains recoverable from replacement FASTA IDs"
         );
-        assert_eq!(headers[1], "HG002#1#chr6:30-34");
         assert_eq!(seqs[0].0, headers[0]);
         assert_eq!(seqs[1].0, headers[1]);
+        for header in &headers {
+            assert!(
+                !header.contains("__impg")
+                    && !header.contains("seq_")
+                    && !header.contains("path_")
+                    && !header.contains("candidate_"),
+                "replacement header should not expose a synthetic local ID: {header}"
+            );
+            assert!(
+                !header.contains(' '),
+                "replacement header should preserve FASTA first-token semantics: {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_source_intervals_get_meaningful_unique_suffixes() {
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some("HG001#1#chr6:100-200".to_string()),
+                    source_begin_bp: 10,
+                    source_end_bp: 14,
+                    sequence: b"ACGT".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some("HG001#1#chr6:100-200".to_string()),
+                    source_begin_bp: 10,
+                    source_end_bp: 14,
+                    sequence: b"ACGA".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "duplicate-naming".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let headers = candidate_sequence_headers(&candidate).unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                "HG001#1#chr6:110-114".to_string(),
+                "HG001#1#chr6:110-114|duplicate-source-interval-copy2".to_string(),
+            ]
+        );
+        for header in headers {
+            assert!(
+                !header.contains("__impg")
+                    && !header.contains("seq_")
+                    && !header.contains("path_")
+                    && !header.contains("candidate_"),
+                "duplicate uniquifier should be meaningful, not opaque: {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_interval_name_matches_query_fasta_contract() {
+        let candidate = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                source_path_name: Some("sample#0#chr1:100-220".to_string()),
+                source_begin_bp: 5,
+                source_end_bp: 17,
+                sequence: b"ACGTACGTACGT".to_vec(),
+                ..PathRange::default()
+            }],
+            signature: "query-contract".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let headers = candidate_sequence_headers(&candidate).unwrap();
+        let query_fasta_header_for_same_interval = "sample#0#chr1:105-117";
+        assert_eq!(headers, vec![query_fasta_header_for_same_interval]);
     }
 
     #[test]
@@ -10486,7 +14034,7 @@ P\talt\t1+,3+,4+\t*
             &path_step_indexes,
         )
         .expect("shared entry/exit anchors should produce a candidate");
-        let headers = candidate_sequence_headers(&candidate);
+        let headers = candidate_sequence_headers(&candidate).unwrap();
 
         assert_eq!(
             headers,
@@ -10495,6 +14043,99 @@ P\talt\t1+,3+,4+\t*
                 "HG002#2#chr6:200-203".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn replacement_paf_sequence_names_match_fasta_headers() {
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some("HG001#1#chr6:100-120".to_string()),
+                    source_begin_bp: 2,
+                    source_end_bp: 10,
+                    sequence: b"ACGTACGT".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some("HG002#2#chr6:200-220".to_string()),
+                    source_begin_bp: 3,
+                    source_end_bp: 11,
+                    sequence: b"ACGTTCGT".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "paf-naming".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let (headers, seqs) = candidate_named_sequences(&candidate).unwrap();
+        let paf =
+            crate::syng_graph::pairwise_biwfa_paf(&seqs[1].0, &seqs[1].1, &seqs[0].0, &seqs[0].1)
+                .expect("BiWFA should emit a PAF row for non-empty local replacement sequences");
+        let fields = paf.trim_end().split('\t').collect::<Vec<_>>();
+
+        assert_eq!(fields[0], headers[1]);
+        assert_eq!(fields[5], headers[0]);
+    }
+
+    #[test]
+    fn local_replacement_gfa_path_names_preserve_semantic_source_names() {
+        let candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some("HG001#1#chr6:100-120".to_string()),
+                    source_begin_bp: 4,
+                    source_end_bp: 12,
+                    sequence: b"ACGTACGT".to_vec(),
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some("HG002#2#chr6:200-220".to_string()),
+                    source_begin_bp: 5,
+                    source_end_bp: 13,
+                    sequence: b"ACGTTCGT".to_vec(),
+                    ..PathRange::default()
+                },
+            ],
+            signature: "gfa-naming".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level: 0,
+        };
+
+        let headers = candidate_sequence_headers(&candidate).unwrap();
+        let replacement =
+            build_biwfa_inmemory_replacement(&candidate, &ResolutionConfig::default()).unwrap();
+        let path_names = replacement
+            .paths
+            .iter()
+            .map(|path| path.name.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(path_names, headers);
+        for path_name in path_names {
+            assert!(
+                !path_name.contains("__impg")
+                    && !path_name.contains("seq_")
+                    && !path_name.contains("path_")
+                    && !path_name.contains("candidate_"),
+                "local replacement GFA path name should stay semantic: {path_name}"
+            );
+        }
     }
 
     fn equal_length_paf_line(name_a: &str, seq_a: &str, name_b: &str, seq_b: &str) -> String {
@@ -10993,7 +14634,644 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn direct_poa_processes_candidate_regardless_of_median_traversal_budget() {
+    fn flank_aware_context_is_taken_from_the_same_repeated_occurrence() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "first_left".to_string(),
+                    seq: b"AA".to_vec(),
+                },
+                Segment {
+                    id: "first_target".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "first_right".to_string(),
+                    seq: b"TT".to_vec(),
+                },
+                Segment {
+                    id: "second_left".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "second_target".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "second_right".to_string(),
+                    seq: b"CC".to_vec(),
+                },
+            ],
+            paths: vec![Path {
+                name: "HG001#1#chr6:0-10 repeated motif occurrence".to_string(),
+                steps: vec![
+                    Step {
+                        node: 0,
+                        rev: false,
+                    },
+                    Step {
+                        node: 1,
+                        rev: false,
+                    },
+                    Step {
+                        node: 2,
+                        rev: false,
+                    },
+                    Step {
+                        node: 3,
+                        rev: false,
+                    },
+                    Step {
+                        node: 4,
+                        rev: false,
+                    },
+                    Step {
+                        node: 5,
+                        rev: false,
+                    },
+                ],
+            }],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                source_path_name: Some(graph.paths[0].name.clone()),
+                source_begin_bp: 7,
+                source_end_bp: 8,
+                begin_step: 4,
+                end_step: 5,
+                ..PathRange::default()
+            }],
+            signature: "repeated-occurrence-local-flank".to_string(),
+            root_start_step: 4,
+            root_end_step: 4,
+            root_span: 1,
+            total_steps: 1,
+            unique_steps: 1,
+            traversal_stats: TraversalStats {
+                count: 1,
+                min_len: 1,
+                median_len: 1,
+                p90_len: 1,
+                max_len: 1,
+                total_len: 1,
+            },
+            level: 0,
+        };
+
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 2,
+                ..ResolutionConfig::default()
+            },
+        );
+
+        let range = &candidate.ranges[0];
+        assert_eq!(range.sequence, b"G");
+        assert_eq!(range.left_flank.sequence_path_orientation, b"GG");
+        assert_eq!(range.right_flank.sequence_path_orientation, b"CC");
+        assert_eq!(range.left_flank.path_step_range, Some((3, 4)));
+        assert_eq!(range.right_flank.path_step_range, Some((5, 6)));
+        assert_eq!(range.left_flank.path_bp_range, Some((5, 7)));
+        assert_eq!(range.right_flank.path_bp_range, Some((8, 10)));
+        assert_eq!(range.resolver_sequence, b"GGGCC");
+    }
+
+    #[test]
+    fn flank_aware_context_records_requested_and_short_path_boundary_flanks() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "left_target".to_string(),
+                    seq: b"AAA".to_vec(),
+                },
+                Segment {
+                    id: "left_right".to_string(),
+                    seq: b"CCC".to_vec(),
+                },
+                Segment {
+                    id: "right_left".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "right_target".to_string(),
+                    seq: b"TTT".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "HG001#1#chr6:0-6".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG002#2#chr6:0-5".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(graph.paths[0].name.clone()),
+                    source_begin_bp: 0,
+                    source_end_bp: 3,
+                    begin_step: 0,
+                    end_step: 1,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some(graph.paths[1].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 5,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "path-boundary-short-flanks".to_string(),
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 3,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 3,
+                median_len: 3,
+                p90_len: 3,
+                max_len: 3,
+                total_len: 6,
+            },
+            level: 0,
+        };
+
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 10,
+                ..ResolutionConfig::default()
+            },
+        );
+
+        let at_start = &candidate.ranges[0];
+        assert_eq!(at_start.left_flank.requested_bp, 10);
+        assert_eq!(at_start.left_flank.actual_bp_path_orientation, 0);
+        assert_eq!(at_start.right_flank.actual_bp_path_orientation, 3);
+        assert_eq!(at_start.right_flank.sequence_path_orientation, b"CCC");
+        assert_eq!(at_start.trim_plan.canonical_left_trim_bp, 0);
+        assert_eq!(at_start.trim_plan.canonical_right_trim_bp, 3);
+
+        let at_end = &candidate.ranges[1];
+        assert_eq!(at_end.left_flank.requested_bp, 10);
+        assert_eq!(at_end.left_flank.actual_bp_path_orientation, 2);
+        assert_eq!(at_end.left_flank.sequence_path_orientation, b"GG");
+        assert_eq!(at_end.right_flank.actual_bp_path_orientation, 0);
+        assert_eq!(at_end.trim_plan.canonical_left_trim_bp, 2);
+        assert_eq!(at_end.trim_plan.canonical_right_trim_bp, 0);
+    }
+
+    #[test]
+    fn flank_aware_reverse_occurrence_trims_and_laces_in_original_orientation() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "f_left".to_string(),
+                    seq: b"AA".to_vec(),
+                },
+                Segment {
+                    id: "f_target".to_string(),
+                    seq: b"CC".to_vec(),
+                },
+                Segment {
+                    id: "f_right".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "r_left".to_string(),
+                    seq: b"TT".to_vec(),
+                },
+                Segment {
+                    id: "r_target_canonical".to_string(),
+                    seq: b"GG".to_vec(),
+                },
+                Segment {
+                    id: "r_right".to_string(),
+                    seq: b"AA".to_vec(),
+                },
+                Segment {
+                    id: "unaffected".to_string(),
+                    seq: b"ACGT".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "HG001#1#chr6:100-106 decorated forward".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG002#2#chr6:200-206 decorated reverse".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step { node: 4, rev: true },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG003#1#chr6:300-304 unaffected".to_string(),
+                    steps: vec![Step {
+                        node: 6,
+                        rev: false,
+                    }],
+                },
+            ],
+        };
+        let before = path_sequence_map(&graph).unwrap();
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(graph.paths[0].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 4,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some(graph.paths[1].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 4,
+                    begin_step: 1,
+                    end_step: 2,
+                    occurrence_orientation: OccurrenceOrientation::Reverse,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "reverse-flank-aware".to_string(),
+            root_start_step: 1,
+            root_end_step: 1,
+            root_span: 2,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 2,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: 4,
+            },
+            level: 0,
+        };
+
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 2,
+                ..ResolutionConfig::default()
+            },
+        );
+        let (_headers, seqs) = candidate_named_sequences(&candidate).unwrap();
+        assert_eq!(seqs[0].1, b"AACCGG");
+        assert_eq!(seqs[1].1, b"TTGGAA");
+        assert_eq!(
+            candidate.ranges[1].left_flank.sequence_path_orientation,
+            b"TT"
+        );
+        assert_eq!(
+            candidate.ranges[1].right_flank.sequence_path_orientation,
+            b"AA"
+        );
+        assert_eq!(candidate.ranges[1].trim_plan.canonical_left_trim_bp, 2);
+        assert_eq!(candidate.ranges[1].trim_plan.canonical_right_trim_bp, 2);
+
+        let replacement = parse_gfa(&linear_candidate_sequences_gfa(&seqs).unwrap()).unwrap();
+        let clipped =
+            clip_replacement_to_interior(replacement, &candidate, "unit-test-global").unwrap();
+        assert_eq!(
+            String::from_utf8(path_sequence(&clipped, &clipped.paths[0]).unwrap()).unwrap(),
+            "CC"
+        );
+        assert_eq!(
+            String::from_utf8(path_sequence(&clipped, &clipped.paths[1]).unwrap()).unwrap(),
+            "CC"
+        );
+        assert_eq!(
+            clipped.paths[1].steps,
+            vec![Step { node: 1, rev: true }],
+            "reverse occurrence should lace as a reversed replacement walk"
+        );
+        for path in &clipped.paths {
+            let seq = path_sequence(&clipped, path).unwrap();
+            assert!(
+                !seq.windows(2)
+                    .any(|window| window == b"AA" || window == b"TT"),
+                "trimmed replacement path must not contain flank context"
+            );
+        }
+
+        let plan = ReplacementPlan::new(candidate, clipped, ResolutionMethod::Poa);
+        let mut next_id = initial_next_segment_id(&graph);
+        let laced = apply_replacement_frontier(&graph, &[plan], &mut next_id).unwrap();
+        assert_eq!(
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.clone())
+                .collect::<Vec<_>>(),
+            laced
+                .paths
+                .iter()
+                .map(|path| path.name.clone())
+                .collect::<Vec<_>>(),
+            "full path names must remain stable after lacing"
+        );
+        assert_eq!(before, path_sequence_map(&laced).unwrap());
+    }
+
+    #[test]
+    fn flank_aware_global_direct_resolvers_trim_simple_indel_context() {
+        let graph = Graph {
+            segments: vec![
+                Segment {
+                    id: "left".to_string(),
+                    seq: b"AC".to_vec(),
+                },
+                Segment {
+                    id: "ref_target".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "alt_target".to_string(),
+                    seq: b"GT".to_vec(),
+                },
+                Segment {
+                    id: "right".to_string(),
+                    seq: b"TA".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "HG001#1#chr6:0-5".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG002#2#chr6:0-6".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let mut candidate = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    source_path_name: Some(graph.paths[0].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 3,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+                PathRange {
+                    path_idx: 1,
+                    source_path_name: Some(graph.paths[1].name.clone()),
+                    source_begin_bp: 2,
+                    source_end_bp: 4,
+                    begin_step: 1,
+                    end_step: 2,
+                    ..PathRange::default()
+                },
+            ],
+            signature: "simple-indel-with-common-flanks".to_string(),
+            root_start_step: 1,
+            root_end_step: 1,
+            root_span: 2,
+            total_steps: 2,
+            unique_steps: 2,
+            traversal_stats: TraversalStats {
+                count: 2,
+                min_len: 1,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: 3,
+            },
+            level: 0,
+        };
+        materialize_candidate_sequences(
+            &graph,
+            &mut candidate,
+            &ResolutionConfig {
+                replacement_flank_bp: 2,
+                ..ResolutionConfig::default()
+            },
+        );
+        assert_eq!(candidate.ranges[0].resolver_sequence, b"ACGTA");
+        assert_eq!(candidate.ranges[1].resolver_sequence, b"ACGTTA");
+
+        for method in [
+            ResolutionMethod::Poa,
+            ResolutionMethod::Poasta,
+            ResolutionMethod::StarBiwfa,
+        ] {
+            let replacement =
+                build_replacement_with_method(&candidate, &ResolutionConfig::default(), method)
+                    .unwrap_or_else(|err| panic!("{method:?} failed: {err}"));
+            let replacement_paths = replacement
+                .paths
+                .iter()
+                .map(|path| path_sequence(&replacement, path).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(replacement_paths, vec![b"G".to_vec(), b"GT".to_vec()]);
+            assert!(
+                replacement_paths
+                    .iter()
+                    .all(|seq| !seq.starts_with(b"AC") && !seq.ends_with(b"TA")),
+                "{method:?} replacement must not reinsert flank context"
+            );
+        }
+    }
+
+    #[test]
+    fn flank_aware_trim_rejects_inconsistent_boundaries_as_path_corruption_risk() {
+        let mut candidate = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                source_path_name: Some("HG001#1#chr6:0-2".to_string()),
+                source_begin_bp: 0,
+                source_end_bp: 2,
+                begin_step: 0,
+                end_step: 1,
+                sequence: b"CC".to_vec(),
+                resolver_sequence: b"AACC".to_vec(),
+                extended_sequence: b"AACC".to_vec(),
+                left_flank_bp: 2,
+                right_flank_bp: 2,
+                trim_plan: TrimPlan {
+                    canonical_left_trim_bp: 2,
+                    canonical_right_trim_bp: 2,
+                    expected_flanked_sequence_canonical: b"AACC".to_vec(),
+                    expected_target_sequence_path_orientation: b"CC".to_vec(),
+                    restore_orientation: OccurrenceOrientation::Forward,
+                },
+                ..PathRange::default()
+            }],
+            signature: "bad-trim-boundary".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 2,
+            total_steps: 1,
+            unique_steps: 1,
+            traversal_stats: TraversalStats {
+                count: 1,
+                min_len: 2,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: 2,
+            },
+            level: 0,
+        };
+        candidate.ranges[0].left_flank.requested_bp = 2;
+        candidate.ranges[0].right_flank.requested_bp = 2;
+        let too_short = single_path_replacement_gfa("HG001#1#chr6:0-2", "AAC");
+        let err = clip_replacement_to_interior(too_short, &candidate, "unit-test-global")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("interior bounds inverted") || err.contains("interior span"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn flank_aware_diagnostics_expose_span_flanks_trim_and_orientation() {
+        let mut candidate = one_range_candidate(0, 1, 2, b"CC");
+        candidate.signature = "diagnostic-candidate".to_string();
+        candidate.ranges[0].source_path_name = Some("HG001#1#chr6:100-106 full name".to_string());
+        candidate.ranges[0].original_path_name = Some("HG001#1#chr6:100-106 full name".to_string());
+        candidate.ranges[0].source_begin_bp = 2;
+        candidate.ranges[0].source_end_bp = 4;
+        candidate.ranges[0].occurrence_orientation = OccurrenceOrientation::Reverse;
+        candidate.ranges[0].left_flank = FlankContext {
+            requested_bp: 5,
+            actual_bp_path_orientation: 2,
+            actual_bp_canonical: 2,
+            path_side: FlankSide::Left,
+            canonical_side: FlankSide::Right,
+            path_step_range: Some((0, 1)),
+            path_bp_range: Some((0, 2)),
+            truncation: FlankTruncationReason::PathBoundary,
+            sequence_path_orientation: b"TT".to_vec(),
+            sequence_canonical: b"AA".to_vec(),
+        };
+        candidate.ranges[0].right_flank = FlankContext {
+            requested_bp: 5,
+            actual_bp_path_orientation: 1,
+            actual_bp_canonical: 1,
+            path_side: FlankSide::Right,
+            canonical_side: FlankSide::Left,
+            path_step_range: Some((2, 3)),
+            path_bp_range: Some((4, 5)),
+            truncation: FlankTruncationReason::PathBoundary,
+            sequence_path_orientation: b"A".to_vec(),
+            sequence_canonical: b"T".to_vec(),
+        };
+        candidate.ranges[0].trim_plan = TrimPlan {
+            canonical_left_trim_bp: 1,
+            canonical_right_trim_bp: 2,
+            expected_flanked_sequence_canonical: b"TGGAA".to_vec(),
+            expected_target_sequence_path_orientation: b"CC".to_vec(),
+            restore_orientation: OccurrenceOrientation::Reverse,
+        };
+        candidate.ranges[0].resolver_sequence = b"TGGAA".to_vec();
+
+        let line = format_flank_aware_candidate_diagnostic(&candidate, 5);
+        assert!(line.contains("candidate_id=diagnostic-candidate"), "{line}");
+        assert!(line.contains("target_span=root_steps:1..1"), "{line}");
+        assert!(
+            line.contains("path=HG001#1#chr6:100-106 full name"),
+            "{line}"
+        );
+        assert!(line.contains("orientation=reverse"), "{line}");
+        assert!(line.contains("path_actual=2"), "{line}");
+        assert!(line.contains("canonical_side=right"), "{line}");
+        assert!(line.contains("trim(left=1,right=2,"), "{line}");
+        assert!(line.contains("resolver_bp=5"), "{line}");
+    }
+
+    #[test]
+    fn direct_poa_processes_candidate_within_median_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -11010,13 +15288,77 @@ P\tins\t1+,2+,3+\t*
             gfa,
             &ResolutionConfig {
                 method: ResolutionMethod::Poa,
-                max_median_traversal_len: 4,
+                max_median_traversal_len: 100,
                 ..ResolutionConfig::default()
             },
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn direct_poa_respects_median_traversal_budget() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tTTTTTTTTTT
+S\t4\tGGGGGGGGGG
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t2\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t2\t+\t0M
+P\tp0\t1+,3+,2+\t*
+P\tp1\t1+,4+,2+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Poa,
+                max_median_traversal_len: 4,
+                max_traversal_len: 100,
+                max_total_sequence: 1_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn direct_poa_respects_max_traversal_budget() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tTTTTTTTTTT
+S\t4\tGGGGGGGGGG
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t2\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t2\t+\t0M
+P\tp0\t1+,3+,2+\t*
+P\tp1\t1+,4+,2+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Poa,
+                max_traversal_len: 4,
+                max_median_traversal_len: 100,
+                max_total_sequence: 1_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
         assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
@@ -11241,7 +15583,7 @@ P\touter_alt\t1+,7+,6+\t*
     }
 
     #[test]
-    fn all_candidates_processed_regardless_of_budget() {
+    fn direct_poa_skips_over_budget_candidate_but_processes_eligible_candidate() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -11275,7 +15617,7 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert!(resolved.stats.resolved >= 2, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
         assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
@@ -11598,6 +15940,201 @@ P\talt\t1+,12+,13+,24+,25+,36+,37+\t*
     }
 
     #[test]
+    fn motif_local_discovers_sparse_offshoot_with_original_path_names_without_povu() {
+        let mut segments = vec![
+            Segment {
+                id: "left".to_string(),
+                seq: b"AA".to_vec(),
+            },
+            Segment {
+                id: "shared".to_string(),
+                seq: b"C".to_vec(),
+            },
+            Segment {
+                id: "right".to_string(),
+                seq: b"TT".to_vec(),
+            },
+        ];
+        for idx in 0..16 {
+            segments.push(Segment {
+                id: format!("filler{idx}"),
+                seq: b"G".to_vec(),
+            });
+        }
+        let private_node = segments.len();
+        segments.push(Segment {
+            id: "private".to_string(),
+            seq: b"G".to_vec(),
+        });
+        let graph = Graph {
+            segments,
+            paths: vec![
+                Path {
+                    name: "HG00001#1#chr6:100-105".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00002#1#chr6:200-205".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00003#1#chr6:300-305".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00004#1#chr6:400-405".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00005#1#chr6:500-505".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00006#1#chr6:600-605".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: private_node,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        };
+        let config = ResolutionConfig {
+            method: ResolutionMethod::MotifLocal,
+            motif_max_sparse_paths: 1,
+            motif_min_flank_paths: 4,
+            motif_min_order_jump: 8,
+            motif_max_window_bp: 100,
+            ..ResolutionConfig::default()
+        };
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &[], &FxHashSet::default());
+        let candidate = generated
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source == MultiLevelCandidateSource::MotifLocal)
+            .expect("motif-local sparse offshoot should be discovered without POVU input");
+
+        assert_eq!(candidate.candidate.ranges.len(), graph.paths.len());
+        assert_eq!(
+            format_candidate_path_coverage(&graph, &candidate.candidate),
+            "6/6"
+        );
+        assert!(
+            candidate
+                .source_ancestry
+                .iter()
+                .any(|entry| entry.contains("motif=sparse-offshoot")),
+            "{candidate:?}"
+        );
+        let source_names = candidate
+            .candidate
+            .ranges
+            .iter()
+            .map(|range| range.source_path_name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_names,
+            graph
+                .paths
+                .iter()
+                .map(|path| path.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let headers = candidate_sequence_headers(&candidate.candidate).unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                "HG00001#1#chr6:100-105",
+                "HG00002#1#chr6:200-205",
+                "HG00003#1#chr6:300-305",
+                "HG00004#1#chr6:400-405",
+                "HG00005#1#chr6:500-505",
+                "HG00006#1#chr6:600-605",
+            ]
+        );
+        assert!(headers.iter().all(|header| {
+            !header.contains("__impg")
+                && !header.contains("candidate_")
+                && !header.contains("path0")
+        }));
+    }
+
+    #[test]
     fn outward_residual_build_budget_diagnostic_log_includes_source_and_limit() {
         let graph = tiny_boundary_graph();
         let window = budget_test_window(MultiLevelCandidateSource::OutwardResidualWindow);
@@ -11691,6 +16228,21 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         assert_eq!(
             multi_level_window_replacement_method(window, &config),
             ResolutionMethod::Poasta
+        );
+
+        let global_poa = ResolutionConfig {
+            auto_spoa_max_traversal_len: 1_000,
+            auto_poasta_max_traversal_len: 1_000,
+            ..config.clone()
+        };
+        assert_eq!(
+            auto_method_by_median(window.candidate.traversal_stats, &global_poa),
+            ResolutionMethod::Poa
+        );
+        assert_eq!(
+            multi_level_window_replacement_method(window, &global_poa),
+            ResolutionMethod::Poa,
+            "equal POA/POASTA ceilings collapse the middle tier instead of promoting to POASTA"
         );
 
         let forced_sweepga = ResolutionConfig {
@@ -11922,8 +16474,379 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         );
     }
 
+    fn incomplete_homologous_fixture_graph() -> Graph {
+        Graph {
+            segments: vec![
+                Segment {
+                    id: "1".to_string(),
+                    seq: b"A".to_vec(),
+                },
+                Segment {
+                    id: "2".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "3".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "4".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "5".to_string(),
+                    seq: b"G".to_vec(),
+                },
+                Segment {
+                    id: "6".to_string(),
+                    seq: b"T".to_vec(),
+                },
+            ],
+            paths: vec![
+                Path {
+                    name: "GRCh38#0#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00001#1#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step {
+                            node: 4,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00002#1#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                        Step {
+                            node: 2,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+                Path {
+                    name: "HG00003#1#chr6:0-4".to_string(),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 3,
+                            rev: false,
+                        },
+                        Step {
+                            node: 4,
+                            rev: false,
+                        },
+                        Step {
+                            node: 5,
+                            rev: false,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+    fn homologous_candidate_for_paths(
+        graph: &Graph,
+        path_indexes: &[usize],
+        signature: &str,
+    ) -> BubbleCandidate {
+        let positions = (0..graph.paths.len())
+            .map(|path_idx| path_positions(graph, path_idx))
+            .collect::<Vec<_>>();
+        let ranges = path_indexes
+            .iter()
+            .map(|&path_idx| PathRange {
+                path_idx,
+                source_path_name: Some(graph.paths[path_idx].name.clone()),
+                original_path_name: Some(graph.paths[path_idx].name.clone()),
+                source_begin_bp: positions[path_idx][1],
+                source_end_bp: positions[path_idx][3],
+                begin_step: 1,
+                end_step: 3,
+                ..PathRange::default()
+            })
+            .collect::<Vec<_>>();
+        let mut unique_steps = FxHashSet::default();
+        for range in &ranges {
+            let path = &graph.paths[range.path_idx];
+            for step_idx in range.begin_step..range.end_step {
+                unique_steps.insert(path.steps[step_idx]);
+            }
+        }
+        BubbleCandidate {
+            ranges,
+            signature: signature.to_string(),
+            root_start_step: 1,
+            root_end_step: 2,
+            root_span: positions[0][3] - positions[0][1],
+            total_steps: path_indexes.len() * 2,
+            unique_steps: unique_steps.len(),
+            traversal_stats: TraversalStats {
+                count: path_indexes.len(),
+                min_len: 2,
+                median_len: 2,
+                p90_len: 2,
+                max_len: 2,
+                total_len: path_indexes.len() * 2,
+            },
+            level: 0,
+        }
+    }
+
+    fn two_node_homologous_replacement(path_count: usize) -> Graph {
+        Graph {
+            segments: vec![
+                Segment {
+                    id: "r1".to_string(),
+                    seq: b"C".to_vec(),
+                },
+                Segment {
+                    id: "r2".to_string(),
+                    seq: b"G".to_vec(),
+                },
+            ],
+            paths: (0..path_count)
+                .map(|idx| Path {
+                    name: format!("replacement_path_{idx}"),
+                    steps: vec![
+                        Step {
+                            node: 0,
+                            rev: false,
+                        },
+                        Step {
+                            node: 1,
+                            rev: false,
+                        },
+                    ],
+                })
+                .collect(),
+        }
+    }
+
     #[test]
-    fn direct_poa_processes_candidate_regardless_of_max_traversal_len() {
+    fn partial_homologous_lacing_can_improve_locally_but_grow_globally() {
+        let graph = incomplete_homologous_fixture_graph();
+        let partial = homologous_candidate_for_paths(&graph, &[0, 1], "partial-homologous");
+        let replacement = two_node_homologous_replacement(partial.ranges.len());
+        let local_delta = replacement_objective_delta(
+            &graph,
+            &partial,
+            &replacement,
+            MultiLevelObjectiveMode::Size,
+        );
+        assert!(
+            local_delta.segment_delta > 0,
+            "fixture must reproduce blocker-04 local improvement: {:?}",
+            local_delta
+        );
+
+        let before_quality = graph_quality(&graph);
+        let mut next_id = 100;
+        let partial_after = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan::new(
+                partial,
+                replacement,
+                ResolutionMethod::Poa,
+            )],
+            &mut next_id,
+        )
+        .unwrap();
+        let partial_after_quality = graph_quality(&partial_after);
+        assert!(
+            partial_after_quality.segments > before_quality.segments,
+            "partial lacing should preserve old homologous nodes and add replacement nodes: before {}, after {}",
+            before_quality.summary(),
+            partial_after_quality.summary()
+        );
+
+        let complete = homologous_candidate_for_paths(&graph, &[0, 1, 2, 3], "complete-homologous");
+        let replacement = two_node_homologous_replacement(complete.ranges.len());
+        let local_delta = replacement_objective_delta(
+            &graph,
+            &complete,
+            &replacement,
+            MultiLevelObjectiveMode::Size,
+        );
+        assert!(
+            local_delta.segment_delta > 0,
+            "complete fixture should still improve locally: {:?}",
+            local_delta
+        );
+
+        let mut next_id = 200;
+        let complete_after = apply_replacement_frontier(
+            &graph,
+            &[ReplacementPlan::new(
+                complete,
+                replacement,
+                ResolutionMethod::Poa,
+            )],
+            &mut next_id,
+        )
+        .unwrap();
+        let complete_after_quality = graph_quality(&complete_after);
+        assert!(
+            complete_after_quality.segments < before_quality.segments,
+            "complete lacing should remove the old homologous structure: before {}, after {}",
+            before_quality.summary(),
+            complete_after_quality.summary()
+        );
+        assert!(path_sequences_equal(&graph, &complete_after).unwrap());
+    }
+
+    #[test]
+    fn iterative_multi_level_aggregates_complete_homologous_traversal_set_before_cap() {
+        let graph = incomplete_homologous_fixture_graph();
+        let partial = homologous_candidate_for_paths(&graph, &[0, 1], "partial-homologous");
+        let discovered = vec![DiscoveredCandidate {
+            candidate: partial,
+            povu_site_id: "site-partial".to_string(),
+            povu_parent_id: None,
+            povu_level: 0,
+            is_leaf: true,
+        }];
+        let path_positions_by_path = (0..graph.paths.len())
+            .map(|path_idx| path_positions(&graph, path_idx))
+            .collect::<Vec<_>>();
+        assert!(is_complete_homologous_seed(
+            &discovered[0],
+            2,
+            graph.paths.len()
+        ));
+        let cluster =
+            complete_homologous_cluster_indexes(&discovered, 0, &path_positions_by_path[0], 2);
+        assert_eq!(cluster, vec![0]);
+        let range_only = candidate_from_complete_homologous_cluster(
+            &graph,
+            &discovered,
+            &cluster,
+            &path_positions_by_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(range_only.ranges.len(), 2, "{range_only:?}");
+
+        let aggregate = candidate_from_complete_homologous_cluster(
+            &graph,
+            &discovered,
+            &cluster,
+            &path_positions_by_path,
+            true,
+        )
+        .unwrap();
+        assert_eq!(aggregate.ranges.len(), graph.paths.len(), "{aggregate:?}");
+        assert_ne!(aggregate.signature, discovered[0].candidate.signature);
+
+        let mut manual_generated = MultiLevelGeneratedCandidates::default();
+        let mut manual_emitted = FxHashSet::default();
+        insert_multi_level_candidate(
+            &mut manual_generated,
+            &mut manual_emitted,
+            &FxHashSet::default(),
+            discovered[0].candidate.clone(),
+            MultiLevelCandidateSource::TopLevel,
+            1,
+            vec![source_ancestry_from_discovered(&discovered[0])],
+            &ResolutionConfig::default(),
+        );
+        add_complete_homologous_windows(
+            &graph,
+            &discovered,
+            2,
+            &path_positions_by_path,
+            &mut manual_generated,
+            &mut manual_emitted,
+            &FxHashSet::default(),
+            &ResolutionConfig::default(),
+        );
+        assert_eq!(
+            manual_generated.complete_homologous_aggregated, 1,
+            "{manual_generated:?}"
+        );
+        let config = ResolutionConfig {
+            method: ResolutionMethod::IterativeMultiLevel,
+            multi_level_window_mode: MultiLevelWindowMode::Largest,
+            multi_level_window_target_bp: 2,
+            multi_level_candidate_limit: 32,
+            ..ResolutionConfig::default()
+        };
+
+        let generated =
+            generate_multi_level_candidates(&graph, &config, &discovered, &FxHashSet::default());
+
+        assert_eq!(generated.complete_homologous_aggregated, 1, "{generated:?}");
+        assert_eq!(generated.candidates.len(), 1, "{generated:?}");
+        let candidate = &generated.candidates[0];
+        assert_eq!(
+            candidate.source,
+            MultiLevelCandidateSource::CompleteHomologousWindow
+        );
+        assert_eq!(candidate.candidate.ranges.len(), graph.paths.len());
+        assert_eq!(
+            format_candidate_path_coverage(&graph, &candidate.candidate),
+            "4/4"
+        );
+        assert!(
+            candidate
+                .source_ancestry
+                .iter()
+                .any(|entry| entry.contains("site=site-partial")),
+            "{candidate:?}"
+        );
+        let headers = candidate_sequence_headers(&candidate.candidate).unwrap();
+        assert!(headers.iter().all(|header| !header.contains("__impg")));
+        assert!(headers.iter().all(|header| !header.contains("candidate_")));
+    }
+
+    #[test]
+    fn direct_poa_processes_candidate_within_max_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -11938,7 +16861,7 @@ P\tins\t1+,2+,3+\t*
         let before = seq_map(gfa);
         let config = ResolutionConfig {
             method: ResolutionMethod::Poa,
-            max_traversal_len: 4,
+            max_traversal_len: 100,
             ..ResolutionConfig::default()
         };
         let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();

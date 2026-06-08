@@ -1,0 +1,115 @@
+{
+  "fixture_id": "microtangle_repeat_motif",
+  "fixture_class": "repeated_motif_microtangle",
+  "title": "Bounded repeated-motif microtangle",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#microtangle_repeat_motif:1-25",
+      "file": "input.fa",
+      "expected_spelling": "TTCGAACAGCAGCAGGGTTAACCGG"
+    },
+    {
+      "name": "hapA#0#microtangle_repeat_motif:1-28",
+      "file": "input.fa",
+      "expected_spelling": "TTCGAACAGCAGCAGCAGGGTTAACCGG"
+    },
+    {
+      "name": "hapB#0#microtangle_repeat_motif:1-22",
+      "file": "input.fa",
+      "expected_spelling": "TTCGAACAGCAGGGTTAACCGG"
+    },
+    {
+      "name": "hapC#0#microtangle_repeat_motif:1-28",
+      "file": "input.fa",
+      "expected_spelling": "TTCGAACAGCAGCAGTAGGGTTAACCGG"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#microtangle_repeat_motif:1-25",
+    "hapA#0#microtangle_repeat_motif:1-28",
+    "hapB#0#microtangle_repeat_motif:1-22",
+    "hapC#0#microtangle_repeat_motif:1-28"
+  ],
+  "expected_path_spellings": {
+    "ref#0#microtangle_repeat_motif:1-25": "TTCGAACAGCAGCAGGGTTAACCGG",
+    "hapA#0#microtangle_repeat_motif:1-28": "TTCGAACAGCAGCAGCAGGGTTAACCGG",
+    "hapB#0#microtangle_repeat_motif:1-22": "TTCGAACAGCAGGGTTAACCGG",
+    "hapC#0#microtangle_repeat_motif:1-28": "TTCGAACAGCAGCAGTAGGGTTAACCGG"
+  },
+  "expected_topology": {
+    "assertion_id": "bounded_repeat_motif_microtangle",
+    "description": "Short repeated motif creates a bounded microtangle with exact spelling and no collapsed motif copy.",
+    "exact": {
+      "path_count": 4,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 18
+    },
+    "link_count": {
+      "min": 1,
+      "max": 28
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Local graph explodes, self-loops appear, or all motif copies collapse into one unsupported node.",
+  "render_hints": {
+    "reference_path": "ref#0#microtangle_repeat_motif:1-25",
+    "highlight_paths": [
+      "hapA#0#microtangle_repeat_motif:1-28",
+      "hapB#0#microtangle_repeat_motif:1-22",
+      "hapC#0#microtangle_repeat_motif:1-28"
+    ],
+    "expected_shape": "bounded motif-count microtangle"
+  }
+}

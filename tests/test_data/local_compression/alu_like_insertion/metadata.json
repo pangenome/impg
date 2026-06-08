@@ -1,0 +1,107 @@
+{
+  "fixture_id": "alu_like_insertion",
+  "fixture_class": "alu_like_insertion",
+  "title": "Repeat-rich Alu-like insertion",
+  "tier": "local",
+  "input_sequences": [
+    {
+      "name": "ref#0#alu_like_insertion:1-26",
+      "file": "input.fa",
+      "expected_spelling": "CCGGAATTCCGGTTAACCGGTTAACC"
+    },
+    {
+      "name": "hapA#0#alu_like_insertion:1-294",
+      "file": "input.fa",
+      "expected_spelling": "CCGGAATTCCGGAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGTTAACCGGTTAACC"
+    },
+    {
+      "name": "hapB#0#alu_like_insertion:1-294",
+      "file": "input.fa",
+      "expected_spelling": "CCGGAATTCCGGAGCTGGTGCAATTAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGTTAACCGGTTAACC"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#alu_like_insertion:1-26",
+    "hapA#0#alu_like_insertion:1-294",
+    "hapB#0#alu_like_insertion:1-294"
+  ],
+  "expected_path_spellings": {
+    "ref#0#alu_like_insertion:1-26": "CCGGAATTCCGGTTAACCGGTTAACC",
+    "hapA#0#alu_like_insertion:1-294": "CCGGAATTCCGGAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGTTAACCGGTTAACC",
+    "hapB#0#alu_like_insertion:1-294": "CCGGAATTCCGGAGCTGGTGCAATTAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGCAAATAGCTGGTGTTAACCGGTTAACC"
+  },
+  "expected_topology": {
+    "assertion_id": "alu_like_repeat_insertion",
+    "description": "Repeat-rich inserted branches preserve exact spelling without repeat-glue long links.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 18
+    },
+    "link_count": {
+      "min": 1,
+      "max": 28
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Repeat content glues unrelated anchors or fails under short exact-match floors.",
+  "render_hints": {
+    "reference_path": "ref#0#alu_like_insertion:1-26",
+    "highlight_paths": [
+      "hapA#0#alu_like_insertion:1-294",
+      "hapB#0#alu_like_insertion:1-294"
+    ],
+    "expected_shape": "repeat-rich insertion with bounded ranges"
+  }
+}

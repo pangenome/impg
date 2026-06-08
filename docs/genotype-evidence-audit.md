@@ -8,21 +8,26 @@ Code references use current source line numbers.
 
 ## Short Answer
 
-`impg genotype cos` is a syng syncmer-node cosine scorer. Today it consumes:
+`impg genotype cos` is a cosine scorer over typed graph-feature vectors. Today
+it has two concrete backends:
 
-- A syng index prefix, or a syng-native render bundle, as the candidate graph
-  source (`src/main.rs:4275`, `src/main.rs:4288`, `src/main.rs:7720`).
-- Sample evidence from `--pack` or `--proj` only (`src/main.rs:4292`,
-  `src/main.rs:4296`, `src/main.rs:7762`).
-- Pack files in plain TSV, zstd-compressed TSV, or current binary pack format,
-  because `pack::read` dispatches on binary magic and otherwise opens a niffler
-  reader for TSV (`src/pack.rs:180`, `src/pack.rs:191`, `src/pack.rs:339`).
+- A syng syncmer-node backend fed by a syng index prefix or syng-native render
+  bundle plus `--pack` or syng `--proj`.
+- A graph-node backend fed by `--graph <local.gfa>`, a graph render bundle, or
+  a syng-derived dynamic query GFA plus a typed graph pack or GFA projection
+  bundle.
 
-`impg genotype cos` does not directly consume FASTA, FASTQ, BAM, CRAM, or GFA.
-It also does not consume GAF read walks directly. When `--proj` is provided,
-genotype loads the projection manifest and uses only its `sample.pack` path for
-cosine scoring (`src/main.rs:7749`, `src/main.rs:7762`); the projection GAF is
-not passed into genotype's config (`src/commands/genotype.rs:47`).
+Both backends accept pack files in plain TSV, zstd-compressed TSV, or current
+binary pack format, because `pack::read` dispatches on binary magic and
+otherwise opens a niffler reader for TSV.
+
+`impg genotype cos` does not directly consume FASTA, FASTQ, BAM, or CRAM as
+sample evidence. FASTA/FASTQ reads must first go through `impg map` to produce
+a syng pack/projection. Raw GAF read walks are not a direct genotype evidence
+argument either; for GFA graphs they must first go through
+`impg project --gfa local.gfa --gaf reads.gaf`, and for syng projections the
+GAF component is used by `infer` read-link stitching rather than local
+`genotype cos` scoring.
 
 `impg map` currently builds this evidence from a syng index plus a query FASTA
 or FASTQ file. It can emit `gaf`, `paf`, binary `pack`, text `pack-tsv`, or
@@ -41,6 +46,8 @@ impg genotype cos -a panel.syng -p sample.pack -r sampleA#0#chr1:100000-102000
 impg genotype cos -a panel.syng -p sample.pack.tsv.zst -r sampleA#0#chr1:100000-102000
 impg genotype cos -a panel.syng --proj sample.proj -r sampleA#0#chr1:100000-102000
 impg genotype cos --render-bundle locus.impg-gbz --pack local.sample.pack --ploidy 2
+impg genotype cos --graph local.gfa --pack sample.graph.pack.tsv --pack-feature-space gfa-segment
+impg genotype cos --graph local.gfa --proj sample.gfa.proj --target-path REF:0-10000
 impg gt cosigt -a panel.syng -p sample.pack -r sampleA#0#chr1:100000-102000
 ```
 
@@ -49,19 +56,17 @@ The `genotype` command has the alias `gt`, and `cos` has the hidden alias
 implementation still emits `#alias\tcosigt` in output metadata
 (`src/commands/genotype.rs:438`, `src/commands/genotype.rs:442`).
 
-The required graph source is either `--index/-a` or `--render-bundle`
-(`src/main.rs:4288`, `src/main.rs:7735`). Render bundle support is limited to
-bundles whose manifest feature space is `syng-syncmer-node`
-(`src/main.rs:7720`, `src/main.rs:7725`). Render bundles resolve to the bundle's
-embedded syng prefix and translate an optional source `-r` into a rendered
-target range (`src/render_bundle.rs:150`, `src/render_bundle.rs:161`).
+The graph source is `--index/-a`, `--graph`, `--render-bundle`, or a dynamic
+query graph built from `--index`, `--target-range`, and `--sequence-files`.
+Render bundles whose manifest feature space is `syng-syncmer-node` route to
+the syng backend; bundles whose feature space is `gfa-segment` or
+`variation-graph-node` route to the graph backend.
 
-The required sample evidence is `--pack/-p` or `--proj`
-(`src/main.rs:4292`, `src/main.rs:4296`, `src/main.rs:7762`). A projection is
-only a manifest wrapper around a pack path, optional GAF path, and syng prefix
-(`src/projection.rs:10`, `src/projection.rs:21`, `src/projection.rs:59`). In
-genotype, `--proj` is used to resolve the pack path; no read-walk evidence is
-used (`src/main.rs:7749`, `src/main.rs:7762`, `src/main.rs:7772`).
+The required sample evidence is `--pack/-p` or `--proj`. In local genotype
+scoring, `--proj` resolves to a pack path. Syng projection GAF paths are not
+used by `genotype cos`; GFA projection bundles are used as typed graph evidence
+because their manifest records the graph pack, graph ID, feature-ID mode,
+contribution model, source GAF copy, and read-contribution table.
 
 ### Map
 
@@ -103,6 +108,13 @@ BAM, CRAM, GAM, existing GAF, or arbitrary graph GFA as sample input. Current
 pack evidence is built only by scanning read/query sequences for syng syncmer
 nodes.
 
+For graph GAF evidence, use `impg project` rather than `impg map`:
+
+```bash
+impg project --gfa local.gfa --gaf reads.gaf -O sample.gfa.proj
+impg genotype cos --graph local.gfa --proj sample.gfa.proj
+```
+
 ## Intermediate Products
 
 Existing products:
@@ -120,10 +132,18 @@ Existing products:
 - GAF read walks: `impg map -o gaf` or projection GAF. Paths are signed syng
   syncmer node walks and include `qp:B:I` query syncmer positions
   (`src/main.rs:516`, `src/main.rs:533`, `src/main.rs:539`).
+- GFA projection bundle: directory with `manifest.json`, typed
+  `sample.pack.tsv`, a source GAF copy, and `read-contributions.tsv`, produced
+  by `impg project --gfa ... --gaf ...`.
 - Genotype result TSV: top cosine genotype combinations with similarity, QV,
   dot, sample norm, genotype norm, haplotypes, regions, candidate anchors, and
   candidate span fractions (`src/commands/genotype.rs:462`,
   `src/commands/genotype.rs:487`).
+- Genotype debug report: `impg genotype cos --emit-report <path>` or
+  `--debug-report <path>` writes a sectioned TSV with input metadata, coverage
+  summaries, selected sample features, candidate features, top result scores,
+  and per-feature score decomposition. The graph backend also reports segment
+  lengths, raw counts, normalized weights, graph ID, and contribution model.
 - Infer local call TSV: one or more target ranges with local genotype-style
   calls and `PASS`/`NO_CALL` status (`src/commands/infer.rs:448`,
   `src/commands/infer.rs:475`).
@@ -133,17 +153,14 @@ Existing products:
 
 Missing or weak for human debugging:
 
-- No per-read pack contribution table. `reads.gaf.zst` shows every syncmer walk,
-  but the pack path deduplicates nodes per read before counting, so the GAF is
-  not a direct explanation of pack counts.
-- No command that dumps candidate feature vectors as `(node_id, candidate_count)`
-  beside sample counts.
-- No output of selected locus features or per-node residuals explaining why a
-  wrong candidate won.
+- No per-read syng pack contribution table. `reads.gaf.zst` shows every
+  syncmer walk, but the syng pack path deduplicates nodes per read before
+  counting, so the GAF is not a direct explanation of pack counts.
 - No report of candidates removed by `--min-anchors`, `--min-span-fraction`, or
   `--candidate-top-k`.
-- No read-length, node-length, or effective-depth diagnostics. The scorer only
-  reports aggregate vector norms.
+- No read-length or effective-depth diagnostics. The GFA report exposes segment
+  lengths; syng feature lengths are uniform within an index and are not a
+  weighting term.
 - Infer mosaic exposes read-link/read-emission weights, but not the underlying
   GAF records, GBWT MEM intervals, matched candidate occurrences, or filtered
   candidates that produced those weights.
@@ -399,17 +416,18 @@ and adds read-link rewards across adjacent local calls
    (`src/commands/genotype.rs:178`, `src/commands/genotype.rs:233`). A debug run
    should compare both modes before concluding the evidence itself is wrong.
 
-7. Projection can make GAF look relevant to genotype when it is not.
+7. Syng projection can make GAF look relevant to local genotype when it is not.
 
    `sample.proj` carries both `sample.pack` and `reads.gaf.zst`, but genotype
-   only consumes the pack path (`src/projection.rs:14`, `src/projection.rs:15`,
-   `src/main.rs:7762`). GAF read-walk order only affects infer stitching.
+   only consumes the pack path for syng local cosine scoring. GAF read-walk
+   order affects infer stitching, not local `genotype cos` rows.
 
-8. Render bundle support is syng-native only.
+8. Graph and syng projection bundles have different semantics.
 
-   Both genotype and infer reject render bundles whose `feature_space` is not
-   `syng-syncmer-node` (`src/main.rs:7721`, `src/main.rs:7884`). Local GFA
-   segment bundles are not current genotype evidence backends.
+   GFA projection bundles are typed graph evidence and include
+   `read-contributions.tsv`; syng projection bundles are syng pack evidence
+   plus optional GAF read walks for infer. They share the `--proj` flag but not
+   the same feature space or read-link behavior.
 
 ## Current Tests
 
@@ -471,17 +489,15 @@ useful but not systematic. Main gaps:
 - No explicit genotype test for the repeated-node mismatch where a long read's
   repeated GAF nodes collapse in pack coverage but candidate vectors retain copy
   multiplicity.
-- No regression test that asserts genotype ignores projection GAF while infer
-  stitching uses it.
-- No direct tests for rejecting or ignoring FASTA/FASTQ/BAM/CRAM/GFA as
-  genotype evidence inputs beyond the current CLI shape.
+- No direct tests for rejecting or ignoring FASTA/FASTQ/BAM/CRAM as genotype
+  evidence inputs beyond the current CLI shape.
 - No benchmark against external LikeGT/COSIGT expected calls or score
   distributions.
-- No tests for node-length/read-length normalization because the implementation
-  has no such normalization today.
-- No human-debug artifact tests, because there is no artifact that reports
-  per-read pack contributions, candidate node vectors, feature residuals, or
-  candidate filter reasons.
+- No tests for read-length normalization because the implementation has no such
+  normalization today.
+- Candidate filter-rejection debug tables are still missing, even though the
+  current debug report exposes selected sample vectors, candidate vectors, and
+  score decomposition.
 
 ## Practical Debug Recipe
 
@@ -502,7 +518,8 @@ For a small weird assignment today:
    ```bash
    impg genotype cos -a panel.syng -p sample.pack.tsv \
      -r sampleA#0#chr1:100000-102000 \
-     --candidate-top-k 0 --top-n 20 --min-span-fraction 0
+     --candidate-top-k 0 --top-n 20 --min-span-fraction 0 \
+     --emit-report genotype.report.tsv
    ```
 
 4. Compare `spanning` and `overlapping`.
@@ -510,7 +527,8 @@ For a small weird assignment today:
    ```bash
    impg genotype cos -a panel.syng -p sample.pack.tsv \
      -r sampleA#0#chr1:100000-102000 --candidate-mode overlapping \
-     --candidate-top-k 0 --top-n 20 --min-anchors 1
+     --candidate-top-k 0 --top-n 20 --min-anchors 1 \
+     --emit-report genotype.overlap.report.tsv
    ```
 
 5. If read order or phase should matter, use infer with a projection or explicit
@@ -523,7 +541,7 @@ For a small weird assignment today:
      --candidate-top-k 0 --top-n 20 --read-link-weight 5
    ```
 
-The key limitation is that these steps still require manual correlation between
-GAF, pack counts, and genotype rows. The current implementation does not yet
-emit the intermediate per-node/candidate residuals that would make that
-correlation straightforward.
+The key remaining limitation is per-read syng pack provenance: `--emit-report`
+now exposes selected sample vectors, candidate vectors, and feature-level score
+decomposition, but syng pack counts still need manual correlation back to
+`reads.gaf.zst` when repeated read-walk nodes collapsed during pack creation.

@@ -1,0 +1,107 @@
+{
+  "fixture_id": "inversion_like_case",
+  "fixture_class": "inversion_like",
+  "title": "Orientation-sensitive inversion-like branch",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#inversion_like_case:1-24",
+      "file": "input.fa",
+      "expected_spelling": "CCGGAATTAACCGGTTTTAACCGG"
+    },
+    {
+      "name": "hapA#0#inversion_like_case:1-24",
+      "file": "input.fa",
+      "expected_spelling": "CCGGAATTTTGGCCAATTAACCGG"
+    },
+    {
+      "name": "hapB#0#inversion_like_case:1-24",
+      "file": "input.fa",
+      "expected_spelling": "CCGGAATTAACCGGAATTAACCGG"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#inversion_like_case:1-24",
+    "hapA#0#inversion_like_case:1-24",
+    "hapB#0#inversion_like_case:1-24"
+  ],
+  "expected_path_spellings": {
+    "ref#0#inversion_like_case:1-24": "CCGGAATTAACCGGTTTTAACCGG",
+    "hapA#0#inversion_like_case:1-24": "CCGGAATTTTGGCCAATTAACCGG",
+    "hapB#0#inversion_like_case:1-24": "CCGGAATTAACCGGAATTAACCGG"
+  },
+  "expected_topology": {
+    "assertion_id": "inversion_like_orientation_preserved",
+    "description": "Inversion-like branches preserve orientation-sensitive path spellings and avoid cross-orientation lacing.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 18
+    },
+    "link_count": {
+      "min": 1,
+      "max": 28
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Resolver reverse-complements the wrong interval or creates long links between inverted anchors.",
+  "render_hints": {
+    "reference_path": "ref#0#inversion_like_case:1-24",
+    "highlight_paths": [
+      "hapA#0#inversion_like_case:1-24",
+      "hapB#0#inversion_like_case:1-24"
+    ],
+    "expected_shape": "orientation-sensitive branch bubble"
+  }
+}

@@ -659,6 +659,79 @@ fn c4_fragment_lacing_uses_pairwise_induced_graphs() {
     }
 }
 
+#[test]
+fn c4_motif_zero_paf_fastga_seqwish_variant_is_rejected_without_replacement() {
+    let gfa = "\
+H\tVN:Z:1.0
+S\tleft\tAA
+S\tshared\tC
+S\tright\tTT
+S\tf00\tG
+S\tf01\tG
+S\tf02\tG
+S\tf03\tG
+S\tf04\tG
+S\tf05\tG
+S\tf06\tG
+S\tf07\tG
+S\tf08\tG
+S\tf09\tG
+S\tf10\tG
+S\tf11\tG
+S\tf12\tG
+S\tf13\tG
+S\tf14\tG
+S\tf15\tG
+S\tprivate\tG
+L\tleft\t+\tshared\t+\t0M
+L\tshared\t+\tright\t+\t0M
+L\tleft\t+\tprivate\t+\t0M
+L\tprivate\t+\tright\t+\t0M
+P\tHG00001#1#chr6:100-105\tleft+,shared+,right+\t*
+P\tHG00002#1#chr6:200-205\tleft+,shared+,right+\t*
+P\tHG00003#1#chr6:300-305\tleft+,shared+,right+\t*
+P\tHG00004#1#chr6:400-405\tleft+,shared+,right+\t*
+P\tHG00005#1#chr6:500-505\tleft+,shared+,right+\t*
+P\tHG00006#1#chr6:600-605\tleft+,private+,right+\t*
+";
+    let before_paths = seq_map(gfa);
+    let resolved = resolve_gfa_bubbles(
+        gfa,
+        &ResolutionConfig {
+            max_iterations: 1,
+            method: ResolutionMethod::MotifLocal,
+            auto_spoa_max_traversal_len: 0,
+            auto_poasta_max_traversal_len: 0,
+            motif_max_sparse_paths: 1,
+            motif_min_flank_paths: 4,
+            motif_min_order_jump: 8,
+            motif_max_window_bp: 100,
+            sweepga_aligner: "fastga".to_string(),
+            sweepga_min_aln_length: 1_000,
+            polish_iterations: 0,
+            ..ResolutionConfig::default()
+        },
+    )
+    .expect("motif-local zero-PAF candidate should be rejected, not fatal");
+
+    assert_eq!(resolved.stats.resolved, 0, "{:?}", resolved.stats);
+    assert!(
+        resolved.stats.candidates_seen > 0,
+        "synthetic motif should be admitted before FastGA rejects it: {:?}",
+        resolved.stats
+    );
+    assert!(
+        resolved.stats.bailed > 0,
+        "zero-PAF FastGA/seqwish variant should count as a rejected build: {:?}",
+        resolved.stats
+    );
+    assert_eq!(
+        resolved.gfa, gfa,
+        "zero-PAF motif-local variant must not replace the graph"
+    );
+    assert_eq!(seq_map(&resolved.gfa), before_paths);
+}
+
 // ---------------------------------------------------------------------------
 // Failure 2 — No round-level quality gate: rounds that grow score are accepted
 //
@@ -1074,6 +1147,68 @@ fn c4_slice_auto_crush_preserves_path_sequences() {
     eprintln!(
         "slice: segs {} → {}, bp {} → {}",
         before_segs, after_segs, before_bp, after_bp
+    );
+}
+
+#[test]
+fn c4_slice_abpoa_crush_preserves_path_sequences_when_configured() {
+    let Ok(abpoa_bin) = std::env::var("IMPG_ABPOA_BIN") else {
+        eprintln!("SKIP: IMPG_ABPOA_BIN is not set; abPOA C4 slice smoke not run");
+        return;
+    };
+    if Command::new(&abpoa_bin).arg("-v").output().is_err() {
+        eprintln!("SKIP: configured IMPG_ABPOA_BIN is not runnable: {abpoa_bin}");
+        return;
+    }
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let gfa_path = manifest_dir.join("tests/test_data/crush/c4_slice_1500_3000.gfa");
+    if !gfa_path.exists() {
+        eprintln!("SKIP: test data slice not found at {:?}", gfa_path);
+        return;
+    }
+
+    let gfa = std::fs::read_to_string(&gfa_path).expect("failed to read C4 slice GFA");
+    let before_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&gfa).unwrap().into_iter().collect();
+
+    let resolved = resolve_gfa_bubbles(
+        &gfa,
+        &ResolutionConfig {
+            method: ResolutionMethod::Abpoa,
+            abpoa_bin,
+            max_iterations: 1,
+            max_traversal_len: 10_000,
+            max_median_traversal_len: 10_000,
+            max_total_sequence: 1_000_000,
+            ..ResolutionConfig::default()
+        },
+    )
+    .expect("resolve_gfa_bubbles failed on C4 slice with abPOA");
+
+    let after_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&resolved.gfa).unwrap().into_iter().collect();
+    for (name, before_seq) in &before_seqs {
+        let after_seq = after_seqs
+            .get(name)
+            .unwrap_or_else(|| panic!("path {name} disappeared after abPOA crush"));
+        assert_eq!(
+            before_seq, after_seq,
+            "path {} changed sequence after abPOA crush",
+            name
+        );
+    }
+
+    assert!(
+        resolved.stats.resolved > 0,
+        "abPOA C4 slice smoke reached candidates but accepted no replacements: {:?}",
+        resolved.stats
+    );
+    eprintln!(
+        "abPOA slice crush: {} paths preserved, {} resolved, {} bailed",
+        before_seqs.len(),
+        resolved.stats.resolved,
+        resolved.stats.bailed
     );
 }
 

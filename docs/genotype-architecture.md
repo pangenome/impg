@@ -150,6 +150,10 @@ the longer-term plan: backend-neutral pangenome genotyping, local variation
 graph backends, alignment evidence, learned local scorers, and phased copying
 inference.
 
+For the current genotype/impute workstream status, input-mode matrix, evidence
+counting semantics, debug artifact inventory, and GBWT-imputation boundary, see
+[`genotype-impute-debug-plan.md`](genotype-impute-debug-plan.md).
+
 For rendered graph products, the genotype layer must preserve source path
 identity through Pan-SN-aware translation tables. See
 [`render-gbz-translation-design.md`](render-gbz-translation-design.md).

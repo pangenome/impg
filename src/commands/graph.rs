@@ -4,6 +4,7 @@
 // by combining sweepga (for alignment) and seqwish (for graph induction).
 
 use log::info;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -34,6 +35,8 @@ use seqwish::seqindex::SeqIndex;
 use seqwish::transclosure::compute_transitive_closures;
 
 static SEQWISH_INDUCTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+const SINGLE_PAF_TRANSCLOSURE_FALLBACK_MAX_TOTAL_BP: u64 = 10_000;
 
 /// Configuration for graph building.
 #[derive(Clone)]
@@ -210,6 +213,19 @@ pub fn induce_graph_from_alignment<W: Write>(
         );
     }
 
+    let filtered_paf_records = count_paf_records(filtered_paf.path())?;
+    if filtered_paf_records == 0 {
+        if config.show_progress {
+            info!(
+                "[graph::transclosure] {:.3}s Empty filtered PAF; emitting source-sequence GFA without seqwish transitive closure",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        let node_count = emit_source_sequence_gfa(&seqidx, output)?;
+        seqwish::tempfile::cleanup();
+        return Ok(node_count);
+    }
+
     // 5) Index alignments into interval tree
     if config.show_progress {
         info!(
@@ -252,6 +268,20 @@ pub fn induce_graph_from_alignment<W: Write>(
             .into_inner()
             .unwrap(),
     );
+
+    if should_skip_tiny_single_paf_transclosure(&seqidx, filtered_paf_records) {
+        if config.show_progress {
+            info!(
+                "[graph::transclosure] {:.3}s Single-row tiny PAF ({} seqs, {} bp); emitting source-sequence GFA without seqwish transitive closure",
+                start_time.elapsed().as_secs_f64(),
+                seqidx.n_seqs(),
+                seqidx.seq_length()
+            );
+        }
+        let node_count = emit_source_sequence_gfa(&seqidx, output)?;
+        seqwish::tempfile::cleanup();
+        return Ok(node_count);
+    }
 
     // 6) Compute transitive closures
     if config.show_progress {
@@ -417,6 +447,68 @@ pub fn induce_graph_from_alignment<W: Write>(
     Ok(node_count)
 }
 
+fn count_paf_records(path: &Path) -> io::Result<usize> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut records = 0usize;
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        records += 1;
+    }
+
+    Ok(records)
+}
+
+fn should_skip_tiny_single_paf_transclosure(seqidx: &SeqIndex, paf_records: usize) -> bool {
+    paf_records == 1
+        && seqidx.n_seqs() == 2
+        && seqidx.seq_length() <= SINGLE_PAF_TRANSCLOSURE_FALLBACK_MAX_TOTAL_BP
+}
+
+fn emit_source_sequence_gfa<W: Write>(seqidx: &SeqIndex, output: &mut W) -> io::Result<usize> {
+    writeln!(output, "H\tVN:Z:1.0")?;
+
+    for seq_id in 1..=seqidx.n_seqs() {
+        write!(output, "S\t{seq_id}\t")?;
+        let seq_start = seqidx.nth_seq_offset(seq_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("seqwish sequence index is missing offset for sequence {seq_id}"),
+            )
+        })?;
+        let seq_len = seqidx.nth_seq_length(seq_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("seqwish sequence index is missing length for sequence {seq_id}"),
+            )
+        })?;
+        for pos in seq_start..seq_start + seq_len {
+            let base = seqidx.at(pos).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("seqwish sequence index is missing base at offset {pos}"),
+                )
+            })?;
+            write!(output, "{base}")?;
+        }
+        writeln!(output)?;
+    }
+
+    for seq_id in 1..=seqidx.n_seqs() {
+        let seq_name = seqidx
+            .nth_name(seq_id)
+            .unwrap_or_else(|| format!("seq{seq_id}"));
+        writeln!(output, "P\t{seq_name}\t{seq_id}+\t*")?;
+    }
+
+    Ok(seqidx.n_seqs())
+}
+
 /// Run the graph building command
 pub fn run_graph_build(
     fasta_files: Vec<String>,
@@ -481,8 +573,19 @@ pub fn run_graph_build_poa<W: Write>(
         return Ok(());
     }
 
-    // Build SPOA graph
-    let (mut graph, mut engine) = crate::graph::build_spoa_engine(scoring_params);
+    let unchopped = build_poa_unchopped_gfa(&sequences, scoring_params)?;
+    let final_gfa = crate::graph::normalize_and_sort(unchopped, config.num_threads)?;
+    output.write_all(final_gfa.as_bytes())?;
+
+    Ok(())
+}
+
+fn build_poa_unchopped_gfa(
+    sequences: &[(String, crate::graph::SequenceMetadata)],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<String> {
+    // Build SPOA graph with end-to-end alignment for whole-sequence graph induction.
+    let (mut graph, mut engine) = build_graph_poa_spoa_engine(scoring_params);
     let metadata: Vec<crate::graph::SequenceMetadata> =
         sequences.iter().map(|(_, m)| m.clone()).collect();
     crate::graph::feed_sequences_to_graph(
@@ -491,12 +594,13 @@ pub fn run_graph_build_poa<W: Write>(
         sequences.iter().map(|(s, _)| s.as_str()),
     );
 
-    // Generate GFA, post-process strands, unchop, then gfaffix+sort
-    let unchopped = crate::graph::spoa_graph_to_unchoped_gfa(graph, &metadata)?;
-    let final_gfa = crate::graph::normalize_and_sort(unchopped, config.num_threads)?;
-    output.write_all(final_gfa.as_bytes())?;
+    crate::graph::spoa_graph_to_unchoped_gfa(graph, &metadata)
+}
 
-    Ok(())
+fn build_graph_poa_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (spoa_rs::Graph, spoa_rs::AlignmentEngine) {
+    crate::graph::build_global_spoa_engine(scoring_params)
 }
 
 /// Build a pangenome graph using the PGGB pipeline: sweepga + seqwish + smoothxg + gfaffix.
@@ -565,11 +669,183 @@ pub fn run_graph_build_pggb<W: Write>(
 
     // Step 3: gfaffix normalization + final sort
     let sorted = crate::graph::normalize_and_sort(smoothed, config.num_threads)?;
+    let sorted = restore_direct_fasta_path_names(&sorted, &fasta_files)?;
 
     info!("[pggb] {:.3}s Done", start_time.elapsed().as_secs_f64());
 
     output.write_all(sorted.as_bytes())?;
     Ok(())
+}
+
+fn restore_direct_fasta_path_names(gfa: &str, fasta_files: &[String]) -> io::Result<String> {
+    let mut expected_by_name: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut names_by_sequence: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
+    let mut exact_full_range_name: HashMap<String, String> = HashMap::new();
+
+    for fasta_path in fasta_files {
+        for (name, sequence) in read_sequences_from_fasta(Path::new(fasta_path))? {
+            if let Some((key, start, _end)) = split_numeric_path_range(&name) {
+                let generated = format!("{key}:{start}-{}", start + sequence.len());
+                exact_full_range_name
+                    .entry(generated)
+                    .or_insert_with(|| name.clone());
+            }
+            names_by_sequence
+                .entry(sequence.clone())
+                .or_default()
+                .push(name.clone());
+            expected_by_name.insert(name, sequence);
+        }
+    }
+
+    if expected_by_name.is_empty() {
+        return Ok(gfa.to_string());
+    }
+
+    let path_sequences = gfa_path_sequences(gfa)?;
+    let mut used_names = HashSet::new();
+    let mut rename: HashMap<String, String> = HashMap::new();
+
+    for (observed_name, observed_sequence) in path_sequences {
+        if expected_by_name
+            .get(&observed_name)
+            .is_some_and(|expected| expected == &observed_sequence)
+        {
+            used_names.insert(observed_name);
+            continue;
+        }
+
+        if let Some(original_name) = exact_full_range_name.get(&observed_name) {
+            if !used_names.contains(original_name)
+                && expected_by_name
+                    .get(original_name)
+                    .is_some_and(|expected| expected == &observed_sequence)
+            {
+                used_names.insert(original_name.clone());
+                rename.insert(observed_name, original_name.clone());
+                continue;
+            }
+        }
+
+        if let Some(candidates) = names_by_sequence.get(&observed_sequence) {
+            let available: Vec<&String> = candidates
+                .iter()
+                .filter(|name| !used_names.contains(*name))
+                .collect();
+            if available.len() == 1 {
+                let original_name = (*available[0]).clone();
+                used_names.insert(original_name.clone());
+                rename.insert(observed_name, original_name);
+            }
+        }
+    }
+
+    if rename.is_empty() {
+        return Ok(gfa.to_string());
+    }
+
+    let mut rewritten = String::with_capacity(gfa.len());
+    for line in gfa.lines() {
+        if let Some(rest) = line.strip_prefix("P\t") {
+            let mut parts = rest.splitn(3, '\t');
+            if let (Some(name), Some(steps), Some(overlaps)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                let replacement = rename.get(name).map(String::as_str).unwrap_or(name);
+                rewritten.push_str("P\t");
+                rewritten.push_str(replacement);
+                rewritten.push('\t');
+                rewritten.push_str(steps);
+                rewritten.push('\t');
+                rewritten.push_str(overlaps);
+                rewritten.push('\n');
+                continue;
+            }
+        }
+        rewritten.push_str(line);
+        rewritten.push('\n');
+    }
+    if !gfa.ends_with('\n') {
+        rewritten.pop();
+    }
+    Ok(rewritten)
+}
+
+fn split_numeric_path_range(name: &str) -> Option<(&str, usize, usize)> {
+    let last_colon = name.rfind(':')?;
+    let (key, range_str) = name.split_at(last_colon);
+    let range_str = &range_str[1..];
+    let (start, end) = range_str.split_once('-')?;
+    Some((key, start.parse().ok()?, end.parse().ok()?))
+}
+
+fn gfa_path_sequences(gfa: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let mut segments: HashMap<&str, &[u8]> = HashMap::new();
+    let mut paths = Vec::new();
+
+    for line in gfa.lines() {
+        let mut fields = line.split('\t');
+        match fields.next() {
+            Some("S") => {
+                if let (Some(id), Some(sequence)) = (fields.next(), fields.next()) {
+                    segments.insert(id, sequence.as_bytes());
+                }
+            }
+            Some("P") => {
+                let Some(name) = fields.next() else {
+                    continue;
+                };
+                let Some(steps) = fields.next() else {
+                    continue;
+                };
+                let mut sequence = Vec::new();
+                if steps != "*" {
+                    for step in steps.split(',').filter(|step| !step.is_empty()) {
+                        let (id, reverse) = if let Some(id) = step.strip_suffix('-') {
+                            (id, true)
+                        } else if let Some(id) = step.strip_suffix('+') {
+                            (id, false)
+                        } else {
+                            (step, false)
+                        };
+                        let Some(segment) = segments.get(id) else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("GFA path '{name}' references missing segment '{id}'"),
+                            ));
+                        };
+                        if reverse {
+                            sequence.extend(reverse_complement_bases(segment));
+                        } else {
+                            sequence.extend_from_slice(segment);
+                        }
+                    }
+                }
+                paths.push((name.to_string(), sequence));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(paths)
+}
+
+fn reverse_complement_bases(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|base| match base {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            b'a' => b't',
+            b'c' => b'g',
+            b'g' => b'c',
+            b't' => b'a',
+            b'N' | b'n' => *base,
+            other => *other,
+        })
+        .collect()
 }
 
 /// Read sequences from a FASTA file path into `(name, sequence_bytes)` pairs.
@@ -1167,11 +1443,13 @@ pub fn run_graph_build_partitioned(
 
 /// Parse a FASTA header into SequenceMetadata.
 ///
-/// If the header contains a `name:start-end` suffix (e.g. from a prior
-/// `impg query -o fasta`), parse the coordinates so that `path_name()`
-/// reproduces the original name without double-encoding.
-/// Otherwise, treat the whole header as the name with start=0.
+/// Direct FASTA graph builds must preserve the input record name exactly in the
+/// emitted GFA `P` line. We still parse a trailing `name:start-end` suffix when
+/// present so ancillary metadata remains useful, but `path_name()` returns the
+/// original FASTA record name via `path_name_override`.
 fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::SequenceMetadata {
+    let path_name_override = Some(header.to_string());
+
     // Try to parse trailing :start-end
     if let Some(last_colon) = header.rfind(':') {
         let (key, range_str) = header.split_at(last_colon);
@@ -1185,6 +1463,7 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
                         size: seq_len as i32,
                         strand: '+',
                         total_length: (start + seq_len as i32) as usize,
+                        path_name_override,
                     };
                 }
             }
@@ -1197,12 +1476,41 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
         size: seq_len as i32,
         strand: '+',
         total_length: seq_len,
+        path_name_override,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_build_poa_uses_global_spoa_alignment() {
+        let scoring = (1, 4, 6, 2, 26, 1);
+        let first = "AAAACCCC";
+        let second = "CCCCGGGG";
+
+        let (mut poa_graph, mut poa_engine) = build_graph_poa_spoa_engine(scoring);
+        let (_, poa_alignment) = poa_engine.align(first, &poa_graph);
+        poa_graph.add_alignment(poa_alignment, first);
+        let (poa_score, _) = poa_engine.align(second, &poa_graph);
+
+        let (mut local_graph, mut local_engine) = crate::graph::build_spoa_engine(scoring);
+        let (_, local_alignment) = local_engine.align(first, &local_graph);
+        local_graph.add_alignment(local_alignment, first);
+        let (local_score, _) = local_engine.align(second, &local_graph);
+
+        let (mut global_graph, mut global_engine) = crate::graph::build_global_spoa_engine(scoring);
+        let (_, global_alignment) = global_engine.align(first, &global_graph);
+        global_graph.add_alignment(global_alignment, first);
+        let (global_score, _) = global_engine.align(second, &global_graph);
+
+        assert_eq!(poa_score, global_score);
+        assert_ne!(
+            poa_score, local_score,
+            "test fixture should distinguish global and local SPOA alignment scores"
+        );
+    }
 
     #[test]
     fn wfmash_raw_mapping_multiplicity_matches_local_filter_mode() {
@@ -1225,5 +1533,33 @@ mod tests {
 
         config.aligner = "fastga".to_string();
         assert_eq!(graph_wfmash_raw_num_mappings(&config, 45), None);
+    }
+
+    #[test]
+    fn restores_direct_fasta_coordinate_like_path_names_after_pggb_smoothing() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fasta_path = dir.path().join("input.fa");
+        std::fs::write(
+            &fasta_path,
+            ">ref#0#fixture:1-27\nACGTACGTACGTCGATTACAGATTACA\n",
+        )
+        .expect("write FASTA");
+
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGTACGTACGTCGATTACAGATTACA
+P\tref#0#fixture:1-28\t1+\t*
+";
+        let restored = restore_direct_fasta_path_names(
+            gfa,
+            &[fasta_path
+                .to_str()
+                .expect("temp FASTA path is UTF-8")
+                .to_string()],
+        )
+        .expect("restore path names");
+
+        assert!(restored.contains("P\tref#0#fixture:1-27\t1+\t*"));
+        assert!(!restored.contains("ref#0#fixture:1-28"));
     }
 }

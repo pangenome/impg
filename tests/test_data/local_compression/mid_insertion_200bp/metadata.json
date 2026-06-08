@@ -1,0 +1,107 @@
+{
+  "fixture_id": "mid_insertion_200bp",
+  "fixture_class": "insertion_50_500bp",
+  "title": "Mid-sized 200 bp insertion",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#mid_insertion_200bp:1-48",
+      "file": "input.fa",
+      "expected_spelling": "GCTAGCTAGCTAGCTAGCTAGCTATTAACCGGTTAACCGGTTAACCGG"
+    },
+    {
+      "name": "hapA#0#mid_insertion_200bp:1-248",
+      "file": "input.fa",
+      "expected_spelling": "GCTAGCTAGCTAGCTAGCTAGCTAACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTAACCGGTTAACCGGTTAACCGG"
+    },
+    {
+      "name": "hapB#0#mid_insertion_200bp:1-246",
+      "file": "input.fa",
+      "expected_spelling": "GCTAGCTAGCTAGCTAGCTAGCTATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTTTAACCGGTTAACCGGTTAACCGG"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#mid_insertion_200bp:1-48",
+    "hapA#0#mid_insertion_200bp:1-248",
+    "hapB#0#mid_insertion_200bp:1-246"
+  ],
+  "expected_path_spellings": {
+    "ref#0#mid_insertion_200bp:1-48": "GCTAGCTAGCTAGCTAGCTAGCTATTAACCGGTTAACCGGTTAACCGG",
+    "hapA#0#mid_insertion_200bp:1-248": "GCTAGCTAGCTAGCTAGCTAGCTAACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTTAACCGGTTAACCGGTTAACCGG",
+    "hapB#0#mid_insertion_200bp:1-246": "GCTAGCTAGCTAGCTAGCTAGCTATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTTTAACCGGTTAACCGGTTAACCGG"
+  },
+  "expected_topology": {
+    "assertion_id": "mid_insertion_shared_flanks",
+    "description": "Inserted 50-500 bp branches remain exactly spelled and share both flanks.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 18
+    },
+    "link_count": {
+      "min": 1,
+      "max": 28
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "POA/SYNG crush over-fragments the insertion or drops the inserted branch.",
+  "render_hints": {
+    "reference_path": "ref#0#mid_insertion_200bp:1-48",
+    "highlight_paths": [
+      "hapA#0#mid_insertion_200bp:1-248",
+      "hapB#0#mid_insertion_200bp:1-246"
+    ],
+    "expected_shape": "bounded mid-sized insertion bubble"
+  }
+}
