@@ -6,7 +6,9 @@ Task: `trace-rust-seqwish`
 
 IMPG uses Rust seqwish as a direct Cargo git dependency. The seqwish core is
 not implemented inside IMPG, not vendored as an IMPG crate/submodule, and not
-invoked by shelling out to an external `seqwish` binary.
+invoked by shelling out to an external `seqwish` binary. A local
+`/home/erikg/seqwish` checkout exists and was inspected separately, but this
+IMPG checkout does not currently point Cargo at that working tree.
 
 The dependency is declared in the root manifest:
 
@@ -36,6 +38,71 @@ Checks:
 - A Rust-source search found `seqwish::` calls only in
   `src/commands/graph.rs` and `src/main.rs`; there is no
   `Command::new("seqwish")` shell-out in the Rust implementation.
+
+## Local `/home/erikg/seqwish` Checkout
+
+The user noted that Rust seqwish work is being fixed locally in `~/seqwish`,
+so that checkout was audited directly instead of assuming the upstream branch
+provenance:
+
+- Path: `/home/erikg/seqwish`
+- Git remote: `origin` fetch/push URL is `git@github.com:ekg/seqwish.git`.
+  No `pangenome/seqwish` remote is configured in this local checkout.
+- Active branch: `rust-2`, tracking `origin/rust-2`.
+- HEAD commit:
+  `15aee55987115bf82b1e0769e52543a265ecfb1a`.
+- HEAD subject/date:
+  `refactor: improve temp file creation in build_index for uniqueness and
+  configurability`, committed `2026-04-11 10:26:07 -0700`.
+- Local remote-tracking state:
+  `origin/rust-2` is also
+  `15aee55987115bf82b1e0769e52543a265ecfb1a`.
+- Remote branch check on 2026-06-08:
+  both `git ls-remote git@github.com:ekg/seqwish.git refs/heads/rust-2`
+  and `git ls-remote https://github.com/pangenome/seqwish refs/heads/rust-2`
+  returned `15aee55987115bf82b1e0769e52543a265ecfb1a`.
+- Dirty state visible from `git status --short --branch --untracked-files=all`:
+  no staged or tracked modifications; one untracked entry, `result`.
+  `result` is a symlink to
+  `/nix/store/xgnvyi9v4rcqrllc2xc5nscgwqq29inw-seqwish-0.7.9`.
+  Therefore the checkout is dirty only because of that untracked symlink; no
+  local tracked Rust fix was visible in `/home/erikg/seqwish` at audit time.
+- `git worktree list --porcelain` shows `/home/erikg/seqwish` as the `rust-2`
+  worktree at `15aee559...` and a separate `/home/erikg/seqwish-rust3`
+  worktree on branch `rust-3` at `9bb13520050c6b5bb468d87a7f345e419eeae93c`.
+  This note is informational; IMPG does not point to either worktree.
+
+## How IMPG Points To seqwish
+
+IMPG currently points to the Cargo git source, not to `/home/erikg/seqwish`:
+
+- `Cargo.toml:74` declares
+  `seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }`.
+- `Cargo.lock:2899` locks that dependency to
+  `git+https://github.com/pangenome/seqwish?branch=rust-2#15aee55987115bf82b1e0769e52543a265ecfb1a`.
+- `cargo metadata --locked --format-version 1` reports the seqwish package
+  source as
+  `git+https://github.com/pangenome/seqwish?branch=rust-2#15aee55987115bf82b1e0769e52543a265ecfb1a`
+  with manifest path
+  `/home/erikg/.cargo/git/checkouts/seqwish-be7416204a0fe48d/15aee55/Cargo.toml`.
+- `cargo tree -i seqwish --locked` reports
+  `seqwish v0.1.3 (https://github.com/pangenome/seqwish?branch=rust-2#15aee559) -> impg v0.4.1`.
+- No project-local `.cargo/config.toml` was found, no `~/.cargo/config.toml`
+  exists, and the current environment exposed no `CARGO_*`, `RUST_*`,
+  `SEQWISH_*`, or `IMPG_*` override variables.
+- The only project patches in `Cargo.toml` target `lib_wfa2`, `ragc`, and
+  `handlegraph`; there is no `[patch]` or path override for `seqwish`.
+
+If IMPG needs to consume unreleased local fixes from `/home/erikg/seqwish`,
+the pointer should be made explicit for the use case:
+
+- For a temporary local test, use an uncommitted local path override such as a
+  path dependency or Cargo patch pointing to `/home/erikg/seqwish`.
+- For a reproducible committed IMPG state, commit and push the seqwish fix,
+  then update IMPG to a git URL plus exact `rev` (or an intentionally chosen
+  branch) and refresh `Cargo.lock`. Do not leave committed IMPG provenance
+  depending on a machine-local `~/seqwish` path unless the project deliberately
+  wants a non-portable local-development manifest.
 
 ## What Code Is Local
 
