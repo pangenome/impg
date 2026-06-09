@@ -4461,7 +4461,7 @@ impl EngineCliOpts {
     }
 
     /// Resolve and build an `EngineOpts`.
-    fn build(&self, num_threads: usize) -> io::Result<EngineOpts> {
+    fn build(&self, num_threads: usize, show_progress: bool) -> io::Result<EngineOpts> {
         let mut parsed = self.parse_engine()?;
         let engine = parsed.engine;
         self.validate_engine_params(engine)?;
@@ -4498,6 +4498,7 @@ impl EngineCliOpts {
             parsed.localized_polish_config,
             parsed.smooth_after_crush,
             parsed.graph_sort_pipeline,
+            show_progress,
         )
     }
 }
@@ -6861,7 +6862,8 @@ fn run() -> io::Result<()> {
                     None
                 };
 
-                let mut engine_config = engine_cli.build(common.threads.get())?;
+                let mut engine_config =
+                    engine_cli.build(common.threads.get(), common.verbose > 0)?;
                 if output_format != "gfa" {
                     engine_config.graph_sort_pipeline = None;
                 }
@@ -6918,7 +6920,8 @@ fn run() -> io::Result<()> {
                 )?;
 
                 // Build engine config (resolves temp_dir and sparsify internally)
-                let mut engine_config = engine_cli.build(common.threads.get())?;
+                let mut engine_config =
+                    engine_cli.build(common.threads.get(), common.verbose > 0)?;
                 if output_format != "gfa" {
                     engine_config.graph_sort_pipeline = None;
                 }
@@ -7274,7 +7277,8 @@ fn run() -> io::Result<()> {
                             }
                         }
                         "gfa" | "vcf" => {
-                            let mut engine_opts = engine_cli.build(common.threads.get())?;
+                            let mut engine_opts =
+                                engine_cli.build(common.threads.get(), common.verbose > 0)?;
                             if resolved_format != "gfa" {
                                 engine_opts.graph_sort_pipeline = None;
                             }
@@ -7942,7 +7946,8 @@ fn run() -> io::Result<()> {
                             )?;
                         }
                         "gfa" => {
-                            let engine_opts = engine_cli.build(common.threads.get())?;
+                            let engine_opts =
+                                engine_cli.build(common.threads.get(), common.verbose > 0)?;
                             if let Some(ps) = engine_opts.partition_size {
                                 // Partitioned mode: split query region into sub-windows
                                 output_results_gfa_partitioned(
@@ -7981,7 +7986,8 @@ fn run() -> io::Result<()> {
                             }
                         }
                         "vcf" => {
-                            let engine_opts = engine_cli.build(common.threads.get())?;
+                            let engine_opts =
+                                engine_cli.build(common.threads.get(), common.verbose > 0)?;
                             let reference_names = vcf_reference_names(&name, &target_name);
                             if let Some(ps) = engine_opts.partition_size {
                                 output_results_vcf_partitioned(
@@ -9178,7 +9184,7 @@ fn run() -> io::Result<()> {
 
             if let Some(ps) = parsed_partition_size {
                 // Partitioned mode: align → IMPG → partition → per-partition engine → lace → gfaffix
-                let engine_opts = engine_cli.build(num_threads)?;
+                let engine_opts = engine_cli.build(num_threads, show_progress)?;
                 let graph_config = build_graph_config(
                     &engine_cli,
                     &engine_cli.aln.sw.sparsify,
@@ -10765,6 +10771,7 @@ fn build_engine_opts(
     localized_polish_config: Option<impg::localized_polish::LocalizedPolishConfig>,
     smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
+    show_progress: bool,
 ) -> io::Result<EngineOpts> {
     let pipeline = graph::GraphBuildConfig {
         num_threads,
@@ -10793,8 +10800,7 @@ fn build_engine_opts(
         temp_dir,
         batch_bytes: aln.sw.batch_bytes.clone(),
         terminal_n_clip,
-        // The partitioned pipeline already logs its own progress
-        show_progress: false,
+        show_progress,
         ..graph::GraphBuildConfig::default()
     };
 
@@ -12277,7 +12283,7 @@ fn build_genotype_query_gfa(
         query_intervals.push(Interval::new(range_start, range_end, target_id));
     }
 
-    let engine_opts = engine_cli.build(threads)?;
+    let engine_opts = engine_cli.build(threads, true)?;
     let scoring_params = Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?);
     let gfa_output = impg::dispatch_gfa_engine(
         &wrapper,
@@ -14427,6 +14433,20 @@ mod tests {
                 assert_eq!(config.resolver.resolution.max_traversal_len, 1_000);
                 assert_eq!(config.resolver.resolution.auto_spoa_max_traversal_len, 20);
                 assert_eq!(config.resolver.resolution.polish_iterations, 0);
+                let verbose_opts = engine_cli
+                    .build(4, true)
+                    .expect("verbose syng-local engine config should build");
+                assert!(
+                    verbose_opts.pipeline.show_progress,
+                    "query-side syng-local seed induction should honor verbose progress logs"
+                );
+                let quiet_opts = engine_cli
+                    .build(4, false)
+                    .expect("quiet syng-local engine config should build");
+                assert!(
+                    !quiet_opts.pipeline.show_progress,
+                    "query-side syng-local seed induction should also honor quiet mode"
+                );
             }
             _ => panic!("expected query command"),
         }

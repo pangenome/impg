@@ -205,11 +205,37 @@ fn paf_line_max_exact_match_run(
     Some((max_run, true))
 }
 
+fn count_nonempty_paf_records(paf_path: &std::path::Path) -> std::io::Result<usize> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(paf_path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut records = 0usize;
+    for line in reader.lines() {
+        if !line?.trim().is_empty() {
+            records += 1;
+        }
+    }
+    Ok(records)
+}
+
+fn should_scan_filtered_paf_exact_runs(config: &crate::commands::graph::GraphBuildConfig) -> bool {
+    config.adaptive_min_match_len
+}
+
 fn filtered_paf_exact_match_run_stats(
     seqs: &[(String, Vec<u8>)],
     paf_path: &std::path::Path,
+    scan_exact_runs: bool,
 ) -> std::io::Result<PafExactMatchRunStats> {
     use std::io::BufRead;
+
+    if !scan_exact_runs {
+        return Ok(PafExactMatchRunStats {
+            records: count_nonempty_paf_records(paf_path)?,
+            ..Default::default()
+        });
+    }
 
     let seq_by_name: std::collections::HashMap<&str, &[u8]> = seqs
         .iter()
@@ -279,6 +305,16 @@ fn gfa_line_stats(gfa: &str) -> (usize, usize, usize, usize) {
         }
     }
     (segments, segment_bp, links, paths)
+}
+
+fn debug_graph_build_dir(config: &crate::commands::graph::GraphBuildConfig) -> Option<PathBuf> {
+    let root = std::env::var_os("IMPG_CRUSH_DEBUG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| config.debug_dir.as_ref().map(PathBuf::from))?;
+    let id = DEBUG_GRAPH_BUILD_ID.fetch_add(1, Ordering::Relaxed);
+    let dir = root.join(format!("graph_build_{id:04}"));
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
 }
 
 #[derive(Default)]
@@ -961,20 +997,31 @@ pub fn build_gfa_from_paf_and_sequences(
     if seqs.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
+    let total_start = std::time::Instant::now();
     let raw_paf_records = paf_content
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    let debug_dir = std::env::var_os("IMPG_CRUSH_DEBUG_DIR").map(|root| {
-        let id = DEBUG_GRAPH_BUILD_ID.fetch_add(1, Ordering::Relaxed);
-        let dir = PathBuf::from(root).join(format!("graph_build_{id:04}"));
-        let _ = std::fs::create_dir_all(&dir);
-        dir
-    });
+    let total_bases = seqs.iter().map(|(_, seq)| seq.len() as u64).sum::<u64>();
+    let debug_dir = debug_graph_build_dir(config);
+    log::info!(
+        "syng_graph: PAF-to-GFA tail starting sequences={} total_bp={} raw_paf_records={} paf_bytes={} min_match_len={} no_filter={} debug_dir={}",
+        seqs.len(),
+        total_bases,
+        raw_paf_records,
+        paf_content.len(),
+        config.min_match_len,
+        config.no_filter,
+        debug_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
 
     // Write combined FASTA to a temp file. One entry per input sequence;
     // seqwish indexes by the header name, so names must match the PAF's
     // query/target columns exactly.
+    let fasta_start = std::time::Instant::now();
     let combined_fasta = tempfile::Builder::new()
         .suffix(".fa")
         .tempfile()
@@ -988,36 +1035,63 @@ pub fn build_gfa_from_paf_and_sequences(
         }
         w.flush()?;
     }
+    log::info!(
+        "syng_graph: wrote seqwish FASTA sequences={} total_bp={} elapsed={:.3}s",
+        seqs.len(),
+        total_bases,
+        fasta_start.elapsed().as_secs_f64()
+    );
     if let Some(dir) = &debug_dir {
         let _ = std::fs::copy(combined_fasta.path(), dir.join("combined.fa"));
         let _ = write_path_spelling_debug(dir, seqs);
     }
 
+    let paf_write_start = std::time::Instant::now();
     let mut paf_file = tempfile::Builder::new()
         .suffix(".paf")
         .tempfile()
         .map_err(|e| std::io::Error::other(format!("Failed to create temp PAF: {}", e)))?;
     paf_file.write_all(paf_content.as_bytes())?;
     paf_file.flush()?;
+    log::info!(
+        "syng_graph: wrote raw PAF temp records={} bytes={} elapsed={:.3}s",
+        raw_paf_records,
+        paf_content.len(),
+        paf_write_start.elapsed().as_secs_f64()
+    );
     if let Some(dir) = &debug_dir {
         let _ = std::fs::write(dir.join("raw.paf"), paf_content);
         let _ = write_paf_stage_debug(dir, "raw", seqs, paf_file.path());
     }
 
-    let total_bases = seqs.iter().map(|(_, seq)| seq.len() as u64).sum::<u64>();
     let avg_seq_len = if seqs.is_empty() {
         0
     } else {
         total_bases / seqs.len() as u64
     };
+    let filter_start = std::time::Instant::now();
     let filtered_paf = crate::commands::graph::filter_generated_paf(paf_file, avg_seq_len, config)?;
+    let filter_elapsed = filter_start.elapsed().as_secs_f64();
     if let Some(dir) = &debug_dir {
         let _ = std::fs::copy(filtered_paf.path(), dir.join("filtered.paf"));
         let _ = std::fs::copy(filtered_paf.path(), dir.join("final.paf"));
         let _ = write_paf_stage_debug(dir, "filtered", seqs, filtered_paf.path());
         let _ = write_paf_stage_debug(dir, "final", seqs, filtered_paf.path());
     }
-    let paf_match_stats = filtered_paf_exact_match_run_stats(seqs, filtered_paf.path())?;
+    let scan_exact_runs = should_scan_filtered_paf_exact_runs(config);
+    let stats_start = std::time::Instant::now();
+    let paf_match_stats =
+        filtered_paf_exact_match_run_stats(seqs, filtered_paf.path(), scan_exact_runs)?;
+    log::info!(
+        "syng_graph: PAF filter/stat boundary raw_records={} filtered_records={} parsed_filtered_records={} max_exact_match_run={} exact_run_scan={} filter_elapsed={:.3}s stats_elapsed={:.3}s",
+        raw_paf_records,
+        paf_match_stats.records,
+        paf_match_stats.parsed_records,
+        paf_match_stats.max_exact_match_run,
+        if scan_exact_runs { "full" } else { "skipped" },
+        filter_elapsed,
+        stats_start.elapsed().as_secs_f64()
+    );
 
     // Optional adaptive seqwish floor. Local replacement induction defaults to
     // `min_match_len == 1`; callers that explicitly request adaptive behaviour
@@ -1049,7 +1123,7 @@ pub fn build_gfa_from_paf_and_sequences(
             effective_config.min_match_len = paf_match_stats.max_exact_match_run;
         }
     }
-    if paf_match_stats.records > 0 && paf_match_stats.max_exact_match_run == 0 {
+    if scan_exact_runs && paf_match_stats.records > 0 && paf_match_stats.max_exact_match_run == 0 {
         log::warn!(
             "crush seqwish min-match diagnostic: filtered PAF has {} record(s) but no indexable exact match run; names_missing={}, length_mismatches={}",
             paf_match_stats.records,
@@ -1058,12 +1132,13 @@ pub fn build_gfa_from_paf_and_sequences(
         );
     }
     log::debug!(
-        "crush seqwish input summary: sequences={}, raw_paf_records={}, filtered_paf_records={}, parsed_filtered_records={}, max_exact_match_run={}, effective_min_match_len={}",
+        "crush seqwish input summary: sequences={}, raw_paf_records={}, filtered_paf_records={}, parsed_filtered_records={}, max_exact_match_run={}, exact_run_scan={}, effective_min_match_len={}",
         seqs.len(),
         raw_paf_records,
         paf_match_stats.records,
         paf_match_stats.parsed_records,
         paf_match_stats.max_exact_match_run,
+        if scan_exact_runs { "full" } else { "skipped" },
         effective_config.min_match_len,
     );
 
@@ -1081,11 +1156,26 @@ pub fn build_gfa_from_paf_and_sequences(
         num_genomes,
     };
     let mut gfa_buf: Vec<u8> = Vec::new();
+    let induce_start = std::time::Instant::now();
+    log::info!(
+        "syng_graph: handing filtered PAF to seqwish induction records={} effective_min_match_len={} threads={} disk_backed={} transclose_batch={}",
+        paf_match_stats.records,
+        effective_config.min_match_len,
+        effective_config.num_threads,
+        effective_config.disk_backed,
+        effective_config.transclose_batch
+    );
     crate::commands::graph::induce_graph_from_alignment(
         aln_result,
         &mut gfa_buf,
         &effective_config,
     )?;
+    log::info!(
+        "syng_graph: seqwish induction returned gfa_bytes={} elapsed={:.3}s total_elapsed={:.3}s",
+        gfa_buf.len(),
+        induce_start.elapsed().as_secs_f64(),
+        total_start.elapsed().as_secs_f64()
+    );
     let gfa_text = String::from_utf8(gfa_buf).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1105,6 +1195,7 @@ pub fn build_gfa_from_paf_and_sequences(
                 "paf_name_mismatches\t{}\n",
                 "paf_length_mismatches\t{}\n",
                 "max_exact_match_run\t{}\n",
+                "exact_run_scan\t{}\n",
                 "adaptive_min_match_len\t{}\n",
                 "effective_min_match_len\t{}\n",
                 "seqwish_segments\t{}\n",
@@ -1121,6 +1212,7 @@ pub fn build_gfa_from_paf_and_sequences(
             paf_match_stats.name_mismatches,
             paf_match_stats.length_mismatches,
             paf_match_stats.max_exact_match_run,
+            if scan_exact_runs { "full" } else { "skipped" },
             effective_config.adaptive_min_match_len,
             effective_config.min_match_len,
             segments,
@@ -1567,6 +1659,39 @@ mod tests {
         let paf = all_pairs_paf(&seqs);
         // 3 pairs: (a,b), (a,c), (b,c).
         assert_eq!(paf.lines().count(), 3);
+    }
+
+    #[test]
+    fn exact_run_scan_is_adaptive_only() {
+        let mut config = crate::commands::graph::GraphBuildConfig {
+            adaptive_min_match_len: false,
+            ..Default::default()
+        };
+        assert!(!should_scan_filtered_paf_exact_runs(&config));
+
+        config.adaptive_min_match_len = true;
+        assert!(should_scan_filtered_paf_exact_runs(&config));
+    }
+
+    #[test]
+    fn non_adaptive_filtered_stats_counts_records_without_replaying_cigars() {
+        use std::io::Write;
+
+        let mut paf = tempfile::NamedTempFile::new().unwrap();
+        writeln!(paf, "q\t4\t0\t4\t+\tt\t4\t0\t4\t4\t4\t255\tcg:Z:4M").unwrap();
+        writeln!(
+            paf,
+            "missing\t4\t0\t4\t+\talso_missing\t4\t0\t4\t4\t4\t255\tcg:Z:4M"
+        )
+        .unwrap();
+
+        let stats = filtered_paf_exact_match_run_stats(&[], paf.path(), false).unwrap();
+
+        assert_eq!(stats.records, 2);
+        assert_eq!(stats.parsed_records, 0);
+        assert_eq!(stats.name_mismatches, 0);
+        assert_eq!(stats.length_mismatches, 0);
+        assert_eq!(stats.max_exact_match_run, 0);
     }
 
     #[test]

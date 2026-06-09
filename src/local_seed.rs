@@ -314,8 +314,16 @@ fn build_whole_region_sweepga_seqwish_seed(
     let align_start = Instant::now();
     let paf_file = sweepga::library_api::sweepga_align(&named, &align_config)
         .map_err(|err| io::Error::other(format!("local seed SweepGA alignment failed: {err}")))?;
+    let align_elapsed = align_start.elapsed().as_secs_f64();
+    log::info!(
+        "[local seed] SweepGA/FastGA invocation returned PAF path={} elapsed={:.3}s",
+        paf_file.path().display(),
+        align_elapsed
+    );
+    let paf_load_start = Instant::now();
     let mut paf = String::new();
     std::fs::File::open(paf_file.path())?.read_to_string(&mut paf)?;
+    let paf_bytes = paf.len();
     let mut paf_lines = paf
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -330,10 +338,17 @@ fn build_whole_region_sweepga_seqwish_seed(
     }
     let inter_sequence_paf_records = count_inter_sequence_paf_records(&paf);
     log::info!(
+        "[local seed] loaded/sorted/deduped raw PAF bytes={} unique_records={} inter_sequence_records={} elapsed={:.3}s",
+        paf_bytes,
+        raw_paf_records,
+        inter_sequence_paf_records,
+        paf_load_start.elapsed().as_secs_f64()
+    );
+    log::info!(
         "[local seed] SweepGA/FastGA alignment emitted {} unique raw PAF record(s), {} inter-sequence record(s) in {:.3}s",
         raw_paf_records,
         inter_sequence_paf_records,
-        align_start.elapsed().as_secs_f64()
+        align_elapsed + paf_load_start.elapsed().as_secs_f64()
     );
     if inter_sequence_paf_records == 0 {
         log::info!(
