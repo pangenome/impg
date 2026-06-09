@@ -978,6 +978,49 @@ pub fn one_hop_ext_visited_with_seed_filter(
     merge_distance: i32,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    let hits = one_hop_ext_visited_with_seed_filter_anchored(
+        syng_index,
+        query_name,
+        query_start,
+        query_end,
+        padding,
+        query_extension,
+        extend_budget,
+        min_chain_anchors,
+        min_chain_fraction,
+        visited_nodes,
+        seed_filter,
+        merge_distance,
+        sequence_index,
+    )?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| HomologousInterval {
+            genome: hit.genome,
+            start: hit.start,
+            end: hit.end,
+            strand: hit.strand,
+            cigar: None,
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn one_hop_ext_visited_with_seed_filter_anchored(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    query_extension: u64,
+    extend_budget: u64,
+    min_chain_anchors: usize,
+    min_chain_fraction: f64,
+    visited_nodes: Option<&mut FxHashSet<u32>>,
+    seed_filter: SyngSeedFilter,
+    merge_distance: i32,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousIntervalWithAnchors>> {
     use std::time::Instant;
     let prof = std::env::var("SYNG_PROFILE").is_ok();
     let t0 = Instant::now();
@@ -1095,7 +1138,7 @@ pub fn one_hop_ext_visited_with_seed_filter(
         .iter()
         .filter(|(h, _, _)| h.anchors.len() < 2)
         .count();
-    let out: Vec<HomologousInterval> = hits_with_neighbors
+    let out: Vec<HomologousIntervalWithAnchors> = hits_with_neighbors
         .par_iter()
         .with_min_len(128)
         .filter_map(|(hit, prev_end, next_start)| {
@@ -1134,12 +1177,12 @@ pub fn one_hop_ext_visited_with_seed_filter(
             if refined_end <= refined_start {
                 return None;
             }
-            Some(HomologousInterval {
+            Some(HomologousIntervalWithAnchors {
                 genome: hit.genome.clone(),
                 start: refined_start,
                 end: refined_end,
                 strand: hit.strand,
-                cigar: None,
+                anchors: hit.anchors.clone(),
             })
         })
         .collect();
@@ -1402,6 +1445,91 @@ pub fn query_transitive_ext_with_seed_filter(
     }
 
     Ok(merge_nearby_on_same_path(all_hits, merge_distance))
+}
+
+/// [`query_transitive_ext_with_seed_filter`] preserving the anchor chains
+/// that support each refined interval.
+///
+/// This is used by query output paths that must decide whether nearby target
+/// spans should be merged or kept split. The legacy unanchored API still does
+/// coordinate-only merging for BED-style output, while GFA/FASTA local-seed
+/// collection can inspect anchor coverage and chain continuity before fetching
+/// sequence.
+#[allow(clippy::too_many_arguments)]
+pub fn query_transitive_ext_with_seed_filter_anchored(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    max_depth: u16,
+    query_extension: u64,
+    extend_budget: u64,
+    min_chain_anchors: usize,
+    min_chain_fraction: f64,
+    seed_filter: SyngSeedFilter,
+    merge_distance: i32,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousIntervalWithAnchors>> {
+    let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
+    visited.insert((query_name.to_string(), query_start, query_end, '+'));
+    let mut visited_nodes: FxHashSet<u32> = FxHashSet::default();
+
+    let mut frontier: Vec<(String, u64, u64)> =
+        vec![(query_name.to_string(), query_start, query_end)];
+    let mut all_hits: Vec<HomologousIntervalWithAnchors> = Vec::new();
+
+    for depth in 0..max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let hop_extension = if depth == 0 { query_extension } else { 0 };
+        let mut next_frontier: Vec<(String, u64, u64)> = Vec::new();
+        for (q_name, q_start, q_end) in &frontier {
+            let hits = match one_hop_ext_visited_with_seed_filter_anchored(
+                syng_index,
+                q_name,
+                *q_start,
+                *q_end,
+                padding,
+                hop_extension,
+                extend_budget,
+                min_chain_anchors,
+                min_chain_fraction,
+                Some(&mut visited_nodes),
+                seed_filter,
+                merge_distance,
+                sequence_index,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(
+                        "syng-transitive anchored hop {} failed for {}:{}-{}: {}",
+                        depth, q_name, q_start, q_end, e
+                    );
+                    continue;
+                }
+            };
+            for hit in hits {
+                let key = (hit.genome.clone(), hit.start, hit.end, hit.strand);
+                if visited.insert(key) {
+                    next_frontier.push((hit.genome.clone(), hit.start, hit.end));
+                    all_hits.push(hit);
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    all_hits.sort_by(|a, b| {
+        a.genome
+            .cmp(&b.genome)
+            .then(a.strand.cmp(&b.strand))
+            .then(a.start.cmp(&b.start))
+            .then(a.end.cmp(&b.end))
+            .then(a.anchors.len().cmp(&b.anchors.len()))
+    });
+    Ok(all_hits)
 }
 
 /// Collapse nearby intervals that share the same

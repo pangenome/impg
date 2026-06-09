@@ -1857,6 +1857,53 @@ pub struct HomologousIntervalWithAnchors {
     pub anchors: Vec<Anchor>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchoredIntervalEmissionReason {
+    AnchorSupported,
+    AnchorTrimmed,
+    MergedChainContinuous,
+    SplitChainDiscontinuous,
+    UnanchoredPassthrough,
+}
+
+impl AnchoredIntervalEmissionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AnchorSupported => "anchor_supported",
+            Self::AnchorTrimmed => "anchor_trimmed",
+            Self::MergedChainContinuous => "merged_chain_continuous",
+            Self::SplitChainDiscontinuous => "split_chain_discontinuous",
+            Self::UnanchoredPassthrough => "unanchored_passthrough",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnchoredIntervalEmission {
+    pub genome: String,
+    pub pre_merge_start: u64,
+    pub pre_merge_end: u64,
+    pub post_merge_start: u64,
+    pub post_merge_end: u64,
+    pub strand: char,
+    pub anchor_count: usize,
+    pub query_anchor_min: Option<u64>,
+    pub query_anchor_max: Option<u64>,
+    pub target_anchor_min: Option<u64>,
+    pub target_anchor_max: Option<u64>,
+    pub emitted_start: u64,
+    pub emitted_end: u64,
+    pub reason: AnchoredIntervalEmissionReason,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AnchorBounds {
+    query_start: u64,
+    query_end: u64,
+    target_start: u64,
+    target_end: u64,
+}
+
 /// Frequency filter for syncmer seed nodes during syng queries.
 ///
 /// The filter applies before locating syncmer occurrences. Dropped
@@ -5291,6 +5338,90 @@ impl SyngIndex {
         Ok(())
     }
 
+    pub fn anchored_interval_emissions(
+        &self,
+        intervals: &[HomologousIntervalWithAnchors],
+        padding: u64,
+        query_extension: u64,
+        merge_distance: i32,
+        merge_strands: bool,
+    ) -> Vec<AnchoredIntervalEmission> {
+        Self::anchored_interval_emissions_with_syncmer_len(
+            intervals,
+            self.syncmer_length_bp() as u64,
+            padding,
+            query_extension,
+            merge_distance,
+            merge_strands,
+        )
+    }
+
+    pub fn anchored_interval_emissions_with_syncmer_len(
+        intervals: &[HomologousIntervalWithAnchors],
+        syncmer_len: u64,
+        padding: u64,
+        query_extension: u64,
+        merge_distance: i32,
+        merge_strands: bool,
+    ) -> Vec<AnchoredIntervalEmission> {
+        let syncmer_len = syncmer_len.max(1);
+        let slop = padding.saturating_add(query_extension);
+        let mut candidates: Vec<AnchoredEmissionCandidate> = intervals
+            .iter()
+            .filter_map(|interval| {
+                AnchoredEmissionCandidate::from_interval(interval, syncmer_len, slop)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        candidates.sort_by(|a, b| {
+            a.genome
+                .cmp(&b.genome)
+                .then(a.emitted_start.cmp(&b.emitted_start))
+                .then(a.emitted_end.cmp(&b.emitted_end))
+                .then(a.strand.cmp(&b.strand))
+        });
+
+        let merge_gap = (merge_distance >= 0).then_some(merge_distance as u64);
+        let mut out = Vec::with_capacity(candidates.len());
+        let mut current = candidates.remove(0);
+
+        for mut next in candidates {
+            let same_path = current.genome == next.genome;
+            let same_strand = current.strand == next.strand;
+            let exact_cross_strand_duplicate = merge_strands
+                && same_path
+                && current.emitted_start == next.emitted_start
+                && current.emitted_end == next.emitted_end;
+            let should_merge = if same_path && same_strand {
+                current.can_merge_with(&next, syncmer_len, slop, merge_gap)
+            } else {
+                exact_cross_strand_duplicate
+            };
+
+            if should_merge {
+                current.merge_with(next, syncmer_len, slop);
+            } else {
+                if same_path
+                    && same_strand
+                    && merge_gap
+                        .map(|gap| next.emitted_start <= current.emitted_end.saturating_add(gap))
+                        .unwrap_or(false)
+                {
+                    next.reason = AnchoredIntervalEmissionReason::SplitChainDiscontinuous;
+                }
+                out.push(current.into_emission());
+                current = next;
+            }
+        }
+        out.push(current.into_emission());
+
+        out.retain(|emission| emission.emitted_start < emission.emitted_end);
+        out
+    }
+
     /// Merge overlapping or adjacent intervals that share the same genome and strand.
     /// Merge a per-target group of anchored intervals in place. Assumes all
     /// entries reference the same genome + strand (caller groups by path).
@@ -5321,6 +5452,186 @@ impl SyngIndex {
                 .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
         }
         *group = merged;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AnchoredEmissionCandidate {
+    genome: String,
+    pre_merge_start: u64,
+    pre_merge_end: u64,
+    post_merge_start: u64,
+    post_merge_end: u64,
+    strand: char,
+    anchors: Vec<Anchor>,
+    bounds: Option<AnchorBounds>,
+    emitted_start: u64,
+    emitted_end: u64,
+    reason: AnchoredIntervalEmissionReason,
+}
+
+impl AnchoredEmissionCandidate {
+    fn from_interval(
+        interval: &HomologousIntervalWithAnchors,
+        syncmer_len: u64,
+        slop: u64,
+    ) -> Option<Self> {
+        if interval.start >= interval.end {
+            return None;
+        }
+        let bounds = anchor_bounds(&interval.anchors, syncmer_len);
+        let (emitted_start, emitted_end, reason) = if let Some(bounds) = bounds {
+            let supported_start = bounds.target_start.saturating_sub(slop);
+            let supported_end = bounds.target_end.saturating_add(slop);
+            let emitted_start = interval.start.max(supported_start);
+            let emitted_end = interval.end.min(supported_end);
+            let reason = if emitted_start == interval.start && emitted_end == interval.end {
+                AnchoredIntervalEmissionReason::AnchorSupported
+            } else {
+                AnchoredIntervalEmissionReason::AnchorTrimmed
+            };
+            (emitted_start, emitted_end, reason)
+        } else {
+            (
+                interval.start,
+                interval.end,
+                AnchoredIntervalEmissionReason::UnanchoredPassthrough,
+            )
+        };
+
+        if emitted_start >= emitted_end {
+            return None;
+        }
+
+        Some(Self {
+            genome: interval.genome.clone(),
+            pre_merge_start: interval.start,
+            pre_merge_end: interval.end,
+            post_merge_start: interval.start,
+            post_merge_end: interval.end,
+            strand: interval.strand,
+            anchors: interval.anchors.clone(),
+            bounds,
+            emitted_start,
+            emitted_end,
+            reason,
+        })
+    }
+
+    fn can_merge_with(
+        &self,
+        next: &Self,
+        syncmer_len: u64,
+        slop: u64,
+        merge_gap: Option<u64>,
+    ) -> bool {
+        if self.emitted_end >= next.emitted_start {
+            return true;
+        }
+        let Some(gap) = merge_gap else {
+            return false;
+        };
+        if next.emitted_start > self.emitted_end.saturating_add(gap) {
+            return false;
+        }
+        let Some(left) = self.bounds else {
+            return false;
+        };
+        let Some(right) = next.bounds else {
+            return false;
+        };
+
+        let target_gap = right.target_start.saturating_sub(left.target_end);
+        let Some(query_gap) = query_gap_for_target_order(left, right, self.strand, syncmer_len)
+        else {
+            return false;
+        };
+        let drift = target_gap.abs_diff(query_gap);
+        drift <= slop.saturating_add(syncmer_len)
+    }
+
+    fn merge_with(&mut self, mut next: Self, syncmer_len: u64, slop: u64) {
+        self.pre_merge_start = self.pre_merge_start.min(next.pre_merge_start);
+        self.pre_merge_end = self.pre_merge_end.max(next.pre_merge_end);
+        self.post_merge_start = self.post_merge_start.min(next.post_merge_start);
+        self.post_merge_end = self.post_merge_end.max(next.post_merge_end);
+        self.anchors.append(&mut next.anchors);
+        self.bounds = anchor_bounds(&self.anchors, syncmer_len);
+        if let Some(bounds) = self.bounds {
+            self.emitted_start = self
+                .post_merge_start
+                .max(bounds.target_start.saturating_sub(slop));
+            self.emitted_end = self
+                .post_merge_end
+                .min(bounds.target_end.saturating_add(slop));
+        } else {
+            self.emitted_start = self.post_merge_start;
+            self.emitted_end = self.post_merge_end;
+        }
+        self.reason = AnchoredIntervalEmissionReason::MergedChainContinuous;
+    }
+
+    fn into_emission(mut self) -> AnchoredIntervalEmission {
+        self.anchors.sort_by(|a, b| {
+            a.query_pos
+                .cmp(&b.query_pos)
+                .then(a.target_pos.cmp(&b.target_pos))
+                .then(a.node_id.cmp(&b.node_id))
+        });
+        self.anchors.dedup_by(|a, b| {
+            a.query_pos == b.query_pos && a.target_pos == b.target_pos && a.node_id == b.node_id
+        });
+        let bounds = anchor_bounds(&self.anchors, 1);
+        AnchoredIntervalEmission {
+            genome: self.genome,
+            pre_merge_start: self.pre_merge_start,
+            pre_merge_end: self.pre_merge_end,
+            post_merge_start: self.post_merge_start,
+            post_merge_end: self.post_merge_end,
+            strand: self.strand,
+            anchor_count: self.anchors.len(),
+            query_anchor_min: bounds.map(|b| b.query_start),
+            query_anchor_max: bounds.map(|b| b.query_end.saturating_sub(1)),
+            target_anchor_min: bounds.map(|b| b.target_start),
+            target_anchor_max: bounds.map(|b| b.target_end.saturating_sub(1)),
+            emitted_start: self.emitted_start,
+            emitted_end: self.emitted_end,
+            reason: self.reason,
+        }
+    }
+}
+
+fn anchor_bounds(anchors: &[Anchor], syncmer_len: u64) -> Option<AnchorBounds> {
+    let first = anchors.first()?;
+    let mut bounds = AnchorBounds {
+        query_start: first.query_pos,
+        query_end: first.query_pos.saturating_add(syncmer_len),
+        target_start: first.target_pos,
+        target_end: first.target_pos.saturating_add(syncmer_len),
+    };
+    for anchor in anchors.iter().skip(1) {
+        bounds.query_start = bounds.query_start.min(anchor.query_pos);
+        bounds.query_end = bounds
+            .query_end
+            .max(anchor.query_pos.saturating_add(syncmer_len));
+        bounds.target_start = bounds.target_start.min(anchor.target_pos);
+        bounds.target_end = bounds
+            .target_end
+            .max(anchor.target_pos.saturating_add(syncmer_len));
+    }
+    Some(bounds)
+}
+
+fn query_gap_for_target_order(
+    left: AnchorBounds,
+    right: AnchorBounds,
+    strand: char,
+    _syncmer_len: u64,
+) -> Option<u64> {
+    if strand == '-' {
+        (left.query_start >= right.query_end).then_some(left.query_start - right.query_end)
+    } else {
+        (right.query_start >= left.query_end).then_some(right.query_start - left.query_end)
     }
 }
 
@@ -7790,6 +8101,171 @@ mod tests {
         let mut intervals = vec![mk_hiwa(10, 20, vec![(15, 15)])];
         SyngIndex::merge_intervals_with_anchors(&mut intervals);
         assert_eq!(intervals.len(), 1);
+    }
+
+    #[test]
+    fn test_anchored_emission_trims_unanchored_terminal_tail() {
+        let _guard = lock_syng();
+        let syncmer_len = 63;
+        let intervals = vec![mk_hiwa(
+            0,
+            184_376,
+            vec![(0, 10_000), (20_000, 30_000), (52_000, 62_000)],
+        )];
+
+        let emitted = SyngIndex::anchored_interval_emissions_with_syncmer_len(
+            &intervals,
+            syncmer_len,
+            1_000,
+            0,
+            100_000,
+            true,
+        );
+
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].emitted_start, 9_000);
+        assert_eq!(emitted[0].emitted_end, 63_063);
+        assert_eq!(
+            emitted[0].reason,
+            AnchoredIntervalEmissionReason::AnchorTrimmed
+        );
+        assert!(
+            emitted[0].emitted_end < 184_376,
+            "terminal sequence without anchor support must not remain in the fetch interval"
+        );
+    }
+
+    #[test]
+    fn test_anchored_emission_trims_unanchored_left_prefix() {
+        let _guard = lock_syng();
+        let syncmer_len = 63;
+        let intervals = vec![mk_hiwa(
+            0,
+            112_588,
+            vec![(0, 32_738), (10_000, 42_738), (42_000, 74_738)],
+        )];
+
+        let emitted = SyngIndex::anchored_interval_emissions_with_syncmer_len(
+            &intervals,
+            syncmer_len,
+            1_000,
+            0,
+            100_000,
+            true,
+        );
+
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].emitted_start, 31_738);
+        assert_eq!(
+            emitted[0].reason,
+            AnchoredIntervalEmissionReason::AnchorTrimmed
+        );
+        assert!(
+            emitted[0].emitted_start > 0,
+            "left-prefix sequence without anchor support must not remain in the fetch interval"
+        );
+    }
+
+    #[test]
+    fn test_anchored_emission_splits_c4_like_32738_target_only_gap() {
+        let _guard = lock_syng();
+        let syncmer_len = 63;
+        let gap = 32_738;
+        let intervals = vec![
+            mk_hiwa(0, 2_063, vec![(10_000, 0), (11_000, 1_000)]),
+            mk_hiwa(
+                2_000 + gap,
+                4_063 + gap,
+                vec![(11_063, 2_000 + gap), (12_063, 3_000 + gap)],
+            ),
+        ];
+
+        let emitted = SyngIndex::anchored_interval_emissions_with_syncmer_len(
+            &intervals,
+            syncmer_len,
+            1_000,
+            0,
+            100_000,
+            true,
+        );
+
+        assert_eq!(
+            emitted.len(),
+            2,
+            "a 32.7 kb target-only discontinuity inside -d must stay split"
+        );
+        assert_eq!(
+            emitted[1].reason,
+            AnchoredIntervalEmissionReason::SplitChainDiscontinuous
+        );
+    }
+
+    #[test]
+    fn test_anchored_emission_splits_c4_like_65476_target_only_gap() {
+        let _guard = lock_syng();
+        let syncmer_len = 63;
+        let gap = 65_476;
+        let intervals = vec![
+            mk_hiwa(0, 2_063, vec![(10_000, 0), (11_000, 1_000)]),
+            mk_hiwa(
+                2_000 + gap,
+                4_063 + gap,
+                vec![(11_063, 2_000 + gap), (12_063, 3_000 + gap)],
+            ),
+        ];
+
+        let emitted = SyngIndex::anchored_interval_emissions_with_syncmer_len(
+            &intervals,
+            syncmer_len,
+            1_000,
+            0,
+            100_000,
+            true,
+        );
+
+        assert_eq!(
+            emitted.len(),
+            2,
+            "a 65.5 kb target-only discontinuity inside -d must stay split"
+        );
+        assert_eq!(
+            emitted[1].reason,
+            AnchoredIntervalEmissionReason::SplitChainDiscontinuous
+        );
+    }
+
+    #[test]
+    fn test_anchored_emission_merges_when_query_and_target_gaps_are_collinear() {
+        let _guard = lock_syng();
+        let syncmer_len = 63;
+        let gap = 32_738;
+        let intervals = vec![
+            mk_hiwa(0, 2_063, vec![(10_000, 0), (11_000, 1_000)]),
+            mk_hiwa(
+                2_000 + gap,
+                4_063 + gap,
+                vec![(11_063 + gap, 2_000 + gap), (12_063 + gap, 3_000 + gap)],
+            ),
+        ];
+
+        let emitted = SyngIndex::anchored_interval_emissions_with_syncmer_len(
+            &intervals,
+            syncmer_len,
+            1_000,
+            0,
+            100_000,
+            true,
+        );
+
+        assert_eq!(
+            emitted.len(),
+            1,
+            "collinear query and target gaps carry anchor continuity and may merge"
+        );
+        assert_eq!(
+            emitted[0].reason,
+            AnchoredIntervalEmissionReason::MergedChainContinuous
+        );
     }
 
     // ── 17. Edge cases for query_region ────────────────────────────
