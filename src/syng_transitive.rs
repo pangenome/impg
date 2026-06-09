@@ -1471,8 +1471,10 @@ pub fn query_transitive_ext_with_seed_filter_anchored(
     merge_distance: i32,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousIntervalWithAnchors>> {
-    let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
-    visited.insert((query_name.to_string(), query_start, query_end, '+'));
+    let mut visited_hits: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
+    visited_hits.insert((query_name.to_string(), query_start, query_end, '+'));
+    let mut visited_frontier: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
+    visited_frontier.insert((query_name.to_string(), query_start, query_end, '+'));
     let mut visited_nodes: FxHashSet<u32> = FxHashSet::default();
 
     let mut frontier: Vec<(String, u64, u64)> =
@@ -1510,11 +1512,17 @@ pub fn query_transitive_ext_with_seed_filter_anchored(
                     continue;
                 }
             };
+            let frontier_hits = anchored_frontier_hits_for_traversal(&hits, merge_distance);
             for hit in hits {
                 let key = (hit.genome.clone(), hit.start, hit.end, hit.strand);
-                if visited.insert(key) {
-                    next_frontier.push((hit.genome.clone(), hit.start, hit.end));
+                if visited_hits.insert(key) {
                     all_hits.push(hit);
+                }
+            }
+            for hit in frontier_hits {
+                let key = (hit.genome.clone(), hit.start, hit.end, hit.strand);
+                if visited_frontier.insert(key) {
+                    next_frontier.push((hit.genome, hit.start, hit.end));
                 }
             }
         }
@@ -1530,6 +1538,24 @@ pub fn query_transitive_ext_with_seed_filter_anchored(
             .then(a.anchors.len().cmp(&b.anchors.len()))
     });
     Ok(all_hits)
+}
+
+fn anchored_frontier_hits_for_traversal(
+    hits: &[HomologousIntervalWithAnchors],
+    merge_distance: i32,
+) -> Vec<HomologousInterval> {
+    merge_nearby_on_same_path(
+        hits.iter()
+            .map(|hit| HomologousInterval {
+                genome: hit.genome.clone(),
+                start: hit.start,
+                end: hit.end,
+                strand: hit.strand,
+                cigar: None,
+            })
+            .collect(),
+        merge_distance,
+    )
 }
 
 /// Collapse nearby intervals that share the same
@@ -1952,6 +1978,36 @@ mod tests {
         assert_eq!((out[0].start, out[0].end), (0, 100));
         assert_eq!((out[1].start, out[1].end), (100, 200));
         assert_eq!((out[2].start, out[2].end), (190, 250));
+    }
+
+    #[test]
+    fn anchored_frontier_merges_for_traversal_without_collapsing_output_hits() {
+        let hits = vec![
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 0,
+                end: 100,
+                strand: '+',
+                anchors: vec![mk_anchor(10, 10)],
+            },
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 150,
+                end: 250,
+                strand: '+',
+                anchors: vec![mk_anchor(20, 160)],
+            },
+        ];
+
+        let frontier = anchored_frontier_hits_for_traversal(&hits, 50);
+
+        assert_eq!(hits.len(), 2, "anchor-bearing output candidates stay split");
+        assert_eq!(
+            frontier.len(),
+            1,
+            "BFS traversal uses the legacy merged span"
+        );
+        assert_eq!((frontier[0].start, frontier[0].end), (0, 250));
     }
 
     #[test]
