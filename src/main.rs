@@ -10325,6 +10325,7 @@ fn build_engine_opts(
         sparsify,
         mash_params,
         aligner: aln.sw.aligner.clone(),
+        map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
         num_mappings: aln.sw.num_mappings.clone(),
         scaffold_jump: aln.sw.scaffold_jump,
         scaffold_mass: aln.sw.scaffold_mass,
