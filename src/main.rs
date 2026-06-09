@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
@@ -7389,40 +7389,67 @@ fn run() -> io::Result<()> {
                                 let mut window_idx = 0usize;
                                 while window_start < *range_end {
                                     let window_end = (window_start + ps).min(*range_end);
-                                    let intervals = if use_boundary_realign {
-                                        impg::syng_transitive::query_transitive_ext_with_seed_filter(
-                                            wrapper.syng_index(),
-                                            target_name,
-                                            window_start as u64,
-                                            window_end as u64,
-                                            syng_padding,
-                                            syng_max_depth,
-                                            syng_extension,
-                                            syng_extend_budget,
-                                            syng_min_chain_anchors,
-                                            syng_min_chain_fraction,
-                                            syng_seed_filter,
-                                            query.effective_merge_distance(),
-                                            sequence_index.as_ref().unwrap(),
-                                        )?
-                                    } else {
-                                        query_raw_syng(
+                                    let window_intervals = if engine_opts.engine
+                                        == GfaEngine::SyngLocal
+                                    {
+                                        let emissions = collect_syng_anchored_interval_emissions(
+                                            &wrapper,
                                             target_name,
                                             window_start,
                                             window_end,
                                             syng_padding,
                                             syng_extension,
+                                            use_boundary_realign,
+                                            syng_max_depth,
+                                            syng_extend_budget,
+                                            syng_min_chain_anchors,
+                                            syng_min_chain_fraction,
+                                            syng_seed_filter,
+                                            query.effective_merge_distance(),
+                                            query.merge_strands_for_output(resolved_format),
+                                            sequence_index.as_ref().unwrap(),
+                                            engine_opts.pipeline.debug_dir.as_deref(),
+                                        )?;
+                                        syng_anchor_emissions_to_query_intervals(
+                                            &emissions,
+                                            wrapper.seq_index(),
                                         )?
+                                    } else {
+                                        let intervals = if use_boundary_realign {
+                                            impg::syng_transitive::query_transitive_ext_with_seed_filter(
+                                                wrapper.syng_index(),
+                                                target_name,
+                                                window_start as u64,
+                                                window_end as u64,
+                                                syng_padding,
+                                                syng_max_depth,
+                                                syng_extension,
+                                                syng_extend_budget,
+                                                syng_min_chain_anchors,
+                                                syng_min_chain_fraction,
+                                                syng_seed_filter,
+                                                query.effective_merge_distance(),
+                                                sequence_index.as_ref().unwrap(),
+                                            )?
+                                        } else {
+                                            query_raw_syng(
+                                                target_name,
+                                                window_start,
+                                                window_end,
+                                                syng_padding,
+                                                syng_extension,
+                                            )?
+                                        };
+                                        syng_intervals_to_merged_query_intervals(
+                                            &intervals,
+                                            target_name,
+                                            window_start,
+                                            window_end,
+                                            wrapper.seq_index(),
+                                            query.effective_merge_distance(),
+                                            query.merge_strands_for_output(resolved_format),
+                                        )
                                     };
-                                    let window_intervals = syng_intervals_to_merged_query_intervals(
-                                        &intervals,
-                                        target_name,
-                                        window_start,
-                                        window_end,
-                                        wrapper.seq_index(),
-                                        query.effective_merge_distance(),
-                                        query.merge_strands_for_output(resolved_format),
-                                    );
                                     info!(
                                         "  [syng sub-window {}] {}:{}-{} → {} intervals",
                                         window_idx,
@@ -7483,40 +7510,66 @@ fn run() -> io::Result<()> {
                                 )?;
                             } else {
                                 // ─── Flat path: one query_region, one engine run ───
-                                let intervals = if use_boundary_realign {
-                                    impg::syng_transitive::query_transitive_ext_with_seed_filter(
-                                        wrapper.syng_index(),
-                                        target_name,
-                                        *range_start as u64,
-                                        *range_end as u64,
-                                        syng_padding,
-                                        syng_max_depth,
-                                        syng_extension,
-                                        syng_extend_budget,
-                                        syng_min_chain_anchors,
-                                        syng_min_chain_fraction,
-                                        syng_seed_filter,
-                                        query.effective_merge_distance(),
-                                        sequence_index.as_ref().unwrap(),
-                                    )?
-                                } else {
-                                    query_raw_syng(
+                                let query_intervals = if engine_opts.engine == GfaEngine::SyngLocal
+                                {
+                                    let emissions = collect_syng_anchored_interval_emissions(
+                                        &wrapper,
                                         target_name,
                                         *range_start,
                                         *range_end,
                                         syng_padding,
                                         syng_extension,
+                                        use_boundary_realign,
+                                        syng_max_depth,
+                                        syng_extend_budget,
+                                        syng_min_chain_anchors,
+                                        syng_min_chain_fraction,
+                                        syng_seed_filter,
+                                        query.effective_merge_distance(),
+                                        query.merge_strands_for_output(resolved_format),
+                                        sequence_index.as_ref().unwrap(),
+                                        engine_opts.pipeline.debug_dir.as_deref(),
+                                    )?;
+                                    syng_anchor_emissions_to_query_intervals(
+                                        &emissions,
+                                        wrapper.seq_index(),
                                     )?
+                                } else {
+                                    let intervals = if use_boundary_realign {
+                                        impg::syng_transitive::query_transitive_ext_with_seed_filter(
+                                            wrapper.syng_index(),
+                                            target_name,
+                                            *range_start as u64,
+                                            *range_end as u64,
+                                            syng_padding,
+                                            syng_max_depth,
+                                            syng_extension,
+                                            syng_extend_budget,
+                                            syng_min_chain_anchors,
+                                            syng_min_chain_fraction,
+                                            syng_seed_filter,
+                                            query.effective_merge_distance(),
+                                            sequence_index.as_ref().unwrap(),
+                                        )?
+                                    } else {
+                                        query_raw_syng(
+                                            target_name,
+                                            *range_start,
+                                            *range_end,
+                                            syng_padding,
+                                            syng_extension,
+                                        )?
+                                    };
+                                    syng_intervals_to_merged_query_intervals(
+                                        &intervals,
+                                        target_name,
+                                        *range_start,
+                                        *range_end,
+                                        wrapper.seq_index(),
+                                        query.effective_merge_distance(),
+                                        query.merge_strands_for_output(resolved_format),
+                                    )
                                 };
-                                let query_intervals = syng_intervals_to_merged_query_intervals(
-                                    &intervals,
-                                    target_name,
-                                    *range_start,
-                                    *range_end,
-                                    wrapper.seq_index(),
-                                    query.effective_merge_distance(),
-                                    query.merge_strands_for_output(resolved_format),
-                                );
 
                                 if query_intervals.is_empty() {
                                     write_graph_output_and_render(
@@ -7565,42 +7618,35 @@ fn run() -> io::Result<()> {
                         }
                         "fasta" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
-                            let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive_ext_with_seed_filter(
-                                    wrapper.syng_index(),
-                                    target_name,
-                                    *range_start as u64,
-                                    *range_end as u64,
-                                    syng_padding,
-                                    syng_max_depth,
-                                    syng_extension,
-                                    syng_extend_budget,
-                                    syng_min_chain_anchors,
-                                    syng_min_chain_fraction,
-                                    syng_seed_filter,
-                                    query.effective_merge_distance(),
-                                    seq_idx,
-                                )?
-                            } else {
-                                query_raw_syng(
-                                    target_name,
-                                    *range_start,
-                                    *range_end,
-                                    syng_padding,
-                                    syng_extension,
-                                )?
-                            };
+                            let emissions = collect_syng_anchored_interval_emissions(
+                                &wrapper,
+                                target_name,
+                                *range_start,
+                                *range_end,
+                                syng_padding,
+                                syng_extension,
+                                use_boundary_realign,
+                                syng_max_depth,
+                                syng_extend_budget,
+                                syng_min_chain_anchors,
+                                syng_min_chain_fraction,
+                                syng_seed_filter,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("fasta"),
+                                seq_idx,
+                                engine_cli.debug_dir.as_deref(),
+                            )?;
                             let mut out = find_output_stream(&target_output_prefix, "fa")?;
-                            for iv in &intervals {
+                            for iv in &emissions {
                                 let sequence = seq_idx.fetch_sequence(
                                     &iv.genome,
-                                    iv.start as i32,
-                                    iv.end as i32,
+                                    iv.emitted_start as i32,
+                                    iv.emitted_end as i32,
                                 )?;
                                 writeln!(
                                     out,
                                     ">{}:{}-{}({})",
-                                    iv.genome, iv.start, iv.end, iv.strand
+                                    iv.genome, iv.emitted_start, iv.emitted_end, iv.strand
                                 )?;
                                 out.write_all(&sequence)?;
                                 writeln!(out)?;
@@ -12221,6 +12267,153 @@ fn syng_intervals_to_merged_query_intervals(
         .into_iter()
         .map(|(query_interval, _, _)| query_interval)
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_syng_anchored_interval_emissions(
+    wrapper: &impg::SyngImpgWrapper,
+    target_name: &str,
+    range_start: i32,
+    range_end: i32,
+    padding: u64,
+    query_extension: u64,
+    use_boundary_realign: bool,
+    max_depth: u16,
+    extend_budget: u64,
+    min_chain_anchors: usize,
+    min_chain_fraction: f64,
+    seed_filter: impg::syng::SyngSeedFilter,
+    merge_distance: i32,
+    merge_strands: bool,
+    sequence_index: &UnifiedSequenceIndex,
+    debug_dir: Option<&str>,
+) -> io::Result<Vec<impg::syng::AnchoredIntervalEmission>> {
+    let start = range_start.max(0) as u64;
+    let end = range_end.max(range_start).max(0) as u64;
+    let intervals = if use_boundary_realign {
+        impg::syng_transitive::query_transitive_ext_with_seed_filter_anchored(
+            wrapper.syng_index(),
+            target_name,
+            start,
+            end,
+            padding,
+            max_depth,
+            query_extension,
+            extend_budget,
+            min_chain_anchors,
+            min_chain_fraction,
+            seed_filter,
+            merge_distance,
+            sequence_index,
+        )?
+    } else {
+        wrapper
+            .syng_index()
+            .query_region_with_anchors_ext_seed_filtered(
+                target_name,
+                start,
+                end,
+                padding,
+                query_extension,
+                seed_filter,
+            )?
+    };
+    let emissions = wrapper.syng_index().anchored_interval_emissions(
+        &intervals,
+        padding,
+        query_extension,
+        merge_distance,
+        merge_strands,
+    );
+    write_syng_local_interval_debug(debug_dir, &emissions)?;
+    Ok(emissions)
+}
+
+fn syng_anchor_emissions_to_query_intervals(
+    emissions: &[impg::syng::AnchoredIntervalEmission],
+    seq_index: &SequenceIndex,
+) -> io::Result<Vec<Interval<u32>>> {
+    emissions
+        .iter()
+        .filter(|emission| emission.emitted_start < emission.emitted_end)
+        .filter_map(|emission| {
+            let homolog_id = seq_index.get_id(&emission.genome)?;
+            Some((emission, homolog_id))
+        })
+        .map(|(emission, homolog_id)| {
+            let start = i32::try_from(emission.emitted_start).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "syng emitted start coordinate exceeds i32: {}:{}",
+                        emission.genome, emission.emitted_start
+                    ),
+                )
+            })?;
+            let end = i32::try_from(emission.emitted_end).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "syng emitted end coordinate exceeds i32: {}:{}",
+                        emission.genome, emission.emitted_end
+                    ),
+                )
+            })?;
+            let interval = if emission.strand == '-' {
+                Interval::new(end, start, homolog_id)
+            } else {
+                Interval::new(start, end, homolog_id)
+            };
+            Ok(interval)
+        })
+        .collect()
+}
+
+fn write_syng_local_interval_debug(
+    debug_dir: Option<&str>,
+    emissions: &[impg::syng::AnchoredIntervalEmission],
+) -> io::Result<()> {
+    let Some(debug_dir) = debug_dir else {
+        return Ok(());
+    };
+    fs::create_dir_all(debug_dir)?;
+    let path = Path::new(debug_dir).join("syng_local_intervals.tsv");
+    let write_header = path.metadata().map(|m| m.len() == 0).unwrap_or(true);
+    let mut out = OpenOptions::new().create(true).append(true).open(path)?;
+    if write_header {
+        writeln!(
+            out,
+            "path_key\tpre_merge_interval\tpost_merge_interval\tstrand\tanchor_count\tquery_anchor_min\tquery_anchor_max\ttarget_anchor_min\ttarget_anchor_max\temitted_fetch_interval\treason"
+        )?;
+    }
+    for emission in emissions {
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            emission.genome,
+            format_u64_interval(emission.pre_merge_start, emission.pre_merge_end),
+            format_u64_interval(emission.post_merge_start, emission.post_merge_end),
+            emission.strand,
+            emission.anchor_count,
+            format_optional_u64(emission.query_anchor_min),
+            format_optional_u64(emission.query_anchor_max),
+            format_optional_u64(emission.target_anchor_min),
+            format_optional_u64(emission.target_anchor_max),
+            format_u64_interval(emission.emitted_start, emission.emitted_end),
+            emission.reason.as_str(),
+        )?;
+    }
+    Ok(())
+}
+
+fn format_u64_interval(start: u64, end: u64) -> String {
+    format!("{start}-{end}")
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| ".".to_string())
 }
 
 fn build_genotype_query_gfa(
