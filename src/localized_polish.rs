@@ -37,6 +37,14 @@ pub struct LocalizedPolishConfig {
 
 impl Default for LocalizedPolishConfig {
     fn default() -> Self {
+        let mut resolver = LocalizedResolverConfig::default();
+        // Localized pairwise polishing should not silently inherit the global
+        // crush 1:1 replacement filter. C4 dirty blocks are many-haplotype
+        // regions; if a user wants a strict replacement filter they can still
+        // request it with replacement-num-mappings/replacement-scaffold-filter.
+        resolver.resolution.replacement_num_mappings = "many:many".to_string();
+        resolver.resolution.replacement_scaffold_filter = "many:many".to_string();
+        resolver.resolution.replacement_scaffold_mass = 0;
         Self {
             max_iterations: 3,
             max_chunks_per_iteration: 1,
@@ -44,7 +52,7 @@ impl Default for LocalizedPolishConfig {
             max_total_chunk_bp: Some(500_000),
             max_runtime_secs: None,
             dirty_options: DirtyRegionOptions::default(),
-            resolver: LocalizedResolverConfig::default(),
+            resolver,
             debug_dir: None,
         }
     }
@@ -370,38 +378,82 @@ fn select_chunks_with_provenance(
 ) -> ChunkSelection {
     let mut selection = ChunkSelection::default();
     let mut selected_provenance = polished_provenance.clone();
+    let mut edge_compounds = Vec::new();
 
     for compound in compound_dirty_chunks(chunks, config) {
-        let chunk = &compound.chunk;
-        if selected_provenance.covers(chunk) {
-            selection.deferred = selection.deferred.saturating_add(compound.source_count);
-            continue;
+        if chunk_core_has_internal_path_anchors(&compound.chunk) {
+            consider_compound_for_selection(
+                compound,
+                config,
+                total_chunks_attempted,
+                total_chunk_bp,
+                &mut selection,
+                &mut selected_provenance,
+            );
+        } else {
+            edge_compounds.push(compound);
         }
+    }
 
-        if selection.chunks.len() >= config.max_chunks_per_iteration
-            || total_chunks_attempted + selection.chunks.len() >= config.max_total_chunks
-        {
-            selection.deferred = selection.deferred.saturating_add(compound.source_count);
-            continue;
-        }
-
-        let chunk_bp = chunk_bp(chunk);
-        if let Some(max_total_bp) = config.max_total_chunk_bp {
-            if total_chunk_bp
-                .saturating_add(selection.selected_bp)
-                .saturating_add(chunk_bp)
-                > max_total_bp
-            {
-                selection.deferred = selection.deferred.saturating_add(compound.source_count);
-                continue;
-            }
-        }
-
-        selection.selected_bp = selection.selected_bp.saturating_add(chunk_bp);
-        selection.chunks.push(chunk.clone());
-        selected_provenance.remember(chunk);
+    for compound in edge_compounds {
+        consider_compound_for_selection(
+            compound,
+            config,
+            total_chunks_attempted,
+            total_chunk_bp,
+            &mut selection,
+            &mut selected_provenance,
+        );
     }
     selection
+}
+
+fn consider_compound_for_selection(
+    compound: CompoundDirtyChunk,
+    config: &LocalizedPolishConfig,
+    total_chunks_attempted: usize,
+    total_chunk_bp: usize,
+    selection: &mut ChunkSelection,
+    selected_provenance: &mut DirtyChunkProvenance,
+) {
+    let chunk = &compound.chunk;
+    if selected_provenance.covers(chunk) {
+        selection.deferred = selection.deferred.saturating_add(compound.source_count);
+        return;
+    }
+
+    if selection.chunks.len() >= config.max_chunks_per_iteration
+        || total_chunks_attempted + selection.chunks.len() >= config.max_total_chunks
+    {
+        selection.deferred = selection.deferred.saturating_add(compound.source_count);
+        return;
+    }
+
+    let chunk_bp = chunk_bp(chunk);
+    if let Some(max_total_bp) = config.max_total_chunk_bp {
+        if total_chunk_bp
+            .saturating_add(selection.selected_bp)
+            .saturating_add(chunk_bp)
+            > max_total_bp
+        {
+            selection.deferred = selection.deferred.saturating_add(compound.source_count);
+            return;
+        }
+    }
+
+    selection.selected_bp = selection.selected_bp.saturating_add(chunk_bp);
+    selection.chunks.push(chunk.clone());
+    selected_provenance.remember(chunk);
+}
+
+fn chunk_core_has_internal_path_anchors(chunk: &DirtyChunk) -> bool {
+    let Some(path_len) = chunk.path_length_bp else {
+        return true;
+    };
+    let Some((start, end)) = chunk_core_span(chunk) else {
+        return true;
+    };
+    start > 0 && end < path_len
 }
 
 fn compound_dirty_chunks(
@@ -757,6 +809,13 @@ fn write_summary_debug(config: &LocalizedPolishConfig, report: &LocalizedPolishR
             path.display()
         );
     }
+    let path = Path::new(debug_dir).join("localized_polish_alignment_yield.tsv");
+    if let Err(err) = std::fs::write(&path, alignment_yield_tsv(report)) {
+        log::warn!(
+            "localized polish: failed to write alignment-yield summary {}: {err}",
+            path.display()
+        );
+    }
 }
 
 fn summary_tsv(report: &LocalizedPolishReport) -> String {
@@ -822,6 +881,82 @@ fn summary_tsv(report: &LocalizedPolishReport) -> String {
         );
     }
     out
+}
+
+fn alignment_yield_tsv(report: &LocalizedPolishReport) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "record_type\titeration\tchunk_id\tstatus\treason\tmethod\tpath_count\tcandidate_sequence_count\tcandidate_total_bp\tstep_range\tpath_range_bp\tpair_count_expected\traw_paf_records\tfiltered_paf_records\taligned_pair_fraction\tmedian_alignment_len\tmax_alignment_len\tmin_match_len\tmin_map_length\tnum_mappings\tscaffold_filter\tscaffold_mass\tno_filter\tseqwish_input_paf\treplacement_segments\treplacement_bp\treplacement_shared_segments\tseqwish_segments\tseqwish_segment_bp\tseqwish_links\tseqwish_paths\n",
+    );
+    for iteration in &report.iterations {
+        for resolver in &iteration.resolver_reports {
+            let evidence = resolver.alignment.as_ref();
+            let _ = writeln!(
+                out,
+                "alignment\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                iteration.iteration,
+                tsv_field(&resolver.chunk_id),
+                resolver.status.as_str(),
+                tsv_field(&resolver.reason),
+                resolver
+                    .method
+                    .map(|method| method.method_name())
+                    .unwrap_or("n/a"),
+                resolver.input_paths,
+                evidence.map(|e| e.candidate_sequence_count).unwrap_or(resolver.input_paths),
+                evidence.map(|e| e.candidate_total_bp).unwrap_or(resolver.input_bp),
+                evidence
+                    .and_then(|e| e.step_range.as_ref())
+                    .map(|s| tsv_field(s))
+                    .unwrap_or_default(),
+                evidence
+                    .and_then(|e| e.path_range_bp.as_ref())
+                    .map(|s| tsv_field(s))
+                    .unwrap_or_default(),
+                evidence.map(|e| e.pair_count_expected).unwrap_or(0),
+                evidence.map(|e| e.raw_paf_records).unwrap_or(0),
+                evidence.map(|e| e.filtered_paf_records).unwrap_or(0),
+                evidence
+                    .and_then(|e| e.aligned_pair_fraction)
+                    .map(|v| format!("{v:.6}"))
+                    .unwrap_or_default(),
+                evidence
+                    .and_then(|e| e.median_alignment_len)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                evidence.map(|e| e.max_alignment_len).unwrap_or(0),
+                evidence.map(|e| e.min_match_len).unwrap_or(0),
+                evidence.map(|e| e.min_map_length).unwrap_or(0),
+                evidence
+                    .map(|e| tsv_field(&e.num_mappings))
+                    .unwrap_or_default(),
+                evidence
+                    .map(|e| tsv_field(&e.scaffold_filter))
+                    .unwrap_or_default(),
+                evidence.map(|e| e.scaffold_mass).unwrap_or(0),
+                evidence.map(|e| e.no_filter).unwrap_or(false),
+                evidence
+                    .and_then(|e| e.seqwish_input_paf.as_ref())
+                    .map(|s| tsv_field(s))
+                    .unwrap_or_default(),
+                resolver.replacement_segments.unwrap_or(0),
+                resolver.replacement_bp.unwrap_or(0),
+                evidence.map(|e| e.replacement_shared_segments).unwrap_or(0),
+                evidence.map(|e| e.seqwish_segments).unwrap_or(0),
+                evidence.map(|e| e.seqwish_segment_bp).unwrap_or(0),
+                evidence.map(|e| e.seqwish_links).unwrap_or(0),
+                evidence.map(|e| e.seqwish_paths).unwrap_or(0),
+            );
+        }
+    }
+    out
+}
+
+fn tsv_field(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 
 #[cfg(test)]
@@ -918,5 +1053,44 @@ mod tests {
         );
         assert_eq!(selection.chunks[0].id, "chunk_0001");
         assert_eq!(selection.deferred, 1);
+    }
+
+    #[test]
+    fn localized_polish_prefers_anchorable_interior_chunks() {
+        let mut config = LocalizedPolishConfig::default();
+        config.max_chunks_per_iteration = 1;
+        config.max_total_chunks = 1;
+        config.max_total_chunk_bp = Some(1_000);
+        config.dirty_options.merge_distance_bp = 0;
+        config.dirty_options.flank_bp = 0;
+
+        let chunks = vec![
+            test_dirty_chunk("left_edge", 0, 10, 0, 10, &["n1"]),
+            test_dirty_chunk("right_edge", 990, 1_000, 990, 1_000, &["n9"]),
+            test_dirty_chunk("interior", 100, 140, 110, 130, &["n5"]),
+        ];
+
+        let selection = select_chunks(&chunks, &config, 0, 0);
+        assert_eq!(
+            selection.chunks.len(),
+            1,
+            "budget should be spent on a chunk that can have both flank anchors"
+        );
+        assert_eq!(selection.chunks[0].id, "interior");
+        assert_eq!(selection.deferred, 2);
+    }
+
+    #[test]
+    fn localized_polish_defaults_do_not_hide_one_to_one_pairwise_filter() {
+        let config = LocalizedPolishConfig::default();
+        assert_eq!(
+            config.resolver.resolution.replacement_num_mappings,
+            "many:many"
+        );
+        assert_eq!(
+            config.resolver.resolution.replacement_scaffold_filter,
+            "many:many"
+        );
+        assert_eq!(config.resolver.resolution.replacement_scaffold_mass, 0);
     }
 }

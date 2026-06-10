@@ -598,8 +598,8 @@ impl Default for ResolutionConfig {
             replacement_min_match_len_policy: ReplacementMinMatchLenPolicy::Fixed(1),
             replacement_min_map_length: DEFAULT_REPLACEMENT_MIN_MAP_LENGTH,
             replacement_min_identity: DEFAULT_REPLACEMENT_MIN_IDENTITY,
-            replacement_num_mappings: "1:1".to_string(),
-            replacement_scaffold_filter: "1:1".to_string(),
+            replacement_num_mappings: "many:many".to_string(),
+            replacement_scaffold_filter: "many:many".to_string(),
             replacement_scaffold_mass: DEFAULT_REPLACEMENT_SCAFFOLD_MASS,
             sweepga_aligner: "fastga".to_string(),
             sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
@@ -721,6 +721,33 @@ pub struct LocalizedGraphMetrics {
     pub path_replay_compression_ratio: Option<f64>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalizedAlignmentYieldReport {
+    pub candidate_sequence_count: usize,
+    pub candidate_total_bp: usize,
+    pub pair_count_expected: usize,
+    pub raw_paf_records: usize,
+    pub filtered_paf_records: usize,
+    pub raw_aligned_pair_fraction: Option<f64>,
+    pub aligned_pair_fraction: Option<f64>,
+    pub median_alignment_len: Option<u64>,
+    pub max_alignment_len: u64,
+    pub min_match_len: u64,
+    pub min_map_length: u64,
+    pub num_mappings: String,
+    pub scaffold_filter: String,
+    pub scaffold_mass: u64,
+    pub no_filter: bool,
+    pub seqwish_input_paf: Option<String>,
+    pub replacement_shared_segments: usize,
+    pub seqwish_segments: usize,
+    pub seqwish_segment_bp: usize,
+    pub seqwish_links: usize,
+    pub seqwish_paths: usize,
+    pub step_range: Option<String>,
+    pub path_range_bp: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct LocalizedResolverReport {
     pub chunk_id: String,
@@ -734,6 +761,7 @@ pub struct LocalizedResolverReport {
     pub trimmed_back: bool,
     pub input_paths: usize,
     pub input_bp: usize,
+    pub alignment: Option<LocalizedAlignmentYieldReport>,
     pub replacement_segments: Option<usize>,
     pub replacement_bp: Option<usize>,
     pub before: LocalizedGraphMetrics,
@@ -1212,6 +1240,10 @@ pub fn resolve_gfa_dirty_chunks(
 
         report.replacement_segments = Some(build.replacement.segments.len());
         report.replacement_bp = Some(replacement_segment_bp(&build.replacement));
+        report.alignment = build
+            .evidence
+            .as_ref()
+            .map(|evidence| localized_alignment_yield_report(&candidate, &local_config, evidence));
         let plan = ReplacementPlan::new(candidate, build.replacement, method);
         match apply_replacement_frontier(&graph, &[plan], &mut next_id) {
             Ok(next_graph) => {
@@ -1617,20 +1649,30 @@ fn resolve_graph_bubbles(
                     );
                 }
                 let result = (|| {
-                    let replacement = build_replacement_with_method(&candidate, config, method)?;
+                    let report = build_replacement_with_method_report(&candidate, config, method)?;
+                    let evidence = report.evidence;
+                    let replacement = report.replacement;
                     if replacement.segments.is_empty() {
-                        return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                        return Ok::<
+                            Option<(ReplacementPlan, Option<SweepgaReplacementEvidence>)>,
+                            io::Error,
+                        >(None);
                     }
-                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan::new(
-                        candidate,
-                        replacement,
-                        method,
-                    )))
+                    Ok::<Option<(ReplacementPlan, Option<SweepgaReplacementEvidence>)>, io::Error>(
+                        Some((
+                            ReplacementPlan::new(candidate, replacement, method),
+                            evidence,
+                        )),
+                    )
                 })();
                 if emit_logs {
                     let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
                     if selected_count <= 32 || done == selected_count || done % 25 == 0 {
-                        let status = replacement_build_status(&result);
+                        let status = match &result {
+                            Ok(Some(_)) => "accepted",
+                            Ok(None) => "empty",
+                            Err(_) => "failed",
+                        };
                         log::info!(
                             "crush round {}: replacement build progress {}/{} ({})",
                             round + 1,
@@ -1638,6 +1680,31 @@ fn resolve_graph_bubbles(
                             selected_count,
                             status
                         );
+                    }
+                    if selected_count <= 32 {
+                        if let Ok(Some((plan, evidence))) = &result {
+                            let evidence = evidence
+                                .as_ref()
+                                .map(format_sweepga_evidence)
+                                .unwrap_or_else(|| {
+                                    "alignment_evidence=not-applicable".to_string()
+                                });
+                            log::info!(
+                                "crush round {}: accepted replacement detail method={:?}; {}; path_coverage={}; lengths=min/median/p90/max/total={}/{}/{}/{}/{}; replacement_segments={}, replacement_paths={}, replacement_bp={}",
+                                round + 1,
+                                plan.method,
+                                evidence,
+                                format_candidate_path_coverage(&graph, &plan.candidate),
+                                plan.candidate.traversal_stats.min_len,
+                                plan.candidate.traversal_stats.median_len,
+                                plan.candidate.traversal_stats.p90_len,
+                                plan.candidate.traversal_stats.max_len,
+                                plan.candidate.traversal_stats.total_len,
+                                plan.replacement.segments.len(),
+                                plan.replacement.paths.len(),
+                                replacement_segment_bp(&plan.replacement),
+                            );
+                        }
                     }
                 }
                 result
@@ -1651,7 +1718,7 @@ fn resolve_graph_bubbles(
         let mut path_invalid = 0usize;
         for result in build_results {
             match result {
-                Ok(Some(plan)) => {
+                Ok(Some((plan, _evidence))) => {
                     plans.push(plan);
                 }
                 Ok(None) => {
@@ -7261,6 +7328,7 @@ fn localized_report_base(
         trimmed_back: false,
         input_paths: 0,
         input_bp: 0,
+        alignment: None,
         replacement_segments: None,
         replacement_bp: None,
         before,
@@ -7495,8 +7563,42 @@ fn log_localized_report(report: &LocalizedResolverReport) {
         .as_ref()
         .map(localized_metrics_summary)
         .unwrap_or_else(|| "n/a".to_string());
+    let alignment = report
+        .alignment
+        .as_ref()
+        .map(|alignment| {
+            format!(
+                "alignment_yield=candidate_sequences={},candidate_bp={},pairs_expected={},raw_paf_records={},filtered_paf_records={},aligned_pair_fraction={},median_alignment_len={},max_alignment_len={},min_match_len={},min_map_length={},num_mappings={},scaffold_filter={},scaffold_mass={},no_filter={},seqwish_input_paf={},seqwish_shape=S{}/bp{}/L{}/P{}",
+                alignment.candidate_sequence_count,
+                alignment.candidate_total_bp,
+                alignment.pair_count_expected,
+                alignment.raw_paf_records,
+                alignment.filtered_paf_records,
+                alignment
+                    .aligned_pair_fraction
+                    .map(|v| format!("{v:.6}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                alignment
+                    .median_alignment_len
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                alignment.max_alignment_len,
+                alignment.min_match_len,
+                alignment.min_map_length,
+                alignment.num_mappings,
+                alignment.scaffold_filter,
+                alignment.scaffold_mass,
+                alignment.no_filter,
+                alignment.seqwish_input_paf.as_deref().unwrap_or("n/a"),
+                alignment.seqwish_segments,
+                alignment.seqwish_segment_bp,
+                alignment.seqwish_links,
+                alignment.seqwish_paths,
+            )
+        })
+        .unwrap_or_else(|| "alignment_yield=n/a".to_string());
     log::info!(
-        "localized resolver report: chunk={} status={} method={} reason={} path_validation={} hard_gate={} quality_gate_used={} before={} after={}",
+        "localized resolver report: chunk={} status={} method={} reason={} path_validation={} hard_gate={} quality_gate_used={} {} before={} after={}",
         report.chunk_id,
         report.status.as_str(),
         report
@@ -7507,9 +7609,82 @@ fn log_localized_report(report: &LocalizedResolverReport) {
         report.path_validation,
         report.hard_rejection_gate,
         report.quality_gate_used,
+        alignment,
         localized_metrics_summary(&report.before),
         after
     );
+}
+
+fn localized_alignment_yield_report(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    evidence: &SweepgaReplacementEvidence,
+) -> LocalizedAlignmentYieldReport {
+    let pair_count_expected = candidate
+        .ranges
+        .len()
+        .saturating_mul(candidate.ranges.len().saturating_sub(1));
+    let fraction = |pairs: usize| {
+        (pair_count_expected > 0).then_some(pairs as f64 / pair_count_expected as f64)
+    };
+    LocalizedAlignmentYieldReport {
+        candidate_sequence_count: candidate.ranges.len(),
+        candidate_total_bp: candidate.traversal_stats.total_len,
+        pair_count_expected,
+        raw_paf_records: evidence.alignment_records,
+        filtered_paf_records: evidence.filtered_alignment_records,
+        raw_aligned_pair_fraction: fraction(evidence.raw_unique_pairs),
+        aligned_pair_fraction: fraction(evidence.filtered_unique_pairs),
+        median_alignment_len: evidence
+            .filtered_median_alignment_len
+            .or(evidence.raw_median_alignment_len),
+        max_alignment_len: evidence
+            .filtered_max_alignment_len
+            .max(evidence.raw_max_alignment_len),
+        min_match_len: evidence.effective_min_match_len,
+        min_map_length: evidence.effective_min_map_length,
+        num_mappings: evidence.num_mappings.clone(),
+        scaffold_filter: evidence.scaffold_filter.clone(),
+        scaffold_mass: evidence.scaffold_mass,
+        no_filter: evidence.no_filter,
+        seqwish_input_paf: evidence.seqwish_input_paf.clone(),
+        replacement_shared_segments: evidence.replacement_shared_segments,
+        seqwish_segments: evidence.seqwish_segments,
+        seqwish_segment_bp: evidence.seqwish_segment_bp,
+        seqwish_links: evidence.seqwish_links,
+        seqwish_paths: evidence.seqwish_paths,
+        step_range: Some(format!(
+            "{}..{}",
+            candidate.root_start_step, candidate.root_end_step
+        )),
+        path_range_bp: candidate
+            .ranges
+            .first()
+            .map(|range| format!("{}..{}", range.source_begin_bp, range.source_end_bp)),
+    }
+    .with_effective_defaults(config)
+}
+
+impl LocalizedAlignmentYieldReport {
+    fn with_effective_defaults(mut self, config: &ResolutionConfig) -> Self {
+        if self.min_match_len == 0 {
+            self.min_match_len = match config.replacement_min_match_len_policy {
+                ReplacementMinMatchLenPolicy::Adaptive => config.replacement_seqwish_min_match_len,
+                ReplacementMinMatchLenPolicy::Fixed(0) => 1,
+                ReplacementMinMatchLenPolicy::Fixed(value) => value,
+            };
+        }
+        if self.min_map_length == 0 {
+            self.min_map_length = self.min_match_len;
+        }
+        if self.num_mappings.is_empty() {
+            self.num_mappings = config.replacement_num_mappings.clone();
+        }
+        if self.scaffold_filter.is_empty() {
+            self.scaffold_filter = config.replacement_scaffold_filter.clone();
+        }
+        self
+    }
 }
 
 fn localized_metrics_summary(metrics: &LocalizedGraphMetrics) -> String {
@@ -10104,6 +10279,13 @@ fn is_zero_alignment_replacement_error(err: &io::Error) -> bool {
 #[derive(Clone, Debug, Default)]
 struct SweepgaReplacementEvidence {
     alignment_records: usize,
+    filtered_alignment_records: usize,
+    raw_unique_pairs: usize,
+    filtered_unique_pairs: usize,
+    raw_median_alignment_len: Option<u64>,
+    raw_max_alignment_len: u64,
+    filtered_median_alignment_len: Option<u64>,
+    filtered_max_alignment_len: u64,
     aligned_bp: u64,
     paf_bytes: usize,
     collinear_records: usize,
@@ -10113,18 +10295,51 @@ struct SweepgaReplacementEvidence {
     replacement_segments: usize,
     replacement_shared_segments: usize,
     replacement_bp: usize,
+    seqwish_segments: usize,
+    seqwish_segment_bp: usize,
+    seqwish_links: usize,
+    seqwish_paths: usize,
+    effective_min_match_len: u64,
+    effective_min_map_length: u64,
+    num_mappings: String,
+    scaffold_filter: String,
+    scaffold_mass: u64,
+    no_filter: bool,
+    seqwish_input_paf: Option<String>,
 }
 
 fn format_sweepga_evidence(evidence: &SweepgaReplacementEvidence) -> String {
     format!(
-        "alignment_evidence=raw_paf_records={},aligned_bp={},paf_bytes={},collinear_records={},off_diagonal_records={},dust_like_records={},fastga_frequency={},replacement_segments={},replacement_shared_segments={},replacement_bp={}",
+        "alignment_evidence=raw_paf_records={},filtered_paf_records={},raw_unique_pairs={},filtered_unique_pairs={},aligned_bp={},paf_bytes={},median_alignment_len={},max_alignment_len={},collinear_records={},off_diagonal_records={},dust_like_records={},fastga_frequency={},min_match_len={},min_map_length={},num_mappings={},scaffold_filter={},scaffold_mass={},no_filter={},seqwish_input_paf={},seqwish_segments={},seqwish_segment_bp={},seqwish_links={},seqwish_paths={},replacement_segments={},replacement_shared_segments={},replacement_bp={}",
         evidence.alignment_records,
+        evidence.filtered_alignment_records,
+        evidence.raw_unique_pairs,
+        evidence.filtered_unique_pairs,
         evidence.aligned_bp,
         evidence.paf_bytes,
+        evidence
+            .filtered_median_alignment_len
+            .or(evidence.raw_median_alignment_len)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        evidence
+            .filtered_max_alignment_len
+            .max(evidence.raw_max_alignment_len),
         evidence.collinear_records,
         evidence.off_diagonal_records,
         evidence.dust_like_records,
         evidence.kmer_frequency,
+        evidence.effective_min_match_len,
+        evidence.effective_min_map_length,
+        evidence.num_mappings.as_str(),
+        evidence.scaffold_filter.as_str(),
+        evidence.scaffold_mass,
+        evidence.no_filter,
+        evidence.seqwish_input_paf.as_deref().unwrap_or("n/a"),
+        evidence.seqwish_segments,
+        evidence.seqwish_segment_bp,
+        evidence.seqwish_links,
+        evidence.seqwish_paths,
         evidence.replacement_segments,
         evidence.replacement_shared_segments,
         evidence.replacement_bp
@@ -10223,6 +10438,8 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         .iter()
         .filter_map(|line| paf_alignment_block_bp(line))
         .sum::<u64>();
+    let raw_unique_pairs = paf_unique_pair_count(&paf_lines);
+    let (raw_median_alignment_len, raw_max_alignment_len) = paf_alignment_len_summary(&paf_lines);
     let alignment_profile = classify_paf_alignment_profile(&paf_lines);
     if paf_lines.is_empty() {
         log::info!(
@@ -10272,7 +10489,12 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         // already made its documented filtering decision.
         graph_config.no_filter = true;
     }
-    let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
+    let graph_debug_dir = debug_replacement_build_dir("sweepga_seqwish_paf_tail");
+    if let Some(dir) = &graph_debug_dir {
+        graph_config.debug_dir = Some(dir.display().to_string());
+    }
+    let (gfa, graph_report) =
+        crate::syng_graph::build_gfa_from_paf_and_sequences_report(&seqs, &paf, &graph_config)?;
     let replacement =
         finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")?;
     let replacement_shared_segments = replacement_shared_segment_count(&replacement);
@@ -10286,6 +10508,13 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     }
     let evidence = SweepgaReplacementEvidence {
         alignment_records: paf_lines.len(),
+        filtered_alignment_records: graph_report.filtered_paf_records,
+        raw_unique_pairs,
+        filtered_unique_pairs: graph_report.filtered_unique_pairs,
+        raw_median_alignment_len,
+        raw_max_alignment_len,
+        filtered_median_alignment_len: graph_report.filtered_median_alignment_len,
+        filtered_max_alignment_len: graph_report.filtered_max_alignment_len,
         aligned_bp,
         paf_bytes: paf.len(),
         collinear_records: alignment_profile.collinear_records,
@@ -10295,6 +10524,22 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         replacement_segments: replacement.segments.len(),
         replacement_shared_segments,
         replacement_bp: replacement_segment_bp(&replacement),
+        seqwish_segments: graph_report.seqwish_segments,
+        seqwish_segment_bp: graph_report.seqwish_segment_bp,
+        seqwish_links: graph_report.seqwish_links,
+        seqwish_paths: graph_report.seqwish_paths,
+        effective_min_match_len: graph_report.effective_min_match_len,
+        effective_min_map_length: graph_config.min_map_length,
+        num_mappings: graph_config.num_mappings.clone(),
+        scaffold_filter: graph_config.scaffold_filter.clone(),
+        scaffold_mass: graph_config.scaffold_mass,
+        no_filter: graph_config.no_filter,
+        seqwish_input_paf: graph_report.debug_dir.as_ref().map(|dir| {
+            std::path::Path::new(dir)
+                .join("filtered.paf")
+                .display()
+                .to_string()
+        }),
     };
     Ok((replacement, evidence))
 }
@@ -10405,6 +10650,32 @@ fn sweepga_backend_min_sequence_len(aligner: &str) -> usize {
 
 fn paf_alignment_block_bp(line: &str) -> Option<u64> {
     line.split('\t').nth(10)?.parse().ok()
+}
+
+fn paf_unique_pair_count(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (fields.len() >= 6).then(|| (fields[0].to_string(), fields[5].to_string()))
+        })
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn paf_alignment_len_summary(lines: &[String]) -> (Option<u64>, u64) {
+    let mut lengths = lines
+        .iter()
+        .filter_map(|line| paf_alignment_block_bp(line))
+        .collect::<Vec<_>>();
+    lengths.sort_unstable();
+    let median = if lengths.is_empty() {
+        None
+    } else {
+        Some(lengths[lengths.len() / 2])
+    };
+    let max = lengths.last().copied().unwrap_or(0);
+    (median, max)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -14348,8 +14619,8 @@ P\talt\t1+,3+,4+\t*
         assert!(!graph_config.adaptive_min_match_len);
         assert_eq!(graph_config.min_map_length, 1);
         assert!((graph_config.min_identity - 0.97).abs() < f64::EPSILON);
-        assert_eq!(graph_config.num_mappings, "1:1");
-        assert_eq!(graph_config.scaffold_filter, "1:1");
+        assert_eq!(graph_config.num_mappings, "many:many");
+        assert_eq!(graph_config.scaffold_filter, "many:many");
 
         config.replacement_min_map_length = 500;
         config.replacement_num_mappings = "1:many".to_string();
@@ -14913,6 +15184,16 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(config.replacement_scaffold_mass, 0);
         let graph_config = seqwish_replacement_config(&config);
         assert_eq!(graph_config.scaffold_mass, 0);
+    }
+
+    #[test]
+    fn replacement_pair_filters_default_to_many_many() {
+        let config = ResolutionConfig::default();
+        assert_eq!(config.replacement_num_mappings, "many:many");
+        assert_eq!(config.replacement_scaffold_filter, "many:many");
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.num_mappings, "many:many");
+        assert_eq!(graph_config.scaffold_filter, "many:many");
     }
 
     #[test]
