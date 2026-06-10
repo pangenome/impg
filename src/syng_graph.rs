@@ -36,6 +36,13 @@ struct PafExactMatchRunStats {
     max_exact_match_run: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PafYieldStats {
+    unique_pairs: usize,
+    median_alignment_len: Option<u64>,
+    max_alignment_len: u64,
+}
+
 thread_local! {
     /// Gap-affine aligner reused across pair calls on the same thread.
     /// `MemoryMode::Low` (piggyback BiWFA) is faster on our size range
@@ -217,6 +224,41 @@ fn count_nonempty_paf_records(paf_path: &std::path::Path) -> std::io::Result<usi
         }
     }
     Ok(records)
+}
+
+fn paf_yield_stats(paf_path: &std::path::Path) -> std::io::Result<PafYieldStats> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(paf_path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut pairs = std::collections::HashSet::<(String, String)>::new();
+    let mut lengths = Vec::<u64>::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 11 {
+            continue;
+        }
+        pairs.insert((fields[0].to_string(), fields[5].to_string()));
+        if let Ok(length) = fields[10].parse::<u64>() {
+            lengths.push(length);
+        }
+    }
+    lengths.sort_unstable();
+    let median_alignment_len = if lengths.is_empty() {
+        None
+    } else {
+        Some(lengths[lengths.len() / 2])
+    };
+    let max_alignment_len = lengths.last().copied().unwrap_or(0);
+    Ok(PafYieldStats {
+        unique_pairs: pairs.len(),
+        median_alignment_len,
+        max_alignment_len,
+    })
 }
 
 fn should_scan_filtered_paf_exact_runs(config: &crate::commands::graph::GraphBuildConfig) -> bool {
@@ -993,9 +1035,45 @@ pub fn build_gfa_from_paf_and_sequences(
     paf_content: &str,
     config: &crate::commands::graph::GraphBuildConfig,
 ) -> std::io::Result<String> {
+    build_gfa_from_paf_and_sequences_report(seqs, paf_content, config).map(|(gfa, _)| gfa)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PafToGfaBuildReport {
+    pub sequences: usize,
+    pub total_sequence_bp: u64,
+    pub raw_paf_records: usize,
+    pub filtered_paf_records: usize,
+    pub filtered_unique_pairs: usize,
+    pub filtered_median_alignment_len: Option<u64>,
+    pub filtered_max_alignment_len: u64,
+    pub parsed_filtered_paf_records: usize,
+    pub filtered_paf_records_with_cigar: usize,
+    pub paf_name_mismatches: usize,
+    pub paf_length_mismatches: usize,
+    pub max_exact_match_run: u64,
+    pub exact_run_scan: bool,
+    pub adaptive_min_match_len: bool,
+    pub effective_min_match_len: u64,
+    pub seqwish_segments: usize,
+    pub seqwish_segment_bp: usize,
+    pub seqwish_links: usize,
+    pub seqwish_paths: usize,
+    pub debug_dir: Option<String>,
+}
+
+/// Report-returning form of [`build_gfa_from_paf_and_sequences`].
+pub fn build_gfa_from_paf_and_sequences_report(
+    seqs: &[(String, Vec<u8>)],
+    paf_content: &str,
+    config: &crate::commands::graph::GraphBuildConfig,
+) -> std::io::Result<(String, PafToGfaBuildReport)> {
     use std::io::{BufWriter, Write};
     if seqs.is_empty() {
-        return Ok(String::from("H\tVN:Z:1.0\n"));
+        return Ok((
+            String::from("H\tVN:Z:1.0\n"),
+            PafToGfaBuildReport::default(),
+        ));
     }
     let total_start = std::time::Instant::now();
     let raw_paf_records = paf_content
@@ -1082,6 +1160,7 @@ pub fn build_gfa_from_paf_and_sequences(
     let stats_start = std::time::Instant::now();
     let paf_match_stats =
         filtered_paf_exact_match_run_stats(seqs, filtered_paf.path(), scan_exact_runs)?;
+    let filtered_yield_stats = paf_yield_stats(filtered_paf.path())?;
     log::info!(
         "syng_graph: PAF filter/stat boundary raw_records={} filtered_records={} parsed_filtered_records={} max_exact_match_run={} exact_run_scan={} filter_elapsed={:.3}s stats_elapsed={:.3}s",
         raw_paf_records,
@@ -1182,8 +1261,8 @@ pub fn build_gfa_from_paf_and_sequences(
             format!("Invalid UTF-8 in GFA: {}", e),
         )
     })?;
+    let (segments, segment_bp, links, paths) = gfa_line_stats(&gfa_text);
     if let Some(dir) = &debug_dir {
-        let (segments, segment_bp, links, paths) = gfa_line_stats(&gfa_text);
         let summary = format!(
             concat!(
                 "sequences\t{}\n",
@@ -1223,7 +1302,31 @@ pub fn build_gfa_from_paf_and_sequences(
         let _ = std::fs::write(dir.join("seqwish.gfa"), gfa_text.as_bytes());
         let _ = std::fs::write(dir.join("summary.tsv"), summary);
     }
-    Ok(gfa_text)
+    Ok((
+        gfa_text,
+        PafToGfaBuildReport {
+            sequences: seqs.len(),
+            total_sequence_bp: total_bases,
+            raw_paf_records,
+            filtered_paf_records: paf_match_stats.records,
+            filtered_unique_pairs: filtered_yield_stats.unique_pairs,
+            filtered_median_alignment_len: filtered_yield_stats.median_alignment_len,
+            filtered_max_alignment_len: filtered_yield_stats.max_alignment_len,
+            parsed_filtered_paf_records: paf_match_stats.parsed_records,
+            filtered_paf_records_with_cigar: paf_match_stats.records_with_cigar,
+            paf_name_mismatches: paf_match_stats.name_mismatches,
+            paf_length_mismatches: paf_match_stats.length_mismatches,
+            max_exact_match_run: paf_match_stats.max_exact_match_run,
+            exact_run_scan: scan_exact_runs,
+            adaptive_min_match_len: effective_config.adaptive_min_match_len,
+            effective_min_match_len: effective_config.min_match_len,
+            seqwish_segments: segments,
+            seqwish_segment_bp: segment_bp,
+            seqwish_links: links,
+            seqwish_paths: paths,
+            debug_dir: debug_dir.as_ref().map(|dir| dir.display().to_string()),
+        },
+    ))
 }
 
 /// Anchor-seeded driver: re-queries syng from a seed interval to recover

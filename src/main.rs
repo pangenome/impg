@@ -6073,11 +6073,11 @@ GFA engine shorthand:
         replacement_min_identity: f64,
 
         /// Plane-sweep mapping filter before replacement seqwish induction; accepts 1:1, 1-many, one-to-many, many:many
-        #[clap(long, value_parser, default_value = "1:1")]
+        #[clap(long, value_parser, default_value = "many:many")]
         replacement_num_mappings: String,
 
         /// Scaffold-chain filter before replacement seqwish induction; accepts 1:1, 1-many, one-to-many, many:many
-        #[clap(long, value_parser, default_value = "1:1")]
+        #[clap(long, value_parser, default_value = "many:many")]
         replacement_scaffold_filter: String,
 
         /// SweepGA aligner backend for --method sweepga: fastga or wfmash
@@ -14623,6 +14623,15 @@ mod tests {
                     config.resolver.resolution.method,
                     impg::resolution::ResolutionMethod::Poa
                 );
+                assert_eq!(
+                    config.resolver.resolution.replacement_num_mappings, "many:many",
+                    "localized pairwise replacements must not hide a 1:1 wrapper filter by default"
+                );
+                assert_eq!(
+                    config.resolver.resolution.replacement_scaffold_filter,
+                    "many:many",
+                    "localized pairwise replacements must not hide a 1:1 scaffold filter by default"
+                );
                 assert_eq!(config.resolver.resolution.max_traversal_len, 1_000);
                 assert_eq!(config.resolver.resolution.auto_spoa_max_traversal_len, 20);
                 assert_eq!(config.resolver.resolution.polish_iterations, 0);
@@ -14813,6 +14822,38 @@ mod tests {
                         seed: 7
                     })
                 );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_localized_polish_explicit_replacement_filter_is_honored() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng-local:localized,method=sweepga,replacement-num-mappings=one-to-one,replacement-scaffold-filter=one-to-many,replacement-scaffold-mass=250:nosort",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let parsed = engine_cli.parse_engine().unwrap();
+                let config = parsed.localized_polish_config.unwrap();
+                assert_eq!(
+                    config.resolver.resolution.method,
+                    impg::resolution::ResolutionMethod::Sweepga
+                );
+                assert_eq!(config.resolver.resolution.replacement_num_mappings, "1:1");
+                assert_eq!(
+                    config.resolver.resolution.replacement_scaffold_filter,
+                    "1:many"
+                );
+                assert_eq!(config.resolver.resolution.replacement_scaffold_mass, 250);
             }
             _ => panic!("expected query command"),
         }
@@ -15897,8 +15938,8 @@ mod tests {
                 assert_eq!(crush.replacement_seqwish_min_match_len, 311);
                 assert_eq!(crush.replacement_min_map_length, 0);
                 assert_eq!(crush.replacement_min_identity, 0.0);
-                assert_eq!(crush.replacement_num_mappings, "1:1");
-                assert_eq!(crush.replacement_scaffold_filter, "1:1");
+                assert_eq!(crush.replacement_num_mappings, "many:many");
+                assert_eq!(crush.replacement_scaffold_filter, "many:many");
                 assert_eq!(crush.max_pair_alignments, 10_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 64 * 1024 * 1024);
                 assert!(!crush.sweepga_no_filter);
