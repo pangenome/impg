@@ -17,6 +17,7 @@ use crate::resolution::{
     LocalizedResolverReport,
 };
 use crate::syng;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
@@ -120,6 +121,7 @@ pub fn polish_seed_graph(
     let mut total_chunks_attempted = 0usize;
     let mut total_chunks_applied = 0usize;
     let mut total_chunk_bp = 0usize;
+    let mut polished_provenance = DirtyChunkProvenance::default();
 
     for iteration in 0..config.max_iterations {
         if runtime_exhausted(run_start, config.max_runtime_secs) {
@@ -151,11 +153,12 @@ pub fn polish_seed_graph(
             break;
         }
 
-        let selection = select_chunks(
+        let selection = select_chunks_with_provenance(
             &dirty_report.candidate_chunks,
             config,
             total_chunks_attempted,
             total_chunk_bp,
+            &polished_provenance,
         );
 
         if selection.chunks.is_empty() {
@@ -218,6 +221,13 @@ pub fn polish_seed_graph(
             .filter(|report| report.status == LocalizedResolutionStatus::Applied)
             .count();
         total_chunks_applied += applied;
+        for chunk in &selection.chunks {
+            if resolved.reports.iter().any(|report| {
+                report.chunk_id == chunk.id && report.status == LocalizedResolutionStatus::Applied
+            }) {
+                polished_provenance.remember(chunk);
+            }
+        }
         let changed = resolved.gfa != gfa;
         let after_source = format!("localized-polish.iter{iteration}.after");
         let after_report =
@@ -322,18 +332,56 @@ struct ChunkSelection {
     deferred: usize,
 }
 
+#[derive(Clone, Debug)]
+struct CompoundDirtyChunk {
+    first_index: usize,
+    source_count: usize,
+    chunk: DirtyChunk,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DirtyChunkProvenance {
+    nodes: BTreeSet<String>,
+    path_intervals: BTreeMap<String, Vec<(usize, usize)>>,
+}
+
+#[cfg(test)]
 fn select_chunks(
     chunks: &[DirtyChunk],
     config: &LocalizedPolishConfig,
     total_chunks_attempted: usize,
     total_chunk_bp: usize,
 ) -> ChunkSelection {
+    select_chunks_with_provenance(
+        chunks,
+        config,
+        total_chunks_attempted,
+        total_chunk_bp,
+        &DirtyChunkProvenance::default(),
+    )
+}
+
+fn select_chunks_with_provenance(
+    chunks: &[DirtyChunk],
+    config: &LocalizedPolishConfig,
+    total_chunks_attempted: usize,
+    total_chunk_bp: usize,
+    polished_provenance: &DirtyChunkProvenance,
+) -> ChunkSelection {
     let mut selection = ChunkSelection::default();
-    for chunk in chunks {
+    let mut selected_provenance = polished_provenance.clone();
+
+    for compound in compound_dirty_chunks(chunks, config) {
+        let chunk = &compound.chunk;
+        if selected_provenance.covers(chunk) {
+            selection.deferred = selection.deferred.saturating_add(compound.source_count);
+            continue;
+        }
+
         if selection.chunks.len() >= config.max_chunks_per_iteration
             || total_chunks_attempted + selection.chunks.len() >= config.max_total_chunks
         {
-            selection.deferred += 1;
+            selection.deferred = selection.deferred.saturating_add(compound.source_count);
             continue;
         }
 
@@ -344,15 +392,250 @@ fn select_chunks(
                 .saturating_add(chunk_bp)
                 > max_total_bp
             {
-                selection.deferred += 1;
+                selection.deferred = selection.deferred.saturating_add(compound.source_count);
                 continue;
             }
         }
 
         selection.selected_bp = selection.selected_bp.saturating_add(chunk_bp);
         selection.chunks.push(chunk.clone());
+        selected_provenance.remember(chunk);
     }
     selection
+}
+
+fn compound_dirty_chunks(
+    chunks: &[DirtyChunk],
+    config: &LocalizedPolishConfig,
+) -> Vec<CompoundDirtyChunk> {
+    let mut path_groups: BTreeMap<String, Vec<(usize, DirtyChunk)>> = BTreeMap::new();
+    let mut compounds = Vec::new();
+
+    for (index, chunk) in chunks.iter().cloned().enumerate() {
+        if let Some(path_name) = chunk.path_name.clone() {
+            if chunk_path_span(&chunk).is_some() {
+                path_groups
+                    .entry(path_name)
+                    .or_default()
+                    .push((index, chunk));
+                continue;
+            }
+        }
+        compounds.push(CompoundDirtyChunk {
+            first_index: index,
+            source_count: 1,
+            chunk,
+        });
+    }
+
+    let merge_distance_bp = config
+        .dirty_options
+        .merge_distance_bp
+        .max(config.dirty_options.flank_bp);
+    for (_path_name, mut group) in path_groups {
+        group.sort_by(|left, right| {
+            chunk_path_span(&left.1)
+                .map(|(start, end)| (start, end, left.0))
+                .cmp(&chunk_path_span(&right.1).map(|(start, end)| (start, end, right.0)))
+        });
+
+        let mut acc: Vec<(usize, DirtyChunk)> = Vec::new();
+        let mut acc_end = 0usize;
+        for item in group {
+            let Some((next_start, next_end)) = chunk_path_span(&item.1) else {
+                if !acc.is_empty() {
+                    push_compound_dirty_chunk(&mut compounds, std::mem::take(&mut acc));
+                }
+                compounds.push(CompoundDirtyChunk {
+                    first_index: item.0,
+                    source_count: 1,
+                    chunk: item.1,
+                });
+                continue;
+            };
+
+            if acc.is_empty() {
+                acc_end = next_end;
+                acc.push(item);
+                continue;
+            }
+
+            if next_start <= acc_end.saturating_add(merge_distance_bp) {
+                acc_end = acc_end.max(next_end);
+                acc.push(item);
+            } else {
+                push_compound_dirty_chunk(&mut compounds, std::mem::take(&mut acc));
+                acc_end = next_end;
+                acc.push(item);
+            }
+        }
+        if !acc.is_empty() {
+            push_compound_dirty_chunk(&mut compounds, acc);
+        }
+    }
+
+    compounds.sort_by_key(|compound| compound.first_index);
+    compounds
+}
+
+fn push_compound_dirty_chunk(
+    compounds: &mut Vec<CompoundDirtyChunk>,
+    chunks: Vec<(usize, DirtyChunk)>,
+) {
+    if chunks.is_empty() {
+        return;
+    }
+    let first_index = chunks.iter().map(|(index, _)| *index).min().unwrap_or(0);
+    let source_count = chunks.len();
+    let chunk = if source_count == 1 {
+        chunks.into_iter().next().map(|(_, chunk)| chunk).unwrap()
+    } else {
+        merge_dirty_chunks(&chunks)
+    };
+    compounds.push(CompoundDirtyChunk {
+        first_index,
+        source_count,
+        chunk,
+    });
+}
+
+fn merge_dirty_chunks(chunks: &[(usize, DirtyChunk)]) -> DirtyChunk {
+    let first = &chunks[0].1;
+    let last = &chunks[chunks.len() - 1].1;
+    let mut site_ids = Vec::new();
+    let mut kinds = Vec::new();
+    let mut nodes = Vec::new();
+    let mut seen_site_ids = BTreeSet::new();
+    let mut seen_kinds = BTreeSet::new();
+    let mut seen_nodes = BTreeSet::new();
+
+    for (_, chunk) in chunks {
+        extend_unique(&mut site_ids, &mut seen_site_ids, &chunk.site_ids);
+        extend_unique(&mut kinds, &mut seen_kinds, &chunk.kinds);
+        extend_unique(&mut nodes, &mut seen_nodes, &chunk.nodes);
+    }
+
+    DirtyChunk {
+        id: format!("{}..{}", first.id, last.id),
+        path_name: first.path_name.clone(),
+        path_start_bp: option_min(chunks.iter().map(|(_, chunk)| chunk.path_start_bp)),
+        path_end_bp: option_max(chunks.iter().map(|(_, chunk)| chunk.path_end_bp)),
+        core_path_start_bp: option_min(chunks.iter().map(|(_, chunk)| chunk.core_path_start_bp)),
+        core_path_end_bp: option_max(chunks.iter().map(|(_, chunk)| chunk.core_path_end_bp)),
+        path_length_bp: first
+            .path_length_bp
+            .or_else(|| chunks.iter().find_map(|(_, chunk)| chunk.path_length_bp)),
+        graph_start_bp: option_min(chunks.iter().map(|(_, chunk)| chunk.graph_start_bp)),
+        graph_end_bp: option_max(chunks.iter().map(|(_, chunk)| chunk.graph_end_bp)),
+        start_order: option_min(chunks.iter().map(|(_, chunk)| chunk.start_order)),
+        end_order: option_max(chunks.iter().map(|(_, chunk)| chunk.end_order)),
+        site_count: chunks
+            .iter()
+            .map(|(_, chunk)| chunk.site_count)
+            .sum::<usize>(),
+        site_ids,
+        kinds,
+        nodes,
+        max_severity: chunks
+            .iter()
+            .map(|(_, chunk)| chunk.max_severity)
+            .fold(first.max_severity, f64::max),
+        flank_bp: chunks
+            .iter()
+            .map(|(_, chunk)| chunk.flank_bp)
+            .max()
+            .unwrap_or(first.flank_bp),
+        capped_by_budget: chunks.iter().any(|(_, chunk)| chunk.capped_by_budget),
+    }
+}
+
+fn extend_unique(out: &mut Vec<String>, seen: &mut BTreeSet<String>, values: &[String]) {
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value.clone());
+        }
+    }
+}
+
+fn option_min(values: impl Iterator<Item = Option<usize>>) -> Option<usize> {
+    values.flatten().min()
+}
+
+fn option_max(values: impl Iterator<Item = Option<usize>>) -> Option<usize> {
+    values.flatten().max()
+}
+
+fn chunk_path_span(chunk: &DirtyChunk) -> Option<(usize, usize)> {
+    chunk
+        .path_start_bp
+        .zip(chunk.path_end_bp)
+        .or_else(|| chunk.core_path_start_bp.zip(chunk.core_path_end_bp))
+}
+
+fn chunk_core_span(chunk: &DirtyChunk) -> Option<(usize, usize)> {
+    chunk
+        .core_path_start_bp
+        .zip(chunk.core_path_end_bp)
+        .or_else(|| chunk.path_start_bp.zip(chunk.path_end_bp))
+}
+
+impl DirtyChunkProvenance {
+    fn covers(&self, chunk: &DirtyChunk) -> bool {
+        self.covers_nodes(chunk) || self.covers_path_interval(chunk)
+    }
+
+    fn remember(&mut self, chunk: &DirtyChunk) {
+        for node in &chunk.nodes {
+            self.nodes.insert(node.clone());
+        }
+        if let (Some(path_name), Some((start, end))) =
+            (chunk.path_name.as_ref(), chunk_core_span(chunk))
+        {
+            if end > start {
+                self.path_intervals
+                    .entry(path_name.clone())
+                    .or_default()
+                    .push((start, end));
+            }
+        }
+    }
+
+    fn covers_nodes(&self, chunk: &DirtyChunk) -> bool {
+        if chunk.nodes.is_empty() {
+            return false;
+        }
+        let unique_nodes = chunk.nodes.iter().collect::<BTreeSet<_>>();
+        let overlap = unique_nodes
+            .iter()
+            .filter(|node| self.nodes.contains(node.as_str()))
+            .count();
+        overlap == unique_nodes.len() || (overlap >= 2 && overlap * 2 >= unique_nodes.len())
+    }
+
+    fn covers_path_interval(&self, chunk: &DirtyChunk) -> bool {
+        let (Some(path_name), Some((start, end))) =
+            (chunk.path_name.as_ref(), chunk_core_span(chunk))
+        else {
+            return false;
+        };
+        if end <= start {
+            return false;
+        }
+        self.path_intervals.get(path_name).is_some_and(|intervals| {
+            intervals.iter().any(|&(seen_start, seen_end)| {
+                interval_covers_half(start, end, seen_start, seen_end)
+            })
+        })
+    }
+}
+
+fn interval_covers_half(start: usize, end: usize, seen_start: usize, seen_end: usize) -> bool {
+    let overlap_start = start.max(seen_start);
+    let overlap_end = end.min(seen_end);
+    if overlap_end <= overlap_start {
+        return false;
+    }
+    overlap_end.saturating_sub(overlap_start) * 2 >= end.saturating_sub(start)
 }
 
 fn chunk_bp(chunk: &DirtyChunk) -> usize {
@@ -539,4 +822,101 @@ fn summary_tsv(report: &LocalizedPolishReport) -> String {
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dirty_chunk(
+        id: &str,
+        path_start: usize,
+        path_end: usize,
+        core_start: usize,
+        core_end: usize,
+        nodes: &[&str],
+    ) -> DirtyChunk {
+        test_dirty_chunk_on_path(id, "ref", path_start, path_end, core_start, core_end, nodes)
+    }
+
+    fn test_dirty_chunk_on_path(
+        id: &str,
+        path_name: &str,
+        path_start: usize,
+        path_end: usize,
+        core_start: usize,
+        core_end: usize,
+        nodes: &[&str],
+    ) -> DirtyChunk {
+        DirtyChunk {
+            id: id.to_string(),
+            path_name: Some(path_name.to_string()),
+            path_start_bp: Some(path_start),
+            path_end_bp: Some(path_end),
+            core_path_start_bp: Some(core_start),
+            core_path_end_bp: Some(core_end),
+            path_length_bp: Some(1_000),
+            graph_start_bp: Some(path_start),
+            graph_end_bp: Some(path_end),
+            start_order: Some(path_start),
+            end_order: Some(path_end),
+            site_count: 1,
+            site_ids: vec![format!("{id}_site")],
+            kinds: vec!["synthetic-scar".to_string()],
+            nodes: nodes.iter().map(|node| (*node).to_string()).collect(),
+            max_severity: 1.0,
+            flank_bp: 4,
+            capped_by_budget: false,
+        }
+    }
+
+    #[test]
+    fn localized_polish_compounds_overlapping_dirty_windows_before_resolution() {
+        let mut config = LocalizedPolishConfig::default();
+        config.max_chunks_per_iteration = 8;
+        config.max_total_chunks = 8;
+        config.max_total_chunk_bp = Some(1_000);
+        config.dirty_options.flank_bp = 4;
+
+        let chunks = vec![
+            test_dirty_chunk("chunk_0001", 10, 20, 14, 16, &["n2"]),
+            test_dirty_chunk("chunk_0002", 18, 28, 22, 24, &["n3"]),
+        ];
+
+        let selection = select_chunks(&chunks, &config, 0, 0);
+        assert_eq!(
+            selection.chunks.len(),
+            1,
+            "overlapping flanked windows from one scar should be resolved as a single anchored compound window"
+        );
+        let compound = &selection.chunks[0];
+        assert_eq!(compound.path_start_bp, Some(10));
+        assert_eq!(compound.path_end_bp, Some(28));
+        assert_eq!(compound.core_path_start_bp, Some(14));
+        assert_eq!(compound.core_path_end_bp, Some(24));
+        assert_eq!(compound.site_count, 2);
+        assert_eq!(selection.selected_bp, 18);
+    }
+
+    #[test]
+    fn localized_polish_defers_duplicate_dirty_interiors_by_provenance() {
+        let mut config = LocalizedPolishConfig::default();
+        config.max_chunks_per_iteration = 8;
+        config.max_total_chunks = 8;
+        config.max_total_chunk_bp = Some(1_000);
+
+        let chunks = vec![
+            test_dirty_chunk_on_path("chunk_0001", "GRCh38", 10, 20, 14, 16, &["n2", "n3"]),
+            test_dirty_chunk_on_path("chunk_0002", "HG00097", 40, 50, 44, 46, &["n2", "n3"]),
+        ];
+
+        let selection = select_chunks(&chunks, &config, 0, 0);
+        assert_eq!(
+            selection.chunks.len(),
+            1,
+            "duplicate interiors on another path should not be reprocessed in the same selection"
+        );
+        assert_eq!(selection.chunks[0].id, "chunk_0001");
+        assert_eq!(selection.deferred, 1);
+    }
 }
