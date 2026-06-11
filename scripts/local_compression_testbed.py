@@ -1562,6 +1562,44 @@ def resolve_executable(name: str, adjacent_to: Optional[Path] = None) -> Optiona
     return None
 
 
+def executable_accepts_args(path: Path, args: Sequence[str]) -> bool:
+    try:
+        result = subprocess.run(
+            [str(path), *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def resolve_control_timeout() -> Optional[Path]:
+    for name in ["timeout", "gtimeout"]:
+        timeout_bin = resolve_executable(name)
+        if timeout_bin is not None and executable_accepts_args(timeout_bin, ["1s", "true"]):
+            return timeout_bin
+    return None
+
+
+def resolve_gnu_time() -> Optional[Path]:
+    candidates: List[Path] = [Path("/usr/bin/time")]
+    for name in ["gtime", "time"]:
+        candidates.extend(executable_candidates(name))
+
+    seen = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        if is_executable(candidate) and executable_accepts_args(candidate, ["-v", "true"]):
+            return candidate
+    return None
+
+
 def control_availability(method_id: str) -> ControlAvailability:
     if method_id not in OPTIONAL_METHOD_IDS:
         return ControlAvailability(False, "unsupported", f"{method_id}: not an optional control method", {})
@@ -1574,17 +1612,13 @@ def control_availability(method_id: str) -> ControlAvailability:
     paths: Dict[str, str] = {}
     missing: List[str] = []
 
-    time_bin = Path("/usr/bin/time")
-    if is_executable(time_bin):
+    time_bin = resolve_gnu_time()
+    if time_bin is not None:
         paths["time"] = str(time_bin)
-    else:
-        missing.append("/usr/bin/time")
 
-    timeout_bin = resolve_executable("timeout")
+    timeout_bin = resolve_control_timeout()
     if timeout_bin is not None:
         paths["timeout"] = str(timeout_bin)
-    else:
-        missing.append("timeout")
 
     impg = resolve_executable("impg")
     if impg is None:
@@ -1613,6 +1647,8 @@ def control_availability(method_id: str) -> ControlAvailability:
         )
     else:
         detail_parts.append("pggb_mapping=internal pggb engine: seqwish induction plus smoothxg-style smoothing and gfaffix")
+    detail_parts.append(f"time={paths.get('time', 'not_available')}")
+    detail_parts.append(f"timeout={paths.get('timeout', 'python_subprocess_timeout')}")
     if missing:
         detail_parts.append("missing=" + ",".join(missing))
         return ControlAvailability(False, provider, ";".join(detail_parts), paths)
@@ -1630,11 +1666,13 @@ def control_command(
     output_gfa = method_dir / "output.gfa"
     target_poa_lengths = CONTROL_IMPG_PGGB_TARGET_POA_LENGTHS[method.method_id]
 
-    args: List[str] = [
-        availability.paths["time"],
-        "-v",
-        availability.paths["timeout"],
-        f"{CONTROL_TIMEOUT_SECONDS}s",
+    args: List[str] = []
+    if "time" in availability.paths:
+        args.extend([availability.paths["time"], "-v"])
+    if "timeout" in availability.paths:
+        args.extend([availability.paths["timeout"], f"{CONTROL_TIMEOUT_SECONDS}s"])
+
+    args.extend([
         availability.paths["impg"],
         "graph",
         "--sequence-files",
@@ -1655,7 +1693,7 @@ def control_command(
         "0",
         "-g",
         rel(output_gfa),
-    ]
+    ])
 
     if method.method_id == "smoothxg_control":
         empty_paf = method_dir / "empty.paf"
