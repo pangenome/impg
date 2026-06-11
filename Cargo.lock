@@ -2896,7 +2896,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/pangenome/seqwish?branch=rust-2#15aee55987115bf82b1e0769e52543a265ecfb1a"
+source = "git+https://github.com/pangenome/seqwish?branch=rust-3#cf256a3e223dba7f268b6d1306c5dccc01619c25"
 dependencies = [
  "bitvec",
  "cbindgen",
