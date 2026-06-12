@@ -57,6 +57,7 @@ GRAPH_METRICS = [
     "path_steps",
     "total_segment_bp",
     "node_coverage_bp_weighted_mean",
+    "bp_weighted_cov",
     "singleton_bp",
     "sparse_coverage_segment_bp",
     "segment_white_space_bp_fraction",
@@ -154,6 +155,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--timeout", type=int, default=3600, help="Per heavy command timeout in seconds")
     parser.add_argument("--trials", help="Comma-separated trial names; default runs all non-control trials")
+    parser.add_argument(
+        "--preset",
+        choices=["graph-quality", "repeat-filter-sweep"],
+        default="graph-quality",
+        help="Named trial set to run when --trials is not supplied",
+    )
     parser.add_argument("--include-control", action="store_true", help="Also score the current impg PGGB-style control row")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--render-labels", help="Comma-separated trial names to render with gfalook -m and upload")
@@ -424,6 +431,15 @@ def left_recheck(
 def selected_trials(args: argparse.Namespace) -> list[str]:
     if args.trials:
         return [item.strip() for item in args.trials.split(",") if item.strip()]
+    if args.preset == "repeat-filter-sweep":
+        return [
+            "q_seed_sensitive_pggb",
+            "q_seed_nm11_sf11_pggb",
+            "q_seed_nm1many_sf11_pggb",
+            "q_seed_nm11_sf11_nojump_pggb",
+            "q_seed_minid98_pggb",
+            "q_seed_minid99_pggb",
+        ]
     return [
         "q_seed_sensitive_pggb",
         "q_boundary_wide_pggb",
@@ -502,6 +518,79 @@ def trial_catalog(args: argparse.Namespace) -> dict[str, Trial]:
             "q_seed_sensitive_pggb",
             ["--syng-seed-drop-top-fraction", "0", "--syng-seed-walk-anchors", "3"],
             "pggb query with high-copy seed drop disabled and 3-walk seeds for left-edge sensitivity",
+        ),
+        "q_seed_nm11_sf11_pggb": query_trial(
+            args,
+            "q_seed_nm11_sf11_pggb",
+            [
+                "--syng-seed-drop-top-fraction",
+                "0",
+                "--syng-seed-walk-anchors",
+                "3",
+                "--num-mappings",
+                "1:1",
+                "--scaffold-filter",
+                "1:1",
+            ],
+            "seed-sensitive pggb plus strict 1:1 mapping-axis and 1:1 scaffold-chain filtering",
+        ),
+        "q_seed_nm1many_sf11_pggb": query_trial(
+            args,
+            "q_seed_nm1many_sf11_pggb",
+            [
+                "--syng-seed-drop-top-fraction",
+                "0",
+                "--syng-seed-walk-anchors",
+                "3",
+                "--num-mappings",
+                "1:many",
+                "--scaffold-filter",
+                "1:1",
+            ],
+            "seed-sensitive pggb with one best mapping per query, many per target, and strict 1:1 scaffold filtering",
+        ),
+        "q_seed_nm11_sf11_nojump_pggb": query_trial(
+            args,
+            "q_seed_nm11_sf11_nojump_pggb",
+            [
+                "--syng-seed-drop-top-fraction",
+                "0",
+                "--syng-seed-walk-anchors",
+                "3",
+                "--num-mappings",
+                "1:1",
+                "--scaffold-filter",
+                "1:1",
+                "--scaffold-jump",
+                "0",
+            ],
+            "seed-sensitive pggb with 1:1 mapping/scaffold filtering and scaffold chaining disabled",
+        ),
+        "q_seed_minid98_pggb": query_trial(
+            args,
+            "q_seed_minid98_pggb",
+            [
+                "--syng-seed-drop-top-fraction",
+                "0",
+                "--syng-seed-walk-anchors",
+                "3",
+                "--min-aln-identity",
+                "0.98",
+            ],
+            "seed-sensitive pggb with first-class post-alignment PAF identity filter at 98%",
+        ),
+        "q_seed_minid99_pggb": query_trial(
+            args,
+            "q_seed_minid99_pggb",
+            [
+                "--syng-seed-drop-top-fraction",
+                "0",
+                "--syng-seed-walk-anchors",
+                "3",
+                "--min-aln-identity",
+                "0.99",
+            ],
+            "seed-sensitive pggb with first-class post-alignment PAF identity filter at 99%",
         ),
         "q_boundary_wide_pggb": query_trial(
             args,
@@ -714,13 +803,15 @@ def render_and_upload(args: argparse.Namespace, trial: str, sorted_gfa: Path) ->
         return ""
     remote_name = f"c4-graph-quality-{trial}-{args.out_dir.name}.Ygs.gfalook-m.png"
     remote = f"{args.upload_target.rstrip('/')}/{remote_name}"
-    run_timed(
+    upload = run_timed(
         args.out_dir,
         f"{trial}.upload",
         ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", png, remote],
         timeout=120,
         force=args.force,
     )
+    if upload.exit_status not in ("0", ""):
+        return ""
     return f"{args.public_base.rstrip('/')}/{remote_name}"
 
 
@@ -783,6 +874,9 @@ def run_trial(args: argparse.Namespace, trial: Trial, should_render: bool) -> tu
     png_url = render_and_upload(args, trial.name, sorted_gfa) if should_render else ""
     crush_summary = parse_crush_summary(runtime.stderr)
     debug = trial.debug_dir
+    metrics = {metric: report.get(metric, "") for metric in GRAPH_METRICS}
+    metrics["bp_weighted_cov"] = report.get("node_coverage_bp_weighted_mean", metrics.get("bp_weighted_cov", ""))
+
     row = {
         "trial": trial.name,
         "variant_kind": trial.kind,
@@ -804,7 +898,7 @@ def run_trial(args: argparse.Namespace, trial: Trial, should_render: bool) -> tu
         "bailed_replacements": crush_summary.get("bailed_replacements", ""),
         "candidates_seen": crush_summary.get("candidates_seen", ""),
         "rounds": crush_summary.get("rounds", ""),
-        **{metric: report.get(metric, "") for metric in GRAPH_METRICS},
+        **metrics,
         **left_counts,
         "gfa": str(gfa),
         "sorted_gfa": str(sorted_gfa),
