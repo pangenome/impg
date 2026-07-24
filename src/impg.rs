@@ -45,6 +45,8 @@ thread_local! {
     static GAP_AFFINE_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static GAP_AFFINE2P_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static ONEALN_HANDLE: RefCell<Option<(String, OneFile)>> = const { RefCell::new(None) };
+    static PAF_HANDLE: RefCell<Option<(String, std::fs::File)>> = const { RefCell::new(None) };
+    static PAF_CIGAR_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static TPA_HANDLE: RefCell<Option<(String, tpa::TpaReader)>> = const { RefCell::new(None) };
     static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
 }
@@ -137,28 +139,26 @@ impl CigarOp {
     }
 }
 
-/// Invert CIGAR operations for bidirectional alignment interpretation.
-/// - Swap I↔D (insertions become deletions and vice versa)
-/// - Reverse the CIGAR array only if strand is Reverse
-/// - Matches (=), mismatches (X), and ambiguous (M) stay the same
-fn invert_cigar_ops(ops: &[CigarOp], strand: Strand) -> Vec<CigarOp> {
-    let inverted: Vec<CigarOp> = ops
-        .iter()
-        .map(|op| {
-            let new_op = match op.op() {
-                'I' => 'D',
-                'D' => 'I',
-                other => other, // =, X, M unchanged
-            };
-            CigarOp::new(op.len(), new_op)
-        })
-        .collect();
-
-    if strand == Strand::Reverse {
-        inverted.into_iter().rev().collect()
-    } else {
-        inverted
+/// Invert CIGAR ops for bidirectional interpretation: swap I<->D, keep =/X/M,
+/// and reverse the array on the reverse strand.
+fn invert_cigar_ops_in_place(ops: &mut [CigarOp], strand: Strand) {
+    for op in ops.iter_mut() {
+        let new_op = match op.op() {
+            'I' => 'D',
+            'D' => 'I',
+            other => other,
+        };
+        *op = CigarOp::new(op.len(), new_op);
     }
+    if strand == Strand::Reverse {
+        ops.reverse();
+    }
+}
+
+fn invert_cigar_ops(ops: &[CigarOp], strand: Strand) -> Vec<CigarOp> {
+    let mut inverted = ops.to_vec();
+    invert_cigar_ops_in_place(&mut inverted, strand);
+    inverted
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -500,7 +500,7 @@ impl Impg {
     ) -> Vec<CigarOp> {
         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
-        let ops = match QueryMetadata::get_file_type(alignment_file) {
+        let mut ops = match QueryMetadata::get_file_type(alignment_file) {
             FileType::Paf => {
                 // For PAF files, read CIGAR directly from file
                 if metadata.data_bytes == 0 {
@@ -510,18 +510,23 @@ impl Impg {
                     );
                 }
 
-                let mut data_buffer = vec![0; metadata.data_bytes];
-                read_cigar_data(alignment_file, metadata.data_offset(), &mut data_buffer)
-                    .unwrap_or_else(|e| panic!("{}", e));
+                // Read the CIGAR bytes into a per-thread scratch buffer reused across
+                // projections, avoiding a malloc/free of up to tens of KB per call.
+                PAF_CIGAR_BUF.with(|buf_cell| {
+                    let mut data_buffer = buf_cell.borrow_mut();
+                    data_buffer.resize(metadata.data_bytes, 0);
+                    read_paf_cigar_data(alignment_file, metadata.data_offset(), &mut data_buffer)
+                        .unwrap_or_else(|e| panic!("{}", e));
 
-                // get_cigar_ops_from_bytes
-                let cigar_str =
-                    std::str::from_utf8(&data_buffer).expect("Failed to parse CIGAR data as UTF-8");
-                parse_cigar_to_delta(cigar_str).unwrap_or_else(|e| {
-                    panic!(
-                        "Failed to parse CIGAR string '{}' in QueryMetadata: {:?}",
-                        cigar_str, e
-                    )
+                    // get_cigar_ops_from_bytes
+                    let cigar_str = std::str::from_utf8(&data_buffer)
+                        .expect("Failed to parse CIGAR data as UTF-8");
+                    parse_cigar_to_delta(cigar_str).unwrap_or_else(|e| {
+                        panic!(
+                            "Failed to parse CIGAR string '{}' in QueryMetadata: {:?}",
+                            cigar_str, e
+                        )
+                    })
                 })
             }
             FileType::OneAln | FileType::Tpa => {
@@ -539,12 +544,11 @@ impl Impg {
             }
         };
 
-        // Apply CIGAR inversion if this is a reversed entry
+        // Apply CIGAR inversion if this is a reversed entry (in place, no extra alloc)
         if metadata.is_reversed() {
-            invert_cigar_ops(&ops, metadata.strand())
-        } else {
-            ops
+            invert_cigar_ops_in_place(&mut ops, metadata.strand());
         }
+        ops
     }
 
     fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
@@ -2030,6 +2034,26 @@ impl Impg {
         results
     }
 
+    /// Get or lazily create a sequence's visited-range set during a transitive walk.
+    /// A new entry gets the sequence's real length when unmasked (matching the old
+    /// eager pre-population) and length 0 otherwise (matching the old `or_default()`).
+    #[inline]
+    fn visited_entry<'a>(
+        &self,
+        visited_ranges: &'a mut FxHashMap<u32, SortedRanges>,
+        id: u32,
+        masked_none: bool,
+    ) -> &'a mut SortedRanges {
+        visited_ranges.entry(id).or_insert_with(|| {
+            let len = if masked_none {
+                self.seq_index.get_len_from_id(id).unwrap() as i32
+            } else {
+                0
+            };
+            SortedRanges::new(len, 0)
+        })
+    }
+
     pub fn query_transitive_dfs(
         &self,
         target_id: u32,
@@ -2046,23 +2070,19 @@ impl Impg {
         approximate_mode: bool,
         subset_filter: Option<&crate::subset_filter::SubsetFilter>,
     ) -> Vec<AdjustedInterval> {
-        // Initialize visited ranges from masked regions if provided
+        // Seed from masked regions if given; other sequences are created lazily on
+        // first touch (visited_entry) instead of pre-populating one SortedRanges per
+        // sequence in the index on every query.
+        let masked_none = masked_regions.is_none();
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
         } else {
-            (0..self.seq_index.len() as u32)
-                .into_par_iter() // Use parallel iterator
-                .map(|id| {
-                    let len = self.seq_index.get_len_from_id(id).unwrap();
-                    (id, SortedRanges::new(len as i32, 0))
-                })
-                .collect()
+            FxHashMap::default()
         };
 
         // Filter input range
-        let filtered_input_range = visited_ranges
-            .entry(target_id)
-            .or_default()
+        let filtered_input_range = self
+            .visited_entry(&mut visited_ranges, target_id, masked_none)
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
@@ -2204,12 +2224,12 @@ impl Impg {
                         true
                     };
                     if should_add_to_output {
-                        results.push((query_interval, cigar.clone(), target_interval));
+                        results.push((query_interval, cigar, target_interval));
                     }
 
                     // Only add non-overlapping portions to the stack for further exploration
                     if query_id != current_target_id {
-                        let ranges = visited_ranges.entry(query_id).or_default();
+                        let ranges = self.visited_entry(&mut visited_ranges, query_id, masked_none);
 
                         let mut should_add = true;
 
@@ -2304,23 +2324,19 @@ impl Impg {
         approximate_mode: bool,
         subset_filter: Option<&crate::subset_filter::SubsetFilter>,
     ) -> Vec<AdjustedInterval> {
-        // Initialize visited ranges from masked regions if provided
+        // Seed from masked regions if given; other sequences are created lazily on
+        // first touch (visited_entry) instead of pre-populating one SortedRanges per
+        // sequence in the index on every query.
+        let masked_none = masked_regions.is_none();
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
         } else {
-            (0..self.seq_index.len() as u32)
-                .into_par_iter() // Use parallel iterator
-                .map(|id| {
-                    let len = self.seq_index.get_len_from_id(id).unwrap();
-                    (id, SortedRanges::new(len as i32, 0))
-                })
-                .collect()
+            FxHashMap::default()
         };
 
         // Filter input range
-        let filtered_input_range = visited_ranges
-            .entry(target_id)
-            .or_default()
+        let filtered_input_range = self
+            .visited_entry(&mut visited_ranges, target_id, masked_none)
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
@@ -2478,7 +2494,7 @@ impl Impg {
                                 last: adjusted_query_end,
                                 metadata: query_id,
                             },
-                            adjusted_cigar.clone(),
+                            adjusted_cigar,
                             Interval {
                                 first: adjusted_target_start,
                                 last: adjusted_target_end,
@@ -2489,7 +2505,7 @@ impl Impg {
 
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
-                        let ranges = visited_ranges.entry(query_id).or_default();
+                        let ranges = self.visited_entry(&mut visited_ranges, query_id, masked_none);
 
                         let mut should_add = true;
 
@@ -2881,16 +2897,51 @@ fn project_target_range_through_alignment(
     }
 }
 
+/// Read a PAF CIGAR span into `buffer`. Uncompressed PAF uses a per-thread cached
+/// handle and `read_exact_at` (no open()+seek per projection); BGZF keeps the
+/// virtual-position path in `read_cigar_data`.
+fn read_paf_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> Result<(), String> {
+    let is_compressed = alignment_file.ends_with(".gz") || alignment_file.ends_with(".bgz");
+    if is_compressed {
+        return read_cigar_data(alignment_file, offset, buffer);
+    }
+
+    use std::os::unix::fs::FileExt;
+    PAF_HANDLE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let needs_open = match slot.as_ref() {
+            Some((cached_path, _)) => cached_path != alignment_file,
+            None => true,
+        };
+        if needs_open {
+            *slot = None;
+            let file = std::fs::File::open(alignment_file)
+                .map_err(|e| format!("Failed to open file '{}': {}", alignment_file, e))?;
+            *slot = Some((alignment_file.to_string(), file));
+        }
+        let (_, file) = slot.as_ref().expect("PAF_HANDLE must contain a handle");
+        file.read_exact_at(buffer, offset).map_err(|e| {
+            format!(
+                "Failed to read {} CIGAR bytes at offset {} in '{}': {}",
+                buffer.len(),
+                offset,
+                alignment_file,
+                e
+            )
+        })
+    })
+}
+
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
+    // CIGAR is pure ASCII; iterate bytes to skip UTF-8 decoding of every char.
     let mut ops = Vec::new();
     let mut len: i32 = 0;
 
-    for c in cigar.chars() {
+    for &c in cigar.as_bytes() {
         if c.is_ascii_digit() {
-            len = len * 10 + (c as i32 - '0' as i32);
+            len = len * 10 + (c - b'0') as i32;
         } else {
-            let op = CigarOp::new(len, c);
-            ops.push(op);
+            ops.push(CigarOp::new(len, c as char));
             len = 0;
         }
     }

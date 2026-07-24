@@ -11995,7 +11995,12 @@ fn output_results_paf(
     original_coordinates: bool,
     sequence_index: Option<&UnifiedSequenceIndex>,
 ) -> io::Result<()> {
+    use std::fmt::Write as _;
     merge_adjusted_intervals(results, merge_distance);
+
+    // Reused across output lines: formatting integers/ops into these avoids a
+    // temporary String allocation per CIGAR op (the previous map(format!).collect()).
+    let mut cigar_str = String::new();
 
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index().get_name(overlap_query.metadata).unwrap();
@@ -12060,20 +12065,17 @@ fn output_results_paf(
         let edit_distance = mismatches + inserted_bp + deleted_bp;
         let block_identity = (matches as f32) / (matches + edit_distance) as f32;
 
-        // Format bi and gi fields without trailing zeros
-        let gi_str = format!("{gap_compressed_identity:.6}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
-        let bi_str = format!("{block_identity:.6}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
+        // Format bi and gi fields without trailing zeros. Bind the formatted
+        // Strings and pass the trimmed &str slices directly (no extra to_string alloc).
+        let gi_full = format!("{gap_compressed_identity:.6}");
+        let gi_str = gi_full.trim_end_matches('0').trim_end_matches('.');
+        let bi_full = format!("{block_identity:.6}");
+        let bi_str = bi_full.trim_end_matches('0').trim_end_matches('.');
 
-        let cigar_str: String = cigar
-            .iter()
-            .map(|op| format!("{}{}", op.len(), op.op()))
-            .collect();
+        cigar_str.clear();
+        for op in cigar.iter() {
+            let _ = write!(cigar_str, "{}{}", op.len(), op.op());
+        }
 
         writeln!(
             out,
