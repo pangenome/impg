@@ -12,8 +12,21 @@
 set -euo pipefail
 
 _impg_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-_guix="${GUIX:-${HOME}/.guix-profile/bin/guix}"
+_default_guix="${HOME}/.guix-profile/bin/guix"
+_per_user_guix="/var/guix/profiles/per-user/${USER:-$(id -un)}/current-guix/bin/guix"
 _manifest="$_impg_dir/manifest.scm"
+
+if [[ -n "${GUIX:-}" ]]; then
+    _guix="$GUIX"
+elif [[ -x "$_default_guix" ]]; then
+    _guix="$_default_guix"
+elif command -v guix >/dev/null 2>&1; then
+    _guix="$(command -v guix)"
+elif [[ -x "$_per_user_guix" ]]; then
+    _guix="$_per_user_guix"
+else
+    _guix="$_default_guix"
+fi
 
 if [[ ! -x "$_guix" ]]; then
     echo "error: Guix command not found or not executable: $_guix" >&2
@@ -78,6 +91,6 @@ export RUSTDOC="$_shim_dir/rustdoc"
 
 echo "impg Guix build env ready: cargo $(cargo --version | cut -d' ' -f2), rustc $(rustc --version | cut -d' ' -f2)"
 
-unset _impg_dir _guix _manifest _search_paths _profile_bin _profile
+unset _impg_dir _guix _default_guix _per_user_guix _manifest _search_paths _profile_bin _profile
 unset _ld_so _gcc_lib _shim_dir _cargo_real _rustc_real _rustdoc_real _rust_lib
 unset -f _write_rust_wrapper
