@@ -1476,6 +1476,15 @@ def write_command_logs(
         pass
     (method_dir / "stdout.log").write_text(stdout, encoding="utf-8")
     (method_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+    if status == "error":
+        tail = "\n".join(stderr.splitlines()[-80:])
+        print(
+            f"\n[CONTROL-DIAG] command failed (exit={exit_code}) in {method_dir}\n"
+            f"[CONTROL-DIAG] command: {command}\n"
+            f"[CONTROL-DIAG] stderr tail:\n{tail}\n",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def skip_row(
@@ -1574,13 +1583,18 @@ def control_availability(method_id: str) -> ControlAvailability:
     paths: Dict[str, str] = {}
     missing: List[str] = []
 
-    time_bin = Path("/usr/bin/time")
-    if is_executable(time_bin):
+    # The control command uses GNU `time -v` and `timeout Ns`. Linux ships GNU
+    # coreutils as `/usr/bin/time` and `timeout`; macOS ships them (via Homebrew
+    # coreutils) only under the `g` prefix, so accept `gtime`/`gtimeout` too.
+    time_bin = resolve_executable("gtime")
+    if time_bin is None and is_executable(Path("/usr/bin/time")):
+        time_bin = Path("/usr/bin/time")
+    if time_bin is not None:
         paths["time"] = str(time_bin)
     else:
-        missing.append("/usr/bin/time")
+        missing.append("gtime or /usr/bin/time")
 
-    timeout_bin = resolve_executable("timeout")
+    timeout_bin = resolve_executable("timeout") or resolve_executable("gtimeout")
     if timeout_bin is not None:
         paths["timeout"] = str(timeout_bin)
     else:
