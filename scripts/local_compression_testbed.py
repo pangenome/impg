@@ -1574,13 +1574,18 @@ def control_availability(method_id: str) -> ControlAvailability:
     paths: Dict[str, str] = {}
     missing: List[str] = []
 
-    time_bin = Path("/usr/bin/time")
-    if is_executable(time_bin):
+    # The control command uses GNU `time -v` and `timeout Ns`. Linux ships GNU
+    # coreutils as `/usr/bin/time` and `timeout`; macOS ships them (via Homebrew
+    # coreutils) only under the `g` prefix, so accept `gtime`/`gtimeout` too.
+    time_bin = resolve_executable("gtime")
+    if time_bin is None and is_executable(Path("/usr/bin/time")):
+        time_bin = Path("/usr/bin/time")
+    if time_bin is not None:
         paths["time"] = str(time_bin)
     else:
-        missing.append("/usr/bin/time")
+        missing.append("gtime or /usr/bin/time")
 
-    timeout_bin = resolve_executable("timeout")
+    timeout_bin = resolve_executable("timeout") or resolve_executable("gtimeout")
     if timeout_bin is not None:
         paths["timeout"] = str(timeout_bin)
     else:
