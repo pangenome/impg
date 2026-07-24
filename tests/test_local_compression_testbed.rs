@@ -347,6 +347,13 @@ fn local_compression_fast_runner_supports_filtered_control_methods() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // Diagnostic: surface the control command output so CI shows why it errors.
+    eprintln!(
+        "[testbed-diag] runner stdout:\n{}\n[testbed-diag] runner stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     let rows = read_json(out_dir.join("scoreboard.json"));
     let rows = rows.as_array().unwrap();
     assert_eq!(rows.len(), 1);
@@ -542,6 +549,14 @@ fn local_compression_chunk_window_sweepga_seqwish_nested_top_level_wrong() {
     assert_eq!(chunk["bubble_count"].as_u64(), Some(2));
     assert_eq!(chunk["flubble_count"].as_u64(), Some(2));
     assert!(chunk["path_replay_compression_ratio"].as_f64().unwrap() > 1.0);
+
+    // Diagnostic: surface the control command output (captured by the runner) so
+    // CI shows why a control errors on a given platform.
+    eprintln!(
+        "[testbed-diag] runner stdout:\n{}\n[testbed-diag] runner stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     for control_id in [
         "pggb_control",

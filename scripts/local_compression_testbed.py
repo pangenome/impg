@@ -1476,6 +1476,15 @@ def write_command_logs(
         pass
     (method_dir / "stdout.log").write_text(stdout, encoding="utf-8")
     (method_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+    if status == "error":
+        tail = "\n".join(stderr.splitlines()[-80:])
+        print(
+            f"\n[CONTROL-DIAG] command failed (exit={exit_code}) in {method_dir}\n"
+            f"[CONTROL-DIAG] command: {command}\n"
+            f"[CONTROL-DIAG] stderr tail:\n{tail}\n",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def skip_row(
