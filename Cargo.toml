@@ -67,10 +67,10 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-# ddd31d3 = 2b9f749 + multi-FASTA PanSN joblist (sweepga PR #29).
+# 04f9edb = ddd31d3 (pansn-sparsification) + wfmash-rs 3cc6677 (vendored wfmash v0.14.1).
 # PanSN haplotype grouping + wfmash-per-hap-pair joblist live upstream;
 # this impg tree just calls them. Handles 1 _or many_ input FASTAs.
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "ddd31d39b6a68fc972025b048076032341b66835", default-features = false }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "04f9edb941bacb075020f9007a0b8fffdd418962", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "6b2798aa9fd405abe680cfb1e644331eff9d58e0", default-features = false }
 
