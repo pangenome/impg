@@ -48,15 +48,15 @@ ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb24
 
 # Dependencies for 1ALN format (for alignments) support
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
-onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}
+onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34" }
 # Dependencies for TPA format (for alignments) support
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "439d2786fd221b95b77b1f7dabb9d2b51d617435" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "989ca3b7a3ffa9bb26708b17ef5cf093a22a5163" }
 # Dependencies for 1ALN and TPA formats (for alignments) support
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "fe882ce5f6d4aafc8078a3cdf4b7e69f050b5ef2" }
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "32ad5bb4442df4a5782b35bf024a319ba0676f50" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
 #tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "46ca24b0f2f33e36129dfccd50d4d86b8c63fb09" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "5303cde5359ffd9c54234a825d1923d26a2a0b20" }
 
 # Dependencies for lace functionality
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
@@ -72,7 +72,7 @@ gzp = "1.0.1"
 # this impg tree just calls them. Handles 1 _or many_ input FASTAs.
 sweepga = { git = "https://github.com/pangenome/sweepga", rev = "14f3eeb", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
-allwave = { git = "https://github.com/pangenome/allwave", rev = "3050f6a457abcee24ce9a31a69c36ccb64744f54", default-features = false }
+allwave = { git = "https://github.com/pangenome/allwave", rev = "87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4", default-features = false }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }

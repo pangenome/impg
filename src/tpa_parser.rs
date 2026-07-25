@@ -199,6 +199,15 @@ impl TpaParser {
                     }
                 }
             }
+            TracepointData::FastgaNoDiff(target_deltas) => {
+                // Same as Fastga with the diff counts dropped. Reconstruction
+                // re-aligns each segment, so a zero diff only costs the identity
+                // estimate, which reports no mismatches for these alignments.
+                for target_delta in target_deltas {
+                    tracepoints.push(target_delta as i64);
+                    trace_diffs.push(0);
+                }
+            }
         }
 
         let mode_data = if matches!(tp_type, tpa::TracepointType::Fastga) {

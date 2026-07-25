@@ -39,7 +39,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allwave"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/allwave?rev=3050f6a457abcee24ce9a31a69c36ccb64744f54#3050f6a457abcee24ce9a31a69c36ccb64744f54"
+source = "git+https://github.com/pangenome/allwave?rev=87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4#87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4"
 dependencies = [
  "atty",
  "bio",
@@ -1564,7 +1564,7 @@ dependencies = [
  "niffler",
  "noodles 0.100.0",
  "num_cpus",
- "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34)",
  "poasta",
  "povu-rs",
  "ragc-core",
@@ -1752,7 +1752,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=fe882ce5f6d4aafc8078a3cdf4b7e69f050b5ef2#fe882ce5f6d4aafc8078a3cdf4b7e69f050b5ef2"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=32ad5bb4442df4a5782b35bf024a319ba0676f50#32ad5bb4442df4a5782b35bf024a319ba0676f50"
 
 [[package]]
 name = "libc"
@@ -2301,16 +2301,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "onecode"
-version = "0.1.0"
-source = "git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642#38182c7acf7cccc53509176b1d11001ae6ff2642"
-dependencies = [
- "bindgen 0.70.1",
- "cc",
- "libc",
-]
 
 [[package]]
 name = "onecode"
@@ -3339,7 +3329,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=439d2786fd221b95b77b1f7dabb9d2b51d617435#439d2786fd221b95b77b1f7dabb9d2b51d617435"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=989ca3b7a3ffa9bb26708b17ef5cf093a22a5163#989ca3b7a3ffa9bb26708b17ef5cf093a22a5163"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -3355,7 +3345,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=46ca24b0f2f33e36129dfccd50d4d86b8c63fb09#46ca24b0f2f33e36129dfccd50d4d86b8c63fb09"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=5303cde5359ffd9c54234a825d1923d26a2a0b20#5303cde5359ffd9c54234a825d1923d26a2a0b20"
 dependencies = [
  "lib_wfa2",
 ]
