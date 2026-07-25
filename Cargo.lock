@@ -3101,7 +3101,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=fb2d9aae9cc83e1e198bb7b64cbbdfa7b7c33683#fb2d9aae9cc83e1e198bb7b64cbbdfa7b7c33683"
+source = "git+https://github.com/pangenome/sweepga?rev=a5c3c14d47c35b81081c2ab90b18bdad255bd9e2#a5c3c14d47c35b81081c2ab90b18bdad255bd9e2"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3594,7 +3594,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs?rev=91d24d26be32fbac351fcc66a259461333693e09#91d24d26be32fbac351fcc66a259461333693e09"
+source = "git+https://github.com/pangenome/wfmash-rs?rev=34339a7f5ead1c5f20ce5226bd5cc9c284d68a30#34339a7f5ead1c5f20ce5226bd5cc9c284d68a30"
 dependencies = [
  "anyhow",
  "num_cpus",
