@@ -97,7 +97,7 @@ pub fn extract_packed_syncmers(
         }
 
         let sit =
-            syng_ffi::syncmerIterator(seqhash, seq_buf.as_mut_ptr() as *mut i8, seq.len() as i32);
+            syng_ffi::syncmerIterator(seqhash, seq_buf.as_mut_ptr() as *mut std::os::raw::c_char, seq.len() as i32);
         if sit.is_null() {
             syng_ffi::impg_seqhashDestroy(seqhash);
             return Err(io::Error::other("syncmerIterator returned null"));
