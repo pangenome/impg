@@ -965,26 +965,48 @@ pub fn sort_gfa_yg(gfa_content: &str, num_threads: usize) -> io::Result<String> 
     sort_gfa_pipeline(gfa_content, "Yg", num_threads)
 }
 
+/// Private install directory next to the running executable:
+/// `<exe_dir>/../libexec/<exe_stem>/`.
+///
+/// Package managers use this to keep bundled binaries out of `bin/`, where
+/// they would overwrite the separately packaged versions.
+pub fn libexec_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe
+        .parent()?
+        .parent()?
+        .join("libexec")
+        .join(exe.file_stem()?);
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
 /// Run gfaffix graph normalization on a GFA string.
 ///
-/// Searches for the `gfaffix` binary next to the current executable
-/// (so it works when both are built together in `target/release/`).
+/// Searches for the `gfaffix` binary next to the current executable (so it
+/// works when both are built together in `target/release/`), then in
+/// `<exe_dir>/../libexec/<exe_stem>/` for packaged installs.
 /// The system PATH is intentionally NOT searched to avoid version mismatches.
 /// Returns an error if the binary is not found or fails.
 pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String> {
     use std::process::Command;
 
-    // Resolve binary: sibling of current exe (e.g. target/release/gfaffix).
+    // Resolve binary: sibling of current exe (e.g. target/release/gfaffix),
+    // then the private install directory used by packagers.
     // The system PATH is intentionally NOT searched to avoid version mismatches.
     let gfaffix_bin = std::env::current_exe()
         .ok()
         .map(|exe| exe.with_file_name("gfaffix"))
         .filter(|p| p.exists())
+        .or_else(|| libexec_dir().map(|d| d.join("gfaffix")).filter(|p| p.exists()))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "gfaffix binary not found next to impg executable. \
-                 It should have been built as a workspace member. \
+                "gfaffix binary not found next to the impg executable, nor in \
+                 ../libexec/impg/. It should have been built as a workspace member. \
                  Try rebuilding with `cargo build --release`.",
             )
         })?;

@@ -19,3 +19,5 @@ demo-results
 .claude/
 perf.data
 perf.data.old
+# release tarballs from scripts/make-release-tarball.sh
+/impg-v*.tar.gz

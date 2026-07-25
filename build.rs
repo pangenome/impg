@@ -40,17 +40,16 @@ fn copy_dep_binary(build_dir: &Path, prefix: &str, binary_name: &str, dest_dir: 
         return; // silently skip if not found
     };
 
-    // Copy to profile dir (e.g. target/release/)
+    // Copy to profile dir (e.g. target/release/). Always overwrite: a stale
+    // copy from an older dependency revision must not survive a version bump.
     let dest = dest_dir.join(binary_name);
-    if !dest.exists() {
-        if let Err(e) = fs::copy(&src, &dest) {
-            eprintln!(
-                "cargo:warning=Failed to copy {binary_name} to {}: {e}",
-                dest.display()
-            );
-        } else {
-            set_executable(&dest);
-        }
+    if let Err(e) = fs::copy(&src, &dest) {
+        eprintln!(
+            "cargo:warning=Failed to copy {binary_name} to {}: {e}",
+            dest.display()
+        );
+    } else {
+        set_executable(&dest);
     }
 
     // Copy to CARGO_HOME/bin/ if it exists (for `cargo install`)
@@ -71,19 +70,31 @@ fn copy_dep_binary(build_dir: &Path, prefix: &str, binary_name: &str, dest_dir: 
 }
 
 /// Search `build_dir` for `<prefix><hash>/out/<binary_name>`.
+///
+/// Several hash directories can coexist, one per dependency revision. Take the
+/// most recently modified one, otherwise a bumped revision keeps losing to a
+/// leftover build of the old one.
 fn find_binary_in_build(build_dir: &Path, prefix: &str, binary_name: &str) -> Option<PathBuf> {
     let entries = fs::read_dir(build_dir).ok()?;
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with(prefix) {
-            let candidate = entry.path().join("out").join(binary_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        if !name_str.starts_with(prefix) {
+            continue;
+        }
+        let candidate = entry.path().join("out").join(binary_name);
+        if !candidate.is_file() {
+            continue;
+        }
+        let mtime = fs::metadata(&candidate)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(best, _)| mtime > *best) {
+            newest = Some((mtime, candidate));
         }
     }
-    None
+    newest.map(|(_, path)| path)
 }
 
 /// Copy shared libraries (*.so*, *.dylib) from `<prefix><hash>/out/` subdirectories
@@ -134,16 +145,14 @@ fn collect_shared_libs(dir: &Path, dest_dir: &Path) {
             continue;
         }
 
-        // Copy to profile dir
+        // Copy to profile dir, overwriting any stale copy
         let dest = dest_dir.join(&fname);
-        if !dest.exists() {
-            if let Err(e) = fs::copy(&path, &dest) {
-                eprintln!(
-                    "cargo:warning=Failed to copy {} to {}: {e}",
-                    fname_str,
-                    dest.display()
-                );
-            }
+        if let Err(e) = fs::copy(&path, &dest) {
+            eprintln!(
+                "cargo:warning=Failed to copy {} to {}: {e}",
+                fname_str,
+                dest.display()
+            );
         }
 
         // Copy to CARGO_HOME/lib/ if it exists
