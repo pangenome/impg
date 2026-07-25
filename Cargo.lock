@@ -39,7 +39,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allwave"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/allwave?rev=6b2798aa9fd405abe680cfb1e644331eff9d58e0#6b2798aa9fd405abe680cfb1e644331eff9d58e0"
+source = "git+https://github.com/pangenome/allwave?rev=3050f6a457abcee24ce9a31a69c36ccb64744f54#3050f6a457abcee24ce9a31a69c36ccb64744f54"
 dependencies = [
  "atty",
  "bio",
@@ -1039,7 +1039,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1632,7 +1632,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1752,7 +1752,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/ekg/lib_wfa2?rev=2f9d9a48addee5185d8ff6ed0594182558d60818#2f9d9a48addee5185d8ff6ed0594182558d60818"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=fe882ce5f6d4aafc8078a3cdf4b7e69f050b5ef2#fe882ce5f6d4aafc8078a3cdf4b7e69f050b5ef2"
 
 [[package]]
 name = "libc"
@@ -2838,7 +2838,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3193,7 +3193,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3212,7 +3212,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3339,7 +3339,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=49f1801f9e0108c211571fa2614e517009446afe#49f1801f9e0108c211571fa2614e517009446afe"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=439d2786fd221b95b77b1f7dabb9d2b51d617435#439d2786fd221b95b77b1f7dabb9d2b51d617435"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -3355,7 +3355,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=66a5511b0b84d8502f9d7c99efd150616ff2cae3#66a5511b0b84d8502f9d7c99efd150616ff2cae3"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=46ca24b0f2f33e36129dfccd50d4d86b8c63fb09#46ca24b0f2f33e36129dfccd50d4d86b8c63fb09"
 dependencies = [
  "lib_wfa2",
 ]
@@ -3653,7 +3653,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
