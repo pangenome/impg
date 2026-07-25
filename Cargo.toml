@@ -70,7 +70,7 @@ gzp = "1.0.1"
 # 04f9edb = ddd31d3 (pansn-sparsification) + wfmash-rs 3cc6677 (vendored wfmash v0.14.1).
 # PanSN haplotype grouping + wfmash-per-hap-pair joblist live upstream;
 # this impg tree just calls them. Handles 1 _or many_ input FASTAs.
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "ae966f3e9977178349a6cff3b238535c99e675ca", default-features = false }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "fb2d9aae9cc83e1e198bb7b64cbbdfa7b7c33683", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4", default-features = false }
 
@@ -87,7 +87,7 @@ cc = "1"
 # Without them build.rs can run first and copy nothing. Revisions must match the
 # ones sweepga pins, otherwise cargo builds each crate twice.
 wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "91d24d26be32fbac351fcc66a259461333693e09" }
-fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "b8efc7f8886c9772b6a4d4f22c642807cb43da01" }
+fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "5216a157f761545c9c3160ea1501ef1beab9c663" }
 
 [dev-dependencies]
 ahash = "0.8"
