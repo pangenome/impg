@@ -16,7 +16,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04-arm catches aarch64-linux bugs that no other runner sees.
+        # c_char is unsigned there and signed on x86-64 and on Apple ARM, so a
+        # cast to a concrete i8 compiles everywhere else and fails only here.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v4
         with:

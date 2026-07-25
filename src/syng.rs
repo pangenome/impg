@@ -2004,7 +2004,7 @@ fn matched_syncmers_in_sequence_impl(
     unsafe {
         let sit = syng_ffi::syncmerIterator(
             seqhash,
-            seq_buf.as_mut_ptr() as *mut i8,
+            seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
             query_seq.len() as i32,
         );
         let mut pos: i32 = 0;
@@ -2023,7 +2023,7 @@ fn matched_syncmers_in_sequence_impl(
             let mut kmer_index: i64 = 0;
             if syng_ffi::kmerHashFindThreadSafe(
                 kmer_hash,
-                seq_buf.as_mut_ptr().add(start) as *mut i8,
+                seq_buf.as_mut_ptr().add(start) as *mut std::os::raw::c_char,
                 &mut kmer_index,
                 kmer_buf.as_mut_ptr(),
             ) {
@@ -2549,14 +2549,14 @@ impl SyngIndex {
         unsafe {
             let sit = syng_ffi::syncmerIterator(
                 self.seqhash,
-                seq_buf.as_mut_ptr() as *mut i8,
+                seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
                 seq_len as i32,
             );
 
             let mut pos: i32 = 0;
             while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
                 let mut kmer_index: i64 = 0;
-                let syncmer_ptr = seq_buf.as_mut_ptr().add(pos as usize) as *mut i8;
+                let syncmer_ptr = seq_buf.as_mut_ptr().add(pos as usize) as *mut std::os::raw::c_char;
                 match lookup_mode {
                     SyncmerLookupMode::AddMissing => {
                         syng_ffi::kmerHashAdd(self.kmer_hash, syncmer_ptr, &mut kmer_index);

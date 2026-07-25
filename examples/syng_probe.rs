@@ -37,7 +37,7 @@ fn raw_syncmer_positions(seq: &[u8], params: SyncmerParams) -> Vec<i32> {
     unsafe {
         let sh =
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
-        let sit = syng_ffi::syncmerIterator(sh, seq_buf.as_mut_ptr() as *mut i8, seq_len as i32);
+        let sit = syng_ffi::syncmerIterator(sh, seq_buf.as_mut_ptr() as *mut std::os::raw::c_char, seq_len as i32);
         let mut pos: i32 = 0;
         while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
             positions.push(pos);

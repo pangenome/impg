@@ -208,6 +208,9 @@ fn compile_syng() {
         .include(&syng_dir)
         .opt_level(3)
         .define("ONEIO", None)
+        // syng was written where char is signed. It is unsigned on aarch64, and
+        // there syngBWTadvanceRank walked to a negative node and aborted.
+        .flag_if_supported("-fsigned-char")
         .warnings(false);
 
     for file in &c_files {
