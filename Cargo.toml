@@ -48,7 +48,7 @@ ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb24
 
 # Dependencies for 1ALN format (for alignments) support
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
-onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34" }
+onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "5fa1e9333f18b311580f1346751c630c626d8342" }
 # Dependencies for TPA format (for alignments) support
 #tpa = { path = "/home/guarracino/git/tpa" }
 tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "989ca3b7a3ffa9bb26708b17ef5cf093a22a5163" }
@@ -70,7 +70,7 @@ gzp = "1.0.1"
 # 04f9edb = ddd31d3 (pansn-sparsification) + wfmash-rs 3cc6677 (vendored wfmash v0.14.1).
 # PanSN haplotype grouping + wfmash-per-hap-pair joblist live upstream;
 # this impg tree just calls them. Handles 1 _or many_ input FASTAs.
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "14f3eeb", default-features = false }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "f409ab36f6039abd57cec456db6be2cccd1abd40", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4", default-features = false }
 
@@ -87,7 +87,7 @@ cc = "1"
 # Without them build.rs can run first and copy nothing. Revisions must match the
 # ones sweepga pins, otherwise cargo builds each crate twice.
 wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "3cc667743d59eca4f9fae0ea3fa9d4ee8b5a3ad6" }
-fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "2da9567" }
+fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "b8efc7f8886c9772b6a4d4f22c642807cb43da01" }
 
 [dev-dependencies]
 ahash = "0.8"
