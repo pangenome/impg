@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "impg"
-version = "0.5.1"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "allwave",
