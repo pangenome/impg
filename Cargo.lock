@@ -39,7 +39,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allwave"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/allwave?rev=6b2798aa9fd405abe680cfb1e644331eff9d58e0#6b2798aa9fd405abe680cfb1e644331eff9d58e0"
+source = "git+https://github.com/pangenome/allwave?rev=87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4#87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4"
 dependencies = [
  "atty",
  "bio",
@@ -1039,7 +1039,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1564,7 +1564,7 @@ dependencies = [
  "niffler",
  "noodles 0.100.0",
  "num_cpus",
- "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34)",
  "poasta",
  "povu-rs",
  "ragc-core",
@@ -1632,7 +1632,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1752,7 +1752,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/ekg/lib_wfa2?rev=2f9d9a48addee5185d8ff6ed0594182558d60818#2f9d9a48addee5185d8ff6ed0594182558d60818"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=32ad5bb4442df4a5782b35bf024a319ba0676f50#32ad5bb4442df4a5782b35bf024a319ba0676f50"
 
 [[package]]
 name = "libc"
@@ -2305,16 +2305,6 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642#38182c7acf7cccc53509176b1d11001ae6ff2642"
-dependencies = [
- "bindgen 0.70.1",
- "cc",
- "libc",
-]
-
-[[package]]
-name = "onecode"
-version = "0.1.0"
 source = "git+https://github.com/pangenome/onecode-rs?rev=f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
 dependencies = [
  "cc",
@@ -2838,7 +2828,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3193,7 +3183,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3212,7 +3202,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3339,7 +3329,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=49f1801f9e0108c211571fa2614e517009446afe#49f1801f9e0108c211571fa2614e517009446afe"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=989ca3b7a3ffa9bb26708b17ef5cf093a22a5163#989ca3b7a3ffa9bb26708b17ef5cf093a22a5163"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -3355,7 +3345,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=66a5511b0b84d8502f9d7c99efd150616ff2cae3#66a5511b0b84d8502f9d7c99efd150616ff2cae3"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=5303cde5359ffd9c54234a825d1923d26a2a0b20#5303cde5359ffd9c54234a825d1923d26a2a0b20"
 dependencies = [
  "lib_wfa2",
 ]
@@ -3653,7 +3643,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
