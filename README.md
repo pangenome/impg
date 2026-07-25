@@ -44,8 +44,14 @@ cd impg
 cargo install --force --path .
 ```
 
+`--recursive` is required. `vendor/gfaffix` and `vendor/syng` are git
+submodules, and the build fails without them. The GitHub tag tarball does not
+contain them either, so use the `impg-vX.Y.Z.tar.gz` asset attached to each
+[release](https://github.com/pangenome/impg/releases) if you cannot clone.
+
 The source install places `impg`, `gfaffix`, and the companion aligner
-binaries (`wfmash`, `FastGA`) into `~/.cargo/bin/`.
+binaries (`wfmash`, `FastGA`) into `~/.cargo/bin/`, and the shared libraries
+they need into `~/.cargo/lib/`.
 
 ### Docker
 
