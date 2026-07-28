@@ -11,7 +11,7 @@ use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the tr
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
-use coitrees::{BasicCOITree, Interval, IntervalTree};
+use coitrees::{BasicCOITree, GenericInterval, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
 use onecode::OneFile;
@@ -375,6 +375,20 @@ struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
+}
+
+/// Lets a decoded interval be fed straight to `BasicCOITree::new`, without first
+/// rebuilding the whole slice as `Vec<Interval<QueryMetadata>>`.
+impl GenericInterval<QueryMetadata> for SerializableInterval {
+    fn first(&self) -> i32 {
+        self.first
+    }
+    fn last(&self) -> i32 {
+        self.last
+    }
+    fn metadata(&self) -> &QueryMetadata {
+        &self.metadata
+    }
 }
 
 #[derive(Default, Clone)]
@@ -1877,18 +1891,8 @@ impl Impg {
                 panic!("Tree mismatch: expected {target_id}, got {loaded_target_id}");
             }
 
-            // Reconstruct the tree
-            let tree = BasicCOITree::new(
-                intervals
-                    .into_iter()
-                    .map(|interval| Interval {
-                        first: interval.first,
-                        last: interval.last,
-                        metadata: interval.metadata, // Move instead of clone
-                    })
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            );
+            // Reconstruct the tree directly from the decoded records
+            let tree = BasicCOITree::new(&intervals);
 
             let arc_tree = Arc::new(tree);
 
