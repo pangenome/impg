@@ -3,7 +3,7 @@ use crate::impg_index::ImpgIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::{apply_subset_filter, SubsetFilter};
 
-use coitrees::{COITree, Interval, IntervalTree};
+use coitrees::{BasicCOITree, Interval, IntervalTree};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -13,7 +13,7 @@ use std::io::{self, BufRead, BufReader};
 use sweepga::pansn::PanSnLevel;
 
 /// Blacklist data structure: sequence name -> interval tree of blacklisted ranges
-pub type Blacklist = FxHashMap<String, COITree<(), u32>>;
+pub type Blacklist = FxHashMap<String, BasicCOITree<(), u32>>;
 
 /// Configuration parameters for the refinement routine.
 /// Mirrors CLI flags and constrains how aggressively flanks can be explored while
@@ -940,7 +940,7 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
     // Build interval trees for each sequence
     let mut blacklist = Blacklist::default();
     for (chrom, intervals) in intervals_by_seq {
-        let tree = COITree::new(&intervals);
+        let tree = BasicCOITree::new(&intervals);
         blacklist.insert(chrom, tree);
     }
 
