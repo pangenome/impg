@@ -3115,6 +3115,108 @@ fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
 }
 
 #[cfg(test)]
+mod tree_cache_tests {
+    use super::*;
+
+    /// Build a tree with `n` one-base intervals, so its accounted size is
+    /// predictable: n * (size_of::<QueryMetadata>() + 24).
+    fn tree_of(n: usize) -> Arc<BasicCOITree<QueryMetadata, u32>> {
+        let intervals: Vec<Interval<QueryMetadata>> = (0..n)
+            .map(|i| Interval {
+                first: i as i32,
+                last: i as i32,
+                metadata: QueryMetadata {
+                    query_id: i as u32,
+                    target_start: 0,
+                    target_end: 1,
+                    query_start: 0,
+                    query_end: 1,
+                    alignment_file_index: 0,
+                    strand_and_data_offset: 0,
+                    data_bytes: 0,
+                },
+            })
+            .collect();
+        Arc::new(BasicCOITree::new(intervals.as_slice()))
+    }
+
+    fn bytes_for(n: usize) -> usize {
+        n * (std::mem::size_of::<QueryMetadata>() + 24)
+    }
+
+    #[test]
+    fn unbounded_cache_never_evicts() {
+        let mut trees = TreeMap::default();
+        for id in 0..10u32 {
+            trees.insert(id, tree_of(50));
+        }
+        let cache = TreeCache::unbounded(trees);
+        for id in 0..10u32 {
+            assert!(cache.get(id).is_some(), "target {id} was evicted");
+        }
+    }
+
+    #[test]
+    fn bounded_cache_evicts_least_recently_used() {
+        // Room for two trees of 100 intervals, not three.
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        // Touch 1 so that 2 becomes the least recently used.
+        assert!(cache.get(1).is_some());
+        cache.insert(3, tree_of(100));
+
+        assert!(cache.get(1).is_some(), "recently used tree was evicted");
+        assert!(cache.get(3).is_some(), "just-inserted tree was evicted");
+        assert!(cache.get(2).is_none(), "LRU tree should have been evicted");
+    }
+
+    #[test]
+    fn oversized_tree_is_still_served() {
+        // A single tree larger than the whole capacity must not evict itself,
+        // otherwise a big chromosome could never be loaded.
+        let mut cache = TreeCache::bounded(bytes_for(10));
+        cache.insert(7, tree_of(1000));
+        assert!(cache.get(7).is_some());
+    }
+
+    #[test]
+    fn reinserting_same_target_does_not_double_count() {
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        // Only two trees' worth of bytes are live, so nothing should be evicted.
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_some());
+    }
+
+    #[test]
+    fn remove_frees_capacity() {
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        cache.remove(1);
+        cache.insert(3, tree_of(100));
+        // Removing 1 made room, so 2 must survive.
+        assert!(cache.get(2).is_some(), "eviction happened despite free room");
+        assert!(cache.get(3).is_some());
+        assert!(cache.get(1).is_none());
+    }
+
+    #[test]
+    fn iter_yields_every_cached_tree() {
+        let mut cache = TreeCache::bounded(bytes_for(10_000));
+        for id in 0..5u32 {
+            cache.insert(id, tree_of(10));
+        }
+        let mut ids: Vec<u32> = cache.iter().map(|(&id, _)| id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::paf::parse_paf;
