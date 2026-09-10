@@ -227,13 +227,44 @@ fn read_kmer_hash_from_prefix(prefix: &str) -> io::Result<*mut syng_ffi::KmerHas
     }
 }
 
-fn encode_query_base(base: u8) -> (u8, bool) {
+pub(crate) fn encode_query_base(base: u8) -> (u8, bool) {
     match base {
         b'a' | b'A' | 0 => (0, true),
         b'c' | b'C' | 1 => (1, true),
         b'g' | b'G' | 2 => (2, true),
         b't' | b'T' | 3 => (3, true),
         _ => (0, false),
+    }
+}
+
+/// Validate monotonically emitted full windows against the original alphabet.
+/// Scan each source byte at most once, with constant extra space. Numeric safety
+/// substitutions for C must never turn an ambiguous window into an exact seed.
+pub(crate) struct SyncmerWindowValidity<'a> {
+    sequence: &'a [u8],
+    scanned_end: usize,
+    invalid_end: usize,
+}
+
+impl<'a> SyncmerWindowValidity<'a> {
+    pub(crate) fn new(sequence: &'a [u8]) -> Self {
+        Self {
+            sequence,
+            scanned_end: 0,
+            invalid_end: 0,
+        }
+    }
+
+    pub(crate) fn is_valid(&mut self, start: usize, length: usize) -> bool {
+        let end = start + length;
+        assert!(end >= self.scanned_end && end <= self.sequence.len());
+        for i in self.scanned_end..end {
+            if !encode_query_base(self.sequence[i]).1 {
+                self.invalid_end = i + 1;
+            }
+        }
+        self.scanned_end = end;
+        self.invalid_end <= start
     }
 }
 
@@ -1504,21 +1535,20 @@ impl SyncmerParams {
 
 #[derive(Debug, Clone, Copy)]
 struct SyngMetadata {
+    version: u32,
     params: SyncmerParams,
 }
 
 impl SyngMetadata {
-    const VERSION: u32 = 1;
-
-    fn new(params: SyncmerParams) -> Self {
-        Self { params }
-    }
+    // v2: full original windows must be valid DNA; explicit zero-count names
+    // rows are known empty. v1 zero rows also represented unknown path starts.
+    const VERSION: u32 = 2;
 
     fn save(&self, path: &str) -> io::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut writer = BufWriter::new(file);
         writeln!(writer, "# impg syng metadata")?;
-        writeln!(writer, "version\t{}", Self::VERSION)?;
+        writeln!(writer, "version\t{}", self.version)?;
         writeln!(writer, "syncmer_k\t{}", self.params.k)?;
         writeln!(writer, "syncmer_w\t{}", self.params.w)?;
         writeln!(writer, "syncmer_seed\t{}", self.params.seed)?;
@@ -1591,7 +1621,7 @@ impl SyngMetadata {
         let version = version.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing version")
         })?;
-        if version != Self::VERSION {
+        if version != 1 && version != Self::VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported syng metadata version {}", version),
@@ -1632,7 +1662,7 @@ impl SyngMetadata {
             ));
         }
 
-        Ok(Self { params })
+        Ok(Self { version, params })
     }
 }
 
@@ -1680,7 +1710,7 @@ pub struct SyngNameMap {
     /// Sequence name → GBWT path number.
     pub name_to_path: FxHashMap<String, u32>,
     /// Per-path GBWT forward-path start info (for walking paths during query).
-    /// None if loaded from an old-format file that lacks this info.
+    /// None when start information is unknown (including legacy zero rows).
     pub path_starts: Vec<Option<GbwtPathStart>>,
 }
 
@@ -1713,7 +1743,7 @@ impl SyngNameMap {
     /// Save to a `.syng.names` file.
     /// Format: one line per path, tab-separated:
     /// `path_number\tname\tlength\tstart_node\tstart_count\tnum_syncmers\tfirst_syncmer_pos`
-    /// (columns 3-6 are 0 if path start info is unavailable). The 7th column
+    /// Unknown starts use the supported 3-column form. The 7th column
     /// `first_syncmer_pos` was added to record the absolute bp offset of
     /// the forward path's first syncmer — older 6-column files load it as 0.
     pub fn save(&self, path: &str) -> io::Result<()> {
@@ -1733,7 +1763,10 @@ impl SyngNameMap {
                     info.num_syncmers,
                     info.first_syncmer_pos,
                 ),
-                None => (0, 0, 0, 0),
+                None => {
+                    writeln!(writer, "{}\t{}\t{}", i, name, length)?;
+                    continue;
+                }
             };
             writeln!(
                 writer,
@@ -1748,8 +1781,13 @@ impl SyngNameMap {
     /// Load from a `.syng.names` file.
     /// Supports 3-, 6-, and 7-column formats. Older 6-column files load with
     /// `first_syncmer_pos = 0` (the pre-fix behaviour) — rebuild the index
-    /// for coordinate-accurate anchor positions.
+    /// for coordinate-accurate anchor positions. Without index metadata, zero
+    /// rows are conservatively unknown; SyngIndex::load uses the policy version.
     pub fn load(path: &str) -> io::Result<Self> {
+        Self::load_with_known_empty_paths(path, false)
+    }
+
+    fn load_with_known_empty_paths(path: &str, known_empty_paths: bool) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
         let mut name_map = Self::new();
@@ -1760,10 +1798,10 @@ impl SyngNameMap {
                 continue;
             }
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 3 {
+            if !matches!(parts.len(), 3 | 6 | 7) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Invalid name map line (need >= 3 columns): {}", line),
+                    format!("Invalid name map line (need 3, 6 or 7 columns): {}", line),
                 ));
             }
             let _path_num: u32 = parts[0].parse().map_err(|e| {
@@ -1784,15 +1822,30 @@ impl SyngNameMap {
             // Parse optional path start info (columns 3-5, plus optional
             // column 6 for first_syncmer_pos).
             if parts.len() >= 6 {
-                let start_node: i32 = parts[3].parse().unwrap_or(0);
-                let start_count: u32 = parts[4].parse().unwrap_or(0);
-                let num_syncmers: u32 = parts[5].parse().unwrap_or(0);
-                // 7th column is optional (new in this format revision). Old
-                // files default to 0 — anchors remain off by the first
-                // syncmer's absolute position until the index is rebuilt.
-                let first_syncmer_pos: u64 =
-                    parts.get(6).map(|s| s.parse().unwrap_or(0)).unwrap_or(0);
-                if num_syncmers > 0 {
+                let invalid_field = |e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Invalid path start in '{}': {}", line, e),
+                    )
+                };
+                let start_node: i32 = parts[3].parse().map_err(invalid_field)?;
+                let start_count: u32 = parts[4].parse().map_err(invalid_field)?;
+                let num_syncmers: u32 = parts[5].parse().map_err(invalid_field)?;
+                let first_syncmer_pos: u64 = parts
+                    .get(6)
+                    .map(|s| s.parse().map_err(invalid_field))
+                    .transpose()?
+                    .unwrap_or(0);
+                if (num_syncmers > 0 && start_node == 0)
+                    || (num_syncmers == 0
+                        && (start_node != 0 || start_count != 0 || first_syncmer_pos != 0))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Inconsistent path start in '{}'", line),
+                    ));
+                }
+                if num_syncmers > 0 || known_empty_paths {
                     name_map.set_path_start(
                         path_num,
                         GbwtPathStart {
@@ -2252,6 +2305,10 @@ pub struct SyngIndex {
     seqhash: *mut syng_ffi::Seqhash,
     pub name_map: SyngNameMap,
     pub params: SyncmerParams,
+    // Preserve legacy seed-policy identity across append/save; only fresh builds are v2.
+    metadata_version: u32,
+    // Construction state, not inferred from potentially unknown legacy path metadata.
+    has_gbwt_paths: bool,
     /// Sampled path checkpoints for path-position to syncmer-step lookup.
     sampled_path_steps: Option<SampledPathSteps>,
     /// Memory-mapped occurrence-major checkpoints for fast target locate.
@@ -2300,6 +2357,8 @@ impl SyngIndex {
             seqhash,
             name_map: SyngNameMap::new(),
             params,
+            metadata_version: SyngMetadata::VERSION,
+            has_gbwt_paths: false,
             sampled_path_steps: None,
             sampled_checkpoints: None,
             locate_checkpoint_index: OnceLock::new(),
@@ -2520,6 +2579,15 @@ impl SyngIndex {
         if seq_len < syncmer_len {
             // Sequence too short for syncmer extraction — record in name map but skip
             let path_num = self.name_map.add(name, seq_len as u64);
+            self.name_map.set_path_start(
+                path_num,
+                GbwtPathStart {
+                    start_node: 0,
+                    start_count: 0,
+                    num_syncmers: 0,
+                    first_syncmer_pos: 0,
+                },
+            );
             if let Some(builder) = self.sampled_position_builder.as_mut() {
                 builder.record_path(path_num as usize, seq_len as u64, &[]);
             }
@@ -2534,13 +2602,8 @@ impl SyngIndex {
         // seqhash library.  The seqhash uses raw byte values as array indices
         // into patternRC[4], so the values MUST be 0-3.
         let mut seq_buf: Vec<u8> = Vec::with_capacity(seq_len + 1);
-        seq_buf.extend(seq.iter().map(|&b| match b {
-            b'a' | b'A' | 0 => 0u8,
-            b'c' | b'C' | 1 => 1u8,
-            b'g' | b'G' | 2 => 2u8,
-            b't' | b'T' | 3 => 3u8,
-            _ => 0u8, // N -> a (syng convention)
-        }));
+        seq_buf.extend(seq.iter().map(|&b| encode_query_base(b).0));
+        let mut validity = SyncmerWindowValidity::new(&seq);
         seq_buf.push(0); // null terminator
 
         // Extract syncmers and build GBWT paths
@@ -2555,8 +2618,12 @@ impl SyngIndex {
 
             let mut pos: i32 = 0;
             while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
+                if !validity.is_valid(pos as usize, syncmer_len) {
+                    continue;
+                }
                 let mut kmer_index: i64 = 0;
-                let syncmer_ptr = seq_buf.as_mut_ptr().add(pos as usize) as *mut std::os::raw::c_char;
+                let syncmer_ptr =
+                    seq_buf.as_mut_ptr().add(pos as usize) as *mut std::os::raw::c_char;
                 match lookup_mode {
                     SyncmerLookupMode::AddMissing => {
                         syng_ffi::kmerHashAdd(self.kmer_hash, syncmer_ptr, &mut kmer_index);
@@ -2584,6 +2651,15 @@ impl SyngIndex {
 
         if syncmers.is_empty() {
             let path_num = self.name_map.add(name, seq_len as u64);
+            self.name_map.set_path_start(
+                path_num,
+                GbwtPathStart {
+                    start_node: 0,
+                    start_count: 0,
+                    num_syncmers: 0,
+                    first_syncmer_pos: 0,
+                },
+            );
             if let Some(builder) = self.sampled_position_builder.as_mut() {
                 builder.record_path(path_num as usize, seq_len as u64, &[]);
             }
@@ -2648,6 +2724,8 @@ impl SyngIndex {
             syng_ffi::syngBWTpathFinish(sbp);
         }
 
+        self.has_gbwt_paths = true;
+
         // Record in name map with path start info
         let path_num = self.name_map.add(name, seq_len as u64);
         self.name_map.set_path_start(
@@ -2683,6 +2761,12 @@ impl SyngIndex {
     /// The shorter sidecar names are used when `prefix` already ends in
     /// `.syng`, avoiding names like `foo.syng.syng.spos`.
     pub fn save(&mut self, prefix: &str) -> io::Result<()> {
+        if !self.has_gbwt_paths {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot save a seed-free syng graph: native GBWT requires at least one vertex",
+            ));
+        }
         let _ = self.finalize_online_sampled_positions()?;
         let schema_text = syng_ffi::syng_schema_text();
 
@@ -2757,7 +2841,11 @@ impl SyngIndex {
 
         // Write metadata last so a complete index records the syncmer
         // parameters that future query/map calls must use.
-        SyngMetadata::new(self.params).save(&syng_meta_path(prefix))?;
+        SyngMetadata {
+            version: self.metadata_version,
+            params: self.params,
+        }
+        .save(&syng_meta_path(prefix))?;
 
         Ok(())
     }
@@ -2921,7 +3009,10 @@ impl SyngIndex {
 
         // Read names sidecar.
         let names_path = existing_syng_sidecar_path(prefix, "names");
-        let name_map = match SyngNameMap::load(&names_path) {
+        let mut name_map = match SyngNameMap::load_with_known_empty_paths(
+            &names_path,
+            metadata.version >= 2,
+        ) {
             Ok(nm) => nm,
             Err(e) => {
                 unsafe {
@@ -2931,6 +3022,22 @@ impl SyngIndex {
                 return Err(e);
             }
         };
+
+        // Length alone proves that legacy too-short paths have no anchors.
+        for (length, start) in name_map
+            .path_to_length
+            .iter()
+            .zip(&mut name_map.path_starts)
+        {
+            if start.is_none() && *length < (params.k + params.w) as u64 {
+                *start = Some(GbwtPathStart {
+                    start_node: 0,
+                    start_count: 0,
+                    num_syncmers: 0,
+                    first_syncmer_pos: 0,
+                });
+            }
+        }
 
         // Create seqhash for future use (queries, incremental adds)
         let seqhash = unsafe {
@@ -3034,6 +3141,9 @@ impl SyngIndex {
             seqhash,
             name_map,
             params,
+            metadata_version: metadata.version,
+            // Native syngBWTread only succeeds for a graph with vertices.
+            has_gbwt_paths: true,
             sampled_path_steps,
             sampled_checkpoints,
             locate_checkpoint_index: OnceLock::new(),
@@ -4271,6 +4381,9 @@ impl SyngIndex {
     /// rebuild of the index corrects this.
     #[allow(dead_code)]
     fn walk_path(&self, start: &GbwtPathStart) -> Vec<(i32, u64)> {
+        if start.num_syncmers == 0 {
+            return Vec::new();
+        }
         let mut nodes = Vec::with_capacity(start.num_syncmers as usize);
         unsafe {
             let sbp = syng_ffi::syngBWTpathStartOld(self.gbwt, start.start_node, start.start_count);
@@ -5374,6 +5487,393 @@ mod tests {
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
     fn lock_syng() -> std::sync::MutexGuard<'static, ()> {
         SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // Unfiltered C sampler reference: preserve selection/RC policy, then compare
+    // filtering against original source windows rather than a second sampler.
+    fn unfiltered_syncmer_positions(params: SyncmerParams, sequence: &[u8]) -> Vec<usize> {
+        let mut numeric = crate::syng_parallel::numeric_sequence(sequence);
+        numeric.push(0);
+        let mut positions = Vec::new();
+        unsafe {
+            let sh = syng_ffi::impg_seqhashCreateSafe(
+                params.k as i32,
+                params.w as i32,
+                params.seed as i32,
+            );
+            let it =
+                syng_ffi::syncmerIterator(sh, numeric.as_mut_ptr().cast(), sequence.len() as i32);
+            let mut pos = 0;
+            while syng_ffi::syncmerNext(it, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
+                positions.push(pos as usize);
+            }
+            syng_ffi::impg_seqhashIteratorDestroy(it);
+            syng_ffi::impg_seqhashDestroy(sh);
+        }
+        positions
+    }
+
+    #[test]
+    fn test_ambiguity_full_window_alphabet_and_reference() {
+        let _guard = lock_syng();
+        use crate::syng_parallel::{
+            extract_packed_syncmers, numeric_sequence, pack_canonical_syncmer,
+        };
+        let params = SyncmerParams::default();
+        let k = (params.k + params.w) as usize;
+        let upper = make_test_sequence(2000, 42);
+        let lower: Vec<_> = upper.iter().map(u8::to_ascii_lowercase).collect();
+        let numeric = numeric_sequence(&upper);
+        let positions = unfiltered_syncmer_positions(params, &upper);
+        assert!(!positions.is_empty());
+        for sequence in [&upper, &lower, &numeric] {
+            let index =
+                SyngIndex::build(params, vec![("valid".into(), sequence.clone())].into_iter());
+            let walk = index.walk_path_range(0, 0, sequence.len() as u64).unwrap();
+            assert_eq!(
+                walk.iter().map(|x| x.1 as usize).collect::<Vec<_>>(),
+                positions
+            );
+            for &(node, pos) in &walk {
+                assert_eq!(
+                    index.syncmer_seq(node).to_ascii_uppercase(),
+                    upper[pos as usize..pos as usize + k]
+                );
+            }
+            let expected: Vec<_> = positions
+                .iter()
+                .map(|&p| pack_canonical_syncmer(&numeric[p..p + k]))
+                .collect();
+            assert_eq!(extract_packed_syncmers(params, sequence).unwrap(), expected);
+        }
+        // Every possible byte follows the query matcher's existing alphabet.
+        for base in 0..=255u8 {
+            let valid = b"ACGTacgt".contains(&base) || base <= 3;
+            assert_eq!(encode_query_base(base).1, valid);
+            let sequence = vec![base; 256];
+            let packed = extract_packed_syncmers(params, &sequence).unwrap();
+            let mut index = SyngIndex::new(params);
+            let stats = index.add_sequence("byte".into(), sequence);
+            assert_eq!(stats.syncmers, packed.len());
+            assert_eq!(packed.is_empty(), !valid, "byte {base}");
+        }
+        // Isolated IUPAC/non-DNA bytes invalidate the FULL k-window, not only
+        // the selected s-mer. Include numeric invalid code 4 and non-ASCII.
+        for &base in b"NnRYSWKMBDHVryswkmbdhvUu-?\x04\xff" {
+            let mut sequence = upper.clone();
+            sequence[1000] = base;
+            let expected: Vec<_> = unfiltered_syncmer_positions(params, &sequence)
+                .into_iter()
+                .filter(|&p| sequence[p..p + k].iter().all(|&b| encode_query_base(b).1))
+                .collect();
+            let index =
+                SyngIndex::build(params, vec![("mixed".into(), sequence.clone())].into_iter());
+            assert_eq!(
+                index
+                    .walk_path_range(0, 0, 2000)
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.1 as usize)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                extract_packed_syncmers(params, &sequence).unwrap(),
+                expected
+                    .iter()
+                    .map(|&p| pack_canonical_syncmer(&sequence[p..p + k]))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    fn ambiguity_sequences() -> Vec<(String, Vec<u8>)> {
+        let mut flanks = vec![b'N'; 100];
+        flanks.extend(make_test_sequence(2000, 42));
+        flanks.extend(vec![b'N'; 10_000]);
+        flanks.extend(make_test_sequence(2000, 99));
+        vec![
+            ("flanks".into(), flanks),
+            ("unknown".into(), vec![b'N'; 20_000]),
+            ("short".into(), b"ACGT".to_vec()),
+            ("polyA".into(), vec![b'A'; 2000]),
+            ("repeat".into(), b"ACGT".repeat(500)),
+        ]
+    }
+
+    fn assert_ambiguity_paths(index: &SyngIndex, sequences: &[(String, Vec<u8>)]) {
+        let k = index.syncmer_length_bp();
+        for (path, (name, sequence)) in sequences.iter().enumerate() {
+            assert_eq!(index.name_map.path_to_name[path], *name);
+            assert_eq!(index.name_map.path_to_length[path], sequence.len() as u64);
+            let start = index.name_map.path_starts[path].as_ref().unwrap();
+            let walk = index
+                .walk_path_range(path, 0, sequence.len() as u64)
+                .unwrap();
+            assert_eq!(walk.len(), start.num_syncmers as usize);
+            assert_eq!(index.walk_forward_path(start), walk);
+            if path == 1 || path == 2 {
+                assert!(walk.is_empty());
+                assert!(index
+                    .query_region(name, 0, sequence.len() as u64, 0)
+                    .unwrap()
+                    .is_empty());
+            } else {
+                assert!(!walk.is_empty());
+                assert_eq!(start.first_syncmer_pos, walk[0].1);
+                for &(node, pos) in &walk {
+                    let window = &sequence[pos as usize..pos as usize + k];
+                    assert!(window.iter().all(|&b| encode_query_base(b).1));
+                    assert_eq!(index.syncmer_seq(node).to_ascii_uppercase(), window);
+                }
+                if path == 0 {
+                    assert!(walk[0].1 >= 100);
+                    assert!(walk.iter().any(|x| x.1 < 2100));
+                    assert!(walk.iter().any(|x| x.1 >= 12100));
+                    assert!(walk.windows(2).any(|w| w[1].1 - w[0].1 >= 10_000));
+                }
+            }
+        }
+        assert!(index
+            .matched_syncmers_in_sequence(&vec![b'N'; 20_000])
+            .is_empty());
+        assert!(!index
+            .matched_syncmers_in_sequence(&vec![b'A'; 2000])
+            .is_empty());
+        assert!(index
+            .query_region("polyA", 0, 2000, 0)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.genome != "unknown"));
+    }
+
+    #[test]
+    fn test_ambiguity_dictionary_replay_region_and_sidecar_roundtrip() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let sequences = ambiguity_sequences();
+        let serial = SyngIndex::build(params, sequences.clone().into_iter());
+        assert_ambiguity_paths(&serial, &sequences);
+        let dictionary =
+            crate::syng_parallel::build_packed_syncmer_dictionary(params, &sequences).unwrap();
+        assert_eq!(dictionary.len(), serial.num_syncmer_nodes());
+        let mut replay =
+            SyngIndex::new_with_packed_syncmer_dictionary(params, &dictionary).unwrap();
+        for (name, seq) in &sequences {
+            replay
+                .add_sequence_with_existing_syncmers(name.clone(), seq.clone())
+                .unwrap();
+        }
+        replay.finalize_online_sampled_positions().unwrap();
+        assert_ambiguity_paths(&replay, &sequences);
+        for path in 0..sequences.len() {
+            let spellings = |index: &SyngIndex| {
+                index
+                    .walk_path_range(path, 0, 30_000)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(node, pos)| (index.syncmer_seq(node), pos))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(spellings(&serial), spellings(&replay));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for regional in [false, true] {
+            let prefix = dir.path().join(if regional {
+                "region.syng"
+            } else {
+                "replay.syng"
+            });
+            let prefix = prefix.to_str().unwrap();
+            if regional {
+                serial
+                    .build_region_gbwt(
+                        &sequences
+                            .iter()
+                            .map(|(n, s)| (n.clone(), s.as_slice()))
+                            .collect::<Vec<_>>(),
+                        prefix,
+                    )
+                    .unwrap();
+            } else {
+                replay.save(prefix).unwrap();
+            }
+            assert_eq!(
+                SyngMetadata::load(&syng_meta_path(prefix)).unwrap().version,
+                2
+            );
+            let loaded = SyngIndex::load(prefix, params).unwrap();
+            assert_ambiguity_paths(&loaded, &sequences);
+            drop(loaded);
+            std::fs::remove_file(syng_pstep_path(prefix)).unwrap();
+            std::fs::remove_file(syng_spos_path(prefix)).unwrap();
+            let mut repair = SyngIndex::load_for_repair(prefix, params).unwrap();
+            repair.rebuild_sampled_path_steps_from_gbwt(7).unwrap();
+            assert_ambiguity_paths(&repair, &sequences);
+            repair
+                .rebuild_sampled_position_indexes_from_gbwt_parallel(7, 0)
+                .unwrap();
+            repair.save_position_sidecars(prefix).unwrap();
+            let loaded = SyngIndex::load(prefix, params).unwrap();
+            assert_ambiguity_paths(&loaded, &sequences);
+        }
+    }
+
+    #[test]
+    fn test_ambiguity_seed_free_save_rejected_without_output() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let mut index = SyngIndex::build(
+            params,
+            vec![
+                ("unknown".into(), vec![b'N'; 20_000]),
+                ("short".into(), b"ACGT".to_vec()),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(index.num_syncmer_nodes(), 0);
+        assert!(index.walk_path_range(0, 0, 20_000).unwrap().is_empty());
+        assert!(index
+            .query_region("unknown", 0, 20_000, 0)
+            .unwrap()
+            .is_empty());
+        index
+            .rebuild_sampled_position_indexes_from_gbwt_parallel(7, 0)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("empty.syng");
+        let prefix = prefix.to_str().unwrap();
+        let error = index.save(prefix).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("seed-free"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        std::fs::write(format!("{prefix}.1gbwt"), b"do not truncate").unwrap();
+        assert!(index.save(prefix).is_err());
+        assert_eq!(
+            std::fs::read(format!("{prefix}.1gbwt")).unwrap(),
+            b"do not truncate"
+        );
+        // A preloaded dictionary alone does not make a nonempty GBWT.
+        let dictionary =
+            crate::syng_parallel::extract_packed_syncmers(params, &make_test_sequence(1000, 42))
+                .unwrap();
+        let mut dictionary_only = SyngIndex::new_with_packed_syncmer_dictionary(
+            params,
+            &crate::syng_parallel::sort_dedup_packed_syncmers(dictionary),
+        )
+        .unwrap();
+        assert!(dictionary_only.num_syncmer_nodes() > 0);
+        assert!(dictionary_only.save(prefix).is_err());
+    }
+
+    #[test]
+    fn test_ambiguity_legacy_unknown_and_positive_corruption_remain_errors() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("legacy.syng");
+        let prefix = prefix.to_str().unwrap();
+        let mut index = SyngIndex::build(params, ambiguity_sequences().into_iter());
+        index.save(prefix).unwrap();
+        let names_path = syng_names_path(prefix);
+        let original_names = std::fs::read_to_string(&names_path).unwrap();
+        SyngMetadata { version: 1, params }
+            .save(&syng_meta_path(prefix))
+            .unwrap();
+        let mut legacy = SyngIndex::load(prefix, params).unwrap();
+        assert!(legacy.name_map.path_starts[1].is_none());
+        assert!(legacy.walk_path_range(1, 0, 20_000).is_err());
+        assert!(legacy.query_region("unknown", 0, 20_000, 0).is_err());
+        assert!(legacy.walk_path_range(2, 0, 4).unwrap().is_empty());
+        assert!(legacy.rebuild_sampled_path_steps_from_gbwt(7).is_err());
+        assert!(legacy
+            .rebuild_sampled_position_indexes_from_gbwt_parallel(7, 0)
+            .is_err());
+        // Re-saving unknown starts does not claim that old seeds were cleaned.
+        legacy.save(prefix).unwrap();
+        assert_eq!(
+            SyngMetadata::load(&syng_meta_path(prefix)).unwrap().version,
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&names_path)
+                .unwrap()
+                .lines()
+                .nth(1)
+                .unwrap(),
+            "1\tunknown\t20000"
+        );
+        assert!(SyngIndex::load(prefix, params)
+            .unwrap()
+            .walk_path_range(1, 0, 20_000)
+            .is_err());
+        // Appending clean sequence also must not promote legacy metadata to v2.
+        legacy.add_sequence("append".into(), make_test_sequence(1000, 21));
+        // Unknown long paths correctly prevent automatic sidecar rebuilding.
+        assert!(legacy
+            .finalize_online_sampled_positions()
+            .unwrap()
+            .is_none());
+        assert_eq!(legacy.metadata_version, 1);
+        SyngMetadata { version: 2, params }
+            .save(&syng_meta_path(prefix))
+            .unwrap();
+        for bad in [
+            "0\tflanks\t14100\t0\t0\t5\t100",
+            "0\tflanks\t14100\t1\t0\tbad\t100",
+            "0\tflanks\t14100\t1\tbad\t5\t100",
+        ] {
+            std::fs::write(&names_path, format!("{bad}\n")).unwrap();
+            assert!(SyngIndex::load_for_repair(prefix, params).is_err());
+        }
+        std::fs::write(&names_path, original_names).unwrap();
+        let mut corrupt = SyngIndex::load(prefix, params).unwrap();
+        corrupt.name_map.path_starts[0]
+            .as_mut()
+            .unwrap()
+            .num_syncmers += 1;
+        assert!(corrupt.rebuild_sampled_path_steps_from_gbwt(7).is_err());
+        assert!(corrupt
+            .rebuild_sampled_position_indexes_from_gbwt_parallel(7, 0)
+            .is_err());
+        corrupt.name_map.path_starts[0] = None;
+        assert!(corrupt.walk_path_range(0, 0, 14100).is_err());
+        // Missing checkpoint files still error for normal loads.
+        std::fs::remove_file(syng_pstep_path(prefix)).unwrap();
+        assert!(SyngIndex::load(prefix, params).is_err());
+
+        let append_prefix = dir.path().join("append.syng");
+        let append_prefix = append_prefix.to_str().unwrap();
+        let mut valid = SyngIndex::build(
+            params,
+            vec![("valid".into(), make_test_sequence(1000, 42))].into_iter(),
+        );
+        valid.save(append_prefix).unwrap();
+        SyngMetadata { version: 1, params }
+            .save(&syng_meta_path(append_prefix))
+            .unwrap();
+        let mut legacy = SyngIndex::load(append_prefix, params).unwrap();
+        // Actual vertices, but no authoritative starts: saving is not an empty-graph error.
+        legacy.name_map.path_starts[0] = None;
+        legacy.save(append_prefix).unwrap();
+        assert_eq!(
+            SyngMetadata::load(&syng_meta_path(append_prefix))
+                .unwrap()
+                .version,
+            1
+        );
+        legacy.name_map.path_starts[0] = valid.name_map.path_starts[0].clone();
+        legacy.add_sequence("appended".into(), make_test_sequence(1000, 21));
+        legacy
+            .rebuild_sampled_position_indexes_from_gbwt_parallel(7, 0)
+            .unwrap();
+        legacy.save(append_prefix).unwrap();
+        assert_eq!(
+            SyngMetadata::load(&syng_meta_path(append_prefix))
+                .unwrap()
+                .version,
+            1
+        );
     }
 
     // ── 1. FFI smoke tests ──────────────────────────────────────────
@@ -8234,12 +8734,17 @@ mod tests {
         let prefix = dir.join("empty_region");
         let prefix_str = prefix.to_str().unwrap();
 
-        // Empty sequence list should still produce valid files
+        // Native GBWT cannot reload a graph without vertices.
         let refs: Vec<(String, &[u8])> = Vec::new();
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        assert!(std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
-        assert!(std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
+        assert_eq!(
+            index
+                .build_region_gbwt(&refs, prefix_str)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(!std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -8259,11 +8764,15 @@ mod tests {
             ("short1".to_string(), b"ACGT" as &[u8]),
             ("short2".to_string(), b"ACGTACGTACGT" as &[u8]),
         ];
-        index.build_region_gbwt(&short_seqs, prefix_str).unwrap();
-
-        // Files should still be produced (empty but valid)
-        assert!(std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
-        assert!(std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
+        assert_eq!(
+            index
+                .build_region_gbwt(&short_seqs, prefix_str)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(!std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -8541,7 +9050,7 @@ mod tests {
     #[test]
     fn test_region_gbwt_very_small_region() {
         let _guard = lock_syng();
-        // Very small region (smaller than one syncmer) → empty/minimal GBWT
+        // Very small regions cannot produce a reloadable native GBWT.
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
 
@@ -8556,11 +9065,15 @@ mod tests {
             ("tiny2".to_string(), b"TGCATGCA" as &[u8]),
         ];
 
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        // Files should still be produced (valid but minimal)
-        assert!(Path::new(&format!("{}.1gbwt", prefix_str)).exists());
-        assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
+        assert_eq!(
+            index
+                .build_region_gbwt(&refs, prefix_str)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(!Path::new(&format!("{}.1khash", prefix_str)).exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }
