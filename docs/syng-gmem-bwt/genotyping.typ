@@ -224,6 +224,18 @@ extension is
 $ mu_f = d sum_(j=1)^J sum_(h in cal(H)_j)
   e_(j h f) n_(j h) a_(j h f) + beta_f. $
 
+This expression applies only to occurrences whose existence and modeled
+exposure are determined by the owning chunk state. Unique ownership alone does
+not make boundary-spanning context local. A feature crossing a donor-switch
+boundary needs occurrence/exposure terms conditioned on the joint phased states
+on both sides (or all states spanned), or an explicit exclusion/approximation.
+
+For example, diploid mosaics `AB | ab` and `Ab | aB` have identical per-chunk
+multiplicities for left candidates `A/a` and right candidates `B/b`, but feature
+`AB` occurs once in the first and zero times in the second. Fixed candidate-local
+terms cannot distinguish them. Include this two-chunk counterexample in
+mathematical validation of boundary-feature scoring.
+
 Here exposure may depend on the candidate and must be calibrated. One global
 $C(f)$ supplies one shared evidence factor, rather than an independent emission
 for every chunk containing $f$. This does not make overlapping features

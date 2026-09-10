@@ -164,8 +164,20 @@ through overlapping context. A proposed shared-feature expectation is
 
     mu[f] = d * sum_j sum_h e[j,h,f] * n[j,h] * a[j,h,f] + beta[f]
 
-where exposure e is calibrated through the actual extraction pipeline and beta
-is constrained background. Candidate-dependent exposure is allowed; this is a
+This expression is restricted to occurrences whose existence and modeled
+exposure are determined by the owning chunk state. Ownership prevents duplicate
+counting; it does not make boundary-spanning features depend on only one chunk.
+Features spanning donor switches require occurrence/exposure terms conditioned
+on the joint phased states they span, or an explicit exclusion/approximation.
+
+The mathematical test plan must include this counterexample: left candidates
+A/a and right candidates B/b give the same per-chunk multiplicities in diploid
+mosaics `AB | ab` and `Ab | aB`, but feature AB occurs once in the first and zero
+times in the second. A candidate-local count formula must not claim to distinguish
+them; a joint boundary-feature model must reproduce the exhaustive counts.
+
+Exposure e is calibrated through the actual extraction pipeline and beta is
+constrained background. Candidate-dependent exposure is allowed; this is a
 model extension, not a calibrated implementation. Overlapping features also
 remain statistically dependent. Pure cosine cannot identify absolute dosage
 when candidate vectors differ only by scale.

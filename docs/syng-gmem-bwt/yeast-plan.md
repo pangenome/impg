@@ -259,6 +259,10 @@ because two chunks query them. The shared-feature expectation in the
 predicted genomic occurrence once despite overlapping query context. Nonlocal
 repeat factors require joint treatment or an explicit approximation; ordinary
 additive local-score dynamic programming is not automatically sufficient.
+Core ownership also does not make boundary-spanning features local: their
+occurrence and exposure must depend on joint phased states, or be explicitly
+excluded/approximated. Test `AB | ab` versus `Ab | aB`: identical per-chunk copy
+counts, different observed AB junction counts.
 
 **Outputs:** local calls, per-chromosome haplotype mosaics, support/phase blocks,
 sequence FASTA where joins are justified, and explicit unknown/gap intervals.
