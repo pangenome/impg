@@ -73,8 +73,10 @@ rehoming. Starting S288C nuclear sequences seed discovery; they do not scope it.
 ### Confirmed source behavior, not yet a complete performance diagnosis
 
 At `c707e2e`, `select_and_window_sequences` in `src/commands/partition.rs` selects
-sample/haplotype groups using missing bases but generates windows across their
-whole paths. The drain loop calls the backend for each queued window without a
+sample/haplotype groups using missing bases but generates windows across the
+whole lengths of selected paths that still have missing intervals. Entirely
+claimed paths are excluded from new selections; stale queued windows remain.
+The drain loop calls the backend for each queued window without a
 fresh missing-core check. The syng wrapper's BFS/DFS methods in `src/lib.rs`
 ignore the supplied masks and dispatch full queries; normal partition masking
 happens after querying/chaining. Other backends must be checked separately.
@@ -84,6 +86,32 @@ source bases. This is evidence of low incremental coverage, **not proof that
 its flanking context or all its discovery work was unnecessary**. We have not
 measured what fraction of total runtime is redundant querying versus legitimate
 high-copy matching, chaining, masking, or writing.
+
+### First measured routing decision
+
+Reviewed instrumentation and deterministic scheduler fixtures are committed as
+`295bca9` on `fix/syng-partition-scheduling`; scheduling is unchanged. Parent
+validation passed421 library and39 integration tests. An asymmetric fixture
+confirms that covered B can discover/group C+D after A covered B; removing that
+query preserves source union but loses the grouping. Both single PAF and
+MultiImpg filter masked seed fragments before expansion; syng does not. These
+backend contracts must remain separate.
+
+The first256 dispatches in a120s yeast replay contained no exact repeated tuples
+and no zero-output calls. All three zero-core queries were productive, emitting
+167,318 new source bp. Of80.382s query time,76.200s (94.8%) was raw lookup;
+chaining/filtering took4.180s. Postprocessing was0.092s, including0.077s masking.
+Nested times must not be added. These measurements cover the early sample only,
+not the late ANM#4 phase.
+
+The next measured optimization target is therefore raw occurrence lookup and
+coordinate recovery/grouping, **not a covered-core skip or query cache**. Isolate
+`S288C#0#chrIV:880000-890000` and `S288C#0#chrIV:990000-1000000`, with ordinary
+and repeated controls, and preserve normalized intervals/anchor occurrences.
+Artifacts: `~/yeast/partition-scheduling-profile-4wj5_t11/`, including profiling
+summary, frozen binary/source patch and partial-output QC. The120s run timed out
+incomplete; no catalog or speedup is claimed. The scheduler investigation below
+remains conditional on later evidence, not a prescribed rewrite.
 
 ### Bounded repair sequence
 
@@ -95,8 +123,9 @@ high-copy matching, chaining, masking, or writing.
    window covered by an earlier query; a mostly covered selected group; a tiny
    residual needing surrounding context; and repeated copies at distinct source
    coordinates. Also test directional/asymmetric discovery.
-3. Separate an **unassigned core** from its **query context**. Generate coverage
-   work from remaining source intervals, preserving useful flanks and the
+3. If scheduling changes are justified, separate an **unassigned core** from its
+   **query context**. Generate coverage work from remaining source intervals only
+   with discovery obligations preserved, retaining useful flanks and the
    declared threshold denominator. Do not silently shrink a 10kb query to a
    tiny core and thereby change eligibility.
 4. Revalidate work when dequeued. Suppress demonstrably redundant work, but
@@ -118,8 +147,9 @@ known homolog/copy recall and context-sensitive fixtures, not only speed or
 byte-identical BED output. Scope syng-specific assumptions to syng; do not
 silently change PAF/BFS/DFS semantics. Check minimum-size omissions explicitly.
 
-**Acceptance:** fewer demonstrably redundant backend calls; no lost source
-occurrences or required homology in adversarial fixtures; errors and seed
+**Acceptance:** reduced measured dominant work (lookup/coordinate recovery or
+proven redundant dispatches), without lost source occurrences or required
+homology in adversarial fixtures; errors and seed
 progress preserved; bounded yeast completion and resource measurements. Source
 coverage, validated homology and callable coverage remain separate gates.
 
@@ -196,8 +226,9 @@ beyond a single stored MEM is panel-model evidence, not preserved mate linkage.
 
 ## Execution order
 
-1. Repair and independently review partition scheduling; complete bounded yeast
-   discovery without hiding remaining source sequence.
+1. Repair and independently review the measured partition bottleneck (currently
+   lookup in the early sample); complete bounded yeast discovery without hiding
+   remaining source sequence. Scheduling changes require their own evidence.
 2. Validate chunk homology, spanning candidates and source-coordinate links;
    reconcile this contract with the formal specification as tests settle it.
 3. Implement and exhaustively test the sample count primitive and contextual

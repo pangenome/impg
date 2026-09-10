@@ -19,8 +19,12 @@ below has an explicit gate; dataset preparation is not genotype validation.
 
 ## Execution state
 
-**Current priority:** repair remaining partition scheduling, then validate the
-chunk catalog before implementing sample inference. The
+**Current priority:** repair the measured partition bottleneck, then validate the
+chunk catalog before implementing sample inference. The first256-query profile
+places94.8% of query time in raw lookup, with no repeated tuples or zero-output
+queries; all three covered-source queries discover additional source bases.
+Optimize occurrence lookup/coordinate recovery first, preserving exact results.
+This early sample does not settle late-stage scheduling cost. The
 [partition/inference contract and repair plan](partition-inference-contract.md)
 records the current source audit, high-copy semantics, shared-count math and
 acceptance gates. It supersedes the initial pilot status below:
