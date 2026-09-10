@@ -13,6 +13,9 @@ graph is required.
 - **[Yeast execution plan](yeast-plan.md)** — staged whole-pangenome chunk
   catalog, sample index, in-graph/recombinant/hold-out validation, and genome
   mosaic milestones.
+- **[Partition/inference contract and repair plan](partition-inference-contract.md)**
+  — current partition failure evidence, bounded scheduling repair, high-copy
+  states, occurrence ownership and shared-count/mosaic constraints.
 - **[Yeast baseline harness](yeast-baseline.md)** — implemented source inventory,
   bounded explicit-query pilot and candidate diagnostics; not a genotyper.
 - **[Formal specification](genotyping.typ)** — the authoritative proposal:

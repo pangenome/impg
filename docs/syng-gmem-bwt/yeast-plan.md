@@ -19,6 +19,25 @@ below has an explicit gate; dataset preparation is not genotype validation.
 
 ## Execution state
 
+**Current priority:** repair remaining partition scheduling, then validate the
+chunk catalog before implementing sample inference. The
+[partition/inference contract and repair plan](partition-inference-contract.md)
+records the current source audit, high-copy semantics, shared-count math and
+acceptance gates. It supersedes the initial pilot status below:
+
+- Partition/scaffold repair #241 and ambiguity repair #242 are reviewed draft
+  PRs, unmerged; Rust CI passed. The ambiguity-safe rebuilt index is
+  `~/yeast/syng-k63-s8-seed7-acgt-only/` (metadata v2); retain the old index only
+  for diagnosis. Fresh rebuilding is required, not legacy sidecar repair.
+- With both fixes and unchanged thresholds, the 1,200s full-panel run timed out
+  after 3,876 partitions and 2,959,027,068 emitted bp (88.6739%). Bounds and
+  non-overlap QC passed; 377,949,788 source bp remain uncovered. Output:
+  `~/yeast/partition-acgt-only-w10k-d1k-full-1200s/`. This is not an accepted
+  inference catalog. Diagnose redundant scheduling versus genuine repeat cost
+  before increasing budgets or changing policy.
+
+### Earlier baseline and data provenance
+
 - Work branch: `work/yeast-gmem-bwt-inference`, initially based on the reviewed
   specification branch at `b2692a1`. Documentation PR #239 remains separate.
 - Panel build completed with the installed impg 0.5.0 binary (upstream Rust
@@ -83,6 +102,12 @@ it continues over remaining source intervals. A small chromosome pilot should
 use explicit `query` seeds, not pretend that this option limits partitioning.
 
 ### Pilot and full catalog
+
+Before expanding the catalog, execute the bounded scheduling repair in the
+[partition/inference contract](partition-inference-contract.md#next-repair-discovery-scheduling).
+Keep missing core intervals separate from query context; a covered seed can
+still reveal a previously undiscovered homolog. A skip optimization must
+preserve that discovery obligation, not just pass a coverage-union test.
 
 1. Pilot explicit 10 kb seed intervals across one verified nuclear chromosome,
    with a small selection of ordinary and repeated regions. Query the full panel
@@ -196,7 +221,10 @@ collections agree. Measure real yeast build size/time/RSS before optimizing.
 ## 5. Local contextual genotyping over chunks
 
 1. Derive one shared, bounded contextual feature universe from each chunk's
-   eligible candidate haplotypes, preserving zero-count observations.
+   eligible candidate haplotypes, preserving zero-count observations. Distinguish
+   alternative panel homologs from within-haplotype copy number and dispersed
+   copies. Retain occurrence identities and boundary compatibility when grouping
+   locally equivalent candidates.
 2. Query sample MEM-BWT counts and candidate occurrence multiplicities.
 3. Implement contextual COSIGT as the initial scorer. Compare node-only and
    contextual features on the same chunk candidates and evidence conventions;
@@ -226,7 +254,11 @@ failed chunks silently or concatenate chromosomes. The sample MEM-BWT supports
 context within each stored MEM, not mate/read linkage between different MEMs;
 phase beyond that comes from the panel model and must retain uncertainty.
 Shared global feature counts must not become independent observations merely
-because two chunks query them.
+because two chunks query them. The shared-feature expectation in the
+[contract](partition-inference-contract.md#count-and-mosaic-contracts) counts each
+predicted genomic occurrence once despite overlapping query context. Nonlocal
+repeat factors require joint treatment or an explicit approximation; ordinary
+additive local-score dynamic programming is not automatically sufficient.
 
 **Outputs:** local calls, per-chromosome haplotype mosaics, support/phase blocks,
 sequence FASTA where joins are justified, and explicit unknown/gap intervals.
