@@ -1,0 +1,40 @@
+name: Typst specification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/syng-gmem-bwt/**'
+      - '.github/workflows/typst.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/syng-gmem-bwt/**'
+      - '.github/workflows/typst.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: typst-community/setup-typst@48aeee7543d37f01afd1ffb27307dc277387ba13 # v4
+        with:
+          typst-version: '0.14.2'
+
+      - name: Compile genotyping specification
+        run: |
+          mkdir -p target/docs
+          typst compile docs/syng-gmem-bwt/genotyping.typ target/docs/syng-gmem-bwt-genotyping.pdf
+          test -s target/docs/syng-gmem-bwt-genotyping.pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syng-gmem-bwt-genotyping
+          path: target/docs/syng-gmem-bwt-genotyping.pdf
+          if-no-files-found: error
