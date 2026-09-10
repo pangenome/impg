@@ -147,11 +147,24 @@ outputs match the original reference. Total sidecar storage grows444.08 to
 took9.13s. Evidence: `~/yeast/syng-k63-s8-seed7-acgt-only-pos64/`, with copied
 index, frozen reference executables, manifest, timing/resource logs and hashes.
 
-A fresh unchanged-matching-parameter full-panel run is now testing sample64 at
-`~/yeast/partition-pos64-w10k-d1k-full-1200s/`, with the same1200s limit. It will
-compare all common partition BEDs with the sample256 run, as well as bounds and
-coordinate-union accounting. Completion and catalog acceptance are still pending.
-The demonstrated improvement is in coordinate lookup, not fewer discovery calls.
+The unchanged-matching-parameter sample64 run at
+`~/yeast/partition-pos64-w10k-d1k-full-1200s/` hit its1200s diagnostic limit after
+14,717 partitions,369,658 intervals and3,276,585,382 emitted bp (98.1902%). All
+3,876 common partition files were byte-identical to sample256; bounds and
+coordinate-union QC passed. Of60,391,474 uncovered bp,60,285,251 were in6,681 gaps
+at least3kb, so this is not simply a minimum-size omission. Progress continued
+through the remaining fragmented source intervals. The demonstrated improvement
+is in coordinate lookup, not fewer discovery calls.
+
+**User decision: let the long tail finish.** Repeated20-minute cutoffs are no
+longer an acceptance policy now that the diagnosed failures and lookup tradeoff
+are understood. The terminated process cannot be resumed with the current CLI;
+a fresh run at `~/yeast/partition-pos64-w10k-d1k-to-completion/` uses the same
+sample64 index, uncached reference binary,16 threads and matching parameters,
+with **no wall-clock cutoff**. No additional parallelism or performance tuning
+is planned. Retain results, compare common BEDs and complete final QC on natural
+exit. Small incremental source gains are not grounds to interrupt healthy
+progress. Completion and biological catalog acceptance remain separate gates.
 
 ### Bounded repair sequence
 
@@ -190,7 +203,9 @@ silently change PAF/BFS/DFS semantics. Check minimum-size omissions explicitly.
 **Acceptance:** reduced measured dominant work (lookup/coordinate recovery or
 proven redundant dispatches), without lost source occurrences or required
 homology in adversarial fixtures; errors and seed
-progress preserved; bounded yeast completion and resource measurements. Source
+progress preserved; natural yeast completion and resource measurements. Use
+bounded experiments for diagnosis, not repeated termination of healthy long-tail
+discovery. Source
 coverage, validated homology and callable coverage remain separate gates.
 
 ## High-copy regions are normal states
@@ -266,9 +281,10 @@ beyond a single stored MEM is panel-model evidence, not preserved mate linkage.
 
 ## Execution order
 
-1. Repair and independently review the measured partition bottleneck (currently
-   lookup in the early sample); complete bounded yeast discovery without hiding
-   remaining source sequence. Scheduling changes require their own evidence.
+1. Let the sample64 reference run complete naturally and validate source
+   accounting and common outputs. No further tuning is currently requested.
+   Any future source optimization or scheduling change requires its own evidence
+   and independent review; do not hide remaining source sequence.
 2. Validate chunk homology, spanning candidates and source-coordinate links;
    reconcile this contract with the formal specification as tests settle it.
 3. Implement and exhaustively test the sample count primitive and contextual

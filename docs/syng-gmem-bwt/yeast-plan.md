@@ -45,10 +45,17 @@ acceptance gates. It supersedes the initial pilot status below:
   diagnostic commit295bca9. No cache/scheduling change is accepted.
 - Existing positional resampling64 versus256 on a separate ambiguity-safe index
   copy gives2.2–3.6x faster isolated lookups, with identical outputs and50.74 MiB
-  extra sidecars. No default or matching-policy change. Full partition replay at
-  `~/yeast/partition-pos64-w10k-d1k-full-1200s/` is running with the same1200s
-  bound; common BED equality, final coverage and completion remain gates. See
-  the contract for timings, hashes and the storage tradeoff.
+  extra sidecars. No default or matching-policy change. The1200s replay reached
+  98.1902% source coverage, with all3,876 common partition BEDs byte-identical.
+  At the user's request, a fresh run at
+  `~/yeast/partition-pos64-w10k-d1k-to-completion/` is now allowed to finish
+  **without a wall-clock cutoff**. No additional tuning or parallelism changes.
+  See the contract for final accounting gates and the storage tradeoff.
+- A static `S288C#0#chrI` overview shows21 partitions covering219,929 bp, a broad
+  interior band of202–211 identities, sparse regions, and a160–170kb group with
+  574 intervals from110 identities. These are candidate ownership groups, not
+  validated spanning homology. [Plots, membership heatmap and tables](http://hypervolu.me/~erik/yeast/syng-chrI-partitions-20260910T231731Z.html)
+  are uploaded with verified remote checksums.
 
 ### Earlier baseline and data provenance
 
