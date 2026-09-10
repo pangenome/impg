@@ -104,10 +104,11 @@ SK1#1#chrI           52740   102721
 
 ## Commands
 
-All commands accept `-a` (alignment files, mixed PAF/1ALN/TPA) or
-`--alignment-list` (text file, one per line), `-t` / `--threads`, and
-`-v 0|1|2` for verbosity. Every command has a `--help` with the
-exhaustive flag list — this section covers the flags you'll actually turn.
+Alignment-backed commands accept `-a` (alignment files, mixed PAF/1ALN/TPA)
+or `--alignment-list` (text file, one per line). Other commands have their own
+input flags; for example, `map -a` takes a syng index. Use each command's
+`--help` for its input, threading, and verbosity options. This section covers
+the commonly used flags.
 
 ### `query` — project a range through alignments
 
@@ -512,23 +513,11 @@ then emit the finalized graph with default self-loop normalization and `Ygs`
 sorting, for example `-o gfa:pggb:crush` or `-o gfa:seqwish:crush`.
 
 For a C4/HPRCv2-style local render where terminal assembly N blocks would
-otherwise become noisy graph tips:
+otherwise become noisy graph tips (replace `<C4-range>` with `start-end`):
 
 ```bash
 impg query -a ~/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
-  -r GRCh38#0#chr6:<C4-range> \
-  --sequence-files ~/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
-  -d 100000 \
-  -o gfa:cut-n=100:pggb \
-  -O c4.cutn100.pggb.gfa
-```
-
-For a C4/HPRCv2-style local render where terminal assembly N blocks would
-otherwise become noisy graph tips:
-
-```bash
-impg query -a ~/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
-  -r GRCh38#0#chr6:<C4-range> \
+  -r 'GRCh38#0#chr6:<C4-range>' \
   --sequence-files ~/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
   -d 100000 \
   -o gfa:cut-n=100:pggb \
@@ -597,6 +586,9 @@ Combining `--aligner fastga` with `--sparsify` or `--aligner wfmash`
 with `--fastga-frequency` is rejected at parse time.
 
 ## Common options
+
+These options apply to alignment-backed commands. Other subcommands may reuse
+short flags for different inputs; consult their `--help`.
 
 - `-a / --alignment-files` — one or more PAF/1ALN/TPA files (can be `.gz`).
 - `--alignment-list` — text file, one alignment path per line.
