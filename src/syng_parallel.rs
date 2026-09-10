@@ -7,17 +7,13 @@
 use rayon::prelude::*;
 use std::io;
 
-use crate::syng::{packed_syncmer_word_len, PackedSyncmer, SyncmerParams};
+use crate::syng::{
+    encode_query_base, packed_syncmer_word_len, PackedSyncmer, SyncmerParams, SyncmerWindowValidity,
+};
 use crate::syng_ffi;
 
 fn base_code(base: u8) -> u8 {
-    match base {
-        b'a' | b'A' | 0 => 0,
-        b'c' | b'C' | 1 => 1,
-        b'g' | b'G' | 2 => 2,
-        b't' | b'T' | 3 => 3,
-        _ => 0,
-    }
+    encode_query_base(base).0
 }
 
 fn complement_code(code: u8) -> u8 {
@@ -45,7 +41,8 @@ fn forward_is_canonical(syncmer: &[u8]) -> bool {
     true
 }
 
-/// Convert a sequence to syng's numeric DNA encoding.
+/// Convert to C-safe numeric DNA. Invalid bytes become temporary zeroes; callers
+/// extracting seeds must separately validate the full original window.
 pub fn numeric_sequence(seq: &[u8]) -> Vec<u8> {
     seq.iter().map(|&b| base_code(b)).collect()
 }
@@ -89,6 +86,7 @@ pub fn extract_packed_syncmers(
     seq_buf.push(0);
 
     let mut out = Vec::new();
+    let mut validity = SyncmerWindowValidity::new(seq);
     unsafe {
         let seqhash =
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
@@ -96,8 +94,11 @@ pub fn extract_packed_syncmers(
             return Err(io::Error::other("seqhashCreate returned null"));
         }
 
-        let sit =
-            syng_ffi::syncmerIterator(seqhash, seq_buf.as_mut_ptr() as *mut std::os::raw::c_char, seq.len() as i32);
+        let sit = syng_ffi::syncmerIterator(
+            seqhash,
+            seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
+            seq.len() as i32,
+        );
         if sit.is_null() {
             syng_ffi::impg_seqhashDestroy(seqhash);
             return Err(io::Error::other("syncmerIterator returned null"));
@@ -117,6 +118,9 @@ pub fn extract_packed_syncmers(
                         seq.len()
                     ),
                 ));
+            }
+            if !validity.is_valid(start, syncmer_len) {
+                continue;
             }
             out.push(pack_canonical_syncmer(&seq_buf[start..start + syncmer_len]));
         }

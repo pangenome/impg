@@ -5481,3 +5481,125 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The FASTA/AGC streaming paths and parallel dictionary prepass must use the
+/// same original-window alphabet, including all-N and too-short named paths.
+#[test]
+fn test_syng_ambiguity_fasta_agc_serial_parallel() {
+    let _guard = lock_syng();
+    let bin = impg_binary().expect("build impg before running CLI tests");
+    let dir = tempfile::tempdir().unwrap();
+    let mut flanks = vec![4; 100];
+    flanks.extend(make_sequence_numeric(2000, 42));
+    flanks.extend(vec![4; 10_000]);
+    flanks.extend(make_sequence_numeric(2000, 99));
+    let sequences = vec![
+        ("flanks", flanks),
+        ("unknown", vec![4; 20_000]),
+        ("short", vec![0, 1, 2, 3]),
+        ("polyA", vec![0; 2000]),
+        ("repeat", vec![0, 1, 2, 3].repeat(500)),
+    ];
+    let fasta = dir.path().join("mixed.fa");
+    let mut fasta_data = Vec::new();
+    for (name, sequence) in &sequences {
+        fasta_data.extend(format!(">{name}#0#chr1\n").as_bytes());
+        fasta_data.extend(numeric_to_ascii(sequence));
+        fasta_data.push(b'\n');
+    }
+    std::fs::write(&fasta, fasta_data).unwrap();
+    let agc = dir.path().join("mixed.agc");
+    let config = StreamingQueueConfig {
+        queue_capacity: 10 * 1024 * 1024,
+        num_threads: 1,
+        verbosity: 0,
+        ..Default::default()
+    };
+    let mut compressor =
+        StreamingQueueCompressor::with_splitters(agc.to_str().unwrap(), config, AHashSet::new())
+            .unwrap();
+    for (name, sequence) in &sequences {
+        compressor
+            .push((*name).into(), format!("{name}#0#chr1"), sequence.clone())
+            .unwrap();
+    }
+    compressor.finalize().unwrap();
+    let mut baseline = None;
+    for use_agc in [false, true] {
+        for parallel in [false, true] {
+            let prefix = dir.path().join(format!("mixed-{use_agc}-{parallel}.syng"));
+            let prefix = prefix.to_str().unwrap();
+            let input = if use_agc { &agc } else { &fasta };
+            let mut command = Command::new(&bin);
+            command.args([
+                "syng",
+                if use_agc { "--agc" } else { "-f" },
+                input.to_str().unwrap(),
+                "-o",
+                prefix,
+                "--position-sample-rate",
+                "7",
+            ]);
+            if parallel {
+                command.arg("--parallel-dictionary");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let index =
+                impg::syng::SyngIndex::load(prefix, impg::syng::SyncmerParams::default()).unwrap();
+            assert_eq!(index.name_map.path_to_name.len(), sequences.len());
+            let mut walks = BTreeMap::new();
+            for (name, sequence) in &sequences {
+                let path_name = format!("{name}#0#chr1");
+                let path = index.name_map.name_to_path[&path_name] as usize;
+                assert_eq!(index.name_map.path_to_length[path], sequence.len() as u64);
+                let walk = index
+                    .walk_path_range(path, 0, sequence.len() as u64)
+                    .unwrap();
+                let known_count = index.name_map.path_starts[path]
+                    .as_ref()
+                    .unwrap()
+                    .num_syncmers;
+                assert_eq!(walk.len(), known_count as usize);
+                if *name == "unknown" || *name == "short" {
+                    assert!(walk.is_empty());
+                    assert!(index
+                        .query_region(&path_name, 0, sequence.len() as u64, 0)
+                        .unwrap()
+                        .is_empty());
+                } else {
+                    assert!(!walk.is_empty());
+                }
+                let spelled: Vec<_> = walk
+                    .iter()
+                    .map(|&(node, pos)| {
+                        let spelling = index.syncmer_seq(node).to_ascii_uppercase();
+                        let window = &sequence[pos as usize..pos as usize + 63];
+                        assert!(window.iter().all(|&b| b < 4));
+                        assert_eq!(spelling, numeric_to_ascii(window));
+                        (spelling, pos)
+                    })
+                    .collect();
+                if *name == "flanks" {
+                    assert!(walk[0].1 >= 100);
+                    assert!(walk.windows(2).any(|w| w[1].1 - w[0].1 >= 10_000));
+                }
+                walks.insert(path_name, spelled);
+            }
+            assert!(index
+                .query_region("polyA#0#chr1", 0, 2000, 0)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.genome != "unknown#0#chr1"));
+            if let Some(expected) = &baseline {
+                assert_eq!(&walks, expected);
+            } else {
+                baseline = Some(walks);
+            }
+        }
+    }
+}
