@@ -13,6 +13,8 @@ graph is required.
 - **[Yeast execution plan](yeast-plan.md)** — staged whole-pangenome chunk
   catalog, sample index, in-graph/recombinant/hold-out validation, and genome
   mosaic milestones.
+- **[Yeast baseline harness](yeast-baseline.md)** — implemented source inventory,
+  bounded explicit-query pilot and candidate diagnostics; not a genotyper.
 - **[Formal specification](genotyping.typ)** — the authoritative proposal:
   weighted substring counts, shared contextual features, exposure and off-locus
   background, contextual COSIGT/count scoring, and windowed mosaic inference.

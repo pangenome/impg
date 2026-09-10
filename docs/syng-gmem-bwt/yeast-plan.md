@@ -21,14 +21,32 @@ below has an explicit gate; dataset preparation is not genotype validation.
 
 - Work branch: `work/yeast-gmem-bwt-inference`, initially based on the reviewed
   specification branch at `b2692a1`. Documentation PR #239 remains separate.
-- Panel build started from the installed impg 0.5.0 binary (upstream Rust source
-  `7bd50a8`) with k=63, s=8, seed=7, position sampling 256, 16 threads and a
-  parallel dictionary prepass.
+- Panel build completed with the installed impg 0.5.0 binary (upstream Rust
+  source `7bd50a8`), k=63, s=8, seed=7, position sampling 256, 16 threads and a
+  parallel dictionary prepass: 4m50.51s, 9,967,384 KiB peak RSS, approximately
+  448 MiB of index sidecars. The archive contains 9,901 paths / 3,336,976,856 bp,
+  with 167 sample-name tokens and 235 sample/haplotype identities, not 235
+  independently verified strains. S288C, SK1 and Y12 are present by name.
 - Data/build outputs: `/home/erikg/yeast/syng-k63-s8-seed7/`. The input archive is
   not modified. The build manifest records its SHA-256 and command parameters.
-- No read datasets have been downloaded, and no new inference accuracy has been
-  measured. Later updates should replace this state with actual artifact paths
-  and gate results, not predicted results.
+- The [baseline harness](yeast-baseline.md) passed 29 fixture tests and a real
+  four-window query on `S288C#0#chrI:100000-140000`: 960 candidate intervals in
+  8.44s query time, including reverse-strand and multiple same-path occurrences.
+  Outputs: `~/yeast/baseline-inventory/` and
+  `~/yeast/baseline-pilot-chrI-4windows/`, with a successful hardened rerun in
+  `~/yeast/baseline-pilot-chrI-4windows-hardened/`. These are bounded candidate
+  diagnostics, not validated homology, spanning haplotypes or genotype results.
+- The full-panel partition discovery pilot **hit its 600-second timeout** at
+  `~/yeast/partition-pilot-w10k-d1k/` (exit 124). It started from S288C nuclear
+  chromosomes. Its last progress record reported partition202 and 16,190,787
+  total partitioned bp (0.4852%); no final result files were emitted. This run
+  is incomplete and not accepted as a catalog. Diagnose partition discovery
+  and source accounting against explicit queries before increasing its budget.
+- Public SK1/Y12 reads are downloaded under `~/yeast/reads/`: all four paired
+  FASTQ files passed their ENA expected-size and MD5 checks. The frozen file
+  list is `ena-manifest.tsv`; verification is recorded in
+  `download-report.json`. Assembly-truth correspondence remains unverified.
+  No new inference accuracy has been measured.
 
 ## 1. Freeze and inventory the panel
 
