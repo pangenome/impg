@@ -392,6 +392,8 @@ pub fn partition_alignments(
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
+            retain_seed_occurrence(&mut overlaps, seq_id, start, end);
+
             // Ignore CIGAR strings and target intervals.
             //debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
             //let merge_start = Instant::now();
@@ -934,6 +936,26 @@ fn select_and_window_sequences(
     windows.extend(new_windows);
 
     Ok(())
+}
+
+/// The selected source occurrence is known even if discovery returns no
+/// eligible homologs. Send it through normal merging/masking so only its
+/// unclaimed bases are emitted, and missing-region selection makes progress.
+fn retain_seed_occurrence(
+    overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
+    seq_id: u32,
+    start: i32,
+    end: i32,
+) {
+    let seed = Interval {
+        first: start,
+        last: end,
+        metadata: seq_id,
+    };
+    overlaps.push((seed, Vec::new(), seed));
+    // mask_and_update_regions needs contiguous sequence runs even when
+    // merge_distance < 0 disables the initial merge/sort.
+    overlaps.sort_by_key(|(interval, _, _)| interval.metadata);
 }
 
 fn merge_overlaps(
@@ -1786,4 +1808,79 @@ fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     }
 
     Ok((start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_seed_makes_progress_without_homologs() {
+        let mut masked = FxHashMap::default();
+        masked.insert(0, SortedRanges::new(10_000, 0));
+        let mut missing = FxHashMap::default();
+        let mut ranges = SortedRanges::new(10_000, 0);
+        ranges.insert((0, 10_000));
+        missing.insert(0, ranges);
+        let mut overlaps = Vec::new();
+        retain_seed_occurrence(&mut overlaps, 0, 0, 10_000);
+        merge_overlaps(&mut overlaps, 1000);
+        let out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            (out[0].0.metadata, out[0].0.first, out[0].0.last),
+            (0, 0, 10_000)
+        );
+        assert!(
+            out[0].1.is_empty(),
+            "seed retention must not fabricate an alignment"
+        );
+        assert!(
+            missing.is_empty(),
+            "there must be no interval left to reselect"
+        );
+    }
+
+    #[test]
+    fn retained_seed_respects_existing_masks_and_does_not_duplicate_self() {
+        for merge_distance in [-1, 0, 1000] {
+            let mut masked = FxHashMap::default();
+            let mut masks = SortedRanges::new(1000, 0);
+            masks.insert((0, 200));
+            masks.insert((400, 600));
+            masked.insert(1, masks);
+            let mut missing = FxHashMap::default();
+            let mut ranges = SortedRanges::new(1000, 0);
+            ranges.insert((200, 400));
+            ranges.insert((600, 1000));
+            missing.insert(1, ranges);
+            let self_hit = Interval {
+                first: 250,
+                last: 350,
+                metadata: 1,
+            };
+            let other = Interval {
+                first: 0,
+                last: 100,
+                metadata: 0,
+            };
+            let mut overlaps = vec![(self_hit, Vec::new(), self_hit), (other, Vec::new(), other)];
+            retain_seed_occurrence(&mut overlaps, 1, 0, 1000);
+            merge_overlaps(&mut overlaps, merge_distance);
+            let mut out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0);
+            merge_overlaps(&mut out, 0);
+            let seed_parts: Vec<_> = out
+                .iter()
+                .filter(|h| h.0.metadata == 1)
+                .map(|h| (h.0.first, h.0.last))
+                .collect();
+            assert_eq!(seed_parts, vec![(200, 400), (600, 1000)]);
+            assert!(missing.is_empty());
+            // Reprocessing an already claimed seed emits nothing.
+            retain_seed_occurrence(&mut overlaps, 1, 0, 1000);
+            assert!(
+                mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0).is_empty()
+            );
+        }
+    }
 }
