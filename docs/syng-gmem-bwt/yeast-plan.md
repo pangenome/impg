@@ -40,6 +40,16 @@ acceptance gates. It supersedes the initial pilot status below:
   inference catalog. Diagnose redundant scheduling versus genuine repeat cost
   before increasing budgets or changing policy.
 
+- The tested primitive-step memo and coarse-grain variant were rejected: exact
+  outputs, but slower real queries. They are archived; source is restored to
+  diagnostic commit295bca9. No cache/scheduling change is accepted.
+- Existing positional resampling64 versus256 on a separate ambiguity-safe index
+  copy gives2.2–3.6x faster isolated lookups, with identical outputs and50.74 MiB
+  extra sidecars. No default or matching-policy change. Full partition replay at
+  `~/yeast/partition-pos64-w10k-d1k-full-1200s/` is running with the same1200s
+  bound; common BED equality, final coverage and completion remain gates. See
+  the contract for timings, hashes and the storage tradeoff.
+
 ### Earlier baseline and data provenance
 
 - Work branch: `work/yeast-gmem-bwt-inference`, initially based on the reviewed

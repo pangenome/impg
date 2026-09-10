@@ -113,6 +113,46 @@ summary, frozen binary/source patch and partial-output QC. The120s run timed out
 incomplete; no catalog or speedup is claimed. The scheduler investigation below
 remains conditional on later evidence, not a prescribed rewrite.
 
+### Rejected memo experiment and denser-checkpoint experiment
+
+A bounded query-local primitive-step cache was implemented and tested, including
+one larger-grain Rayon variant. A sequential controlled comparison of frozen
+reference/default/coarse builds at16 threads produced identical canonical
+interval/anchor outputs in all45 runs. Nevertheless, the default memo was
+8.6–18.3% slower and coarse memo12.6–31.6% slower across the five query medians.
+Independent review blocked production adoption. The experiment is archived under
+`target/experiments/syng-partition-scheduling/lookup-optimization/`; production
+source was restored to clean diagnostic commit295bca9. No cache or grain change
+is accepted. Toy operation savings were not evidence of a real speedup.
+
+Using the ORIGINAL uncached lookup code, an independent index copy was resampled
+with existing `syng-repair --position-sample-rate 64 --force`, instead of256.
+Only positional sidecars changed; original files and the copied graph,
+dictionary, names and metadata were hash-checked unchanged. This is an explicit
+acceleration/storage experiment, **not a default, sketch or matching-policy
+change**, and not an ambiguity cleanup of a legacy index.
+
+| Query | Sample256 median | Sample64 median |
+|---|---:|---:|
+| `S288C#0#chrIV:880000-890000` | 2.206s | 0.735s |
+| `S288C#0#chrIV:990000-1000000` | 2.157s | 0.663s |
+| `S288C#0#chrIII:90000-100000` | 1.548s | 0.505s |
+| `S288C#0#chrI:100000-110000` | 0.226s | 0.102s |
+| `S288C#0#chrXII:470000-480000` | 0.107s | 0.030s |
+
+These are three-repetition exploratory medians, excluding index loading and
+output serialization; not a randomized benchmark. All15 sample64 canonical
+outputs match the original reference. Total sidecar storage grows444.08 to
+494.83 MiB (+50.74 MiB); position sidecars alone grow20.49 to71.23 MiB. Resampling
+took9.13s. Evidence: `~/yeast/syng-k63-s8-seed7-acgt-only-pos64/`, with copied
+index, frozen reference executables, manifest, timing/resource logs and hashes.
+
+A fresh unchanged-matching-parameter full-panel run is now testing sample64 at
+`~/yeast/partition-pos64-w10k-d1k-full-1200s/`, with the same1200s limit. It will
+compare all common partition BEDs with the sample256 run, as well as bounds and
+coordinate-union accounting. Completion and catalog acceptance are still pending.
+The demonstrated improvement is in coordinate lookup, not fewer discovery calls.
+
 ### Bounded repair sequence
 
 1. Add focused per-query counters/timings: queued and dispatched queries,
