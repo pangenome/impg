@@ -92,7 +92,7 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     )
 }
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
-    serde_json::from_reader(File::open(path)?).map_err(io::Error::other)
+    serde_json::from_reader(io::BufReader::new(File::open(path)?)).map_err(io::Error::other)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("incomplete");
