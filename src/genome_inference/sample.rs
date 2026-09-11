@@ -133,6 +133,9 @@ impl SampleIndex {
         atomic_write(path, &bytes)
     }
     pub fn load(path: &Path, panel: &PanelIdentity) -> io::Result<Self> {
+        Self::load_with_checksum(path, panel).map(|(sample, _)| sample)
+    }
+    pub fn load_with_checksum(path: &Path, panel: &PanelIdentity) -> io::Result<(Self, String)> {
         let bytes = fs::read(path)?;
         if bytes.len() < 24 || &bytes[..8] != b"IMPGMEM1" {
             return Err(invalid("sample index header mismatch"));
@@ -160,7 +163,7 @@ impl SampleIndex {
         if sample.stats.collection_symbols != sample.counts.symbols() {
             return Err(invalid("sample symbol count mismatch"));
         }
-        Ok(sample)
+        Ok((sample, format!("{digest:016x}")))
     }
 }
 

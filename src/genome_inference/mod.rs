@@ -1,7 +1,9 @@
-//! Experimental ownership-group diagnostics, not validated genotype or mosaic inference.
+//! Experimental ownership diagnostics, quantitative haploid calls and source-path threads.
 pub mod calling;
 pub mod catalog;
+pub mod genotype;
 pub mod sample;
+pub mod threading;
 
 use crate::sample_mem_bwt::invalid;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -121,6 +123,9 @@ pub fn save_catalog(path: &Path, catalog: &catalog::Catalog) -> io::Result<()> {
     )
 }
 pub fn load_catalog(path: &Path) -> io::Result<catalog::Catalog> {
+    load_catalog_with_checksum(path).map(|(catalog, _)| catalog)
+}
+pub fn load_catalog_with_checksum(path: &Path) -> io::Result<(catalog::Catalog, String)> {
     let envelope: Envelope<catalog::Catalog> = read_json(path)?;
     let bytes = serde_json::to_vec(&envelope.payload).map_err(io::Error::other)?;
     if envelope.version != FORMAT_VERSION
@@ -129,7 +134,7 @@ pub fn load_catalog(path: &Path) -> io::Result<catalog::Catalog> {
         return Err(invalid("catalog version/checksum mismatch"));
     }
     envelope.payload.validate()?;
-    Ok(envelope.payload)
+    Ok((envelope.payload, envelope.checksum))
 }
 
 /// Reserve a NEW directory atomically; even empty preexisting directories are
@@ -138,10 +143,17 @@ pub fn with_output(
     out: &Path,
     operation: impl FnOnce() -> io::Result<serde_json::Value>,
 ) -> io::Result<()> {
+    with_output_model(out, MODEL, operation)
+}
+pub fn with_output_model(
+    out: &Path,
+    model: &str,
+    operation: impl FnOnce() -> io::Result<serde_json::Value>,
+) -> io::Result<()> {
     fs::create_dir(out)?;
     write_json(
         &out.join("manifest.json"),
-        &serde_json::json!({"version": FORMAT_VERSION, "status": "running", "experimental": true, "model": MODEL}),
+        &serde_json::json!({"version": FORMAT_VERSION, "status": "running", "experimental": true, "model": model}),
     )?;
     let started = std::time::Instant::now();
     match operation() {
@@ -150,7 +162,7 @@ pub fn with_output(
                 &out.join("manifest.json"),
                 &serde_json::json!({
                 "version": FORMAT_VERSION, "status": "succeeded", "experimental": true,
-                "model": MODEL, "elapsed_seconds": started.elapsed().as_secs_f64(), "stats": stats,
+                "model": model, "elapsed_seconds": started.elapsed().as_secs_f64(), "stats": stats,
                 "argv": std::env::args().collect::<Vec<_>>() }),
             );
             if result.is_err() {
@@ -162,10 +174,11 @@ pub fn with_output(
             // Intermediate reusable objects remain diagnostic only under failed status.
             let _ = fs::remove_file(out.join("calls.json"));
             let _ = fs::remove_file(out.join("evaluation.json"));
+            let _ = fs::remove_file(out.join("threads.json"));
             let _ = write_json(
                 &out.join("manifest.json"),
                 &serde_json::json!({"version": FORMAT_VERSION,
-                "status": "failed", "experimental": true, "model": MODEL, "error": error.to_string()}),
+                "status": "failed", "experimental": true, "model": model, "error": error.to_string()}),
             );
             Err(error)
         }

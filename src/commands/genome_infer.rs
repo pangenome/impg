@@ -1,5 +1,5 @@
-//! Explicit bootstrap CLI; deliberately independent of the legacy infer stitcher.
-use crate::genome_inference::{self as genome, calling, catalog, sample};
+//! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
+use crate::genome_inference::{self as genome, calling, catalog, genotype, sample, threading};
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
 use clap::{Args, Subcommand};
@@ -29,7 +29,7 @@ pub struct CallOptions {
     /// Acknowledge bounds/anchors are NOT validated homology, alleles or copy structure
     #[arg(long)]
     allow_unvalidated_catalog: bool,
-    /// Only 1 supported; still occurrence diagnostics, not certified haploid genotypes
+    /// Only 1 supported; interpretation depends on the selected command/model
     #[arg(long, default_value_t = 1)]
     ploidy: usize,
     /// Evaluation-only JSON; opened only after frozen calls are written
@@ -62,6 +62,35 @@ pub enum Command {
         catalog: PathBuf,
         #[command(flatten)]
         options: CallOptions,
+    },
+    /// Experimental quantitative haploid source bundles, optionally threaded on an explicit axis
+    Genotype {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        sample: PathBuf,
+        #[arg(long)]
+        catalog: PathBuf,
+        #[command(flatten)]
+        options: CallOptions,
+        /// Independently declared haploid sequencing depth, never estimated from truth
+        #[arg(long)]
+        haploid_depth: f64,
+        /// Positive expected background MEM-substring count per factor
+        #[arg(long, default_value_t = 0.1)]
+        background: f64,
+        /// Working mean Poisson deviance cutoff; not a calibrated significance level
+        #[arg(long, default_value_t = 10.0)]
+        max_mean_deviance: f64,
+        /// Version-1 reference axis; omitted groups still have independent partition calls
+        #[arg(long)]
+        axis: Option<PathBuf>,
+        /// Cost of source-path/orientation/nonmonotonic changes; reset at chromosomes
+        #[arg(long, default_value_t = 10.0)]
+        switch_penalty: f64,
+        /// Debug only: emit reproducible per-factor counts/exposures and bundle multiplicities (potentially huge)
+        #[arg(long)]
+        include_feature_details: bool,
     },
     /// One-command bootstrap: reads -> sample index -> catalog -> diagnostics -> evaluation
     Run {
@@ -140,6 +169,80 @@ pub fn run(command: Command) -> io::Result<()> {
             }
             let sample = sample::SampleIndex::load(&sample, &identity)?;
             finish_calls(&common.out_dir, &catalog, &sample, options)
+        }),
+        Command::Genotype {
+            common,
+            sample,
+            catalog,
+            options,
+            haploid_depth,
+            background,
+            max_mean_deviance,
+            axis,
+            switch_penalty,
+            include_feature_details,
+        } => genome::with_output_model(&common.out_dir, genotype::MODEL, || {
+            let parameters = genotype::Parameters {
+                haploid_depth,
+                background,
+                max_mean_deviance,
+            };
+            parameters.validate()?;
+            if !switch_penalty.is_finite() || switch_penalty < 0.0 {
+                return Err(invalid("switch penalty must be finite and nonnegative"));
+            }
+            if options.ploidy != 1 || !options.allow_unvalidated_catalog {
+                return Err(invalid(
+                    "quantitative mode requires ploidy 1 and --allow-unvalidated-catalog",
+                ));
+            }
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let (catalog, catalog_checksum) = genome::load_catalog_with_checksum(&catalog)?;
+            if catalog.panel != identity {
+                return Err(invalid("catalog/current panel fingerprint mismatch"));
+            }
+            let (sample, sample_checksum) =
+                sample::SampleIndex::load_with_checksum(&sample, &identity)?;
+            let started = std::time::Instant::now();
+            let mut calls = genotype::call(
+                &catalog,
+                &sample,
+                parameters,
+                options.allow_unvalidated_catalog,
+                options.ploidy,
+            )?;
+            calls.sample_payload_checksum = Some(sample_checksum);
+            calls.catalog_payload_checksum = Some(catalog_checksum);
+            if !include_feature_details {
+                calls.omit_feature_details();
+            }
+            genome::write_json(&common.out_dir.join("calls.json"), &calls)?;
+            let call_seconds = started.elapsed().as_secs_f64();
+            let started = std::time::Instant::now();
+            let threads = axis
+                .map(|path| {
+                    let axis = genome::read_json(&path)?;
+                    let threads = threading::thread(&catalog, &calls, axis, switch_penalty)?;
+                    genome::write_json(&common.out_dir.join("threads.json"), &threads)?;
+                    Ok::<_, io::Error>(threads)
+                })
+                .transpose()?;
+            let thread_seconds = started.elapsed().as_secs_f64();
+            // Both artifacts are frozen before even opening truth.
+            if let Some(path) = options.truth {
+                let truth = genome::read_json(&path)?;
+                let evaluation = genotype::evaluate(&catalog, &calls, threads.as_ref(), truth)?;
+                genome::write_json(&common.out_dir.join("evaluation.json"), &evaluation)?;
+            }
+            Ok(
+                serde_json::json!({"model": genotype::MODEL, "groups": calls.calls.len(),
+                "global_factors_used": calls.global_factors_used, "excluded_features": calls.excluded_features,
+                "call_and_save_seconds": call_seconds, "thread_and_save_seconds": thread_seconds,
+                "resolved_axis_intervals": threads.as_ref().map(|t| t.resolved_intervals),
+                "unresolved_axis_intervals": threads.as_ref().map(|t| t.unresolved_intervals),
+                "calls_bytes": std::fs::metadata(common.out_dir.join("calls.json"))?.len(),
+                "sample": sample.stats, "catalog_accepted": false}),
+            )
         }),
         Command::Run {
             common,

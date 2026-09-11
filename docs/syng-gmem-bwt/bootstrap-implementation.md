@@ -1,5 +1,9 @@
 # Experimental sample MEM-BWT bootstrap
 
+The subsequent quantitative `genome-infer genotype` and source-path threading
+extension is documented in [quantitative-threading.md](quantitative-threading.md).
+This document describes the preserved presence-only bootstrap commands.
+
 This is **not completed whole-genome genotype/mosaic inference**. The approved
 first executable stage is `impg genome-infer`: reusable sample counts, an
 occurrence-preserving ownership catalog, and **presence-compatibility source
