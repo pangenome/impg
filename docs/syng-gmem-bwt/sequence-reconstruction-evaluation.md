@@ -5,6 +5,9 @@ calls and threads. They do not implement substring cover, rebuild the catalog,
 change genotype/DP parameters, infer recombinant splice positions, or certify a
 complete phased chromosome assembly. Catalog acceptance remains false.
 
+Measured full-genome S288C/SK1 FASTA results and remaining failures are recorded in
+[whole-genome sequence results](whole-genome-sequence-results.md).
+
 ## Commands
 
 After the existing `genome-infer genotype --axis ...` command:

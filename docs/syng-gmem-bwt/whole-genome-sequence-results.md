@@ -1,0 +1,194 @@
+# First whole-genome sequence reconstruction controls
+
+## Status
+
+The first **actual reconstructed FASTA versus whole-truth sequence evaluations**
+completed for both in-panel controls. This advances beyond source-label agreement,
+but **does not pass complete in-panel genome recovery**: substantial sequence
+remains unresolved, and SK1 has erroneous/competing reconstructed fragments.
+Neither sample is a strict held-out test.
+
+Implementation: `83548105bb9228f7e62986f71cc5b82adad1839a`, independently reviewed
+OK with notes, followed by **571 passing parent tests**. The only review note was
+valid concatenated-XZ input being unsupported; documentation and a rejection
+regression were added without changing the reviewed production evaluator.
+Normal `cargo install` produced installed impg SHA256
+`5f12677fc925ebf6074e7e316cb3a056003b28a04cc5b1784ad61a7ccd5b2b47`.
+
+## Frozen experiment
+
+Root: `/home/erikg/yeast/genome-sequence-controls-20260911T160545Z/`.
+The driver, preflight, source snapshot/review evidence and test logs are under
+`/home/erikg/impg/target/experiments/genome-mem-bwt-pipeline/sequence-evaluation/`.
+
+- Reused unchanged S288C/SK1 quantitative calls and threads from the documented
+  [haploid controls](whole-genome-haploid-results.md). No genotype parameter tuning.
+- Reconstructed source-supported blocks with `--gap-policy split`, no gap filler,
+  no imputed source bridges. Exact sequence-equivalent optimal ties emitted
+  standalone unphased fragments, not invented donor paths.
+- Truth was introduced only after FASTA/provenance were frozen. Input SHA256s and
+  reconstruction hashes verified unchanged through both complete runs.
+- Native base-level wfmash b55cf75: `-t4 -H0 -f -n10 -S10 -s1000 -l1000 -p90 -k19`.
+  Raw PAF, stderr, exact arguments/tool fingerprints and resource logs retained.
+- Deterministic greedy whole-record one-to-one accounting: each query and truth
+  coordinate credited at most once; no identity-based sorting or result filtering.
+- All17 truth paths counted. Each truth has17,357 ambiguous bases; these remain in
+  whole-genome lengths, while unknown alignment columns are excluded from base QV.
+
+See [stage commands and contracts](sequence-reconstruction-evaluation.md).
+
+## Measured results
+
+| Metric | S288C | SK1 |
+|---|---:|---:|
+| Whole truth bp | 12,242,942 | 12,147,923 |
+| Reconstructed bp | 11,482,108 | 11,068,241 |
+| Reconstructed blocks/fragments | 129 | 158 |
+| Selected aligned query bp | 11,481,711 | 11,023,563 |
+| Query coverage | 99.9965% | 99.5963% |
+| Selected aligned truth bp | 11,481,711 | 11,023,734 |
+| **Whole-truth coverage** | **93.7823%** | **90.7458%** |
+| Unaligned truth bp | 761,231 | 1,124,189 |
+| Unaligned query bp | 397 | 44,678 |
+| Assessed alignment columns | 11,481,711 | 11,024,766 |
+| Matches | 11,481,711 | 11,021,753 |
+| Substitutions | 0 | 778 |
+| Inserted bases | 0 | 1,032 |
+| Deleted bases | 0 | 1,203 |
+| Aligned-column identity | 100% | 99.9727% |
+| Alignment-derived QV | zero observed errors; no infinite-QV claim | 35.6337 |
+
+QV uses `(substitutions + inserted bp + deleted bp) / assessed_columns`.
+It is **conditional alignment-derived QV**, not calibrated assembly-wide QV;
+missing sequence must not disappear behind the aligned identity. Coverage counts
+aligned coordinate spans, including indels, rather than only exact-match bases.
+
+No cross-block reused-source-coordinate overlap was reported. SK1 has three
+queries with split-mapping diagnostics: one collinear split and two queries with
+three total target-path changes. These are diagnostics of the selected alignments,
+not automatically three proven assembly misjoins or biological rearrangements.
+
+Reconstruction took7.21s/7.12s for S288C/SK1, with peak RSS1,310,720/1,298,432KiB;
+alignment/evaluation took2.87s/2.82s, with216,276/239,500KiB peak RSS. These are
+**downstream-stage costs only**: they exclude sample construction, the large
+catalog and original genotype calling. Runs used affinity252–255, nice+10 and
+at most four threads; stages were serialized. Whole driver/installation succeeded.
+
+## Diagnosed limitations—not tuned away
+
+### Most remaining missing sequence is explicitly unthreaded
+
+Unresolved counts and bp below use the **S288C reference axis**, not the SK1 source
+coordinate system and not the alignment's missing-truth denominator.
+
+| Unresolved axis category | S288C intervals / bp | SK1 intervals / bp |
+|---|---:|---:|
+| Repeated-axis groups | 111 /553,177 | 111 /553,177 |
+| No positive features | 17 /79,518 | 49 /312,646 |
+| Nonidentical sequence alternatives | 5 /39,936 | 5 /43,225 |
+| Multicopy placement ties | 7 /64,596 | 10 /94,647 |
+| Unknown/poor-fit alternative | 0 /0 | 1 /4,596 |
+| Unresolved orientation | 1 /3,544 | 2 /5,645 |
+| No local features | 2 /19,946 | 2 /19,946 |
+
+Source/axis length differences, source gaps and alignment accounting mean this
+ledger must not be equated directly with unaligned truth bp. Genotype-only and
+unscaffolded groups remain available but are not claimed as reconstructed.
+
+### S288C's397 unaligned query bases are an aligner clipping limitation
+
+All397 occur at ends of three fragments extracted from S288C itself. Independent
+post-evaluation direct-string comparisons confirmed the **entire** three fragments
+match the truth at their source coordinates, including those397 bases. Evidence:
+`s288c-alignment-clipping-check.json`. Frozen native alignment metrics above were
+not rewritten to credit them.
+
+### SK1 errors expose missing candidates/locus modelling, not just donor parsimony
+
+`sequence-discrepancies.json` traces every selected alignment with errors and every
+unaligned query to original source/axis provenance. `sk1-error-call-audit.json`
+checks the frozen independent count calls for those groups.
+
+**3,011 of3,013 assessed error columns occur in fragments whose ownership groups
+contain no SK1 candidate.** Their selected donors were already local best-score
+states (or tied minima). The remaining two inserted bases are in the46,651bp
+DBVPG6044 chrXVI fragment covering five axis groups; four of those groups tie SK1
+locally and the first prefers DBVPG6044 by10.6339 loss units.
+
+Therefore simply imposing hard local-best genotype constraints would **not repair
+these observed errors**. This is a candidate/locus/shared-context problem to
+investigate, not evidence for merely increasing the switch penalty. An ownership
+group lacking the true genome is not by itself proof of biological absence or
+proof that its selected features are correctly localized.
+
+There is also a20,902bp CBM chrXIV fragment that aligns in the raw PAF but receives
+no selected one-to-one credit because of competing truth coordinates. Its first
+axis group does contain SK1, but locally prefers CBM by1,353.5319 score units;
+the second lacks SK1. Its duplication/placement and count evidence need diagnosis.
+Neither dropping this fragment nor selecting overlapping alignments to inflate
+coverage is an acceptable fix.
+
+Greedy overlap rejection accounts for39,868bp of SK1's query-coverage reduction
+relative to the raw alignment union. This is not all certified extra sequence:
+whole-record rejection can under-credit partial overlaps. Native mapping itself
+misses4,810 query bp. Preserve that distinction when diagnosing inference errors.
+
+## Does the same count evidence identify the complete in-panel genome?
+
+A separate **restricted whole-template diagnostic** was frozen and run after the
+mosaic outputs. For every panel identity h, sum all group background scores, then
+add `bundle_score(g,h) - background_score(g)` wherever h has a bundle. A group
+without h retains its background-only likelihood; its observation is not dropped.
+All10,830,290 owned local factors enter once, with the same1,066,487 exclusions.
+There is no reference axis, local-best/fit filtering, new count query or truth
+input. This is the existing working loss restricted to one complete panel identity,
+not a posterior and **not a recombinant reconstruction algorithm**.
+
+Among all235 panel identities:
+
+| Sample (evaluated afterward) | Unique minimum | Next best | Working loss gap |
+|---|---|---|---:|
+| S288C | S288C#0 | AAA#0 / SGDref#0 tied | 17,335.7371 |
+| SK1 | SK1#0 | DBVPG6044#0 | 474,813.4430 |
+
+Thus these counts **do select the correct whole-genome template** in both controls
+under the explicit single-template restriction. That does not rescue the flexible
+mosaic automatically: the latter must handle absent alternatives, repeated copies
+and off-axis sequence without forcing a foreign donor into every positive group.
+Large composite loss gaps are not calibrated confidence values.
+
+The uniquely selected identities were then extracted **anew from the panel AGC**,
+using all their source paths, before introducing truth. Both recovered all17 paths:
+12,242,942bp for S288C and12,147,923bp for SK1. Independent complete-record
+comparisons found exact named-sequence equality with truth for both genomes,
+including the same ambiguous symbols. Those symbols are not newly determined
+nucleotides. Native alignment again found zero assessed errors, with12,225,156 and
+12,130,421 ACGT matches respectively. Native whole-truth coverage was99.8582% and
+99.8592%; unknown columns and clipping remain explicit. Full-string equality is a
+separate check, not an alteration of the frozen alignment metrics or infinite QV.
+
+Evidence: `whole-template-diagnostic/{ranking-0,ranking-1,manifest}.json` and
+`whole-template-diagnostic/export-{0,1}/{manifest.json,panel-template.fa,alignment/}`.
+The truth-blind ranking script is `rank-whole-templates.py`; extraction/evaluation
+uses `export-template-controls.py`, both in the parent experiment directory.
+Full-template identification must remain a separately labelled baseline, not a
+replacement for recombinant/held-out validation or a claim of completed mosaics.
+
+## Next acceptance gates
+
+1. Explain the absent-SK1 candidate groups and competing chrXIV fragment using
+   physical sequence/copy membership and count-factor evidence. Do not silently
+   strengthen fit thresholds, discard repeats, or replace missing candidates with
+   truth-seeded ones.
+2. Add a dosage-/copy-aware treatment of repeated-axis and genotype-only sequence
+   without scoring shared evidence repeatedly or asserting arbitrary phase.
+3. Re-evaluate full in-panel sequence and coverage, retaining these frozen baselines.
+4. Proceed to a training-only rebuilt held-out panel. SK1/Y12 whole sample identities
+   are predeclared as initial exclusions (34paths/24,111,938bp); exact genome-alias
+   audit remains pending, S288C is retained as reference, and no held-out index has
+   been built yet. Rebuild the panel dictionary/walks/positions, catalog/axis and
+   sample MEM-BWT; removing final candidate rows alone is not a strict hold-out.
+
+The present result establishes that sequence-level validation is executable and
+useful. It does **not** establish finished in-panel inference, biological locus
+validation, diploid/polyploid support or novel-sequence reconstruction.
