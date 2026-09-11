@@ -41,7 +41,15 @@ fn interval(name: &str, start: u64, end: u64, strand: &str) -> Value {
 }
 #[test]
 fn quantitative_cli_bundles_threads_truth_independence_and_failures() {
-    let temp = tempfile::tempdir().unwrap();
+    let artifact_root = std::env::var_os("IMPG_TEST_SEQUENCE_ARTIFACT_DIR");
+    let temp = if let Some(directory) = &artifact_root {
+        tempfile::Builder::new()
+            .prefix("sequence-cli-fixture-")
+            .tempdir_in(directory)
+            .unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
     let root = temp.path();
     let panel_path = root.join("panel.syng");
     let mut sequences = vec![
@@ -280,6 +288,187 @@ fn quantitative_cli_bundles_threads_truth_independence_and_failures() {
         .unwrap()
         .iter()
         .all(|r| r["truth_set_contained_in_one_best_bundle"] == true));
+    // Continue through actual reconstruction and independent sequence-evaluation CLIs.
+    let sources = root.join("sources.fa");
+    fs::write(
+        &sources,
+        sequences
+            .iter()
+            .map(|(n, s)| format!(">{n}\n{}\n", String::from_utf8_lossy(s)))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let reconstruction = root.join("reconstruction");
+    let reconstruct = |destination: &Path, call_path: &Path, success| {
+        run(
+            &[
+                "genome-infer",
+                "reconstruct",
+                "--calls",
+                path(call_path),
+                "--threads",
+                path(&out.join("threads.json")),
+                "--panel-names",
+                path(&root.join("panel.syng.names")),
+                "--sources",
+                path(&sources),
+                "--out-dir",
+                path(destination),
+            ],
+            success,
+        )
+    };
+    reconstruct(&reconstruction, &out.join("calls.json"), true);
+    let spelled =
+        genome::sequence_evaluation::read_fasta(&reconstruction.join("reconstruction.fa")).unwrap();
+    assert_eq!(spelled.len(), 4);
+    assert_eq!(spelled["block000001"], sequences[0].1[..3000]);
+    assert_eq!(spelled["block000002"], sequences[1].1[3000..9000]);
+    assert_eq!(
+        spelled["block000003"],
+        genome::sequence_evaluation::reverse_complement(&sequences[5].1[3000..9000])
+    );
+    assert_eq!(spelled["block000004"], sequences[2].1[..3000]);
+    let provenance = read(&reconstruction.join("provenance.json"));
+    assert_eq!(provenance["emitted_bp"], 18000);
+    assert_eq!(provenance["source_bridged_imputed_bp"], 0);
+    assert_eq!(provenance["unresolved_intervals"], 3);
+    assert_eq!(provenance["blocks"][2]["scored_source_union_bp"], 6000); // not 6500: overlap once
+    assert_eq!(
+        provenance["blocks"][3]["source_states"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(provenance["group_ledger"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["group"] == "accessory-copies"
+            && g["unscaffolded"] == true
+            && g["emitted_interval_indices"] == json!([])));
+    assert!(!root.join("sources.fa.fai").exists()); // reconstruction never modifies input FASTA
+    reconstruct(&reconstruction, &out.join("calls.json"), false);
+    let corrupt_calls = root.join("corrupt-calls.json");
+    let mut bad = calls.clone();
+    bad["source_occurrences"][0]["interval"]["end"] = json!(999999);
+    write(&corrupt_calls, bad);
+    let failed_reconstruction = root.join("failed-reconstruction");
+    reconstruct(&failed_reconstruction, &corrupt_calls, false);
+    assert_eq!(
+        read(&failed_reconstruction.join("manifest.json"))["status"],
+        "failed"
+    );
+    assert!(!failed_reconstruction.join("reconstruction.fa").exists());
+    let sequence_truth = root.join("sequence-truth.fa");
+    let chr1 = [&sequences[0].1[..3000], &sequences[1].1[3000..9000]].concat();
+    let chr3 = genome::sequence_evaluation::reverse_complement(&sequences[5].1[3000..9000]);
+    fs::write(
+        &sequence_truth,
+        format!(
+            ">truth1\n{}\n>truth2\n{}\n>truth3\n{}\n>copy1\n{}\n>copy2\n{}\n",
+            String::from_utf8_lossy(&chr1),
+            String::from_utf8_lossy(&sequences[2].1),
+            String::from_utf8_lossy(&chr3),
+            String::from_utf8_lossy(&sequences[6].1),
+            String::from_utf8_lossy(&sequences[7].1)
+        ),
+    )
+    .unwrap();
+    let paf = root.join("exact.paf");
+    fs::write(&paf,"block000001\t3000\t0\t3000\t+\ttruth1\t9000\t0\t3000\t3000\t3000\t60\tcg:Z:3000=\nblock000002\t6000\t0\t6000\t+\ttruth1\t9000\t3000\t9000\t6000\t6000\t60\tcg:Z:6000=\nblock000003\t6000\t0\t6000\t+\ttruth3\t6000\t0\t6000\t6000\t6000\t60\tcg:Z:6000=\nblock000004\t3000\t0\t3000\t+\ttruth2\t9000\t0\t3000\t3000\t3000\t60\tcg:Z:3000=\n").unwrap();
+    let evaluation = root.join("sequence-evaluation");
+    run(
+        &[
+            "genome-infer",
+            "evaluate-sequence",
+            "--query",
+            path(&reconstruction.join("reconstruction.fa")),
+            "--truth",
+            path(&sequence_truth),
+            "--paf",
+            path(&paf),
+            "--out-dir",
+            path(&evaluation),
+        ],
+        true,
+    );
+    let e = read(&evaluation.join("evaluation.json"));
+    assert_eq!(e["counts"]["matches"], 18000);
+    assert_eq!(e["assessed_columns"], 18000);
+    assert_eq!(e["truth_total_bp"], 30000);
+    assert_eq!(e["truth_coverage"], 0.6);
+    assert_eq!(e["unaligned_truth_bp"], 12000);
+    assert_eq!(e["alignment_qv_status"], "zero-observed-errors");
+    assert!(e["alignment_qv"].is_null());
+    if let Ok(tool) = std::env::var("IMPG_TEST_WFMASH") {
+        let aligned = root.join("native-sequence-evaluation");
+        run(
+            &[
+                "genome-infer",
+                "align-sequence",
+                "--query",
+                path(&reconstruction.join("reconstruction.fa")),
+                "--truth",
+                path(&sequence_truth),
+                "--wfmash",
+                &tool,
+                "--threads",
+                "4",
+                "--out-dir",
+                path(&aligned),
+            ],
+            true,
+        );
+        let actual = read(&aligned.join("evaluation.json"));
+        assert_eq!(actual["counts"]["matches"], 18000);
+        assert_eq!(actual["assessed_columns"], 18000);
+        assert_eq!(actual["truth_coverage"], 0.6);
+        assert_eq!(actual["unaligned_truth_bp"], 12000);
+        assert_eq!(actual["alignment_qv_status"], "zero-observed-errors");
+        eprintln!(
+            "NATIVE SEQUENCE FIXTURE {}",
+            read(&aligned.join("manifest.json"))
+        );
+    } else {
+        eprintln!("Native alignment smoke not requested: set IMPG_TEST_WFMASH to inspected b55cf75 executable");
+    }
+    let frozen_fasta = fs::read(reconstruction.join("reconstruction.fa")).unwrap();
+    let frozen_provenance = fs::read(reconstruction.join("provenance.json")).unwrap();
+    fs::copy(&sequence_truth, root.join("frozen-sequence-truth.fa")).unwrap();
+    fs::write(&sequence_truth, ">changed\nAAAA\n").unwrap();
+    let repeated_reconstruction = root.join("reconstructed-after-truth-change");
+    reconstruct(&repeated_reconstruction, &out.join("calls.json"), true);
+    assert_eq!(
+        frozen_fasta,
+        fs::read(repeated_reconstruction.join("reconstruction.fa")).unwrap()
+    );
+    assert_eq!(
+        frozen_provenance,
+        fs::read(repeated_reconstruction.join("provenance.json")).unwrap()
+    );
+    let failed_evaluation = root.join("failed-sequence-evaluation");
+    run(
+        &[
+            "genome-infer",
+            "evaluate-sequence",
+            "--query",
+            path(&reconstruction.join("reconstruction.fa")),
+            "--truth",
+            path(&sequence_truth),
+            "--paf",
+            path(&paf),
+            "--out-dir",
+            path(&failed_evaluation),
+        ],
+        false,
+    );
+    assert_eq!(
+        read(&failed_evaluation.join("manifest.json"))["status"],
+        "failed"
+    );
+    assert!(!failed_evaluation.join("evaluation.json").exists());
     // Change truth, then remove truth: frozen quantitative calls and threads stay byte-identical.
     write(
         &truth,
@@ -344,6 +533,76 @@ fn quantitative_cli_bundles_threads_truth_independence_and_failures() {
         .unwrap()
         .iter()
         .any(|r| r["status"] == "poor-fit"));
+    let no_call = root.join("no-call-reconstruction");
+    run(
+        &[
+            "genome-infer",
+            "reconstruct",
+            "--calls",
+            path(&poor.join("calls.json")),
+            "--threads",
+            path(&poor.join("threads.json")),
+            "--panel-names",
+            path(&root.join("panel.syng.names")),
+            "--sources",
+            path(&sources),
+            "--out-dir",
+            path(&no_call),
+        ],
+        true,
+    );
+    assert_eq!(fs::read(no_call.join("reconstruction.fa")).unwrap(), b"");
+    assert_eq!(read(&no_call.join("provenance.json"))["emitted_bp"], 0);
+    let empty_paf = root.join("empty.paf");
+    fs::write(&empty_paf, b"").unwrap();
+    let no_call_eval = root.join("no-call-evaluation");
+    run(
+        &[
+            "genome-infer",
+            "evaluate-sequence",
+            "--query",
+            path(&no_call.join("reconstruction.fa")),
+            "--truth",
+            path(&sequence_truth),
+            "--paf",
+            path(&empty_paf),
+            "--out-dir",
+            path(&no_call_eval),
+        ],
+        true,
+    );
+    let e = read(&no_call_eval.join("evaluation.json"));
+    assert_eq!(e["truth_coverage"], 0.0);
+    assert_eq!(e["unaligned_truth_bp"], 4);
+    assert_eq!(e["alignment_qv_status"], "unavailable-no-assessed-columns");
+    if let Ok(tool) = std::env::var("IMPG_TEST_WFMASH") {
+        let no_call_native = root.join("no-call-native-evaluation");
+        run(
+            &[
+                "genome-infer",
+                "align-sequence",
+                "--query",
+                path(&no_call.join("reconstruction.fa")),
+                "--truth",
+                path(&sequence_truth),
+                "--wfmash",
+                &tool,
+                "--threads",
+                "4",
+                "--out-dir",
+                path(&no_call_native),
+            ],
+            true,
+        );
+        assert_eq!(
+            read(&no_call_native.join("evaluation.json"))["truth_coverage"],
+            0.0
+        );
+        assert_eq!(
+            read(&no_call_native.join("aligner.json"))["skipped_empty_input"],
+            true
+        );
+    }
     invoke(&out, None, &[], false); // Existing output directories are never reused.
     let mut malformed = axis_value.clone();
     malformed["intervals"][1]["component"] = names[2].into();
@@ -365,4 +624,7 @@ fn quantitative_cli_bundles_threads_truth_independence_and_failures() {
             .len()
     );
     eprintln!("QUANTITATIVE FIXTURE {}", read(&out.join("manifest.json")));
+    if artifact_root.is_some() {
+        eprintln!("RETAINED SEQUENCE FIXTURE {}", temp.keep().display());
+    }
 }

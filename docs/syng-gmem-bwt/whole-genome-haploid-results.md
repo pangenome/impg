@@ -5,6 +5,11 @@ pipeline, not only the presence-compatibility bootstrap. These are **source-bund
 and source-interval recovery results**, not calibrated allele accuracy or final
 catalog acceptance. Diploid and whole-genome recombinant validation remain open.
 
+A separate [source-block reconstruction and independent alignment/QV evaluator](sequence-reconstruction-evaluation.md)
+now supplies the next executable gate. The historical results below are unchanged;
+its small-fixture validation does not turn these controls into measured whole-genome
+sequence-QV results.
+
 ## Frozen conditions
 
 - Code: `9e1cc305a0d346b7c06c8f81002e677abdaa49b9`, branch

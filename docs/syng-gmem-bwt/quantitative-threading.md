@@ -3,8 +3,11 @@
 `genome-infer genotype` is a quantitative extension, not the old presence-only
 `call`/`run` model. Those bootstrap commands are unchanged. Catalog acceptance
 remains false: source accounting is not validated homology, copy structure or
-biological genotyping. There is no FASTA, calibrated posterior, diploid search,
-read linkage, global strain ranking or nonlocal/boundary-factor inference.
+biological genotyping. This stage emits no FASTA; the separate downstream
+[source-block reconstruction and independent sequence evaluation](sequence-reconstruction-evaluation.md)
+commands spell frozen calls/threads without rebuilding the catalog. There is no
+calibrated posterior, diploid search, read linkage, global strain ranking or
+nonlocal/boundary-factor inference.
 
 Measured full-genome S288C and fixed-reference SK1 controls are recorded in
 [whole-genome haploid results](whole-genome-haploid-results.md), with explicit

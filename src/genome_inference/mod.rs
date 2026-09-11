@@ -2,7 +2,9 @@
 pub mod calling;
 pub mod catalog;
 pub mod genotype;
+pub mod reconstruction;
 pub mod sample;
+pub mod sequence_evaluation;
 pub mod threading;
 
 use crate::sample_mem_bwt::invalid;
@@ -175,6 +177,16 @@ pub fn with_output_model(
             let _ = fs::remove_file(out.join("calls.json"));
             let _ = fs::remove_file(out.join("evaluation.json"));
             let _ = fs::remove_file(out.join("threads.json"));
+            for name in [
+                "reconstruction.fa",
+                "provenance.json",
+                "unresolved.json",
+                "unresolved.bed",
+                "evaluation.json",
+            ] {
+                let _ = fs::remove_file(out.join(name));
+                let _ = fs::remove_file(out.join(name).with_extension("incomplete"));
+            }
             let _ = write_json(
                 &out.join("manifest.json"),
                 &serde_json::json!({"version": FORMAT_VERSION,

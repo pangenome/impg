@@ -92,6 +92,50 @@ pub enum Command {
         #[arg(long)]
         include_feature_details: bool,
     },
+    /// Spell frozen source-supported blocks (no truth input; not a chromosome assembly)
+    Reconstruct {
+        #[arg(long)]
+        calls: PathBuf,
+        #[arg(long)]
+        threads: PathBuf,
+        /// Exact panel .names sidecar; verified against calls, no graph/catalog reload
+        #[arg(long)]
+        panel_names: PathBuf,
+        #[arg(long, required=true, num_args=1..)]
+        sources: Vec<String>,
+        /// Split at positive source/reference gaps, or copy same-source gaps as imputed bp
+        #[arg(long, default_value="split", value_parser=["split", "copy-source"])]
+        gap_policy: String,
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// Independently replay a base-level PAF against whole reconstruction and truth FASTAs
+    EvaluateSequence {
+        #[arg(long)]
+        query: PathBuf,
+        #[arg(long)]
+        truth: PathBuf,
+        #[arg(long)]
+        paf: PathBuf,
+        #[arg(long)]
+        aligner_metadata: Option<PathBuf>,
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// Run inspected wfmash b55cf75 with explicit non-masking settings, then evaluate
+    AlignSequence {
+        #[arg(long)]
+        query: PathBuf,
+        #[arg(long)]
+        truth: PathBuf,
+        /// Exact executable path (fingerprinted); use evaluate-sequence for other tools
+        #[arg(long)]
+        wfmash: PathBuf,
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
     /// One-command bootstrap: reads -> sample index -> catalog -> diagnostics -> evaluation
     Run {
         #[command(flatten)]
@@ -136,6 +180,47 @@ fn finish_calls(
 }
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::Reconstruct {
+            calls,
+            threads,
+            panel_names,
+            sources,
+            gap_policy,
+            out_dir,
+        } => genome::with_output_model(&out_dir, genome::reconstruction::MODEL, || {
+            genome::reconstruction::run(
+                &calls,
+                &threads,
+                &panel_names,
+                &sources,
+                &out_dir,
+                gap_policy == "copy-source",
+            )
+        }),
+        Command::EvaluateSequence {
+            query,
+            truth,
+            paf,
+            aligner_metadata,
+            out_dir,
+        } => genome::with_output_model(&out_dir, genome::sequence_evaluation::MODEL, || {
+            genome::sequence_evaluation::run(
+                &query,
+                &truth,
+                &paf,
+                &out_dir,
+                aligner_metadata.as_deref(),
+            )
+        }),
+        Command::AlignSequence {
+            query,
+            truth,
+            wfmash,
+            threads,
+            out_dir,
+        } => genome::with_output_model(&out_dir, genome::sequence_evaluation::MODEL, || {
+            genome::sequence_evaluation::align(&query, &truth, &wfmash, &out_dir, threads)
+        }),
         Command::BuildSample { common, reads } => genome::with_output(&common.out_dir, || {
             let identity = genome::PanelIdentity::read(&common.panel)?;
             let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
