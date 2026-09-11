@@ -9,6 +9,9 @@ read linkage, global strain ranking or nonlocal/boundary-factor inference.
 Measured full-genome S288C and fixed-reference SK1 controls are recorded in
 [whole-genome haploid results](whole-genome-haploid-results.md), with explicit
 coverage/accuracy denominators and remaining acceptance gates.
+The [substring-cover research report](substring-cover-research.md) distinguishes
+hard genotype-compatible cover from the existing soft count-plus-continuity DP;
+it proposes a bounded comparison, not an adopted algorithm change.
 
 ## Reuse existing artifacts (no catalog rebuild)
 
