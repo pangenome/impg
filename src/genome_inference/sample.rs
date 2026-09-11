@@ -34,6 +34,18 @@ pub struct SampleIndex {
 /// then remove only exact contiguous coordinate+node subwalks of longer records.
 /// Envelope containment alone never removes differing content. Overlaps survive.
 fn collect_read(panel: &SyngIndex, sequence: &[u8]) -> io::Result<Vec<Vec<u64>>> {
+    collect_tagged_read(panel, sequence)?
+        .iter()
+        .map(|r| encode_walk(r).map(|t| canonical(&t)))
+        .collect()
+}
+
+pub(crate) type TaggedWalk = Vec<(i32, u64)>;
+
+pub(crate) fn collect_tagged_read(
+    panel: &SyngIndex,
+    sequence: &[u8],
+) -> io::Result<Vec<TaggedWalk>> {
     let rc = crate::graph::reverse_complement(sequence);
     let mut records = BTreeSet::new();
     for (reverse, seq) in [(false, sequence), (true, rc.as_slice())] {
@@ -61,9 +73,52 @@ fn collect_read(panel: &SyngIndex, sequence: &[u8]) -> io::Result<Vec<Vec<u64>>>
             records.insert(record);
         }
     }
-    maximal_content_records(records)
-        .iter()
-        .map(|r| encode_walk(r).map(|t| canonical(&t)))
+    Ok(maximal_content_records(records))
+}
+
+/// Both raw views use increasing input-forward coordinates. Selection reproduces
+/// the public matcher for each input orientation (input wins ties). Coordinates
+/// remain transient; reverse MEM traversal is queried separately, never interleaved.
+pub(crate) fn collect_raw_views(
+    panel: &SyngIndex,
+    forward: &[(i32, u64)],
+    reverse: &[(i32, u64)],
+    length: u64,
+) -> io::Result<Vec<TaggedWalk>> {
+    let mut records = BTreeSet::new();
+    for rev in [false, true] {
+        let selected = if forward.len() > reverse.len() || (forward.len() == reverse.len() && !rev)
+        {
+            forward
+        } else {
+            reverse
+        };
+        let mut selected = selected.to_vec();
+        if rev {
+            selected = normalize_reverse(&selected, length, panel.syncmer_length_bp() as u64);
+        }
+        let walk: Vec<_> = selected
+            .iter()
+            .map(|&(signed_node, bp_pos)| SyngWalkStep {
+                signed_node,
+                bp_pos,
+            })
+            .collect();
+        for mem in panel.gbwt_mems_for_walk(&walk)? {
+            let mut record = selected[mem.step_start..mem.step_end].to_vec();
+            if rev {
+                record = normalize_reverse(&record, length, panel.syncmer_length_bp() as u64);
+            }
+            records.insert(record);
+        }
+    }
+    Ok(maximal_content_records(records))
+}
+
+pub(crate) fn normalize_reverse(walk: &[(i32, u64)], length: u64, k: u64) -> TaggedWalk {
+    walk.iter()
+        .rev()
+        .map(|&(n, p)| (-n, length - k - p))
         .collect()
 }
 

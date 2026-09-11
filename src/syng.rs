@@ -4476,6 +4476,30 @@ impl SyngIndex {
             .collect())
     }
 
+    /// Orientation-specific dictionary trace. Unlike the public matcher this
+    /// never selects the richer reverse-complement trace.
+    pub(crate) fn raw_syncmers_in_sequence(&self, sequence: &[u8]) -> io::Result<Vec<(i32, u64)>> {
+        if sequence.len() > i32::MAX as usize {
+            return Err(io::Error::other(
+                "raw sequence exceeds native coordinate range",
+            ));
+        }
+        let mut packed = vec![0; unsafe { (*self.kmer_hash).plen as usize }];
+        let mut out = Vec::new();
+        matched_syncmers_in_sequence_impl(
+            self.seqhash,
+            self.kmer_hash,
+            self.params,
+            sequence,
+            &mut packed,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut out,
+        );
+        out.sort_unstable_by_key(|m| m.query_pos);
+        Ok(out.into_iter().map(|m| (m.signed_node, m.query_pos)).collect())
+    }
+
     /// Return query syncmers that are present in this syng index.
     ///
     /// The query sequence does not need to be one of the indexed paths. This

@@ -1,5 +1,7 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
-use crate::genome_inference::{self as genome, calling, catalog, genotype, sample, threading};
+use crate::genome_inference::{
+    self as genome, calling, catalog, genotype, observations, sample, threading,
+};
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
 use clap::{Args, Subcommand};
@@ -44,6 +46,54 @@ pub enum Command {
         common: Common,
         #[arg(long, required = true, num_args = 1..)]
         reads: Vec<PathBuf>,
+    },
+    /// Compile reusable partition-major physical incidences and exact source-read profiles
+    BuildPartitionObservations {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long, required=true, num_args=1..)]
+        sources: Vec<String>,
+        #[arg(long, required=true, value_delimiter=',', num_args=1..)]
+        read_lengths: Vec<u64>,
+        /// Select all originally owned features, never restrict the panel/source scan
+        #[arg(long)]
+        feature_group: Vec<String>,
+    },
+    /// Occurrence-weighted partition calls; partial feature scopes cannot be threaded
+    GenotypePartitions {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        observations: PathBuf,
+        #[arg(long)]
+        sample: PathBuf,
+        #[arg(long)]
+        haploid_depth: f64,
+        #[arg(long, default_value_t = 0.1)]
+        background: f64,
+        #[arg(long, default_value_t = 10.0)]
+        max_mean_deviance: f64,
+        #[arg(long)]
+        allow_unvalidated_catalog: bool,
+        #[arg(long)]
+        axis: Option<PathBuf>,
+        #[arg(long, default_value_t = 10.0)]
+        switch_penalty: f64,
+    },
+    /// Rethread frozen full-scope partition calls without reloading legacy catalog/sample
+    ThreadPartitions {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        observations: PathBuf,
+        #[arg(long)]
+        calls: PathBuf,
+        #[arg(long)]
+        axis: PathBuf,
+        #[arg(long, default_value_t = 10.0)]
+        switch_penalty: f64,
     },
     /// Preserve source occurrences and audit global two-anchor feature ownership
     BuildCatalog {
@@ -180,6 +230,112 @@ fn finish_calls(
 }
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::BuildPartitionObservations {
+            common,
+            catalog,
+            sources,
+            read_lengths,
+            feature_group,
+        } => genome::with_output_model(&common.out_dir, observations::MODEL, || {
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
+            observations::build(
+                &panel,
+                identity,
+                &catalog,
+                &sources,
+                read_lengths,
+                &feature_group,
+                &common.out_dir,
+            )
+        }),
+        Command::GenotypePartitions {
+            common,
+            observations: directory,
+            sample: sample_path,
+            haploid_depth,
+            background,
+            max_mean_deviance,
+            allow_unvalidated_catalog,
+            axis,
+            switch_penalty,
+        } => genome::with_output_model(&common.out_dir, observations::MODEL, || {
+            if !allow_unvalidated_catalog {
+                return Err(invalid("explicit --allow-unvalidated-catalog required"));
+            }
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let (metadata, checksum) = observations::load(&directory, &identity)?;
+            if axis.is_some() && !metadata.full_feature_scope {
+                return Err(invalid(
+                    "partial feature scope cannot be threaded/reconstructed",
+                ));
+            }
+            let (sample, sample_checksum) =
+                sample::SampleIndex::load_with_checksum(&sample_path, &identity)?;
+            let mut calls = observations::call(
+                &metadata,
+                checksum,
+                &directory,
+                &sample,
+                sample_checksum,
+                genotype::Parameters {
+                    haploid_depth,
+                    background,
+                    max_mean_deviance,
+                },
+                &common.out_dir,
+            )?;
+            let axis: Option<threading::Axis> =
+                axis.map(|path| genome::read_json(&path)).transpose()?;
+            if let Some(axis) = &axis {
+                observations::prepare_orientations(&metadata, &directory, &mut calls, axis)?;
+            }
+            genome::write_json(&common.out_dir.join("calls.json"), &calls)?;
+            if let Some(axis) = axis {
+                let threads = observations::thread(&metadata, &calls, axis, switch_penalty)?;
+                genome::write_json(&common.out_dir.join("threads.json"), &threads)?;
+            }
+            Ok(
+                serde_json::json!({"model": observations::MODEL, "full_feature_scope": metadata.full_feature_scope,
+                    "global_factors_used": calls.global_factors_used, "excluded_features":calls.excluded_features,
+                    "exclusions":calls.excluded_features_by_reason, "observations":calls.observations.as_ref().map(|p| &p.metadata_checksum)}),
+            )
+        }),
+        Command::ThreadPartitions {
+            common,
+            observations: directory,
+            calls,
+            axis,
+            switch_penalty,
+        } => genome::with_output_model(&common.out_dir, observations::THREAD_MODEL, || {
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let (metadata, checksum) = observations::load(&directory, &identity)?;
+            let calls_path = calls;
+            let original = std::fs::read(&calls_path)?;
+            let mut calls: genotype::Genotypes =
+                serde_json::from_slice(&original).map_err(io::Error::other)?;
+            if calls.model != observations::MODEL
+                || calls
+                    .observations
+                    .as_ref()
+                    .is_none_or(|p| p.metadata_checksum != checksum)
+            {
+                return Err(invalid("calls/observation linkage mismatch"));
+            }
+            let axis: threading::Axis = genome::read_json(&axis)?;
+            observations::prepare_orientations(&metadata, &directory, &mut calls, &axis)?;
+            observations::write_derived_calls(
+                &common.out_dir.join("calls.json"),
+                &calls_path,
+                &original,
+                &mut calls,
+            )?;
+            let threads = observations::thread(&metadata, &calls, axis, switch_penalty)?;
+            genome::write_json(&common.out_dir.join("threads.json"), &threads)?;
+            Ok(
+                serde_json::json!({"resolved_intervals":threads.resolved_intervals,"unresolved_intervals":threads.unresolved_intervals}),
+            )
+        }),
         Command::Reconstruct {
             calls,
             threads,

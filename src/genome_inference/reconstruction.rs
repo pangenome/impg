@@ -47,16 +47,33 @@ pub fn validate(
     lengths: &BTreeMap<String, u64>,
 ) -> io::Result<()> {
     calls.parameters.validate()?;
+    let new_model = calls.model == super::observations::MODEL;
+    let linked = if new_model {
+        calls.observations.as_ref().is_some_and(|p| {
+            p.full_feature_scope
+                && p.feature_groups.is_empty()
+                && p.orientation_support
+                    .windows(2)
+                    .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1))
+                && digest(&Some(p.metadata_checksum.clone()))
+                && threads.observation_metadata_checksum.as_ref() == Some(&p.metadata_checksum)
+        }) && calls.catalog_payload_checksum.is_none()
+            && calls.artifact_checksum_algorithm == super::observations::CHECKSUM_ALGORITHM
+    } else {
+        calls.observations.is_none()
+            && threads.observation_metadata_checksum.is_none()
+            && digest(&calls.catalog_payload_checksum)
+            && calls.artifact_checksum_algorithm
+                == "fnv1a64-payload-v1; sample=bincode-payload; catalog=compact-json-payload"
+    };
     if calls.version != FORMAT_VERSION
-        || calls.model != super::genotype::MODEL
+        || (!new_model && calls.model != super::genotype::MODEL)
         || calls.ploidy != 1
         || calls.count_policy != COUNT_POLICY
-        || calls.artifact_checksum_algorithm
-            != "fnv1a64-payload-v1; sample=bincode-payload; catalog=compact-json-payload"
+        || !linked
         || !calls.experimental
         || calls.catalog_accepted
         || !digest(&calls.sample_payload_checksum)
-        || !digest(&calls.catalog_payload_checksum)
         || threads.panel != calls.panel
         || threads.sample_payload_checksum != calls.sample_payload_checksum
         || threads.catalog_payload_checksum != calls.catalog_payload_checksum
@@ -192,6 +209,15 @@ pub fn validate(
         } else {
             "informative"
         };
+        let (status, mut expected) = if new_model {
+            let (status, expected, _) = super::observations::classify(c, &calls.parameters);
+            (status, expected)
+        } else {
+            (status.to_string(), expected)
+        };
+        // Classifiers may order epsilon ties by score rather than bundle index.
+        // Normalize order only: duplicate reported indices must still fail.
+        expected.sort_unstable();
         if c.status != status
             || (if status.starts_with("no-call") {
                 !reported.is_empty()
@@ -252,6 +278,37 @@ pub fn validate(
                 } else {
                     None
                 };
+                if established.is_none() {
+                    if let Some(p) = &calls.observations {
+                        let mask = p
+                            .orientation_support
+                            .binary_search_by_key(&(a.reference_occurrence, id), |&(r, m, _)| {
+                                (r, m)
+                            })
+                            .ok()
+                            .map(|i| p.orientation_support[i].2)
+                            .unwrap_or(0);
+                        let (strand, evidence) = match mask {
+                            1 => (
+                                Some(a.reference_strand.clone()),
+                                "consistent-signed-contexts",
+                            ),
+                            2 => (
+                                Some(if a.reference_strand == "+" { "-" } else { "+" }.into()),
+                                "consistent-signed-contexts",
+                            ),
+                            3 => (None, "conflicting-signed-contexts"),
+                            _ => (None, "unsupported-or-palindromic-contexts"),
+                        };
+                        if s.strand != strand
+                            || (id == s.source_occurrences[0] && s.orientation_evidence != evidence)
+                        {
+                            return Err(invalid(
+                                "state contradicts frozen observation orientation evidence",
+                            ));
+                        }
+                    }
+                }
                 if let Some((strand, evidence)) = established {
                     if s.strand.as_ref() != Some(&strand)
                         || (id == s.source_occurrences[0] && s.orientation_evidence != evidence)
@@ -710,6 +767,24 @@ pub fn run(
         .iter()
         .map(|p| fingerprint(&PathBuf::from(p)))
         .collect::<io::Result<Vec<_>>>()?;
+    if let Some(p) = &calls.observations {
+        let identities = |files: &[Value]| -> BTreeSet<(String, u64)> {
+            files
+                .iter()
+                .map(|f| {
+                    (
+                        f["fnv1a64"].as_str().unwrap_or("").to_string(),
+                        f["bytes"].as_u64().unwrap_or(0),
+                    )
+                })
+                .collect()
+        };
+        if identities(&source_files) != identities(&p.source_files) {
+            return Err(invalid(
+                "reconstruction sources differ from compiled observation context",
+            ));
+        }
+    }
     let source_bindings: Vec<_> = chosen
         .iter()
         .map(|(n, &i)| json!({"path":n,"length":lengths[n],"source_file_index":i}))
@@ -717,6 +792,10 @@ pub fn run(
     let mut result = reconstruct(&calls, &threads, &Sources { indexes, chosen }, copy_source)?;
     result.provenance["inputs"] = json!({"calls":fingerprint(calls_path)?,"threads":fingerprint(threads_path)?,"panel_names":names_fp,"source_files":source_files,
         "panel":calls.panel,"sample_payload_checksum":calls.sample_payload_checksum,"catalog_payload_checksum":calls.catalog_payload_checksum,"source_bindings":source_bindings});
+    if let Some(p) = &calls.observations {
+        result.provenance["inputs"]["genotype_model"] = json!(calls.model);
+        result.provenance["inputs"]["observations"] = json!(p);
+    }
     atomic_write(&out.join("reconstruction.fa"), &result.fasta)?;
     write_json(&out.join("provenance.json"), &result.provenance)?;
     write_json(&out.join("unresolved.json"), &result.unresolved)?;
@@ -878,6 +957,7 @@ mod tests {
             count_policy: COUNT_POLICY.into(),
             sample_payload_checksum: Some("1111111111111111".into()),
             catalog_payload_checksum: Some("2222222222222222".into()),
+            observations: None,
             artifact_checksum_algorithm:
                 "fnv1a64-payload-v1; sample=bincode-payload; catalog=compact-json-payload".into(),
             feature_details_included: false,

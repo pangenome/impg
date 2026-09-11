@@ -100,6 +100,8 @@ pub struct Genotypes {
     pub count_policy: String,
     pub sample_payload_checksum: Option<String>,
     pub catalog_payload_checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observations: Option<super::observations::Provenance>,
     pub artifact_checksum_algorithm: String,
     pub feature_details_included: bool,
     pub experimental: bool,
@@ -353,7 +355,7 @@ pub fn call(
         }
     }
     Ok(Genotypes { version: FORMAT_VERSION, model: MODEL.into(), panel: catalog.panel.clone(),
-        count_policy: sample.count_policy.clone(), sample_payload_checksum: None, catalog_payload_checksum: None,
+        count_policy: sample.count_policy.clone(), sample_payload_checksum: None, catalog_payload_checksum: None, observations: None,
         artifact_checksum_algorithm: "fnv1a64-payload-v1; sample=bincode-payload; catalog=compact-json-payload".into(),
         feature_details_included: true, experimental: true, catalog_accepted: false, ploidy,
         parameters, assumptions: "Working composite Poisson, not calibrated posterior: ideal read-span exposure; MEM overlap/selection, error background and feature dependence uncalibrated. Globally owned within-group factors only, each scored once; shared/nonlocal/boundary factors excluded, not solved. Source bundles do not certify homology.".into(),

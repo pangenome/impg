@@ -87,6 +87,8 @@ pub struct Threads {
     pub count_policy: String,
     pub sample_payload_checksum: Option<String>,
     pub catalog_payload_checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_metadata_checksum: Option<String>,
     pub experimental: bool,
     pub catalog_accepted: bool,
     pub coordinate_system: String,
@@ -110,7 +112,7 @@ fn multiply_strands(a: &str, b: &str) -> String {
 fn valid_strand(s: &str) -> bool {
     s == "+" || s == "-"
 }
-fn validate_axis(catalog: &Catalog, axis: &Axis) -> io::Result<Vec<usize>> {
+pub(super) fn validate_axis(catalog: &Catalog, axis: &Axis) -> io::Result<Vec<usize>> {
     if axis.version != FORMAT_VERSION
         || axis.coordinate_system.trim().is_empty()
         || axis.intervals.is_empty()
@@ -178,6 +180,7 @@ fn orientations(
     catalog: &Catalog,
     axis: &AxisInterval,
     group: usize,
+    frozen: Option<&BTreeMap<(usize, usize), u8>>,
 ) -> BTreeMap<usize, (Option<String>, String)> {
     let reference = &catalog.occurrences[axis.reference_occurrence];
     let mut support: BTreeMap<usize, u8> = BTreeMap::new();
@@ -210,6 +213,11 @@ fn orientations(
                     }
                 }
             }
+        }
+    }
+    if let Some(frozen) = frozen {
+        for (&(_, id), &mask) in frozen.range((reference.id, 0)..=(reference.id, usize::MAX)) {
+            *support.entry(id).or_default() |= mask;
         }
     }
     catalog.groups[group]
@@ -379,6 +387,52 @@ pub fn thread(
     for &g in &groups {
         *frequencies.entry(g).or_insert(0usize) += 1;
     }
+    let frozen = if calls.model == super::observations::MODEL {
+        let p = calls
+            .observations
+            .as_ref()
+            .ok_or_else(|| invalid("missing observation provenance"))?;
+        if !p.full_feature_scope
+            || !p.feature_groups.is_empty()
+            || calls.catalog_payload_checksum.is_some()
+            || !p
+                .orientation_support
+                .windows(2)
+                .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1))
+        {
+            return Err(invalid(
+                "partial/incompatible observation calls cannot be threaded",
+            ));
+        }
+        let expected: BTreeSet<_> = axis
+            .intervals
+            .iter()
+            .zip(&groups)
+            .filter(|(_, g)| frequencies[g] == 1)
+            .map(|(a, _)| a.reference_occurrence)
+            .collect();
+        if p.orientation_references != expected.iter().copied().collect::<Vec<_>>() {
+            return Err(invalid("axis reference orientation provider was not assessed; derive axis-specific calls first"));
+        }
+        let mut masks = BTreeMap::new();
+        for &(a, b, mask) in &p.orientation_support {
+            if a >= catalog.occurrences.len()
+                || b >= catalog.occurrences.len()
+                || !expected.contains(&a)
+                || mask == 0
+                || mask > 3
+                || catalog.occurrences[a].group != catalog.occurrences[b].group
+                || masks.insert((a, b), mask).is_some()
+            {
+                return Err(invalid("invalid frozen signed orientation evidence"));
+            }
+        }
+        Some(masks)
+    } else if calls.model == super::genotype::MODEL && calls.observations.is_none() {
+        None
+    } else {
+        return Err(invalid("unknown quantitative threading model"));
+    };
     let repeated_axis_groups = frequencies
         .iter()
         .filter(|(_, n)| **n > 1)
@@ -406,12 +460,21 @@ pub fn thread(
         };
         if frequencies[&g] > 1 {
             row.status = "unresolved-repeated-axis-group".into();
-        } else if call.status.starts_with("no-call") || call.status == "poor-fit" {
+        } else if (calls.model == super::observations::MODEL
+            && !matches!(call.status.as_str(), "informative" | "tied"))
+            || (calls.model != super::observations::MODEL
+                && (call.status.starts_with("no-call") || call.status == "poor-fit"))
+        {
             row.status = format!("unresolved-{}", call.status);
         } else {
-            let orientations = orientations(catalog, &row.axis, g);
+            let orientations = orientations(catalog, &row.axis, g, frozen.as_ref());
             let mut physical: BTreeMap<_, usize> = BTreeMap::new();
             for (b, bundle) in call.bundles.iter().enumerate() {
+                if calls.model == super::observations::MODEL
+                    && !super::observations::eligible(call, bundle)
+                {
+                    continue;
+                }
                 for &id in &bundle.source_occurrences {
                     let occurrence = &catalog.occurrences[id];
                     let (strand, evidence) = &orientations[&id];
@@ -544,8 +607,8 @@ pub fn thread(
         .iter()
         .filter(|r| r.status == "resolved-experimental")
         .count();
-    Ok(Threads { version: FORMAT_VERSION, model: "haploid-source-occurrence-min-sum-v1".into(),
-        panel: calls.panel.clone(), count_policy: calls.count_policy.clone(), sample_payload_checksum: calls.sample_payload_checksum.clone(), catalog_payload_checksum: calls.catalog_payload_checksum.clone(),
+    Ok(Threads { version: FORMAT_VERSION, model: if calls.model == super::observations::MODEL { super::observations::THREAD_MODEL } else { "haploid-source-occurrence-min-sum-v1" }.into(),
+        panel: calls.panel.clone(), count_policy: calls.count_policy.clone(), sample_payload_checksum: calls.sample_payload_checksum.clone(), catalog_payload_checksum: calls.catalog_payload_checksum.clone(), observation_metadata_checksum: calls.observations.as_ref().map(|p| p.metadata_checksum.clone()),
         experimental: true, catalog_accepted: false,
         coordinate_system: axis.coordinate_system, switch_penalty, tie_epsilon: TIE_EPSILON,
         interpretation: "Count-score emissions plus explicit continuation/switch cost, chromosome resets; no posterior or read-linkage phase. Optimal states are marginal alternatives, NOT freely combinable paths. Unknown orientations never establish continuity. Repeated-axis groups excluded entirely; accessory calls retained. Breakpoints span flanking partitions, not exact edges. Blocks preserve source/reference gaps and overlaps without sequence emission.".into(),
@@ -667,7 +730,7 @@ mod tests {
             ],
         };
         let mut axis = row(Vec::new()).axis;
-        let inferred = orientations(&catalog, &axis, 0);
+        let inferred = orientations(&catalog, &axis, 0, None);
         assert_eq!(inferred[&0].0.as_deref(), Some("+"));
         assert_eq!(inferred[&1].0.as_deref(), Some("+"));
         assert_eq!(inferred[&2].0.as_deref(), Some("-"));
@@ -676,10 +739,13 @@ mod tests {
         assert_eq!(inferred[&4].0, None);
         assert_eq!(inferred[&5].0, None);
         axis.reference_strand = "-".into();
-        assert_eq!(orientations(&catalog, &axis, 0)[&2].0.as_deref(), Some("+"));
+        assert_eq!(
+            orientations(&catalog, &axis, 0, None)[&2].0.as_deref(),
+            Some("+")
+        );
         axis.orientations.insert(3, "-".into());
         assert_eq!(
-            orientations(&catalog, &axis, 0)[&3].1,
+            orientations(&catalog, &axis, 0, None)[&3].1,
             "explicit-axis-input"
         );
     }

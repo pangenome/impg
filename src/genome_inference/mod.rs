@@ -2,6 +2,7 @@
 pub mod calling;
 pub mod catalog;
 pub mod genotype;
+pub mod observations;
 pub mod reconstruction;
 pub mod sample;
 pub mod sequence_evaluation;

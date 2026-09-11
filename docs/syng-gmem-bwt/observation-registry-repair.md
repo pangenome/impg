@@ -3,10 +3,12 @@
 ## Status
 
 **A defect is demonstrated, and a bounded enumeration/count-accounting method
-passed independent review. The production repair is not implemented or approved
-for a full-panel run.** No new genotype, reconstructed FASTA, QV or whole-genome
-coverage result is claimed. The [original sequence controls](whole-genome-sequence-results.md)
-remain the frozen comparator.
+passed independent review. A production implementation with native small-fixture
+checks is now available in [partition-observations.md](partition-observations.md),
+pending independent acceptance review and real-panel controls.** No new real-panel
+genotype, reconstructed FASTA, QV or whole-genome coverage result is claimed. The
+[original sequence controls](whole-genome-sequence-results.md) remain the frozen
+comparator. The diagnostic evidence and original proposal below are retained.
 
 The accepted production source used by the diagnostics was
 `d8a9ce6197cb08b52105c8d35e5317f2cf1e9051`. Panel, dictionary, sketch parameters,
