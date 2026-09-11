@@ -6,6 +6,10 @@ remains false: source accounting is not validated homology, copy structure or
 biological genotyping. There is no FASTA, calibrated posterior, diploid search,
 read linkage, global strain ranking or nonlocal/boundary-factor inference.
 
+Measured full-genome S288C and fixed-reference SK1 controls are recorded in
+[whole-genome haploid results](whole-genome-haploid-results.md), with explicit
+coverage/accuracy denominators and remaining acceptance gates.
+
 ## Reuse existing artifacts (no catalog rebuild)
 
 ```sh
