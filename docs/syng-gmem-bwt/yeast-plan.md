@@ -13,21 +13,67 @@ paths provide the haplotypes through repeats, including repeated occurrences
 and copy number; bluntification, graph projection and de novo repeat resolution
 are not prerequisites.
 
-The current mapper, panel GBWT and local cosine scorer are available. The sample
-gMEM-BWT and contextual genotype scorer are **not implemented yet**. Each stage
-below has an explicit gate; dataset preparation is not genotype validation.
+A count-only weighted sample gMEM-BWT, quantitative haploid source-bundle caller
+and chromosome-reset source-path threading are now implemented and exercised on
+two whole-genome in-panel controls. They are a restricted working count model,
+not calibrated full genotype/dosage/mosaic inference. Each stage below retains
+its acceptance gate; source accounting and source-label recovery are not
+biological locus validation.
 
 ## Execution state
 
-**Current priority:** repair the measured partition bottleneck, then validate the
-chunk catalog before implementing sample inference. The first256-query profile
-places94.8% of query time in raw lookup, with no repeated tuples or zero-output
-queries; all three covered-source queries discover additional source bases.
-Optimize occurrence lookup/coordinate recovery first, preserving exact results.
-This early sample does not settle late-stage scheduling cost. The
-[partition/inference contract and repair plan](partition-inference-contract.md)
-records the current source audit, high-copy semantics, shared-count math and
-acceptance gates. It supersedes the initial pilot status below:
+**Current priority:** whole-genome recombinant/diploid inference and truth gates,
+not more partition tuning or optional graph rendering. Discovery is complete.
+Keep validated homologous/spanning/copy states, quantitative shared/boundary
+factors and uncertainty in the full-pipeline contract; do not mistake the current
+restricted haploid implementation for completion of those requirements.
+
+### Quantitative implementation checkpoint (2026-09-11)
+
+- Local implementation worktree `/home/erikg/impg-genome-inference`, branch
+  `work/genome-mem-bwt-pipeline`, code commit `9e1cc30`. Independent review found
+  no issues; parent reran433 library +85 CLI unit +41 integration tests. Nothing
+  was merged into main. Ordinary execution now uses the cargo-installed binary.
+- `impg genome-infer genotype` reuses weighted MEM-BWT evidence and all19,421
+  groups. Sparse working Poisson scores use count magnitude, zeros, explicit
+  depth/background and read-span exposure. Same-assembly copies are bundled;
+  duplicate BED representations do not inflate physical multiplicity.
+- Exact forward/backward threading uses full source-path identity, strand-aware
+  monotonic coordinates, chromosome resets, explicit ties/no-calls and coarse
+  switch bounds. Repeated-axis groups are left unthreaded, not scored repeatedly.
+  Truth is read only after calls/threads are frozen. No per-read placements,
+  calibrated posterior, diploid search or assembled FASTA is claimed.
+- Error-free150bp/10x/seed1729 controls include all17 paths of S288C and SK1, with
+  ambiguity-spanning reads retained. Both use the same S288C coordinate axis and
+  unchanged parameters. S288C: true bundle among best across97.27% of sample bp;
+  87.73% of reference bp threaded;99.81% exact source-interval agreement on
+  resolved/assessable reference bp. SK1:98.13%,85.70%,99.46%, respectively. The SK1
+  percentage excludes8 resolved intervals without a truth group;6 assessed
+  intervals disagree. These are **source-recovery metrics, not allele accuracy**.
+- Quantitative commands took282.1s/245.5s for S288C/SK1; scoring+save22.91s/20.46s,
+  threading+save3.06s/2.69s. The sample indexes are~38MiB. The shared41.13GB JSON
+  catalog remains an excessive diagnostic representation; native quantitative
+  peak RSS is~37.9GiB. Default calls omit redundant feature maps (~213MB each).
+- The initial presence-only truth attempt was interrupted after measuring
+  33.8billion approximately one-byte reads from an unbuffered JSON parser.
+  `40a7e1d` adds buffering; successful sample/catalog artifacts were reused.
+  SK1 sample construction separately took983s wall but92s CPU; its waiting cause
+  is not established, and no masking/sampling policy was changed.
+- Detailed evidence: implementation doc
+  `docs/syng-gmem-bwt/whole-genome-haploid-results.md` in the implementation
+  worktree; S288C artifacts under
+  `~/yeast/genome-mem-bwt-bootstrap-20260911T055203Z/quantitative-thread-20260911T125231Z/`,
+  SK1 under `~/yeast/genome-mem-bwt-sk1-control-20260911T130448Z/quantitative/`.
+  Commands, binary/input/output hashes, denominators and disagreement records
+  are retained. Code publication remains separate from this plan PR.
+
+### Completed discovery and earlier diagnostic background
+
+The earlier first256-query profile placed94.8% of query time in raw lookup, with
+no repeated tuples or zero-output queries; all three covered-source queries
+were productive. It did not characterize late-stage scheduling. The
+[partition/inference contract](partition-inference-contract.md) retains that
+source audit, high-copy semantics, shared-count math and acceptance gates.
 
 - Partition/scaffold repair #241 and ambiguity repair #242 are reviewed draft
   PRs, unmerged; Rust CI passed. The ambiguity-safe rebuilt index is
