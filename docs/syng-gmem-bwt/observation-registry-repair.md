@@ -129,6 +129,28 @@ limits, finding no remaining issues.
 
 ## Proposed implementation, in order
 
+### Execution model: iterate partitions, not alternative pangenome views
+
+The partition is the unit of iteration. Each physical genome piece has one
+partition owner and one member representation in that partition's pangenome
+view. Keep that ownership fixed. The orientation-dependent observation defect
+must be reconciled **inside the partition**, not represented as two copies, two
+panels or two independently called partition views.
+
+The source-first two-view experiment above was a diagnostic oracle, not the
+intended production execution plan. Raw orientation traces are an internal
+compatibility detail of the current observer. They feed one physical incidence
+record per feature/source coordinate; they are not additional member paths.
+
+The exact-once audit confirms this invariant on the frozen input: **19,421
+partitions, 383,849 member intervals and all 9,901 source paths / 3,336,976,856 bp**.
+There are zero uncovered bases, zero multiple-partition-owned bases and zero
+overlapping duplicate descriptions. The sum of member lengths equals the total
+source length. This is stronger than the earlier union-coverage check.
+
+Read-only context halos do not own bases, add copies, receive independent
+genotype calls or emit sequence twice.
+
 ### 1. Share the observation primitives without changing the sample
 
 Expose/reuse orientation-specific raw extraction separately from the existing
@@ -141,18 +163,24 @@ ambiguity, repeated features and overlapping MEMs. Coordinates used to compile
 expected contributions are transient coordinates of synthetic panel contexts;
 no actual-read IDs, placements or read-by-haplotype table are introduced.
 
-### 2. Build a source-blind physical-location sidecar
+### 2. Reconcile observations inside each partition
 
-Keep the existing feature-token universe and IDs initially. For **every panel
-source**, extract independent forward and RC raw views with the unchanged
-parameters/dictionary. Find existing feature pairs within each view, normalize
-to source-forward coordinates, and deduplicate by
-`(feature_id, full_source_path, start, end)`.
+Keep the existing feature-token universe and IDs initially. Iterate partitions
+in their existing deterministic order, fetching each member's owned sequence
+and the original-source context required by the observation operator. Apply the
+same procedure to every member, without identity-specific branches. Retain one
+physical member representation with its full source coordinates and orientation.
 
-Retain view provenance without counting views as copies. Preserve distinct
-physical spans even when their DNA is identical. Do not insert only the diagnosed
-SK1 locations, add dictionary words, concatenate observations, modify source
-intervals or silently change the sketch scheme.
+For the current observer, independently extracted raw orientation traces can
+supply the missing feature incidences. Find pairs within each trace separately,
+normalize to source-forward coordinates, and emit one record keyed by
+`(feature_id, full_source_path, start, end)`. Do not construct an interleaved
+walk or expose the traces as parallel pangenome views. Context-halo discoveries
+must be routed to their actual owner or a boundary record, never counted twice.
+
+Preserve distinct physical spans even when their DNA is identical. Do not insert
+only the diagnosed SK1 locations, add dictionary words, concatenate observations,
+modify source intervals or silently change the sketch scheme.
 
 Two-view enumeration is a candidate fast path, not an unconditional completeness
 theorem. Its sufficient conditions are: cropped raw anchors equal the relevant
@@ -168,17 +196,25 @@ intervening anchors or change anchor words, so this gate does not establish a
 complete prediction model for noisy reads. The capability and limitations must
 be explicit in versioned artifacts.
 
-### 3. Recompute complete ownership and context validity
+### 3. Preserve partition ownership; recompute feature support
 
-Rejoin every recovered location against all original source occurrences. Rerun
-full-span containment, crossing, outside-catalog and shared-group classification.
-A location in another group or across a boundary can invalidate a previous
-unique owner. Keep exclusions and counts explicit; do not assign by start alone
-or expand an interval to retain a useful factor.
+The base-to-partition ownership map does not change. Against that fixed map,
+derive full-span containment, crossing and shared-partition support for each
+reconciled physical feature incidence. A formerly local **observation factor**
+may turn out to span or occur in several partitions; that is not overlapping
+ownership of the underlying genome pieces. Do not assign a crossing factor by
+its start alone or expand an interval to retain a useful factor.
 
-The two-path diagnostic cannot certify new global owners. Production ownership
-must consume the complete location pass across all relevant sources. BED groups
-remain ownership descriptions, not certified homologous loci.
+A token feature can recur in different physical pieces even when every base has
+exactly one owner. Use a compact shared/boundary-factor ledger to combine their
+selected-copy contributions inside one rate and count the sample observation
+once. This is cross-partition bookkeeping, not a second pangenome view. Keep
+unsupported/nonlocal observations and their exclusions explicit until the
+consumer can handle their complete scope.
+
+The two-path diagnostic does not close that global factor ledger. Complete
+incidence accounting must cover every partition. BED groups remain ownership
+descriptions, not certified homologous loci.
 
 The exposure-support context also matters. Full-source flanks cannot silently be
 assumed across a new mosaic junction. The initial local consumer must either
@@ -214,10 +250,13 @@ features, posterior confidence or junction validity.
 ### 5. Bound memory and prove any execution shortcuts
 
 Do not make another fully materialized41GB JSON object a prerequisite. A proposed
-sidecar compiler can stream existing feature definitions into a compact exact
-lookup, process one complete source at a time, and externally sort/merge bounded
-runs of physical records. Deduplication must be deterministic and retain complete
-membership/view provenance. Record input/model fingerprints, completed sources
+partition-major compiler can stream existing feature definitions into a compact
+exact lookup, process one partition at a time, and externally sort/merge bounded
+runs of physical incidence records for the shared/boundary ledger. Fetch member
+cores and validated context rather than materializing the full pangenome. Any
+boundary stitching of panel traces must follow actual source continuity; it is
+not permission to concatenate sample MEMs. Deduplication must be deterministic
+and retain complete ownership and orientation provenance. Record input/model fingerprints, completed sources
 and checksums for resumable immutable stages; never append to a mismatched run.
 
 The singleton-FASTA oracle is not the production exposure algorithm. First keep
@@ -261,7 +300,8 @@ force the globally identified donor, or impute an unvalidated recombinant join.
 2. Exact synthetic observation and physical-copy conservation, including zero,
    repeated-MEM and multi-copy contributions; parity with the public oracle.
 3. Expanded crop/location tests and an explicit supported capability/error model;
-   complete global membership/exclusion accounting on the chosen panel.
+   exact-once physical ownership and complete incidence/exclusion accounting,
+   without changing the chosen partitions.
 4. Bounded, deterministic, restart-compatible resource behavior established before
    authorizing the full-panel compiler.
 5. Fresh unchanged S288C/SK1 controls: report errors, conditional alignment QV,
@@ -303,6 +343,9 @@ Root`B`:
   `5ec6b2fb1b7dd84cd881317568a45a4fc6319107f496cbb28042fef657869e5b`.
 - `dual-view-run-v1/independent-record-accounting.json` and
   `check-tagged-record-counts.py`: separate numerical accounting check.
+- `partition-ownership-exact-once.json` and `audit-partition-ownership.py`: full
+  coordinate sweep over all frozen source occurrences, checking gaps, distinct
+  partition ownership and duplicate descriptions separately.
 - `reviews/`: retained implementation, static review and diagnosis reports.
 
 Failed diagnostic attempts were retained: missing inherited Cargo patches,
