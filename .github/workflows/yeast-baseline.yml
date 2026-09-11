@@ -1,0 +1,28 @@
+name: Yeast baseline harness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/yeast_inference_baseline.py'
+      - 'tests/test_yeast_inference_baseline.py'
+      - '.github/workflows/yeast-baseline.yml'
+  pull_request:
+    paths:
+      - 'scripts/yeast_inference_baseline.py'
+      - 'tests/test_yeast_inference_baseline.py'
+      - '.github/workflows/yeast-baseline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test stdlib harness without panel data or native build
+        run: python3 -B -m unittest discover -s tests -p 'test_yeast_inference_baseline.py' -v
