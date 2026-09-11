@@ -47,10 +47,13 @@ acceptance gates. It supersedes the initial pilot status below:
   copy gives2.2–3.6x faster isolated lookups, with identical outputs and50.74 MiB
   extra sidecars. No default or matching-policy change. The1200s replay reached
   98.1902% source coverage, with all3,876 common partition BEDs byte-identical.
-  At the user's request, a fresh run at
-  `~/yeast/partition-pos64-w10k-d1k-to-completion/` is now allowed to finish
-  **without a wall-clock cutoff**. No additional tuning or parallelism changes.
-  See the contract for final accounting gates and the storage tradeoff.
+  At the user's request, the fresh run at
+  `~/yeast/partition-pos64-w10k-d1k-to-completion/` finished naturally
+  **without a wall-clock cutoff**, in10,544.341s. It wrote19,421 partitions and
+  383,849 intervals covering all3,336,976,856bp across9,901 source paths.
+  Bounds and union-equals-sum checks passed; all14,717 common BEDs are
+  byte-identical to the earlier sample64 snapshot. No tuning or parallelism
+  changes were made. Discovery is complete; biological catalog acceptance is not.
 - A static `S288C#0#chrI` overview shows21 partitions covering219,929 bp, a broad
   interior band of202–211 identities, sparse regions, and a160–170kb group with
   574 intervals from110 identities. These are candidate ownership groups, not

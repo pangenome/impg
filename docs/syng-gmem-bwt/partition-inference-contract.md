@@ -162,9 +162,18 @@ are understood. The terminated process cannot be resumed with the current CLI;
 a fresh run at `~/yeast/partition-pos64-w10k-d1k-to-completion/` uses the same
 sample64 index, uncached reference binary,16 threads and matching parameters,
 with **no wall-clock cutoff**. No additional parallelism or performance tuning
-is planned. Retain results, compare common BEDs and complete final QC on natural
-exit. Small incremental source gains are not grounds to interrupt healthy
+is planned. Small incremental source gains are not grounds to interrupt healthy
 progress. Completion and biological catalog acceptance remain separate gates.
+
+**Natural-completion result:** the underlying partition command exited0 after
+10,544.341s (2h55m44s), without a timeout. It wrote19,421 partitions containing
+383,849 intervals across all9,901 source paths, accounting for exactly
+3,336,976,856bp: **100% source coverage, zero uncovered bases**. All intervals
+are in bounds and the coordinate union equals the emitted sum. All14,717 BEDs
+common with the earlier sample64 snapshot are byte-identical. The completed
+run's `report.json` records these checks and explicitly retains
+`catalog_accepted: false`; validated homology, spanning support and inference
+accuracy are not established by complete source accounting.
 
 ### Bounded repair sequence
 

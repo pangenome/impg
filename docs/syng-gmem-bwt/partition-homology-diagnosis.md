@@ -1,8 +1,10 @@
 # Yeast partition homology and graph-view diagnosis
 
 This is diagnostic evidence, not a policy change or a validated inference catalog.
-The complete source partitioning run remains uninterrupted, without a wall-clock
-cutoff. Local PGGB graph construction is an optional diagnostic view, not a new
+The full source partitioning run subsequently finished naturally, without a
+wall-clock cutoff: 19,421 partitions and 100% source accounting, with bounds and
+nonoverlap checks passing. This does not resolve the homology issues below.
+Local PGGB graph construction is an optional diagnostic view, not a new
 requirement for the sample MEM-BWT method.
 
 ## Inputs and scope
