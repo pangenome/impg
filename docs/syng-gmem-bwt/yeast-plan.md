@@ -56,6 +56,12 @@ acceptance gates. It supersedes the initial pilot status below:
   574 intervals from110 identities. These are candidate ownership groups, not
   validated spanning homology. [Plots, membership heatmap and tables](http://hypervolu.me/~erik/yeast/syng-chrI-partitions-20260910T231731Z.html)
   are uploaded with verified remote checksums.
+- Subsequent local PGGB views exposed two distinct construction defects: an
+  automatic FastGA frequency-cutoff dropout and loss of reverse-oriented
+  homology sharing during smoothing. All source sequences remain exact, so
+  spelling checks alone miss the latter. [Diagnosis and regression controls](partition-homology-diagnosis.md)
+  record the stage isolation and distinguish anchor extent from matched-base
+  coverage. No implementation fix or policy change has been applied.
 
 ### Earlier baseline and data provenance
 

@@ -16,6 +16,9 @@ graph is required.
 - **[Partition/inference contract and repair plan](partition-inference-contract.md)**
   — current partition failure evidence, bounded scheduling repair, high-copy
   states, occurrence ownership and shared-count/mosaic constraints.
+- **[Partition homology and graph-view diagnosis](partition-homology-diagnosis.md)**
+  — measured FastGA frequency dropout, smoothing loss of reverse-oriented
+  homology, node-sharing matrices and minimal regression controls.
 - **[Yeast baseline harness](yeast-baseline.md)** — implemented source inventory,
   bounded explicit-query pilot and candidate diagnostics; not a genotyper.
 - **[Formal specification](genotyping.typ)** — the authoritative proposal:
