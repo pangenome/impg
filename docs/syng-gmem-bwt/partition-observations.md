@@ -2,8 +2,10 @@
 
 Production commands now implement the observation repair described in
 [observation-registry-repair.md](observation-registry-repair.md). Native small
-fixtures, independent review and the 590-test parent release gate pass. Real-panel
-resource/sequence controls are still required. This is **error-free source replay**, not a calibrated noisy-read
+fixtures, independent review and the 590-test parent release gate pass.
+[Full-panel resource and sequence controls](partition-observation-results.md)
+are now measured: SK1 alignment QV improves, but whole-truth coverage falls for
+both controls. This is not default-adoption approval. This is **error-free source replay**, not a calibrated noisy-read
 model, posterior, biological absence call or complete assembly method.
 
 ## Commands
@@ -179,8 +181,9 @@ record main extraction work. `profile_execution` records reused profiles,
 maximum per-hit context bases/anchors. Each fetched context supplies two raw-view
 calls. Remaining work includes exact per-hit/per-length event/MEM replay and one
 bounded fetch per supported endpoint incidence; heavily fragmented ownership can
-increase endpoint fallback work. Full-panel runtime, peak memory and scratch capacity
-remain to be measured; this is not an all-panel performance claim.
+increase endpoint fallback work. [Full-panel measurements](partition-observation-results.md)
+now report runtime, peak memory and retained output size. Peak scratch usage remains
+unmeasured; the small-fixture counters above are not substitutes for those full-panel results.
 
 **Fresh-only, no resume:** every output directory must be new, including empty
 ones. There is no `--resume`. Failed/running outputs preserve diagnostic shards but
