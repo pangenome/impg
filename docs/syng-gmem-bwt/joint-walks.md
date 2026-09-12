@@ -1,5 +1,9 @@
 # Joint physical-walk evidence (first runnable slice)
 
+The subsequent [automatic panel-route implementation](panel-routes.md) builds all
+source lanes/topology families and explores successive donor switches, using this
+unchanged finite engine as an independent replay oracle.
+
 This **finite explicit-layout** compiler/evaluator/bounded exhaustive solver uses
 shared observations jointly. It is not genome-wide candidate completion, a noisy
 read model, a calibrated posterior, or permission to emit an incumbent as sequence.

@@ -1,6 +1,7 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
 use crate::genome_inference::{
-    self as genome, calling, catalog, genotype, joint, observations, sample, threading,
+    self as genome, calling, catalog, genotype, joint, observations, panel_routes, sample,
+    threading,
 };
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
@@ -49,8 +50,72 @@ pub struct JointEvidence {
     #[arg(long, default_value_t = 0.1)]
     background: f64,
 }
+#[derive(Debug, Args)]
+pub struct RouteEvidence {
+    #[arg(long)]
+    routes: PathBuf,
+    #[arg(long)]
+    sample: PathBuf,
+    #[arg(long)]
+    haploid_depth: f64,
+    #[arg(long, default_value_t = 0.1)]
+    background: f64,
+    /// Memory resource failure, never partial feature selection
+    #[arg(long, default_value_t = 50000000)]
+    max_feature_terms: usize,
+    #[arg(long, default_value_t = 1000000)]
+    cache_terms: usize,
+}
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Automatic all-source lanes, all identity endpoint families, DNA hubs and indexed native start profiles
+    BuildPanelRoutes {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long, required=true, num_args=1..)]
+        sources: Vec<String>,
+        #[arg(long, required=true, value_delimiter=',', num_args=1..)]
+        read_lengths: Vec<u64>,
+        #[arg(long, default_value_t = 65536)]
+        core_bp: u64,
+        #[arg(long, default_value_t = 2000000)]
+        max_profile_terms: usize,
+    },
+    /// Exact lazy full-genome route evaluation; fixed-universe background-relative objective only
+    EvaluatePanelRoutes {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        evidence: RouteEvidence,
+        #[arg(
+            long,
+            required_unless_present = "native_family",
+            conflicts_with = "native_family"
+        )]
+        assignment: Option<PathBuf>,
+        /// Automatically select this identity's complete native path inventory
+        #[arg(long)]
+        native_family: Option<String>,
+    },
+    /// All-native initializations plus cross-source routes; identity mixing reported separately (no emission)
+    SearchPanelRoutes {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        evidence: RouteEvidence,
+        #[arg(long, default_value_t = 100000)]
+        max_work: u64,
+        #[arg(long, default_value_t = 10000)]
+        max_evaluations: u64,
+        #[arg(long, default_value_t = 1024)]
+        max_frontier: usize,
+        #[arg(long, default_value_t = 1000)]
+        max_optima: usize,
+        #[arg(long, default_value_t = 1e-9)]
+        tie_epsilon: f64,
+    },
     /// Fresh exact native replay of explicit mixed-source linear molecule alternatives
     CompileJointWalks {
         #[command(flatten)]
@@ -308,8 +373,116 @@ fn joint_run(
         )
     })
 }
+fn route_run(
+    common: Common,
+    evidence: RouteEvidence,
+    operation: impl FnOnce(
+        &mut panel_routes::Evaluator<'_>,
+        &std::path::Path,
+    ) -> io::Result<serde_json::Value>,
+) -> io::Result<()> {
+    genome::with_output_model(&common.out_dir, panel_routes::MODEL, || {
+        let identity = genome::PanelIdentity::read(&common.panel)?;
+        let graph = panel_routes::Graph::load(&evidence.routes, &identity)?;
+        let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
+        let (sample, sample_checksum) =
+            sample::SampleIndex::load_with_checksum(&evidence.sample, &identity)?;
+        let mut evaluator = panel_routes::Evaluator::new(
+            &evidence.routes,
+            &graph,
+            &panel,
+            &sample,
+            evidence.haploid_depth,
+            evidence.background,
+            evidence.max_feature_terms,
+            evidence.cache_terms,
+        )?;
+        let result = operation(&mut evaluator, &common.out_dir)?;
+        let value = serde_json::json!({"version":panel_routes::VERSION,"model":panel_routes::MODEL,
+            "graph_checksum":graph.digest()?,"sample_payload_checksum":sample_checksum,
+            "compiler_identity":panel_routes::compiler_identity(),"count_policy":genome::COUNT_POLICY,
+            "haploid_depth":evidence.haploid_depth,"background":evidence.background,
+            "objective_kind":"fixed-universe-background-relative-NLL-only","result":result});
+        genome::write_json(&common.out_dir.join("result.json"), &value)?;
+        Ok(
+            serde_json::json!({"result":genome::reconstruction::fingerprint(&common.out_dir.join("result.json"))?,"sequence_emission_authorized":false}),
+        )
+    })
+}
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::BuildPanelRoutes {
+            common,
+            catalog,
+            sources,
+            read_lengths,
+            core_bp,
+            max_profile_terms,
+        } => genome::with_output_model(&common.out_dir, panel_routes::MODEL, || {
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
+            panel_routes::build(
+                &panel,
+                identity,
+                &catalog,
+                &sources,
+                read_lengths,
+                &common.out_dir,
+                core_bp,
+                max_profile_terms,
+            )
+        }),
+        Command::EvaluatePanelRoutes {
+            common,
+            evidence,
+            assignment,
+            native_family,
+        } => route_run(common, evidence, |e, _out| {
+            let assignment = if let Some(path) = assignment {
+                genome::read_json(&path)?
+            } else {
+                let family = e
+                    .graph
+                    .families
+                    .iter()
+                    .position(|f| Some(&f.identity) == native_family.as_ref())
+                    .ok_or_else(|| invalid("unknown native topology family"))?;
+                e.graph.native_assignment(family)?
+            };
+            serde_json::to_value(e.evaluate(&assignment)?).map_err(io::Error::other)
+        }),
+        Command::SearchPanelRoutes {
+            common,
+            evidence,
+            max_work,
+            max_evaluations,
+            max_frontier,
+            max_optima,
+            tie_epsilon,
+        } => route_run(common, evidence, |e, out| {
+            let result = panel_routes::search(
+                e,
+                panel_routes::SearchBudget {
+                    max_work,
+                    max_evaluations,
+                    max_frontier,
+                    max_optima,
+                    tie_epsilon,
+                },
+                out,
+            )?;
+            if let Some(incumbent) = &result.incumbent {
+                genome::write_json(
+                    &out.join("incumbent-assignment.json"),
+                    &incumbent.assignment,
+                )?;
+                genome::write_json(
+                    &out.join("incumbent-evaluation.json"),
+                    &e.evaluate(&incumbent.assignment)?,
+                )?;
+            }
+            serde_json::to_value(result).map_err(io::Error::other)
+        }),
         Command::CompileJointWalks {
             common,
             layout,

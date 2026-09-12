@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod genotype;
 pub mod joint;
 pub mod observations;
+pub mod panel_routes;
 pub mod reconstruction;
 pub mod sample;
 pub mod sequence_evaluation;
