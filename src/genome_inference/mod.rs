@@ -2,6 +2,7 @@
 pub mod calling;
 pub mod catalog;
 pub mod genotype;
+pub mod joint;
 pub mod observations;
 pub mod reconstruction;
 pub mod sample;

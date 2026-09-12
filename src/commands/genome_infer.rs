@@ -1,6 +1,6 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
 use crate::genome_inference::{
-    self as genome, calling, catalog, genotype, observations, sample, threading,
+    self as genome, calling, catalog, genotype, joint, observations, sample, threading,
 };
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
@@ -38,8 +38,56 @@ pub struct CallOptions {
     #[arg(long)]
     truth: Option<PathBuf>,
 }
+#[derive(Debug, Args)]
+pub struct JointEvidence {
+    #[arg(long)]
+    compiled: PathBuf,
+    #[arg(long)]
+    sample: PathBuf,
+    #[arg(long)]
+    haploid_depth: f64,
+    #[arg(long, default_value_t = 0.1)]
+    background: f64,
+}
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Fresh exact native replay of explicit mixed-source linear molecule alternatives
+    CompileJointWalks {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        layout: PathBuf,
+        #[arg(long, required=true, num_args=1..)]
+        sources: Vec<String>,
+        #[arg(long, required=true, value_delimiter=',', num_args=1..)]
+        read_lengths: Vec<u64>,
+        /// Optional full legacy catalog: definitions only, never conditional profiles
+        #[arg(long)]
+        registry_catalog: Option<PathBuf>,
+    },
+    /// Evaluate one complete physical-slot assignment; not unary genotypes or sequence
+    EvaluateJointWalks {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        evidence: JointEvidence,
+        #[arg(long)]
+        assignment: PathBuf,
+    },
+    /// Bounded exhaustive coupled search in a finite explicit layout (not genome-wide completion)
+    SolveJointWalks {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        evidence: JointEvidence,
+        /// Includes infeasible complete assignments; no alternatives silently pruned
+        #[arg(long, default_value_t = 100000)]
+        max_assignments: u64,
+        #[arg(long, default_value_t = 1000)]
+        max_optima: usize,
+        #[arg(long, default_value_t = 1e-9)]
+        tie_epsilon: f64,
+    },
     /// Build reusable weighted MEM-substring FM counts (no read IDs or locations)
     BuildSample {
         #[command(flatten)]
@@ -228,8 +276,86 @@ fn finish_calls(
         "sample": sample.stats, "catalog_accepted": false, "scope": "bootstrap-source-occurrence-diagnostics-only"}),
     )
 }
+fn joint_run(
+    common: Common,
+    evidence: JointEvidence,
+    operation: impl FnOnce(&joint::Problem<'_>) -> io::Result<serde_json::Value>,
+) -> io::Result<()> {
+    genome::with_output_model(&common.out_dir, joint::MODEL, || {
+        let identity = genome::PanelIdentity::read(&common.panel)?;
+        let (compiled, compiled_checksum) = joint::Compiled::load(&evidence.compiled, &identity)?;
+        let (sample, sample_checksum) =
+            sample::SampleIndex::load_with_checksum(&evidence.sample, &identity)?;
+        let problem = joint::Problem::new(
+            &compiled,
+            &sample,
+            evidence.haploid_depth,
+            evidence.background,
+        )?;
+        genome::write_json(&common.out_dir.join("factors.json"), &problem.factors)?;
+        let result = operation(&problem)?;
+        let artifact = serde_json::json!({"version":joint::VERSION,"model":joint::MODEL,
+            "compiled_checksum":compiled_checksum,"sample_payload_checksum":sample_checksum,
+            "compiler_identity":joint::compiler_identity(),"haploid_depth":evidence.haploid_depth,
+            "background":evidence.background,"count_policy":genome::COUNT_POLICY,
+            "feature_universe":"registry-union-candidate-generated-union-sample-positive",
+            "factor_omissions":"none; constants and unsupported sample residuals explicit",
+            "result":result});
+        genome::write_json(&common.out_dir.join("result.json"), &artifact)?;
+        Ok(
+            serde_json::json!({"factors":problem.factors.len(),"scope":"finite-explicit-layout-only",
+            "sequence_emission_authorized":false}),
+        )
+    })
+}
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::CompileJointWalks {
+            common,
+            layout,
+            sources,
+            read_lengths,
+            registry_catalog,
+        } => genome::with_output_model(&common.out_dir, joint::MODEL, || {
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
+            let compiled = joint::compile(
+                &panel,
+                identity,
+                genome::read_json(&layout)?,
+                &sources,
+                read_lengths,
+                registry_catalog.as_deref(),
+            )?;
+            compiled.save(&common.out_dir.join("joint-profiles.json"))?;
+            Ok(
+                serde_json::json!({"slots":compiled.layout.slots.len(),"features":compiled.definitions.len(),
+                    "scope":"finite-explicit-layout-only","context_complete":true}),
+            )
+        }),
+        Command::EvaluateJointWalks {
+            common,
+            evidence,
+            assignment,
+        } => joint_run(common, evidence, |problem| {
+            serde_json::to_value(joint::evaluate(problem, &genome::read_json(&assignment)?)?)
+                .map_err(io::Error::other)
+        }),
+        Command::SolveJointWalks {
+            common,
+            evidence,
+            max_assignments,
+            max_optima,
+            tie_epsilon,
+        } => joint_run(common, evidence, |problem| {
+            serde_json::to_value(joint::solve(
+                problem,
+                max_assignments,
+                max_optima,
+                tie_epsilon,
+            )?)
+            .map_err(io::Error::other)
+        }),
         Command::BuildPartitionObservations {
             common,
             catalog,

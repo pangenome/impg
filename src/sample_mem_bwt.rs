@@ -29,7 +29,7 @@ pub fn encode_walk(walk: &[(i32, u64)]) -> io::Result<Vec<u64>> {
     Ok(result)
 }
 
-fn validate_pattern(pattern: &[u64]) -> io::Result<()> {
+pub(crate) fn validate_pattern(pattern: &[u64]) -> io::Result<()> {
     if pattern.is_empty() || pattern.len() % 2 == 0 {
         return Err(invalid("feature must begin and end on a node"));
     }
@@ -204,6 +204,53 @@ impl WeightedBwt {
         }
     }
 
+    /// Enumerate positive adjacent-node feature counts directly from the FM index.
+    /// Each suffix row supplies one possible three-token occurrence. Two LF
+    /// steps recover its start row, whose weight is the same weight used by
+    /// `count_oriented`. No read identities, suffix locations or record tape
+    /// are reconstructed. Separators cannot form a valid node-gap-node triple.
+    pub fn observed_pairs(&self) -> io::Result<BTreeMap<[u64; 3], u64>> {
+        if self.bwt.is_empty()
+            || self.ranks.values().map(|(_, p)| p.len()).sum::<usize>() != self.bwt.len()
+        {
+            return Err(invalid("weighted BWT must be rebuilt before enumeration"));
+        }
+        let mut lf = vec![0usize; self.bwt.len()];
+        for (start, positions) in self.ranks.values() {
+            for (rank, &row) in positions.iter().enumerate() {
+                lf[row] = start + rank;
+            }
+        }
+        let mut counts = BTreeMap::<[u64; 3], u64>::new();
+        for (&last, (start, positions)) in &self.ranks {
+            if last < 4 || last % 2 != 0 {
+                continue;
+            }
+            for row in *start..start + positions.len() {
+                let gap = self.bwt[row];
+                let first = self.bwt[lf[row]];
+                if gap < 3 || gap % 2 != 1 || first < 4 || first % 2 != 0 {
+                    continue;
+                }
+                let pattern = [first, gap, last];
+                validate_pattern(&pattern)?;
+                let first_row = lf[lf[row]];
+                let weight = self.weights[first_row + 1] - self.weights[first_row];
+                if weight == 0 {
+                    continue;
+                }
+                let key: [u64; 3] = canonical(&pattern)
+                    .try_into()
+                    .expect("canonical pair retains three tokens");
+                let total = counts.entry(key).or_default();
+                *total = total
+                    .checked_add(weight)
+                    .ok_or_else(|| invalid("count overflow"))?;
+            }
+        }
+        Ok(counts)
+    }
+
     pub fn symbols(&self) -> usize {
         self.bwt.len()
     }
@@ -234,6 +281,60 @@ mod tests {
             })
             .sum()
     }
+    #[test]
+    fn observed_pairs_match_weighted_records_and_public_orbit_counts() {
+        let records = BTreeMap::from([
+            (walk(&[1, 2, 1, 2], 7), 3),
+            (walk(&[-2, -1], 7), 5),
+            (walk(&[1, 2], 8), 2),
+            (walk(&[1, -1], 7), 4),
+            (walk(&[4], 7), 11),
+            (walk(&[5], 7), 13),
+        ]);
+        let mut expected = BTreeMap::<[u64; 3], u64>::new();
+        for (record, &weight) in &records {
+            for pair in record.windows(3).step_by(2) {
+                *expected
+                    .entry(canonical(pair).try_into().unwrap())
+                    .or_default() += weight;
+            }
+        }
+        let bwt = WeightedBwt::build(&records).unwrap();
+        let bytes_before =
+            bincode::serde::encode_to_vec(&bwt, bincode::config::standard()).unwrap();
+        assert_eq!(bwt.observed_pairs().unwrap(), expected);
+        let mut canonical_records = BTreeMap::new();
+        for (record, &weight) in &records {
+            *canonical_records.entry(canonical(record)).or_default() += weight;
+        }
+        assert_eq!(
+            WeightedBwt::build(&canonical_records)
+                .unwrap()
+                .observed_pairs()
+                .unwrap(),
+            expected
+        );
+        for (pair, &count) in &expected {
+            assert_eq!(bwt.count(pair).unwrap(), count);
+        }
+        assert_eq!(
+            bytes_before,
+            bincode::serde::encode_to_vec(&bwt, bincode::config::standard()).unwrap()
+        );
+        assert_eq!(bwt.count(&walk(&[1, -1], 7)).unwrap(), 4);
+        let (mut restored, used): (WeightedBwt, usize) =
+            bincode::serde::decode_from_slice(&bytes_before, bincode::config::standard()).unwrap();
+        assert_eq!(used, bytes_before.len());
+        assert!(restored.observed_pairs().is_err());
+        restored.rebuild().unwrap();
+        assert_eq!(restored.observed_pairs().unwrap(), expected);
+        assert!(WeightedBwt::build(&BTreeMap::new())
+            .unwrap()
+            .observed_pairs()
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn exhaustive_weighted_substrings_spacing_repeats_boundaries_orientations() {
         let records = BTreeMap::from([

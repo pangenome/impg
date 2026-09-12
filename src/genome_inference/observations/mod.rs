@@ -3,8 +3,8 @@
 mod consumer;
 mod orientation;
 pub use orientation::{prepare_orientations, write_derived_calls};
-mod input;
-mod profile;
+pub(crate) mod input;
+pub(crate) mod profile;
 use super::{catalog, genotype, sample, threading, PanelIdentity, COUNT_POLICY, FORMAT_VERSION};
 use crate::{
     sample_mem_bwt::{canonical, encode_walk, invalid},
@@ -116,7 +116,7 @@ fn verify(path: &Path, expected: &Value) -> io::Result<()> {
         "observation content fingerprint mismatch",
     )
 }
-fn compiler_identity() -> String {
+pub(crate) fn compiler_identity() -> String {
     // Source-bound algorithm identity, independent of build path or timestamps.
     let mut hash = 0xcbf29ce484222325;
     for source in [
