@@ -2340,11 +2340,22 @@ unsafe impl Send for SyngIndex {}
 unsafe impl Sync for SyngIndex {}
 
 impl SyngIndex {
+    fn initialize_native_diagnostics() {
+        // Native pathCount and PATH_DEBUG both start at zero, accidentally
+        // enabling full per-match dumps until a path-walking API suppresses
+        // them. Raw MEM replay need not walk a stored path first. Initialize
+        // before publishing any index, once rather than writing the C global
+        // on each concurrent read-only query. This changes diagnostics only.
+        static INITIALIZED: std::sync::Once = std::sync::Once::new();
+        INITIALIZED.call_once(|| unsafe { syng_ffi::impg_syng_suppress_debug() });
+    }
+
     /// Create a new, empty SyngIndex with default parameters.
     ///
     /// The GBWT is created with a fixed syncmer length of `w + k` (default 63)
     /// and an initial capacity of 0 paths.
     pub fn new(params: SyncmerParams) -> Self {
+        Self::initialize_native_diagnostics();
         let syncmer_len = (params.w + params.k) as i32;
         let gbwt = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
         let kmer_hash = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
@@ -2959,6 +2970,7 @@ impl SyngIndex {
     }
 
     fn load_with_options(prefix: &str, require_sampled_positions: bool) -> io::Result<Self> {
+        Self::initialize_native_diagnostics();
         let metadata_path = existing_syng_sidecar_path(prefix, "meta");
         let metadata = SyngMetadata::load(&metadata_path)?;
         let params = metadata.params;

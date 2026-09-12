@@ -33,6 +33,22 @@ fn read(p: &Path) -> Value {
 }
 fn run(binary: &str, args: &[&str], ok: bool) {
     let out = Command::new(binary).args(args).output().unwrap();
+    // Check fresh CLI processes: earlier path walking in a shared test process
+    // can otherwise hide the native library's initially enabled debug tracing.
+    // Frozen binaries remain unchanged independent count oracles.
+    if binary == env!("CARGO_BIN_EXE_impg") {
+        for bytes in [&out.stdout, &out.stderr] {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(
+                !text.contains("++match ") && !text.contains("++path "),
+                "unexpected native per-match/path debug dump: {args:?}"
+            );
+        }
+        assert!(
+            out.stdout.len() + out.stderr.len() <= 1024 * 1024,
+            "small route fixture exceeded its 1 MiB diagnostic budget: {args:?}"
+        );
+    }
     assert_eq!(
         out.status.success(),
         ok,

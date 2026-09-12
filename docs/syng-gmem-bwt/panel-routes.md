@@ -263,6 +263,25 @@ The driver gate additionally requires Python 3, `/usr/bin/time`, `taskset`, `nic
 and the explicitly configured parent native runtime environment. No private path
 is substituted when configuration is absent.
 
+## Native diagnostic startup and first full-panel attempt
+
+The first real all-panel build was stopped after 578 of 9,901 source-path
+checkpoints: unintended native per-match tracing had written 256,361,382,017 bytes
+of diagnostics. Native `pathCount` and `PATH_DEBUG` both default to zero; raw replay
+could reach their equality guard before an existing path-walking API suppressed
+it. This was a logging/resource failure, not an inference or coverage result.
+Search had not started. Checkpoints and bounded diagnostic excerpts were preserved;
+the full runaway log was removed with user authorization.
+
+`SyngIndex` now invokes the existing native debug-suppression helper once at
+construction/loading, before publishing an index to callers. No vendor/gitlink,
+counting, routing or likelihood changes are involved. Fresh-process route CLI
+regressions reject native match/path dumps and enforce a 1 MiB diagnostic budget
+for each small fixture command (not a cap on biological output files). Updating
+`syng.rs` changes source-bound compiler identities: use fresh artifacts, not a
+spoofed identity or an implied resume of the interrupted graph. Preserved frozen
+executables remain independent count oracles.
+
 ## Parent-run driver and residual scalability limits
 
 `python3 scripts/panel-route-gate.py` is a parent-only fresh output driver. `--help` describes
