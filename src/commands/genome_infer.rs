@@ -1,4 +1,5 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
+mod panel_route_search_policy;
 use crate::genome_inference::{
     self as genome, calling, catalog, genotype, joint, observations, panel_routes, sample,
     threading,
@@ -115,6 +116,15 @@ pub enum Command {
         max_optima: usize,
         #[arg(long, default_value_t = 1e-9)]
         tie_epsilon: f64,
+    },
+    /// Fair sample-ranked lazy coupled search; explicit immutable-parent resume (no emission)
+    SearchPanelRoutesGuided {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        evidence: RouteEvidence,
+        #[command(flatten)]
+        options: panel_route_search_policy::Options,
     },
     /// Fresh exact native replay of explicit mixed-source linear molecule alternatives
     CompileJointWalks {
@@ -379,6 +389,7 @@ fn route_run(
     operation: impl FnOnce(
         &mut panel_routes::Evaluator<'_>,
         &std::path::Path,
+        &str,
     ) -> io::Result<serde_json::Value>,
 ) -> io::Result<()> {
     genome::with_output_model(&common.out_dir, panel_routes::MODEL, || {
@@ -397,7 +408,7 @@ fn route_run(
             evidence.max_feature_terms,
             evidence.cache_terms,
         )?;
-        let result = operation(&mut evaluator, &common.out_dir)?;
+        let result = operation(&mut evaluator, &common.out_dir, &sample_checksum)?;
         let value = serde_json::json!({"version":panel_routes::VERSION,"model":panel_routes::MODEL,
             "graph_checksum":graph.digest()?,"sample_payload_checksum":sample_checksum,
             "compiler_identity":panel_routes::compiler_identity(),"count_policy":genome::COUNT_POLICY,
@@ -437,7 +448,7 @@ pub fn run(command: Command) -> io::Result<()> {
             evidence,
             assignment,
             native_family,
-        } => route_run(common, evidence, |e, _out| {
+        } => route_run(common, evidence, |e, _out, _sample| {
             let assignment = if let Some(path) = assignment {
                 genome::read_json(&path)?
             } else {
@@ -459,7 +470,7 @@ pub fn run(command: Command) -> io::Result<()> {
             max_frontier,
             max_optima,
             tie_epsilon,
-        } => route_run(common, evidence, |e, out| {
+        } => route_run(common, evidence, |e, out, _sample| {
             let result = panel_routes::search(
                 e,
                 panel_routes::SearchBudget {
@@ -483,6 +494,16 @@ pub fn run(command: Command) -> io::Result<()> {
             }
             serde_json::to_value(result).map_err(io::Error::other)
         }),
+        Command::SearchPanelRoutesGuided {
+            common,
+            evidence,
+            options,
+        } => {
+            let cache_terms = evidence.cache_terms;
+            route_run(common, evidence, |e, out, sample_checksum| {
+                panel_route_search_policy::run(e, sample_checksum.into(), cache_terms, options, out)
+            })
+        }
         Command::CompileJointWalks {
             common,
             layout,
