@@ -78,17 +78,6 @@ impl Permutation {
     pub fn new(len: u64) -> Self {
         Self { len, ordinal: 0 }
     }
-    pub(super) fn validate(&self, base: u64, count: u64) -> io::Result<()> {
-        let domain = if self.len == 0 {
-            0
-        } else {
-            (self.len as u128).next_power_of_two()
-        };
-        ensure(
-            base.checked_add(self.len).is_some_and(|n| n <= count) && self.ordinal <= domain,
-            "invalid persisted permutation",
-        )
-    }
     pub fn next(&mut self) -> Option<Option<u64>> {
         let bits = if self.len <= 1 {
             0

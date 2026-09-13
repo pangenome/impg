@@ -37,8 +37,6 @@ pub(super) fn advance(
     epsilon: f64,
     ledger: &mut std::fs::File,
 ) -> io::Result<()> {
-    let old = task.clone();
-    let emitted_id = s.next_id;
     let g = e.graph;
     let c = &task.context;
     let target = g.families[c.family].paths[c.slot];
@@ -353,7 +351,7 @@ pub(super) fn advance(
     if again {
         s.insert(task)?;
     }
-    s.handoff(&old, (s.next_id > emitted_id).then_some(emitted_id))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -432,6 +430,6 @@ mod tests {
         assert_eq!(s.tasks.len(), 10);
         assert_eq!(s.fifo.len(), 10);
         assert_eq!(s.shallow.len(), 10);
-        s.validate_links().unwrap();
+        assert_eq!(s.progress.len(), 10);
     }
 }

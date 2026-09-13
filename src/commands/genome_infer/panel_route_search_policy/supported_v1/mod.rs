@@ -1,12 +1,7 @@
 //! Command-owned fair sample-ranked lazy coupled search. No backend identity inputs.
 mod adapter;
 mod checkpoint;
-mod continuation;
 mod machine;
-mod transition;
-mod v1_schema;
-mod validation;
-mod validation_containers;
 use crate::genome_inference::{self as genome, panel_routes as routes};
 use crate::sample_mem_bwt::invalid;
 use adapter::{Permutation, Port};
@@ -16,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const POLICY_VERSION: &str = "fair-sample-ranked-live-continuation-v2";
+pub const POLICY_VERSION: &str = "fair-sample-ranked-lazy-coupled-v1";
 fn ensure(ok: bool, message: &str) -> io::Result<()> {
     if ok {
         Ok(())
@@ -39,31 +34,6 @@ pub fn identity() -> BTreeMap<String, String> {
         ("adapter", include_str!("adapter.rs")),
         ("checkpoint", include_str!("checkpoint.rs")),
         ("cli", include_str!("../../genome_infer.rs")),
-        ("continuation", include_str!("continuation.rs")),
-        ("transition", include_str!("transition.rs")),
-        ("v1_schema", include_str!("v1_schema.rs")),
-        ("validation", include_str!("validation.rs")),
-        (
-            "validation_containers",
-            include_str!("validation_containers.rs"),
-        ),
-        ("supported_v1_policy", include_str!("supported_v1/mod.rs")),
-        (
-            "supported_v1_machine",
-            include_str!("supported_v1/machine.rs"),
-        ),
-        (
-            "supported_v1_adapter",
-            include_str!("supported_v1/adapter.rs"),
-        ),
-        (
-            "supported_v1_checkpoint",
-            include_str!("supported_v1/checkpoint.rs"),
-        ),
-        (
-            "supported_v1_cli",
-            include_str!("supported_v1/genome_infer.rs"),
-        ),
     ]
     .into_iter()
     .map(|(name, source)| {
@@ -97,12 +67,6 @@ pub struct Options {
     /// Immutable previous output directory; current --out-dir must be NEW
     #[arg(long)]
     pub resume_from: Option<PathBuf>,
-    /// Explicit conversion only; no search or rescoring. Requires an exact supported v1 parent.
-    #[arg(long, requires_all = ["resume_from", "v1_ancestry_manifest"])]
-    pub convert_exact_v1_to_v2: bool,
-    /// Independently frozen exact old checkpoint/ledger pins, including every ancestor.
-    #[arg(long, requires = "convert_exact_v1_to_v2")]
-    pub v1_ancestry_manifest: Option<PathBuf>,
     /// Explicit authorization to increase cumulative work/evaluation/storage/support caps
     #[arg(long, requires = "resume_from")]
     pub extend_budgets: bool,
@@ -224,8 +188,6 @@ struct Task {
     id: u64,
     ready: u64,
     depth: usize,
-    prev: Option<u64>,
-    next: Option<u64>,
     context: Context,
     op: Op,
 }
@@ -240,26 +202,15 @@ struct FamilyStats {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HistoricalAccounting {
-    newest_ready_modes: Vec<[u64; 3]>,
-    task_bytes_v1: u64,
-    peak_state_bytes_v1: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct State {
     native: Vec<Scored>,
     ranking: Vec<usize>,
     family_cursor: usize,
     quantum: u8,
-    #[serde(deserialize_with = "validation::unique_map")]
     tasks: BTreeMap<u64, Task>,
-    #[serde(deserialize_with = "validation::unique_set")]
     fifo: BTreeSet<(usize, u64, u64)>,
-    #[serde(deserialize_with = "validation::unique_set")]
     shallow: BTreeSet<(usize, usize, u64)>,
-    focus: Vec<Option<u64>>,
-    historical_accounting: Option<HistoricalAccounting>,
+    progress: BTreeSet<(usize, u64, u64)>,
     next_id: u64,
     next_ready: u64,
     task_bytes: u64,
@@ -295,8 +246,7 @@ impl State {
             tasks: BTreeMap::new(),
             fifo: BTreeSet::new(),
             shallow: BTreeSet::new(),
-            focus: vec![None; families],
-            historical_accounting: None,
+            progress: BTreeSet::new(),
             next_id: 0,
             next_ready: 0,
             task_bytes: 0,
@@ -324,7 +274,7 @@ impl State {
         }
     }
     // Logical occupancy: compact serialized task payload + 256 bytes for ownership,
-    // two ordered indices and live links and allocator/node allowances, with no tombstones.
+    // all three ordered indices and allocator/node allowances, with no tombstones.
     fn task_weight(task: &Task) -> io::Result<u64> {
         plus(bytes(task)?, 256)
     }
@@ -334,9 +284,7 @@ impl State {
     fn occupancy(&self) -> io::Result<u64> {
         plus(
             plus(self.task_bytes, self.score_bytes)?,
-            bytes(&self.historical_accounting)?
-                + 4096
-                + self.families.len() as u64 * 512
+            4096 + self.families.len() as u64 * 512
                 + (self.switches.len()
                     + self.visited_sources.len()
                     + self.mixed_donor_sources.len()) as u64
@@ -350,6 +298,7 @@ impl State {
         let f = task.context.family;
         self.fifo.insert((f, task.ready, task.id));
         self.shallow.insert((f, task.depth, task.id));
+        self.progress.insert((f, task.ready, task.id));
         ensure(
             self.tasks.insert(task.id, task).is_none(),
             "duplicate task ownership",
@@ -362,8 +311,6 @@ impl State {
             id,
             ready: 0,
             depth: context.depth(),
-            prev: None,
-            next: None,
             context,
             op,
         })
@@ -375,7 +322,9 @@ impl State {
             .ok_or_else(|| invalid("missing indexed task"))?;
         let f = task.context.family;
         ensure(
-            self.fifo.remove(&(f, task.ready, id)) && self.shallow.remove(&(f, task.depth, id)),
+            self.fifo.remove(&(f, task.ready, id))
+                && self.shallow.remove(&(f, task.depth, id))
+                && self.progress.remove(&(f, task.ready, id)),
             "inconsistent task indices",
         )?;
         self.task_bytes = self
@@ -400,7 +349,13 @@ impl State {
                             .unwrap()
                             .2
                     }
-                    _ => self.focus[f].unwrap_or(first),
+                    _ => {
+                        self.progress
+                            .range((f, 0, 0)..=(f, u64::MAX, u64::MAX))
+                            .next_back()
+                            .unwrap()
+                            .2
+                    }
                 };
                 return Some((cursor, if skip == 0 { self.quantum } else { 32 }, id, mode));
             }
@@ -540,17 +495,6 @@ pub fn run(
         cache_terms,
         count_policy: genome::COUNT_POLICY.into(),
     };
-    if options.convert_exact_v1_to_v2 {
-        return transition::convert(
-            e,
-            options.resume_from.as_ref().unwrap(),
-            options.v1_ancestry_manifest.as_ref().unwrap(),
-            out,
-            bindings,
-            limits,
-            options.extend_budgets,
-        );
-    }
     let (mut state, budgets, parent) = if let Some(path) = &options.resume_from {
         let (s, b, p) = checkpoint::load(path, &bindings, &limits, options.extend_budgets)?;
         (s, b, Some(p))
@@ -561,7 +505,6 @@ pub fn run(
             None,
         )
     };
-    validation::graph(&state, e.graph)?;
     let metadata_bytes = bytes(&(&bindings, &budgets, &parent))?;
     ensure(
         plus(state.occupancy()?, metadata_bytes)? <= limits.max_state_bytes,
@@ -595,7 +538,16 @@ pub fn run(
         // Preflight reserves the maximum retained growth of ONE operation: at most
         // three task/score copies, one native tail, indices and bounded counters.
         // Eight copies plus slack deliberately overcharge; never a claimed RSS cap.
-        let reserve = reservation(task_size, &native, e.graph.k)?;
+        let reserve = plus(
+            plus(task_size, bytes(&native)?)?,
+            e.graph
+                .k
+                .checked_mul(16)
+                .ok_or_else(|| invalid("reservation overflow"))?,
+        )?
+        .checked_mul(8)
+        .and_then(|n| n.checked_add(8192))
+        .ok_or_else(|| invalid("reservation overflow"))?;
         if plus(plus(state.occupancy()?, metadata_bytes)?, reserve)? > limits.max_state_bytes {
             stop = "state-budget-exhausted";
             break;
@@ -611,8 +563,6 @@ pub fn run(
             stop = "evaluation-budget-exhausted";
             break;
         }
-        // Reserve clock/counter widths before ownership, selectors or work mutate.
-        validation::counter_room(&state)?;
         state.work = plus(state.work, 1)?;
         if initializing {
             let result = e.evaluate(&native)?;
@@ -649,9 +599,6 @@ pub fn run(
             state.quantum = quantum;
             state.families[family].work += 1;
             state.families[family].modes[mode] += 1;
-            if mode == 2 {
-                state.seed_focus(id);
-            }
             let task = state.remove(id)?;
             machine::advance(
                 &mut state,
@@ -694,42 +641,14 @@ pub fn run(
         "frontier_tasks":state.tasks.len(),"peak_frontier_tasks":state.peak_tasks,
         "retained_state_bytes":plus(state.occupancy()?,metadata_bytes)?,"checkpoint_metadata_bytes":metadata_bytes,
         "peak_state_bytes":plus(state.peak_state_bytes,metadata_bytes)?,
-        "occupancy_kind":"logical-serialized-payload-plus-live-links-v2;not-RSS;atomic-evaluator-excluded",
+        "occupancy_kind":"logical-serialized-payload-plus-index-allowances-v1;not-RSS;atomic-evaluator-excluded",
         "search_exhausted":exhausted,"global_optimum_certified":exhausted,
         "correlated_optima_complete":exhausted && !state.lost_support,"sticky_support_loss":state.lost_support,
         "incumbent":state.incumbent.as_ref().map(Scored::json),"correlated_optima":state.support.iter().map(Scored::json).collect::<Vec<_>>(),
         "lower_bound":e.lower_bound(),"generation_rule_complete":true,"native_evaluation_complete":true,
         "biological_topology_complete":false,"sequence_emission_authorized":false});
-    result["historical_accounting"] =
-        serde_json::to_value(&state.historical_accounting).map_err(io::Error::other)?;
-    result["focused_services_by_family"] = serde_json::to_value(
-        state
-            .families
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                f.modes[2]
-                    - state
-                        .historical_accounting
-                        .as_ref()
-                        .map_or(0, |h| h.newest_ready_modes[i][2])
-            })
-            .collect::<Vec<_>>(),
-    )
-    .map_err(io::Error::other)?;
     result["mixed_donor_source_ids"] =
         serde_json::to_value(&state.mixed_donor_sources).map_err(io::Error::other)?;
-    checkpoint::save(out, bindings, parent, budgets, state, &mut ledger, None)?;
+    checkpoint::save(out, bindings, parent, budgets, state, &mut ledger)?;
     Ok(result)
-}
-
-fn reservation(task_size: u64, native: &Assignment, k: u64) -> io::Result<u64> {
-    plus(
-        plus(task_size, bytes(native)?)?,
-        k.checked_mul(16)
-            .ok_or_else(|| invalid("reservation overflow"))?,
-    )?
-    .checked_mul(8)
-    .and_then(|n| n.checked_add(8192))
-    .ok_or_else(|| invalid("reservation overflow"))
 }

@@ -1,10 +1,25 @@
-# Guided panel-route policy v1 (experimental, no sequence emission)
+# Guided panel-route policy v2 (experimental, no sequence emission)
 
 `genome-infer search-panel-routes-guided` is a **separate command-owned policy**.
 The existing `search-panel-routes` lexical DFS, graph format, compiler identity,
 loader seals, native counting, complete-assignment evaluator, normalization and
 lower bound are unchanged. Existing graphs are accepted only through normal
 `Graph::load` and `Evaluator::new` verification, never migrated or re-identified.
+
+## Parent validation
+
+The corrected v2 passed **678 ordinary Rust tests** (16 explicitly ignored),
+**eight configured oracle/driver/long-producer/transition tests**, **six Python
+tests**, and the near-cap backlog continuation gate. Parent source checks confirm
+all 96 protected backend files/modes and gitlinks are unchanged. Independent
+review's remaining history-consistency finding was reproduced, corrected and
+re-reviewed clean: conversion retains its prior ledger, and each ordinary resume
+preserves the exact parent prefix while allowing new records to be appended.
+These are normal scientific-data consistency checks, not cryptographic assurances.
+
+The prior real-panel v1 search failed to construct mixed assignments; successful
+synthetic v2 tests do not establish real-panel recovery or authorize sequence
+emission. The next milestone is useful continued search on that preserved problem.
 
 ## CLI and explicit resume
 
@@ -40,7 +55,9 @@ and evaluator cache reconstruction still run normally.
   ascending native objective determines family order, with identity ties.
 * All live families rotate in **32 primitive-work** quanta. Within each family the
   service cycle is FIFO, shallowest committed switch depth (creation-ID ties),
-  newest progress. A task has one owner and three exact ordered indices. Unfinished
+  live focused continuation. A task has one owner, two exact ordered indices, and
+  optional reciprocal previous/next links in its family's single live return chain.
+  An empty focus seeds from FIFO on the third share. Unfinished
   tasks move to the FIFO tail; modes, IDs, requeue clocks and remaining quantum
   persist. FIFO has a fixed one-third service share. No stale index entries exist.
 * Each source-bound probe, source ordinal, hub-bound probe, hub-member ordinal,
@@ -86,7 +103,7 @@ assignment checksum, objective and switch/mixing flags. It excludes timings and
 cold-cache diagnostics. Objective state is serialized as IEEE-754 **integer bits**,
 so JSON floating-point parsing cannot perturb ranking or resumed tie decisions.
 
-`checkpoint.json` schema version 1 contains:
+`checkpoint.json` schema version 2 contains:
 
 * `bindings`: actual separately named source checksums for policy, state machine,
   adapter, checkpoint and CLI, policy version, normally computed backend compiler
@@ -96,7 +113,7 @@ so JSON floating-point parsing cannot perturb ranking or resumed tie decisions.
   identities (or null); `budgets`: cumulative, explicitly extended cap history;
 * `state`: initialization/ranking, tasks and all operation phases (lookup bounds,
   permutations, committed segments, pending children, closures, probes and exact
-  evaluations), all three scheduler indices and counters, native-score table,
+  evaluations), both scheduler indices, family heads, live links and counters, native-score table,
   incumbent/support, sticky support loss and logical occupancy accounting.
 
 `checkpoint-seal.json` binds the exact checkpoint bytes and cumulative ledger by
@@ -105,7 +122,9 @@ These are **not cryptographic authenticity signatures**. Resume verifies both
 seals, bindings and every immutable ancestor's expected checkpoint/ledger identity;
 it copies the ledger prefix to the new directory and verifies the copied bytes
 before proceeding. Ledger and checkpoint files are synced; checkpoint installation
-uses the existing atomic JSON writer and the directory is synced on Unix. Preserve
+streams through a command-owned buffered atomic JSON writer (byte-identical pretty
+JSON, no trailing newline), and the directory is synced on Unix. Serialization
+failure leaves an `.incomplete` file, never an installed successful checkpoint. Preserve
 all ancestors and their original paths. Missing seals/ancestors and changed bindings
 fail; resuming a partially written checkpoint is not supported. File permissions
 are not an immutable-storage enforcement mechanism: callers must keep parents
@@ -117,12 +136,13 @@ unchanged. Failed/running output manifests never mean successful completion.
 
 * compact serialized bytes of each owned task (including context, pending operation,
   segment bindings and permutations), plus **256 units per task** for map ownership
-  and its three ordered indices;
+  two ordered indices and live-link allowances;
 * compact serialized bytes of every native score, incumbent and retained correlated
   score, plus **64 units per score** (each actual stored copy is charged);
 * **4096 fixed units**, **512 per family** for scheduler/statistic storage, and
   **64 per occupied switch-histogram entry, visited-source ID or mixed-donor ID**;
-* compact serialized bytes of bindings, cumulative budget history and parent link.
+* compact serialized bytes of bindings, cumulative budget history and parent link;
+  conversion-boundary receipt metadata and historical accounting are also charged.
 
 One unit is one logical byte/allowance unit, **not a measured resident byte**.
 This does not cap allocator overhead, verified graph/sample/evaluator memory or
@@ -151,7 +171,7 @@ certifies the finite retained domain, not biological topology. The backend lower
 bound is unchanged. Biological completeness and sequence-emission authorization
 remain **false**, even for exhausted fixtures.
 
-Parent release acceptance passed **664 ordinary Rust tests** across 25 suites
+Historical v1 parent release acceptance passed **664 ordinary Rust tests** across 25 suites
 (12 explicitly ignored), followed by **six configured oracle/driver tests** and
 **six Python tests**. All 96 protected backend source hashes/modes and gitlinks
 were unchanged. Independent review found one zero-operation peak-occupancy
@@ -215,3 +235,87 @@ existing configured helper. Optional absolute `IMPG_TEST_POLICY_OUTPUT` and
 and checkpoints; they must be fresh. Parent-only backend SHA/mode/gitlink audit and
 real-graph useful-mixing/resource gates remain required before production acceptance.
 No real-data or biological recovery claim follows from these tests.
+
+
+## V2 continuation and exact-v1 transition
+
+Source scanners and hub scanners hand an active focus to their emitted child,
+retaining themselves as live returns. A waiting producer's emission is ordinary
+work and does not preempt focus. Waiting nonproducer transformations replace
+only their current chain position. Every share performs the same bounded local
+link repair; consumed middle/tail tasks are unlinked immediately, not tombstoned.
+There is no fourth index, depth cap, stale-entry scan, or discarded construction.
+
+Unchanged native `Start` follows source-bound construction rather than closure.
+Changed geometry (including same-source repeats, orientation changes, and earlier
+completed mixed routes) follows legal closure feasibility first, retaining its
+source-bound alternative behind it. Changed closure follows its completion probe
+with ordinary next-slot construction immediately behind. Both probe success and
+conflict return to that ordinary work; coupled exchanges are never pruned by the
+hypothetical native tail. Native-only completion receives one service when seeded
+but is not pinned through the completion chain. All checks, lookups and evaluator
+calls retain their original one-primitive charging and native-score reuse rules.
+
+Ordinary v2 resume rejects v1. Conversion is a separate **conversion-only** opt-in:
+
+```
+impg genome-infer search-panel-routes-guided \
+  --panel PANEL --routes ROUTES --sample SAMPLE \
+  --haploid-depth DEPTH --background 0.1 \
+  --resume-from EXACT_V1_OUTPUT --convert-exact-v1-to-v2 \
+  --v1-ancestry-manifest OWNER_FROZEN_PINS.json \
+  --max-work OLD_WORK --max-evaluations OLD_EVALUATIONS \
+  --max-state-bytes AUTHORIZED_BYTES --max-optima OLD_OPTIMA \
+  --out-dir NEW_CONVERSION_OUTPUT
+```
+
+Any cap increase additionally requires `--extend-budgets`. Conversion performs
+normal graph/sample/source/evaluator construction but **no search or rescoring**.
+It verifies exact supported a520 v1 source identity from the five byte-identical
+archived inputs under `supported_v1/` (including the entire CLI), not a trusted
+hash string supplied by the checkpoint. Those archived inputs, the transition,
+schema and validation modules all enter actual v2 policy identity independently.
+The backend identity continues to be computed and checked normally.
+
+The separately frozen owner declaration is mandatory and must precede any
+suspected corruption. Its schema is:
+
+```json
+{"version":1,"checkpoints":[{"directory":"/canonical/old/output",
+ "checkpoint":"fnv1a64:BYTE_LENGTH:16_HEX_DIGITS",
+ "ledger":"fnv1a64:BYTE_LENGTH:16_HEX_DIGITS"}]}
+```
+
+Include the selected root and **every** old ancestor, with no duplicates or
+extras. These pins must be independently verified/frozen by the owner, not
+created from suspect inputs during conversion. Preserve this declaration at its
+original path. The recognized receipt binds its path and exact content identity.
+Existing FNV/length identities are noncryptographic corruption checks, **not
+signatures or proof of authenticity**. Self-consistent resealed unlogged work
+cannot be authenticated by structural checks alone; the independent pins close
+that corruption gap only while the owner keeps the declaration trustworthy.
+
+The sealed checkpoint embeds a versioned conversion receipt containing old/new
+bindings/schema, actual transform source, old root/ledger identity, byte-identical
+ledger-prefix identity, budget history/authorized caps, old mode/counter baseline,
+old occupancy evidence and streaming converted-state fingerprint. Stronger
+non-scoring validation rejects malformed ownership, duplicate indices, counters,
+native ledger discrepancies, geometry/cursors and links. These additional checks
+were not part of the historical v1 loader.
+
+Conversion preserves tasks/IDs/operation payloads, FIFO/shallow order and clocks,
+native objective bits, incumbent/support, sticky loss, cumulative counters and
+family rank/cursor/quantum. Only obsolete newest-ready indexing is removed and
+focus heads/links are initialized empty. `historical_accounting` preserves old
+third-share modes and v1 occupancy; `focused_services_by_family` reports only
+post-conversion focused service. New occupancy/peak use v2 accounting rather than
+relabeling old high-water values. Converted occupancy **plus the required next
+operation reservation** must fit the explicitly authorized cap. Failure never
+silently grows caps or evicts work.
+
+Subsequent v2 ancestry crosses policies only through the recognized receipt,
+re-verifying its exact old pinned ancestry and conversion conservation. Every
+other epoch binding must match exactly. Keep ancestors and failed/interrupted
+outputs; incomplete writes are not successful transitions. No v1/v2 trace equality
+is claimed. No real checkpoint conversion or practical real-panel acceptance has
+been authorized or demonstrated by these synthetic tests.
