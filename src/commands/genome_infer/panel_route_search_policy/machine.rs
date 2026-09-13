@@ -92,7 +92,7 @@ pub(super) fn advance(
                 };
                 task.op = Op::SourceScan {
                     base,
-                    permutation: Permutation::new(len),
+                    permutation: SourcePermutation::new(len),
                 };
             }
             again = true;

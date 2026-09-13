@@ -25,7 +25,7 @@ fn scanner(s: &mut State, f: usize) -> u64 {
         context(f),
         Op::SourceScan {
             base: 0,
-            permutation: Permutation::new(1 << 20),
+            permutation: SourcePermutation::new(1 << 20),
         },
     )
     .unwrap();
@@ -435,7 +435,7 @@ fn long_dead_chain_and_exhaustion_have_no_history_or_depth_cap() {
             id,
             Some(Op::SourceScan {
                 base: 0,
-                permutation: Permutation::new(1 << 20),
+                permutation: SourcePermutation::new(1 << 20),
             }),
             true,
         );

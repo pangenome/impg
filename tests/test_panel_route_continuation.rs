@@ -1,4 +1,6 @@
-//! Continuation-v2-specific synthetic gates. No legacy fixtures or helpers are modified.
+//! Continuation and source-order synthetic gates; frozen forward recipes remain unchanged.
+#[path = "panel_route_source_pair_order/mod.rs"]
+mod source_pair_order;
 use impg::{
     genome_inference::{self as genome, panel_routes as routes, sample},
     syng::{SyncmerParams, SyngIndex},
@@ -53,15 +55,31 @@ fn fixture(root: &Path, repeats: usize) -> Fixture {
     fixture_with_slots(root, repeats, 1)
 }
 fn fixture_with_slots(root: &Path, repeats: usize, slots: usize) -> Fixture {
+    fixture_with_orientation(root, repeats, slots, false)
+}
+fn fixture_with_orientation(root: &Path, repeats: usize, slots: usize, reverse: bool) -> Fixture {
     fs::create_dir(root).expect("fresh synthetic fixture directory");
     let a = dna(400, 113);
     let mut b = a.clone();
     for i in [150, 260] {
         b[i] = if b[i] == b'A' { b'C' } else { b'A' };
     }
+    let donor = if reverse {
+        b.iter()
+            .rev()
+            .map(|b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                _ => b'A',
+            })
+            .collect::<Vec<_>>()
+    } else {
+        b.clone()
+    };
     let mut seq = vec![
         ("A#0#native".to_string(), a.repeat(repeats)),
-        ("B#0#native".to_string(), b.repeat(repeats)),
+        ("B#0#native".to_string(), donor.repeat(repeats)),
     ];
     if slots == 2 {
         seq.extend([
@@ -315,9 +333,11 @@ fn pin(root: &Path, outputs: &[PathBuf]) -> PathBuf {
     path
 }
 #[test]
-#[ignore = "independent exact-v1 transition gate; requires IMPG_TEST_GUIDED_V1 and fresh IMPG_TEST_TRANSITION_OUTPUT"]
+#[ignore = "legacy v1-to-v2 gate; requires IMPG_TEST_GUIDED_V1, IMPG_TEST_GUIDED_V2 and fresh IMPG_TEST_TRANSITION_OUTPUT"]
 fn guided_exact_v1_conversion_and_resume() {
-    let binary = env!("CARGO_BIN_EXE_impg");
+    let v2 = std::env::var("IMPG_TEST_GUIDED_V2")
+        .expect("legacy conversion gate requires preserved v2 binary");
+    let binary = v2.as_str();
     let old = std::env::var("IMPG_TEST_GUIDED_V1")
         .expect("requested transition gate needs IMPG_TEST_GUIDED_V1");
     let check = Command::new("sha256sum").arg(&old).output().unwrap();

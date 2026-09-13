@@ -1,4 +1,4 @@
-# Guided panel-route policy v2 (experimental, no sequence emission)
+# Guided panel-route policy v3 (experimental, no sequence emission)
 
 `genome-infer search-panel-routes-guided` is a **separate command-owned policy**.
 The existing `search-panel-routes` lexical DFS, graph format, compiler identity,
@@ -6,7 +6,77 @@ loader seals, native counting, complete-assignment evaluator, normalization and
 lower bound are unchanged. Existing graphs are accepted only through normal
 `Graph::load` and `Evaluator::new` verification, never migrated or re-identified.
 
-## Parent validation
+## Parent release validation
+
+V3 passed **682 ordinary Rust tests**, **nine additional configured scientific,
+update and driver gates**, a repeated every-primitive resume gate, and **six
+Python tests**. Parent checks verified the source package, patch apply/reversal,
+file modes and all 96 unchanged protected backend files/gitlinks. Independent
+source review found no issues. This establishes tested enumeration and resume
+behavior, not real-panel genome recovery, QV or coverage.
+
+## Source pair order and explicit v2 update
+
+V3 changes **only source-port enumeration**: for a virtual `2^b` domain,
+`index = 2 * reverse_(b-1)(ordinal / 2) + ordinal % 2` (0/1 handled directly).
+Adjacent source positions are interleaved while anchor-pair groups remain spread.
+Plain bit reversal on paired forward/reverse source records visits only even
+positions for half the domain; the paired order offers both orientations in its
+first two positions. This is ordering, not candidate/evidence filtering or an
+assumption that adjacent records are homologous copies. Arbitrary bases and odd
+lengths retain full coverage. Hub-member order remains plain bit reversal.
+
+Ordinary v3 resume requires an exact v3 policy identity. To preserve an existing
+compatible `fair-sample-ranked-live-continuation-v2` checkpoint, explicitly run:
+
+```
+impg genome-infer search-panel-routes-guided \
+  --panel PANEL --routes ROUTES --sample SAMPLE \
+  --haploid-depth DEPTH --background 0.1 \
+  --resume-from V2_OUTPUT --update-source-pair-order \
+  --max-work OLD_WORK --max-evaluations OLD_EVALUATIONS \
+  --max-state-bytes AUTHORIZED_BYTES --max-optima OLD_OPTIMA \
+  --out-dir NEW_UPDATE_OUTPUT
+```
+
+This is **update-only**, never search or native rescoring. Preserve all prior paths.
+Use `--extend-budgets` for any cap increase, including space for new cursor fields.
+Then resume `NEW_UPDATE_OUTPUT` normally with explicitly increased work if desired.
+A repeated update of v3 is rejected; updating the same immutable v2 parent twice
+produces equivalent states. Actual old/new source identities are recorded honestly
+in `order_update`; all non-policy scientific/backend bindings remain exact.
+
+Schema3 source scans retain `{len, ordinal, old_prefix}`. The update preserves each
+legacy scan's visited ordinal boundary in `old_prefix`, sets its paired cursor to
+zero, and changes no other task payload, live link, FIFO/shallow index, focus,
+clock, native objective bit, counter or ledger byte. Task storage is recomputed;
+the old occupancy is recorded and the peak never decreases. Each paired cursor
+position is charged normally, including virtual positions and indices whose
+inverse old ordinal is below `old_prefix`. Thus the old visited set and newly
+yielded set are disjoint and together cover the original domain. Pending bounds
+create fresh paired scans (`old_prefix=0`). No native work is restarted.
+
+V2 is accepted only for explicit updates and historical ancestry. Existing
+v1-to-v2 receipts remain readable using their recorded historical source identity
+and ordinary conservation checks, not comparison to today's transform source.
+Direct v1 conversion is rejected in v3: use the preserved v2 executable for the
+historical conversion below, then update its v2 output. No new source archive,
+signature, or authentication machinery is introduced.
+
+Synthetic opt-in gates in `tests/panel_route_source_pair_order/mod.rs` require
+fresh `IMPG_TEST_PAIR_REVERSE_OUTPUT` / `IMPG_TEST_PAIR_UPDATE_OUTPUT`; the latter
+also requires preserved `IMPG_TEST_GUIDED_V1` and `IMPG_TEST_GUIDED_V2` binaries.
+The reverse recipe is seed113, 400bp, mutations150/260 in B followed by reverse
+complement, repeated1000, with fixed 200,000 work / 10,000 evaluations / 256MiB
+logical-state caps. It requires actual complete mixed assignments with positive
+reverse donor spans, not merely a reverse task. The update recipe repeats100 and
+checks caps1/2/5/32/128/512/2048/8192, nonzero focused reverse work, exact state and
+ledger conservation, repeated updates from equivalent parents, resumed continuation,
+and genuine v1→v2→v3 ancestry. Existing forward/coupled/finite gates remain in place.
+Synthetic success does **not** establish real best-family mixed recovery, whole-genome
+reconstruction, QV, coverage, or sequence-emission authorization.
+
+## Historical v2 parent validation
 
 The corrected v2 passed **678 ordinary Rust tests** (16 explicitly ignored),
 **eight configured oracle/driver/long-producer/transition tests**, **six Python
@@ -62,8 +132,8 @@ and evaluator cache reconstruction still run normally.
   persist. FIFO has a fixed one-third service share. No stale index entries exist.
 * Each source-bound probe, source ordinal, hub-bound probe, hub-member ordinal,
   pairwise feasibility comparison and traversal transition is one resumable
-  primitive. Scanner and hub tasks are independent. Bit-reversed ordinal order
-  spreads early visits over indexed intervals; virtual out-of-range positions and
+  primitive. Scanner and hub tasks are independent. Source-paired and hub bit-reversed
+  ordinal orders spread visits over indexed intervals; virtual out-of-range positions and
   failed proposals also consume work. A `u128` cursor safely represents a virtual
   `2^64` domain. Record reads always seek to a checked absolute offset, including
   when interleaved with evaluator operations on shared handles.
@@ -103,7 +173,7 @@ assignment checksum, objective and switch/mixing flags. It excludes timings and
 cold-cache diagnostics. Objective state is serialized as IEEE-754 **integer bits**,
 so JSON floating-point parsing cannot perturb ranking or resumed tie decisions.
 
-`checkpoint.json` schema version 2 contains:
+`checkpoint.json` schema version 3 contains (v2 ancestry is retained):
 
 * `bindings`: actual separately named source checksums for policy, state machine,
   adapter, checkpoint and CLI, policy version, normally computed backend compiler
@@ -256,7 +326,8 @@ hypothetical native tail. Native-only completion receives one service when seede
 but is not pinned through the completion chain. All checks, lookups and evaluator
 calls retain their original one-primitive charging and native-score reuse rules.
 
-Ordinary v2 resume rejects v1. Conversion is a separate **conversion-only** opt-in:
+The following is historical v2 behavior: invoke the **preserved v2 binary**, not
+v3. Ordinary v2 resume rejects v1. Conversion is a separate **conversion-only** opt-in:
 
 ```
 impg genome-infer search-panel-routes-guided \

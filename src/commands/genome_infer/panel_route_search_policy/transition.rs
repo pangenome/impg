@@ -244,8 +244,10 @@ pub(super) fn verify_boundary(cp: &checkpoint::Checkpoint, ledger: &str) -> io::
         .as_ref()
         .ok_or_else(|| invalid("missing transition receipt"))?;
     ensure(
-        cp.bindings.policy == identity(),
-        "transition target policy mismatch",
+        cp.version == 2
+            && source_order::is_v2(&cp.bindings.policy)
+            && receipt.new_bindings == cp.bindings,
+        "historical transition target policy mismatch",
     )?;
     let mut old = cp.bindings.clone();
     old.policy = supported_identity();
@@ -261,6 +263,13 @@ pub(super) fn verify_boundary(cp: &checkpoint::Checkpoint, ledger: &str) -> io::
         true,
     )?;
     expected.new_bindings = cp.bindings.clone();
+    // Historical policy source is provenance, not the current implementation.
+    expected.transform_source = cp
+        .bindings
+        .policy
+        .get("transition")
+        .ok_or_else(|| invalid("missing historical transition source"))?
+        .clone();
     expected.authorized_limits = receipt.authorized_limits.clone();
     ensure(
         validation::fingerprint(&expected)? == validation::fingerprint(receipt)?,
@@ -283,63 +292,6 @@ pub(super) fn verify_boundary(cp: &checkpoint::Checkpoint, ledger: &str) -> io::
         budgets.push(receipt.authorized_limits.clone());
     }
     ensure(budgets == cp.budgets, "transition budget history mismatch")
-}
-pub(super) fn convert(
-    e: &Evaluator<'_>,
-    from: &Path,
-    declaration_path: &Path,
-    out: &Path,
-    bindings: Bindings,
-    limits: Limits,
-    extend: bool,
-) -> io::Result<serde_json::Value> {
-    let mut old = bindings.clone();
-    old.policy = supported_identity();
-    let declaration_hash = checkpoint::hash_file(declaration_path)?;
-    let (state, mut receipt) = load_old(from, &old, declaration_path, &declaration_hash)?;
-    validation::graph(&state, e.graph)?;
-    validation::counter_room(&state)?;
-    authorize(receipt.budget_history.last().unwrap(), &limits, extend)?;
-    receipt.new_bindings = bindings.clone();
-    receipt.authorized_limits = limits.clone();
-    let mut budgets = receipt.budget_history.clone();
-    if budgets.last() != Some(&limits) {
-        budgets.push(limits.clone());
-    }
-    let parent = Some(receipt.ancestor.clone());
-    let metadata = bytes(&(&bindings, &budgets, &parent, &Some(&receipt)))?;
-    let reservation = if state.native.len() < e.graph.families.len() {
-        reservation(
-            0,
-            &e.graph.native_assignment(state.native.len())?,
-            e.graph.k,
-        )?
-    } else if let Some((_, _, id, _)) = state.select() {
-        let t = &state.tasks[&id];
-        reservation(
-            State::task_weight(t)?,
-            &state.native[t.context.family].assignment,
-            e.graph.k,
-        )?
-    } else {
-        0
-    };
-    ensure(
-        plus(plus(state.occupancy()?, metadata)?, reservation)? <= limits.max_state_bytes,
-        "converted occupancy and next-operation reservation exceed authorized cap",
-    )?;
-    let result = serde_json::json!({"method":POLICY_VERSION,"status":"converted-exact-v1-to-v2-no-search","conversion_only":true,"work":state.work,"evaluations":state.evaluations,"historical_newest_ready_modes":receipt.historical_modes,"new_focused_services":0,"old_task_bytes":receipt.old_task_bytes,"old_peak_state_bytes":receipt.old_peak_state_bytes,"retained_state_bytes":plus(state.occupancy()?,metadata)?,"next_operation_reservation":reservation,"receipt":receipt,"sequence_emission_authorized":false});
-    let mut ledger = checkpoint::ledger(out, parent.as_ref())?;
-    checkpoint::save(
-        out,
-        bindings,
-        parent,
-        budgets,
-        state,
-        &mut ledger,
-        Some(receipt),
-    )?;
-    Ok(result)
 }
 #[cfg(test)]
 mod tests {

@@ -40,6 +40,8 @@ pub(super) struct Checkpoint {
     pub(super) budgets: Vec<Limits>,
     pub(super) state: State,
     pub(super) transition: Option<transition::Receipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) order_update: Option<source_order::Receipt>,
 }
 pub(super) fn hash_file(path: &Path) -> io::Result<String> {
     let mut f = File::open(path)?;
@@ -78,7 +80,7 @@ fn verify_ledger_prefix(child: &Path, parent: &Path) -> io::Result<()> {
         )?;
     }
 }
-fn verify(directory: &Path) -> io::Result<(Checkpoint, Seal)> {
+pub(super) fn verify(directory: &Path) -> io::Result<(Checkpoint, Seal)> {
     let seal: Seal = genome::read_json(&directory.join("checkpoint-seal.json"))?;
     ensure(
         seal.version == 1
@@ -90,11 +92,26 @@ fn verify(directory: &Path) -> io::Result<(Checkpoint, Seal)> {
         directory.join("checkpoint.json"),
     )?))
     .map_err(io::Error::other)?;
-    ensure(checkpoint.version == 2, "unsupported checkpoint version")?;
+    ensure(
+        matches!(checkpoint.version, 2 | 3),
+        "unsupported checkpoint version",
+    )?;
+    ensure(
+        checkpoint.version == 2 || checkpoint.transition.is_none(),
+        "v1 transition requires v2 boundary",
+    )?;
+    ensure(
+        checkpoint.version == 3 || checkpoint.order_update.is_none(),
+        "order update requires v3 boundary",
+    )?;
+    source_order::validate_scans(&checkpoint.state, checkpoint.version == 3)?;
     validation::state(&checkpoint.state)?;
     validation::ledger(&checkpoint.state, &directory.join("evaluations.jsonl"))?;
     if checkpoint.transition.is_some() {
         transition::verify_boundary(&checkpoint, &seal.ledger)?;
+    }
+    if checkpoint.order_update.is_some() {
+        source_order::verify_boundary(&checkpoint, &seal.ledger)?;
     }
     Ok((checkpoint, seal))
 }
@@ -106,6 +123,10 @@ pub(super) fn load(
 ) -> io::Result<(State, Vec<Limits>, Parent)> {
     let directory = fs::canonicalize(directory)?;
     let (checkpoint, seal) = verify(&directory)?;
+    ensure(
+        checkpoint.version == if bindings.policy == identity() { 3 } else { 2 },
+        "v2 resume requires explicit --update-source-pair-order",
+    )?;
     ensure(
         &checkpoint.bindings == bindings,
         "resume policy/backend/graph/sample/parameter mismatch",
@@ -125,7 +146,7 @@ pub(super) fn load(
         limits == old || extend,
         "budget extension requires --extend-budgets",
     )?;
-    let mut ancestor = if checkpoint.transition.is_some() {
+    let mut ancestor = if checkpoint.transition.is_some() || checkpoint.order_update.is_some() {
         None
     } else {
         checkpoint.parent.clone()
@@ -147,7 +168,7 @@ pub(super) fn load(
         let parent_ledger = parent.directory.join("evaluations.jsonl");
         verify_ledger_prefix(&child_ledger, &parent_ledger)?;
         child_ledger = parent_ledger;
-        ancestor = if cp.transition.is_some() {
+        ancestor = if cp.transition.is_some() || cp.order_update.is_some() {
             None
         } else {
             cp.parent
@@ -194,7 +215,7 @@ pub(super) fn save(
     budgets: Vec<Limits>,
     state: State,
     ledger: &mut File,
-    transition: Option<transition::Receipt>,
+    order_update: Option<source_order::Receipt>,
 ) -> io::Result<()> {
     state.validate_links()?;
     ledger.flush()?;
@@ -202,12 +223,13 @@ pub(super) fn save(
     write_checkpoint_json(
         &out.join("checkpoint.json"),
         &Checkpoint {
-            version: 2,
+            version: 3,
             bindings,
             parent,
             budgets,
             state,
-            transition,
+            transition: None,
+            order_update,
         },
     )?;
     genome::write_json(
@@ -278,7 +300,7 @@ mod tests {
             },
             Op::SourceScan {
                 base: 0,
-                permutation: Permutation::new(u64::MAX),
+                permutation: SourcePermutation::new(u64::MAX),
             },
         )
         .unwrap();

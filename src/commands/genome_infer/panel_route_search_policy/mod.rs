@@ -3,20 +3,21 @@ mod adapter;
 mod checkpoint;
 mod continuation;
 mod machine;
+mod source_order;
 mod transition;
 mod v1_schema;
 mod validation;
 mod validation_containers;
 use crate::genome_inference::{self as genome, panel_routes as routes};
 use crate::sample_mem_bwt::invalid;
-use adapter::{Permutation, Port};
+use adapter::{Permutation, Port, SourcePermutation};
 use routes::{Assignment, Evaluator, Route, Segment};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const POLICY_VERSION: &str = "fair-sample-ranked-live-continuation-v2";
+pub const POLICY_VERSION: &str = "fair-sample-ranked-source-pair-order-v3";
 fn ensure(ok: bool, message: &str) -> io::Result<()> {
     if ok {
         Ok(())
@@ -41,6 +42,7 @@ pub fn identity() -> BTreeMap<String, String> {
         ("cli", include_str!("../../genome_infer.rs")),
         ("continuation", include_str!("continuation.rs")),
         ("transition", include_str!("transition.rs")),
+        ("source_order", include_str!("source_order.rs")),
         ("v1_schema", include_str!("v1_schema.rs")),
         ("validation", include_str!("validation.rs")),
         (
@@ -103,6 +105,13 @@ pub struct Options {
     /// Independently frozen exact old checkpoint/ledger pins, including every ancestor.
     #[arg(long, requires = "convert_exact_v1_to_v2")]
     pub v1_ancestry_manifest: Option<PathBuf>,
+    /// Update a compatible v2 checkpoint to paired source order only; no search or rescoring.
+    #[arg(
+        long,
+        requires = "resume_from",
+        conflicts_with = "convert_exact_v1_to_v2"
+    )]
+    pub update_source_pair_order: bool,
     /// Explicit authorization to increase cumulative work/evaluation/storage/support caps
     #[arg(long, requires = "resume_from")]
     pub extend_budgets: bool,
@@ -180,7 +189,7 @@ enum Op {
     },
     SourceScan {
         base: u64,
-        permutation: Permutation,
+        permutation: SourcePermutation,
     },
     Check {
         piece: Segment,
@@ -540,11 +549,12 @@ pub fn run(
         cache_terms,
         count_policy: genome::COUNT_POLICY.into(),
     };
-    if options.convert_exact_v1_to_v2 {
-        return transition::convert(
+    ensure(!options.convert_exact_v1_to_v2,
+        "direct v1 conversion is not supported by v3; use the preserved v2 binary first, then --update-source-pair-order")?;
+    if options.update_source_pair_order {
+        return source_order::update(
             e,
             options.resume_from.as_ref().unwrap(),
-            options.v1_ancestry_manifest.as_ref().unwrap(),
             out,
             bindings,
             limits,
