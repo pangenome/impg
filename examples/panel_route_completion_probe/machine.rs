@@ -1,5 +1,6 @@
 //! Alternating discovery/active service and producer/closure service, with backpressure.
 use super::*;
+use std::collections::LinkedList;
 #[derive(Serialize)]
 enum SourceStage {
     Recover,
@@ -58,12 +59,100 @@ struct Pending {
     task: Task,
     index: usize,
 }
+// Membership is owned here, not copied/indexed by repeated scans of the pool.
+struct ReadyFamily {
+    producers: LinkedList<Producer>,
+    grants: u64,
+    native_order: u64,
+    in_flight: bool,
+}
+struct ReadyFamilies {
+    families: Vec<ReadyFamily>,
+    eligible: BTreeSet<(u64, u64, usize)>,
+    producers: usize,
+}
+impl ReadyFamilies {
+    fn new(native: &[Scored], slots: usize, mem: &mut Memory) -> io::Result<Self> {
+        // One family row/key plus prepaid node/transfer slack per live producer.
+        // LinkedList owns one node per queued element and pop_front deallocates
+        // that node: empty/partly drained families retain no historical capacity.
+        // 8*Producer+256 covers two links/alignment, a local moved Producer and
+        // even one extra transient node under the total live producer width.
+        // Producer payload allocations are separately reserved, never cloned here.
+        let rows = (native.len() as u64)
+            .checked_mul(256)
+            .ok_or_else(|| invalid("ready metadata overflow"))?;
+        let queues = (slots as u64)
+            .checked_mul(8 * std::mem::size_of::<Producer>() as u64 + 256)
+            .ok_or_else(|| invalid("ready queue overflow"))?;
+        mem.reserve(plus(rows, queues)?)?;
+        Ok(Self {
+            families: native
+                .iter()
+                .map(|n| ReadyFamily {
+                    producers: LinkedList::new(),
+                    grants: 0,
+                    in_flight: false,
+                    // Monotone total order on finite saved f64 scores, including -0.
+                    native_order: if n.objective_bits >> 63 == 1 {
+                        !n.objective_bits
+                    } else {
+                        n.objective_bits ^ (1 << 63)
+                    },
+                })
+                .collect(),
+            eligible: BTreeSet::new(),
+            producers: 0,
+        })
+    }
+    fn key(&self, family: usize) -> (u64, u64, usize) {
+        let f = &self.families[family];
+        (f.grants, f.native_order, family)
+    }
+    fn refresh(&mut self, family: usize) {
+        let f = &self.families[family];
+        if !f.in_flight && !f.producers.is_empty() {
+            self.eligible.insert(self.key(family));
+        }
+    }
+    fn retain(&mut self, p: Producer) {
+        let family = p.original.family;
+        self.families[family].producers.push_back(p);
+        self.producers += 1;
+        self.refresh(family);
+    }
+    fn take(&mut self) -> io::Result<Producer> {
+        let key = *self.eligible.first().expect("ready family available");
+        let next = plus(key.0, 1)?;
+        self.eligible.remove(&key);
+        let f = &mut self.families[key.2];
+        f.grants = next; // every granted member attempt, regardless of outcome
+        self.producers -= 1;
+        Ok(f.producers
+            .pop_front()
+            .expect("eligible family owns producer"))
+    }
+    fn launched(&mut self, family: usize) {
+        assert!(!self.families[family].in_flight);
+        self.families[family].in_flight = true;
+    }
+    fn retired(&mut self, family: usize) {
+        assert!(self.families[family].in_flight);
+        self.families[family].in_flight = false;
+        self.refresh(family);
+    }
+}
+fn member_ready(p: &Producer) -> bool {
+    matches!(p.hub.as_ref().map(|h| &h.stage), Some(HubStage::Members { next, end }) if next < end)
+}
 pub struct Engine<'a> {
     options: &'a Options,
     pub snapshot: snapshot::Snapshot,
     mem: Memory,
     counts: Counts,
     producers: VecDeque<Producer>,
+    ready: ReadyFamilies,
+    member_turn: bool,
     chains: VecDeque<Chain>,
     pending: Option<Pending>,
     cache: BTreeMap<Assignment, u64>,
@@ -99,7 +188,10 @@ impl<'a> Engine<'a> {
             mem.reserve(128)?;
             scores.insert(n.objective_bits);
         }
+        let ready = ReadyFamilies::new(&snapshot.native, options.producer_slots, &mut mem)?;
         Ok(Self {
+            ready,
+            member_turn: true,
             options,
             snapshot,
             mem,
@@ -187,8 +279,10 @@ impl<'a> Engine<'a> {
     }
     pub fn drive(&mut self, input: &mut stream::Json, e: &mut Evaluator<'_>) -> io::Result<()> {
         loop {
-            let discovery = !self.input_end && self.producers.len() < self.options.producer_slots;
-            let active = !self.producers.is_empty() || !self.chains.is_empty();
+            let discovery = !self.input_end
+                && self.producers.len() + self.ready.producers < self.options.producer_slots;
+            let active =
+                !self.producers.is_empty() || self.ready.producers > 0 || !self.chains.is_empty();
             if !discovery && !active {
                 self.stop = "proposal-subset-exhausted".into();
                 break;
@@ -223,24 +317,50 @@ impl<'a> Engine<'a> {
         self.ledger.flush()?;
         self.ledger.sync_all()
     }
+    fn retain_producer(&mut self, p: Producer) {
+        if member_ready(&p) {
+            self.ready.retain(p);
+        } else {
+            self.producers.push_back(p);
+        }
+    }
     fn active(&mut self, e: &mut Evaluator<'_>) -> io::Result<()> {
-        if !self.producers.is_empty() && (self.producer_turn || self.chains.is_empty()) {
+        let ready = self.chains.len() < self.options.chain_slots && !self.ready.eligible.is_empty();
+        let producing = !self.producers.is_empty() || ready;
+        if producing && (self.producer_turn || self.chains.is_empty()) {
             self.producer_turn = false;
-            let mut p = self.producers.pop_front().unwrap();
-            let result = self.produce(&mut p, e);
-            if matches!(result, Ok(true)) {
-                self.mem.release(p.weight);
+            if ready && (self.member_turn || self.producers.is_empty()) {
+                self.member_turn = false;
+                let mut p = self.ready.take()?;
+                let family = p.original.family;
+                let before = self.chains.len();
+                let result = self.member(&mut p, e);
+                if self.chains.len() > before {
+                    self.ready.launched(family);
+                }
+                self.retain_producer(p);
+                self.ready.refresh(family);
+                result
             } else {
-                self.producers.push_back(p);
+                self.member_turn = true;
+                let mut p = self.producers.pop_front().unwrap();
+                let result = self.produce(&mut p, e);
+                if matches!(result, Ok(true)) {
+                    self.mem.release(p.weight);
+                } else {
+                    self.retain_producer(p);
+                }
+                result.map(|_| ())
             }
-            result.map(|_| ())
         } else {
             self.producer_turn = true;
             let mut c = self.chains.pop_front().unwrap();
             let result = self.close(&mut c, e);
             if matches!(result, Ok(true)) {
                 self.mem.release(c.weight);
+                self.ready.retired(c.assignment.family);
             } else {
+                // In particular, a resource-stopped chain still owns its family.
                 self.chains.push_back(c);
             }
             result.map(|_| ())
@@ -541,7 +661,7 @@ impl<'a> Engine<'a> {
         self.ledger.flush()?;
         create_json(
             &self.options.out_dir.join("result.json"),
-            &json!({"method":"experimental-snapshot-completion-probe-v1","status":self.stop,"proposal_subset_only":true,"candidate_domain_complete":false,"original_frontier_immutable":true,"one_shot_no_sidecar_resume":true,"sequence_emission_authorized":false,"counts":self.counts,"native_baselines_reused":self.snapshot.native.len(),"native_initialization_evaluations":0,"input_position":position,"input_end":self.input_end,"input_tasks_preflight":self.snapshot.tasks,"pending_input":self.pending.as_ref().map(|p|json!({"task":p.task.id,"eligibility_position":p.index})),"pending_producers":self.producers.iter().map(|p|json!({"task":p.task,"next_entry":p.next_entry,"source_stage":p.source,"hub_stage":p.hub.as_ref().map(|h|&h.stage)})).collect::<Vec<_>>(),"pending_chains":self.chains.iter().map(|c|json!({"task":c.task,"stage":c.stage})).collect::<Vec<_>>(),"logical_reserved_bytes":self.mem.used,"peak_logical_reserved_bytes":self.mem.peak,"logical_limit_bytes":self.mem.limit,"output_fnv1a64":stream::hash_file(&self.options.out_dir.join("proposals.jsonl"))?}),
+            &json!({"method":METHOD,"ready_family_service":self.ready.families.iter().enumerate().map(|(family,f)|json!({"family":family,"member_attempt_grants":f.grants,"in_flight":f.in_flight,"ready_producers":f.producers.len()})).collect::<Vec<_>>(),"status":self.stop,"proposal_subset_only":true,"candidate_domain_complete":false,"original_frontier_immutable":true,"one_shot_no_sidecar_resume":true,"sequence_emission_authorized":false,"counts":self.counts,"native_baselines_reused":self.snapshot.native.len(),"native_initialization_evaluations":0,"input_position":position,"input_end":self.input_end,"input_tasks_preflight":self.snapshot.tasks,"pending_input":self.pending.as_ref().map(|p|json!({"task":p.task.id,"eligibility_position":p.index})),"pending_producers":self.producers.iter().chain(self.ready.families.iter().flat_map(|f|f.producers.iter())).map(|p|json!({"task":p.task,"family":p.original.family,"member_ready":member_ready(p),"next_entry":p.next_entry,"source_stage":p.source,"hub_stage":p.hub.as_ref().map(|h|&h.stage)})).collect::<Vec<_>>(),"pending_chains":self.chains.iter().map(|c|json!({"task":c.task,"family":c.assignment.family,"stage":c.stage})).collect::<Vec<_>>(),"logical_reserved_bytes":self.mem.used,"peak_logical_reserved_bytes":self.mem.peak,"logical_limit_bytes":self.mem.limit,"output_fnv1a64":stream::hash_file(&self.options.out_dir.join("proposals.jsonl"))?}),
         )
     }
 }
@@ -1016,4 +1136,723 @@ mod eligibility_tests {
         c.completed[1].segments.clear();
         assert_eq!(first_change(&c), Some(3));
     }
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::*;
+    fn native(bits: &[f64]) -> Vec<Scored> {
+        bits.iter()
+            .enumerate()
+            .map(|(family, n)| Scored {
+                assignment: Assignment {
+                    version: 1,
+                    model: routes::MODEL.into(),
+                    graph_checksum: String::new(),
+                    family,
+                    routes: vec![],
+                },
+                objective_bits: n.to_bits(),
+            })
+            .collect()
+    }
+    fn producer(family: usize, task: u64) -> Producer {
+        Producer {
+            task,
+            original: Context {
+                family,
+                slot: 0,
+                completed: vec![],
+                segments: vec![],
+                source: 0,
+                cut: 0,
+                reverse: false,
+            },
+            next_entry: 0,
+            current: None,
+            source: SourceStage::Recover,
+            hub: Some(Hub {
+                port: Port {
+                    word: vec![],
+                    source: 0,
+                    anchor: 0,
+                    reverse: false,
+                },
+                stage: HubStage::Members { next: 0, end: 2 },
+            }),
+            direct: None,
+            weight: 0,
+        }
+    }
+    fn check(r: &ReadyFamilies) {
+        let expected = r
+            .families
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.in_flight && !f.producers.is_empty())
+            .map(|(i, _)| r.key(i))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(r.eligible, expected);
+        assert_eq!(
+            r.producers,
+            r.families.iter().map(|f| f.producers.len()).sum::<usize>()
+        );
+    }
+    #[test]
+    fn ready_family_local_keys_fifo_unready_and_all_outcome_grants() {
+        let mut mem = Memory {
+            used: 0,
+            peak: 0,
+            limit: 1 << 20,
+        };
+        let mut r = ReadyFamilies::new(&native(&[-100.0, -10.0, -1.0]), 16, &mut mem).unwrap();
+        // Best family 0 is absent and cannot impose an all-family barrier.
+        r.retain(producer(1, 11));
+        r.retain(producer(1, 12));
+        r.retain(producer(2, 21));
+        check(&r);
+        let a = r.take().unwrap();
+        assert_eq!(a.task, 11);
+        r.launched(1);
+        r.refresh(1);
+        check(&r);
+        let mut b = r.take().unwrap();
+        assert_eq!(b.task, 21); // A is better-ranked but already in flight.
+                                // A rejected member consumes the same grant, advances only its own cursor.
+        if let Some(Hub {
+            stage: HubStage::Members { next, .. },
+            ..
+        }) = &mut b.hub
+        {
+            *next += 1;
+        }
+        r.retain(b);
+        check(&r);
+        assert_eq!(r.families[2].grants, 1);
+        let b = r.take().unwrap();
+        assert_eq!(b.task, 21);
+        r.launched(2);
+        r.refresh(2);
+        check(&r);
+        // Cache/native/capacity terminal outcomes all retire identically; no bonus
+        // or reset for a non-fresh evaluation or a nonproductive closure.
+        r.retired(1);
+        check(&r);
+        let a = r.take().unwrap();
+        assert_eq!(a.task, 12);
+        r.launched(1);
+        r.refresh(1);
+        assert_eq!(r.families[1].grants, 2);
+        r.retired(1);
+        r.retired(2);
+        check(&r);
+        assert!(r.eligible.is_empty());
+        r.retain(producer(1, 13));
+        check(&r);
+        assert_eq!(r.take().unwrap().task, 13);
+        r.refresh(1);
+        check(&r);
+        assert_eq!(r.families[1].grants, 3);
+    }
+    #[test]
+    fn ready_family_storage_churn_releases_nodes_not_historical_capacity() {
+        const FAMILIES: usize = 32;
+        const WIDTH: usize = 16;
+        const PASSES: usize = 4;
+        const ROTATIONS: usize = 128;
+        let p_bytes = std::mem::size_of::<Producer>();
+        let alignment = std::mem::align_of::<Producer>().max(std::mem::align_of::<usize>());
+        // std LinkedList owns one separately allocated node per element, with
+        // two links; pop_front deallocates the removed node, not a reusable
+        // per-family backing buffer. Allow two alignment pads conservatively.
+        // This is owned collection storage, NOT allocator caching/RSS.
+        let node_upper = p_bytes + 2 * std::mem::size_of::<usize>() + 2 * alignment;
+        let per_slot = 8 * p_bytes + 256;
+        assert!(2 * node_upper + p_bytes <= per_slot);
+        let mut mem = Memory {
+            used: 0,
+            peak: 0,
+            limit: 1 << 20,
+        };
+        let mut ready = ReadyFamilies::new(&native(&[-1.0; FAMILIES]), WIDTH, &mut mem).unwrap();
+        let reservation = mem.used as usize;
+        assert_eq!(reservation, 256 * FAMILIES + WIDTH * per_slot);
+        let mut old: Vec<VecDeque<Producer>> = (0..FAMILIES).map(|_| VecDeque::new()).collect();
+        let mut task = 0;
+        let mut peak_nodes = 0;
+        let mut peak_bound = 0;
+        let mut partial = false;
+        let mut most_families = 0;
+        let mut observe = |r: &ReadyFamilies, old: &[VecDeque<Producer>]| {
+            check(r);
+            let nodes = r.families.iter().map(|f| f.producers.len()).sum::<usize>();
+            assert!(nodes <= WIDTH);
+            assert_eq!(nodes, old.iter().map(VecDeque::len).sum::<usize>());
+            for (f, q) in r.families.iter().zip(old) {
+                // Same FIFO contents throughout the adversarial storage history.
+                assert_eq!(
+                    f.producers.iter().map(|p| p.task).collect::<Vec<_>>(),
+                    q.iter().map(|p| p.task).collect::<Vec<_>>()
+                );
+            }
+            // LinkedList length equals owned nodes specifically because removed
+            // nodes are deallocated. VecDeque length would NOT justify this bound.
+            let bound = (nodes + 1) * node_upper + p_bytes;
+            assert!(bound <= WIDTH * per_slot);
+            peak_nodes = peak_nodes.max(nodes);
+            peak_bound = peak_bound.max(bound);
+            partial |= r
+                .families
+                .iter()
+                .any(|f| (2..WIDTH).contains(&f.producers.len()));
+            most_families = most_families.max(
+                r.families
+                    .iter()
+                    .filter(|f| !f.producers.is_empty())
+                    .count(),
+            );
+        };
+        for _ in 0..PASSES {
+            for family in 0..FAMILIES {
+                for _ in 0..WIDTH {
+                    task += 1;
+                    ready.retain(producer(family, task));
+                    old[family].push_back(producer(family, task));
+                    observe(&ready, &old);
+                }
+                for _ in 0..WIDTH {
+                    let p = ready.take().unwrap();
+                    assert_eq!(p.original.family, family);
+                    assert_eq!(old[family].pop_front().unwrap().task, p.task);
+                    ready.refresh(family);
+                    observe(&ready, &old);
+                }
+            }
+        }
+        let old_capacity_slots = old.iter().map(VecDeque::capacity).sum::<usize>();
+        let old_retained_bytes = old_capacity_slots * p_bytes;
+        assert!(old.iter().all(VecDeque::is_empty));
+        assert!(old_capacity_slots >= FAMILIES * WIDTH);
+        // Reproduce the P1 against ACTUAL old capacities, not live lengths.
+        assert!(old_retained_bytes > reservation);
+        assert_eq!(ready.producers, 0);
+        // Keep a partially drained large family alongside a moving small family.
+        for _ in 0..WIDTH {
+            task += 1;
+            ready.retain(producer(0, task));
+            old[0].push_back(producer(0, task));
+        }
+        for _ in 0..FAMILIES {
+            let mut p = ready.take().unwrap();
+            let from = p.original.family;
+            let mut q = old[from].pop_front().unwrap();
+            ready.refresh(from);
+            observe(&ready, &old);
+            p.original.family = (from + 1) % FAMILIES;
+            q.original.family = p.original.family;
+            old[p.original.family].push_back(q);
+            ready.retain(p);
+            observe(&ready, &old);
+        }
+        while ready.producers > 0 {
+            let p = ready.take().unwrap();
+            old[p.original.family].pop_front().unwrap();
+            ready.refresh(p.original.family);
+            observe(&ready, &old);
+        }
+        // Sixteen nonempty families coexist; move one element at a time without
+        // ever increasing the aggregate width, including between earlier families.
+        for family in 0..WIDTH {
+            task += 1;
+            ready.retain(producer(family, task));
+            old[family].push_back(producer(family, task));
+        }
+        observe(&ready, &old);
+        for _ in FAMILIES..ROTATIONS {
+            let mut p = ready.take().unwrap();
+            let from = p.original.family;
+            let mut q = old[from].pop_front().unwrap();
+            ready.refresh(from);
+            observe(&ready, &old);
+            p.original.family = (from + WIDTH) % FAMILIES;
+            q.original.family = p.original.family;
+            old[p.original.family].push_back(q);
+            ready.retain(p);
+            observe(&ready, &old);
+        }
+        while ready.producers > 0 {
+            let p = ready.take().unwrap();
+            old[p.original.family].pop_front().unwrap();
+            ready.refresh(p.original.family);
+            observe(&ready, &old);
+        }
+        drop(observe);
+        assert!(partial);
+        assert_eq!(most_families, WIDTH);
+        assert_eq!(peak_nodes, WIDTH);
+        assert_eq!(mem.used as usize, reservation);
+        assert!(ready.families.iter().all(|f| f.producers.is_empty()));
+        let evidence = json!({"families":FAMILIES,"width":WIDTH,"passes":PASSES,"rotations":ROTATIONS,
+            "producer_bytes":p_bytes,"node_upper_bytes":node_upper,"prepaid_ready_bytes":reservation,
+            "old_retained_capacity_slots_after_full_drain":old_capacity_slots,"old_backing_bytes_after_full_drain":old_retained_bytes,
+            "old_reservation_violation":old_retained_bytes>reservation,"new_peak_owned_nodes":peak_nodes,
+            "new_peak_nodes_and_transfer_bound":peak_bound,"node_allowance":WIDTH*per_slot,
+            "new_owned_nodes_after_full_drain":0,"partially_drained_families_checked":partial,
+            "max_simultaneous_nonempty_families":most_families,"fifo_and_key_conservation":true,
+            "ownership_basis":"std LinkedList one owned node per element; pop_front deallocates nodes; no historical per-family backing capacity; excludes allocator caching/RSS"});
+        if let Some(path) = std::env::var_os("IMPG_TEST_READY_STORAGE_OUTPUT") {
+            create_json(Path::new(&path), &evidence).unwrap();
+        }
+        println!("{evidence}");
+    }
+    #[test]
+    fn ready_metadata_reservation_stops_before_growth() {
+        let mut mem = Memory {
+            used: 7,
+            peak: 7,
+            limit: 8,
+        };
+        assert!(ReadyFamilies::new(&native(&[-1.0]), 16, &mut mem).is_err());
+        assert_eq!((mem.used, mem.peak), (7, 7));
+    }
+}
+
+#[cfg(test)]
+fn fixture_engine<'a>(
+    o: &'a Options,
+    native: &[Scored],
+    g: &routes::Graph,
+) -> io::Result<Engine<'a>> {
+    fs::create_dir(&o.out_dir)?;
+    let snapshot = snapshot::Snapshot {
+        bindings: snapshot::Bindings {
+            policy: identity::policy_identity(),
+            backend: routes::compiler_identity(),
+            graph: g.digest()?,
+            sample: "ready-family-mechanism-only".into(),
+            depth_bits: 10.0f64.to_bits(),
+            background_bits: 0.1f64.to_bits(),
+            tie_bits: 1e-9f64.to_bits(),
+            max_feature_terms: 50000000,
+            cache_terms: 1000000,
+            count_policy: genome::COUNT_POLICY.into(),
+        },
+        seal: Value::Null,
+        parent: Value::Null,
+        budgets: Value::Null,
+        transition: Value::Null,
+        order_update: Value::Null,
+        native: native.to_vec(),
+        tasks_position: 0,
+        tasks: 10000,
+        preflight_bytes: 0,
+    };
+    let mut mem = Memory {
+        used: 0,
+        peak: 0,
+        limit: o.max_state_bytes,
+    };
+    mem.reserve(weight(o.record_bytes as u64)? + 131072 + weight(bytes(&snapshot.native)?)?)?;
+    Engine::new(o, snapshot, mem)
+}
+#[cfg(test)]
+fn conservation(e: &Engine<'_>) {
+    let mut ids = BTreeSet::new();
+    for p in &e.producers {
+        assert!(!member_ready(p));
+        assert!(ids.insert(p.task));
+    }
+    for (family, f) in e.ready.families.iter().enumerate() {
+        for p in &f.producers {
+            assert!(member_ready(p));
+            assert_eq!(p.original.family, family);
+            assert!(ids.insert(p.task));
+        }
+        assert_eq!(
+            e.chains
+                .iter()
+                .filter(|c| c.assignment.family == family)
+                .count(),
+            usize::from(f.in_flight)
+        );
+        assert_eq!(
+            e.ready.eligible.contains(&e.ready.key(family)),
+            !f.in_flight && !f.producers.is_empty()
+        );
+    }
+    assert_eq!(ids.len(), e.producers.len() + e.ready.producers);
+    assert!(ids.len() <= e.options.producer_slots);
+    assert!(e.chains.len() <= e.options.chain_slots);
+}
+
+/// Isolated bb981c8 selector only. Uses the identical member/tail/capacity/evaluator
+/// primitives, with the original producer RR and shared chain pool; no fair index.
+#[cfg(test)]
+fn legacy_drive(
+    engine: &mut Engine<'_>,
+    input: &mut stream::Json,
+    e: &mut Evaluator<'_>,
+) -> io::Result<()> {
+    loop {
+        let discovery = !engine.input_end && engine.producers.len() < engine.options.producer_slots;
+        let active = !engine.producers.is_empty() || !engine.chains.is_empty();
+        if !discovery && !active {
+            engine.stop = "proposal-subset-exhausted".into();
+            break;
+        }
+        if engine.counts.work >= engine.options.max_work {
+            engine.stop = "work-budget-exhausted".into();
+            break;
+        }
+        engine.counts.work += 1;
+        let result = if discovery && (engine.discovery_turn || !active) {
+            engine.discovery_turn = false;
+            engine.discovery(input, e)
+        } else {
+            engine.discovery_turn = true;
+            if !engine.producers.is_empty() && (engine.producer_turn || engine.chains.is_empty()) {
+                engine.producer_turn = false;
+                let mut p = engine.producers.pop_front().unwrap();
+                let result = engine.produce(&mut p, e);
+                if matches!(result, Ok(true)) {
+                    engine.mem.release(p.weight);
+                } else {
+                    engine.producers.push_back(p);
+                }
+                result.map(|_| ())
+            } else {
+                engine.producer_turn = true;
+                let mut c = engine.chains.pop_front().unwrap();
+                let result = engine.close(&mut c, e);
+                if matches!(result, Ok(true)) {
+                    engine.mem.release(c.weight);
+                } else {
+                    engine.chains.push_back(c);
+                }
+                result.map(|_| ())
+            }
+        };
+        if let Err(err) = result {
+            if err.to_string() == "evaluation-budget-exhausted" {
+                engine.stop = err.to_string();
+                break;
+            }
+            return Err(err);
+        }
+    }
+    engine.ledger.flush()?;
+    engine.ledger.sync_all()
+}
+
+#[cfg(test)]
+pub(crate) fn ready_family_checks(mut o: Options, e: &mut Evaluator<'_>) -> io::Result<Value> {
+    fs::create_dir(&o.out_dir)?;
+    o.max_work = 20000;
+    o.max_evaluations = 2; // frozen mechanism budget; widths/defaults unchanged
+    let root = o.out_dir.clone();
+    create_json(
+        &root.join("predeclaration.json"),
+        &json!({"options":o,"selector_fixture":"already-ready A,A,D; A native strictly better than D; live B source and10000 undiscovered native contexts","outcome_fixture":"one attempt at a time; fresh cap1,work2000: fresh/cache/native/capacity-reject/member-reject","before":"isolated bb981c8 producer-RR selection, unchanged primitives"}),
+    )?;
+    let g = e.graph;
+    ensure(g.families.len() == 4, "four-family mechanism required")?;
+    let sources = g.families.iter().map(|f| f.paths[0]).collect::<Vec<_>>();
+    let mut ports = vec![];
+    for i in 0..g.port_count {
+        ports.push(adapter::read(&mut e.ports.global, g.k, g.port_count, i)?);
+    }
+    let mut common = ports
+        .iter()
+        .filter(|p| {
+            p.source == sources[2]
+                && !p.reverse
+                && sources.iter().all(|s| {
+                    ports.iter().any(|q| {
+                        q.source == *s && !q.reverse && q.word == p.word && q.anchor == p.anchor
+                    })
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    common.sort_by_key(|p| p.anchor);
+    ensure(common.len() >= 4, "separated common ports required")?;
+    let entry = common[0].cut(g.k)?;
+    let exits = [
+        common[common.len() / 2].clone(),
+        common.last().unwrap().clone(),
+    ];
+    let mut native = vec![];
+    for f in 0..4 {
+        let r = e.evaluate(&g.native_assignment(f)?)?;
+        native.push(Scored {
+            assignment: r.assignment,
+            objective_bits: r.relative_objective.to_bits(),
+        });
+    }
+    ensure(
+        native[0].objective() < native[3].objective(),
+        "waiting family must have worse native rank",
+    )?;
+    let make = |family: usize, task: u64, exit: usize| -> io::Result<Producer> {
+        let source = sources[2];
+        let target = sources[family];
+        let port = exits[exit].clone();
+        let member = ports
+            .iter()
+            .position(|q| q.source == target && !q.reverse && q.word == port.word)
+            .ok_or_else(|| invalid("missing test return"))? as u64;
+        let c = Context {
+            family,
+            slot: 0,
+            completed: vec![],
+            segments: vec![Segment {
+                source: target,
+                start: 0,
+                end: entry,
+                reverse: false,
+            }],
+            source,
+            cut: entry,
+            reverse: false,
+        };
+        Ok(Producer {
+            task,
+            weight: weight(bytes(&c)? + 2 * g.k)?,
+            original: c.clone(),
+            next_entry: 2,
+            current: Some(c),
+            source: SourceStage::Recover,
+            hub: Some(Hub {
+                port,
+                stage: HubStage::Members {
+                    next: member,
+                    end: member + 1,
+                },
+            }),
+            direct: None,
+        })
+    };
+    let input_path = root.join("distractors.json");
+    let mut input_file = File::create(&input_path)?;
+    input_file.write_all(b"{")?;
+    for id in 100..10100 {
+        if id != 100 {
+            input_file.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut input_file, &id.to_string()).map_err(io::Error::other)?;
+        input_file.write_all(b":")?;
+        serde_json::to_writer(
+            &mut input_file,
+            &Task {
+                id,
+                ready: id,
+                depth: 0,
+                prev: None,
+                next: None,
+                context: Context {
+                    family: 0,
+                    slot: 0,
+                    completed: vec![],
+                    segments: vec![],
+                    source: sources[0],
+                    cut: 0,
+                    reverse: false,
+                },
+                op: Op::Start,
+            },
+        )
+        .map_err(io::Error::other)?;
+    }
+    input_file.write_all(b"}")?;
+    drop(input_file);
+    let mut summaries = vec![];
+    for legacy in [true, false] {
+        o.out_dir = root.join(if legacy {
+            "before-old-selector"
+        } else {
+            "after-ready-family"
+        });
+        let mut engine = fixture_engine(&o, &native, g)?;
+        for p in [make(0, 1, 0)?, make(0, 2, 1)?, make(3, 3, 0)?] {
+            engine.mem.reserve(p.weight)?;
+            if legacy {
+                engine.producers.push_back(p)
+            } else {
+                engine.retain_producer(p)
+            }
+            engine.counts.admitted += 1;
+        }
+        let mut live = make(1, 4, 0)?;
+        live.hub = None;
+        live.source = SourceStage::Bound {
+            lo: 0,
+            hi: g.lanes[live.original.source].port_count,
+        };
+        engine.mem.reserve(live.weight)?;
+        engine.producers.push_back(live);
+        engine.counts.admitted += 1;
+        let mut input = stream::Json::open(&input_path, o.record_bytes)?;
+        input.expect(b'{')?;
+        if legacy {
+            legacy_drive(&mut engine, &mut input, e)?
+        } else {
+            engine.drive(&mut input, e)?;
+            conservation(&engine);
+        }
+        let ledger = std::fs::read_to_string(o.out_dir.join("proposals.jsonl"))?;
+        let families = ledger
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|r| r["kind"] == "fresh")
+            .map(|r| r["assignment"]["family"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        let live = engine
+            .producers
+            .iter()
+            .chain(engine.ready.families.iter().flat_map(|f| &f.producers))
+            .any(|p| p.task == 4);
+        let row = json!({"selector":if legacy{"isolated-bb981c8-RR"}else{METHOD},"fresh_families":families,"counts":engine.counts,"status":engine.stop,"source_producer_live":live,"discovery_unfinished":!engine.input_end,"input_position":input.position});
+        create_json(&o.out_dir.join("causal-result.json"), &row)?;
+        ensure(
+            engine.stop == "evaluation-budget-exhausted"
+                && families.len() == 2
+                && live
+                && !engine.input_end
+                && engine.counts.inspected > 0,
+            "causal fixture did not retain live work",
+        )?;
+        if legacy {
+            ensure(
+                families == [0, 0],
+                "old selector did not reproduce waiting-family miss",
+            )?;
+        } else {
+            ensure(
+                families.contains(&3),
+                "ready-family selector missed waiting family",
+            )?;
+            ensure(
+                engine
+                    .chains
+                    .iter()
+                    .all(|c| engine.ready.families[c.assignment.family].in_flight),
+                "stopped chain lost family ownership",
+            )?;
+            engine.finish(input.position)?;
+        }
+        summaries.push(row);
+    }
+    // A failed chain reservation retains the exact member and ready ownership.
+    o.out_dir = root.join("ready-storage-stop");
+    let mut stopped = fixture_engine(&o, &native, g)?;
+    let p = make(0, 9, 0)?;
+    let original_hub = bytes(&p.hub)?;
+    let cursor = serde_json::to_value(&p.hub).map_err(io::Error::other)?;
+    stopped.mem.reserve(p.weight)?;
+    stopped.retain_producer(p);
+    stopped.mem.limit = stopped.mem.used;
+    let occupied = stopped.mem.used;
+    stopped.counts.work += 1;
+    let err = stopped.active(e).unwrap_err();
+    ensure(
+        err.to_string() == "state-budget-exhausted",
+        "wrong ready reservation stop",
+    )?;
+    conservation(&stopped);
+    ensure(
+        stopped.mem.used == occupied
+            && stopped.ready.families[0].grants == 1
+            && stopped.counts.target_members == 0
+            && stopped.chains.is_empty(),
+        "ready stop changed occupancy/cursor service",
+    )?;
+    let retained = stopped.ready.families[0].producers.front().unwrap();
+    ensure(
+        bytes(&retained.hub)? == original_hub
+            && serde_json::to_value(&retained.hub).map_err(io::Error::other)? == cursor,
+        "ready storage stop advanced member",
+    )?;
+    stopped.stop = err.to_string();
+    stopped.finish(0)?;
+    // Same service counter for rejected members and rejected/native/cached chains.
+    o.out_dir = root.join("outcome-accounting");
+    o.max_evaluations = 1;
+    o.max_work = 2000;
+    let mut engine = fixture_engine(&o, &native, g)?;
+    for (i, kind) in ["fresh", "cache", "native", "capacity", "member"]
+        .iter()
+        .enumerate()
+    {
+        let mut p = make(0, 10 + i as u64, 0)?;
+        if *kind == "native" {
+            p.original.source = sources[0];
+            p.current.as_mut().unwrap().source = sources[0];
+            p.hub.as_mut().unwrap().port.source = sources[0];
+        }
+        if *kind == "capacity" {
+            p.current.as_mut().unwrap().segments.push(Segment {
+                source: sources[2],
+                start: entry,
+                end: exits[0].cut(g.k)?,
+                reverse: false,
+            });
+            p.original = p.current.as_ref().unwrap().clone();
+            // This explicitly one-shot outcome fixture has no unvisited entry.
+            p.next_entry = p.original.segments.len() + 1;
+            p.weight = weight(bytes(&p.original)? + 2 * g.k)?;
+        }
+        if *kind == "member" {
+            let (index, q) = ports
+                .iter()
+                .enumerate()
+                .find(|(_, q)| q.source == sources[0] && q.reverse)
+                .unwrap();
+            let h = p.hub.as_mut().unwrap();
+            h.port.word = q.word.clone();
+            h.stage = HubStage::Members {
+                next: index as u64,
+                end: index as u64 + 1,
+            };
+        }
+        engine.mem.reserve(p.weight)?;
+        engine.retain_producer(p);
+        for _ in 0..400 {
+            if engine.producers.is_empty()
+                && engine.ready.producers == 0
+                && engine.chains.is_empty()
+            {
+                break;
+            }
+            engine.counts.work += 1;
+            engine.active(e)?;
+            conservation(&engine);
+        }
+        ensure(
+            engine.producers.is_empty() && engine.ready.producers == 0 && engine.chains.is_empty(),
+            "outcome service did not drain",
+        )?;
+        create_json(
+            &o.out_dir.join(format!("{i}-{kind}.json")),
+            &json!({"counts":engine.counts,"grants":engine.ready.families[0].grants,"expected_grants":i+1}),
+        )?;
+        ensure(
+            engine.ready.families[0].grants == i as u64 + 1,
+            "outcome changed grant weight",
+        )?;
+    }
+    ensure(
+        engine.counts.fresh_evaluations == 1
+            && engine.counts.cached_reuses == 1
+            && engine.counts.native_reuses == 1
+            && engine.counts.capacity_rejections == 1
+            && engine.counts.target_members == 5,
+        "outcome accounting mismatch",
+    )?;
+    create_json(
+        &o.out_dir.join("outcome-evidence.json"),
+        &json!({"counts":engine.counts,"grants":engine.ready.families[0].grants,"conservation":true}),
+    )?;
+    let evidence = json!({"injected_mechanism_only":true,"native_A_better_than_waiting_D":true,"before_after":summaries,"all_five_outcomes_charged_equally":true});
+    create_json(&root.join("causal-evidence.json"), &evidence)?;
+    Ok(evidence)
 }

@@ -651,3 +651,39 @@ fn integrity_stops(f: &Fixture, snapshot: &Path) {
     );
     write(&f.root.join("integrity-and-stops.json"), &json!(results));
 }
+
+#[test]
+fn completion_ready_family_causal_service_and_outcomes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("IMPG_TEST_READY_FAMILY_OUTPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temp.path().join("fixture"));
+    let base = dna(400, 113);
+    let mut private = base.clone();
+    private[300..].copy_from_slice(&dna(100, 479));
+    let f = fixture(
+        &root,
+        vec![
+            ("A#0#one".into(), base.clone()),
+            ("B#0#one".into(), base.clone()),
+            ("C#0#one".into(), base.clone()),
+            ("D#0#one".into(), private),
+        ],
+        &[base],
+    );
+    let id = genome::PanelIdentity::read(p(&f.panel)).unwrap();
+    let g = routes::Graph::load(&f.graph, &id).unwrap();
+    let panel = SyngIndex::load(p(&f.panel), SyncmerParams::default()).unwrap();
+    let sample = sample::SampleIndex::load(&f.sample, &id).unwrap();
+    let mut e = routes::Evaluator::new(&f.graph, &g, &panel, &sample, 10.0, 0.1, 50000000, 1000000)
+        .unwrap();
+    probe::ready_family_checks(
+        opts(
+            &f,
+            Path::new("mechanism-only-not-a-snapshot"),
+            &root.join("service"),
+        ),
+        &mut e,
+    )
+    .unwrap();
+}

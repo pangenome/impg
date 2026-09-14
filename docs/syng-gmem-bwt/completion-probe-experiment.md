@@ -42,9 +42,29 @@ experiment; the acceptance recipe never tunes them after outcomes):
 Each producer retains at most one reconstructed entry and one target-interval
 cursor. Full queues apply backpressure; there is no eviction or reservoir.
 Discovery and active service alternate when both can run; active service
-alternates round-robin producers and round-robin closure chains. A producer can
-wait on a member interval, but neither discovery nor an entire source/member
-range must finish before closure/check/evaluation chains receive service.
+alternates producer work and round-robin closure chains. Producer work alternates
+source/bound RR with ready-member grants when both can run. Total producer
+occupancy includes both source and member-ready queues; the width is unchanged.
+Neither discovery nor an entire source/member range must finish before closure
+chains receive service.
+
+Revision `experimental-snapshot-completion-ready-family-v2` groups producers with
+`Members { next < end }` into owned per-family FIFO queues. At a free chain slot,
+a single ordered index chooses the **least member-attempt-granted currently-ready
+family**, breaking ties only by saved complete-native objective order and stable
+family ID. No native rescore, partial score, source priority, or family exclusion
+is used. Each grant inspects one member and increments that family's counter,
+including rejected members and chains that later fail capacity or reuse a native
+or cached score. A resource-failed attempt also consumes its grant without advancing
+the retained member. There is at most **one in-flight chain per family**; ownership
+ends only on actual chain termination, not on a resource stop. Unready families
+are absent from the eligible index and cannot impose an all-family barrier.
+
+Ready ownership transfers preserve cursors and producer payloads. A charged
+exhausted-member step returns to ordinary source service. Only the affected family
+key is updated at enqueue/grant/retirement; there are no full-pool scans or
+family-wide rekey loops in service. This bounds repeated service to one ready
+family but does not promise every family a completion within arbitrary budgets.
 Every rejected record, eligibility span/route boundary, prefix position, binary-bound comparison,
 source ordinal (including virtual/rejected positions), member, blocked producer
 turn, native-tail append, and whole-assignment capacity comparison costs a turn.
@@ -90,7 +110,27 @@ Logical payload reservations are compact wire length times 16 plus 4096 bytes of
 node/cursor slack. Whole-chain reservations include the entire possible native
 tail before construction. Producer reservations include both retained port words.
 Queues, native metadata, cache keys, score-tie indices, and fixed metadata are
-reserved before retention. An additional `16 * record_bytes + 135168` reservation
+reserved before retention. Ready-service metadata still reserves 256 bytes
+per native family and `(8 * size_of(Producer) + 256)` bytes per producer slot,
+before allocating family rows, FIFO storage and eligible keys. Each owned ready
+FIFO is now a standard `LinkedList<Producer>`: one owned node per element, with
+removed nodes deallocated by `pop_front`. Empty or partly drained families retain
+no historical backing capacity. The total live producer width therefore bounds
+aggregate owned list nodes across **all** families, independently of churn.
+
+A conservative node allowance is `size_of(Producer) + 2 * pointer_size +
+2 * max_alignment` (two links plus alignment padding). The unchanged per-slot
+reservation covers this node storage, a locally moved producer, and even an extra
+transient node. Producer payload buffers remain separately reserved and are moved,
+not cloned, during FIFO transfers. Global source/chain deques retain their original
+fixed-width reservations. Freed allocator caches/size-class overhead are not owned
+list storage and are not an RSS claim.
+
+The previous per-family `VecDeque` representation was incorrect for this bound:
+`pop_front` retained each family's high-water capacity, which could accumulate
+across many families despite bounded live length. No cap or scheduling change is
+used to correct this; only the owned ready-FIFO representation changes.
+An additional `16 * record_bytes + 135168` reservation
 bounds parsing/current-input transient payloads and reader buffers before input is
 opened. Overlarge records explicitly fail rather than allocating an unbounded
 whole JSON document. A resource stop preserves/report pending cursors in the
@@ -106,12 +146,13 @@ Outputs are exclusively coordinate/score/accounting artifacts:
 
 - `options.json`: invocation and caps;
 - `provenance.json`: actual snapshot seals, scientific/policy bindings, saved native
-  score bits, ancestry/budgets, preflight accounting;
+  score bits, ancestry/budgets, preflight accounting, explicit method/service revision;
 - `proposals.jsonl`: every evaluated/reused complete assignment, objective bits,
   bit-preserved native deltas, task/entry provenance, input position/unfinished flag,
   fresh/cache/native visit classification, distinct-physical and score-tie flags;
 - `result.json`: explicit stop, inspected/skipped/admitted and stage counters,
-  pending producers/chains/input, logical occupancy and output checksum;
+  pending source/member-ready producers/chains/input, per-family grant/in-flight/ready
+  counters, logical occupancy and output checksum;
 - `failure.json`: input/initial resource failure (no partial scientific result).
 
 Caching only reuses computation for exactly identical normalized physical
@@ -155,3 +196,27 @@ beat all native baselines. Its ordinary input snapshot had **already** recovered
 that same truth/score. Thus this establishes standalone synthetic correctness, not
 novel improvement over ordinary search. The injected mechanism cases establish
 service of earlier/deferred prefixes separately. No real-data result is implied.
+
+The portable `completion_ready_family_causal_service_and_outcomes` test freezes
+three already-admitted, target-member-ready producers (A, A, D), a live B source
+producer and 10,000 native distractors under two fresh evaluations. A has a strictly
+better complete native score than D. Isolated original producer-RR selection uses
+both fresh calls on A; ready-family service evaluates A and D under the identical
+caps and unchanged member/tail/capacity/evaluator primitives. The test checks local
+queue/cursor conservation, stopped-chain ownership, and equal grant accounting
+for fresh/cache/native/capacity-rejected/member-rejected outcomes. Set
+`IMPG_TEST_READY_FAMILY_OUTPUT` to a fresh path to retain this mechanism evidence.
+It injects readiness for a scheduling regression only; the original normally
+generated 1600bp DNA gate and its thresholds/caps remain unchanged.
+
+The frozen `ready_family_storage_churn_releases_nodes_not_historical_capacity`
+regression fills/drains32 families at width16 for four passes, then performs128
+bounded-width rotations with partially drained and concurrently nonempty families.
+It records **actual old VecDeque capacities**, reproduces their reservation
+violation, and checks new aggregate node/transfer bounds using LinkedList's node
+ownership/deallocation guarantees (not a length-as-capacity assumption). FIFO and
+local key conservation are checked throughout. Set `IMPG_TEST_READY_STORAGE_OUTPUT`
+to a fresh JSON filename to preserve this evidence. Existing failed-reservation,
+ready-cursor, chain-ownership, causal and frozen scientific gates are unchanged.
+Old/new ready-service executable proposal ledgers must also be byte-identical on
+the same frozen synthetic snapshot: the storage correction is not a policy change.

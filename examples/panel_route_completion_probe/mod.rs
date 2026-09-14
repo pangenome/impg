@@ -4,6 +4,7 @@ mod machine;
 mod schema;
 mod snapshot;
 mod stream;
+const METHOD: &str = "experimental-snapshot-completion-ready-family-v2";
 // Reuse the current read-only verified-handle adapter, not a scheduler/archive.
 #[path = "../../src/commands/genome_infer/panel_route_search_policy/adapter.rs"]
 mod adapter;
@@ -185,7 +186,7 @@ fn run_inner(o: &Options) -> io::Result<()> {
     let preflight_seconds = began.elapsed().as_secs_f64();
     create_json(
         &o.out_dir.join("provenance.json"),
-        &json!({"snapshot":fs::canonicalize(&o.snapshot)?,"checkpoint_seal":snap.seal,"bindings":snap.bindings,"parent":snap.parent,"budgets":snap.budgets,"transition":snap.transition,"order_update":snap.order_update,"native":snap.native,"preflight_bytes":snap.preflight_bytes,"preflight_seconds":preflight_seconds,"preflight_is_not_discovery":true,"transient_reserved_bytes":transient,"memory_excludes":"graph/panel/sample/evaluator route cache and atomic evaluator scratch; RSS measured externally"}),
+        &json!({"method":METHOD,"closure_service":"least-member-attempt-grants-ready-family;complete-native-score-then-family-ID-ties;one-in-flight-per-family;source/member-alternation","snapshot":fs::canonicalize(&o.snapshot)?,"checkpoint_seal":snap.seal,"bindings":snap.bindings,"parent":snap.parent,"budgets":snap.budgets,"transition":snap.transition,"order_update":snap.order_update,"native":snap.native,"preflight_bytes":snap.preflight_bytes,"preflight_seconds":preflight_seconds,"preflight_is_not_discovery":true,"transient_reserved_bytes":transient,"memory_excludes":"graph/panel/sample/evaluator route cache and atomic evaluator scratch; RSS measured externally"}),
     )?;
     let mut input = stream::Json::open(&o.snapshot.join("checkpoint.json"), o.record_bytes)?;
     input.seek(snap.tasks_position)?;
@@ -206,3 +207,5 @@ fn run_inner(o: &Options) -> io::Result<()> {
 }
 #[cfg(test)]
 pub(crate) use machine::mechanism_checks;
+#[cfg(test)]
+pub(crate) use machine::ready_family_checks;
