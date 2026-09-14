@@ -1,4 +1,137 @@
-# Gate B1: automatic two-ended proposals with exact global feedback
+# Gate B1 defaults and opt-in B2 geometry experiment
+
+## B2 opt-in: bounded construction evidence, not full gate acceptance
+
+`--geometry-b2` enables exact-cut opposite reciprocal proposals and automatic
+recipient-prefix → donor1 → donor2 → recipient-suffix interiors. Without that
+flag the accepted B1 geometry, task order, charges and score behavior remain the
+baseline described below. `score.rs`, the operator and capacity policy are unchanged.
+
+**These are haploid-oriented construction/canonical-capacity experiments, NOT
+diploid dosage or phasing validation.** Two molecules or identical panel sources
+are not evidence of diploid support. A separately reviewed copy-aware diploid
+representation/identifiability gate is required before further genome-scale work.
+Full B2 and full Gate B remain incomplete: no positive witness for transporting
+an interior seam in an opposite exchange has been established.
+
+Opposite proposals release exactly the canonical spans occupied by both edits;
+the removed subwalk is reversed only when donor/occupied traversal disagree.
+Every normalized final seam, including transported interior seams, requires an
+actual source-index port at the same canonical cut in the required orientation,
+equal full-DNA words and source DNA provenance. At k63 this means looking up
+anchor=cut−31 or cut−32, never shifting a cut. Missing counterparts reject that
+construction only. Complete public validation/capacity precedes unchanged global
+delta and public confirmation. Unexpected source/provenance errors remain fatal.
+
+A chain cursor lazily enumerates a multiscale LEFT seed, its entry hub, positive
+donor1 source exits, donor2 entry hub members, positive donor2 exits, then return
+hub members. Each return maps to **every** eligible downstream recipient segment
+occurrence; RIGHT is discovered, not forced to a fixed-width preselected region.
+No source/family visited-label pruning or intermediate one-donor validation/score
+is used. Even contiguous seam descriptions are retained; only zero-length donor
+traversals and final assignments identical to the baseline are skipped. Thus a
+normalizing closing seam is not a reason to discard a chain. Final complete
+assignments alone enter validation/scoring. Feedback records actual discovered
+`[lo,hi]`, with the LEFT seed's level as the remaining refinement-depth convention.
+Coarse and score-selected refinement tasks remain independently live.
+
+One cursor per immutable `(baseline,slot)` is admitted lazily, at most32 live.
+Existing work and round-robin chain primitives receive recurring1:1 service when
+both are ready. At32, the next key is retained rather than eagerly expanding a
+waiting list. Pending output retains active/queued nested cursors and next key;
+this is not a resume contract. The original numerical/work/state caps are unchanged,
+plus a fixed100000 chain-primitive admission cap. Admissions and completed cursor
+transitions are separate; a completed transition need not imply a completed score.
+B2 reserves34×(8192+8k) bytes for queued/active/transfer cursor fixed fields and
+word buffers, in addition to B1 assignment/profile workspace. Existing port-read,
+source-open, validation, profile and sparse-score charges apply. These are logical
+reservations and proxy primitive charges, not allocator/RSS/backend instruction
+bounds; output serialization and opaque source verification remain separate costs.
+
+Frozen standalone results, before fresh review:
+- Seed113/220 RC two-source case:21 automatic opposite compound confirmations;
+  exact full integer profiles equal the native objective−197.67177534451292;
+  12 retained physical ties. This identical-copy mechanism is not identifiable
+  biological recovery. Work1999924 stop; no complete support claim.
+- Three400bp sources, seeds1009/1086/1163, fixed pairwise63bp words at90/250:
+  return-hub construction recovers the exact560bp frozen mosaic from L150 reads
+  (step15 plus last), improving94.49658895097784 over every native, to
+  −140.86554930178144. One exact-DNA best retained. No coordinates/assignments
+  entered CLI inference. Outputs were fingerprinted before DNA assessment.
+  301 chain confirmations;58300 primitive admissions; validation1024 stop;
+  work1882227, profile work696400. No recipe/budget outcome retry.
+
+The initial fixed-width coarse schedule had no snapped121/281 pair. A structural
+refinement path existed but its first three predecessors had zero complete
+candidates and could not supply feedback confirmations. This negative motivated
+supervisor approval of GENERAL return-hub endpoint discovery, not truth changes.
+The independent actual-port <=3-switch oracle exhausts4 complete feasible routes
+across3 families (13 traversal states), with no native-baseline one-donor target.
+That does not establish impossibility for multi-step algorithms. This small chain
+domain has no reverse/capacity-rejection witness; other regressions retain those
+protections. Full finite profiles are audited only after inference is frozen.
+
+The two-source opposite domain exhausts182 proposals:42 feasible/140 rejected.
+A frozen third-source53..54 same-strand seam baseline yields418 proposals:
+96 feasible/322 rejected, but **all48 interior-transport proposals rejected**.
+One approved necessary-counterpart-filtered diagnostic extension hit2m work
+before baseline filtering:91 raw descriptors, zero tested baselines, no witness.
+Those91 descriptors were not serialized historically. No further witness search
+or budget retry occurred. Expected-negative/incomplete diagnostic regressions are
+not the originally failed positive-witness gate. That capability remains OPEN.
+
+Evidence: `target/experiments/genome-mem-bwt-pipeline/candidate-copy-repair/structured-poisson-b2-worker-final-v1`,
+including original failures/binaries, staged approvals, frozen contract and
+inference/evaluation ledgers. New tests are `test_panel_route_residual_b2`;
+portable outputs optionally use `IMPG_TEST_RESIDUAL_B2_OUTPUT`. The ignored public
+CLI gate requires BOTH `IMPG_TEST_RESIDUAL_B2_BIN` and fresh
+`IMPG_TEST_RESIDUAL_B2_CLI_OUTPUT`, with no private-path fallback.
+
+### B2 review corrections: independent service and completed confirmations
+
+The fresh v1 review found two adapter defects, corrected without changing
+`chain.rs`, `oriented.rs`, `geometry.rs`, `score.rs` or any frozen recipe/cap:
+
+- The outer ordinary/chain alternation remains deterministic. The **inner
+  native/task alternation now advances only on ordinary-channel turns**. Chain
+  service must not consume the ordinary task's turn and defer all ordinary
+  geometry until every native is initialized. B1 has no chain turns and retains
+  its exact original ordering and charges.
+- A chain confirmation is classified immediately from the authoritative
+  completed-public/parity counter difference, **before propagating a later
+  retention/feedback/reservation error**. Score attempts are not completions;
+  genuinely completed confirmations remain counted even if downstream work stops.
+
+Two source-derived boundary regressions preserve actual v1 red evidence. Five
+  identical220bp native families with only3 score admissions leave native3 active
+  and native[3,4] pending: v1 has no ordinary geometry, while corrected service
+  attempts geometry after2 natives, retaining ordinary and chain frontiers. Two
+  identical220bp families, level0/epochs0 and4 tie slots fit exactly2 native plus
+  2 ordinary-root assignments; the next new chain tie confirms and then stops at
+  retention. Its3 candidate records/8 complete score records are unchanged, but
+  chain classification is corrected from0 to1. These are focused service/accounting
+  settings, not recovery-budget tuning. Optional portable retention uses
+  `IMPG_TEST_RESIDUAL_B2_SERVICE_OUTPUT`; no private-path fallback is added.
+
+Frozen automatic recovery remains exact560bp with the same objective and1 best
+assignment. On the same chain input, ordinary geometry now runs after2 rather
+than3 native initializations; chain primitive admissions change58300→58298,
+reported work1882219→1882213, with301 chain confirmations and the same validation
+stop/profile work. Opposite control remains21 confirmations/12 physical ties.
+Every common complete assignment retains exact full factors/objective; changed
+B2 service order is not required to reproduce v1 ledgers. Same-input original B1
+normal and boundary ledgers remain byte-identical. Full regression:710 portable
+Rust tests, configured B1/B2 and seven prior gates, GateA, DNA1600, examples and
+Python passed. Fresh review and parent acceptance are still required.
+
+Fresh evidence is the sibling `structured-poisson-b2-worker-final-v2` package,
+including narrow v1 diff, source-derived red/green fixtures/binaries, same-input
+CLI checks and preserved v1 identities. The original v1 package/failures remain
+immutable. These fixes do not close positive transported-interior support,
+full B2/GateB or diploid dosage/phasing; no diploid implementation or additional
+witness search was performed.
+
+## Accepted B1 baseline (unchanged mode)
 
 This standalone experiment implements the **approved B1 subset**, not all of
 [Gate B](structured-poisson-optimization.md). Existing tracked code, production

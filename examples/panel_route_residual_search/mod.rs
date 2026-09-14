@@ -1,5 +1,7 @@
-//! Gate B1 only. Heuristic generated neighborhoods, never global pricing bounds.
+//! B1 defaults plus opt-in B2 geometry; no global pricing/support certificate.
+pub mod chain;
 pub mod geometry;
+pub mod oriented;
 pub mod score;
 use clap::Parser;
 use geometry::Region;
@@ -34,6 +36,10 @@ fn close(a: f64, b: f64) -> io::Result<()> {
 }
 #[derive(Parser, Clone, Debug, Serialize)]
 pub struct Options {
+    /// Experimental oriented exchanges and return-hub two-donor construction.
+    #[arg(long)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub geometry_b2: bool,
     #[arg(long)]
     pub panel: String,
     #[arg(long)]
@@ -281,6 +287,13 @@ struct Engine<'a, 'b> {
     conflicts: usize,
     compound_confirmed: usize,
     unsupported_opposite_strand: usize,
+    chains: VecDeque<chain::Cursor>,
+    active_chain: Option<chain::Cursor>,
+    next_chain_key: (usize, usize),
+    chain_primitives: u64,
+    chain_primitives_completed: u64,
+    chain_confirmed: usize,
+    oriented_rejections: usize,
     stop: String,
 }
 impl<'a, 'b> Engine<'a, 'b> {
@@ -584,6 +597,15 @@ impl<'a, 'b> Engine<'a, 'b> {
                     a.routes[region.slot] =
                         geometry::splice(&a.routes[region.slot], lo, hi, vec![donor.clone()])?;
                     Some(a)
+                } else if self.meter.limits.geometry_b2 {
+                    oriented::reciprocal_proposal(
+                        assignment,
+                        region.slot,
+                        lo,
+                        hi,
+                        &donor,
+                        other - 1,
+                    )?
                 } else {
                     match geometry::reciprocal(assignment, region.slot, lo, hi, &donor, other - 1)?
                     {
@@ -614,75 +636,144 @@ impl<'a, 'b> Engine<'a, 'b> {
                 let Some(candidate) = candidate else {
                     return Ok(());
                 };
-                if candidate == self.bases[base].assignment {
-                    return Ok(());
-                }
-                self.meter.score_room(2)?;
-                self.meter
-                    .validation(&candidate, self.e.graph.k, self.e.graph.port_count)?;
-                let candidate = match self.e.validate_assignment(&candidate) {
-                    Ok(a) => a,
-                    Err(e) if e.to_string().contains("conflicting canonical") => {
-                        self.conflicts += 1;
-                        line(
-                            &mut self.ledger,
-                            &json!({"kind":"capacity_rejection","baseline":base,"region":region,"compound":other>0,"assignment":candidate,"error":e.to_string()}),
-                        )?;
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        line(
-                            &mut self.ledger,
-                            &json!({"kind":"unexpected_validation_error","task":self.active,"baseline":base,"candidate":candidate,"error":e.to_string()}),
-                        )?;
-                        return Err(e);
-                    }
-                };
-                let change = score::delta(
-                    self.e,
-                    &self.bases[base],
-                    &candidate,
-                    &self.observed,
-                    &self.histogram,
-                    self.denominator,
-                    &mut self.meter,
-                )?;
-                line(
-                    &mut self.ledger,
-                    &json!({"kind":"unconfirmed_exact_delta","baseline":base,"assignment":candidate,"delta":change,"region":region,"compound":other>0}),
-                )?;
-                let actual = self.public(&candidate, false)?;
-                line(
-                    &mut self.ledger,
-                    &json!({"kind":"public_confirmation","baseline":base,"public":actual}),
-                )?;
-                score::parity(
-                    &self.bases[base],
-                    &change,
-                    &actual,
-                    &self.observed,
-                    &mut self.meter,
-                )?;
-                self.confirmed += 1;
-                if other > 0 {
-                    self.compound_confirmed += 1;
-                }
-                line(
-                    &mut self.ledger,
-                    &json!({"kind":"candidate","baseline":base,"baseline_objective":self.bases[base].score,"region":region,"snapped":[lo,hi],"guided":guided,"compound":other>0,"delta":change,"public_minus_sparse":actual.relative_objective-change.objective,"public":actual}),
-                )?;
-                self.remember(&actual)?;
-                self.feedback(base, &region, actual.relative_objective)?;
-                let family = actual.assignment.family;
-                if actual.relative_objective < self.family_best[family] - 1e-9 {
-                    self.family_best[family] = actual.relative_objective;
-                    if self.epochs[family] < self.meter.limits.max_epochs {
-                        self.epochs[family] += 1;
-                        self.add_base(actual, self.epochs[family])?;
-                    }
-                }
+                self.confirm_candidate(base, region, guided, lo, hi, other, candidate)?;
             }
         }
+        Ok(())
+    }
+    fn confirm_candidate(
+        &mut self,
+        base: usize,
+        region: Region,
+        guided: bool,
+        lo: u64,
+        hi: u64,
+        other: usize,
+        candidate: routes::Assignment,
+    ) -> io::Result<()> {
+        if candidate == self.bases[base].assignment {
+            return Ok(());
+        }
+        if self.meter.limits.geometry_b2 {
+            if let Some(rejection) = oriented::seam_rejection(self.e, &candidate, &mut self.meter)?
+            {
+                self.oriented_rejections += 1;
+                line(
+                    &mut self.ledger,
+                    &json!({"kind":"oriented_construction_rejection","baseline":base,"region":region,"assignment":candidate,"rejection":rejection,"global_infeasibility_claim":false}),
+                )?;
+                return Ok(());
+            }
+        }
+        self.meter.score_room(2)?;
+        self.meter
+            .validation(&candidate, self.e.graph.k, self.e.graph.port_count)?;
+        let candidate = match self.e.validate_assignment(&candidate) {
+            Ok(a) => a,
+            Err(e) if e.to_string().contains("conflicting canonical") => {
+                self.conflicts += 1;
+                line(
+                    &mut self.ledger,
+                    &json!({"kind":"capacity_rejection","baseline":base,"region":region,"compound":other>0,"assignment":candidate,"error":e.to_string()}),
+                )?;
+                return Ok(());
+            }
+            Err(e) => {
+                line(
+                    &mut self.ledger,
+                    &json!({"kind":"unexpected_validation_error","task":self.active,"baseline":base,"candidate":candidate,"error":e.to_string()}),
+                )?;
+                return Err(e);
+            }
+        };
+        let change = score::delta(
+            self.e,
+            &self.bases[base],
+            &candidate,
+            &self.observed,
+            &self.histogram,
+            self.denominator,
+            &mut self.meter,
+        )?;
+        line(
+            &mut self.ledger,
+            &json!({"kind":"unconfirmed_exact_delta","baseline":base,"assignment":candidate,"delta":change,"region":region,"compound":other>0}),
+        )?;
+        let actual = self.public(&candidate, false)?;
+        line(
+            &mut self.ledger,
+            &json!({"kind":"public_confirmation","baseline":base,"public":actual}),
+        )?;
+        score::parity(
+            &self.bases[base],
+            &change,
+            &actual,
+            &self.observed,
+            &mut self.meter,
+        )?;
+        self.confirmed += 1;
+        if other > 0 {
+            self.compound_confirmed += 1;
+        }
+        line(
+            &mut self.ledger,
+            &json!({"kind":"candidate","baseline":base,"baseline_objective":self.bases[base].score,"region":region,"snapped":[lo,hi],"guided":guided,"compound":other>0,"delta":change,"public_minus_sparse":actual.relative_objective-change.objective,"public":actual}),
+        )?;
+        self.remember(&actual)?;
+        self.feedback(base, &region, actual.relative_objective)?;
+        let family = actual.assignment.family;
+        if actual.relative_objective < self.family_best[family] - 1e-9 {
+            self.family_best[family] = actual.relative_objective;
+            if self.epochs[family] < self.meter.limits.max_epochs {
+                self.epochs[family] += 1;
+                self.add_base(actual, self.epochs[family])?;
+            }
+        }
+        Ok(())
+    }
+    fn admit_chains(&mut self) -> io::Result<()> {
+        if !self.meter.limits.geometry_b2 {
+            return Ok(());
+        }
+        while self.chains.len() < 32 && self.next_chain_key.0 < self.bases.len() {
+            self.meter.work(1)?;
+            let (base, slot) = self.next_chain_key;
+            if slot == self.bases[base].assignment.routes.len() {
+                self.next_chain_key = (base + 1, 0);
+            } else {
+                self.chains.push_back(chain::Cursor::new(base, slot));
+                self.next_chain_key.1 += 1;
+            }
+        }
+        Ok(())
+    }
+    fn chain_step(&mut self) -> io::Result<()> {
+        let mut cursor = self.chains.pop_front().unwrap();
+        self.active_chain = Some(cursor.clone());
+        ensure(self.chain_primitives < 100_000, "budget: chain_primitives")?;
+        self.meter.work(1)?;
+        self.chain_primitives += 1;
+        let (done, candidate) =
+            cursor.advance(self.e, &self.bases[cursor.base].assignment, &mut self.meter)?;
+        self.chain_primitives_completed += 1;
+        let base = cursor.base;
+        if !done {
+            self.chains.push_back(cursor);
+        }
+        if let Some((region, candidate)) = candidate {
+            line(
+                &mut self.events,
+                &json!({"event":"chain_complete_geometry","baseline":base,"cursor":self.active_chain,"region":region,"assignment":candidate,"right_discovered_from_return_hub":true}),
+            )?;
+            let before = self.confirmed;
+            let (lo, hi) = (region.left, region.right);
+            let confirmation = self.confirm_candidate(base, region, false, lo, hi, 0, candidate);
+            // Confirmation precedes fallible retention/feedback. Classify any
+            // completed public/parity result even when that later work stops.
+            self.chain_confirmed += self.confirmed - before;
+            confirmation?;
+        }
+        self.active_chain = None;
         Ok(())
     }
 }
@@ -772,6 +863,19 @@ pub fn run(options: Options, mechanism_family: Option<usize>) -> io::Result<serd
                 + graph.families.len() as u64 * 4096
                 + graph.lanes.len() as u64 * 1024,
         )?;
+        if options.geometry_b2 {
+            // 32 queued cursors plus active and transfer copies. Each cursor
+            // owns at most three k-byte words; reserve eight word buffers per
+            // slot for clones/read/RC temporaries, plus fixed fields/allocator
+            // capacity. Candidate transfers stay in B1's assignment workspace.
+            meter.reserve(
+                34 * (8192
+                    + graph
+                        .k
+                        .checked_mul(8)
+                        .ok_or_else(|| invalid("cursor word size overflow"))?),
+            )?;
+        }
         let mut evaluator = routes::Evaluator::new(
             &options.routes,
             &graph,
@@ -784,7 +888,7 @@ pub fn run(options: Options, mechanism_family: Option<usize>) -> io::Result<serd
         )?;
         genome::write_json(
             &options.out_dir.join("provenance.json"),
-            &json!({"graph":graph.digest()?,"compiler":graph.compiler_identity,"count_policy":graph.count_policy,"sample":genome::reconstruction::fingerprint(&options.sample)?,"histogram":histogram,"read_lengths":graph.read_lengths,"verified_source_bytes":graph.source_files.iter().map(|f|f["bytes"].as_u64().unwrap_or(0)).sum::<u64>(),"global_port_bytes":graph.ports.bytes,"mechanism_only_fixed_family":mechanism_family,"fractional_genomes":false,"new_two_donor_chain_generation":false}),
+            &json!({"graph":graph.digest()?,"compiler":graph.compiler_identity,"count_policy":graph.count_policy,"sample":genome::reconstruction::fingerprint(&options.sample)?,"histogram":histogram,"read_lengths":graph.read_lengths,"verified_source_bytes":graph.source_files.iter().map(|f|f["bytes"].as_u64().unwrap_or(0)).sum::<u64>(),"global_port_bytes":graph.ports.bytes,"mechanism_only_fixed_family":mechanism_family,"fractional_genomes":false,"new_two_donor_chain_generation":options.geometry_b2}),
         )?;
         let nf = graph.families.len();
         let max_bases = nf * (options.max_epochs as usize + 1);
@@ -811,6 +915,13 @@ pub fn run(options: Options, mechanism_family: Option<usize>) -> io::Result<serd
             conflicts: 0,
             compound_confirmed: 0,
             unsupported_opposite_strand: 0,
+            chains: VecDeque::with_capacity(if options.geometry_b2 { 32 } else { 0 }),
+            active_chain: None,
+            next_chain_key: (0, 0),
+            chain_primitives: 0,
+            chain_primitives_completed: 0,
+            chain_confirmed: 0,
+            oriented_rejections: 0,
             stop: "declared_neighborhood_schedule_finished_not_global".into(),
         };
         let families: Vec<_> = mechanism_family
@@ -821,9 +932,21 @@ pub fn run(options: Options, mechanism_family: Option<usize>) -> io::Result<serd
         }
         let mut next = 0;
         let mut init_turn = true;
+        let mut chain_turn = false;
         let mut active_native_family = None;
         loop {
-            let attempt = if next < families.len() && (init_turn || engine.tasks.is_empty()) {
+            if let Err(e) = engine.admit_chains() {
+                if e.to_string().starts_with("budget:") {
+                    engine.stop = e.to_string();
+                    break;
+                }
+                return Err(e);
+            }
+            let servicing_chain = !engine.chains.is_empty()
+                && (chain_turn || (next == families.len() && engine.tasks.is_empty()));
+            let attempt = if servicing_chain {
+                engine.chain_step()
+            } else if next < families.len() && (init_turn || engine.tasks.is_empty()) {
                 let family = families[next];
                 active_native_family = Some(family);
                 engine.initialize(family).map(|()| {
@@ -836,7 +959,12 @@ pub fn run(options: Options, mechanism_family: Option<usize>) -> io::Result<serd
             } else {
                 break;
             };
-            init_turn = !init_turn;
+            // Chain turns must not consume the ordinary channel's independent
+            // native/task alternation (B1 has no chain turns).
+            if !servicing_chain {
+                init_turn = !init_turn;
+            }
+            chain_turn = !chain_turn;
             if let Err(e) = attempt {
                 if e.to_string().starts_with("budget:") {
                     engine.stop = e.to_string();
@@ -849,11 +977,16 @@ pub fn run(options: Options, mechanism_family: Option<usize>) -> io::Result<serd
         engine.ledger.flush()?;
         engine.events.flush()?;
         engine.meter.accounting.as_mut().unwrap().flush()?;
-        genome::write_json(
-            &options.out_dir.join("pending.json"),
-            &json!({"active_at_stop":engine.active,"active_native_family":active_native_family,"pending_native_families":&families[next..],"queued":engine.tasks,"immutable_baselines":engine.bases.iter().enumerate().map(|(id,b)|json!({"id":id,"epoch":b.epoch,"assignment":b.assignment,"objective":b.score})).collect::<Vec<_>>(),"resume_supported":false}),
-        )?;
-        let result = json!({"status":engine.stop,"native_initializations":engine.native_done,"native_initialization_complete":next==families.len(),"confirmed_candidates":engine.confirmed,"compound_confirmations":engine.compound_confirmed,"unsupported_opposite_strand_reciprocals":engine.unsupported_opposite_strand,"capacity_rejections":engine.conflicts,"refinement_tasks_generated":engine.refinements,"best_public_objective":engine.best.is_finite().then_some(engine.best),"retained_correlated_best_found":engine.ties,"meter":engine.meter,"elapsed_seconds":start.elapsed().as_secs_f64(),"pending_tasks":engine.tasks.len(),"global_bound":null,"global_gap":null,"correlated_support_complete":false,"sequence_emission_authorized":false,"remaining_gate_b":"oriented coupled construction, two-donor/no-simple-return generation and reviewed genome-scale development experiments","remaining_finer_work":true});
+        let mut pending = json!({"active_at_stop":engine.active,"active_native_family":active_native_family,"pending_native_families":&families[next..],"queued":engine.tasks,"immutable_baselines":engine.bases.iter().enumerate().map(|(id,b)|json!({"id":id,"epoch":b.epoch,"assignment":b.assignment,"objective":b.score})).collect::<Vec<_>>(),"resume_supported":false});
+        if options.geometry_b2 {
+            pending["b2"] = json!({"active_chain":engine.active_chain,"queued_chains":engine.chains,"next_chain_admission_key":engine.next_chain_key,"primitive_admissions":engine.chain_primitives,"live_cursor_cap":32,"key_admission_is_lazy":true});
+        }
+        genome::write_json(&options.out_dir.join("pending.json"), &pending)?;
+        let mut result = json!({"status":engine.stop,"native_initializations":engine.native_done,"native_initialization_complete":next==families.len(),"confirmed_candidates":engine.confirmed,"compound_confirmations":engine.compound_confirmed,"unsupported_opposite_strand_reciprocals":engine.unsupported_opposite_strand,"capacity_rejections":engine.conflicts,"refinement_tasks_generated":engine.refinements,"best_public_objective":engine.best.is_finite().then_some(engine.best),"retained_correlated_best_found":engine.ties,"meter":engine.meter,"elapsed_seconds":start.elapsed().as_secs_f64(),"pending_tasks":engine.tasks.len(),"global_bound":null,"global_gap":null,"correlated_support_complete":false,"sequence_emission_authorized":false,"remaining_gate_b":"oriented coupled construction, two-donor/no-simple-return generation and reviewed genome-scale development experiments","remaining_finer_work":true});
+        if options.geometry_b2 {
+            result["b2"] = json!({"chain_primitive_admissions":engine.chain_primitives,"chain_primitives_completed":engine.chain_primitives_completed,"chain_confirmations":engine.chain_confirmed,"oriented_construction_rejections":engine.oriented_rejections,"live_chains":engine.chains.len(),"transported_interior_positive_witness_established":false,"diploid_dosage_or_phasing_validated":false,"full_b2_complete":false});
+            result["remaining_gate_b"]=json!("positive transported-interior witness, full B2 acceptance and reviewed genome-scale development experiments");
+        }
         genome::write_json(&options.out_dir.join("result.json"), &result)?;
         Ok(result)
     })();
