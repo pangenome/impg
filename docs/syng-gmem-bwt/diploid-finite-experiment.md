@@ -1,8 +1,10 @@
 # Fixed-diploid finite diagnostic: approved frozen experiment
 
-Design approved by supervisor before source edits, 2026-09-14, HEAD05637f5.
+Design approved before source edits at HEAD05637f5; implementation `d35b00d`
+accepted after independent review and parent reproduction, 2026-09-14.
 This new restricted experimental copy model is NOT production diploid support.
-The foundation contract and all existing files remain unchanged.
+All625 previous regular files remained unchanged during implementation/tests;
+subsequent parent acceptance updates affect documentation only.
 
 ## Frozen contract
 
@@ -72,10 +74,12 @@ Only new example/helpers/tests/this results document are added. Offline locked
 release; CPUs252-255 nice10, jobs/Rayon<=4, serialized shared target. Full portable,
 B1/B2/GateA/DNA1600, seven configured gates, examples and Python regressions follow.
 Evidence: candidate-copy-repair/diploid-foundation-worker-final-v1. Production,
-backend, dependencies, existing files, installed impg and biological inputs are
-protected. No installation/staging/commit/emission/general diploid claim.
+backend, dependencies, existing files, installed impg and biological inputs were
+protected throughout worker implementation and parent tests. Workers did not stage
+or commit; parent publication followed acceptance. No installation, emission or
+general diploid claim is authorized.
 
-## Frozen results (worker checked; independent review/parent acceptance pending)
+## Frozen results (independently reviewed and parent-reproduced)
 
 | Case | Supplied haploids / pairs | Relative minimum | Correlated optima |
 |---|---:|---:|---|
@@ -144,5 +148,16 @@ Reproduction: the evidence package contains `run.sh`, `commands.tsv`,
 `results.tsv`, `configured-gates.sh`, `remaining-regressions.sh`, `cli-checks.py`,
 source/executable SHA256 manifests, complete count/support/assessment artifacts,
 and provenance showing all625 previous regular files and installed impg unchanged.
-The `frozen-design.md` copy predates source edits/results. Review and parent reruns
-remain required; automatic diploid discovery and general diploid support stay open.
+The `frozen-design.md` copy predates source edits/results. Fresh review found no
+issues. Parent reproduction passed in331s, including712 portable tests (24 ignored),
+four focused tests, all24 independently reconstructed pairs and all regression gates.
+Worker/parent feature, pair and selection ledgers are byte-identical; assessments
+agree. Parent reverified all9131 manifest files and unchanged source/install bindings.
+
+Acceptance: `candidate-copy-repair/diploid-foundation-parent-v1/acceptance.json`.
+Review: `candidate-copy-repair/reviews/diploid-foundation-review.md`.
+Standalone SHA256: `9b04494193696ec10184805a524b0c2ef1db89e88ceceac879e582335ae72685`.
+Worker manifest SHA256: `5689b91e2e264bcac6bfb8b05bbf4f7efe590f9f72ac3a885cefb101ca060a23`.
+Automatic diploid discovery and general diploid support stay open; next is the
+[automatic paired-construction design](diploid-foundation.md#next-automatic-joint-diploid-proposals-design-first),
+not production installation or certified assembly emission.

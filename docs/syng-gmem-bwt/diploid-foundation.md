@@ -1,6 +1,6 @@
 # Diploid foundation: representation, counts and identifiability
 
-Status: **NEXT, design approval required before implementation**. This foundational gate precedes further genome-scale development under the [structured optimization plan](structured-poisson-optimization.md). The user explicitly asked whether the system works for diploids. **Diploid inference has not been validated.** Existing multi-molecule, reciprocal-exchange and haploid mosaic results do not establish diploid dosage or phasing support.
+Status: **ACCEPTED for the restricted finite fixed-two-copy model, 2026-09-14**, commit `d35b00d`. Independent review and parent reproduction passed: 712 portable tests, four focused tests, all existing configured gates, and independent reconstruction of all24 paired profiles/optima. See the [frozen experiment and results](diploid-finite-experiment.md). A/A retains two copies from one panel source; heterozygous dosage and identifiable near phase are recovered; exactly indistinguishable far-phase alternatives remain paired ties. **Automatic and general diploid inference remain unvalidated.** Next is automatic joint diploid mosaic generation, before further genome-scale development under the [structured optimization plan](structured-poisson-optimization.md). The design contract below records the accepted finite scope.
 
 ## Separate questions
 
@@ -18,13 +18,13 @@ For two complete homolog hypotheses and equal **per-copy** depth d:
     s_f = d * (e_f(G_1) + e_f(G_2))
     R = sum_f [s_f - C_f log(1 + s_f / beta)]
 
-Depth10 per homolog means20 relative to a haploid-length reference. The convention must be explicit; neither changing the depth nor adding separately evaluated haploid losses creates a diploid model. Background is added once per feature, not once per homolog. Shared signals sum inside the same logarithm.
+Nominal depth10 per homolog means20 relative to a haploid-length reference; realized short-fixture coverage is lower because of terminal effects (7.75 per diploid base in the accepted cases). The convention must be explicit; neither changing the depth nor adding separately evaluated haploid losses creates a diploid model. Background is added once per feature, not once per homolog. Shared signals sum inside the same logarithm.
 
 Use checked integer per-length count addition before exposure conversion. Preserve forward/RC occurrence semantics, realized zeros, unsupported positives, exact junction/terminal replay and physical copy multiplicity through caches/deduplication. Retain depth10/background0.1/L150 controls with the declared per-copy interpretation; no fitted parameters or statistical calibration claim.
 
 ## Representation design before edits
 
-The current public assignment uses one sample–haplotype endpoint inventory and global unit canonical source-span capacity. It is not already a diploid validator. Concatenating two assignments can violate that capacity even for the biologically necessary A/A case.
+The current public assignment uses one sample–haplotype endpoint inventory and global unit canonical source-span capacity. It is not already a diploid validator. The A/A concatenation control fails with `incomplete topology assignment`; separate valid-sized controls demonstrate within-copy capacity rejection. The new wrapper validates each whole copy separately, rather than relaxing the old validator.
 
 Propose explicit fixed homolog/copy slots for a small known-topology experiment. Resource instances must be declared once for the whole hypothesis, never minted per segment or to escape a conflict. Specify within-copy and cross-molecule capacity and the paired validation rule. Homolog-label exchange alone is not a different phase solution.
 
@@ -51,5 +51,11 @@ Independently check exact counts, the joint objective, the finite discrete optim
 Unphased or phase-block alternatives are correct outcomes when observations cannot distinguish long-range phase. Do not invent a globally phased assembly. MEM overlap means the count loss alone provides neither calibrated confidence nor independent-Poisson statistical guarantees.
 
 Exit: reviewed and parent-reproduced finite evidence either validates the declared fixed-diploid representation/operator/ambiguity model or identifies a concrete mismatch. Automatic diploid generation, genome-scale recovery, unknown ploidy, allele imbalance, real stock identity, noisy reads, CNV and novel topology remain separate gates.
+
+Parent acceptance is recorded in `candidate-copy-repair/diploid-foundation-parent-v1/acceptance.json`. Worker and fresh parent feature/pair/selection ledgers are byte-identical; copy-aware assessments agree. All625 pre-existing regular files and the installed executable were unchanged during implementation/reproduction. This document's acceptance update is subsequent parent documentation only.
+
+## Next: automatic joint diploid proposals (design first)
+
+Construct a paired hypothesis containing a non-native mosaic from panel/count inputs, rather than supplying all candidate haplotypes. Score changes against the complete paired baseline, not two independent haploid objectives. Preserve the partner's signal, exact per-copy capacity, copy multiplicity, immutable baseline/slot identities, exploratory and compound opportunities, and correlated count-equivalent phase alternatives. Reuse existing geometry where practical without copying the entire search implementation or silently changing B1/B2 behavior. Freeze the smallest synthetic construction and ambiguity experiments, budgets and failure criteria before outcomes; finite oracle checks and copy-aware assessment remain mandatory. This is the next Gate-B design task, not authorization to claim genome-scale recovery.
 
 The known yeast mosaic remains haploid-oriented development data. A later diploid biological claim requires a new frozen challenge. Production installation, assembly emission and general diploid-support claims remain unauthorized.
