@@ -1,6 +1,6 @@
 # Whole-genome mosaic inference: structured Poisson optimization and completion plan
 
-Status: **working project plan, 2026-09-14**. The observation operator and complete-genome scorer exist; reliable genome-scale mosaic recovery does not yet exist. The next implementation is the finite-oracle mathematics gate below, not another scheduling/budget experiment.
+Status: **Gate A accepted; Gate B design next, 2026-09-14**. The observation operator and complete-genome scorer exist; reliable genome-scale mosaic recovery does not yet exist. [Gate A's executable finite diagnostic](structured-poisson-finite-diagnostic.md) was independently reviewed and parent-reproduced (commit `9d8cc24`): public counts, exhaustive feasible optima/support and numerical bounds agreed; 699 portable Rust tests and the configured gates passed. This is finite numerical evidence, not a genome-scale certificate. The next step is residual-guided generation of new complete-genome changes, not another scheduling/budget experiment.
 
 ## Goal and scope
 
@@ -122,7 +122,7 @@ Linear pricing may become a weighted path/flow problem if sufficient read-contex
 
 ## 5. Delivery gates, in order
 
-### Gate A — executable finite-oracle mathematics (NEXT)
+### Gate A — executable finite-oracle mathematics (ACCEPTED, finite numerical scope)
 
 Add an isolated experimental diagnostic; keep production and the accepted completion prototype unchanged.
 
@@ -135,7 +135,7 @@ Add an isolated experimental diagnostic; keep production and the accepted comple
 
 Exit: reviewed executable evidence establishes the formulas, the scope of every bound and the failure cases. If the mathematics/representation does not match the actual operator, correct that mismatch before genome-scale implementation.
 
-### Gate B — structured complete-genome proposal/pricing experiment
+### Gate B — structured complete-genome proposal/pricing experiment (NEXT; design approval before implementation)
 
 Use Gate A to choose the smallest scalable candidate generator: coarse two-ended replacements, boundary refinement and compound changes, with sufficient junction context and globally valid capacity. Residual weights prioritize **complete feasible changes**; exact full-genome evaluation accepts their reported scores.
 
