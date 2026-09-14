@@ -1,6 +1,6 @@
 # Whole-genome mosaic inference: structured Poisson optimization and completion plan
 
-Status: **Gate A accepted; Gate B design next, 2026-09-14**. The observation operator and complete-genome scorer exist; reliable genome-scale mosaic recovery does not yet exist. [Gate A's executable finite diagnostic](structured-poisson-finite-diagnostic.md) was independently reviewed and parent-reproduced (commit `9d8cc24`): public counts, exhaustive feasible optima/support and numerical bounds agreed; 699 portable Rust tests and the configured gates passed. This is finite numerical evidence, not a genome-scale certificate. The next step is residual-guided generation of new complete-genome changes, not another scheduling/budget experiment.
+Status: **Gate A and bounded B1 accepted; full Gate B incomplete, 2026-09-14**. The observation operator and complete-genome scorer exist; reliable genome-scale mosaic recovery does not yet exist. [Gate A's executable finite diagnostic](structured-poisson-finite-diagnostic.md) was independently reviewed and parent-reproduced (commit `9d8cc24`): public counts, exhaustive feasible optima/support and numerical bounds agreed; 699 portable Rust tests and the configured gates passed. This is finite numerical evidence, not a genome-scale certificate. [B1's score-guided generator](panel-route-residual-search.md), commit `594a6f3`, now constructs new complete mosaics and changes subsequent refinement geometry in response to sample counts. Independent review and parent reruns passed, including 706 portable tests and the original resource-boundary red/green cases. It recovered the exact frozen 1,936bp two-molecule synthetic truth, improving the objective by 67.5373 over every native. This is not whole-yeast recovery. Next: oriented coupled and two-donor/no-simple-return construction, then a separately declared practical genome-scale resource/development experiment.
 
 ## Goal and scope
 
@@ -135,7 +135,9 @@ Add an isolated experimental diagnostic; keep production and the accepted comple
 
 Exit: reviewed executable evidence establishes the formulas, the scope of every bound and the failure cases. If the mathematics/representation does not match the actual operator, correct that mismatch before genome-scale implementation.
 
-### Gate B — structured complete-genome proposal/pricing experiment (NEXT; design approval before implementation)
+### Gate B — structured complete-genome proposal/pricing experiment (IN PROGRESS; B1 accepted)
+
+**B1 exit:** automatic single-donor replacements, score-dependent refinement and supported same-orientation exchanges passed the frozen tiny recovery/causal/physical-resource tests. Exact sparse complete-objective deltas drive feedback; the diagnostic linear residual price is not advertised as a cheaper oracle. Seven retained best physical assignments spell the exact test genome; support remains incomplete. Opposite-strand reciprocal construction and two-donor/no-simple-return generation remain unfinished. The frozen B1 resource caps cannot initialize a whole yeast genome; no genome-scale or full Gate-B acceptance follows from this result.
 
 Use Gate A to choose the smallest scalable candidate generator: coarse two-ended replacements, boundary refinement and compound changes, with sufficient junction context and globally valid capacity. Residual weights prioritize **complete feasible changes**; exact full-genome evaluation accepts their reported scores.
 
