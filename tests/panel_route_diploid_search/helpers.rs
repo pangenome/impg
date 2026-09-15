@@ -474,7 +474,10 @@ fn sum(a: &BTreeMap<[u64; 3], u64>, b: &BTreeMap<[u64; 3], u64>) -> BTreeMap<[u6
     out
 }
 /// Oracle constructs independent witnessed subsets AFTER inference.
-fn oracle_at(e: &mut routes::Evaluator<'_>, starts: &[usize]) -> Vec<routes::Assignment> {
+pub(crate) fn oracle_at(
+    e: &mut routes::Evaluator<'_>,
+    starts: &[usize],
+) -> Vec<routes::Assignment> {
     let mut ports = Vec::new();
     for source in [0, 1] {
         let mut f = e.ports.source_file(e.graph, source).unwrap();

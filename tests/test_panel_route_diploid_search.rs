@@ -761,3 +761,243 @@ fn paired_frontier_pending_diagnostics() {
         search::test_scheduler_transitions(e, o, true)
     });
 }
+
+mod partition {
+    mod tests {
+        #[test]
+        fn reconstructed_diploid_assignments_are_independently_public_valid() {
+            use crate::search::partition::*;
+            use impg::{
+                genome_inference::{self as genome, catalog, panel_routes as routes, sample},
+                syng::SyngIndex,
+            };
+            let range =
+                |partition: usize, occurrence: usize, source: usize, start: usize, end: usize| {
+                    SourceRange {
+                        partition,
+                        occurrence,
+                        source,
+                        start: start as u64,
+                        end: end as u64,
+                        reverse: false,
+                    }
+                };
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("partition-public-validity");
+            let fixture = crate::helpers::dosage_fixture(&root);
+            let prefix = root.join("panel.syng");
+            let identity = genome::PanelIdentity::read(prefix.to_str().unwrap()).unwrap();
+            let panel = SyngIndex::load(prefix.to_str().unwrap(), Default::default()).unwrap();
+            let graph = routes::Graph::load(&root.join("routes"), &identity).unwrap();
+            let sample = sample::SampleIndex::load(&root.join("sample.membwt"), &identity).unwrap();
+            let mut evaluator = routes::Evaluator::new(
+                &root.join("routes"),
+                &graph,
+                &panel,
+                &sample,
+                10.0,
+                0.1,
+                50_000,
+                50_000,
+            )
+            .unwrap();
+            let domain = crate::helpers::oracle_at(&mut evaluator, &[256, 576, 896, 1216]);
+            let template = graph.native_assignment(0).unwrap();
+            let slot = template
+                .routes
+                .iter()
+                .position(|route| route.segments[0].source == 0)
+                .unwrap();
+            let donor_segments = domain[15].routes[slot]
+                .segments
+                .iter()
+                .filter(|segment| segment.source == 1)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(donor_segments.len(), 4);
+            let cuts = [
+                0,
+                donor_segments[0].end,
+                donor_segments[1].end,
+                donor_segments[2].end,
+                donor_segments[3].end,
+            ];
+            assert!(cuts.windows(2).all(|window| window[1] - window[0] >= 150));
+            let mut partitions = Vec::new();
+            for partition in 0..4 {
+                partitions.push(vec![
+                    allele(
+                        range(
+                            partition,
+                            2 * partition,
+                            0,
+                            cuts[partition] as usize,
+                            cuts[partition + 1] as usize,
+                        ),
+                        evaluator
+                            .sources
+                            .fetch(0, cuts[partition], cuts[partition + 1])
+                            .unwrap(),
+                        &panel,
+                        150,
+                        50_000,
+                    )
+                    .unwrap(),
+                    allele(
+                        range(
+                            partition,
+                            2 * partition + 1,
+                            1,
+                            cuts[partition] as usize,
+                            cuts[partition + 1] as usize,
+                        ),
+                        evaluator
+                            .sources
+                            .fetch(1, cuts[partition], cuts[partition + 1])
+                            .unwrap(),
+                        &panel,
+                        150,
+                        50_000,
+                    )
+                    .unwrap(),
+                ]);
+            }
+            let mut links = Vec::new();
+            for boundary in 0..3 {
+                for left in &partitions[boundary] {
+                    for right in &partitions[boundary + 1] {
+                        let outgoing = evaluator
+                            .ports
+                            .at_cut(&graph, left.range.source, left.range.end, false)
+                            .unwrap();
+                        let incoming = evaluator
+                            .ports
+                            .at_cut(&graph, right.range.source, right.range.start, false)
+                            .unwrap();
+                        if outgoing
+                            .zip(incoming)
+                            .is_some_and(|(a, b)| a.word == b.word)
+                        {
+                            links.push(catalog::Link {
+                                from: left.range.occurrence,
+                                to: right.range.occurrence,
+                                source_gap_bp: 0,
+                                relation: "panel-port-compatible".into(),
+                                oriented_continuation: true,
+                            });
+                        }
+                    }
+                }
+            }
+            let seams = seams_from_public_links(&partitions, &links, &panel, 150, 50_000).unwrap();
+            let ledger = universe(&partitions, &seams, &sample.counts, 50_000).unwrap();
+            let histogram = sample.stats.read_lengths[&150];
+            let model = ScoreModel {
+                read_length: 150,
+                histogram,
+                denominator: 150.0 * histogram as f64,
+                depth: 10.0,
+                background: 0.1,
+            };
+            let mut search = chain_diplotypes(&partitions, &seams, &ledger, &model).unwrap();
+            assert!(search.complete && !search.states.is_empty());
+            let suffix = evaluator.sources.fetch(0, cuts[4], 1536).unwrap();
+            let ranked = rescore_chained(
+                &mut search,
+                &panel,
+                &partitions,
+                &ledger,
+                &model,
+                &suffix,
+                50_000,
+            )
+            .unwrap();
+            assert!(search.complete);
+            eprintln!(
+                "public_assignment_partition_accounting={}",
+                serde_json::to_string(&search.accounting).unwrap()
+            );
+            let truth_phase = [vec![0, 0, 1, 1], vec![0, 1, 0, 1]];
+            let selected = ranked
+                .iter()
+                .find(|candidate| {
+                    let mut phase = search.states[candidate.state].choices.clone();
+                    phase.sort();
+                    phase == truth_phase
+                })
+                .unwrap();
+            assert!((selected.objective - ranked[0].objective).abs() < 1e-9);
+            let selected_state = &search.states[selected.state];
+            let build = |choices: &[usize]| {
+                let ranges = donor_segments
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| choices[*bit] == 1)
+                    .map(|(bit, segment)| SourceRange {
+                        partition: bit,
+                        occurrence: 2 * bit + 1,
+                        source: segment.source,
+                        start: segment.start,
+                        end: segment.end,
+                        reverse: false,
+                    })
+                    .collect::<Vec<_>>();
+                reconstruct_assignment(&template, slot, &ranges, 0, 1536).unwrap()
+            };
+            let selected = [
+                build(&selected_state.choices[0]),
+                build(&selected_state.choices[1]),
+            ];
+            let validated = selected
+                .iter()
+                .map(|assignment| evaluator.validate_assignment(assignment).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(validated, selected);
+            let spelled = validated
+                .iter()
+                .map(|assignment| {
+                    evaluator
+                        .sources
+                        .spell(&assignment.routes[slot], 0, 1536)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                spelled,
+                vec![fixture.truth[2].clone(), fixture.truth[0].clone()]
+            );
+            assert!(validated
+                .iter()
+                .all(|assignment| assignment.routes[slot].segments.len() > 1));
+
+            // Identical cross-copy use is legal because each assignment is validated
+            // independently; overlap within one copy and undeclared joins are not.
+            assert!(evaluator.validate_assignment(&build(&[0, 1, 0, 1])).is_ok());
+            assert!(evaluator.validate_assignment(&build(&[0, 1, 0, 1])).is_ok());
+            let mut overlap = donor_segments[0].clone();
+            overlap.end = donor_segments[1].start + 1;
+            let bad_ranges = vec![
+                SourceRange {
+                    partition: 0,
+                    occurrence: 1,
+                    source: 1,
+                    start: overlap.start,
+                    end: overlap.end,
+                    reverse: false,
+                },
+                SourceRange {
+                    partition: 1,
+                    occurrence: 3,
+                    source: 1,
+                    start: donor_segments[1].start,
+                    end: donor_segments[1].end,
+                    reverse: false,
+                },
+            ];
+            assert!(reconstruct_assignment(&template, slot, &bad_ranges, 0, 1536).is_err());
+            let mut illegal = build(&[0, 1, 0, 1]);
+            illegal.routes[slot].segments[1].start += 1;
+            assert!(evaluator.validate_assignment(&illegal).is_err());
+        }
+    }
+}

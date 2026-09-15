@@ -33,7 +33,11 @@ pub struct SampleIndex {
 /// returned MEMs to input coordinates, deduplicate exact coordinate+node vectors,
 /// then remove only exact contiguous coordinate+node subwalks of longer records.
 /// Envelope containment alone never removes differing content. Overlaps survive.
-fn collect_read(panel: &SyngIndex, sequence: &[u8]) -> io::Result<Vec<Vec<u64>>> {
+/// Return the complete canonical maximal-MEM records retained for one read.
+/// Coordinates and read identity are intentionally absent, matching `WeightedBwt`
+/// construction exactly. Experimental variable-length scorers should derive
+/// node-to-node subwalk keys from these records rather than `observed_pairs`.
+pub fn canonical_mem_records(panel: &SyngIndex, sequence: &[u8]) -> io::Result<Vec<Vec<u64>>> {
     collect_tagged_read(panel, sequence)?
         .iter()
         .map(|r| encode_walk(r).map(|t| canonical(&t)))
@@ -153,7 +157,7 @@ pub fn build(
                 .checked_add(sequence.len() as u64)
                 .ok_or_else(|| invalid("base count overflow"))?;
             *stats.read_lengths.entry(sequence.len()).or_default() += 1;
-            let mems = collect_read(panel, sequence)?;
+            let mems = canonical_mem_records(panel, sequence)?;
             stats.reads_with_mems += u64::from(!mems.is_empty());
             for mem in mems {
                 stats.mem_records += 1;

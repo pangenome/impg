@@ -2,6 +2,7 @@
 #[allow(dead_code)]
 #[path = "../panel_route_residual_search/mod.rs"]
 pub mod haploid;
+pub mod partition;
 pub mod score;
 use clap::Parser;
 use haploid::{

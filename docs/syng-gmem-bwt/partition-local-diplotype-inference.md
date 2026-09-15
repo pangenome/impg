@@ -1,6 +1,6 @@
 # Partition-local diplotype inference and physical chaining
 
-Status: **implementation guide; not yet implemented or validated**, 2026-09-15.
+Status: **finite experimental implementation; not a production CLI**, 2026-09-15.
 
 This document is the working plan for replacing genome-wide mosaic frontier search
 with bounded local genotyping followed by physical haplotype chaining. It is meant
@@ -18,19 +18,21 @@ clever complete-genome edits to a global incumbent.
 
 Instead:
 
-1. treat each bounded syng partition as a genotyping locus;
-2. enumerate complete physical traversals spanning that partition;
-3. genotype unordered pairs of those traversals from their summed MEM-BWT count
-   profiles;
+1. treat each existing syng catalog group (a homologous subpangenome) as a
+   genotyping locus;
+2. preserve every complete oriented source interval occurrence in that group as
+   a physical allele, including coordinate and copy multiplicity;
+3. genotype unordered pairs of those intervals from their summed variable-length
+   maximal-MEM-subwalk count profiles;
 4. retain all relevant physical alternatives, including count-equivalent ones;
 5. chain local diplotypes through legal panel continuations, considering both
    homolog matchings at each boundary;
-6. reconstruct two complete `panel_routes::Assignment`s; and
-7. use the unchanged exact whole-genome paired loss as the authoritative final
-   score.
+6. reconstruct two complete source-coordinate routes and sequences; and
+7. rescore both complete sequences with the same variable-length MEM-subwalk
+   profile and joint Poisson loss used locally.
 
-The local model proposes genomes. It does not replace complete-route validation or
-the global score.
+The local model proposes genomes. It does not replace complete physical validation
+or the global score.
 
 ## Relationship to LikeGT
 
@@ -47,19 +49,21 @@ The reference implementation is the canonical checkout at `/home/erikg/likegt`
 We should reuse that simple exhaustive **local genotype construction**, not its
 particular evidence model.
 
-Our feature space is stronger than LikeGT's node-coverage vector. The current
-route scorer queries canonical node-gap-node substrings from a weighted MEM-BWT
-whose records originate as maximal exact syng-anchor subwalks. The scored features
-retain ordered graph context, exact inter-anchor spacing, orientation orbit,
-occurrence multiplicity, observed zeros, unsupported positives, and junction or
-terminal changes induced by a physical route. They must never be collapsed to
-plain node depth.
+Our feature space is stronger than LikeGT's node-coverage vector. For every
+retained maximal exact syng-anchor record, it contains every canonical odd-length
+node-to-node contiguous subwalk: single-node, adjacent-node, intermediate, and
+full-record patterns. Every occurrence position contributes, multiplied by the
+maximal-record multiplicity. Direct candidate accumulation must equal
+`WeightedBwt::count(key)`, including RC orbits, palindromes, and repeated patterns.
+The features retain ordered graph context, exact inter-anchor spacing, orientation
+orbit, observed zeros, unsupported positives, and junction changes. They must
+never be collapsed to node depth or adjacent `[node,gap,node]` factors.
 
 The differences are therefore substantive:
 
 | LikeGT regional kernel | This design |
 |---|---|
-| graph path | complete physical partition-spanning traversal |
+| graph path | complete oriented catalog source-interval occurrence |
 | node coverage vector | sparse MEM-BWT occurrence-count profile |
 | cosine similarity | existing background-relative Poisson loss |
 | independent regional result | phase-aware state in a physical whole-genome chain |
@@ -83,8 +87,8 @@ rescoring are additional requirements here.
 
    The observation and background occur once per feature. Independently scored
    haploid losses are never added.
-3. Each local allele is a complete spanning traversal, not an arbitrary fragment
-   that merely touches a partition.
+3. Each local allele is one complete oriented source interval from the catalog
+   group, not a graph route or arbitrary fragment that merely touches a locus.
 4. Source coordinates, orientation, entry and exit geometry, legal seams, and
    copy multiplicity remain explicit.
 5. Canonical source-span conflicts remain illegal within one copy. Reusing the
@@ -96,22 +100,64 @@ rescoring are additional requirements here.
    preserved as ambiguity rather than invented.
 8. No truth tract, donor hint, closest-reference choice, sample family, read
    placement, or assessment-only finite domain enters inference.
-9. The existing complete paired scorer remains unchanged and authoritative.
+9. Complete paired rescoring uses the same fixed variable-length feature universe
+   and arithmetic as local/transition scoring and remains authoritative.
 10. Exhaustion, support completeness, and optimality are claimed only for a domain
     actually enumerated. A cap stop is not such a claim.
 
 ## Initial evidence universe
 
-The first implementation must use the same registered feature tokens, sample
-counts, read-length histogram, depth, background, and arithmetic as the public
-route evaluator. It must not create a separate surrogate based on base mismatches,
-node presence, donor labels, or read placement.
+The implementation uses canonical variable-length subwalk keys, sample counts
+queried from `WeightedBwt`, the L150 histogram, depth, background, and existing
+Poisson arithmetic. For one read length, `denominator=L*H`, exposure is `q*H /
+denominator`, and signal is therefore `depth*q/L`; the histogram must not remain in
+the final scale. The stride-1 finite control uses depth 150, while the production-like
+stride-15 route control uses depth 10. It does not create a surrogate based on base
+mismatches, node presence, donor labels, or read placement.
 
-The presently registered route factors are canonical `[node, gap, node]` token
-triples. They are exact ordered-and-spaced substring queries against the weighted
-MEM-BWT, not node-depth observations. Supporting longer registered subwalk factors
-later is compatible with this architecture, but is not required for the first
-slice.
+The universe is frozen from all public catalog-allele interior profiles and every
+publicly legal adjacent-seam profile before genotyping. Observations are point
+queries against the supplied aggregate `WeightedBwt`; raw reads and truth-derived
+profiles never enter inference or feature-cap accounting. Unsupported candidate
+positives remain in the score. Longer sample-only keys cannot be enumerated from
+the BWT and are reported as an audit limitation; numerically their candidate-zero
+background-relative contribution is zero. `max_features` fails closed with no
+truncation, and truth never selects feature length or content.
+
+Singleton-node maximal MEM/subwalks are valid one-token features and must not be
+noise-filtered. A globally unique singleton can provide strong local
+presence/dosage evidence, but it provides no junction or phase linkage and one
+observation is not treated as definitive. The experimental audit reports exact
+bins by node count/token length (singleton, pair, and three-or-more-node), summed
+observed and predicted multiplicity, and empirical local-versus-shared incidence.
+
+### Production projection versus retained information
+
+This distinction is critical. L150 and the weighted MEM-BWT are not the limitation
+exposed by the central phase counterexample: `WeightedBwt::count` can count any
+valid odd-length node-to-node pattern. The current production route registry and
+scorer deliberately materialize only `[node,gap,node]` triples. That downstream
+projection can make two hypotheses equal after the BWT has retained a distinguishing
+three-node/five-token (or longer) pattern.
+
+The isolated experimental module proves the minimal extension seam without
+rewriting production scoring:
+
+1. use `Vec<u64>` as the registered feature key;
+2. register at least all public candidate-derived five-token patterns, and in the
+   experiment every node-to-node subwalk through the full maximal record;
+3. replay complete ranged starts and complete reconstructed sequences through
+   `sample::canonical_mem_records`;
+4. obtain each observation with `WeightedBwt::count(key)`;
+5. dynamically retain candidate-positive/sample-zero terms rather than dropping
+   unsupported positives; and
+6. add both copy counts before the existing exposure conversion and single
+   background-relative Poisson logarithm.
+
+Production `panel_routes` remains triple-projected in this slice. Moving this
+`Vec<u64>` registry/replay seam into the authoritative whole-route scorer requires
+an explicit reviewed follow-up; a local surrogate must not claim phase that the
+production global score cannot yet distinguish.
 
 Every registered factor is classified exactly once for proposal scoring:
 
@@ -165,21 +211,18 @@ logical fields.
 ```text
 PartitionAllele
     partition/group ID
-    stable physical allele ID
-    complete oriented Route through the partition
-    entry continuation/port key
-    exit continuation/port key
-    canonical source spans consumed by this allele
-    sparse integer count profile for owned factors
+    catalog occurrence ID
+    source ID and half-open source coordinates
+    explicit orientation (both retained when the catalog strand is unknown)
+    exact oriented interval sequence
+    sparse variable-length MEM-subwalk profile for wholly interior L150 starts
 ```
 
 Two alleles with identical sequence or counts may share cached profile storage.
-They remain separate physical alleles if their ports, source coordinates,
-orientation, or legal continuations differ.
-
-For the first linear fixture, an allele may be one source segment. The abstraction
-must nevertheless be a `Route`, so a later internally branching partition can use
-a multi-segment spanning traversal without changing the diplotype interface.
+They remain separate physical alleles if their occurrence, source coordinates,
+orientation, multiplicity, or legal continuations differ. Routes are reconstructed
+from chosen source intervals after chaining; they do not define the partition or
+its alleles.
 
 ### Local diplotype
 
@@ -229,20 +272,21 @@ continuations.
 
 ## Allele enumeration
 
-The first implementation should reuse existing public panel data rather than build
-a second graph model.
+The first implementation reuses the existing public catalog rather than treating a
+graph route as a locus.
 
-1. Read fixed partition ownership/group intervals and public route/port data.
-2. For every physical source occurrence capable of entering and exiting the
-   partition, construct the oriented spanning `Route` and its boundary keys.
-3. Normalize harmless adjacent storage pieces without changing physical copy
-   count.
-4. Reject nonspanning fragments, ambiguous/incomplete boundary geometry, invalid
-   orientation seams, and paths that fail the existing public validation rules.
-5. Deduplicate only exact duplicate physical descriptions.
-6. Cache allele profiles by exact route and, separately, cache score arithmetic by
-   exact count vector. Do not deduplicate the physical alleles themselves by
-   profile.
+1. Read each catalog group and every homologous source interval occurrence in it.
+2. Preserve the exact half-open coordinates, orientation, occurrence identity,
+   and multiplicity. If strand is unspecified, retain both orientations.
+3. Fetch and orient that exact sequence subrange; reject invalid or incomplete
+   source bindings.
+4. Profile every complete L150 start wholly within the subrange directly through
+   `sample::canonical_mem_records` and variable-length subwalk accumulation.
+5. Enumerate public physically compatible adjacent interval pairs and profile only
+   complete L150 windows crossing their concatenated seam.
+6. Enforce this slice's decomposition precondition: every typed interval has
+   length at least L150, so one complete start crosses at most one boundary.
+7. Cache profile arithmetic without deduplicating physical occurrences.
 
 The initial deterministic fixture may use a declared linear partition axis. A
 whole-genome extension must obtain adjacency from public axis/route/port structure,
@@ -280,8 +324,9 @@ A transition combines physical validity with the boundary factor subset.
 
 For each predecessor state, next local diplotype, and the two homolog matchings:
 
-1. join the actual oriented route pieces for each copy;
-2. compute or retrieve the exact boundary-seam count profile;
+1. join the actual oriented source intervals for each copy;
+2. compute or retrieve the maximal-MEM-subwalk profile of complete L150 windows
+   crossing that concatenated seam;
 3. add counts across both copies;
 4. score every factor assigned to that boundary once;
 5. update each copy's physical source-span ledger; and
@@ -300,11 +345,13 @@ transition criteria in this slice.
 
 A completed chain is only a proposal until it passes all of the following:
 
-1. coalesce exactly contiguous same-source/same-orientation segments;
-2. build exactly two complete `panel_routes::Assignment`s;
-3. run `Evaluator::validate_assignment` independently on both copies;
-4. evaluate the pair through the unchanged joint scorer, adding integer route
-   counts across copies before one loss; and
+1. concatenate the selected oriented interval sequences for each copy;
+2. retain their exact source-coordinate route descriptions and validate every
+   physical join and within-copy source-span constraint;
+3. replay all complete L150 starts on each reconstructed sequence through the same
+   maximal-MEM/subwalk profiler;
+4. add integer counts across copies before one Poisson loss over the fixed feature
+   universe; and
 5. retain global-score ties and exact count-equivalent alternatives within the
    declared state limits.
 
@@ -415,8 +462,11 @@ a beam until the exact state behavior is understood.
 
 ### Milestone 4 — complete reconstruction and global rescore
 
-Produce two complete assignments, validate them publicly, run the unchanged paired
-scorer, and compare against the finite whole-pair oracle. The old global frontier
+Produce two complete assignments, validate them publicly, rescore their complete
+sequences with the experimental variable-length universe and joint formula, and
+compare against the separately named finite whole-pair assessment oracle. The
+production triple scorer remains unchanged and is insufficient for the long-linkage
+witness. The old global frontier
 may be run only as a baseline comparison; it is not extended to make the test pass.
 
 ### Milestone 5 — scaling ladder
