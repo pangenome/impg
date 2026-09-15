@@ -149,4 +149,4 @@ Evidence:
 
 ## Next engineering step
 
-Measure and reduce candidate-validation work without changing the recovered domain or objective, then test the same generic operator on a larger ordinary multi-molecule mosaic. Production integration should occur only after that algorithmic scaling step and a fresh recovery validation.
+Do not extend this global projection operator into the genome-scale architecture. Its role was to prove joint two-copy count arithmetic and a real coupled candidate-generation failure. Follow the [partition-local diplotype inference and physical chaining guide](partition-local-diplotype-inference.md): exhaustively genotype complete spanning allele pairs within bounded syng partitions, use boundary MEMs for physical phase transitions, reconstruct two complete assignments, and retain the unchanged exact whole-genome joint score as authoritative.
