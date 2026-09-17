@@ -2,7 +2,7 @@
 //!
 //! Fixture: `tests/test_data/yeast-toy-35-sim-td.paf` — S288C#0 aligned against
 //! TOY288#0 (as target=TOY288#0, query=S288C#0) on the toy yeast genome, carrying
-//! known DEL, INS, strand-based INV, MUM&Co-style TCON, and a genuine
+//! known DEL, INS, strand-based INV, MUM&Co-style TCON/TDUP, and a genuine
 //! cross-chromosome TRA (chrX <-> chrXI) at fixed loci. This locks in the whole
 //! classification pipeline (gap-event merging, strand-based INV detection,
 //! tandem-overlap detection, cross-chromosome TRA) end to end through the CLI,
@@ -43,7 +43,7 @@ TOY288#0#chrXI\t614915\t664862\tTRA\t49947\t1\tS288C#0#chrX\t701664\t751611
 ";
 
 #[test]
-fn yeast_toy_del_ins_inv_tcon_tra_calls_are_stable() {
+fn toy_sv_are_stable() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let paf_path = manifest_dir.join("tests/test_data/yeast-toy-35-sim-td.paf");
     assert!(paf_path.exists(), "missing fixture: {}", paf_path.display());
