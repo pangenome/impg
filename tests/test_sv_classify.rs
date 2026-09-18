@@ -3,9 +3,9 @@
 //! Fixture: `tests/test_data/yeast-toy-35-sim-td.paf` — S288C#0 aligned against
 //! TOY288#0 (as target=TOY288#0, query=S288C#0) on the toy yeast genome, carrying
 //! known DEL, INS, strand-based INV, MUM&Co-style TCON/TDUP, and a genuine
-//! cross-chromosome TRA (chrX <-> chrXI) at fixed loci. This locks in the whole
+//! inter-chromosome TRA (chrX <-> chrXI) at fixed loci. This locks in the whole
 //! classification pipeline (gap-event merging, strand-based INV detection,
-//! tandem-overlap detection, cross-chromosome TRA) end to end through the CLI,
+//! tandem-overlap detection, inter-chromosome TRA) end to end through the CLI,
 //! not just the underlying functions.
 
 use std::path::PathBuf;
