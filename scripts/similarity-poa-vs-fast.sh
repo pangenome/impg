@@ -128,7 +128,7 @@ run_similarity() {
     # Not wrapping through a bash function so the stdout capture can't collide
     # with the TSV redirect.
     set +e
-    "$TIME" -v "$IMPG" similarity \
+    "$TIME" -v "$IMPG" similarity -d 0 \
         --alignment-list "$TPA_LIST" --sequence-files "$AGC" \
         --target-range "$region" \
         --delim "$DELIM" --delim-pos "$DELIM_POS" \
@@ -315,7 +315,7 @@ run_fast_tagged() {
     local log="$OUTDIR/${tag}.fast.log"
 
     set +e
-    "$TIME" -v "$IMPG" similarity --fast \
+    "$TIME" -v "$IMPG" similarity --fast -d 0 \
         --alignment-list "$TPA_LIST" --sequence-files "$AGC" \
         --target-range "$region" \
         --delim "$DELIM" --delim-pos "$DELIM_POS" \
@@ -383,12 +383,12 @@ IND_POA_LOG="$OUTDIR/chr6_29M_2k_indiv.poa.log"
 IND_FAST_LOG="$OUTDIR/chr6_29M_2k_indiv.fast.log"
 
 set +e
-"$TIME" -v "$IMPG" similarity --gfa-engine poa \
+"$TIME" -v "$IMPG" similarity --gfa-engine poa -d 0 \
     --alignment-list "$TPA_LIST" --sequence-files "$AGC" \
     --target-range "$IND_REGION" --force-large-region \
     -t "$THREADS" -v 1 > "$IND_POA_TSV" 2> "$IND_POA_LOG"
 poa_rc=$?
-"$TIME" -v "$IMPG" similarity --fast \
+"$TIME" -v "$IMPG" similarity --fast -d 0 \
     --alignment-list "$TPA_LIST" --sequence-files "$AGC" \
     --target-range "$IND_REGION" --force-large-region \
     -t "$THREADS" -v 1 > "$IND_FAST_TSV" 2> "$IND_FAST_LOG"
