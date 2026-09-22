@@ -1,0 +1,115 @@
+{
+  "fixture_id": "nested_top_level_right",
+  "fixture_class": "nested_bubbles_top_level_right",
+  "title": "Nested bubbles where top-level boundary is right",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#nested_top_level_right:1-24",
+      "file": "input.fa",
+      "expected_spelling": "AATTCCGGGGAACCTTGGCCAATT"
+    },
+    {
+      "name": "hapA#0#nested_top_level_right:1-24",
+      "file": "input.fa",
+      "expected_spelling": "AATTCCGGTTAACTTTGGCCAATT"
+    },
+    {
+      "name": "hapB#0#nested_top_level_right:1-24",
+      "file": "input.fa",
+      "expected_spelling": "AATTCCGGGGAAGGTTGGCCAATT"
+    },
+    {
+      "name": "hapC#0#nested_top_level_right:1-24",
+      "file": "input.fa",
+      "expected_spelling": "AATTCCGGTTAACTTAGGCCAATT"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#nested_top_level_right:1-24",
+    "hapA#0#nested_top_level_right:1-24",
+    "hapB#0#nested_top_level_right:1-24",
+    "hapC#0#nested_top_level_right:1-24"
+  ],
+  "expected_path_spellings": {
+    "ref#0#nested_top_level_right:1-24": "AATTCCGGGGAACCTTGGCCAATT",
+    "hapA#0#nested_top_level_right:1-24": "AATTCCGGTTAACTTTGGCCAATT",
+    "hapB#0#nested_top_level_right:1-24": "AATTCCGGGGAAGGTTGGCCAATT",
+    "hapC#0#nested_top_level_right:1-24": "AATTCCGGTTAACTTAGGCCAATT"
+  },
+  "expected_topology": {
+    "assertion_id": "nested_parent_boundary_right",
+    "description": "Nested bubbles are compressed by top-level non-overlapping boundaries with descendant detail included.",
+    "exact": {
+      "path_count": 4,
+      "self_loops": 0,
+      "repeat_loops": 0,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "forbid_self_and_repeat_loops"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 18
+    },
+    "link_count": {
+      "min": 1,
+      "max": 28
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 8
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 0,
+      "max": 0
+    },
+    "repeat_loop_count": {
+      "min": 0,
+      "max": 0
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Leaf-only selection leaves avoidable nested white-space or repeated replacement conflicts.",
+  "render_hints": {
+    "reference_path": "ref#0#nested_top_level_right:1-24",
+    "highlight_paths": [
+      "hapA#0#nested_top_level_right:1-24",
+      "hapB#0#nested_top_level_right:1-24",
+      "hapC#0#nested_top_level_right:1-24"
+    ],
+    "expected_shape": "nested event inside one parent bubble"
+  }
+}

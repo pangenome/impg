@@ -16,11 +16,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04-arm catches aarch64-linux bugs that no other runner sees.
+        # c_char is unsigned there and signed on x86-64 and on Apple ARM, so a
+        # cast to a concrete i8 compiles everywhere else and fails only here.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout submodules
+        run: |
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git submodule sync --recursive
+          git submodule update --init --recursive
 
       - name: Install dependencies
         run: |
@@ -28,7 +37,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y build-essential cmake zlib1g-dev libzstd-dev libbz2-dev liblzma-dev libcurl4-gnutls-dev libhts-dev libgsl-dev libjemalloc-dev
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            brew install zstd cmake xz gcc libomp htslib gsl jemalloc
+            brew install zstd cmake xz gcc libomp htslib gsl jemalloc coreutils gnu-time
             echo "CFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include -I$(brew --prefix htslib)/include -I$(brew --prefix gsl)/include -I$(brew --prefix jemalloc)/include" >> $GITHUB_ENV
             echo "LDFLAGS=-L$(brew --prefix zstd)/lib -L$(brew --prefix libomp)/lib -L$(brew --prefix htslib)/lib -L$(brew --prefix gsl)/lib -L$(brew --prefix jemalloc)/lib" >> $GITHUB_ENV
             echo "CPPFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include -I$(brew --prefix htslib)/include -I$(brew --prefix gsl)/include -I$(brew --prefix jemalloc)/include" >> $GITHUB_ENV
@@ -43,6 +52,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
+          cache-bin: false
 
       - name: Build
         run: cargo build --release

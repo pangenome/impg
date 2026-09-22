@@ -92,6 +92,8 @@ fn test_non_overlapping_regions_stay_separate() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -120,6 +122,8 @@ fn test_non_overlapping_regions_stay_separate() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -167,6 +171,8 @@ fn test_transitive_coordinate_accuracy() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -233,6 +239,8 @@ fn test_bidirectional_symmetry() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -258,6 +266,8 @@ fn test_bidirectional_symmetry() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -300,6 +310,8 @@ fn test_reverse_strand_coordinates() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -359,6 +371,8 @@ fn test_distant_regions_no_collapse() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -397,6 +411,8 @@ fn test_distant_regions_no_collapse() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -454,6 +470,8 @@ fn test_indel_coordinate_accuracy() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -483,6 +501,8 @@ fn test_indel_coordinate_accuracy() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -531,6 +551,8 @@ fn test_multiple_alignments_stay_separate() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -590,6 +612,8 @@ fn test_partition_window_separation() {
         &work_dir,
         &[
             "partition",
+            "-d",
+            "100000",
             "-a",
             "test.paf",
             "-i",
@@ -637,6 +661,8 @@ fn test_empty_query_region() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -680,6 +706,8 @@ fn test_transitive_depth_limit() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",
@@ -711,6 +739,8 @@ fn test_transitive_depth_limit() {
         &work_dir,
         &[
             "query",
+            "-d",
+            "0",
             "-i",
             "test.impg",
             "-a",

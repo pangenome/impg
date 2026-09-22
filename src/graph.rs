@@ -6,7 +6,10 @@ use std::io::{self, BufWriter, Write};
 
 // Gfasort imports for graph sorting
 use gfasort::gfa_parser::load_gfa_from_str;
-use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
+use gfasort::ygs::{
+    groom_only, priority_topological_sort_only, sgd_sort_only, topological_sort_only, unchop_only,
+    ygs_sort, YgsParams,
+};
 
 #[derive(Clone)]
 pub struct SequenceMetadata {
@@ -15,6 +18,7 @@ pub struct SequenceMetadata {
     pub size: i32,
     pub strand: char,
     pub total_length: usize,
+    pub path_name_override: Option<String>,
 }
 
 impl SequenceMetadata {
@@ -24,6 +28,10 @@ impl SequenceMetadata {
     /// For `-` strand this converts from MAF-style RC-frame coordinates back to
     /// forward-strand: `name:(total-start-size)-(total-start)`.
     pub fn path_name(&self) -> String {
+        if let Some(path_name) = &self.path_name_override {
+            return path_name.clone();
+        }
+
         let (fwd_start, fwd_end) = if self.strand == '+' {
             (self.start, self.start + self.size)
         } else {
@@ -47,6 +55,104 @@ impl SequenceMetadata {
             self.strand
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalNRunClip {
+    pub min_run: usize,
+}
+
+fn is_n_base(base: u8) -> bool {
+    base == b'N' || base == b'n'
+}
+
+pub fn terminal_n_clip_span(seq: &[u8], min_run: usize) -> Option<(usize, usize)> {
+    if seq.is_empty() {
+        return None;
+    }
+    if min_run == 0 {
+        return Some((0, seq.len()));
+    }
+
+    let prefix = seq.iter().take_while(|&&base| is_n_base(base)).count();
+    let suffix = seq
+        .iter()
+        .rev()
+        .take_while(|&&base| is_n_base(base))
+        .count();
+    let start = if prefix >= min_run { prefix } else { 0 };
+    let end = if suffix >= min_run {
+        seq.len().saturating_sub(suffix)
+    } else {
+        seq.len()
+    };
+
+    (start < end).then_some((start, end))
+}
+
+pub fn clip_intervals_terminal_n_runs(
+    impg: &impl ImpgIndex,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    clip: TerminalNRunClip,
+) -> std::io::Result<Vec<Interval<u32>>> {
+    use rayon::prelude::*;
+
+    let clipped: Vec<Option<Interval<u32>>> = results
+        .par_iter()
+        .map(|interval| -> std::io::Result<Option<Interval<u32>>> {
+            let seq_name = impg
+                .seq_index()
+                .get_name(interval.metadata)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence name not found for ID {}", interval.metadata),
+                    )
+                })?;
+
+            let (start, end, is_reverse) = if interval.first <= interval.last {
+                (interval.first, interval.last, false)
+            } else {
+                (interval.last, interval.first, true)
+            };
+            if start >= end {
+                return Ok(None);
+            }
+
+            let seq_bytes = sequence_index.fetch_sequence(seq_name, start, end)?;
+            let Some((clip_start, clip_end)) = terminal_n_clip_span(&seq_bytes, clip.min_run)
+            else {
+                return Ok(None);
+            };
+            let left_clip = i32::try_from(clip_start).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "terminal N prefix clip exceeds i32 coordinate range",
+                )
+            })?;
+            let right_clip = i32::try_from(seq_bytes.len() - clip_end).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "terminal N suffix clip exceeds i32 coordinate range",
+                )
+            })?;
+            let clipped_start = start + left_clip;
+            let clipped_end = end - right_clip;
+            if clipped_start >= clipped_end {
+                return Ok(None);
+            }
+
+            let clipped_interval = if is_reverse {
+                Interval::new(clipped_end, clipped_start, interval.metadata)
+            } else {
+                Interval::new(clipped_start, clipped_end, interval.metadata)
+            };
+            Ok(Some(clipped_interval))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(clipped.into_iter().flatten().collect())
 }
 
 pub fn generate_gfa_from_intervals(
@@ -307,10 +413,24 @@ fn format_fasta_alignment_from_msa(
 pub(crate) fn build_spoa_engine(
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> (SpoaGraph, AlignmentEngine) {
+    build_spoa_engine_with_alignment(scoring_params, SpoaAlignmentType::kSW)
+}
+
+/// Build a global/end-to-end SPOA graph and alignment engine.
+pub(crate) fn build_global_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (SpoaGraph, AlignmentEngine) {
+    build_spoa_engine_with_alignment(scoring_params, SpoaAlignmentType::kNW)
+}
+
+fn build_spoa_engine_with_alignment(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    alignment_type: SpoaAlignmentType,
+) -> (SpoaGraph, AlignmentEngine) {
     let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
     let graph = SpoaGraph::new();
     let engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW,
+        alignment_type,
         match_score as i8,
         -(mismatch as i8),
         -(gap_open1 as i8),
@@ -429,6 +549,7 @@ pub fn prepare_sequences(
                 size: seq_size,
                 strand,
                 total_length,
+                path_name_override: None,
             };
 
             Ok((sequence_str, meta))
@@ -740,10 +861,49 @@ pub(crate) fn unchop_gfa(gfa_content: &str) -> io::Result<String> {
 /// found or exits non-zero — callers must ensure the binary is available.
 pub fn normalize_and_sort(gfa: String, num_threads: usize) -> io::Result<String> {
     let normalized = run_gfaffix(&gfa, num_threads)?;
+    let normalized = normalize_self_loop_runs(normalized)?;
     sort_gfa(&normalized, num_threads)
 }
 
+/// Collapse path-local repeat-unit self-loop runs while preserving path
+/// spellings exactly.
+pub fn normalize_self_loop_runs(gfa: String) -> io::Result<String> {
+    let result = crate::gfa_self_loops::normalize_repeat_self_loops(
+        &gfa,
+        &crate::gfa_self_loops::NormalizeSelfLoopsConfig::default(),
+    )?;
+    if result.stats.collapsed_runs > 0
+        || result.stats.input_direct_self_loop_edges != result.stats.output_direct_self_loop_edges
+        || result.stats.input_adjacent_same_step_path_steps
+            != result.stats.output_adjacent_same_step_path_steps
+    {
+        log::info!(
+            "self-loop normalization: direct self-loop edges {} -> {}, adjacent same-step repeats {} -> {}, collapsed {} run(s), created {} segment(s)",
+            result.stats.input_direct_self_loop_edges,
+            result.stats.output_direct_self_loop_edges,
+            result.stats.input_adjacent_same_step_path_steps,
+            result.stats.output_adjacent_same_step_path_steps,
+            result.stats.collapsed_runs,
+            result.stats.created_segments
+        );
+    }
+    Ok(result.gfa)
+}
+
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
+    sort_gfa_pipeline(gfa_content, "Ygs", num_threads)
+}
+
+pub fn sort_gfa_pipeline(
+    gfa_content: &str,
+    pipeline: &str,
+    num_threads: usize,
+) -> io::Result<String> {
+    let pipeline = pipeline.trim();
+    if pipeline.is_empty() {
+        return Ok(gfa_content.to_string());
+    }
+
     // Load GFA directly from string (no temp file round-trip)
     let mut graph = load_gfa_from_str(gfa_content)
         .map_err(|e| io::Error::other(format!("Failed to load GFA for sorting: {}", e)))?;
@@ -754,11 +914,38 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
         return Ok(gfa_content.to_string());
     }
 
-    // Create Ygs parameters from the graph
-    let params = YgsParams::from_graph(&graph, 0, num_threads);
+    for c in pipeline.chars() {
+        match c {
+            'Y' | 'g' | 's' | 'S' | 'u' => {}
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported gfasort pipeline step '{other}' in '{pipeline}' (expected any of: Y, g, s, S, u)"
+                    ),
+                ));
+            }
+        }
+    }
 
-    // Sort the graph using Ygs pipeline (path-guided SGD + grooming + topological sort)
-    ygs_sort(&mut graph, &params);
+    // Create Ygs parameters from the initial graph, matching the gfasort CLI.
+    let params = YgsParams::from_graph(&graph, 0, num_threads);
+    let sgd_params = params.path_sgd.clone();
+
+    if pipeline == "Ygs" {
+        ygs_sort(&mut graph, &params);
+    } else {
+        for c in pipeline.chars() {
+            match c {
+                'Y' => sgd_sort_only(&mut graph, sgd_params.clone(), 0),
+                'g' => groom_only(&mut graph, 0),
+                's' => topological_sort_only(&mut graph, 0),
+                'S' => priority_topological_sort_only(&mut graph, 0),
+                'u' => unchop_only(&mut graph, 0),
+                _ => unreachable!("gfasort pipeline was validated"),
+            }
+        }
+    }
 
     // Write sorted GFA to string
     let mut sorted_output = Vec::new();
@@ -774,26 +961,52 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
     })
 }
 
+pub fn sort_gfa_yg(gfa_content: &str, num_threads: usize) -> io::Result<String> {
+    sort_gfa_pipeline(gfa_content, "Yg", num_threads)
+}
+
+/// Private install directory next to the running executable:
+/// `<exe_dir>/../libexec/<exe_stem>/`.
+///
+/// Package managers use this to keep bundled binaries out of `bin/`, where
+/// they would overwrite the separately packaged versions.
+pub fn libexec_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe
+        .parent()?
+        .parent()?
+        .join("libexec")
+        .join(exe.file_stem()?);
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
 /// Run gfaffix graph normalization on a GFA string.
 ///
-/// Searches for the `gfaffix` binary next to the current executable
-/// (so it works when both are built together in `target/release/`).
+/// Searches for the `gfaffix` binary next to the current executable (so it
+/// works when both are built together in `target/release/`), then in
+/// `<exe_dir>/../libexec/<exe_stem>/` for packaged installs.
 /// The system PATH is intentionally NOT searched to avoid version mismatches.
-/// Returns an error if the binary is not found, allowing callers to fall back gracefully.
+/// Returns an error if the binary is not found or fails.
 pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String> {
     use std::process::Command;
 
-    // Resolve binary: sibling of current exe (e.g. target/release/gfaffix).
+    // Resolve binary: sibling of current exe (e.g. target/release/gfaffix),
+    // then the private install directory used by packagers.
     // The system PATH is intentionally NOT searched to avoid version mismatches.
     let gfaffix_bin = std::env::current_exe()
         .ok()
         .map(|exe| exe.with_file_name("gfaffix"))
         .filter(|p| p.exists())
+        .or_else(|| libexec_dir().map(|d| d.join("gfaffix")).filter(|p| p.exists()))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "gfaffix binary not found next to impg executable. \
-                 It should have been built as a workspace member. \
+                "gfaffix binary not found next to the impg executable, nor in \
+                 ../libexec/impg/. It should have been built as a workspace member. \
                  Try rebuilding with `cargo build --release`.",
             )
         })?;
@@ -920,6 +1133,59 @@ P\tseq2:0-8\t1+,3+\t*
         let gfa = "H\tVN:Z:1.0\n";
         let msa = gfa_to_msa(gfa);
         assert!(msa.is_empty());
+    }
+
+    #[test]
+    fn global_spoa_engine_penalizes_unaligned_ends() {
+        let scoring = (1, 4, 6, 2, 26, 1);
+        let first = "AAAACCCC";
+        let second = "CCCCGGGG";
+
+        let (mut local_graph, mut local_engine) = build_spoa_engine(scoring);
+        let (_, local_alignment) = local_engine.align(first, &local_graph);
+        local_graph.add_alignment(local_alignment, first);
+        let (local_score, _) = local_engine.align(second, &local_graph);
+
+        let (mut global_graph, mut global_engine) = build_global_spoa_engine(scoring);
+        let (_, global_alignment) = global_engine.align(first, &global_graph);
+        global_graph.add_alignment(global_alignment, first);
+        let (global_score, _) = global_engine.align(second, &global_graph);
+
+        assert!(
+            global_score < local_score,
+            "global alignment should penalize terminal sequence absent from the graph"
+        );
+    }
+
+    #[test]
+    fn terminal_n_clip_span_keeps_sequence_unchanged_without_policy() {
+        let seq = b"NNNNACGTNNNN";
+        assert_eq!(terminal_n_clip_span(seq, usize::MAX), Some((0, seq.len())));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_clips_prefix_at_threshold() {
+        assert_eq!(terminal_n_clip_span(b"NNNACGT", 3), Some((3, 7)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_clips_suffix_at_threshold() {
+        assert_eq!(terminal_n_clip_span(b"ACGTNNN", 3), Some((0, 4)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_preserves_internal_n_run() {
+        assert_eq!(terminal_n_clip_span(b"ACNNNNGT", 3), Some((0, 8)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_preserves_short_terminal_runs() {
+        assert_eq!(terminal_n_clip_span(b"NNACGTNN", 3), Some((0, 8)));
+    }
+
+    #[test]
+    fn terminal_n_clip_span_clips_both_ends() {
+        assert_eq!(terminal_n_clip_span(b"NNNACGTNNNN", 3), Some((3, 7)));
     }
 
     #[test]

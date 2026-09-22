@@ -865,6 +865,7 @@ fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentC
 //   * Exactly one group present → part of an indel run at the group level.
 //   * Both fully gapped → ignored (no alignment signal for this pair).
 // Gap events are counted at transitions *into* a group-level indel state.
+#[allow(clippy::needless_range_loop)]
 fn calculate_group_intersection(
     msa_chars: &[Vec<char>],
     group_a_indices: &[usize],

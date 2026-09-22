@@ -1,0 +1,12 @@
+C4FIXTURE#0#bounded_multi_bubble:15-219	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:36-240	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_4	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:15-219	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:49-253	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_7	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:15-219	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:61-265	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_17	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:36-240	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:15-219	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_36	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:36-240	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:49-253	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_45	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:36-240	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:61-265	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_47	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:49-253	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:15-219	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_93	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:49-253	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:36-240	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_94	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:49-253	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:61-265	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_92	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:61-265	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:15-219	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_144	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:61-265	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:36-240	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_150	st:Z:scaffold
+C4FIXTURE#0#bounded_multi_bubble:61-265	204	0	204	+	C4FIXTURE#0#bounded_multi_bubble:49-253	204	0	204	204	204	255	gi:f:1	bi:f:1	md:f:1	cg:Z:204=	ch:Z:chain_136	st:Z:scaffold

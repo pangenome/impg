@@ -235,7 +235,7 @@ fn refine_single_range(
         orig_end
     );
 
-    let evaluate = |left: i32, right: i32| -> Option<CandidateResult> {
+    let evaluate = |left: i32, right: i32| -> io::Result<Option<CandidateResult>> {
         evaluate_candidate(
             impg,
             target_id,
@@ -251,6 +251,14 @@ fn refine_single_range(
             &cigar_cache,
         )
     };
+    let reduce_candidates =
+        |candidates: Vec<io::Result<CandidateResult>>| -> io::Result<Option<CandidateResult>> {
+            let mut best = None;
+            for candidate in candidates {
+                best = update_best_candidate(best, candidate?);
+            }
+            Ok(best)
+        };
 
     // Helper to check if candidate has reached maximum support
     let check_max = |candidate: &Option<CandidateResult>| -> bool {
@@ -264,7 +272,7 @@ fn refine_single_range(
     let mut best_candidate: Option<CandidateResult> = None;
 
     // Evaluate baseline (0,0) first
-    let baseline_candidate = evaluate(0, 0);
+    let baseline_candidate = evaluate(0, 0)?;
     let original_support_count = baseline_candidate
         .as_ref()
         .map(|c| c.support_count)
@@ -286,12 +294,17 @@ fn refine_single_range(
         );
     } else {
         // Search for minimal left extension, excluding 0 (already evaluated as baseline)
-        if let Some(candidate) = flanks
-            .par_iter()
-            .filter(|&&left| left > 0)
-            .filter_map(|&left| evaluate(left, 0))
-            .reduce_with(better_candidate)
-        {
+        if let Some(candidate) = reduce_candidates(
+            flanks
+                .par_iter()
+                .filter(|&&left| left > 0)
+                .filter_map(|&left| match evaluate(left, 0) {
+                    Ok(Some(candidate)) => Some(Ok(candidate)),
+                    Ok(None) => None,
+                    Err(err) => Some(Err(err)),
+                })
+                .collect(),
+        )? {
             best_candidate = update_best_candidate(best_candidate, candidate);
         }
 
@@ -312,11 +325,16 @@ fn refine_single_range(
                 .unwrap_or(0);
 
             // Next, keep the chosen left flank fixed and look for the best right expansion.
-            if let Some(candidate) = flanks
-                .par_iter()
-                .filter_map(|&right| evaluate(left_fixed, right))
-                .reduce_with(better_candidate)
-            {
+            if let Some(candidate) = reduce_candidates(
+                flanks
+                    .par_iter()
+                    .filter_map(|&right| match evaluate(left_fixed, right) {
+                        Ok(Some(candidate)) => Some(Ok(candidate)),
+                        Ok(None) => None,
+                        Err(err) => Some(Err(err)),
+                    })
+                    .collect(),
+            )? {
                 best_candidate = update_best_candidate(best_candidate, candidate);
             }
 
@@ -337,11 +355,16 @@ fn refine_single_range(
                     .unwrap_or(0);
 
                 // Finally, re-optimise the left flank while holding the right flank steady to capture asymmetric trade-offs.
-                if let Some(candidate) = flanks
-                    .par_iter()
-                    .filter_map(|&left| evaluate(left, right_fixed))
-                    .reduce_with(better_candidate)
-                {
+                if let Some(candidate) = reduce_candidates(
+                    flanks
+                        .par_iter()
+                        .filter_map(|&left| match evaluate(left, right_fixed) {
+                            Ok(Some(candidate)) => Some(Ok(candidate)),
+                            Ok(None) => None,
+                            Err(err) => Some(Err(err)),
+                        })
+                        .collect(),
+                )? {
                     best_candidate = update_best_candidate(best_candidate, candidate);
                 }
             }
@@ -399,7 +422,7 @@ fn evaluate_candidate(
     sequence_index: Option<&UnifiedSequenceIndex>,
     max_entities: Option<usize>,
     cigar_cache: &FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>>,
-) -> Option<CandidateResult> {
+) -> io::Result<Option<CandidateResult>> {
     let tentative_start = orig_start.saturating_sub(left_flank);
     let tentative_end = orig_end.saturating_add(right_flank);
 
@@ -411,7 +434,7 @@ fn evaluate_candidate(
             "Skipping non-positive range {}:{}-{} after applying flanks L{} R{}",
             chrom, start, end, left_flank, right_flank
         );
-        return None;
+        return Ok(None);
     }
 
     let mut overlaps = Vec::new();
@@ -423,7 +446,7 @@ fn evaluate_candidate(
         sequence_index,
         &mut overlaps,
         cigar_cache,
-    );
+    )?;
 
     apply_subset_filter(impg, target_id, &mut overlaps, config.subset_filter);
 
@@ -452,7 +475,7 @@ fn evaluate_candidate(
         support_entities: stats.survivors,
     };
 
-    Some(candidate)
+    Ok(Some(candidate))
 }
 
 fn query_overlaps(
@@ -463,7 +486,7 @@ fn query_overlaps(
     sequence_index: Option<&UnifiedSequenceIndex>,
     buffer: &mut Vec<AdjustedInterval>,
     cigar_cache: &FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>>,
-) {
+) -> io::Result<()> {
     buffer.clear();
 
     let mut results = if config.use_transitive_bfs {
@@ -481,7 +504,7 @@ fn query_overlaps(
             sequence_index,
             config.approximate_mode,
             config.subset_filter,
-        )
+        )?
     } else if config.use_transitive_dfs {
         impg.query_transitive_dfs(
             target_id,
@@ -497,7 +520,7 @@ fn query_overlaps(
             sequence_index,
             config.approximate_mode,
             config.subset_filter,
-        )
+        )?
     } else {
         let mut res = impg.query_with_cache(
             target_id,
@@ -507,7 +530,7 @@ fn query_overlaps(
             config.min_identity,
             sequence_index,
             cigar_cache,
-        );
+        )?;
 
         // Apply subset filter for non-transitive queries (transitive queries filter during exploration)
         if let Some(filter) = config.subset_filter {
@@ -518,15 +541,7 @@ fn query_overlaps(
     };
 
     buffer.append(&mut results);
-}
-
-/// Return whichever candidate ranks higher according to `compare_candidates`.
-fn better_candidate(a: CandidateResult, b: CandidateResult) -> CandidateResult {
-    if compare_candidates(&a, &b) == Ordering::Greater {
-        a
-    } else {
-        b
-    }
+    Ok(())
 }
 
 /// Maintain the best-so-far candidate when combining sequential passes.

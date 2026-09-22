@@ -132,6 +132,8 @@ fn test_full_pipeline() -> std::io::Result<()> {
         &work_dir,
         &[
             "partition",
+            "-d",
+            "100000",
             "-a",
             "alignments.paf",
             "-i",

@@ -1,0 +1,4 @@
+path_name	expected_spelling
+ref#0#inversion_like_case:1-24	CCGGAATTAACCGGTTTTAACCGG
+hapA#0#inversion_like_case:1-24	CCGGAATTTTGGCCAATTAACCGG
+hapB#0#inversion_like_case:1-24	CCGGAATTAACCGGAATTAACCGG

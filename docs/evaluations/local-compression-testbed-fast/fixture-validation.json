@@ -1,0 +1,37 @@
+{
+  "manifest_path": "tests/test_data/local_compression/manifest.json",
+  "fixtures_validated": [
+    "snp_bubble_3path",
+    "short_indel_3path",
+    "mid_insertion_200bp",
+    "alu_like_insertion",
+    "adjacent_bubbles_joint",
+    "fake_repeat_anchor_split",
+    "microtangle_repeat_motif",
+    "duplicated_flank_context",
+    "tandem_copy_loop_keep",
+    "dispersed_repeat_glue_break",
+    "inversion_like_case",
+    "nested_top_level_right",
+    "nested_top_level_wrong"
+  ],
+  "required_fixture_classes": [
+    "snp_bubble",
+    "short_indel",
+    "insertion_50_500bp",
+    "alu_like_insertion",
+    "adjacent_bubbles_compress_together",
+    "bubble_split_by_fake_repeat_anchor",
+    "repeated_motif_microtangle",
+    "duplicated_flank_requires_path_context",
+    "tandem_copy_number_loop_cyclic",
+    "dispersed_repeat_glue_break_or_ignore",
+    "inversion_like",
+    "nested_bubbles_top_level_right",
+    "nested_bubbles_top_level_wrong"
+  ],
+  "status": "pass",
+  "messages": [
+    "validated exact fixture paths and path spellings before method execution"
+  ]
+}

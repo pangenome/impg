@@ -1,0 +1,4 @@
+path_name	expected_spelling
+ref#0#duplicated_flank_context:1-29	AACCGGGGATCCCTTAAGGATCCGGAATT
+hapA#0#duplicated_flank_context:1-29	AACCGGGGATCCCTTACGGATCCGGAATT
+hapB#0#duplicated_flank_context:1-29	AACCGGGGATCCCTTAAGGATCCCTAATT

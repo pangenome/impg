@@ -12,7 +12,7 @@ use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use coitrees::BasicCOITree;
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 /// Trait for IMPG index operations.
 ///
@@ -32,7 +32,7 @@ pub trait ImpgIndex: Send + Sync {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
-    ) -> Vec<AdjustedInterval>;
+    ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Query with pre-populated CIGAR cache for efficiency.
     fn query_with_cache(
@@ -44,7 +44,7 @@ pub trait ImpgIndex: Send + Sync {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
-    ) -> Vec<AdjustedInterval>;
+    ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Populate CIGAR cache for a region.
     fn populate_cigar_cache(
@@ -73,7 +73,7 @@ pub trait ImpgIndex: Send + Sync {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval>;
+    ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Transitive query using breadth-first search.
     fn query_transitive_bfs(
@@ -91,7 +91,7 @@ pub trait ImpgIndex: Send + Sync {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval>;
+    ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Get or load an interval tree for a target sequence.
     fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>>;
@@ -109,6 +109,15 @@ pub trait ImpgIndex: Send + Sync {
 
     /// Get the sequence files (FASTA/AGC) associated with this index.
     fn sequence_files(&self) -> &[String];
+
+    /// Access the underlying `SyngIndex` if this implementation is
+    /// backed by syng (`SyngImpgWrapper`). Used by the syng-native
+    /// graph engine to re-query anchor chains for anchor-seeded
+    /// gap-only BiWFA. Default returns `None` so alignment-backed
+    /// implementations don't need to implement this.
+    fn syng_index_ref(&self) -> Option<&crate::syng::SyngIndex> {
+        None
+    }
 }
 
 /// Enum wrapper that can hold either a single `Impg` or a `MultiImpg`.
@@ -158,9 +167,9 @@ impl ImpgIndex for ImpgWrapper {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
-            ImpgWrapper::Single(impg) => impg.query(
+            ImpgWrapper::Single(impg) => Ok(impg.query(
                 target_id,
                 range_start,
                 range_end,
@@ -168,8 +177,9 @@ impl ImpgIndex for ImpgWrapper {
                 min_gap_compressed_identity,
                 sequence_index,
                 approximate_mode,
-            ),
-            ImpgWrapper::Multi(multi) => multi.query(
+            )),
+            ImpgWrapper::Multi(multi) => ImpgIndex::query(
+                multi,
                 target_id,
                 range_start,
                 range_end,
@@ -190,9 +200,9 @@ impl ImpgIndex for ImpgWrapper {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
-            ImpgWrapper::Single(impg) => impg.query_with_cache(
+            ImpgWrapper::Single(impg) => Ok(impg.query_with_cache(
                 target_id,
                 range_start,
                 range_end,
@@ -200,8 +210,9 @@ impl ImpgIndex for ImpgWrapper {
                 min_gap_compressed_identity,
                 sequence_index,
                 cigar_cache,
-            ),
-            ImpgWrapper::Multi(multi) => multi.query_with_cache(
+            )),
+            ImpgWrapper::Multi(multi) => ImpgIndex::query_with_cache(
+                multi,
                 target_id,
                 range_start,
                 range_end,
@@ -257,9 +268,9 @@ impl ImpgIndex for ImpgWrapper {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
-            ImpgWrapper::Single(impg) => impg.query_transitive_dfs(
+            ImpgWrapper::Single(impg) => Ok(impg.query_transitive_dfs(
                 target_id,
                 range_start,
                 range_end,
@@ -273,8 +284,9 @@ impl ImpgIndex for ImpgWrapper {
                 sequence_index,
                 approximate_mode,
                 subset_filter,
-            ),
-            ImpgWrapper::Multi(multi) => multi.query_transitive_dfs(
+            )),
+            ImpgWrapper::Multi(multi) => ImpgIndex::query_transitive_dfs(
+                multi,
                 target_id,
                 range_start,
                 range_end,
@@ -307,9 +319,9 @@ impl ImpgIndex for ImpgWrapper {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
-    ) -> Vec<AdjustedInterval> {
+    ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
-            ImpgWrapper::Single(impg) => impg.query_transitive_bfs(
+            ImpgWrapper::Single(impg) => Ok(impg.query_transitive_bfs(
                 target_id,
                 range_start,
                 range_end,
@@ -323,8 +335,9 @@ impl ImpgIndex for ImpgWrapper {
                 sequence_index,
                 approximate_mode,
                 subset_filter,
-            ),
-            ImpgWrapper::Multi(multi) => multi.query_transitive_bfs(
+            )),
+            ImpgWrapper::Multi(multi) => ImpgIndex::query_transitive_bfs(
+                multi,
                 target_id,
                 range_start,
                 range_end,

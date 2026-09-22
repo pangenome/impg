@@ -1,6 +1,6 @@
 [package]
 name = "impg"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["Andrea Guarracino <aguarracino@tgen.org>"]
 
@@ -10,6 +10,12 @@ authors = ["Andrea Guarracino <aguarracino@tgen.org>"]
 name = "gfaffix"
 path = "vendor/gfaffix/src/main.rs"
 
+# Release build with debug info for flamegraph / perf profiling.
+# Build with: cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dependencies]
 bincode = { version = "2.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -17,6 +23,7 @@ clap = { version = "4.5", features = ["derive", "wrap_help", "cargo"] }
 flate2 = { version = "1", features = ["zlib"], default-features = false }
 gfa = "0.10.1"
 coitrees = "0.4"
+crossbeam-channel = "0.5"
 num_cpus = "1.17"
 rayon = "1.11"
 noodles = { version = "0.100.0", features = ["bgzf"] }
@@ -25,26 +32,31 @@ log = "0.4"
 env_logger = "0.11"
 natord = "1.0"
 rustc-hash = "2.1"
+libc = "0.2"
+memmap2 = "0.9"
 indexmap = { version = "2", features = ["rayon"] }
 nalgebra = "0.33"
 indicatif = "0.18"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
+poasta = "0.1.0"
 rust-htslib = { version = "1.0.0", default-features = false, features = ["libdeflate"] }
+csv = "1.3"
+serde_json = "1.0"
 
 # Dependencies for AGC format (for sequences) support
 ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0" }
 
 # Dependencies for 1ALN format (for alignments) support
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
-onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}
+onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "5fa1e9333f18b311580f1346751c630c626d8342" }
 # Dependencies for TPA format (for alignments) support
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "49f1801f9e0108c211571fa2614e517009446afe" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "989ca3b7a3ffa9bb26708b17ef5cf093a22a5163" }
 # Dependencies for 1ALN and TPA formats (for alignments) support
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6a214141968f37d9bcb22552408318adda0" }
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "32ad5bb4442df4a5782b35bf024a319ba0676f50" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
 #tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "66a5511b0b84d8502f9d7c99efd150616ff2cae3" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "5303cde5359ffd9c54234a825d1923d26a2a0b20" }
 
 # Dependencies for lace functionality
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
@@ -55,13 +67,35 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "018e4ce49d2c125820e0ac50dc5feaa02d423683", default-features = false }
-seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
+# 04f9edb = ddd31d3 (pansn-sparsification) + wfmash-rs 3cc6677 (vendored wfmash v0.14.1).
+# PanSN haplotype grouping + wfmash-per-hap-pair joblist live upstream;
+# this impg tree just calls them. Handles 1 _or many_ input FASTAs.
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "6cf4a35b4b913233664fd299b8141e95b0ef6959", default-features = false }
+seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
+allwave = { git = "https://github.com/pangenome/allwave", rev = "87fbbb64a388d078e7f6f224e9eb6d5cbfc168f4", default-features = false }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
+bluntg = { git = "https://github.com/pangenome/bluntg" }
+povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "0c9f21a40e7755293f5b21f33a7e2c894dc6cb15", default-features = false }
+
+[build-dependencies]
+cc = "1"
+# build.rs copies wfmash and the FastGA utilities out of their build directories.
+# Cargo only guarantees that a build script runs after the build scripts of its
+# own build-dependencies, so declare these here even though the code is unused.
+# Without them build.rs can run first and copy nothing. Revisions must match the
+# ones sweepga pins, otherwise cargo builds each crate twice.
+wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "b55cf75a29c4570702675c7f4d67e99936de5fb7" }
+fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "5216a157f761545c9c3160ea1501ef1beab9c663" }
 
 [dev-dependencies]
+ahash = "0.8"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "crush"
+harness = false
 
 [features]
 default = []
@@ -74,5 +108,3 @@ ragc-common = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb
 # Redirect gfaffix's handlegraph = "0.7.0-alpha.9" to impg's pinned git rev (same API, 3 additive commits newer)
 [patch.crates-io]
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
-
-

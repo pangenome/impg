@@ -1,0 +1,5 @@
+path_name	expected_spelling
+ref#0#microtangle_repeat_motif:1-25	TTCGAACAGCAGCAGGGTTAACCGG
+hapA#0#microtangle_repeat_motif:1-28	TTCGAACAGCAGCAGCAGGGTTAACCGG
+hapB#0#microtangle_repeat_motif:1-22	TTCGAACAGCAGGGTTAACCGG
+hapC#0#microtangle_repeat_motif:1-28	TTCGAACAGCAGCAGTAGGGTTAACCGG

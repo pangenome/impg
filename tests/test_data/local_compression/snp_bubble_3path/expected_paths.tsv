@@ -1,0 +1,4 @@
+path_name	expected_spelling
+ref#0#snp_bubble_3path:1-27	ACGTACGTACGTCGATTACAGATTACA
+hapA#0#snp_bubble_3path:1-27	ACGTACGTACGTTGATTACAGATTACA
+hapB#0#snp_bubble_3path:1-27	ACGTACGTACGTGGATTACAGATTACA

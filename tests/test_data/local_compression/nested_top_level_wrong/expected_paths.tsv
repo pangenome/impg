@@ -1,0 +1,5 @@
+path_name	expected_spelling
+ref#0#nested_top_level_wrong:1-32	GGCCAATTCCGGTTAAAACCGGTTCCAATTGG
+hapA#0#nested_top_level_wrong:1-32	GGCCAATTCCGGAATAAACCGGTTCCAATTGG
+hapB#0#nested_top_level_wrong:1-32	GGCCAATTCCGGTTAAAACCAATTCCAATTGG
+hapC#0#nested_top_level_wrong:1-32	GGCCAATTCCGGAATAAACCAATTCCAATTGG

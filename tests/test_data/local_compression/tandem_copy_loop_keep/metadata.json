@@ -1,0 +1,110 @@
+{
+  "fixture_id": "tandem_copy_loop_keep",
+  "fixture_class": "tandem_copy_number_loop_cyclic",
+  "title": "Tandem copy-number loop should be kept",
+  "tier": "ci",
+  "input_sequences": [
+    {
+      "name": "ref#0#tandem_copy_loop_keep:1-32",
+      "file": "input.fa",
+      "expected_spelling": "GTTACCGGAATTACACACACTTAACCGGTTAA"
+    },
+    {
+      "name": "hapA#0#tandem_copy_loop_keep:1-36",
+      "file": "input.fa",
+      "expected_spelling": "GTTACCGGAATTACACACACACACTTAACCGGTTAA"
+    },
+    {
+      "name": "hapB#0#tandem_copy_loop_keep:1-40",
+      "file": "input.fa",
+      "expected_spelling": "GTTACCGGAATTACACACACACACACACTTAACCGGTTAA"
+    }
+  ],
+  "input_sequence_names": [
+    "ref#0#tandem_copy_loop_keep:1-32",
+    "hapA#0#tandem_copy_loop_keep:1-36",
+    "hapB#0#tandem_copy_loop_keep:1-40"
+  ],
+  "expected_path_spellings": {
+    "ref#0#tandem_copy_loop_keep:1-32": "GTTACCGGAATTACACACACTTAACCGGTTAA",
+    "hapA#0#tandem_copy_loop_keep:1-36": "GTTACCGGAATTACACACACACACTTAACCGGTTAA",
+    "hapB#0#tandem_copy_loop_keep:1-40": "GTTACCGGAATTACACACACACACACACTTAACCGGTTAA"
+  },
+  "expected_topology": {
+    "assertion_id": "tandem_copy_loop_required",
+    "description": "Tandem copy-number variation preserves a cyclic or loop-capable representation.",
+    "exact": {
+      "path_count": 3,
+      "self_loops": 1,
+      "repeat_loops": 1,
+      "max_long_link_span_bp": 0,
+      "loop_policy": "repeat_loop_required"
+    }
+  },
+  "allowed_ranges": {
+    "segment_count": {
+      "min": 2,
+      "max": 12
+    },
+    "link_count": {
+      "min": 1,
+      "max": 18
+    },
+    "path_depth_median": {
+      "min": 2,
+      "max": 20
+    },
+    "node_depth_p95": {
+      "min": 1,
+      "max": 12
+    },
+    "white_space_proxy_bp_p95": {
+      "min": 0,
+      "max": 4
+    },
+    "white_space_proxy_bp_max": {
+      "min": 0,
+      "max": 8
+    },
+    "bubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "flubble_count": {
+      "min": 1,
+      "max": 3
+    },
+    "long_link_count": {
+      "min": 0,
+      "max": 0
+    },
+    "long_link_max_span_bp": {
+      "min": 0,
+      "max": 0
+    },
+    "self_loop_count": {
+      "min": 1,
+      "max": 1
+    },
+    "repeat_loop_count": {
+      "min": 1,
+      "max": 1
+    }
+  },
+  "long_link_policy": {
+    "max_count": 0,
+    "max_span_bp": 0
+  },
+  "known_failure_mode": "Normalization or crush linearizes the copy-number loop and loses cyclic topology.",
+  "render_hints": {
+    "reference_path": "ref#0#tandem_copy_loop_keep:1-32",
+    "highlight_paths": [
+      "hapA#0#tandem_copy_loop_keep:1-36",
+      "hapB#0#tandem_copy_loop_keep:1-40"
+    ],
+    "expected_shape": "copy-number loop over a tandem motif",
+    "repeat_motif": "ACAC",
+    "shared_left": "GTTACCGGAATT",
+    "shared_right": "TTAACCGGTTAA"
+  }
+}

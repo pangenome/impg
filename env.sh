@@ -1,78 +1,83 @@
-#!/bin/bash
-# Source this to set up the impg build environment using Guix libraries.
+#!/usr/bin/env bash
+# Enter or source the Guix environment used to build impg from this checkout.
 #
+# Start an isolated shell:
+#   ./env.sh
+#   cargo build --release --locked
+#
+# Or add the Guix profile to the current shell:
 #   source ./env.sh
-#   cargo build
-#   cargo build --release
-#   cargo install --path .
-#   cargo test
+#   cargo build --release --locked
 #
-# Why: This system (Debian Buster) has glibc 2.28 and cmake 3.13, but impg
-# needs cmake >= 3.16, GCC >= 9 (C++17 filesystem), and several libraries
-# (htslib, gsl, jemalloc). Guix provides all of these but its libraries are
-# built against glibc 2.35. To avoid mixing glibc versions, we run cargo and
-# rustc under Guix's dynamic linker so everything uses glibc 2.35 consistently.
-#
-# Prerequisites (one-time):
-#   guix install jemalloc
+set -euo pipefail
 
-_impg_env_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+_impg_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+_guix="${GUIX:-${HOME}/.guix-profile/bin/guix}"
+_manifest="$_impg_dir/manifest.scm"
 
-# --- Guix store paths ---
-_guix_gcc="/gnu/store/rfm800pq3q2midj29a4xlikdzjp1ps2l-gcc-toolchain-12.3.0"
-_guix_gcc_lib="/gnu/store/gmv6n5vy5qcsn71pkapg2hnknyn1p7g3-gcc-12.3.0-lib/lib"
-_guix_glibc="/gnu/store/gsjczqir1wbz8p770zndrpw4rnppmxi3-glibc-2.35/lib"
-_guix_cmake="/gnu/store/r0g7ygnvmgmlv13375fkv2dn6r694k11-cmake-3.25.1/bin"
-_guix_pkgconfig="/gnu/store/jz5dwdxq4di29cd0rjjzkw356dhkzjil-pkg-config-0.29.2/bin"
-_guix_profile="/gnu/store/2r5ryq2ibvy44jkz9diar0fvf5cm7q4c-profile"
-_guix_ldso="$_guix_glibc/ld-linux-x86-64.so.2"
+if [[ ! -x "$_guix" ]]; then
+    echo "error: Guix command not found or not executable: $_guix" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
-# --- Rust toolchain ---
-_rust_toolchain="$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu"
-_lib_path="$_guix_glibc:$_guix_gcc_lib:$_guix_profile/lib:$_rust_toolchain/lib"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    exec bash --noprofile --norc -c 'source "$1"; exec bash --noprofile --norc -i' bash "$_impg_dir/env.sh"
+fi
 
-# --- Create cargo/rustc wrappers that run under Guix's glibc ---
-_wrapper_dir="$_impg_env_dir/.guix/bin"
-mkdir -p "$_wrapper_dir"
+set +u
+_search_paths="$("$_guix" shell -m "$_manifest" --search-paths)"
+if [[ -z "$_search_paths" ]]; then
+    echo "error: Guix did not return a usable environment" >&2
+    return 1 2>/dev/null || exit 1
+fi
+eval "$_search_paths"
+set -u
+export CC=gcc
+export CXX=g++
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
 
-cat > "$_wrapper_dir/cargo" << SCRIPT
-#!/bin/bash
-exec $_guix_ldso --library-path "$_lib_path" $_rust_toolchain/bin/cargo "\$@"
-SCRIPT
+_profile_bin="${PATH%%:*}"
+_profile="${_profile_bin%/bin}"
+export LIBCLANG_PATH="$_profile/lib"
+export SSL_CERT_FILE="$_profile/etc/ssl/certs/ca-certificates.crt"
 
-cat > "$_wrapper_dir/rustc" << SCRIPT
-#!/bin/bash
-exec $_guix_ldso --library-path "$_lib_path" $_rust_toolchain/bin/rustc "\$@"
-SCRIPT
+_ld_so="$(gcc -print-file-name=ld-linux-x86-64.so.2)"
+_gcc_lib="$(dirname "$(gcc -print-file-name=libgcc_s.so.1)")"
+_shim_dir="${TMPDIR:-/tmp}/impg-guix-rust-${USER:-$(id -u)}-${_profile##*/}"
 
-cat > "$_wrapper_dir/rustdoc" << SCRIPT
-#!/bin/bash
-exec $_guix_ldso --library-path "$_lib_path" $_rust_toolchain/bin/rustdoc "\$@"
-SCRIPT
+if command -v rustup >/dev/null 2>&1; then
+    _cargo_real="$(rustup which cargo)"
+    _rustc_real="$(rustup which rustc)"
+    _rustdoc_real="$(rustup which rustdoc)"
+else
+    _cargo_real="$(command -v cargo)"
+    _rustc_real="$(command -v rustc)"
+    _rustdoc_real="$(command -v rustdoc)"
+fi
+_rust_lib="$(dirname "$_rustc_real")/../lib"
 
-chmod +x "$_wrapper_dir/cargo" "$_wrapper_dir/rustc" "$_wrapper_dir/rustdoc"
+mkdir -p "$_shim_dir"
+_write_rust_wrapper() {
+    local _name="$1"
+    local _real="$2"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf 'exec %q --library-path %q %q "$@"\n' \
+            "$_ld_so" "$_profile/lib:$_gcc_lib:$_rust_lib" "$_real"
+    } >"$_shim_dir/$_name"
+    chmod +x "$_shim_dir/$_name"
+}
+_write_rust_wrapper cargo "$_cargo_real"
+_write_rust_wrapper rustc "$_rustc_real"
+_write_rust_wrapper rustdoc "$_rustdoc_real"
 
-# --- Environment ---
-export PATH="$_wrapper_dir:$_guix_gcc/bin:$_guix_cmake:$_guix_pkgconfig:$_guix_profile/bin:$PATH"
-export CC="$_guix_gcc/bin/gcc"
-export CXX="$_guix_gcc/bin/g++"
-export LIBRARY_PATH="$_impg_env_dir/.guix-stubs:$_guix_gcc/lib:$_guix_profile/lib"
-export C_INCLUDE_PATH="$_guix_profile/include"
-export CPLUS_INCLUDE_PATH="$_guix_profile/include"
-export PKG_CONFIG_PATH="$_guix_profile/lib/pkgconfig"
-export LIBCLANG_PATH="$_guix_profile/lib"
-export CXXFLAGS="-include limits -include cstdint"
-# Suppress locale warnings from /bin/bash spawned by build scripts:
-# system bash (glibc 2.28) can't read Guix's 2.35 locale data.
-export LC_ALL=C
-export LANG=C
-unset LC_CTYPE
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$_guix_gcc/bin/gcc"
-export RUSTC="$_wrapper_dir/rustc"
-export RUSTDOC="$_wrapper_dir/rustdoc"
+export PATH="$_shim_dir:$PATH"
+export CARGO="$_shim_dir/cargo"
+export RUSTC="$_shim_dir/rustc"
+export RUSTDOC="$_shim_dir/rustdoc"
 
-echo "impg build env ready — Guix GCC 12.3 + glibc 2.35 (cmake $(cmake --version 2>/dev/null | head -1 | awk '{print $3}'))"
+echo "impg Guix build env ready: cargo $(cargo --version | cut -d' ' -f2), rustc $(rustc --version | cut -d' ' -f2)"
 
-# cleanup temp vars
-unset _impg_env_dir _guix_gcc _guix_gcc_lib _guix_glibc _guix_cmake
-unset _guix_pkgconfig _guix_profile _guix_ldso _rust_toolchain _lib_path _wrapper_dir
+unset _impg_dir _guix _manifest _search_paths _profile_bin _profile
+unset _ld_so _gcc_lib _shim_dir _cargo_real _rustc_real _rustdoc_real _rust_lib
+unset -f _write_rust_wrapper
