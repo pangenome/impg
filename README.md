@@ -228,16 +228,26 @@ impg refine -a aln.paf -r chr1:1000-2000 --support-output support.bed
 ### `similarity` — pairwise similarity / distance within a region
 
 ```bash
-impg similarity -a aln.paf -r chr1:1000-2000 --sequence-files *.fa
-impg similarity -a aln.1aln -b regions.bed --sequence-files *.fa --distances
+impg similarity --gfa-engine poa -d 100 -a aln.paf -r chr1:1000-2000 --sequence-files *.fa
+impg similarity --gfa-engine poa -d 100 -a aln.1aln -b regions.bed --sequence-files *.fa --distances
 
 # Group by PanSN prefix
-impg similarity -a aln.paf -r chr1:1000-2000 --sequence-files *.fa \
+impg similarity --gfa-engine poa -d 100 -a aln.paf -r chr1:1000-2000 --sequence-files *.fa \
                 --delim '#' --delim-pos 2     # sample#haplotype
 
 # PCA / MDS on the distance matrix
-impg similarity -a aln.paf -r chr1:1000-2000 --sequence-files *.fa \
+impg similarity --gfa-engine poa -d 100 -a aln.paf -r chr1:1000-2000 --sequence-files *.fa \
                 --pca --pca-components 3 --pca-measure cosine
+```
+
+Two engines, one of which you must select (the default `--gfa-engine pggb` is not supported here):
+
+* **`--gfa-engine poa`**: SPOA multiple alignment per region; reports gap-compressed identity (`matches / (matches + mismatches + gap_events)`, minimap2 `de` convention). Accurate, scales poorly.
+* **`--fast`**: bottom-k MinHash sketching, Mash identity `(2J/(1+J))^(1/k)`. Faster, works at Mb scale.
+
+```bash
+# MinHash-based, much faster than POA
+impg similarity --fast -d 100 -a aln.paf -r chr1:1000-2000 --sequence-files *.fa
 ```
 
 ### `lace` — combine many per-window graphs into one
