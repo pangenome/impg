@@ -3638,20 +3638,17 @@ impl SyngIndex {
         if end <= start {
             return Ok(Vec::new());
         }
-        let path_start = self
-            .name_map
-            .path_starts
-            .get(path_idx)
-            .and_then(|start| start.as_ref())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "No GBWT path start info for path {} — index may need rebuilding",
-                        path_idx
-                    ),
-                )
-            })?;
+        let path_start = match self.name_map.path_starts.get(path_idx).and_then(|start| start.as_ref()) {
+            Some(path_start) => path_start,
+            None => {
+                // A path with no start info has no walkable syncmer steps
+                // (e.g. a sequence shorter than w+k). An empty walk lets
+                // callers treat the region as anchorless instead of aborting
+                // the whole command; stale/corrupt indexes are caught by
+                // `impg syng-repair`.
+                return Ok(Vec::new());
+            }
+        };
         if path_start.num_syncmers == 0 {
             return Ok(Vec::new());
         }
@@ -5250,6 +5247,232 @@ impl SyngIndex {
             );
         }
         Ok(merged)
+    }
+
+    /// Occurrence cap for coverage-only (interval) queries such as
+    /// partitioning. Nodes more frequent than this in the GBWT (satellite
+    /// arrays, poly-N runs, telomeric repeats) are located at `cap`
+    /// evenly-spaced ranks instead of every occurrence; their per-path
+    /// interval spans are sampled, not exhaustive. Override with the
+    /// `IMPG_SYNG_INTERVAL_LOCATE_CAP` environment variable (0 = uncapped).
+    pub const INTERVAL_QUERY_MAX_OCCURRENCES: u32 = 100_000;
+
+    fn interval_locate_cap() -> u32 {
+        std::env::var("IMPG_SYNG_INTERVAL_LOCATE_CAP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(Self::INTERVAL_QUERY_MAX_OCCURRENCES)
+    }
+
+    /// Coverage-only region query for callers that only need homolog
+    /// intervals, not per-syncmer anchors (e.g. partition discovery).
+    ///
+    /// Two differences from [`Self::query_region`]:
+    /// 1. Per-syncmer anchor maps are never materialized. A repetitive 1 Mb
+    ///    window can emit >100M anchors that the caller immediately drops;
+    ///    here each hit contributes only to its (path, node, strand) span.
+    /// 2. Nodes with more than `IMPG_SYNG_INTERVAL_LOCATE_CAP` occurrences
+    ///    are located at evenly-spaced sampled ranks, and the sampled ranks
+    ///    are located in parallel chunks. A window over a satellite array or
+    ///    a poly-N run collapses to a handful of distinct nodes, each with
+    ///    millions of occurrences; without capping that costs hours on a
+    ///    single rayon task. Sampled location keeps one occurrence per
+    ///    `count/cap` ranks so every path keeps coverage.
+    pub fn query_region_intervals(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+    ) -> Result<Vec<HomologousInterval>, io::Error> {
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        let query_path_num = self
+            .name_map
+            .name_to_path
+            .get(genome)
+            .copied()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Genome '{}' not found in syng index", genome),
+                )
+            })?;
+
+        let query_nodes =
+            self.walk_path_range_from_sampled_steps(query_path_num as usize, start, end)?;
+        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
+        for (signed_node, pos) in query_nodes {
+            let abs = signed_node.unsigned_abs();
+            let q_orient: u8 = if signed_node >= 0 { 0 } else { 1 };
+            query_node_positions
+                .entry(abs)
+                .or_default()
+                .push((pos, q_orient));
+        }
+
+        self.query_intervals_from_node_positions(query_node_positions, padding)
+    }
+
+    fn query_intervals_from_node_positions(
+        &self,
+        query_node_positions: FxHashMap<u32, Vec<(u64, u8)>>,
+        padding: u64,
+    ) -> Result<Vec<HomologousInterval>, io::Error> {
+        if query_node_positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let syncmer_len = (self.params.w + self.params.k) as u64;
+        let cap = Self::interval_locate_cap();
+
+        self.prepare_locate_checkpoint_lookup()?;
+        // (path_idx, node, strand) -> (min padded start, max padded end)
+        type SpanBuckets = FxHashMap<(usize, u32, char), (u64, u64)>;
+        let span_results: Vec<io::Result<SpanBuckets>> = query_node_positions
+            .into_par_iter()
+            .map(|(query_node, query_positions)| {
+                // The interval span of a hit does not depend on which query
+                // position matched — only the strand does. Deduplicate the
+                // orientations (≤2) so a node with thousands of window
+                // positions does not multiply hits by positions.
+                let mut orients = Vec::with_capacity(2);
+                for &(_, q_orient) in query_positions.iter() {
+                    if !orients.contains(&q_orient) {
+                        orients.push(q_orient);
+                    }
+                }
+                let mut per_node: SpanBuckets = FxHashMap::default();
+                for hit in self.locate_node_occurrences_capped(query_node, cap)? {
+                    if hit.path_idx >= self.name_map.path_to_name.len() {
+                        continue;
+                    }
+                    let genome_len = self.name_map.path_to_length[hit.path_idx];
+                    let hit_end = hit.target_pos + syncmer_len;
+                    let padded_start = hit.target_pos.saturating_sub(padding);
+                    let padded_end = (hit_end + padding).min(genome_len);
+                    if padded_start >= padded_end {
+                        continue;
+                    }
+                    for &q_orient in &orients {
+                        let strand = if q_orient == hit.target_orient {
+                            '+'
+                        } else {
+                            '-'
+                        };
+                        let entry = per_node
+                            .entry((hit.path_idx, query_node, strand))
+                            .or_insert((padded_start, padded_end));
+                        entry.0 = entry.0.min(padded_start);
+                        entry.1 = entry.1.max(padded_end);
+                    }
+                }
+                Ok(per_node)
+            })
+            .collect();
+
+        let mut per_node_sampled: SpanBuckets = FxHashMap::default();
+        for result in span_results {
+            for (key, (start, end)) in result? {
+                let entry = per_node_sampled.entry(key).or_insert((start, end));
+                entry.0 = entry.0.min(start);
+                entry.1 = entry.1.max(end);
+            }
+        }
+
+        let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
+            FxHashMap::default();
+        for ((genome_idx, _node, strand), (start, end)) in per_node_sampled {
+            per_path
+                .entry((genome_idx, strand))
+                .or_default()
+                .push(HomologousIntervalWithAnchors {
+                    genome: self.name_map.path_to_name[genome_idx].clone(),
+                    start,
+                    end,
+                    strand,
+                    anchors: Vec::new(),
+                });
+        }
+
+        let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::new();
+        for (_key, mut group) in per_path {
+            Self::merge_intervals_with_anchors(&mut group);
+            merged.extend(group);
+        }
+        merged.sort_by(|a, b| {
+            a.genome
+                .cmp(&b.genome)
+                .then(a.strand.cmp(&b.strand))
+                .then(a.start.cmp(&b.start))
+        });
+        Ok(merged
+            .into_iter()
+            .map(|h| HomologousInterval {
+                genome: h.genome,
+                start: h.start,
+                end: h.end,
+                strand: h.strand,
+                cigar: None,
+            })
+            .collect())
+    }
+
+    fn locate_node_occurrences_capped(
+        &self,
+        node_id: u32,
+        cap: u32,
+    ) -> io::Result<Vec<LocatedSyncmerHit>> {
+        if node_id == 0 || node_id > i32::MAX as u32 || cap == 0 {
+            return Ok(Vec::new());
+        }
+        let signed_node = node_id as i32;
+        let mut hits = self.locate_signed_node_occurrences_capped(signed_node, cap)?;
+        hits.extend(self.locate_signed_node_occurrences_capped(-signed_node, cap)?);
+        Ok(hits)
+    }
+
+    fn locate_signed_node_occurrences_capped(
+        &self,
+        signed_node: i32,
+        cap: u32,
+    ) -> io::Result<Vec<LocatedSyncmerHit>> {
+        let occurrence_count = self.signed_node_occurrence_count(signed_node)?;
+        if occurrence_count == 0 {
+            return Ok(Vec::new());
+        }
+        if occurrence_count <= cap {
+            return self.locate_signed_node_occurrence_range(signed_node, 0, occurrence_count);
+        }
+
+        // Sample `cap` evenly-spaced ranks so every path keeps coverage,
+        // then locate the sampled ranks in parallel chunks. A single node
+        // with millions of occurrences must not serialize the whole pool.
+        let stride = (occurrence_count as u64).div_ceil(cap as u64);
+        let ranks: Vec<u32> = (0..occurrence_count as u64)
+            .step_by(stride as usize)
+            .map(|r| r as u32)
+            .collect();
+        let chunk_size = (ranks.len() / rayon::current_num_threads().max(1)).max(64);
+        let chunk_results: Vec<io::Result<Vec<LocatedSyncmerHit>>> = ranks
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut out = Vec::new();
+                for &rank in chunk {
+                    out.extend(self.locate_signed_node_occurrence_range(
+                        signed_node,
+                        rank,
+                        rank + 1,
+                    )?);
+                }
+                Ok(out)
+            })
+            .collect();
+        let mut hits = Vec::new();
+        for chunk in chunk_results {
+            hits.extend(chunk?);
+        }
+        Ok(hits)
     }
 
     /// Build a region-specific GBWT from fetched sequences.

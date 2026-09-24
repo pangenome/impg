@@ -308,6 +308,45 @@ impl SyngImpgWrapper {
         }
     }
 
+    /// Map syng interval-only results into AdjustedInterval format.
+    ///
+    /// Used by transitive queries (partition discovery, similarity, refine):
+    /// these callers need homolog coverage, not per-syncmer anchors. The
+    /// interval path caps locate work per node and skips the anchor
+    /// Cartesian product, which otherwise explodes on low-complexity windows
+    /// (satellites, poly-N runs) — see [`syng::SyngIndex::query_region_intervals`].
+    fn query_via_syng_intervals(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+    ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let name = match self.seq_index.get_name(target_id) {
+            Some(n) => n,
+            None => return Ok(Vec::new()),
+        };
+        let intervals = self
+            .syng_index
+            .query_region_intervals(name, range_start as u64, range_end as u64, self.syng_padding)
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "syng query_region_intervals failed for {}:{}-{}: {}",
+                        name, range_start, range_end, e
+                    ),
+                )
+            })?;
+        Ok(intervals
+            .into_iter()
+            .filter_map(|iv| {
+                let id = self.seq_index.get_id(&iv.genome)?;
+                let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
+                Some((interval, vec![], interval))
+            })
+            .collect())
+    }
+
     fn query_via_syng_raw(
         &self,
         name: &str,
@@ -476,7 +515,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
-        self.query_via_syng(target_id, range_start, range_end)
+        self.query_via_syng_intervals(target_id, range_start, range_end)
     }
 
     fn query_transitive_bfs(
@@ -495,7 +534,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
-        self.query_via_syng(target_id, range_start, range_end)
+        self.query_via_syng_intervals(target_id, range_start, range_end)
     }
 
     fn get_or_load_tree(
