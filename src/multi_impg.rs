@@ -816,17 +816,14 @@ impl MultiImpg {
         } else {
             (0..self.seq_index.len() as u32)
                 .into_par_iter()
-                .map(|id| {
-                    let len = self.seq_index.get_len_from_id(id).unwrap_or(0);
-                    (id, SortedRanges::new(len as i32, 0))
-                })
+                .map(|id| (id, SortedRanges::new()))
                 .collect()
         };
 
         // Filter input range
         let filtered_input_range = visited_ranges
             .entry(target_id)
-            .or_default()
+            .or_insert_with(SortedRanges::new)
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
@@ -916,51 +913,19 @@ impl MultiImpg {
                 }
 
                 // Only add non-overlapping portions to the stack for further exploration
-                let ranges = visited_ranges.entry(query_id).or_insert_with(|| {
-                    let len = self.seq_index.get_len_from_id(query_id).unwrap_or(0);
-                    SortedRanges::new(len as i32, 0)
-                });
+                let ranges = visited_ranges
+                    .entry(query_id)
+                    .or_insert_with(SortedRanges::new);
 
-                let mut should_add = true;
+                let new_ranges = ranges.insert_with_boundary_snap(
+                    (adjusted_query_start, adjusted_query_end),
+                    min_distance_between_ranges,
+                );
 
-                // Check if the range is too close to any existing ranges
-                if min_distance_between_ranges > 0 {
-                    let (new_min, new_max) = (adjusted_query_start, adjusted_query_end);
-
-                    // Find insertion point in sorted ranges
-                    let idx = match ranges
-                        .ranges
-                        .binary_search_by_key(&new_min, |&(start, _)| start)
-                    {
-                        Ok(i) => i,
-                        Err(i) => i,
-                    };
-
-                    // Only need to check adjacent ranges due to sorting
-                    if idx > 0 {
-                        // Check previous range
-                        let (_, prev_end) = ranges.ranges[idx - 1];
-                        if (new_min - prev_end).abs() < min_distance_between_ranges {
-                            should_add = false;
-                        }
-                    }
-                    if idx < ranges.ranges.len() {
-                        // Check next range
-                        let (next_start, _) = ranges.ranges[idx];
-                        if (next_start - new_max).abs() < min_distance_between_ranges {
-                            should_add = false;
-                        }
-                    }
-                }
-
-                if should_add {
-                    let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
-
-                    // Add non-overlapping portions to stack
-                    for (new_start, new_end) in new_ranges {
-                        if (new_end - new_start).abs() >= min_transitive_len {
-                            stack.push_back((query_id, new_start, new_end, current_depth + 1));
-                        }
+                // Add non-overlapping portions to stack
+                for (new_start, new_end) in new_ranges {
+                    if (new_end - new_start).abs() >= min_transitive_len {
+                        stack.push_back((query_id, new_start, new_end, current_depth + 1));
                     }
                 }
             }

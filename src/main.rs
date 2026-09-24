@@ -4272,7 +4272,8 @@ struct TransitiveOpts {
     #[clap(long, value_parser)]
     min_transitive_len: Option<i32>,
 
-    /// Minimum distance between transitive ranges to consider on the same sequence
+    /// Minimum distance to an already-visited transitive range boundary below which the boundary is
+    /// snapped onto the new range, absorbing alignment boundary jitter while keeping novel territory
     #[arg(help_heading = "Transitive query options")]
     #[clap(long, value_parser, default_value_t = 10)]
     min_distance_between_ranges: i32,
@@ -6603,6 +6604,26 @@ fn run() -> io::Result<()> {
 
             // ─── Syng query path ──────────────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
+                // The syng backend has its own transitive machinery and does not
+                // honor the alignment-backend transitive options; warn rather
+                // than silently no-op them.
+                let mut ignored_transitive_opts: Vec<&str> = Vec::new();
+                if query.transitive_opts.transitive_dfs {
+                    ignored_transitive_opts.push("--transitive-dfs");
+                }
+                if query.transitive_opts.effective_min_transitive_len() != 101 {
+                    ignored_transitive_opts.push("--min-transitive-len");
+                }
+                if query.transitive_opts.min_distance_between_ranges != 10 {
+                    ignored_transitive_opts.push("--min-distance-between-ranges");
+                }
+                if !ignored_transitive_opts.is_empty() {
+                    warn!(
+                        "syng index input ignores these alignment-backend transitive options, which have no effect here: {}",
+                        ignored_transitive_opts.join(", ")
+                    );
+                }
+
                 // Validate that alignment files are NOT also provided
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
