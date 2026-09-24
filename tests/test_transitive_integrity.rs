@@ -765,3 +765,151 @@ fn test_transitive_depth_limit() {
     assert!(seq_names.contains("C"), "Should contain C at depth 2");
     assert!(!seq_names.contains("D"), "Should NOT contain D (depth 3)");
 }
+
+/// Test: --min-distance-between-ranges must absorb boundary jitter, not discard
+/// novel transitive ranges (issue #238).
+///
+/// Setup: A -> C (block 1: C:0-1000), A -> B -> C (block 2 on C), and D aligned
+/// inside block 2, so D is reachable only if block 2 is expanded from.
+///
+/// A 4 bp alignment of E onto C:1000-1004 sits exactly in the space between the
+/// two blocks: it is found only when block 2's explored range is snapped onto
+/// the visited block-1 boundary (start 1005 -> 1000). With the snapping
+/// disabled (threshold 0) or with the old rejecting check, the explored range
+/// starts at 1005 and E is only touched at an endpoint, so E never appears.
+/// With a 15 bp gap the threshold must NOT absorb, so E stays absent there too.
+#[test]
+fn test_min_distance_between_ranges_snaps_instead_of_discarding() {
+    // (label, second-block start/end on C, D alignment start/end on C,
+    //  E expected with the default threshold)
+    let cases: [(&str, i32, i32, i32, i32, bool); 3] = [
+        ("gap-5bp", 1005, 2005, 1605, 1905, true),   // 5 bp gap: snapped
+        ("gap-15bp", 1015, 2015, 1615, 1915, false), // 15 bp gap: not absorbed
+        ("overlap-5bp", 995, 1995, 1595, 1895, true), // 5 bp overlap: snapped
+    ];
+
+    for (label, second_start, second_end, d_start, d_end, e_expected) in cases {
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path().to_path_buf();
+
+        let alignments = [
+            "C\t3000\t0\t1000\t+\tA\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=".to_string(),
+            "B\t1000\t0\t1000\t+\tA\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=".to_string(),
+            format!("C\t3000\t{}\t{}\t+\tB\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=", second_start, second_end),
+            format!("D\t300\t0\t300\t+\tC\t3000\t{}\t{}\t300\t300\t60\tcg:Z:300=", d_start, d_end),
+            "E\t4\t0\t4\t+\tC\t3000\t1000\t1004\t4\t4\t60\tcg:Z:4=".to_string(),
+        ];
+        let paf_refs: Vec<&str> = alignments.iter().map(|s| s.as_str()).collect();
+        create_paf_file(&work_dir, "test.paf", &paf_refs);
+
+        let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
+        assert!(output.status.success(), "Index failed ({})", label);
+
+        // Default min-distance-between-ranges (10).
+        let output = run_impg(
+            &work_dir,
+            &[
+                "query", "-d", "0", "-i", "test.impg", "-a", "test.paf",
+                "-r", "A:0-1000", "-x", "-m", "0", "-o", "bed",
+            ],
+        )
+        .unwrap();
+        assert!(output.status.success(), "Query failed ({})", label);
+        let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
+
+        assert!(
+            results.iter().any(|(name, _, _, _)| name == "D"),
+            "D must be reached with the default threshold ({})",
+            label
+        );
+        assert_eq!(
+            results.iter().any(|(name, s, _, _)| name == "E" && *s == 0),
+            e_expected,
+            "E:0-4 presence must reflect boundary snapping ({})",
+            label
+        );
+
+        if label == "gap-5bp" {
+            // The visited-set snapping must not alter reported coordinates:
+            // the two C blocks stay exactly as projected.
+            let c_rows: Vec<(i32, i32)> = results
+                .iter()
+                .filter(|(name, _, _, _)| name == "C")
+                .map(|(_, s, e, _)| (*s, *e))
+                .collect();
+            assert_eq!(
+                c_rows,
+                vec![(0, 1000), (1005, 2005)],
+                "C block coordinates must be exact (gap-5bp)"
+            );
+
+            let output = run_impg(
+                &work_dir,
+                &[
+                    "query", "-d", "0", "-i", "test.impg", "-a", "test.paf",
+                    "-r", "A:0-1000", "-x", "-m", "0", "-o", "bed",
+                    "--min-distance-between-ranges", "0",
+                ],
+            )
+            .unwrap();
+            assert!(output.status.success(), "Query with snap disabled failed");
+            let rows = parse_query_output(&String::from_utf8_lossy(&output.stdout));
+            assert!(rows.iter().any(|(name, _, _, _)| name == "D"));
+            assert!(!rows.iter().any(|(name, _, _, _)| name == "E"));
+        }
+    }
+}
+
+#[test]
+fn test_snap_considers_both_visited_neighbors() {
+    let mut visited = impg::impg::SortedRanges::new();
+    visited.insert((0, 100));
+    visited.insert((105, 200));
+
+    assert_eq!(
+        visited.insert_with_boundary_snap((102, 103), 10),
+        vec![(100, 105)]
+    );
+    assert_eq!(visited.ranges, vec![(0, 200)]);
+}
+
+/// The user-requested range must never be snapped: A:5-500 must stay A:5-500
+/// regardless of --min-distance-between-ranges (issue #238 review).
+#[test]
+fn test_requested_range_coordinates_stay_exact() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path().to_path_buf();
+
+    let alignments = [
+        "C\t3000\t0\t1000\t+\tA\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=",
+        "B\t1000\t0\t1000\t+\tA\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=",
+        "C\t3000\t1005\t2005\t+\tB\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=",
+        "D\t300\t0\t300\t+\tC\t3000\t1605\t1905\t300\t300\t60\tcg:Z:300=",
+    ];
+    create_paf_file(&work_dir, "test.paf", &alignments);
+
+    let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
+    assert!(output.status.success(), "Index failed");
+
+    let output = run_impg(
+        &work_dir,
+        &[
+            "query", "-d", "0", "-i", "test.impg", "-a", "test.paf",
+            "-r", "A:5-500", "-x", "-m", "0", "-o", "bed",
+        ],
+    )
+    .unwrap();
+    assert!(output.status.success(), "Query failed");
+    let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
+
+    let a_rows: Vec<(i32, i32)> = results
+        .iter()
+        .filter(|(name, _, _, _)| name == "A")
+        .map(|(_, s, e, _)| (*s, *e))
+        .collect();
+    assert!(
+        !a_rows.is_empty() && a_rows.iter().all(|&(s, e)| s == 5 && e == 500),
+        "A:5-500 must not be extended to A:0-500; got {:?}",
+        a_rows
+    );
+}

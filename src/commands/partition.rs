@@ -249,19 +249,15 @@ pub fn partition_alignments(
     // Initialize masked regions
     let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index().len() as u32)
         .into_par_iter()
-        .map(|id| {
-            let len = impg.seq_index().get_len_from_id(id).unwrap();
-            (id, SortedRanges::new(len as i32, 0))
-        })
+        .map(|id| (id, SortedRanges::new()))
         .collect();
 
     // Initialize missing regions from sequence index
     let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index().len() as u32)
         .into_par_iter()
         .map(|id| {
-            let len = impg.seq_index().get_len_from_id(id).unwrap();
-            let mut ranges = SortedRanges::new(len as i32, 0);
-            ranges.insert((0, len as i32));
+            let mut ranges = SortedRanges::new();
+            ranges.insert((0, impg.seq_index().get_len_from_id(id).unwrap() as i32));
             (id, ranges)
         })
         .collect();
