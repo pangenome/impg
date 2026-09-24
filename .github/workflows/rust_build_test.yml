@@ -49,9 +49,26 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Companion binaries (wfmash, allwave, FastGA, ...) are compiled with
+      # CPU-specific optimizations (SIMD dispatch paths in WFA2-lib etc.)
+      # and live inside target/. Restoring them from a cache entry built on
+      # a runner with a different CPU makes them die with SIGILL at runtime
+      # (intermittent ubuntu-latest failures on smoke tests and lib tests).
+      # Scope the cache to the runner's CPU signature so a target/ built for
+      # one ISA class is never restored on another.
+      - name: Compute CPU signature for cache scoping
+        id: cpu_sig
+        run: |
+          if [[ "$(uname)" == "Linux" ]]; then
+            sig=$(grep -m1 '^flags' /proc/cpuinfo | md5sum | cut -d' ' -f1)
+          else
+            sig=$(sysctl -n machdep.cpu.brand_string | md5sum | cut -d' ' -f1)
+          fi
+          echo "sig=$sig" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust-${{ steps.cpu_sig.outputs.sig }}
           cache-bin: false
 
       - name: Build
