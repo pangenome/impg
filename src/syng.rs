@@ -7607,14 +7607,19 @@ mod tests {
     #[test]
     fn test_query_region_no_path_start_info() {
         let _guard = lock_syng();
-        // Build an index, then manually clear path_starts to simulate old format
+        // A path with no GBWT start info has no walkable syncmer steps —
+        // the normal state for a sequence shorter than w+k. The query must
+        // treat it as anchorless (empty result), not error out.
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
         let mut index = SyngIndex::build(params, vec![("seq1".to_string(), seq)].into_iter());
         index.name_map.path_starts[0] = None;
 
         let result = index.query_region("seq1", 0, 100, 0);
-        assert!(result.is_err(), "Should error when path_starts is missing");
+        assert!(
+            result.is_ok() && result.unwrap().is_empty(),
+            "Anchorless path should query to an empty result"
+        );
     }
 
     #[test]
