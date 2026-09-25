@@ -1,5 +1,8 @@
 use super::*;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
+use rustc_hash::FxHashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use storage::{Port, Seal};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -256,10 +259,35 @@ impl Graph {
         })
     }
 }
+/// Probe counters for the `Sources::fetch` memo (IMPG_DB only): total
+/// unmemoized fetches and memo hits, printed by callers that quote the
+/// boundary-endpoint stage.
+static PROBE_FETCH_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROBE_FETCH_MEMO_HITS: AtomicU64 = AtomicU64::new(0);
+static PROBE_FETCH_ON: OnceLock<bool> = OnceLock::new();
+fn probe_sources_fetch() -> bool {
+    *PROBE_FETCH_ON.get_or_init(|| std::env::var("IMPG_DB").is_ok())
+}
+/// (unmemoized fetches, memo hits) since process start; IMPG_DB probes only.
+pub fn sources_fetch_probe_stats() -> (u64, u64) {
+    (
+        PROBE_FETCH_CALLS.load(Ordering::Relaxed),
+        PROBE_FETCH_MEMO_HITS.load(Ordering::Relaxed),
+    )
+}
+
 pub struct Sources {
     indexes: Vec<UnifiedSequenceIndex>,
     chosen: Vec<usize>,
     pub lanes: Vec<(String, u64)>,
+    /// Memoized answers to small-crop `fetch` queries, keyed by the public
+    /// query (source, start, end). The boundary-endpoint derivation issues
+    /// ~100k short flank fetches through this path with heavily repeated
+    /// coordinates (shared segment heads across alleles of a partition);
+    /// source files are immutable during a run, so a memoized answer equals
+    /// the recomputed one bit for bit (the same argument as the port
+    /// `at_cut` memo). Large crops bypass the memo to bound its memory.
+    fetch_memo: Mutex<FxHashMap<(usize, u64, u64), Arc<Vec<u8>>>>,
 }
 impl Sources {
     pub fn open(paths: &[String], lanes: Vec<(String, u64)>) -> io::Result<Self> {
@@ -288,6 +316,7 @@ impl Sources {
             indexes,
             chosen,
             lanes,
+            fetch_memo: Mutex::new(FxHashMap::default()),
         })
     }
     pub fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
@@ -295,6 +324,25 @@ impl Sources {
             source < self.lanes.len() && start < end && end <= self.lanes[source].1,
             "invalid source crop",
         )?;
+        // Only small crops are memoized: the boundary flanks are ~150 bp and
+        // repeat heavily, while full-sequence spells are large and mostly
+        // distinct (memoizing them would waste RSS for no hits).
+        const FETCH_MEMO_MAX_CROP: u64 = 1024;
+        let memoizable = end - start <= FETCH_MEMO_MAX_CROP;
+        let key = (source, start, end);
+        if memoizable {
+            if let Ok(memo) = self.fetch_memo.lock() {
+                if let Some(dna) = memo.get(&key) {
+                    if probe_sources_fetch() {
+                        PROBE_FETCH_MEMO_HITS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Ok(dna.as_ref().clone());
+                }
+            }
+        }
+        if probe_sources_fetch() {
+            PROBE_FETCH_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
         let mut dna = self.indexes[self.chosen[source]].fetch_sequence(
             &self.lanes[source].0,
             start as i32,
@@ -308,6 +356,11 @@ impl Sources {
             "invalid source DNA",
         )?;
         dna.make_ascii_uppercase();
+        if memoizable {
+            if let Ok(mut memo) = self.fetch_memo.lock() {
+                memo.insert(key, Arc::new(dna.clone()));
+            }
+        }
         Ok(dna)
     }
     pub fn spell(&self, route: &Route, lo: u64, hi: u64) -> io::Result<Vec<u8>> {
@@ -344,6 +397,15 @@ impl Sources {
 pub struct Ports {
     root: PathBuf,
     verified: BTreeSet<usize>,
+    /// Open per-source port file handles, reused across lookups: re-opening
+    /// the file on every `at_cut`/`source_file` call dominated the seam
+    /// derivation stage (~100k opens on a tract slice). The port files are
+    /// immutable during a run, so handle reuse is behavior-identical.
+    files: BTreeMap<usize, File>,
+    /// Memoized `at_cut` answers keyed by the public query
+    /// (source, cut, reverse). Port files are immutable during a run, so the
+    /// memoized answer equals the recomputed one bit for bit.
+    at_cut_memo: BTreeMap<(usize, u64, bool), Option<Port>>,
     pub global: File,
 }
 impl Ports {
@@ -352,17 +414,88 @@ impl Ports {
         Ok(Self {
             root: root.into(),
             verified: BTreeSet::new(),
+            files: BTreeMap::new(),
+            at_cut_memo: BTreeMap::new(),
             global: File::open(root.join(&g.ports.path))?,
         })
     }
-    pub fn source_file(&mut self, g: &Graph, source: usize) -> io::Result<File> {
-        let lane = &g.lanes[source];
+    /// Component-local open for subrange smoke runs: skips the whole-artifact
+    /// global ports verification (an O(35 GB) FNV re-read) while keeping the
+    /// per-source lazy verification that actually guards seam lookups. The
+    /// global file is used only by the route search engine, never by the
+    /// genome smoke's per-cut `at_cut`/`forward_ports_inside` lookups.
+    pub fn open_without_global_verification(root: &Path, g: &Graph) -> io::Result<Self> {
+        Ok(Self {
+            root: root.into(),
+            verified: BTreeSet::new(),
+            files: BTreeMap::new(),
+            at_cut_memo: BTreeMap::new(),
+            global: File::open(root.join(&g.ports.path))?,
+        })
+    }
+    /// Cached per-source port file handle: verifies the source's port index
+    /// once, then keeps the handle open for reuse.
+    fn source_handle(&mut self, g: &Graph, source: usize) -> io::Result<&mut File> {
         if !self.verified.contains(&source) {
-            lane.ports.verify(&self.root)?;
+            g.lanes[source].ports.verify(&self.root)?;
             self.verified.insert(source);
         }
-        File::open(self.root.join(&lane.ports.path))
+        let path = self.root.join(&g.lanes[source].ports.path);
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.files.entry(source) {
+            entry.insert(File::open(&path)?);
+        }
+        Ok(self
+            .files
+            .get_mut(&source)
+            .expect("per-source port handle just inserted"))
     }
+    /// A duplicate of the cached per-source port file handle, positioned at
+    /// offset 0 so sequential readers see a fresh file exactly as the old
+    /// open-per-call behavior provided (dup vs open — same bytes; every
+    /// binary-search reader re-seeks explicitly anyway).
+    pub fn source_file(&mut self, g: &Graph, source: usize) -> io::Result<File> {
+        let mut file = self.source_handle(g, source)?.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+    pub fn forward_ports_inside(
+        &mut self,
+        g: &Graph,
+        source: usize,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<Port>> {
+        require(
+            source < g.lanes.len() && start < end && end <= g.lanes[source].length,
+            "invalid source port interval",
+        )?;
+        let mut file = self.source_file(g, source)?;
+        let first_anchor = start.saturating_add(1).saturating_sub(g.cut_offset);
+        let (mut lo, mut hi) = (0, g.lanes[source].port_count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let p = storage::port_at(&mut file, g.k as usize, mid)?;
+            if (p.anchor, p.reverse) < (first_anchor, false) {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        let mut result = Vec::new();
+        while lo < g.lanes[source].port_count {
+            let p = storage::port_at(&mut file, g.k as usize, lo)?;
+            let cut = p.anchor.saturating_add(g.cut_offset);
+            if cut >= end {
+                break;
+            }
+            if !p.reverse && start < cut {
+                result.push(p);
+            }
+            lo += 1;
+        }
+        Ok(result)
+    }
+
     pub fn at_cut(
         &mut self,
         g: &Graph,
@@ -370,29 +503,37 @@ impl Ports {
         cut: u64,
         reverse: bool,
     ) -> io::Result<Option<Port>> {
+        let key = (source, cut, reverse);
+        if let Some(answer) = self.at_cut_memo.get(&key) {
+            return Ok(answer.clone());
+        }
         let shift = if reverse {
             g.k - g.cut_offset
         } else {
             g.cut_offset
         };
         let Some(anchor) = cut.checked_sub(shift) else {
+            self.at_cut_memo.insert(key, None);
             return Ok(None);
         };
-        let mut file = self.source_file(g, source)?;
+        let file = self.source_handle(g, source)?;
         let (mut lo, mut hi) = (0, g.lanes[source].port_count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let p = storage::port_at(&mut file, g.k as usize, mid)?;
+            let p = storage::port_at(file, g.k as usize, mid)?;
             if (p.anchor, p.reverse) < (anchor, reverse) {
                 lo = mid + 1
             } else {
                 hi = mid
             }
         }
-        if lo == g.lanes[source].port_count {
-            return Ok(None);
-        }
-        let p = storage::port_at(&mut file, g.k as usize, lo)?;
-        Ok(((p.anchor, p.reverse) == (anchor, reverse)).then_some(p))
+        let answer = if lo == g.lanes[source].port_count {
+            None
+        } else {
+            let p = storage::port_at(file, g.k as usize, lo)?;
+            ((p.anchor, p.reverse) == (anchor, reverse)).then_some(p)
+        };
+        self.at_cut_memo.insert(key, answer.clone());
+        Ok(answer)
     }
 }

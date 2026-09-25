@@ -2,6 +2,7 @@
 pub mod calling;
 pub mod catalog;
 pub mod genotype;
+pub mod mem_records;
 pub mod joint;
 pub mod observations;
 pub mod panel_routes;

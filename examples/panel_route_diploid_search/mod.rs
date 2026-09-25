@@ -1,4 +1,6 @@
 //! Fixed two ordered whole-copy baselines; shared geometry, complete paired feedback.
+#[path = "genome.rs"]
+pub mod genome_wide;
 #[allow(dead_code)]
 #[path = "../panel_route_residual_search/mod.rs"]
 pub mod haploid;

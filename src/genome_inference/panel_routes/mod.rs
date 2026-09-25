@@ -13,7 +13,7 @@ use crate::{
 };
 pub use build::build;
 pub use evaluate::{Assignment, Evaluation, Evaluator, Route, Segment};
-pub use graph::{Family, Graph, Lane};
+pub use graph::{sources_fetch_probe_stats, Family, Graph, Lane, Ports, Sources};
 pub use search::{search, SearchBudget, SearchResult};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,6 +22,7 @@ use std::{
     io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+pub use storage::Port;
 pub const MODEL: &str = "panel-route-relative-poisson-v1";
 pub const VERSION: u32 = 1;
 pub const RULE: &str = "all-native-identity-end-pairings;all-donors;raw-view-coordinate-union;equal-oriented-full-DNA;cut=floor(k/2);positive-traversals;canonical-source-span-capacity-v1";

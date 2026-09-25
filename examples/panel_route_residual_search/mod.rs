@@ -411,7 +411,8 @@ impl<'a, 'b> Engine<'a, 'b> {
             tasks: &mut self.tasks,
             events: &mut self.events,
             unsupported_opposite_strand: &mut self.unsupported_opposite_strand,
-        }.step(t)?;
+        }
+        .step(t)?;
         if let Some(p) = proposal {
             self.confirm_candidate(p.base, p.region, p.guided, p.lo, p.hi, p.other, p.candidate)?;
         }

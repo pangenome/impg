@@ -9,7 +9,7 @@
 //! query space without changing the production scorer.
 use super::{ensure, invalid};
 use impg::{
-    genome_inference::{catalog, panel_routes as routes, sample},
+    genome_inference::{catalog, mem_records, panel_routes as routes},
     graph::reverse_complement,
     sample_mem_bwt::{canonical, WeightedBwt},
     syng::SyngIndex,
@@ -148,13 +148,29 @@ pub fn add_record_subwalks(
     record: &[u64],
     max_features: usize,
 ) -> io::Result<()> {
+    add_record_subwalks_weighted(profile, record, 1, max_features)
+}
+
+/// Weighted form used by event-compressed replay. `multiplicity` is the exact
+/// number of consecutive read starts represented by one invariant MEM query.
+pub fn add_record_subwalks_weighted(
+    profile: &mut Profile,
+    record: &[u64],
+    multiplicity: u64,
+    max_features: usize,
+) -> io::Result<()> {
     ensure(
-        !record.is_empty() && record.len() % 2 == 1,
-        "invalid maximal MEM token record",
+        !record.is_empty() && record.len() % 2 == 1 && multiplicity > 0,
+        "invalid weighted maximal MEM token record",
     )?;
     for start in (0..record.len()).step_by(2) {
         for end in (start..record.len()).step_by(2) {
-            add(profile, canonical(&record[start..=end]), 1, max_features)?;
+            add(
+                profile,
+                canonical(&record[start..=end]),
+                multiplicity,
+                max_features,
+            )?;
         }
     }
     Ok(())
@@ -163,7 +179,7 @@ pub fn add_record_subwalks(
 pub fn profile_read(panel: &SyngIndex, read: &[u8], max_features: usize) -> io::Result<Profile> {
     feature_cap(max_features)?;
     let mut profile = Profile::new();
-    for record in sample::canonical_mem_records(panel, read)? {
+    for record in mem_records::canonical_mem_records(panel, read)? {
         add_record_subwalks(&mut profile, &record, max_features)?;
     }
     Ok(profile)
@@ -509,7 +525,7 @@ impl ScoreModel {
             "invalid partition score normalization",
         )
     }
-    fn loss(&self, q: u64, observed: u64) -> io::Result<f64> {
+    pub fn loss(&self, q: u64, observed: u64) -> io::Result<f64> {
         self.validate()?;
         ensure(observed <= 1 << 53, "partition observation precision")?;
         // Mirror the exact scorer's precision bound on the q*histogram product
@@ -1317,7 +1333,7 @@ mod tests {
     fn sample_bwt(panel: &SyngIndex, reads: &[Vec<u8>]) -> WeightedBwt {
         let mut records = BTreeMap::new();
         for read in reads {
-            for record in sample::canonical_mem_records(panel, read).unwrap() {
+            for record in mem_records::canonical_mem_records(panel, read).unwrap() {
                 *records.entry(record).or_insert(0u64) += 1;
             }
         }
