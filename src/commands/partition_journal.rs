@@ -38,7 +38,18 @@ use std::time::{Duration, Instant};
 
 const FILE_MAGIC: &[u8; 8] = b"IMPGPJ01";
 const REC_MAGIC: u32 = 0x5057_4A31; // "PWJ1"
-const SYNC_EVERY: Duration = Duration::from_secs(60);
+/// Seconds between flush+fsync of the journal: a hard kill loses at most this
+/// much work. IMPG_PARTITION_JOURNAL_SYNC_SECS overrides it -- the resume test
+/// needs it short, because with kills shorter than the interval nothing is ever
+/// flushed and every restart silently begins from zero (which is what the
+/// first version of that test measured).
+fn sync_every() -> Duration {
+    let secs = std::env::var("IMPG_PARTITION_JOURNAL_SYNC_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60);
+    Duration::from_secs(secs)
+}
 
 fn fnv1a(bytes: &[u8], mut h: u64) -> u64 {
     for b in bytes {
@@ -69,6 +80,7 @@ pub struct Journal {
     good_offset: u64,
     writer: Option<BufWriter<File>>,
     last_sync: Instant,
+    sync_every: Duration,
     pub replayed_windows: u64,
     pub appended_windows: u64,
 }
@@ -98,6 +110,7 @@ impl Journal {
                 good_offset: good,
                 writer: Some(BufWriter::with_capacity(8 << 20, writer)),
                 last_sync: Instant::now(),
+                sync_every: sync_every(),
                 replayed_windows: 0,
                 appended_windows: 0,
             }));
@@ -134,6 +147,7 @@ impl Journal {
             good_offset: good,
             writer: None,
             last_sync: Instant::now(),
+            sync_every: sync_every(),
             replayed_windows: 0,
             appended_windows: 0,
         }))
@@ -215,7 +229,7 @@ impl Journal {
         let w = self.writer.as_mut().expect("journal writer");
         w.write_all(&buf)?;
         self.appended_windows += 1;
-        if self.last_sync.elapsed() >= SYNC_EVERY {
+        if self.last_sync.elapsed() >= self.sync_every {
             self.sync()?;
         }
         Ok(())
