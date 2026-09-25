@@ -271,6 +271,45 @@ pub fn partition_alignments(
 
     info!("Partitioning");
 
+    // Write-ahead journal, only when IMPG_PARTITION_JOURNAL is set. The header
+    // is everything that shapes the partition: resuming under any other value
+    // of it would replay one run's masks into another run.
+    let mut journal = {
+        let seqfp = super::partition_journal::seq_index_fingerprint(
+            (0..impg.seq_index().len() as u32).map(|id| {
+                (
+                    impg.seq_index().get_name(id).unwrap_or("").to_string(),
+                    impg.seq_index().get_len_from_id(id).unwrap_or(0),
+                )
+            }),
+        );
+        let header = format!(
+            "impg={} w={} sel={} d={} minid={:?} mms={} mbd={} dfs={} depth={} mtl={} mdr={} \
+             approx={} start={:?} rehome={} fmt={} sep={} nseq={} total={} seqfp={:016x} tag={}",
+            env!("CARGO_PKG_VERSION"),
+            window_size,
+            selection_mode,
+            merge_distance,
+            min_identity,
+            min_missing_size,
+            min_boundary_distance,
+            transitive_dfs,
+            max_depth,
+            min_transitive_len,
+            min_distance_between_ranges,
+            approximate_mode,
+            starting_sequences_file,
+            rehome_singletons,
+            output_format,
+            separate_files,
+            impg.seq_index().len(),
+            total_sequence_length,
+            seqfp,
+            std::env::var("IMPG_PARTITION_JOURNAL_TAG").unwrap_or_default(),
+        );
+        super::partition_journal::Journal::from_env(&header)?
+    };
+
     // Force-progress bookkeeping: if a round emits no partitions and the
     // next selection replays the exact same windows, the selected region has
     // no homologs the backend can see (e.g. low-complexity sequence the
@@ -364,62 +403,88 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = if transitive_dfs {
-                impg.query_transitive_dfs(
-                    seq_id,
-                    start,
-                    end,
-                    Some(&masked_regions),
-                    max_depth,
-                    min_transitive_len,
-                    min_distance_between_ranges,
-                    None,  // No min_output_length for partition
-                    false, // Don't store CIGAR strings during partitioning
-                    min_identity,
-                    sequence_index,
-                    approximate_mode,
-                    None, // No subset filter for partition
-                )?
-            } else {
-                impg.query_transitive_bfs(
-                    seq_id,
-                    start,
-                    end,
-                    Some(&masked_regions),
-                    max_depth,
-                    min_transitive_len,
-                    min_distance_between_ranges,
-                    None,  // No min_output_length for partition
-                    false, // Don't store CIGAR strings during partitioning
-                    min_identity,
-                    sequence_index,
-                    approximate_mode,
-                    None, // No subset filter for partition
-                )?
+            // Journal replay (IMPG_PARTITION_JOURNAL): a window a killed run already
+            // queried takes its pre-mask overlaps from the journal instead of the
+            // index. Everything from masking on runs unchanged, so the state it
+            // rebuilds is the state the killed run had. Targets are not journaled:
+            // masking only rescales them and nothing downstream reads them.
+            let replayed = match journal.as_mut() {
+                Some(j) => j.take_replay(seq_id, start, end)?,
+                None => None,
             };
-            //let query_time = query_start.elapsed();
-            debug!("  Collected {} query overlaps", overlaps.len());
+            let mut overlaps = if let Some(ivs) = replayed {
+                ivs.into_iter()
+                    .map(|q| {
+                        let t = Interval { first: q.first, last: q.last, metadata: q.metadata };
+                        (q, Vec::new(), t)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                let mut overlaps = if transitive_dfs {
+                    impg.query_transitive_dfs(
+                        seq_id,
+                        start,
+                        end,
+                        Some(&masked_regions),
+                        max_depth,
+                        min_transitive_len,
+                        min_distance_between_ranges,
+                        None,  // No min_output_length for partition
+                        false, // Don't store CIGAR strings during partitioning
+                        min_identity,
+                        sequence_index,
+                        approximate_mode,
+                        None, // No subset filter for partition
+                    )?
+                } else {
+                    impg.query_transitive_bfs(
+                        seq_id,
+                        start,
+                        end,
+                        Some(&masked_regions),
+                        max_depth,
+                        min_transitive_len,
+                        min_distance_between_ranges,
+                        None,  // No min_output_length for partition
+                        false, // Don't store CIGAR strings during partitioning
+                        min_identity,
+                        sequence_index,
+                        approximate_mode,
+                        None, // No subset filter for partition
+                    )?
+                };
+                //let query_time = query_start.elapsed();
+                debug!("  Collected {} query overlaps", overlaps.len());
 
-            // Ignore CIGAR strings and target intervals.
-            //debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
-            //let merge_start = Instant::now();
-            merge_overlaps(&mut overlaps, merge_distance);
-            //let merge_time = merge_start.elapsed();
-            debug!(
-                "  Collected {} query overlaps after merging those closer than {}bp",
-                overlaps.len(),
-                merge_distance
-            );
-
-            //let extend_start = Instant::now();
-            if min_boundary_distance > 0 {
-                //debug!("  Extending short intervals");
-                extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
+                // Ignore CIGAR strings and target intervals.
+                //debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
+                //let merge_start = Instant::now();
+                merge_overlaps(&mut overlaps, merge_distance);
+                //let merge_time = merge_start.elapsed();
                 debug!(
-                    "  Collected {} query overlaps after extending those close to boundaries",
-                    overlaps.len()
+                    "  Collected {} query overlaps after merging those closer than {}bp",
+                    overlaps.len(),
+                    merge_distance
                 );
-            }
+
+                //let extend_start = Instant::now();
+                if min_boundary_distance > 0 {
+                    //debug!("  Extending short intervals");
+                    extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
+                    debug!(
+                        "  Collected {} query overlaps after extending those close to boundaries",
+                        overlaps.len()
+                    );
+                }
+                if let Some(j) = journal.as_mut() {
+                    let ivs: Vec<Interval<u32>> = overlaps
+                        .iter()
+                        .map(|(q, _, _)| Interval { first: q.first, last: q.last, metadata: q.metadata })
+                        .collect();
+                    j.append(seq_id, start, end, &ivs)?;
+                }
+                overlaps
+            };
             //let extend_time = extend_start.elapsed();
 
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
@@ -647,6 +712,10 @@ pub fn partition_alignments(
             )?;
         }
         last_round_windows = Some(round_windows);
+    }
+
+    if let Some(j) = journal.as_mut() {
+        j.finish()?;
     }
 
     // Convert temporary BED files to graph/MAF if needed
