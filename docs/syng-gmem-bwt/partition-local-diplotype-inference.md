@@ -147,7 +147,7 @@ rewriting production scoring:
 2. register at least all public candidate-derived five-token patterns, and in the
    experiment every node-to-node subwalk through the full maximal record;
 3. replay complete ranged starts and complete reconstructed sequences through
-   `sample::canonical_mem_records`;
+   `mem_records::canonical_mem_records`;
 4. obtain each observation with `WeightedBwt::count(key)`;
 5. dynamically retain candidate-positive/sample-zero terms rather than dropping
    unsupported positives; and
@@ -281,7 +281,7 @@ graph route as a locus.
 3. Fetch and orient that exact sequence subrange; reject invalid or incomplete
    source bindings.
 4. Profile every complete L150 start wholly within the subrange directly through
-   `sample::canonical_mem_records` and variable-length subwalk accumulation.
+   `mem_records::canonical_mem_records` and variable-length subwalk accumulation.
 5. Enumerate public physically compatible adjacent interval pairs and profile only
    complete L150 windows crossing their concatenated seam.
 6. Enforce this slice's decomposition precondition: every typed interval has
@@ -490,22 +490,212 @@ and backpointer storage. They must not erase physical continuations.
 
 ## Resource discipline
 
-The existing paired-search ceilings remain unchanged: 4M work, 8M profile work,
-2,048 complete paired scores, 4,096 public haploid scores, 128 MiB logical state,
-50,000 features, and 64 segments, together with the other existing host limits.
-Local partial-score operations require explicit accounting; they are not hidden
-complete scores. Exact global rescoring consumes the existing paired/public-score
-budgets normally.
+The reviewed finite prototype keeps its original ceilings unchanged: 4M work,
+8M profile work, 2,048 complete paired scores, 4,096 public haploid scores,
+128 MiB logical state, 50,000 features per materialized structure, and 64
+segments. The separate genome experiment has a documented 600,000,000
+MEM-query-run ceiling. This corrects the earlier prototype-scale mistake of
+applying the finite 8M meter globally: one exhaustive public pass is estimated at
+about 500M event runs, while comparable existing machinery processed 2.17B events
+in about 70 minutes. Genome accounting reports each locus, each boundary, and the
+global total; exceeding 600M stops incomplete. It does not alter production or
+the finite module.
 
 Use at most four threads, CPUs 252–255 at nice 10, Cargo
 `--offline --locked --release -j4`, and serialized tests. A bounded stop reports
 incomplete search. It never becomes evidence of infeasibility or exhaustive
 support.
 
-If whole-yeast local combination counts exceed the work ceiling, first exploit
-exact profile equivalence for arithmetic reuse while retaining all physical
-members. Do not respond by choosing a nearest donor, dropping count-equivalent
-continuations, raising the cap, or weakening the feature space.
+## Genome-scale experimental path
+
+`examples/panel_route_diploid_search/genome.rs` loads the public reference axis
+and BED3 catalog groups, preserves occurrence, source coordinates, multiplicity,
+and orientation, and permits contiguous same-source traversals plus cross-source
+seams whose verified production exit/entry port words match exactly. A bounded,
+truth-free refinement can also replace one forward interval with a two-segment
+spanning traversal: an occurrence-local prefix joined to another occurrence's
+suffix at equal interior production port words. Blocks are expanded from reported
+owned-feature margins, with selected classes retained in the top-K scope. Cuts are
+ranked by the complete composed traversal profile (prefix interior + suffix
+interior + internal seam) jointly with the locus's public native allele, retaining
+top-N per ordered occurrence pair plus every exact best-loss tie. The physical
+beam is configurable (`--beam-width`, default 1024) and remains subject to the
+128 MiB logical-state cap. Each boundary is filled globally into one bounded
+physical-ledger layer; there are no per-state successor quotas or local-loss early
+stops once cumulative scores are in use. Physical boundary links sharing exact
+oriented L149 endpoint sequences reference
+one composed seam profile, so expansion never profiles physical member pairs.
+Either truncation makes the run explicitly `bounded_refined`, never exact. A
+configurable RSS guard defaults to 16 GiB and emits stage/allocation diagnostics
+before aborting. Interior and seam profiles use event-compressed
+complete L150 replay. One full canonical
+maximal-MEM query is made per invariant run and every odd-length node-to-node
+subwalk contribution is multiplied by the run length. Sealed append-only caches
+are keyed by physical occurrence and orientation. A parity regression compares
+event compression against exhaustive per-window replay.
+
+Feature incidence is classified in deterministic shards, so no materialized
+incidence or scoring structure exceeds 50,000 keys. The bounded merger carries a
+persistent cumulative joint-count profile as an `Arc` parent plus an interned
+sparse locus/seam delta. Every transition applies the exact Poisson difference
+`loss(q_old + delta) - loss(q_old)`, including shared and Deferred features.
+Identical cumulative profiles with identical conflict-window suffixes merge only
+for search, after exact profile equality verification; physical histories remain
+distinct tie backpointers. Logical-state charging counts each reachable shared
+node and delta once rather than charging duplicated complete maps.
+
+The merger is exact min-plus DP over ordered physical exit pairs, with arithmetic
+cached by exact interior-profile and seam-signature classes. Boundary arithmetic
+adds both copy counts before one Poisson loss,
+and both homolog matchings arise from the two ordered continuations. Backpointers
+retain equal-score predecessor sets; a 2,048-alternative overflow is explicit
+`complete=false`, never silent pruning. Before chaining, the audit reports each
+exit-signature `E_i`, `E_i^2 E_{i+1}^2`, and the maximum locus distance `W` of
+candidate same-source overlap. `W=0` makes the current physical exit pair a
+sufficient resource state. For nonzero `W`, the experimental path retains exact
+in-chain overlap eligibility in a conflict-window history and applies the configured
+beam only when required; it always reports bounded/incomplete and counts both
+dropped cutoff ties and dropped non-ties. Internally overlapping two-segment
+traversals are rejected before admission to the initial or successor layer.
+
+The incidence pre-pass stores only two hashes and compact location state per key.
+A detected primary-hash collision is wholly deferred. Profiles are loaded one
+locus at a time from an offset-indexed sealed JSONL cache, then discarded. Sample
+counts are queried lazily and retained in 256 bounded hash shards. Complete-copy
+rescoring emits at most 50,000-key sorted runs, merges them with fan-in 16, sums
+the two copies per key, and performs one final Poisson loss.
+
+The chrI exhaustive profile preflight completed all 8,944 oriented alleles in
+11,172,346 MEM-query runs (80,158,038 integrated windows), only 1.40% above the
+previous 8M early-stop average per allele and therefore below the owner’s 2x
+review threshold. The occurrence-keyed chrI audit measured 11,225,933 executed
+runs including 2,871 seams. Its exit-class counts were
+`[2,2,3,22,30,26,49,30,24,23,25,52,31,30,17,3,10,15,34,2,51]`, the largest
+`E_i^2 E_{i+1}^2` was 2,598,544, and `W=0`. The eight-partition 80 kb control now
+runs through the exact DP and completes without beam pruning. The streaming chrI
+gate initially completed in 894.38 seconds with 1,794,012 KiB peak RSS. Preparing
+owned profile classes once and scoring their Cartesian products on three Rayon
+workers reduced the same exact run to 59.60 seconds with 1,904,004 KiB peak RSS:
+input 5.95 s, cache index 3.41 s, streamed interior incidence 12.70 s, seams
+0.06 s, exact DP 26.74 s, and external final rescore 10.65 s. The optimized run
+retained one exact physical pair, used
+721,174 feature hashes with 20,234 deferred and zero detected collisions, and
+rescored 860 bounded runs / 61,892 MEM-query runs to
+`-1286625.6161305453` for chrI. Both reconstructed routes are the complete public
+S288C chrI source interval and pass coordinate-seam/span validation. A
+current-source route-artifact rebuild completed. Current-source evaluation of the
+unchanged S288C family-216 assignment is `-10525297.667494176`; the historical
+artifact objective is retired because that artifact records an unreviewed WIP
+compiler identity. Lanes 0--3 and S288C lanes 9564--9567 have byte-identical
+native totals across the artifacts, and registry/ownership seals are also
+identical, localizing the change to current evaluator semantics rather than
+native-profile compilation.
+
+The resumed chromosome-reset whole-axis run completed all 17 components in
+4:00:06 with 3,508,952 KiB peak RSS and 538,106,401 new profile-query runs, below
+the 600M ceiling. Ten `W=0` components used exact min-plus DP. Seven components
+(chrIII, chrIV, chrX, chrXII, chrXIII, chrXV, chrXVI) used the approved bounded
+conflict-window policy (`W=2..82`) and therefore remain explicitly incomplete,
+even though completion-viability filtering made every dropped-tie and dropped
+non-tie counter zero in this run. One external sorted-run merge over all 17
+chromosomes and both copies produced full-subwalk loss `-34233513.67185511`.
+Matched native and assessment-only truth duplicate-pair rescoring on the rebuilt
+artifact produced `-34260135.38842692` and `-34133457.58802463`, respectively.
+The chain did not recover the chrIII SK1 tract: both selected chrIII copies are
+native S288C source 9564 over `[0,341580)`. Moreover, only chain copy 1 passes the
+authoritative production Evaluator; copy 0 fails native endpoint pairing because
+several full public-axis donor routes are not legal production route assignments.
+The external score is thus an experimental physical-copy score, not a validated
+production pair objective.
+
+## The sufficiency principle (logged 2026-09, from the owner's formulation)
+
+The controlling design rule for all search and scoring layers, distilled from the
+campaign's measured failures and fixes:
+
+**We never need to score all possible pairs — only a sufficient set. Two
+candidates are interchangeable until some evidence can distinguish them, and the
+MEM structure itself defines where evidence exists at all.**
+
+The evidence is symmetric MEM-finding: haplotype-haplotype MEMs are what the
+pangenome graph is *built from* (syng), and read-haplotype MEMs are what the
+sample index stores (`sample.membwt`). They are the same object class. Their
+intersection with a decision defines the sufficient scoring set: a feature can
+discriminate a pair only if (a) the candidates' predicted counts differ on it
+AND (b) it has observations. Features with no observations, or identical
+predictions across candidates, cancel in every comparison — scoring them is
+pure waste. Candidates with identical profiles are one class — enumerating
+their members separately is pure waste. Pairs provably unable to beat the
+incumbent are decided — expanding them is pure waste.
+
+The campaign's three measured collapses were this one principle applied at
+three layers, each with its measured win:
+
+1. **Feature sufficiency** (the telescoped extend): features with q_old = 0
+   contribute per-feature *constants* — per-state arithmetic is needed only on
+   the overlap set (features the state has touched). Measured: 240 µs/extend →
+   40–60 ns per delta feature.
+2. **Candidate/class sufficiency** (byte-identical class dedup; top-N +
+   exact-best-ties admission; tie-sets retained as sets, never physically
+   enumerated): measured 38M physical seams → 1,204 endpoint classes; 4.88B
+   transition instances → 0.67M folded edges.
+3. **Decision sufficiency** (seed incumbent + admissible bounds): check pairs
+   only until optimality is *proven* — the search's job is proof, not
+   discovery (the slice's greedy incumbent was already optimal to 5e-9).
+
+The corresponding **failure mode**, also measured three times: any new path
+that re-instantiates search in unfolded form (per-state × per-feature ×
+per-physical-pair arithmetic) reintroduces the explosion — the composition
+explosion, the 5.3B-transition DP, and the routed-DP c14 run (492M dropped
+non-ties, 42 min) were all the same disease arriving through fresh code.
+
+**Structural obligation:** the folded search must be a shared engine that
+consumes (evidence, candidates) as inputs. No integration path may instantiate
+its own DP over physical pairs. Any new evidence layer (including the MEM-routed
+collection) must feed the shared folded engine, never re-implement scoring.
+
+## The block model (logged 2026-09, from the owner's formulation; companion to the sufficiency principle)
+
+The evidence architecture, stated in one object hierarchy:
+
+1. **Blocks** are the maximal shared segments between haplotypes — which is
+   what the pangenome graph already encodes. The panel's compression IS the
+   block set; a "deeply covering set of MEMs or blocks" over the haplotype set
+   is the graph's own segment/occurrence structure. No new structure to
+   invent: the territory index and geometric-q derivation already consume
+   panel segments this way, and candidates are paths over blocks.
+2. **Read MEMs against blocks** are what `sample.membwt` already stores
+   (read-vs-panel maximal MEM records, canonical subwalks). The missing base
+   data type is a first-class **read-to-block index**: every read mapped to
+   the blocks it matches, with offsets and orientations, built ONCE per
+   sample. It replaces the per-run sample-record re-derivation (the measured
+   5.8–13 s API gap), compresses evidence finding to block-local lookups,
+   and — because a read spanning two blocks carries their adjacency with
+   offsets — it also stores the within-read MEM adjacency that the
+   evidence-topology scout independently proved is required for junction
+   detection. One base type fixes three known problems: the API gap, evidence
+   compression, and junction observability.
+3. **Candidates are paths over blocks**; predicted counts derive from geometry
+   (Gate 1 validated: geometric q vs the profile_read oracle, every residual
+   diff classified, decision-level effect <= 2.1% with direction unchanged).
+4. **The search runs on block-level sufficiency** through the shared folded
+   engine (the structural obligation above): per-block observed support,
+   per-class-pair constants, O(overlap) extends, proof-by-incumbent. No path
+   may re-instantiate unfolded search.
+
+**The one open design choice**: block granularity — deep coverage (few large
+blocks) maximizes compression but loses variant resolution at boundaries;
+shallow (many small blocks) the reverse. It is a measurable tradeoff (score
+resolution vs block count), not an open research problem; the k63 anchor
+length sets the floor and the current BED/segment structure is one point in
+the space.
+
+**Status (2026-09)**: pieces 1, 3, 4 exist and are validated (routed slice
+25.2 s zero-cache; routing 0.4 s; geometric profiles 4.5 s; exit-cut decision
+preserved in all model variants). Piece 2 (the read-to-block index as a base
+type) is queued. The routed-DP port of the folded engine is in flight; the
+42-minute c14 run was the unfolded-search failure mode, not a property of the
+block model.
 
 ## Explicit non-goals for this slice
 
