@@ -77,8 +77,8 @@
 
 use super::{
     build_spine_boundary_draft, class_locus_alleles, class_pair_index, draft_feature_set,
-    exhaustive_local_sweep, finalize_spine_boundary, scorable_classes, spine_viability,
-    LocusClassing, LocusSweep, SpineBoundary, SpineBoundaryDraft,
+    exhaustive_local_sweep, finalize_spine_boundary, scorable_classes, seam_swings_of,
+    spine_viability, LocusClassing, LocusSweep, SpineBoundary, SpineBoundaryDraft,
 };
 use super::junction::JunctionSpanIndex;
 use crate::*;
@@ -2625,6 +2625,7 @@ pub(in super) fn run_correlation_phasing(
         successors_ref[boundary] = boundaries[boundary].successors.clone();
     }
     *viable = spine_viability(ranges, successors_ref);
+    let seam_swings = seam_swings_of(sweeps.len(), successors_ref, viable);
     for &locus in &augmented {
         sweeps[locus] = exhaustive_local_sweep(
             &folded[locus],
@@ -2633,6 +2634,7 @@ pub(in super) fn run_correlation_phasing(
             &viable[locus],
             Some(backbone_chain[locus]),
             model,
+            seam_swings[locus],
             &locus_classes[locus].class_charges,
             &scorable_classes(&locus_classes[locus], &ranges[locus]),
         )?;

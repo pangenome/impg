@@ -98,13 +98,32 @@ pub struct ReadChains {
 }
 
 /// Derive the per-read chains and canonical record multiset in one pass over
-/// the base reads. `expected` carries the sample index's stats; the derived
-/// multiset must match it exactly (the record re-derivation guarantee).
+/// the base reads (the process-wide anchor scheme; see
+/// `derive_read_chains_scheme` for the scheme-conditioned guards).
 pub fn derive_read_chains(
     panel: &SyngIndex,
     reads: &[Vec<u8>],
     expected: &sample::SampleStats,
     rss: &mut genome::PeriodicRssGuard,
+) -> io::Result<ReadChains> {
+    derive_read_chains_scheme(panel, reads, expected, rss, mem_records::anchor_scheme())
+}
+
+/// `derive_read_chains` with an explicit anchor scheme. Under `Syng` the
+/// re-derived record multiset is pinned to the stored sample index's stats
+/// (the re-derivation consistency guards). Under `Canonical` the record
+/// set legitimately differs (the canonical qualification changes anchor
+/// positions, hence MEM boundaries and multiplicities — the scheme of
+/// record for the collapsed index), so the stored-scheme totals are not a
+/// valid guard; only the reads-count identity and internal self-consistency
+/// hold (the sample index remains base data for the read-length histogram,
+/// and the stored-count pooled diagnostics are quarantined as non-gate).
+pub fn derive_read_chains_scheme(
+    panel: &SyngIndex,
+    reads: &[Vec<u8>],
+    expected: &sample::SampleStats,
+    rss: &mut genome::PeriodicRssGuard,
+    scheme: mem_records::AnchorScheme,
 ) -> io::Result<ReadChains> {
     ensure(reads.len() as u64 == expected.reads, "reads count mismatch")?;
     let mut record_index: BTreeMap<Vec<u64>, u32> = BTreeMap::new();
@@ -118,7 +137,7 @@ pub fn derive_read_chains(
         let per_read: Vec<(Vec<(Vec<u64>, bool, u32, u32)>, Vec<Vec<(i32, u64)>>)> = chunk
             .par_iter()
             .map(|read| {
-                let tagged = mem_records::tagged_mem_records(panel, read)?;
+                let tagged = mem_records::tagged_mem_records_scheme(panel, read, scheme)?;
                 let mut entries: Vec<(Vec<u64>, bool, u32, u32)> =
                     Vec::with_capacity(tagged.len());
                 let mut walks: Vec<Vec<(i32, u64)>> = Vec::with_capacity(tagged.len());
@@ -184,11 +203,13 @@ pub fn derive_read_chains(
         }
     }
     let total: u64 = record_counts.iter().sum();
-    ensure(total == expected.mem_records, "re-derived MEM record total mismatch")?;
-    ensure(
-        record_tokens.len() == expected.distinct_mems,
-        "re-derived distinct MEM mismatch",
-    )?;
+    if scheme == mem_records::AnchorScheme::Syng {
+        ensure(total == expected.mem_records, "re-derived MEM record total mismatch")?;
+        ensure(
+            record_tokens.len() == expected.distinct_mems,
+            "re-derived distinct MEM mismatch",
+        )?;
+    }
     Ok(ReadChains {
         chains,
         record_tokens,

@@ -481,8 +481,20 @@ pub(super) struct LocusSweep {
     /// Admissible per-locus floor: what the locus's own observations can
     /// explain at best (`locus_min_pair_lower_bound_folded`).
     pub(super) floor: f64,
-    /// [min, q25, median, q75, max] of the class-pair loss distribution.
+    /// [min, q25, median, q75, max] of the class-pair loss distribution
+    /// over the EXACTLY scored pairs (the admissibly-pruned beyond-margin
+    /// mass is excluded; see `bound_pruned_pairs`).
     pub(super) quantiles: Vec<f64>,
+    /// STEP-3 admissible-bound pruning: pairs whose derived lower bound
+    /// provably exceeds the locus's retention margin (min viable pair loss
+    /// + the adjacent seam-evidence swing — the DP's own retention rule),
+    /// so their exact values are never computed; their table entries carry
+    /// +INFINITY (the DP's non-retained path reads no value from them).
+    pub(super) bound_pruned_pairs: u64,
+    /// The retention margin the prune used (admissible, data-derived; equals
+    /// the DP's `compute_local_margins` value bit-for-bit: the locus's
+    /// min viable pair loss + the adjacent seam swings).
+    pub(super) prune_margin: f64,
     /// Exact best over VIABLE class pairs (the chaining-relevant winner).
     pub(super) best_viable_loss: f64,
     pub(super) best_viable_class_pairs: Vec<[usize; 2]>,
@@ -493,6 +505,49 @@ pub(super) struct LocusSweep {
 /// tie set, and the native pair's position. Class-pair granularity is exact
 /// over allele pairs (profile-identical alleles are one class — the
 /// sufficiency principle); allele-pair counts are reported alongside.
+/// Per-locus adjacent seam-evidence swings (both boundaries' [max-min]
+/// over viable-linked class seams) — the STEP-3 sweep prune's admissible
+/// margin input, identical to `compute_local_margins`' swing and the
+/// phasing rebuild's `local_seam_swing_margins` swing.
+pub(super) fn seam_swings_of(
+    locus_count: usize,
+    successors: &[Vec<Vec<(usize, f64)>>],
+    viable: &[Vec<bool>],
+) -> Vec<f64> {
+    let extremes: Vec<(f64, f64)> = successors
+        .iter()
+        .enumerate()
+        .map(|(boundary, lists)| {
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for (left, list) in lists.iter().enumerate() {
+                if !viable[boundary][left] {
+                    continue;
+                }
+                for &(right, score) in list {
+                    if viable[boundary + 1][right] {
+                        min = min.min(score);
+                        max = max.max(score);
+                    }
+                }
+            }
+            (min, max)
+        })
+        .collect();
+    (0..locus_count)
+        .map(|locus| {
+            let mut swing = 0.0f64;
+            if locus > 0 {
+                swing += (extremes[locus - 1].1 - extremes[locus - 1].0).max(0.0);
+            }
+            if locus + 1 < locus_count {
+                swing += (extremes[locus].1 - extremes[locus].0).max(0.0);
+            }
+            swing
+        })
+        .collect()
+}
+
 pub(super) fn exhaustive_local_sweep(
     folded: &LocusFolded,
     loss_tables: &[Vec<f64>],
@@ -500,6 +555,13 @@ pub(super) fn exhaustive_local_sweep(
     viable: &[bool],
     native_allele: Option<usize>,
     model: &ScoreModel,
+    // STEP-3 admissible-bound input: the locus's adjacent seam-evidence
+    // swing (both boundaries' [max-min] over viable-linked class seams —
+    // the same quantity `compute_local_margins` uses). The sweep computes
+    // the exact min viable pair loss first (bound-ordered branch-and-bound)
+    // and then prunes every pair whose derived lower bound provably exceeds
+    // min + swing (the DP's own retention rule) BEFORE scoring it.
+    seam_swing: f64,
     // Per-class restricted interior-junction charges (charge-homogeneous
     // classes), folded into the class-pair table: the pair loss of two
     // alleles is the profile-pair loss plus each allele's additive novel-
@@ -521,44 +583,186 @@ pub(super) fn exhaustive_local_sweep(
     let classes = folded.prepared.len();
     ensure(classes > 0, "spine locus has no classes")?;
     ensure(scorable.len() == classes, "spine scorable cardinality mismatch")?;
-    let rows: Vec<Vec<(usize, f64)>> = (0..classes)
-        .into_par_iter()
-        .map(|first| {
-            let mut row = Vec::with_capacity(classes - first);
-            for second in first..classes {
-                let value = if !scorable[first] || !scorable[second] {
-                    f64::INFINITY
-                } else {
-                    prepared_pair_loss_folded(
-                        &folded.prepared[first],
-                        &folded.prepared[second],
-                        folded.owners[first] == folded.owners[second],
-                        &folded.entries_by_fid,
-                        loss_tables,
-                        model,
-                    )?
-                };
-                row.push((second, value));
-            }
-            Ok(row)
-        })
-        .collect::<io::Result<_>>()?;
-    let mut table = vec![0.0f64; classes * (classes + 1) / 2];
-    for (first, row) in rows.iter().enumerate() {
-        for &(second, value) in row {
-            table[class_pair_index(first, second)] = value;
-        }
-    }
     ensure(
         class_charges.len() == classes,
         "spine class charge cardinality mismatch"
     )?;
-    for first in 0..classes {
-        for second in first..classes {
-            table[class_pair_index(first, second)] +=
-                class_charges[first] + class_charges[second];
+    ensure(
+        seam_swing.is_finite() && seam_swing >= 0.0,
+        "spine seam swing must be finite and nonnegative"
+    )?;
+
+    // ------------------------------------------------------------- per-class
+    // admissible-bound summaries (STEP 3; derived entirely from the
+    // per-feature loss arithmetic, no thresholds):
+    //  - singleton loss S_c: the EXACT sum of the class's own per-feature
+    //    terms (the terms the pair loss keeps for features the other class
+    //    lacks);
+    //  - union-minimum mass M_c and its positive part P_c: the per-feature
+    //    global minima m_f over the locus's achievable count range and the
+    //    maximal observed side (the loss is decreasing in observed support
+    //    and concave in count, so the box minimum sits at an endpoint:
+    //    m_f = min(0, c_f(2*max_f, 2*obs_f))), summed over the class's
+    //    features (inclusion-exclusion over the pair's feature union);
+    //  - interaction mass J_c: the per-feature UPPER bound on the shared-
+    //    feature interaction I_f = c(qa,obsA) + c(qb,obsB) - c(qa+qb, .):
+    //    every singleton term is maximized at the locus's MINIMAL observed
+    //    side and every merged form is minimized at the MAXIMAL merged side
+    //    (2*obs_f), so I_f is bounded by the achievable count-grid maximum
+    //    I_f^up = max over qa,qb <= max_f of
+    //    [c(qa,obs_min_f) + c(qb,obs_min_f) - c(qa+qb, 2*obs_f)].
+    // Every quantity comes from `loss_fractional_entry`'s own form.
+    let summaries_started = std::time::Instant::now();
+    let per_count = model.histogram as f64 * model.depth / model.denominator;
+    let mut m_by_fid = vec![0.0f64; folded.max_add.len()];
+    let mut j_by_fid = vec![0.0f64; folded.max_add.len()];
+    let mut obs_min_by_fid = vec![f64::INFINITY; folded.max_add.len()];
+    for class in 0..classes {
+        for &(_fid, _q, observed) in &folded.prepared[class] {
+            if observed < obs_min_by_fid[_fid as usize] {
+                obs_min_by_fid[_fid as usize] = observed;
+            }
         }
     }
+    for fid in 0..folded.max_add.len() as u32 {
+        let max = folded.max_add[fid as usize];
+        if max == 0 {
+            continue;
+        }
+        let obs_max = folded.obs_by_fid[fid as usize];
+        let obs_min = obs_min_by_fid[fid as usize];
+        let entry = folded.entry(fid);
+        let merged_floor = crate::loss_fractional_entry(
+            model,
+            2 * max,
+            2.0 * obs_max,
+            entry,
+        )?;
+        m_by_fid[fid as usize] = 0.0f64.min(merged_floor);
+        // CLOSED-FORM interaction upper bound (derivation, straight from
+        // c(q, obs) = q*s - w*obs*ln_1p(q*s/beta): floor the singleton
+        // observed sides at obs_min (the loss is decreasing in observed
+        // support), ceiling the merged side at 2*obs_max, and write
+        // I(sa, sb) = w*[O*ln(1+u) - o*ln(1+u+v)] with u = (sa+sb)/beta,
+        // v = sa*sb/beta^2 >= 0, O = 2*obs_max, o = obs_min. Along each
+        // line sa+sb = t the maximum sits at v = 0 (one count zero), and
+        // the resulting w*(O-o)*ln(1+u) is increasing in u, so the box
+        // maximum is
+        //   I_f^up = w*(2*obs_max - obs_min)*ln_1p(2*max_f*s_unit/beta).
+        let beta = match entry {
+            Some(entry) if entry.beta.is_finite() && entry.beta > 0.0 => entry.beta,
+            _ => model.background,
+        };
+        let weight = match entry {
+            Some(entry) => entry.weight,
+            None => 1.0,
+        };
+        let interaction = weight
+            * (2.0 * obs_max - obs_min)
+                .max(0.0)
+            * (2.0 * max as f64 * per_count / beta).ln_1p();
+        j_by_fid[fid as usize] = interaction;
+    }
+    let grid_evaluations: u64 = folded
+        .max_add
+        .iter()
+        .map(|&max| (max as u64 + 1) * (max as u64 + 1))
+        .sum();
+    let summaries_grid_seconds = summaries_started.elapsed().as_secs_f64();
+    let summaries_started = std::time::Instant::now();
+    let mut class_singleton = vec![0.0f64; classes];
+    let mut class_min_mass = vec![0.0f64; classes];
+    let mut class_min_pos = vec![0.0f64; classes];
+    let mut class_interaction = vec![0.0f64; classes];
+    for class in 0..classes {
+        if !scorable[class] {
+            continue;
+        }
+        let mut singleton = 0.0f64;
+        let mut min_mass = 0.0f64;
+        let mut min_pos = 0.0f64;
+        let mut interaction = 0.0f64;
+        for &(fid, q, observed) in &folded.prepared[class] {
+            singleton += crate::folded_term(
+                fid,
+                q,
+                observed,
+                folded.entry(fid),
+                loss_tables,
+                model,
+            )?;
+            min_mass += m_by_fid[fid as usize];
+            if m_by_fid[fid as usize] > 0.0 {
+                min_pos += m_by_fid[fid as usize];
+            }
+            interaction += j_by_fid[fid as usize];
+        }
+        class_singleton[class] = singleton + class_charges[class];
+        class_min_mass[class] = min_mass + class_charges[class];
+        class_min_pos[class] = min_pos;
+        class_interaction[class] = interaction;
+    }
+
+    let summaries_class_seconds = summaries_started.elapsed().as_secs_f64();
+    let summaries_seconds = summaries_grid_seconds + summaries_class_seconds;
+    eprintln!(
+        "[sweep] summaries: grid evals {grid_evaluations} ({summaries_grid_seconds:.2}s), classes ({summaries_class_seconds:.2}s), total {summaries_seconds:.2}s"
+    );
+    let pass1_started = std::time::Instant::now();
+    // Bound-ordered enumeration order: classes ascending by the singleton-
+    // charged summary (the tighter anchor; best candidates first so the
+    // branch-and-bound incumbent improves fast and rows terminate early).
+    let mut order: Vec<usize> = (0..classes).filter(|&c| scorable[c]).collect();
+    order.sort_by(|&a, &b| {
+        class_singleton[a]
+            .total_cmp(&class_singleton[b])
+            .then(a.cmp(&b))
+    });
+
+    // The exact pair evaluation (bit-identical to the old every-pair sweep).
+    let evaluate = |first: usize, second: usize| -> io::Result<f64> {
+        let mut value = prepared_pair_loss_folded(
+            &folded.prepared[first],
+            &folded.prepared[second],
+            folded.owners[first] == folded.owners[second],
+            &folded.entries_by_fid,
+            loss_tables,
+            model,
+        )?;
+        value += class_charges[first] + class_charges[second];
+        Ok(value)
+    };
+    // The two derived lower bounds (both admissible; take the max).
+    let bounds = |first: usize, second: usize| -> f64 {
+        let interaction = class_interaction[first].min(class_interaction[second]);
+        let singleton_bound = class_singleton[first] + class_singleton[second] - interaction;
+        let positive = class_min_pos[first].min(class_min_pos[second]);
+        let union_bound = class_min_mass[first] + class_min_mass[second] - positive;
+        singleton_bound.max(union_bound)
+    };
+    // Row-terminating (monotone) weakenings of the bounds for `first` fixed:
+    // drop the `min` with the row partner's masses (<= the row's own).
+    let row_bound_singleton = |first: usize, second: usize| -> f64 {
+        class_singleton[first] + class_singleton[second] - class_interaction[first]
+    };
+    let row_bound_union = |first: usize, second: usize| -> f64 {
+        class_min_mass[first] + class_min_mass[second] - class_min_pos[first]
+    };
+
+    let mut table = vec![f64::INFINITY; classes * (classes + 1) / 2];
+    let mut scored = vec![false; classes * (classes + 1) / 2];
+    for class in 0..classes {
+        if !scorable[class] {
+            continue;
+        }
+        // Unscorable partners keep +INFINITY (the old unscorable entry).
+        for partner in (class + 1)..classes {
+            if !scorable[partner] {
+                scored[class_pair_index(class, partner)] = true;
+            }
+        }
+    }
+
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); classes];
     let mut viable_members: Vec<Vec<usize>> = vec![Vec::new(); classes];
     for (allele, &class) in membership.iter().enumerate() {
@@ -567,35 +771,328 @@ pub(super) fn exhaustive_local_sweep(
             viable_members[class].push(allele);
         }
     }
+
+    let order_seconds = pass1_started.elapsed().as_secs_f64();
+    eprintln!("[sweep] order build: {order_seconds:.2}s");
+    let pass1_started = std::time::Instant::now();
+    // ------------------------------------------------- pass 1: the exact core
+    // (best/second/min-viable/native + their exact tie sets), bound-ordered
+    // branch-and-bound. The prune threshold is shared across the parallel
+    // rows through one monotone atomic: it holds the running
+    // min(second-best-so-far, min-viable-so-far), a skipped pair's bound
+    // exceeding a read (which is >= the final value, the quantities only
+    // decrease) proves the pair out of every consumer's exact set.
+    #[derive(Clone)]
+    struct Core {
+        best_loss: f64,
+        second_loss: Option<f64>,
+        min_viable_loss: f64,
+        best_viable_loss: f64,
+        best_pairs: Vec<[usize; 2]>,
+        viable_pairs: Vec<[usize; 2]>,
+    }
+    impl Core {
+        fn new() -> Self {
+            Self {
+                best_loss: f64::INFINITY,
+                second_loss: None,
+                min_viable_loss: f64::INFINITY,
+                best_viable_loss: f64::INFINITY,
+                best_pairs: Vec::new(),
+                viable_pairs: Vec::new(),
+            }
+        }
+    }
+    fn track(
+        first: usize,
+        second: usize,
+        loss: f64,
+        viable_pair: bool,
+        core: &mut Core,
+    ) {
+        if viable_pair {
+            if (core.min_viable_loss.total_cmp(&loss)).is_gt() {
+                core.min_viable_loss = loss;
+            }
+            if (core.best_viable_loss.total_cmp(&loss)).is_gt() {
+                core.best_viable_loss = loss;
+                core.viable_pairs.clear();
+                core.viable_pairs.push([first, second]);
+            } else if loss.to_bits() == core.best_viable_loss.to_bits() {
+                core.viable_pairs.push([first, second]);
+            }
+        }
+        if (core.best_loss.total_cmp(&loss)).is_gt() {
+            core.second_loss = Some(core.best_loss);
+            core.best_loss = loss;
+            core.best_pairs.clear();
+            core.best_pairs.push([first, second]);
+        } else if loss.to_bits() == core.best_loss.to_bits() {
+            core.best_pairs.push([first, second]);
+        } else if core
+            .second_loss
+            .is_none_or(|s| (s.total_cmp(&loss)).is_gt())
+        {
+            core.second_loss = Some(loss);
+        }
+    }
+    let mut core = Core::new();
+    let core_evaluations = AtomicU64::new(0);
+    // Seed the incumbent with the native pair (the backbone's own class
+    // pair — also the DP's structurally-retained pair).
+    if let Some(native) = native_allele {
+        let class = membership[native];
+        let loss = evaluate(class, class)?;
+        let index = class_pair_index(class, class);
+        table[index] = loss;
+        scored[index] = true;
+        core_evaluations.fetch_add(1, Ordering::Relaxed);
+        let viable_pair = !viable_members[class].is_empty();
+        track(class, class, loss, viable_pair, &mut core);
+    }
+    // Two shared monotone thresholds: the running second-best (best/second
+    // exactness, every pair) and the running min viable loss (margin
+    // exactness, viable pairs). A pair is skip-SAFE iff its bound exceeds
+    // every threshold its exactness depends on: non-viable pairs need
+    // bound > second; viable pairs need bound > second AND bound >
+    // min_viable (skipping must be safe for BOTH statistics). A racy read
+    // only ever sees a staler (larger) value, costing work, never a wrong
+    // skip.
+    let shared_second = std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits());
+    let shared_min_viable = std::sync::atomic::AtomicU64::new(f64::INFINITY.to_bits());
+    let lower_shared = |cell: &std::sync::atomic::AtomicU64, value: f64| {
+        let bits = value.to_bits();
+        let mut current = cell.load(Ordering::Relaxed);
+        while bits < current {
+            match cell.compare_exchange_weak(
+                current,
+                bits,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    };
+    lower_shared(&shared_second, core.second_loss.unwrap_or(f64::INFINITY));
+    lower_shared(&shared_min_viable, core.min_viable_loss);
+    let results: Vec<io::Result<(Core, Vec<(usize, f64)>)>> = order
+        .par_iter()
+        .copied()
+        .map(|first| {
+            let mut local = Core::new();
+            let mut computed: Vec<(usize, f64)> = Vec::new();
+            for &second in order.iter() {
+                if second < first {
+                    continue;
+                }
+                let index = class_pair_index(first, second);
+                if scored[index] {
+                    continue;
+                }
+                let second_so_far = f64::from_bits(shared_second.load(Ordering::Relaxed));
+                let min_viable_so_far =
+                    f64::from_bits(shared_min_viable.load(Ordering::Relaxed));
+                // Row termination: the monotone bounds grow with the
+                // partner's anchors; past BOTH thresholds the whole
+                // remainder of the row (mixed viability) is provably
+                // excluded.
+                if row_bound_singleton(first, second) > second_so_far
+                    && row_bound_singleton(first, second) > min_viable_so_far
+                    && row_bound_union(first, second) > second_so_far
+                    && row_bound_union(first, second) > min_viable_so_far
+                {
+                    break;
+                }
+                let viable_pair = !viable_members[first].is_empty()
+                    && !viable_members[second].is_empty();
+                let skip_safe = if viable_pair {
+                    bounds(first, second) > second_so_far
+                        && bounds(first, second) > min_viable_so_far
+                } else {
+                    bounds(first, second) > second_so_far
+                };
+                if skip_safe {
+                    continue;
+                }
+                let loss = evaluate(first, second)?;
+                core_evaluations.fetch_add(1, Ordering::Relaxed);
+                computed.push((index, loss));
+                track(first, second, loss, viable_pair, &mut local);
+                lower_shared(&shared_second, local.second_loss.unwrap_or(f64::INFINITY));
+                lower_shared(&shared_min_viable, local.min_viable_loss);
+            }
+            Ok((local, computed))
+        })
+        .collect();
+    for result in &results {
+        let (_local, computed) = result.as_ref().expect("row sweep");
+        for &(index, loss) in computed {
+            table[index] = loss;
+            scored[index] = true;
+        }
+    }
+    // Merge the per-row cores into the sweep's exact statistics (the global
+    // best is the min over row bests with the row tie sets; the global
+    // second is the best of the merged runner-ups and non-winning row
+    // bests; min-viable is the min over rows).
+    let mut best_class_pairs: Vec<[usize; 2]> = Vec::new();
+    let mut best_viable_class_pairs: Vec<[usize; 2]> = Vec::new();
+    let mut second_candidates: Vec<f64> = Vec::new();
+    for result in &results {
+        let row = result.as_ref().map(|(local, _)| local).expect("row sweep");
+        if (core.min_viable_loss.total_cmp(&row.min_viable_loss)).is_gt() {
+            core.min_viable_loss = row.min_viable_loss;
+        }
+        if (core.best_viable_loss.total_cmp(&row.best_viable_loss)).is_gt() {
+            core.best_viable_loss = row.best_viable_loss;
+            best_viable_class_pairs.clear();
+        }
+        if row.best_viable_loss.to_bits() == core.best_viable_loss.to_bits() {
+            best_viable_class_pairs.extend_from_slice(&row.viable_pairs);
+        }
+        if (core.best_loss.total_cmp(&row.best_loss)).is_gt() {
+            core.best_loss = row.best_loss;
+        }
+        if let Some(row_second) = row.second_loss {
+            second_candidates.push(row_second);
+        }
+        if row.best_loss.to_bits() != core.best_loss.to_bits() {
+            second_candidates.push(row.best_loss);
+        }
+    }
+    for result in &results {
+        let row = result.as_ref().map(|(local, _)| local).expect("row sweep");
+        if row.best_loss.to_bits() == core.best_loss.to_bits() {
+            best_class_pairs.extend_from_slice(&row.best_pairs);
+        }
+    }
+    if let Some(native) = native_allele {
+        let class = membership[native];
+        let loss = table[class_pair_index(class, class)];
+        if loss.to_bits() == core.best_loss.to_bits()
+            && !best_class_pairs.contains(&[class, class])
+        {
+            best_class_pairs.push([class, class]);
+        }
+        if !viable_members[class].is_empty()
+            && loss.to_bits() == core.best_viable_loss.to_bits()
+            && !best_viable_class_pairs.contains(&[class, class])
+        {
+            best_viable_class_pairs.push([class, class]);
+        }
+    }
+    for value in second_candidates {
+        if value.to_bits() == core.best_loss.to_bits() {
+            continue;
+        }
+        if core
+            .second_loss
+            .is_none_or(|s| (s.total_cmp(&value)).is_gt())
+        {
+            core.second_loss = Some(value);
+        }
+    }
+    let core_evaluations = core_evaluations.load(Ordering::Relaxed);
+    // The old sweep's deterministic tie order: (first, second) id order.
+    best_class_pairs.sort_unstable();
+    best_class_pairs.dedup();
+    best_viable_class_pairs.sort_unstable();
+    best_viable_class_pairs.dedup();
+    let best_loss = core.best_loss;
+    let second_loss = core.second_loss;
+    let min_viable_loss = core.min_viable_loss;
+    let best_viable_loss = core.best_viable_loss;
+
+    ensure(best_loss.is_finite(), "spine sweep found no scored pair")?;
+    ensure(
+        min_viable_loss.is_finite(),
+        "spine locus has no viable class pair"
+    )?;
+    let pass1_seconds = pass1_started.elapsed().as_secs_f64();
+    eprintln!("[sweep] pass 1 (exact core): {pass1_seconds:.2}s");
+    let pass2_started = std::time::Instant::now();
+    // The retention margin (identical to compute_local_margins' rule).
+    let prune_margin = min_viable_loss + seam_swing;
+
+    // --------------------------------------- pass 2: the margin fill (STEP 3).
+    // Every pair whose derived lower bound provably exceeds the retention
+    // margin is left at +INFINITY (the DP's own non-retained path reads no
+    // value from it; the retention predicate, the stage-3 admission and
+    // every margin consumer see exactly the retained/not-retained decision
+    // the full table produced). Pairs inside the possible-retention range
+    // get exact scores (parallel over rows; the threshold is fixed).
+    let rows: Vec<io::Result<(Vec<(usize, f64)>, u64, u64)>> = order
+        .par_iter()
+        .copied()
+        .map(|first| {
+            let mut computed: Vec<(usize, f64)> = Vec::new();
+            let mut evaluations = 0u64;
+            let mut skips = 0u64;
+            for &second in order.iter() {
+                if second < first {
+                    continue;
+                }
+                let index = class_pair_index(first, second);
+                if scored[index] {
+                    continue;
+                }
+                // Row termination against the fixed margin.
+                if row_bound_singleton(first, second) > prune_margin + BOUND_PRUNE_EPSILON
+                    && row_bound_union(first, second) > prune_margin + BOUND_PRUNE_EPSILON
+                {
+                    break;
+                }
+                if bounds(first, second) > prune_margin + BOUND_PRUNE_EPSILON {
+                    skips += 1;
+                    continue;
+                }
+                let loss = evaluate(first, second)?;
+                evaluations += 1;
+                computed.push((index, loss));
+            }
+            Ok((computed, evaluations, skips))
+        })
+        .collect();
+    let mut margin_evaluations = 0u64;
+    let mut bound_pruned_pairs = 0u64;
+    for result in rows {
+        let (computed, evaluations, skips) = result?;
+        margin_evaluations += evaluations;
+        bound_pruned_pairs += skips;
+        for (index, loss) in computed {
+            table[index] = loss;
+            scored[index] = true;
+        }
+    }
+
+    let pass2_seconds = pass2_started.elapsed().as_secs_f64();
+    eprintln!("[sweep] pass 2 (margin fill): {pass2_seconds:.2}s");
+    // ------------------------------------------------------- statistics.
+    // The counting statistics are over the same pair population as before
+    // (every scorable pair); the loss-distribution statistics are over the
+    // EXACTLY scored pairs (the pruned mass is provably beyond every
+    // consumer's decision range; reported separately).
     let mut class_pairs = 0u64;
     let mut allele_pairs = 0u64;
     let mut viable_allele_pairs = 0u64;
-    let mut best_loss = f64::INFINITY;
-    let mut best_class_pairs: Vec<[usize; 2]> = Vec::new();
-    let mut second_loss: Option<f64> = None;
-    let mut min_viable_loss = f64::INFINITY;
-    let mut best_viable_loss = f64::INFINITY;
-    let mut best_viable_class_pairs: Vec<[usize; 2]> = Vec::new();
     let mut losses: Vec<f64> = Vec::new();
-    for first in 0..classes {
+    for &first in &order {
         let m1 = members[first].len() as u64;
         if m1 == 0 {
             continue;
         }
         let v1 = viable_members[first].len() as u64;
-        for second in first..classes {
+        for &second in order.iter() {
+            if second < first {
+                continue;
+            }
             let m2 = members[second].len() as u64;
             if m2 == 0 {
                 continue;
             }
-            let loss = table[class_pair_index(first, second)];
-            if !scorable[first] || !scorable[second] {
-                // Unscorable mini/empty classes keep their +infinity entry
-                // (never within any margin) but contribute no statistics.
-                continue;
-            }
             class_pairs += 1;
-            losses.push(loss);
             allele_pairs += if first == second {
                 m1 * (m1 + 1) / 2
             } else {
@@ -608,34 +1105,13 @@ pub(super) fn exhaustive_local_sweep(
                 } else {
                     v1 * v2
                 };
-                if (min_viable_loss.total_cmp(&loss)).is_gt() {
-                    min_viable_loss = loss;
-                }
-                if (best_viable_loss.total_cmp(&loss)).is_gt() {
-                    best_viable_loss = loss;
-                    best_viable_class_pairs.clear();
-                    best_viable_class_pairs.push([first, second]);
-                } else if loss.to_bits() == best_viable_loss.to_bits() {
-                    best_viable_class_pairs.push([first, second]);
-                }
             }
-            if (best_loss.total_cmp(&loss)).is_gt() {
-                second_loss = Some(best_loss);
-                best_loss = loss;
-                best_class_pairs.clear();
-                best_class_pairs.push([first, second]);
-            } else if loss.to_bits() == best_loss.to_bits() {
-                best_class_pairs.push([first, second]);
-            } else if second_loss.is_none_or(|s| (s.total_cmp(&loss)).is_gt()) {
-                second_loss = Some(loss);
+            let index = class_pair_index(first, second);
+            if scored[index] {
+                losses.push(table[index]);
             }
         }
     }
-    ensure(best_loss.is_finite(), "spine sweep found no scored pair")?;
-    ensure(
-        min_viable_loss.is_finite(),
-        "spine locus has no viable class pair"
-    )?;
     let (native_pair_loss, native_class_pair, native_rank) = match native_allele {
         Some(native) => {
             let class = membership[native];
@@ -648,6 +1124,7 @@ pub(super) fn exhaustive_local_sweep(
         }
         None => (None, None, None),
     };
+    ensure(!losses.is_empty(), "spine sweep scored no pair")?;
     losses.sort_by(|a, b| a.total_cmp(b));
     let quantile = |fraction: f64| -> f64 {
         let index = ((losses.len() as f64 - 1.0) * fraction).round() as usize;
@@ -660,6 +1137,11 @@ pub(super) fn exhaustive_local_sweep(
         quantile(0.75),
         losses[losses.len() - 1],
     ];
+    eprintln!(
+        "[sweep] bound prune: class pairs {class_pairs}, exact {} (core {core_evaluations} \
+         + margin {margin_evaluations}), bound-pruned {bound_pruned_pairs}",
+        losses.len()
+    );
     Ok(LocusSweep {
         table,
         class_pairs,
@@ -677,6 +1159,8 @@ pub(super) fn exhaustive_local_sweep(
         quantiles,
         best_viable_loss,
         best_viable_class_pairs,
+        bound_pruned_pairs,
+        prune_margin,
     })
 }
 
@@ -3845,7 +4329,9 @@ pub(super) fn run_local_first_spine(
     ensure(incumbent.is_finite(), "nonfinite spine incumbent");
     eprintln!("[spine] native backbone incumbent {incumbent:.2}");
 
-    // Exhaustive per-locus sweeps (sequential over loci, rows in parallel).
+    // Exhaustive per-locus sweeps (sequential over loci; STEP-3: the
+    // admissible-bound branch-and-bound with margin-sentinel pruning inside).
+    let seam_swings = seam_swings_of(locus_count, &successors_ref, &viable);
     let mut sweeps: Vec<LocusSweep> = Vec::with_capacity(locus_count);
     for locus in 0..locus_count {
         sweeps.push(exhaustive_local_sweep(
@@ -3855,6 +4341,7 @@ pub(super) fn run_local_first_spine(
             &viable[locus],
             Some(backbone_chain[locus]),
             model,
+            seam_swings[locus],
             &locus_classes[locus].class_charges,
             &scorable_classes(&locus_classes[locus], &ranges[locus]),
         )?);
@@ -4795,6 +5282,7 @@ pub(super) fn run_local_first_spine(
             seam_feature_sets[boundary] = boundary_feature_set(&boundaries[boundary].seam_by_pair);
         }
         viable = spine_viability(&ranges, &successors_ref);
+        let seam_swings = seam_swings_of(locus_count, &successors_ref, &viable);
         for &locus in &fresh {
             sweeps[locus] = exhaustive_local_sweep(
                 &folded[locus],
@@ -4803,6 +5291,7 @@ pub(super) fn run_local_first_spine(
                 &viable[locus],
                 Some(backbone_chain[locus]),
                 model,
+                seam_swings[locus],
                 &locus_classes[locus].class_charges,
                 &scorable_classes(&locus_classes[locus], &ranges[locus]),
             )?;

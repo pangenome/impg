@@ -1548,10 +1548,15 @@ mod tests {
         let a = [dna(PART, 11), dna(PART, 12), dna(PART, 13), dna(PART, 14)];
         let mut b = a.clone();
         for (partition, allele) in b.iter_mut().enumerate() {
+            // The window offsets are phase-aligned one base early so the
+            // long boundary-MEM entries carry a phase-distinguishing
+            // signature under BOTH anchor schemes (syng best-orientation and
+            // the canonical qualification; the property itself — linked truth
+            // beats alternate phase — holds at every offset under both).
             let (lo, hi) = match partition {
-                1 => (PART - 42, PART - 18),
-                2 => (18, 42),
-                _ => (72, 96),
+                1 => (PART - 43, PART - 19),
+                2 => (17, 41),
+                _ => (71, 95),
             };
             for base in &mut allele[lo..hi] {
                 *base = match *base {

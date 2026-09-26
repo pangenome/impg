@@ -755,8 +755,6 @@ struct Territory {
     steps: Vec<(u64, i32)>,
 }
 
-const NODE_KEY_OFFSET: i64 = 1 << 30;
-
 /// Bound-prune tolerance, mirroring the oracle DP's BOUND_PRUNE_EPSILON: the
 /// beam score is an f64 fold while the bound is a direct sum, so near-tie
 /// states are kept to avoid pruning an optimum by summation noise.
@@ -765,27 +763,20 @@ const BOUND_PRUNE_EPSILON: f64 = 1e-6;
 struct TerritoryIndex {
     territories: Vec<Territory>,
     /// (node, territory index, bp) sorted by node; entries only for anchors
-    /// whose syncmer span overlaps the territory interval.
+    /// whose syncmer span overlaps the territory interval. The node's entry
+    /// range is found by binary search (the STEP-2 collapse: the former
+    /// dense node_ranges table — ~2^30 u64 slots, 8.6 GiB, the single
+    /// largest resident item of every routing pass — is gone; the sorted
+    /// entries ARE the index).
     entries: Vec<(i32, u32, u64)>,
-    /// node_ranges[key] = number of entries with node key < key, so the
-    /// range of node with key `k` is [node_ranges[k], node_ranges[k+1]).
-    node_ranges: Vec<u64>,
     /// Per path: sorted (bp_start, bp_end, partition) interval lists.
     path_intervals: Vec<Vec<(u64, u64, u32)>>,
 }
 
-fn node_key(node: i32) -> usize {
-    (node as i64 + NODE_KEY_OFFSET) as usize
-}
-
 impl TerritoryIndex {
     fn node_range(&self, node: i32) -> (usize, usize) {
-        let key = node_key(node);
-        if key + 1 >= self.node_ranges.len() {
-            return (0, 0);
-        }
-        let start = self.node_ranges[key] as usize;
-        let end = self.node_ranges[key + 1] as usize;
+        let start = self.entries.partition_point(|&(n, _, _)| n < node);
+        let end = self.entries.partition_point(|&(n, _, _)| n <= node);
         (start, end)
     }
 
@@ -914,15 +905,68 @@ fn rc_frame_step(signed_hash: i32, q: u64, range_lo: u64, range_len: u64, k: u64
     (range_lo + range_len - k - q, -signed_hash)
 }
 
+/// The territory step index's k-mer qualification scheme.
+/// - `Forward`: the panel GBWT walk's own forward-frame qualifying k-mers
+///   (the strand-asymmetric-era index; the strandfix-yield oracle's
+///   baseline).
+/// - `Twin`: forward ∪ rc-frame qualifying k-mers (the strandfix-era
+///   production index; kept as the transition verification oracle).
+/// - `Canonical` (the scheme of record): a k-mer qualifies iff its
+///   canonical form qualifies — per position, the syng selection of the
+///   frame that spells the canonical form min(K, rc(K)) forward. One
+///   selection of single-frame density serves both strands (the rule is
+///   frame-free), replacing the twin's union; the per-run re-derived
+///   records use the same rule, so every anchor of every record verifies
+///   at every true occurrence of either orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerritoryScheme {
+    Forward,
+    Twin,
+    Canonical,
+}
+
+impl TerritoryScheme {
+    fn from_env() -> io::Result<Self> {
+        match std::env::var("IMPG_INDEX_SCHEME").as_deref() {
+            Ok("forward") => Ok(TerritoryScheme::Forward),
+            Ok("twin") => Ok(TerritoryScheme::Twin),
+            Ok("canonical") | Err(_) => Ok(TerritoryScheme::Canonical),
+            Ok(other) => Err(invalid(&format!(
+                "IMPG_INDEX_SCHEME must be forward, twin or canonical (got {other})"
+            ))),
+        }
+    }
+}
+
 fn build_territory_index(
     panel: &SyngIndex,
     universe: &Universe,
     path_of_name: &HashMap<String, usize>,
     syncmer_len: u64,
     fetch_path_seq: &(dyn Fn(usize, u64, u64) -> io::Result<Vec<u8>> + Sync),
-    both_frames: bool,
+    scheme: TerritoryScheme,
 ) -> io::Result<TerritoryIndex> {
-    let rows = &universe.rows;
+    build_territory_index_rows(
+        panel,
+        &universe.rows,
+        path_of_name,
+        syncmer_len,
+        fetch_path_seq,
+        scheme,
+    )
+}
+
+/// `build_territory_index` over a SLICE of universe rows (the STEP-2
+/// streaming primitive: one partition-aligned batch of rows at a time, so
+/// only one batch's territory index is resident).
+fn build_territory_index_rows(
+    panel: &SyngIndex,
+    rows: &[UniverseRow],
+    path_of_name: &HashMap<String, usize>,
+    syncmer_len: u64,
+    fetch_path_seq: &(dyn Fn(usize, u64, u64) -> io::Result<Vec<u8>> + Sync),
+    scheme: TerritoryScheme,
+) -> io::Result<TerritoryIndex> {
     let path_count = panel.name_map.path_to_name.len();
     let territories: Vec<Territory> = rows
         .par_iter()
@@ -932,46 +976,98 @@ fn build_territory_index(
             })?;
             let lo = row.start.saturating_sub(SLACK);
             let hi = row.end + SLACK;
-            let mut steps: Vec<(u64, i32)> = panel
+            let forward_steps: Vec<(u64, i32)> = panel
                 .walk_path_range(path_idx, lo, hi)?
                 .into_iter()
                 .map(|(node, bp)| (bp, node))
                 .collect();
-            // The rc-symmetric index (the strand-asymmetry fix): the path's
-            // step list above carries only the forward frame's qualifying
-            // k-mers — the syncmer scheme is not rc-symmetric, so a locus
-            // where the path stores a k-mer's rc (the rc strand's k-mer
-            // qualifies, the forward strand's does not) has NO step at all,
-            // and every record whose occurrence there is an rc occurrence is
-            // unplaceable (the route_record rc search's anchors are exactly
-            // the forward hash's negation, which the verify can never meet).
-            // The fix emits the RC frame's qualifying k-mers as steps too:
-            // run the same matched-syncmer extraction on the range's reverse
-            // complement; its k-mer at rc position q covers the path's
-            // forward [b, b+k) with b = len - k - q, its signed hash m =
-            // -hash(path[b..b+k)), and the step node -m = hash(path[b..b+k))
-            // — the SAME node id the forward frame would assign (the node
-            // identity is frame-independent; only the qualification is
-            // frame-dependent). With both frames' steps, a record's rc-
-            // orientation search verifies at rc-stored loci (its anchors'
-            // k-mers qualify on the rc strand there by construction — they
-            // are the record's own selected anchors), and the rc-frame
-            // records' forward search verifies symmetrically. No query-side
-            // change, no record change, no remap change.
-            if both_frames {
-                let seq = fetch_path_seq(path_idx, lo, hi)?;
-                let seq_len = seq.len() as u64;
-                let rc_seq = impg::graph::reverse_complement(&seq);
-                // The RAW single-frame extraction (no best-orientation
-                // selection — the selector discards the losing frame, and
-                // the losing frame is exactly where the rc-frame-only
-                // qualifying k-mers live).
-                for (signed_node, q) in mem_records::raw_matched_syncmers(panel, &rc_seq)? {
-                    steps.push(rc_frame_step(signed_node, q, lo, seq_len, syncmer_len));
+            // The rc-symmetric augmentation (the strand-asymmetry fix):
+            // the path's forward step list carries only the forward frame's
+            // qualifying k-mers — the syncmer scheme is not rc-symmetric
+            // (measured: the rc-mirrored selection is the forward selection
+            // shifted one base), so a locus where the path stores a k-mer's
+            // rc has NO step at all and every record whose occurrence there
+            // is an rc occurrence is unplaceable. The fix extracts the RC
+            // frame's qualifying k-mers too (raw extraction on the range's
+            // reverse complement; the step node is the SAME forward-frame
+            // node id — node identity is frame-independent; only the
+            // qualification is frame-dependent).
+            //
+            // Scheme dispatch over the two frames' selections:
+            // - Twin: keep the union (the strandfix-era production index).
+            // - Canonical: a k-mer qualifies iff its canonical form
+            //   qualifies — keep, per position, only the selection of the
+            //   frame that spells the k-mer's canonical form min(K, rc(K))
+            //   forward. Both frames' selections are computed; each
+            //   position keeps exactly one decision (single-frame density,
+            //   ≈half the twin's steps), and the per-run re-derived records
+            //   apply the same rule, so placements are preserved at every
+            //   true occurrence of either orientation.
+            let steps: Vec<(u64, i32)> = match scheme {
+                TerritoryScheme::Forward => forward_steps,
+                TerritoryScheme::Twin | TerritoryScheme::Canonical => {
+                    // Fetch with one syncmer length of extra context on each
+                    // side: every step overlapping [lo, hi) — including the
+                    // slack-zone steps whose windows run past the range —
+                    // must have its full k-mer inside the fetched sequence
+                    // for the canonical-form check (and the rc extraction
+                    // gains the same context; fetch_path_seq clips at the
+                    // lane bounds itself).
+                    let seq_lo = lo.saturating_sub(syncmer_len);
+                    let seq_hi = hi + syncmer_len;
+                    let seq = fetch_path_seq(path_idx, seq_lo, seq_hi)?;
+                    let seq_len = seq.len() as u64;
+                    let rc_seq = impg::graph::reverse_complement(&seq);
+                    // The RAW single-frame extraction (no best-orientation
+                    // selection — the selector discards the losing frame,
+                    // and the losing frame is exactly where the rc-frame-only
+                    // qualifying k-mers live).
+                    let reverse_steps: Vec<(u64, i32)> =
+                        mem_records::raw_matched_syncmers(panel, &rc_seq)?
+                            .into_iter()
+                            .map(|(signed_node, q)| {
+                                rc_frame_step(signed_node, q, seq_lo, seq_len, syncmer_len)
+                            })
+                            .collect();
+                    if scheme == TerritoryScheme::Twin {
+                        let mut steps = forward_steps;
+                        steps.extend(reverse_steps);
+                        steps.sort_by_key(|&(bp, _)| bp);
+                        steps.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+                        steps
+                    } else {
+                        let forward_map: std::collections::BTreeMap<u64, i32> =
+                            forward_steps.into_iter().collect();
+                        let reverse_map: std::collections::BTreeMap<u64, i32> =
+                            reverse_steps.into_iter().collect();
+                        let mut positions: std::collections::BTreeSet<u64> =
+                            forward_map.keys().copied().collect();
+                        positions.extend(reverse_map.keys().copied());
+                        let mut steps = Vec::with_capacity(positions.len());
+                        for bp in positions {
+                            // The canonical form's frame decides: the
+                            // window must lie fully inside the fetched
+                            // range (extended one syncmer length past the
+                            // walk range on both sides; every walk step
+                            // does).
+                            let start = (bp - seq_lo) as usize;
+                            let canonical_forward = seq
+                                .get(start..start + syncmer_len as usize)
+                                .map(mem_records::window_is_canonical_forward)
+                                .unwrap_or(false);
+                            let chosen = if canonical_forward {
+                                forward_map.get(&bp)
+                            } else {
+                                reverse_map.get(&bp)
+                            };
+                            if let Some(&node) = chosen {
+                                steps.push((bp, node));
+                            }
+                        }
+                        steps
+                    }
                 }
-            }
-            steps.sort_by_key(|&(bp, _)| bp);
-            steps.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+            };
             Ok::<_, io::Error>(Territory {
                 partition: row.partition,
                 path_idx,
@@ -997,26 +1093,9 @@ fn build_territory_index(
         }
     }
     entries.par_sort_unstable_by_key(|&(node, _, _)| node);
-    let max_node = panel.num_syncmer_nodes() as i64;
-    ensure(
-        NODE_KEY_OFFSET > max_node,
-        "node key offset collides with node space",
-    )?;
-    let table_len = node_key(max_node as i32) + 2;
-    let mut counts = vec![0u64; table_len];
-    for &(node, _, _) in &entries {
-        counts[node_key(node)] += 1;
-    }
-    let mut node_ranges = vec![0u64; table_len];
-    let mut acc = 0u64;
-    for key in 0..table_len {
-        node_ranges[key] = acc;
-        acc += counts[key];
-    }
     Ok(TerritoryIndex {
         territories,
         entries,
-        node_ranges,
         path_intervals,
     })
 }
@@ -1228,6 +1307,187 @@ fn route_record(
         }
     }
     (occurrences, total_occurrences, forward_positions, reverse_positions)
+}
+
+// ---------------------------------------------------------------------------
+// BOUNDED (STREAMED) ROUTING — the STEP-2 collapse of the routing pass.
+//
+// The former shape materialized the FULL universe territory index at once
+// (the genome-universe pass: 197M entries, 193M steps, an 8.6 GiB dense
+// node-range table — 38.7 GiB measured peak). The collapsed shape streams
+// the universe in PARTITION-ALIGNED row batches: one batch's territory
+// index is resident at a time (a few hundred MB), every record is routed
+// against every batch, and the per-record outputs (touched-partition
+// occurrence maps, placement positions, totals) are accumulated across
+// batches — batch partitions are disjoint and partition-aligned, so a
+// (occurrence, partition) touch is counted in exactly one batch and the
+// merged map equals the full-index routing's map. Placement positions are
+// deduplicated across batches (the same occurrence is reachable through
+// several of its search anchors' entries in different batches). The
+// single-anchor search's anchor choice (the least-populated node) is
+// evaluated per batch, so edge occurrences whose search anchor's step
+// falls outside a territory interval can drift in-kind with the existing
+// measured limitation (the router-placement diagnosis's own finding);
+// interior occurrences are identical. `keep_positions=false` skips the
+// per-record placement lists (the genome background pass needs only the
+// touched maps). GENOME_TERRITORY_BATCH_ROWS is an ENGINEERING streaming
+// bound (the batch index's resident size), the sibling of the existing
+// GENOME_PASS_CHUNK — not a model constant: no score, threshold or
+// candidate set reads it.
+// ---------------------------------------------------------------------------
+
+/// Engineering streaming bound: universe rows per batch. A batch's territory
+/// index (steps + entries + intervals) stays bounded by
+/// ~(rows × ~600 steps × 16 B) ≈ 200 MiB at 8192 rows.
+const GENOME_TERRITORY_BATCH_ROWS: usize = 8192;
+
+/// Partition-aligned row batches of a universe (rows are partition-ordered
+/// by construction: every partition's BED rows are emitted consecutively).
+fn partition_aligned_row_batches(rows: &[UniverseRow]) -> Vec<(usize, usize)> {
+    let mut batches: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    while start < rows.len() {
+        let mut end = rows.len().min(start + GENOME_TERRITORY_BATCH_ROWS);
+        // extend/shrink to a partition boundary so no partition's rows
+        // straddle two batches (a (occurrence, partition) touch is then
+        // counted in exactly one batch).
+        while end < rows.len() && rows[end].partition == rows[end - 1].partition {
+            end += 1;
+        }
+        batches.push((start, end));
+        start = end;
+    }
+    batches
+}
+
+/// The streamed bounded routing pass: per-record (occurrences, positions,
+/// totals) accumulated over partition-aligned territory batches.
+struct StreamedRouting {
+    occurrences: Vec<BTreeMap<u32, u64>>,
+    forward_positions: Vec<Vec<(usize, u64)>>,
+    reverse_positions: Vec<Vec<(usize, u64)>>,
+    total_occurrences: Vec<u64>,
+    batch_count: usize,
+    batch_peak_steps: u64,
+    batch_peak_entries: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_universe_bounded(
+    panel: &SyngIndex,
+    universe: &Universe,
+    path_of_name: &HashMap<String, usize>,
+    k: u64,
+    fetch_path_seq: &(dyn Fn(usize, u64, u64) -> io::Result<Vec<u8>> + Sync),
+    scheme: TerritoryScheme,
+    record_vec: &[(&Vec<u64>, u64)],
+    keep_positions: bool,
+    every_anchor: bool,
+    rss: &mut genome::PeriodicRssGuard,
+) -> io::Result<StreamedRouting> {
+    // Decode each record's anchors once; reused across every batch.
+    let anchors: Vec<Option<Vec<(i32, u64)>>> = record_vec
+        .par_iter()
+        .map(|(tokens, _)| {
+            if tokens.is_empty() {
+                None
+            } else {
+                decode_tokens(tokens).ok()
+            }
+        })
+        .collect();
+    // One accumulator per record (a single par_iter_mut target — distinct
+    // elements, no locking).
+    struct Accum {
+        occurrences: BTreeMap<u32, u64>,
+        forward: Vec<(usize, u64)>,
+        reverse: Vec<(usize, u64)>,
+        total: u64,
+    }
+    let mut accumulators: Vec<Accum> = record_vec
+        .iter()
+        .map(|_| Accum {
+            occurrences: BTreeMap::new(),
+            forward: Vec::new(),
+            reverse: Vec::new(),
+            total: 0,
+        })
+        .collect();
+    let mut batch_count = 0usize;
+    let mut batch_peak_steps = 0u64;
+    let mut batch_peak_entries = 0u64;
+    for (lo, hi) in partition_aligned_row_batches(&universe.rows) {
+        let index = build_territory_index_rows(
+            panel,
+            &universe.rows[lo..hi],
+            path_of_name,
+            k,
+            fetch_path_seq,
+            scheme,
+        )?;
+        batch_count += 1;
+        batch_peak_steps = batch_peak_steps
+            .max(index.territories.iter().map(|t| t.steps.len() as u64).sum::<u64>());
+        batch_peak_entries = batch_peak_entries.max(index.entries.len() as u64);
+        // Parallel over records: each task owns exactly one accumulator.
+        accumulators
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(record, accum)| {
+                let Some(record_anchors) = &anchors[record] else {
+                    return;
+                };
+                let (batch_occurrences, batch_total, batch_forward, batch_reverse) =
+                    route_record(record_anchors, &index, k, every_anchor);
+                if batch_occurrences.is_empty()
+                    && batch_forward.is_empty()
+                    && batch_reverse.is_empty()
+                {
+                    return;
+                }
+                accum.total += batch_total;
+                for (partition, count) in batch_occurrences {
+                    *accum.occurrences.entry(partition).or_default() += count;
+                }
+                if keep_positions {
+                    accum.forward.extend_from_slice(&batch_forward);
+                    accum.reverse.extend_from_slice(&batch_reverse);
+                }
+            });
+        rss_probe(rss, "genome_background_batch")?;
+    }
+    let mut occurrences: Vec<BTreeMap<u32, u64>> = Vec::with_capacity(accumulators.len());
+    let mut forward_positions: Vec<Vec<(usize, u64)>> = Vec::with_capacity(accumulators.len());
+    let mut reverse_positions: Vec<Vec<(usize, u64)>> = Vec::with_capacity(accumulators.len());
+    let mut total_occurrences: Vec<u64> = Vec::with_capacity(accumulators.len());
+    if keep_positions {
+        // The same occurrence is reachable through different batches'
+        // search anchors: deduplicate placement positions.
+        for mut accum in accumulators {
+            accum.forward.sort_unstable();
+            accum.forward.dedup();
+            accum.reverse.sort_unstable();
+            accum.reverse.dedup();
+            occurrences.push(accum.occurrences);
+            forward_positions.push(accum.forward);
+            reverse_positions.push(accum.reverse);
+            total_occurrences.push(accum.total);
+        }
+    } else {
+        for accum in accumulators {
+            occurrences.push(accum.occurrences);
+            total_occurrences.push(accum.total);
+        }
+    }
+    Ok(StreamedRouting {
+        occurrences,
+        forward_positions,
+        reverse_positions,
+        total_occurrences,
+        batch_count,
+        batch_peak_steps,
+        batch_peak_entries,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,6 +1971,281 @@ fn router_placement_diagnosis(
     let out_file = std::fs::File::create(&spec.out)?;
     serde_json::to_writer_pretty(&out_file, &report)?;
     eprintln!("[router-diag] wrote {} ({} target records)", spec.out, target_reports.len());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SCHEME-YIELD DIAGNOSIS (env-gated: IMPG_SCHEME_YIELD=report.json).
+//
+// The STEP-1 collapse's verification harness: the per-read placement sets
+// of the HISTORICAL scheme pairing (syng best-orientation records + the
+// twin both-frames index) vs the COLLAPSED pairing (canonical records +
+// the canonical index) over the SAME base reads and universe. The record
+// sets differ by construction (the canonical qualification changes anchor
+// positions, hence MEM boundaries), so the honest equivalence unit is the
+// READ: a read's evidence is the union of its records' verified occurrences
+// and touched partitions. Reports per-read gained/lost partitions and
+// placements, per-record deltas for the token-identical records, index
+// sizes (step/entry counts, the RSS proxy), and exits before downstream
+// stages (a measurement-only invocation). Unset env = zero cost.
+// ---------------------------------------------------------------------------
+
+fn scheme_yield_diagnosis(
+    out_path: &str,
+    panel: &SyngIndex,
+    reads: &[Vec<u8>],
+    expected: &sample::SampleStats,
+    universe: &Universe,
+    path_of_name: &HashMap<String, usize>,
+    k: u64,
+    fetch_path_seq: &(dyn Fn(usize, u64, u64) -> io::Result<Vec<u8>> + Sync),
+    slice_partitions: &BTreeSet<u32>,
+    rss: &mut genome::PeriodicRssGuard,
+) -> io::Result<()> {
+    let started = Instant::now();
+    struct Side {
+        name: &'static str,
+        chains: spine::junction::ReadChains,
+        index: TerritoryIndex,
+        per_read_placements: Vec<BTreeSet<(usize, u64)>>,
+        per_read_partitions: Vec<BTreeSet<u32>>,
+    }
+    let mut sides: Vec<Side> = Vec::new();
+    for (name, anchor_scheme, index_scheme) in [
+        (
+            "syng+twin",
+            mem_records::AnchorScheme::Syng,
+            TerritoryScheme::Twin,
+        ),
+        (
+            "canonical",
+            mem_records::AnchorScheme::Canonical,
+            TerritoryScheme::Canonical,
+        ),
+    ] {
+        let chains = spine::junction::derive_read_chains_scheme(
+            panel,
+            reads,
+            expected,
+            rss,
+            anchor_scheme,
+        )?;
+        let index = build_territory_index(
+            panel,
+            universe,
+            path_of_name,
+            k,
+            fetch_path_seq,
+            index_scheme,
+        )?;
+        let step_total: u64 = index
+            .territories
+            .iter()
+            .map(|t| t.steps.len() as u64)
+            .sum();
+        let entry_total = index.entries.len() as u64;
+        eprintln!(
+            "[scheme-yield] side {name}: {} records (x{{mult}}), {} steps, {} entries",
+            chains.record_tokens.len(),
+            step_total,
+            entry_total
+        );
+        let per_read: Vec<(BTreeSet<(usize, u64)>, BTreeSet<u32>)> = reads
+            .par_iter()
+            .enumerate()
+            .map(|(read_index, _)| {
+                let mut placements: BTreeSet<(usize, u64)> = BTreeSet::new();
+                let mut partitions: BTreeSet<u32> = BTreeSet::new();
+                for entry in &chains.chains[read_index] {
+                    let tokens = &chains.record_tokens[entry.record as usize];
+                    if tokens.is_empty() {
+                        continue;
+                    }
+                    let anchors = decode_tokens(tokens)?;
+                    let (occurrences, _, forward_positions, reverse_positions) =
+                        route_record(&anchors, &index, k, false);
+                    for &(path, start) in
+                        forward_positions.iter().chain(reverse_positions.iter())
+                    {
+                        placements.insert((path, start));
+                    }
+                    for partition in occurrences.keys() {
+                        partitions.insert(*partition);
+                    }
+                }
+                Ok((placements, partitions))
+            })
+            .collect::<io::Result<_>>()?;
+        let per_read_placements: Vec<BTreeSet<(usize, u64)>> =
+            per_read.iter().map(|(p, _)| p.clone()).collect();
+        let per_read_partitions: Vec<BTreeSet<u32>> =
+            per_read.iter().map(|(_, q)| q.clone()).collect();
+        sides.push(Side {
+            name,
+            chains,
+            index,
+            per_read_placements,
+            per_read_partitions,
+        });
+    }
+    let [old, new] = &sides[..] else {
+        return Err(invalid("scheme-yield requires both sides"));
+    };
+    let mut reads_identical = 0u64;
+    let mut reads_gained_partitions = 0u64;
+    let mut reads_lost_partitions = 0u64;
+    let mut reads_gained_placements = 0u64;
+    let mut reads_lost_placements = 0u64;
+    let mut slice_reads_lost_partitions = 0u64;
+    let mut partition_gains = 0u64;
+    let mut partition_losses = 0u64;
+    let mut placement_gains = 0u64;
+    let mut placement_losses = 0u64;
+    let mut examples: Vec<serde_json::Value> = Vec::new();
+    for read_index in 0..reads.len() {
+        let old_p = &old.per_read_placements[read_index];
+        let new_p = &new.per_read_placements[read_index];
+        let old_q = &old.per_read_partitions[read_index];
+        let new_q = &new.per_read_partitions[read_index];
+        let gained_q: Vec<u32> = new_q.difference(old_q).copied().collect();
+        let lost_q: Vec<u32> = old_q.difference(new_q).copied().collect();
+        let gained_p: Vec<(usize, u64)> = new_p.difference(old_p).copied().collect();
+        let lost_p: Vec<(usize, u64)> = old_p.difference(new_p).copied().collect();
+        if gained_q.is_empty() && lost_q.is_empty() && gained_p.is_empty() && lost_p.is_empty() {
+            reads_identical += 1;
+            continue;
+        }
+        if !gained_q.is_empty() {
+            reads_gained_partitions += 1;
+            partition_gains += gained_q.len() as u64;
+        }
+        if !lost_q.is_empty() {
+            reads_lost_partitions += 1;
+            partition_losses += lost_q.len() as u64;
+            if lost_q
+                .iter()
+                .any(|p| slice_partitions.contains(p))
+            {
+                slice_reads_lost_partitions += 1;
+            }
+        }
+        if !gained_p.is_empty() {
+            reads_gained_placements += 1;
+            placement_gains += gained_p.len() as u64;
+        }
+        if !lost_p.is_empty() {
+            reads_lost_placements += 1;
+            placement_losses += lost_p.len() as u64;
+        }
+        if examples.len() < 32 {
+            examples.push(serde_json::json!({
+                "read": read_index,
+                "partitions_gained": gained_q,
+                "partitions_lost": lost_q,
+                "placements_gained": gained_p,
+                "placements_lost": lost_p,
+            }));
+        }
+    }
+    // Per-record comparison restricted to token-identical records (records
+    // existing under both schemes; the canonical scheme's NEW records have
+    // no old-side counterpart and vice versa).
+    let old_records: BTreeMap<&Vec<u64>, &spine::junction::ReadChains> = BTreeMap::new();
+    let _ = old_records;
+    let mut common = 0u64;
+    let mut common_gained = 0u64;
+    let mut common_lost = 0u64;
+    let mut common_examples: Vec<serde_json::Value> = Vec::new();
+    {
+        let old_index_map: BTreeMap<&Vec<u64>, u32> = old
+            .chains
+            .record_tokens
+            .iter()
+            .enumerate()
+            .map(|(id, tokens)| (tokens, id as u32))
+            .collect();
+        for (id, tokens) in new.chains.record_tokens.iter().enumerate() {
+            let Some(&old_id) = old_index_map.get(tokens) else {
+                continue;
+            };
+            common += 1;
+            let anchors = decode_tokens(tokens)?;
+            let (new_occ, _, new_forward, new_reverse) =
+                route_record(&anchors, &new.index, k, false);
+            let (old_occ, _, old_forward, old_reverse) =
+                route_record(&anchors, &old.index, k, false);
+            let new_set: BTreeSet<(usize, u64)> = new_forward
+                .iter()
+                .chain(new_reverse.iter())
+                .copied()
+                .collect();
+            let old_set: BTreeSet<(usize, u64)> = old_forward
+                .iter()
+                .chain(old_reverse.iter())
+                .copied()
+                .collect();
+            let gained = new_set.difference(&old_set).count() as u64;
+            let lost = old_set.difference(&new_set).count() as u64;
+            common_gained += gained;
+            common_lost += lost;
+            if (gained > 0 || lost > 0) && common_examples.len() < 32 {
+                let touches_slice = new_occ
+                    .keys()
+                    .chain(old_occ.keys())
+                    .any(|p| slice_partitions.contains(p));
+                common_examples.push(serde_json::json!({
+                    "record": tokens,
+                    "new_multiplicity": new.chains.record_counts[id],
+                    "old_multiplicity": old.chains.record_counts[old_id as usize],
+                    "placements_gained": gained,
+                    "placements_lost": lost,
+                    "touches_slice": touches_slice,
+                }));
+            }
+        }
+    }
+    let old_step_total: u64 = old
+        .index
+        .territories
+        .iter()
+        .map(|t| t.steps.len() as u64)
+        .sum();
+    let new_step_total: u64 = new
+        .index
+        .territories
+        .iter()
+        .map(|t| t.steps.len() as u64)
+        .sum();
+    let report = serde_json::json!({
+        "reads": reads.len(),
+        "old_records": old.chains.record_tokens.len(),
+        "new_records": new.chains.record_tokens.len(),
+        "old_record_instances": old.chains.record_counts.iter().sum::<u64>(),
+        "new_record_instances": new.chains.record_counts.iter().sum::<u64>(),
+        "old_index_steps": old_step_total,
+        "new_index_steps": new_step_total,
+        "old_index_entries": old.index.entries.len(),
+        "new_index_entries": new.index.entries.len(),
+        "reads_identical": reads_identical,
+        "reads_gained_partitions": reads_gained_partitions,
+        "reads_lost_partitions": reads_lost_partitions,
+        "slice_reads_lost_partitions": slice_reads_lost_partitions,
+        "reads_gained_placements": reads_gained_placements,
+        "reads_lost_placements": reads_lost_placements,
+        "partition_gains": partition_gains,
+        "partition_losses": partition_losses,
+        "placement_gains": placement_gains,
+        "placement_losses": placement_losses,
+        "common_records": common,
+        "common_record_placements_gained": common_gained,
+        "common_record_placements_lost": common_lost,
+        "read_examples": examples,
+        "common_record_examples": common_examples,
+        "wall_seconds": started.elapsed().as_secs_f64(),
+    });
+    let text = serde_json::to_string_pretty(&report)?;
+    std::fs::write(out_path, text.clone() + "\n")?;
+    eprintln!("[scheme-yield] wrote {out_path} ({} bytes)", text.len());
     Ok(())
 }
 
@@ -7575,16 +8110,23 @@ fn main() -> io::Result<()> {
         .zip(read_chains.record_counts.iter())
         .map(|(tokens, &count)| (tokens.clone(), count))
         .collect();
-    let mut spot_checked = 0usize;
-    for (record, &multiplicity) in records.iter() {
-        if spot_checked >= 512 {
-            break;
+    // The stored-index spot check pins the re-derivation to the SAMPLE
+    // INDEX's own anchor scheme; under the canonical scheme the record set
+    // legitimately differs (canonical qualification -> different MEM
+    // boundaries/multiplicities), so the guard applies to the syng scheme
+    // only (the reads-count identity is checked inside derive_read_chains).
+    if mem_records::anchor_scheme() == mem_records::AnchorScheme::Syng {
+        let mut spot_checked = 0usize;
+        for (record, &multiplicity) in records.iter() {
+            if spot_checked >= 512 {
+                break;
+            }
+            spot_checked += 1;
+            ensure(
+                sample_index.counts.count(record)? >= multiplicity,
+                "derived record missing from stored index",
+            )?;
         }
-        spot_checked += 1;
-        ensure(
-            sample_index.counts.count(record)? >= multiplicity,
-            "derived record missing from stored index",
-        )?;
     }
     let records_seconds = records_started.elapsed().as_secs_f64();
     rss_probe(&mut rss, "sample_record_rederivation")?;
@@ -7609,10 +8151,35 @@ fn main() -> io::Result<()> {
     let yield_index = strand_yield_path
         .as_ref()
         .map(|_| {
-            build_territory_index(&panel, &universe, &path_of_name, k, &fetch_path_seq, false)
+            build_territory_index(
+                &panel,
+                &universe,
+                &path_of_name,
+                k,
+                &fetch_path_seq,
+                TerritoryScheme::Forward,
+            )
         })
         .transpose()?;
-    let territory = build_territory_index(&panel, &universe, &path_of_name, k, &fetch_path_seq, true)?;
+    let index_scheme = TerritoryScheme::from_env()?;
+    // The STEP-2 bounded routing applies to the genome-universe
+    // diagnostics-only pass (the 38.7 GiB measured shape): the territory
+    // index streams in partition-aligned batches inside the routing pass
+    // and never materializes as a whole. Every other path (component
+    // universes; spine flows) builds the index as before — it stays
+    // resident for the whole run downstream (the span index, the in-window
+    // attribution), and at component scale it is bounded.
+    let streamed_genome_routing =
+        options.routing_universe == "genome" && options.routing_diagnostics_only;
+    let territory = if streamed_genome_routing {
+        TerritoryIndex {
+            territories: Vec::new(),
+            entries: Vec::new(),
+            path_intervals: Vec::new(),
+        }
+    } else {
+        build_territory_index(&panel, &universe, &path_of_name, k, &fetch_path_seq, index_scheme)?
+    };
     let territory_seconds = territory_started.elapsed().as_secs_f64();
     rss_probe(&mut rss, "territory_index")?;
 
@@ -7651,6 +8218,26 @@ fn main() -> io::Result<()> {
             }
         }
     }
+    // The scheme-yield diagnosis (STEP-1 verification, env-gated): per-read
+    // placement-set equivalence, old pairing (syng records + twin index) vs
+    // collapsed pairing (canonical records + canonical index) — then exits
+    // (a measurement-only invocation; the production flow continues without
+    // it otherwise).
+    if let Ok(yield_path) = std::env::var("IMPG_SCHEME_YIELD") {
+        scheme_yield_diagnosis(
+            &yield_path,
+            &panel,
+            &reads_batch,
+            &sample_index.stats,
+            &universe,
+            &path_of_name,
+            k,
+            &fetch_path_seq,
+            &slice_partitions,
+            &mut rss,
+        )?;
+        std::process::exit(0);
+    }
     let record_vec: Vec<(&Vec<u64>, u64)> = records.iter().map(|(r, &w)| (r, w)).collect();
     let yield_records_total = AtomicU64::new(0);
     let yield_slice_records_total = AtomicU64::new(0);
@@ -7658,7 +8245,51 @@ fn main() -> io::Result<()> {
     let yield_slice_records_gained = AtomicU64::new(0);
     let yield_placements_gained = AtomicU64::new(0);
     let yield_placements_lost = AtomicU64::new(0);
-    let routed_records: Vec<RoutedRecord> = record_vec
+    // STEP-2 streamed bounded routing (the genome diagnostics pass): the
+    // universe's territory streams in partition-aligned batches inside
+    // `route_universe_bounded`; positions are kept (the diagnostics pass's
+    // exit summary and any env-gated yield comparisons consume the
+    // placement lists).
+    let streamed_routing = if streamed_genome_routing {
+        Some(route_universe_bounded(
+            &panel,
+            &universe,
+            &path_of_name,
+            k,
+            &fetch_path_seq,
+            index_scheme,
+            &record_vec,
+            true,
+            false,
+            &mut rss,
+        )?)
+    } else {
+        None
+    };
+    let routed_records: Vec<RoutedRecord> = if let Some(streamed) = &streamed_routing {
+        streamed
+            .occurrences
+            .iter()
+            .zip(streamed.forward_positions.iter())
+            .zip(streamed.reverse_positions.iter())
+            .zip(streamed.total_occurrences.iter())
+            .zip(record_vec.iter())
+            .filter(|((((occurrences, _), _), _), (tokens, _))| {
+                !tokens.is_empty() && !occurrences.is_empty()
+            })
+            .map(|((((occurrences, forward), reverse), total), (tokens, multiplicity))| {
+                RoutedRecord {
+                    tokens: (*tokens).clone(),
+                    multiplicity: *multiplicity,
+                    occurrences: occurrences.clone(),
+                    total_occurrences: *total,
+                    forward_positions: forward.clone(),
+                    reverse_positions: reverse.clone(),
+                }
+            })
+            .collect()
+    } else {
+        record_vec
         .par_iter()
         .filter(|(tokens, _)| !tokens.is_empty())
         .filter_map(|(tokens, multiplicity)| {
@@ -7706,7 +8337,8 @@ fn main() -> io::Result<()> {
                 }
             })
         })
-        .collect();
+        .collect()
+    };
     let records_touching_universe = routed_records.len() as u64;
     // The strand-fix yield summary (env-gated): the completeness delta of the
     // rc-symmetric index over the routed records — the fraction of records
@@ -7743,6 +8375,11 @@ fn main() -> io::Result<()> {
     // records' placements through route_record's search and force-verifies
     // the walks at the spelled loci — then exits before any downstream stage.
     if let Ok(spec_path) = std::env::var("IMPG_ROUTER_PLACEMENT_DIAG") {
+        ensure(
+            !streamed_genome_routing,
+            "the router-placement diagnosis requires a materialized territory index \
+             (component routing universe)",
+        )?;
         router_placement_diagnosis(&spec_path, &routed_records, &territory, &panel, k)?;
         std::process::exit(0);
     }
@@ -7886,14 +8523,22 @@ fn main() -> io::Result<()> {
         .unwrap_or_default();
     let mut instance_spans: RecordPlacementSpans = Vec::new();
     let mut window_records: WindowRecordLists = Vec::new();
-    let window_obs: Vec<HashMap<FeatureKey, f64>> = build_in_window_obs(
-        &routed_records,
-        &territory,
-        k,
-        &window_owner_sets,
-        Some(&mut instance_spans),
-        Some(&mut window_records),
-    )?;
+    // The in-window observed attribution consults the (materialized)
+    // territory index; the streamed genome diagnostics pass has none (and
+    // exits before any consumer of the window profiles), so it is skipped
+    // there.
+    let window_obs: Vec<HashMap<FeatureKey, f64>> = if streamed_genome_routing {
+        Vec::new()
+    } else {
+        build_in_window_obs(
+            &routed_records,
+            &territory,
+            k,
+            &window_owner_sets,
+            Some(&mut instance_spans),
+            Some(&mut window_records),
+        )?
+    };
     // The records' equal shares (the mass each record's index carries; the
     // same share the observed maps accumulated).
     let record_shares: Vec<f64> = routed_records
@@ -7924,6 +8569,8 @@ fn main() -> io::Result<()> {
     let mut genome_background: HashMap<FeatureKey, f64> = HashMap::new();
     let mut genome_partitions = 0usize;
     let mut genome_records_placed = 0u64;
+    let mut genome_territory_batches = 0usize;
+    let mut genome_territory_batch_peak_entries = 0u64;
     let mut genome_territory_seconds = 0.0f64;
     let mut genome_seconds = 0.0f64;
     // t_r_genome buckets of the gap-realizing records (the reconciliation
@@ -7955,6 +8602,16 @@ fn main() -> io::Result<()> {
                     })
                     .collect()
             } else {
+                // The STEP-2 collapse: the genome-universe placement pass
+                // streams the universe in partition-aligned batches (one
+                // batch's territory index resident at a time) instead of
+                // materializing the full 197M-entry genome index. The
+                // owner-ruling semantics stay: the extension never enters
+                // the genome universe (gap records keep t_r_genome = 0 ->
+                // beta = base); the merged per-record touched maps are the
+                // full-index routing's maps (partition-aligned batches; the
+                // single-anchor search's anchor choice is per batch, an
+                // in-kind edge effect of the measured search limitation).
                 let genome_territory_started = Instant::now();
                 let genome_universe = load_universe(
                     &axis,
@@ -7963,66 +8620,57 @@ fn main() -> io::Result<()> {
                     &options.component,
                     "genome",
                     traversals.len(),
-                    // The genome-universe placement pass stays EXACTLY as is
-                    // (owner ruling): the extension never enters it, so gap
-                    // records keep t_r_genome = 0 -> beta = base.
                     None,
                 )?;
                 genome_partitions = genome_universe.partitions;
-                let genome_index = build_territory_index(
+                let streamed = route_universe_bounded(
                     &panel,
                     &genome_universe,
                     &path_of_name,
                     k,
                     &fetch_path_seq,
-                    true,
+                    index_scheme,
+                    &record_vec,
+                    // positions are not consumed by the background pass
+                    false,
+                    false,
+                    &mut rss,
                 )?;
+                genome_territory_batches = streamed.batch_count;
+                genome_territory_batch_peak_entries = streamed.batch_peak_entries;
                 genome_territory_seconds =
                     genome_territory_started.elapsed().as_secs_f64();
-                record_vec
-                    .par_chunks(GENOME_PASS_CHUNK)
-                    .map(|chunk| {
-                        let mut map = HashMap::new();
-                        let mut placed = 0u64;
-                        let mut gap_buckets = [0u64; 8];
-                        let mut gap_placed = 0u64;
-                        for &(tokens, multiplicity) in chunk {
-                            if tokens.is_empty() {
-                                continue;
-                            }
-                            let anchors = match decode_tokens(tokens) {
-                                Ok(anchors) => anchors,
-                                Err(_) => continue,
-                            };
-                            let (occurrences, _, _, _) =
-                                route_record(&anchors, &genome_index, k, false);
-                            if occurrences.is_empty() {
-                                continue;
-                            }
-                            placed += 1;
-                            if extension_record_tokens.contains(tokens) {
-                                gap_placed += 1;
-                                let bucket = match occurrences.len() {
-                                    1 => 1,
-                                    2 => 2,
-                                    3..=4 => 3,
-                                    5..=8 => 4,
-                                    9..=16 => 5,
-                                    17..=32 => 6,
-                                    _ => 7,
-                                };
-                                gap_buckets[bucket] += 1;
-                            }
-                            accumulate_cross_support(
-                                &mut map,
-                                tokens,
-                                multiplicity,
-                                occurrences.len(),
-                            );
-                        }
-                        (map, placed, gap_buckets, gap_placed)
-                    })
-                    .collect()
+                let mut map = HashMap::new();
+                let mut placed = 0u64;
+                let mut gap_buckets = [0u64; 8];
+                let mut gap_placed = 0u64;
+                for (index, (tokens, multiplicity)) in record_vec.iter().enumerate() {
+                    let occurrences = &streamed.occurrences[index];
+                    if occurrences.is_empty() {
+                        continue;
+                    }
+                    placed += 1;
+                    if extension_record_tokens.contains(*tokens) {
+                        gap_placed += 1;
+                        let bucket = match occurrences.len() {
+                            1 => 1,
+                            2 => 2,
+                            3..=4 => 3,
+                            5..=8 => 4,
+                            9..=16 => 5,
+                            17..=32 => 6,
+                            _ => 7,
+                        };
+                        gap_buckets[bucket] += 1;
+                    }
+                    accumulate_cross_support(
+                        &mut map,
+                        tokens,
+                        *multiplicity,
+                        occurrences.len(),
+                    );
+                }
+                vec![(map, placed, gap_buckets, gap_placed)]
             };
         for (map, placed, gap_buckets, gap_placed) in chunk_maps {
             genome_records_placed += placed;
@@ -8042,17 +8690,49 @@ fn main() -> io::Result<()> {
     // search on a deterministic sample of records.
     let mut multi_anchor_checked = 0usize;
     let mut multi_anchor_touched_set_mismatches = 0usize;
-    for (index, record) in routed_records.iter().enumerate() {
-        if index % 1024 != 0 || multi_anchor_checked >= 512 {
-            continue;
+    if let Some(streamed) = &streamed_routing {
+        // The streamed genome pass's consistency check: the SAME sampled
+        // records, re-routed with EVERY anchor through the same batch
+        // stream (the exact-mode oracle of the single-anchor search).
+        let sample: Vec<(&Vec<u64>, u64)> = routed_records
+            .iter()
+            .step_by(1024)
+            .take(512)
+            .map(|record| (&record.tokens, record.multiplicity))
+            .collect();
+        multi_anchor_checked = sample.len();
+        let exact = route_universe_bounded(
+            &panel,
+            &universe,
+            &path_of_name,
+            k,
+            &fetch_path_seq,
+            index_scheme,
+            &sample,
+            false,
+            true,
+            &mut rss,
+        )?;
+        for (exact_occurrences, record) in exact.occurrences.iter().zip(routed_records.iter().step_by(1024)) {
+            let keys_exact: BTreeSet<u32> = exact_occurrences.keys().copied().collect();
+            let keys_fast: BTreeSet<u32> = record.occurrences.keys().copied().collect();
+            if keys_exact != keys_fast {
+                multi_anchor_touched_set_mismatches += 1;
+            }
         }
-        multi_anchor_checked += 1;
-        let anchors = decode_tokens(&record.tokens)?;
-        let (exact, _, _, _) = route_record(&anchors, &territory, k, true);
-        let keys_exact: BTreeSet<u32> = exact.keys().copied().collect();
-        let keys_fast: BTreeSet<u32> = record.occurrences.keys().copied().collect();
-        if keys_exact != keys_fast {
-            multi_anchor_touched_set_mismatches += 1;
+    } else {
+        for (index, record) in routed_records.iter().enumerate() {
+            if index % 1024 != 0 || multi_anchor_checked >= 512 {
+                continue;
+            }
+            multi_anchor_checked += 1;
+            let anchors = decode_tokens(&record.tokens)?;
+            let (exact, _, _, _) = route_record(&anchors, &territory, k, true);
+            let keys_exact: BTreeSet<u32> = exact.keys().copied().collect();
+            let keys_fast: BTreeSet<u32> = record.occurrences.keys().copied().collect();
+            if keys_exact != keys_fast {
+                multi_anchor_touched_set_mismatches += 1;
+            }
         }
     }
     let routing_seconds = routing_started.elapsed().as_secs_f64();
@@ -8060,7 +8740,13 @@ fn main() -> io::Result<()> {
         "universe": options.routing_universe,
         "universe_partitions": universe.partitions,
         "universe_territory_intervals": universe.rows.len(),
-        "territory_entries": territory.entries.len(),
+        "territory_entries": if let Some(streamed) = &streamed_routing {
+            // streamed passes never materialize the whole index; the batch
+            // peak is the resident bound and 0 marks the streamed shape
+            streamed.batch_peak_entries
+        } else {
+            territory.entries.len() as u64
+        },
         "records_total": records.len() as u64,
         "records_touching_universe": records_touching_universe,
         "records_routed_to_slice": records_routed_to_slice,
@@ -8110,6 +8796,8 @@ fn main() -> io::Result<()> {
                 "genome_background": {
                     "partitions": genome_partitions,
                     "records_placed": genome_records_placed,
+                    "territory_batches": genome_territory_batches,
+                    "territory_batch_peak_entries": genome_territory_batch_peak_entries,
                     "features": genome_background.len(),
                 },
                 "stage_wall_seconds": {
@@ -8398,6 +9086,8 @@ fn main() -> io::Result<()> {
                 "genome_background": {
                     "partitions": genome_partitions,
                     "records_placed": genome_records_placed,
+                    "territory_batches": genome_territory_batches,
+                    "territory_batch_peak_entries": genome_territory_batch_peak_entries,
                     "territory_seconds": genome_territory_seconds,
                     "features": genome_background.len(),
                 },
@@ -8892,7 +9582,14 @@ fn main() -> io::Result<()> {
                 "reads": sample_index.stats.reads,
                 "mem_records": sample_index.stats.mem_records,
                 "distinct_mems": sample_index.stats.distinct_mems,
-                "spot_checked_against_index": spot_checked,
+                "anchor_scheme": format!("{:?}", mem_records::anchor_scheme()),
+                "spot_checked_against_index": if mem_records::anchor_scheme()
+                    == mem_records::AnchorScheme::Syng
+                {
+                    records.len().min(512)
+                } else {
+                    0
+                },
             },
             "routing": routing_summary,
             "dp": dp_summary_global,
@@ -9358,7 +10055,6 @@ mod multiplicity_background_tests {
         let index = TerritoryIndex {
             territories: Vec::new(),
             entries: Vec::new(),
-            node_ranges: Vec::new(),
             path_intervals: vec![
                 vec![(100u64, 200u64, 1u32)],
                 vec![(100u64, 200u64, 2u32)],
@@ -9573,7 +10269,6 @@ mod multiplicity_background_tests {
         let index = TerritoryIndex {
             territories: Vec::new(),
             entries: Vec::new(),
-            node_ranges: Vec::new(),
             path_intervals: vec![vec![(100u64, 200u64, 1u32)]],
         };
         let walk = vec![(5i32, 0u64), (7, 10), (-3, 20)];
@@ -9669,7 +10364,6 @@ mod multiplicity_background_tests {
         let index = TerritoryIndex {
             territories: Vec::new(),
             entries: Vec::new(),
-            node_ranges: Vec::new(),
             path_intervals: vec![vec![(100u64, 200u64, 1u32)]],
         };
         let walk = vec![(5i32, 0u64), (7, 10), (-3, 20)];
@@ -9720,7 +10414,6 @@ mod multiplicity_background_tests {
         let index = TerritoryIndex {
             territories: Vec::new(),
             entries: Vec::new(),
-            node_ranges: Vec::new(),
             path_intervals: vec![vec![(100u64, 300u64, 1u32)]],
         };
         // Node 5 recurs: the singleton subwalks (0,0) and (2,2) encode the
@@ -9792,23 +10485,7 @@ mod multiplicity_background_tests {
             .filter(|&&(bp, _)| bp + k > start && bp < end)
             .map(|&(bp, node)| (node, 0u32, bp))
             .collect();
-        entries.sort_by_key(|&(node, _, _)| node_key(node));
-        let max_node = entries
-            .iter()
-            .map(|&(node, _, _)| node)
-            .max()
-            .unwrap_or(i32::MAX);
-        let table_len = node_key(max_node) + 2;
-        let mut counts = vec![0u64; table_len];
-        for &(node, _, _) in &entries {
-            counts[node_key(node)] += 1;
-        }
-        let mut node_ranges = vec![0u64; table_len];
-        let mut acc = 0u64;
-        for key in 0..table_len {
-            node_ranges[key] = acc;
-            acc += counts[key];
-        }
+        entries.sort_by_key(|&(node, _, _)| node);
         TerritoryIndex {
             territories: vec![Territory {
                 partition,
@@ -9818,7 +10495,6 @@ mod multiplicity_background_tests {
                 steps,
             }],
             entries,
-            node_ranges,
             path_intervals: vec![vec![interval]],
         }
     }
