@@ -1720,6 +1720,10 @@ pub(in super) struct PhasingPosterior {
     pub(in super) best_total: f64,
     pub(in super) wall_seconds: f64,
     pub(in super) backward_states: Vec<usize>,
+    /// Retained states excluded from the posterior universe (empty
+    /// retained-universe continuation; the documented over-approximation
+    /// of zero — see the joint loop). Per locus.
+    pub(in super) betaless_states: Vec<usize>,
 }
 
 /// The deterministic splitmix64 generator (the documented standard
@@ -1779,7 +1783,35 @@ pub(in super) fn phasing_posterior(
             let boundary = &boundary_costs[locus];
             let right_count = boundary.right_count as usize;
             let next_beta = &beta[locus + 1];
+            // One row/index lookup per STATE, not per edge — the dense-
+            // index convention of the forward loop (the diploid track's
+            // large layers make the per-edge hash lookup the dominant
+            // cost; measured 2177s vs the forward's 27s at the p1 slice
+            // before this precompute).
             let next_row_of = &row_of[locus + 1];
+            // The haploid track's EMPTY second slot never indexes the cost
+            // matrix (the shared zero row pays the second charge) — its
+            // dense column is a placeholder 0, never read.
+            let successor_info: Vec<(usize, u32, u32, f64)> = layers[locus + 1]
+                .iter()
+                .filter_map(|successor| {
+                    let row = next_row_of[&successor.pair];
+                    if !next_beta[row].is_finite() {
+                        return None;
+                    }
+                    let right_second = if haploid {
+                        0
+                    } else {
+                        boundary.right_index[successor.pair[1]]
+                    };
+                    Some((
+                        row,
+                        boundary.right_index[successor.pair[0]],
+                        right_second,
+                        successor.loss,
+                    ))
+                })
+                .collect();
             let mut current = vec![f64::INFINITY; tables[locus].rows.len()];
             let zero_row = if haploid {
                 Some(vec![0.0f64; right_count])
@@ -1804,11 +1836,7 @@ pub(in super) fn phasing_posterior(
                     }
                 };
                 let mut best = f64::INFINITY;
-                for successor in layers[locus + 1].iter() {
-                    let row = next_row_of[&successor.pair];
-                    if !next_beta[row].is_finite() {
-                        continue;
-                    }
+                for &(row, right_first, right_second, successor_loss) in successor_info.iter() {
                     // The cost matrix's columns are the DENSE right-member
                     // indices (the same convention as the forward loop's
                     // count-sorted `first` field); the haploid second slot
@@ -1818,11 +1846,11 @@ pub(in super) fn phasing_posterior(
                     let second_charge = if haploid {
                         0.0
                     } else {
-                        row_second[boundary.right_index[successor.pair[1]] as usize]
+                        row_second[right_second as usize]
                     };
-                    let candidate = row_first[boundary.right_index[successor.pair[0]] as usize]
+                    let candidate = row_first[right_first as usize]
                         + second_charge
-                        + successor.loss
+                        + successor_loss
                         + next_beta[row];
                     if candidate < best {
                         best = candidate;
@@ -1835,15 +1863,29 @@ pub(in super) fn phasing_posterior(
             beta[locus] = current;
         }
     }
-    // joint over the retained states; the global best.
+    // joint over the retained states; the global best. A retained state
+    // whose retained-universe continuation is EMPTY (beta = +INFINITY: the
+    // suffix-bound prune kept it, but no retained successor chain reaches
+    // the end at or below the incumbent) lies in no chain through the
+    // retained universe and is excluded from the posterior — the same
+    // documented over-approximation of zero as the suffix-bound prune
+    // itself (its joint mass is bounded by exp(-(incumbent - best))).
+    // Counted and reported per locus (the small haploid layers happened to
+    // carry none; the diploid track's large layers can).
     let mut joint: Vec<Vec<f64>> = Vec::with_capacity(locus_count);
     let mut best_total = f64::INFINITY;
     let mut backward_states: Vec<usize> = Vec::with_capacity(locus_count);
+    let mut betaless_states: Vec<usize> = Vec::with_capacity(locus_count);
     for locus in 0..locus_count {
         let mut joints = Vec::with_capacity(layers[locus].len());
+        let mut betaless = 0usize;
         for state in layers[locus].iter().enumerate() {
             let beta_value = beta[locus][row_of[locus][&state.1.pair]];
-            ensure(beta_value.is_finite(), "posterior joint over a betaless state")?;
+            if !beta_value.is_finite() {
+                betaless += 1;
+                joints.push(f64::INFINITY);
+                continue;
+            }
             let value = state.1.score + beta_value;
             ensure(value.is_finite(), "posterior joint not finite")?;
             if value < best_total {
@@ -1853,6 +1895,7 @@ pub(in super) fn phasing_posterior(
         }
         joint.push(joints);
         backward_states.push(layers[locus].len());
+        betaless_states.push(betaless);
     }
     let forward_best = layers[locus_count - 1]
         .iter()
@@ -1868,6 +1911,9 @@ pub(in super) fn phasing_posterior(
         let mut by_pair: HashMap<[usize; 2], (f64, f64)> = HashMap::new();
         for (index, state) in layers[locus].iter().enumerate() {
             let value = joint[locus][index];
+            if !value.is_finite() {
+                continue;
+            }
             let entry = by_pair.entry(state.pair).or_insert((value, 0.0));
             if value < entry.0 {
                 entry.0 = value;
@@ -1978,6 +2024,7 @@ pub(in super) fn phasing_posterior(
         best_total,
         wall_seconds: started.elapsed().as_secs_f64(),
         backward_states,
+        betaless_states,
     })
 }
 
@@ -3608,6 +3655,39 @@ pub(in super) fn run_correlation_phasing(
             posterior.best_total,
             dp_haploid.best_score,
             posterior.backward_states,
+            posterior.wall_seconds
+        );
+        Some(posterior)
+    } else {
+        None
+    };
+    // The DIPLOID track's own posterior (the COSIGT-pattern per-locus
+    // diplotype product's chain layer — owner directive 2026-09-26): the
+    // SAME exact backward machinery invoked with haploid=false over the
+    // diploid tables and the diploid DP's retained layers, giving the
+    // chain-conditioned marginal of every retained diplotype pair at each
+    // locus (min-marginal + posterior mass at the model's own scale).
+    // Purely observational like the haploid pass: no selection reads it
+    // (the chain DP's argmin routes and the ploidy comparison are
+    // bit-untouched). No posterior samples are drawn on this track (the
+    // product consumes the marginals; the exact-sample machinery stays
+    // the selected haploid track's).
+    let spine_posterior_diploid: Option<PhasingPosterior> = if posterior_enabled {
+        let posterior = phasing_posterior(
+            locus_count,
+            &per_locus_tables,
+            &dp_diploid.layers,
+            &transition_costs,
+            false,
+            0,
+            rss,
+        )?;
+        eprintln!(
+            "[phasing] diploid posterior: best {:.2} (forward {:.2}), backward states {:?}, betaless {:?}, {:.2}s",
+            posterior.best_total,
+            dp_diploid.best_score,
+            posterior.backward_states,
+            posterior.betaless_states,
             posterior.wall_seconds
         );
         Some(posterior)
@@ -5313,6 +5393,488 @@ pub(in super) fn run_correlation_phasing(
     let self_delta = m1_oracle_dp_best - dp.best_score;
     let dp_beats_incumbent = (dp.best_score.total_cmp(&incumbent_phasing)).is_le();
 
+    // -------------------------------- COSIGT-pattern per-locus GENOTYPE CALLS
+    // (owner directive 2026-09-26: PER-LOCUS GENOTYPING IS THE PRODUCT; the
+    // chain DP is the phasing layer ON TOP of the calls, unchanged in
+    // machinery). Per locus, the diplotype framing compares EVERY class
+    // pair of the locus's panel haplotypes (profile-identical alleles are
+    // one class — the sufficiency principle; the STEP-3 admissible bound
+    // provably excludes no argmax: a bound-pruned pair's loss exceeds the
+    // retention margin, itself at or above the all-pairs best, so the
+    // reported argmax tie set IS the exact all-pairs argmax), scores each
+    // pair's expected merged profile against the observed projection (the
+    // sweep table — the merged-pair feature-level Poisson), and reports:
+    //   - the CALLED PAIR (the exact best-loss tie set over the LOCALLY
+    //     VIABLE candidate set — the directive's domain: pairs of classes
+    //     with at least one port-viable member, the sweep's own
+    //     best_viable tie enumeration; the unrestricted table's argmax is
+    //     reported as the domain diagnostic — the non-viable classes are
+    //     hygiene rows that can never be a haplotype at the locus); the
+    //     full tie set = the credible set at the model's own exact-tie
+    //     level — the pairs the model cannot separate at ANY mass level;
+    //   - the FULL local posterior over all finite-loss pairs at the
+    //     model's own likelihood scale (mass = exp(-(loss - best)); NO
+    //     temperature, no constants), plus the admissible bound on the
+    //     beyond-margin pruned mass;
+    //   - the class DOSAGE VECTOR of the called pair (2 = homozygote,
+    //     1 = heterozygote, 0 = absent) with the member alleles and their
+    //     spelled segments (class members are model-indistinguishable —
+    //     the dosage per haplotype is the class dosage over its members);
+    //   - the CHAIN LAYER's own quantities, repositioned: the selected
+    //     route's pair (the phase layer's per-locus call) and the DIPLOID
+    //     track's backward-pass pair marginals (the chain-conditioned
+    //     posterior over diplotypes — the Step-4b machinery, invoked with
+    //     haploid=false over the diploid tables).
+    // The haploid framing (the sample's calls; the ploidy statement stays
+    // an output) is the single-allele mirror: the per-allele record-once
+    // argmax, its posterior over alleles, and the selected haploid track's
+    // chain marginal. Truth columns are ASSESSMENT-SIDE only (the
+    // established Stage-1 pattern), never read by any production path.
+    let genotype_calls_started = Instant::now();
+    // Per-locus unordered-pair chain marginals of the DIPLOID track
+    // (both homolog matchings merged; mass summed, min-marginal minimized).
+    let diploid_chain_maps: Vec<HashMap<[usize; 2], (f64, f64)>> =
+        spine_posterior_diploid
+            .as_ref()
+            .map(|posterior| {
+                posterior
+                    .locus_marginals
+                    .iter()
+                    .map(|rows| {
+                        let mut map: HashMap<[usize; 2], (f64, f64)> = HashMap::new();
+                        for &(pair, min_marginal, mass) in rows {
+                            let key =
+                                [pair[0].min(pair[1]), pair[0].max(pair[1])];
+                            let entry = map.entry(key).or_insert((min_marginal, 0.0));
+                            if min_marginal < entry.0 {
+                                entry.0 = min_marginal;
+                            }
+                            entry.1 += mass;
+                        }
+                        map
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    let diploid_chain_totals: Vec<f64> = diploid_chain_maps
+        .iter()
+        .map(|map| map.values().map(|&(_, mass)| mass).sum())
+        .collect();
+    // The exact-allele match of one truth copy's piece list against the
+    // locus's combined rows (the Stage-1 `truth_pair_alleles` convention).
+    let truth_allele_of = |locus: usize, copy: usize| -> Option<usize> {
+        let pieces: Vec<(usize, u64, u64, bool)> = truth_pieces[locus][copy]
+            .iter()
+            .map(|&(source, start, end, reverse, _owner)| (source, start, end, reverse))
+            .collect();
+        if pieces.is_empty() {
+            return None;
+        }
+        combined[locus].iter().position(|traversal| {
+            traversal.segments.len() == pieces.len()
+                && traversal
+                    .segments
+                    .iter()
+                    .zip(pieces.iter())
+                    .all(|(segment, piece)| {
+                        segment.source == piece.0
+                            && segment.start == piece.1
+                            && segment.end == piece.2
+                            && segment.reverse == piece.3
+                    })
+        })
+    };
+    let genotype_call_rows: Vec<serde_json::Value> = (0..locus_count)
+        .into_par_iter()
+        .map(|locus| -> io::Result<serde_json::Value> {
+            let classes = locus_classes[locus].profiles.len();
+            let membership = &membership_slices[locus];
+            let domain_alleles = ranges[locus].len();
+            let sweep = &sweeps[locus];
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); classes];
+            for (allele, &class) in membership.iter().enumerate() {
+                members[class].push(allele);
+            }
+            let member_segments = |class: usize| -> serde_json::Value {
+                serde_json::json!(members[class]
+                    .iter()
+                    .map(|&allele| serde_json::json!({
+                        "allele": allele,
+                        "segments": combined[locus][allele]
+                            .segments
+                            .iter()
+                            .map(segment_json)
+                            .collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>())
+            };
+            // ---- the diplotype framing: the all-pairs local posterior
+            // over the LOCALLY VIABLE candidate set (the directive's own
+            // domain: "every diplotype pair of the locus's LOCALLY VIABLE
+            // panel haplotypes"). A class is locally viable iff it has
+            // at least one port-viable member allele — the sweep's own
+            // viable-pair predicate (best_viable_*); the non-viable
+            // classes are domain hygiene rows (sub-read-length fragments
+            // and port-disconnected rows that can never be a haplotype
+            // AT the locus — they cannot chain into any genome). The
+            // degenerate mini-class pairs (near-empty expected profiles)
+            // win the UNRESTRICTED table's argmax at near-zero loss and
+            // are reported as the diagnostic domain_argmax, but they are
+            // not genotypes. The FULL finite-pair table is dumped with a
+            // viability flag so nothing is hidden.
+            let viable_class: Vec<bool> = (0..classes)
+                .map(|class| {
+                    members[class]
+                        .iter()
+                        .any(|&allele| viable[locus][allele])
+                })
+                .collect();
+            let pair_viable = |pair: [usize; 2]| viable_class[pair[0]] && viable_class[pair[1]];
+            let best_loss = sweep.best_loss;
+            let viable_best_loss = sweep.best_viable_loss;
+            let mut posterior_rows: Vec<(f64, [usize; 2], f64, bool)> = Vec::new();
+            for first in 0..classes {
+                for second in first..classes {
+                    let loss = sweep.table[class_pair_index(first, second)];
+                    if loss.is_finite() {
+                        posterior_rows.push((
+                            loss,
+                            [first, second],
+                            (-(loss - best_loss)).exp(),
+                            pair_viable([first, second]),
+                        ));
+                    }
+                }
+            }
+            posterior_rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+            // The PRODUCT posterior normalizes over the viable candidate
+            // set's pairs (the degenerate non-viable mass is excluded by
+            // the candidate-set definition, and its exclusion is reported:
+            // the non-viable rows' own mass sum).
+            let local_total: f64 = posterior_rows
+                .iter()
+                .filter(|&&(_, _, _, is_viable)| is_viable)
+                .map(|&(_, _, mass, _)| mass)
+                .sum();
+            let nonviable_mass: f64 = posterior_rows
+                .iter()
+                .filter(|&&(_, _, _, is_viable)| !is_viable)
+                .map(|&(_, _, mass, _)| mass)
+                .sum();
+            let viable_count = posterior_rows
+                .iter()
+                .filter(|&&(_, _, _, is_viable)| is_viable)
+                .count();
+            let mut cumulative = 0.0f64;
+            let posterior_json: Vec<serde_json::Value> = posterior_rows
+                .iter()
+                .map(|&(loss, pair, mass, is_viable)| {
+                    if is_viable {
+                        cumulative += mass;
+                    }
+                    serde_json::json!([
+                        pair[0],
+                        pair[1],
+                        loss,
+                        is_viable,
+                        if is_viable && local_total > 0.0 {
+                            mass / local_total
+                        } else {
+                            f64::NAN
+                        },
+                        if is_viable && local_total > 0.0 {
+                            cumulative / local_total
+                        } else {
+                            f64::NAN
+                        },
+                    ])
+                })
+                .collect();
+            let pruned_mass_bound = if sweep.bound_pruned_pairs > 0 {
+                sweep.bound_pruned_pairs as f64
+                    * (-(sweep.prune_margin - best_loss)).exp()
+            } else {
+                0.0
+            };
+            // The CALL: the exact best-loss tie set over the VIABLE pairs
+            // (the sweep's own `best_viable_class_pairs` — bit-identical
+            // enumeration); the unrestricted table's argmax is reported
+            // alongside as the domain diagnostic.
+            let called_pair = sweep.best_viable_class_pairs[0];
+            let credible_set: Vec<[usize; 2]> = sweep.best_viable_class_pairs.clone();
+            let credible_mass: f64 = posterior_rows
+                .iter()
+                .filter(|&&(_, pair, _, is_viable)| {
+                    is_viable
+                        && credible_set
+                            .iter()
+                            .any(|&tie| tie == pair)
+                })
+                .map(|&(_, _, mass, _)| mass)
+                .sum();
+            // ---- the dosage vector of the called pair (per class).
+            let mut dosage: Vec<(usize, u8)> = Vec::new();
+            for &class in &called_pair {
+                match dosage.iter_mut().find(|(c, _)| *c == class) {
+                    Some(entry) => entry.1 += 1,
+                    None => dosage.push((class, 1)),
+                }
+            }
+            dosage.sort();
+            let dosage_json: Vec<serde_json::Value> = dosage
+                .iter()
+                .map(|&(class, dose)| {
+                    serde_json::json!({
+                        "class": class,
+                        "dosage": dose,
+                        "members": members[class],
+                        "segments": member_segments(class),
+                    })
+                })
+                .collect();
+            // ---- the haploid framing: the per-allele record-once posterior.
+            let losses = &haploid_loss_tables[locus];
+            let best_single = losses
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .fold(f64::INFINITY, f64::min);
+            let mut haploid_rows: Vec<(f64, usize, f64)> = losses
+                .iter()
+                .enumerate()
+                .filter(|&(_, &loss)| loss.is_finite())
+                .map(|(allele, &loss)| (loss, allele, (-(loss - best_single)).exp()))
+                .collect();
+            haploid_rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+            let haploid_total: f64 = haploid_rows.iter().map(|&(_, _, mass)| mass).sum();
+            let haploid_ties: Vec<usize> = haploid_rows
+                .iter()
+                .take_while(|&&(loss, _, _)| loss.to_bits() == best_single.to_bits())
+                .map(|&(_, allele, _)| allele)
+                .collect();
+            let haploid_posterior_json: Vec<serde_json::Value> = haploid_rows
+                .iter()
+                .map(|&(loss, allele, mass)| {
+                    serde_json::json!([
+                        allele,
+                        loss,
+                        if haploid_total > 0.0 { mass / haploid_total } else { f64::NAN },
+                    ])
+                })
+                .collect();
+            // ---- the chain layer (repositioned: the phase on top of the
+            // calls). The selected route's pair; the diploid track's
+            // chain-conditioned diplotype marginals (top pair, the called
+            // pair's mass); the haploid track's chain marginal.
+            let diploid_chain = diploid_chain_maps
+                .get(locus)
+                .map(|map| {
+                    let total = diploid_chain_totals[locus];
+                    let mut ordered: Vec<([usize; 2], f64, f64)> = map
+                        .iter()
+                        .map(|(&pair, &(min_marginal, mass))| (pair, min_marginal, mass))
+                        .collect();
+                    ordered.sort_by(|left, right| left.1.total_cmp(&right.1));
+                    let ml = ordered.first();
+                    let runner = ordered.get(1);
+                    serde_json::json!({
+                        "ml_pair": ml.map(|&(pair, _, _)| pair).unwrap_or([usize::MAX; 2]),
+                        "ml_min_marginal": ml.map(|&(_, value, _)| value).unwrap_or(f64::NAN),
+                        "ml_mass_fraction": ml
+                            .map(|&(_, _, mass)| if total > 0.0 { mass / total } else { f64::NAN })
+                            .unwrap_or(f64::NAN),
+                        "runner_pair": runner.map(|&(pair, _, _)| pair).unwrap_or([usize::MAX; 2]),
+                        "runner_delta": runner
+                            .map(|&(_, value, _)| value - ml.map(|&(_, v, _)| v).unwrap_or(f64::NAN))
+                            .unwrap_or(f64::NAN),
+                        "retained_pairs": ordered.len(),
+                        "total_mass": total,
+                        "top_pairs": ordered
+                            .iter()
+                            .take(16)
+                            .map(|&(pair, min_marginal, mass)| serde_json::json!([
+                                pair[0], pair[1], min_marginal,
+                                if total > 0.0 { mass / total } else { f64::NAN },
+                            ]))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null);
+            let haploid_chain = spine_posterior
+                .as_ref()
+                .map(|posterior| {
+                    let rows = &posterior.locus_marginals[locus];
+                    let total: f64 = rows.iter().map(|&(_, _, mass)| mass).sum();
+                    let ml = rows.first();
+                    let runner = rows.get(1);
+                    serde_json::json!({
+                        "ml_allele": ml.map(|&(pair, _, _)| pair[0]).unwrap_or(usize::MAX),
+                        "ml_mass_fraction": ml
+                            .map(|&(_, _, mass)| if total > 0.0 { mass / total } else { f64::NAN })
+                            .unwrap_or(f64::NAN),
+                        "runner_allele": runner.map(|&(pair, _, _)| pair[0]).unwrap_or(usize::MAX),
+                        "runner_delta": runner
+                            .map(|&(_, min_marginal, _)| min_marginal - ml.map(|&(_, v, _)| v).unwrap_or(f64::NAN))
+                            .unwrap_or(f64::NAN),
+                        "retained_alleles": rows.len(),
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null);
+            // ---- assessment-side truth columns (the Stage-1 pattern:
+            // never read by production paths; the gate scripts consume).
+            let truth_alleles =
+                [truth_allele_of(locus, 0), truth_allele_of(locus, 1)];
+            let truth_class_pair: Option<[usize; 2]> = match truth_alleles {
+                [Some(first), Some(second)]
+                    if first < domain_alleles && second < domain_alleles =>
+                {
+                    let class_pair = [membership[first], membership[second]];
+                    Some([
+                        class_pair[0].min(class_pair[1]),
+                        class_pair[0].max(class_pair[1]),
+                    ])
+                }
+                _ => None,
+            };
+            let truth_pair_is_viable = truth_class_pair.map(pair_viable);
+            let truth_table_loss = truth_class_pair
+                .map(|pair| sweep.table[class_pair_index(pair[0], pair[1])]);
+            let truth_local_mass = truth_table_loss.map(|loss| {
+                if loss.is_finite() && local_total > 0.0 {
+                    (-(loss - best_loss)).exp() / local_total
+                } else {
+                    0.0
+                }
+            });
+            let truth_in_credible_set = truth_class_pair
+                .map(|pair| credible_set.iter().any(|&tie| tie == pair))
+                .unwrap_or(false);
+            let truth_within_margin = truth_table_loss
+                .map(|loss| loss.is_finite() && loss <= margins[locus]);
+            let truth_chain_mass = truth_class_pair.and_then(|pair| {
+                diploid_chain_maps
+                    .get(locus)?
+                    .get(&pair)
+                    .map(|&(_, mass)| {
+                        let total = diploid_chain_totals[locus];
+                        if total > 0.0 { mass / total } else { f64::NAN }
+                    })
+            });
+            let truth_haploid_mass = truth_alleles[0].map(|allele| {
+                let loss = losses[allele];
+                if loss.is_finite() && haploid_total > 0.0 {
+                    (-(loss - best_single)).exp() / haploid_total
+                } else {
+                    0.0
+                }
+            });
+            Ok(serde_json::json!({
+                "locus": locus,
+                "full_locus": locus_offset + locus,
+                "axis_interval": [axis_slice[locus].start, axis_slice[locus].end],
+                "classes": classes,
+                "class_pairs": sweep.class_pairs,
+                "diplotype": {
+                    "called_pair": called_pair,
+                    "called_pair_loss": viable_best_loss,
+                    "credible_set_pairs": credible_set,
+                    "credible_set_mass": if local_total > 0.0 {
+                        credible_mass / local_total
+                    } else {
+                        f64::NAN
+                    },
+                    "dosage": dosage_json,
+                    "domain_argmax_pair": sweep.best_class_pairs[0],
+                    "domain_argmax_loss": best_loss,
+                    "local_posterior": {
+                        "pairs": posterior_json,
+                        "finite_pairs": posterior_rows.len(),
+                        "viable_pairs": viable_count,
+                        "nonviable_mass": nonviable_mass,
+                        "bound_pruned_pairs": sweep.bound_pruned_pairs,
+                        "pruned_mass_bound": pruned_mass_bound,
+                    },
+                },
+                "haploid_call": {
+                    "called_allele": haploid_rows.first().map(|&(_, allele, _)| allele),
+                    "called_allele_loss": best_single,
+                    "tie_alleles": haploid_ties,
+                    "posterior": haploid_posterior_json,
+                    "segments": haploid_rows
+                        .first()
+                        .map(|&(_, allele, _)| serde_json::json!(
+                            combined[locus][allele]
+                                .segments
+                                .iter()
+                                .map(segment_json)
+                                .collect::<Vec<_>>()
+                        ))
+                        .unwrap_or(serde_json::Value::Null),
+                },
+                "chain_layer": {
+                    "selected_ploidy": selected_ploidy,
+                    "selected_route_pair": [
+                        if route[locus][0] == EMPTY_SLOT2 {
+                            serde_json::json!("empty-slot2")
+                        } else {
+                            serde_json::json!(route[locus][0])
+                        },
+                        if route[locus][1] == EMPTY_SLOT2 {
+                            serde_json::json!("empty-slot2")
+                        } else {
+                            serde_json::json!(route[locus][1])
+                        },
+                    ],
+                    "diploid_marginals": diploid_chain,
+                    "haploid_marginals": haploid_chain,
+                },
+                "truth": {
+                    "pair_alleles": [
+                        truth_alleles[0].and_then(|allele| serde_json::to_value(allele).ok()).unwrap_or(serde_json::Value::Null),
+                        truth_alleles[1].and_then(|allele| serde_json::to_value(allele).ok()).unwrap_or(serde_json::Value::Null),
+                    ],
+                    "pair_in_domain": [
+                        truth_alleles[0].is_some_and(|allele| allele < domain_alleles),
+                        truth_alleles[1].is_some_and(|allele| allele < domain_alleles),
+                    ],
+                    "pair_viable": truth_pair_is_viable,
+                    "class_pair": truth_class_pair,
+                    "table_loss": truth_table_loss,
+                    "local_mass": truth_local_mass,
+                    "within_margin": truth_within_margin,
+                    "in_credible_set": truth_in_credible_set,
+                    "chain_mass": truth_chain_mass,
+                    "haploid_allele_mass": truth_haploid_mass,
+                    "reference_pair_loss": truth_losses[locus],
+                },
+            }))
+        })
+        .collect::<io::Result<_>>()?;
+    let genotype_calls_seconds = genotype_calls_started.elapsed().as_secs_f64();
+    eprintln!(
+        "[phasing] genotype calls: {} loci ({genotype_calls_seconds:.2}s)",
+        genotype_call_rows.len()
+    );
+    let genotype_calls_json = serde_json::json!({
+        "framing": "per-locus genotyping IS the product (COSIGT pattern, owner \
+            directive 2026-09-26): every diplotype pair of the locus's panel \
+            haplotypes scored against the observed projection; the argmax \
+            pair is the genotype call, the full posterior over pairs is the \
+            ambiguity report, the dosage vector comes from the called pair; \
+            the chain DP is the PHASING layer on top (machinery unchanged)",
+        "credible_set_semantics": "the exact best-loss tie set over the \
+            locally VIABLE candidate set — the diplotypes the model cannot \
+            separate at any mass level; the full local posterior (all finite \
+            pairs with viability flags, the model's own likelihood scale, no \
+            temperature constants) is reported alongside so any credible \
+            level is constructible; the beyond-margin pruned mass is \
+            admissibly bounded; the unrestricted domain argmax is reported \
+            as a diagnostic (its winners are non-viable hygiene rows)",
+        "selected_ploidy": selected_ploidy,
+        "loci": genotype_call_rows,
+        "wall_seconds": genotype_calls_seconds,
+    });
+
     Ok(serde_json::json!({
         "model": "local-first-spine-v1-correlation-phasing",
         "stage1_sweep": stage1_summary,
@@ -5562,6 +6124,7 @@ pub(in super) fn run_correlation_phasing(
                 "total": started.elapsed().as_secs_f64(),
             },
         },
+        "genotype_calls": genotype_calls_json,
         "rss_peak_bytes": rss.peak_bytes(),
         "total_seconds": started.elapsed().as_secs_f64(),
     }))
@@ -5959,5 +6522,258 @@ mod tests {
         // The mirror direction: a''s LEFT cover at window b; window b
         // observes nothing (empty keys) — no backward credit.
         // (full_left/shares_left empty; left_exon_a.self_instances empty.)
+    }
+
+    /// The per-locus genotype-call machinery's exact posterior (COSIGT
+    /// pattern, owner directive 2026-09-26): over a synthetic DIPLOID DP
+    /// (the diplotype product's chain layer — haploid=false, the new
+    /// invocation), the backward pass's per-locus pair marginals are the
+    /// exact min-marginals and state-joint masses of every ordered
+    /// diplotype pair, brute-force verified; both homolog matchings of an
+    /// unordered diplotype carry identical marginals.
+    #[test]
+    fn diploid_posterior_marginals_are_exact_min_marginals() {
+        // Two loci, two alleles; every ordered pair state per locus.
+        let locus_pairs = |losses: &[f64]| -> Vec<([usize; 2], u32, u32, f64)> {
+            let mut rows = Vec::new();
+            for first in 0..2usize {
+                for second in 0..2usize {
+                    let index = first * 2 + second;
+                    rows.push(([first, second], first as u32, second as u32, losses[index]));
+                }
+            }
+            rows
+        };
+        let losses0 = [1.0f64, 4.0, 4.0, 6.0];
+        let losses1 = [2.0f64, 3.0, 3.0, 5.0];
+        let table0 = LocusStateTable::build(locus_pairs(&losses0), 2);
+        let table1 = LocusStateTable::build(locus_pairs(&losses1), 2);
+        let tables = [table0, table1];
+        // Dense 2x2 member transition matrix.
+        let matrix = vec![1.0f64, 2.0, 3.0, 0.5];
+        let costs = [BoundaryTransitionCosts {
+            cost: matrix.clone(),
+            cost_haploid: matrix.clone(),
+            left_index: vec![0, 1],
+            right_index: vec![0, 1],
+            right_count: 2,
+            stats: serde_json::Value::Null,
+        }];
+        let mut rss = genome::PeriodicRssGuard::new(None, 1);
+        let dp = run_phasing_chain_dp(
+            2,
+            &tables,
+            &costs,
+            &[0.0f64, 0.0],
+            f64::INFINITY,
+            false,
+            &mut rss,
+        )
+        .unwrap();
+        let posterior =
+            phasing_posterior(2, &tables, &dp.layers, &costs, false, 0, &mut rss).unwrap();
+        // Brute force over every ordered-pair chain: the total, and per
+        // (locus, pair) the best chain THROUGH the pair (the min-marginal)
+        // and the summed state-joint mass exp(-(best-through - global)).
+        let mut brute_best = f64::INFINITY;
+        let mut through: HashMap<([usize; 2], usize), f64> = HashMap::new();
+        for (left_first, left_second, left_loss) in
+            [(0usize, 0usize, 1.0f64), (0, 1, 4.0), (1, 0, 4.0), (1, 1, 6.0)]
+        {
+            for (right_first, right_second, right_loss) in
+                [(0usize, 0usize, 2.0f64), (0, 1, 3.0), (1, 0, 3.0), (1, 1, 5.0)]
+            {
+                let total = left_loss
+                    + matrix[left_first * 2 + right_first]
+                    + matrix[left_second * 2 + right_second]
+                    + right_loss;
+                brute_best = brute_best.min(total);
+                let left_entry = through
+                    .entry(([left_first, left_second], 0usize))
+                    .or_insert(f64::INFINITY);
+                *left_entry = left_entry.min(total);
+                let right_entry = through
+                    .entry(([right_first, right_second], 1usize))
+                    .or_insert(f64::INFINITY);
+                *right_entry = right_entry.min(total);
+            }
+        }
+        assert_eq!(
+            posterior.best_total.to_bits(),
+            brute_best.to_bits(),
+            "the posterior best is the brute-force chain best"
+        );
+        for locus in 0..2usize {
+            let rows = &posterior.locus_marginals[locus];
+            assert_eq!(rows.len(), 4, "every ordered pair marginal at locus {locus}");
+            for &(pair, min_marginal, mass) in rows {
+                let expected = through[&(pair, locus)];
+                assert_eq!(
+                    min_marginal.to_bits(),
+                    expected.to_bits(),
+                    "exact min-marginal of {pair:?} at locus {locus}"
+                );
+                let expected_mass = (-(expected - brute_best)).exp();
+                assert_eq!(
+                    mass.to_bits(),
+                    expected_mass.to_bits(),
+                    "exact state-joint mass of {pair:?} at locus {locus}"
+                );
+            }
+            // Both homolog matchings of one unordered diplotype carry
+            // identical marginals (the diplotype product merges them).
+            for &(pair, min_marginal, mass) in rows {
+                let mirror = [pair[1], pair[0]];
+                let mirrored = rows
+                    .iter()
+                    .find(|&&(candidate, _, _)| candidate == mirror)
+                    .expect("the mirrored matching is a state");
+                assert_eq!(mirrored.1.to_bits(), min_marginal.to_bits());
+                assert_eq!(mirrored.2.to_bits(), mass.to_bits());
+            }
+        }
+        assert!(posterior.betaless_states.iter().all(|&count| count == 0));
+    }
+
+    /// A retained state whose retained-universe continuation is EMPTY
+    /// (beta = +INFINITY) is EXCLUDED from the posterior universe and
+    /// counted, not a run failure — the documented over-approximation of
+    /// zero (its joint mass is bounded by exp(-(incumbent - best))); the
+    /// global best still equals the forward best exactly.
+    #[test]
+    fn posterior_excludes_betaless_retained_states() {
+        // Hand-built layers: locus 0 keeps a live state [0,0] and a
+        // dead-end state [1,1] (its every transition is forbidden); locus
+        // 1 keeps the single live successor.
+        let build_layer = |rows: &[(usize, usize, f64, f64)]| -> Vec<PhState> {
+            rows.iter()
+                .map(|&(first, second, score, loss)| PhState {
+                    score,
+                    pair: [first, second],
+                    pred: u32::MAX,
+                    loss,
+                })
+                .collect()
+        };
+        let layers = vec![
+            build_layer(&[(0, 0, 1.0, 1.0), (1, 1, 5.0, 5.0)]),
+            build_layer(&[(0, 0, 5.0, 2.0)]),
+        ];
+        let table0 = LocusStateTable::build(
+            vec![([0usize, 0], 0, 0, 1.0f64), ([1usize, 1], 1, 1, 5.0)],
+            2,
+        );
+        let table1 = LocusStateTable::build(vec![([0usize, 0], 0, 0, 2.0f64)], 2);
+        let tables = [table0, table1];
+        // Member 1's every transition is forbidden (+INFINITY).
+        let costs = [BoundaryTransitionCosts {
+            cost: vec![1.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY],
+            cost_haploid: vec![1.0f64, f64::INFINITY, f64::INFINITY, f64::INFINITY],
+            left_index: vec![0, 1],
+            right_index: vec![0, 0],
+            right_count: 2,
+            stats: serde_json::Value::Null,
+        }];
+        let mut rss = genome::PeriodicRssGuard::new(None, 1);
+        let posterior = phasing_posterior(2, &tables, &layers, &costs, false, 0, &mut rss)
+            .expect("the betaless state excludes itself, not a failure");
+        // The dead-end state is counted and absent from the marginals.
+        assert_eq!(posterior.betaless_states, vec![1usize, 0]);
+        assert_eq!(
+            posterior.locus_marginals[0],
+            vec![([0usize, 0], 5.0f64, 1.0f64)],
+            "only the live pair carries marginal mass"
+        );
+        assert_eq!(
+            posterior.locus_marginals[1],
+            vec![([0usize, 0], 5.0f64, 1.0f64)]
+        );
+        // The global best still equals the forward best exactly.
+        assert_eq!(posterior.best_total.to_bits(), 5.0f64.to_bits());
+    }
+    /// The haploid track's backward pass (the regression lock for the
+    /// dense-index precompute): the EMPTY second slot never indexes the
+    /// boundary cost matrix, the marginals stay exact, and the exact
+    /// posterior sample is drawn without panic.
+    #[test]
+    fn haploid_posterior_backward_pass_over_empty_second_slot() {
+        let losses: [Vec<f64>; 2] = [vec![10.0, 12.0], vec![5.0, 7.0]];
+        let build_table = |rows: Vec<([usize; 2], u32, u32, f64)>, columns: usize| {
+            LocusStateTable::build(rows, columns)
+        };
+        let table0 = build_table(
+            vec![([0usize, EMPTY_SLOT2], 0, 0, 10.0f64), ([1usize, EMPTY_SLOT2], 1, 0, 12.0)],
+            2,
+        );
+        let table1 = build_table(
+            vec![([0usize, EMPTY_SLOT2], 0, 0, 5.0f64), ([1usize, EMPTY_SLOT2], 1, 0, 7.0)],
+            2,
+        );
+        let tables = [table0, table1];
+        let t0 = vec![1.0f64, 2.0, 3.0, 0.5];
+        let costs = [BoundaryTransitionCosts {
+            cost: t0.clone(),
+            cost_haploid: t0.clone(),
+            left_index: vec![0, 1],
+            right_index: vec![0, 1],
+            right_count: 2,
+            stats: serde_json::Value::Null,
+        }];
+        let mut rss = genome::PeriodicRssGuard::new(None, 1);
+        let dp = run_phasing_chain_dp(
+            2,
+            &tables,
+            &costs,
+            &[0.0f64, 0.0],
+            f64::INFINITY,
+            true,
+            &mut rss,
+        )
+        .unwrap();
+        let posterior =
+            phasing_posterior(2, &tables, &dp.layers, &costs, true, 1, &mut rss).unwrap();
+        // Brute force: the two-locus haploid chains.
+        let mut brute: Vec<f64> = Vec::new();
+        for a in 0..2usize {
+            for b in 0..2usize {
+                brute.push(losses[0][a] + t0[a * 2 + b] + losses[1][b]);
+            }
+        }
+        let brute_best = brute.iter().copied().fold(f64::INFINITY, f64::min);
+        assert_eq!(posterior.best_total.to_bits(), brute_best.to_bits());
+        // The min-marginals: best chain through each allele at each locus.
+        let marg0 = |allele| {
+            [0usize, 1]
+                .iter()
+                .map(|&b| losses[0][allele] + t0[allele * 2 + b] + losses[1][b])
+                .fold(f64::INFINITY, f64::min)
+        };
+        let marg1 = |allele| {
+            [0usize, 1]
+                .iter()
+                .map(|&a| losses[0][a] + t0[a * 2 + allele] + losses[1][allele])
+                .fold(f64::INFINITY, f64::min)
+        };
+        for &(pair, min_marginal, mass) in &posterior.locus_marginals[0] {
+            assert_eq!(pair, [pair[0], EMPTY_SLOT2]);
+            assert_eq!(min_marginal.to_bits(), marg0(pair[0]).to_bits());
+            assert_eq!(
+                mass.to_bits(),
+                (-(min_marginal - brute_best)).exp().to_bits()
+            );
+        }
+        for &(pair, min_marginal, mass) in &posterior.locus_marginals[1] {
+            assert_eq!(pair, [pair[0], EMPTY_SLOT2]);
+            assert_eq!(min_marginal.to_bits(), marg1(pair[0]).to_bits());
+            assert_eq!(
+                mass.to_bits(),
+                (-(min_marginal - brute_best)).exp().to_bits()
+            );
+        }
+        // The exact posterior sample draws a full route without touching
+        // the EMPTY slot's dense columns.
+        assert_eq!(posterior.samples.len(), 1);
+        assert_eq!(posterior.samples[0].len(), 2);
+        assert!(posterior.betaless_states.iter().all(|&count| count == 0));
     }
 }
