@@ -2928,6 +2928,35 @@ pub(in super) fn run_correlation_phasing(
             )
         })
         .collect::<io::Result<_>>()?;
+    // -------------------------------- P4b gate (the STEP-4 fold).
+    // The k-best finalist enumeration + the exact model-of-record re-rank
+    // RETIRE from the production path: the folded DP's own argmin (the
+    // model's decomposed optimum at bounded scale — the per-allele local
+    // losses carry the in-window omission addends and the boundary matrices
+    // carry the junction/seam charges + the pairwise instance-exoneration
+    // coupling) IS the selection. The retired machinery remains, env-gated
+    // (IMPG_RERANK_ORACLE=<path>), as the quarantined verification oracle
+    // that must CONFIRM the folded selection (differences decomposed per
+    // locus; the scoreboard is the gate).
+    // THE APPROXIMATION'S HONEST LABEL: the residual beyond-pairwise
+    // chain-level exoneration (once-per-material effects across more than
+    // two adjacent windows) is a MODELED APPROXIMATION inside the DP's
+    // pairwise coupling, not a post-hoc correction. The documented
+    // escalation path (NOT implemented here) is the owner's sampling loop:
+    // an outer MC-EM iteration where posterior samples from this folded DP
+    // recompute the chain-level exoneration as expectations over samples,
+    // then resample — expectations replacing the pairwise approximation,
+    // never re-inflating the DP state.
+    let rerank_oracle_path = std::env::var("IMPG_RERANK_ORACLE").ok();
+    let folded_production = rerank_oracle_path.is_none();
+    if folded_production {
+        eprintln!(
+            "[phasing] STEP-4 fold: the k-best finalist enumeration + the exact \
+             re-rank are RETIRED from the production path (the folded DP's argmin \
+             is the selection); set IMPG_RERANK_ORACLE=<path> to run the \
+             quarantined confirmation oracle"
+        );
+    }
     // The FINALIST track's own boundary drafts over the finalist state sets
     // (the L DP's transitions and the re-ranked route's surrogate/boundary
     // lookups; the re-ranked chain's alleles are finalist states by
@@ -2935,8 +2964,12 @@ pub(in super) fn run_correlation_phasing(
     // composition's charge pools over its realizing pairs' owners and
     // junction events, so widening the pair universe can change a SHARED
     // composition's value — the tracks' matrices must stay bit-identical.
+    // Under the fold these exist only in oracle mode.
     let finalist_transition_started = Instant::now();
-    let finalist_transition_drafts: Vec<BoundaryTransitionDraft> = (0..locus_count - 1)
+    let finalist_transition_drafts: Vec<BoundaryTransitionDraft> = if folded_production {
+        Vec::new()
+    } else {
+    (0..locus_count - 1)
         .into_par_iter()
         .map(|boundary| {
             build_boundary_transition_draft(
@@ -2955,7 +2988,8 @@ pub(in super) fn run_correlation_phasing(
                 &finalist_union_sets[boundary + 1],
             )
         })
-        .collect::<io::Result<_>>()?;
+        .collect::<io::Result<_>>()?
+    };
     eprintln!(
         "[phasing] finalist boundary drafts: {:.2}s",
         finalist_transition_started.elapsed().as_secs_f64()
@@ -2989,20 +3023,24 @@ pub(in super) fn run_correlation_phasing(
             )
         })
         .collect::<io::Result<_>>()?;
-    let finalist_transition_costs: Vec<BoundaryTransitionCosts> = finalist_transition_drafts
-        .into_par_iter()
-        .enumerate()
-        .map(|(boundary, draft)| {
-            finalize_boundary_transition_costs(
-                draft,
-                routed_equal,
-                component_locus_to_partition,
-                model,
-                backgrounds_shared,
-                sample_backgrounds,
-            )
-        })
-        .collect::<io::Result<_>>()?;
+    let finalist_transition_costs: Vec<BoundaryTransitionCosts> = if folded_production {
+        Vec::new()
+    } else {
+        finalist_transition_drafts
+            .into_par_iter()
+            .enumerate()
+            .map(|(boundary, draft)| {
+                finalize_boundary_transition_costs(
+                    draft,
+                    routed_equal,
+                    component_locus_to_partition,
+                    model,
+                    backgrounds_shared,
+                    sample_backgrounds,
+                )
+            })
+            .collect::<io::Result<_>>()?
+    };
     let boundary_floors: Vec<f64> = transition_costs
         .iter()
         .map(|costs| costs.cost.iter().copied().fold(f64::INFINITY, f64::min))
@@ -3250,7 +3288,10 @@ pub(in super) fn run_correlation_phasing(
     // selected_chain_level_m1 evaluator). The re-ranked best becomes the
     // haploid track's representative.
     let finalists_started = Instant::now();
-    let per_locus_finalist_tables: Vec<LocusStateTable> = (0..locus_count)
+    let per_locus_finalist_tables: Vec<LocusStateTable> = if folded_production {
+        Vec::new()
+    } else {
+    (0..locus_count)
         .map(|locus| {
             let states = ordered_haploid_states(
                 &haploid_losses[locus],
@@ -3278,7 +3319,8 @@ pub(in super) fn run_correlation_phasing(
                 ))
             }
         })
-        .collect::<io::Result<_>>()?;
+        .collect::<io::Result<_>>()?
+    };
     // The pairwise-coupling search objective's boundary matrices (the
     // enumeration order; see build_coupling_transition_costs). The DP's local
     // losses stay the SURROGATE's (the tables above); the coupling lives in
@@ -3292,14 +3334,17 @@ pub(in super) fn run_correlation_phasing(
     // coupling matrices are SKIPPED (the enumerator has no order; the
     // probes' model totals and the instance-probe diagnostic do not need
     // them). Diagnostic guard, not a model path — a run that QUOTES
-    // coupling numbers must not set it.
-    let skip_coupling = std::env::var("IMPG_FINALIST_SKIP_COUPLING")
-        .ok()
-        .as_deref()
-        == Some("1");
+    // coupling numbers must not set it. Under the fold the coupling
+    // matrices exist only in oracle mode (the whole L-DP + enumerator is
+    // retired from production).
+    let skip_coupling = folded_production
+        || std::env::var("IMPG_FINALIST_SKIP_COUPLING")
+            .ok()
+            .as_deref()
+            == Some("1");
     let coupling_started = Instant::now();
     let coupling_transition_costs: Vec<BoundaryTransitionCosts> = if skip_coupling {
-        eprintln!("[phasing] coupling transition matrices: SKIPPED (probe-only mode)");
+        eprintln!("[phasing] coupling transition matrices: SKIPPED (probe-only/oracle-off mode)");
         Vec::new()
     } else {
     (0..locus_count - 1)
@@ -3335,16 +3380,20 @@ pub(in super) fn run_correlation_phasing(
         "[phasing] coupling transition matrices: {:.2}s",
         coupling_started.elapsed().as_secs_f64()
     );
-    let finalist_local_floors: Vec<f64> = per_locus_finalist_tables
-        .iter()
-        .map(|table| {
-            table
-                .rows
-                .iter()
-                .map(|&(_, _, _, loss)| loss)
-                .fold(f64::INFINITY, f64::min)
-        })
-        .collect();
+    let finalist_local_floors: Vec<f64> = if folded_production {
+        Vec::new()
+    } else {
+        per_locus_finalist_tables
+            .iter()
+            .map(|table| {
+                table
+                    .rows
+                    .iter()
+                    .map(|&(_, _, _, loss)| loss)
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect()
+    };
     ensure(
         finalist_local_floors.iter().all(|value| value.is_finite()),
         "finalist local floor over an empty finalist table",
@@ -3371,7 +3420,7 @@ pub(in super) fn run_correlation_phasing(
         "finalist boundary floor over an unscored matrix",
     )?;
     let mut suffix_finalist_from_locus = vec![0.0f64; locus_count];
-    {
+    if !folded_production {
         let mut local_suffix = 0.0f64;
         let mut boundary_suffix = 0.0f64;
         for locus in (0..locus_count).rev() {
@@ -3513,8 +3562,13 @@ pub(in super) fn run_correlation_phasing(
         total
     };
     // The chain's true SURROGATE total under the finalist tables (path-order
-    // accumulation — the DP's own form).
+    // accumulation — the DP's own form). Under the STEP-4 fold the
+    // finalist tables are retired: the surrogate is undefined (NaN) and the
+    // probe rows report the model total only.
     let chain_surrogate = |alleles: &[usize]| -> f64 {
+        if finalist_transition_costs.is_empty() {
+            return f64::NAN;
+        }
         let mut surrogate = 0.0f64;
         for (locus, &allele) in alleles.iter().enumerate() {
             surrogate += haploid_losses[locus][allele];
@@ -3603,11 +3657,11 @@ pub(in super) fn run_correlation_phasing(
                     "label": label,
                     "mapped": true,
                     "in_finalist_universe": true,
-                    "surrogate_total": surrogate,
-                    "coupling_search_total": coupling,
-                    "coupling_minus_model": coupling - model,
+                    "surrogate_total": if folded_production { serde_json::Value::Null } else { serde_json::json!(surrogate) },
+                    "coupling_search_total": if folded_production { serde_json::Value::Null } else { serde_json::json!(coupling) },
+                    "coupling_minus_model": if folded_production { serde_json::Value::Null } else { serde_json::json!(coupling - model) },
                     "model_of_record_total": model,
-                    "refund": surrogate - model,
+                    "refund": if folded_production { serde_json::Value::Null } else { serde_json::json!(surrogate - model) },
                     "instance_probe": instance_probe,
                 })
             }
@@ -3654,7 +3708,13 @@ pub(in super) fn run_correlation_phasing(
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(2000);
-    if skip_coupling {
+    if folded_production {
+        // The STEP-4 fold: no enumeration, no re-rank — the folded DP's
+        // argmin IS the selection; the quarantined oracle (env-gated) is the
+        // only path that runs them.
+        eprintln!("[phasing] finalist enumeration + re-rank RETIRED (folded DP selects)");
+    }
+    if skip_coupling && !folded_production {
         eprintln!("[phasing] finalist enumeration SKIPPED (probe-only mode)");
         // The probes' rows above carry the run's model-of-record evidence;
         // the enumeration/re-rank machinery needs the coupling matrices.
@@ -3670,13 +3730,15 @@ pub(in super) fn run_correlation_phasing(
             "probe_only": true,
         }));
     }
-    let mut enumerator = FinalistEnumerator::new(
-            &dp_finalist
-                .as_ref()
-                .expect("the enumerator implies the finalist DP (probe-only mode skips it)")
-                .layers,
-            &coupling_transition_costs,
-        );
+    let folded_summary_json: serde_json::Value = if folded_production {
+        serde_json::json!({
+            "skipped": "STEP-4 fold: the k-best finalist enumeration and the exact model-of-record re-rank are retired from the production path; the folded DP's argmin is the selection (IMPG_RERANK_ORACLE=<path> runs the quarantined confirmation oracle)",
+            "probe_rows": probe_rows,
+            "reranked_best": serde_json::Value::Null,
+        })
+    } else {
+        serde_json::Value::Null
+    };
     let mut w_best = f64::INFINITY;
     // The measured maximum refund (surrogate - model) over the enumerated
     // finalists: the stop rule's slack. An un-enumerated chain's surrogate is
@@ -3693,6 +3755,16 @@ pub(in super) fn run_correlation_phasing(
     let mut stopped_by = "exhausted";
     let mut rank = 0usize;
     let mut dry_run = std::env::var("IMPG_FINALIST_DRY_RUN").is_ok();
+    let mut surrogate_frontier: Option<f64> = None;
+    let mut enumerator_seed_delta = 0.0f64;
+    if !folded_production {
+    let mut enumerator = FinalistEnumerator::new(
+        &dp_finalist
+            .as_ref()
+            .expect("the enumerator implies the finalist DP (probe-only mode skips it)")
+            .layers,
+        &coupling_transition_costs,
+    );
     loop {
         let Some((coupling_total, allele_route)) = enumerator.next_chain() else {
             stopped_by = "exhausted";
@@ -3785,7 +3857,9 @@ pub(in super) fn run_correlation_phasing(
     }
     // The coupling frontier at the stop (the next un-enumerated chain's
     // search-objective total).
-    let surrogate_frontier = enumerator.next_chain().map(|(value, _)| value);
+    surrogate_frontier = enumerator.next_chain().map(|(value, _)| value);
+    enumerator_seed_delta = enumerator.max_seed_delta;
+    } // !folded_production (the enumerator + exact re-rank loop)
     // Completeness check: could an allele OUTSIDE the finalist universe lie
     // on a chain that beats the re-ranked best? A chain through an excluded
     // allele needs a surrogate total at most W + max_refund (its model is its
@@ -3828,7 +3902,6 @@ pub(in super) fn run_correlation_phasing(
         }
     }
     }
-    let enumerator_seed_delta = enumerator.max_seed_delta;
     let finalists_seconds = finalists_started.elapsed().as_secs_f64();
     eprintln!(
         "[phasing] finalists done: {} enumerated ({}), best model {:.2}, {:.2}s",
@@ -3837,8 +3910,10 @@ pub(in super) fn run_correlation_phasing(
         w_best,
         finalists_seconds
     );
-    let finalist_summary = {
-        let count = finalist_rows.len();
+    let finalist_summary = if folded_production {
+        folded_summary_json
+    } else {
+    let count = finalist_rows.len();
         let shown: Vec<serde_json::Value> = finalist_rows
             .iter()
             .take(16)
@@ -3926,6 +4001,9 @@ pub(in super) fn run_correlation_phasing(
             "wall_seconds": finalists_seconds,
         })
     };
+    // Ploidy selection (the folded form): the haploid side is the folded
+    // DP's own best score (the re-rank's representative exists only in
+    // oracle mode); the comparison family is unchanged.
     let reranked_route: Option<Vec<[usize; 2]>> = reranked_best
         .as_ref()
         .map(|&(_, _, _, ref route)| route.clone());
@@ -3937,6 +4015,58 @@ pub(in super) fn run_correlation_phasing(
         .as_ref()
         .map(|&(_, _, model, _)| model)
         .unwrap_or(f64::INFINITY);
+
+    // The quarantined oracle's CONFIRMATION (oracle mode only,
+    // IMPG_RERANK_ORACLE=<path>): the retired k-best + exact re-rank
+    // machinery must confirm the folded DP's selection — the oracle's
+    // re-ranked best chain vs the folded DP's argmin chain, per locus,
+    // with both chains' exact model-of-record totals. Differences are
+    // decomposed per locus and reported; the scoreboard is the gate.
+    if let (Some(oracle_path), Some(oracle_route)) = (&rerank_oracle_path, &reranked_route) {
+        let folded_route = dp_haploid.route.clone();
+        let folded_alleles: Vec<usize> =
+            folded_route.iter().map(|pair| pair[0]).collect();
+        let folded_model_total = evaluate_chain(
+            &folded_alleles,
+            &mut shared_piece_memo,
+            &mut shared_spelled_memo,
+            None,
+        )?;
+        let mut differing_loci: Vec<serde_json::Value> = Vec::new();
+        let mut difference_count = 0usize;
+        for locus in 0..locus_count {
+            let oracle_pair = oracle_route[locus];
+            let folded_pair = folded_route[locus];
+            if oracle_pair != folded_pair {
+                difference_count += 1;
+                differing_loci.push(serde_json::json!({
+                    "locus": locus,
+                    "oracle_pair": oracle_pair,
+                    "folded_pair": folded_pair,
+                }));
+            }
+        }
+        let confirmed = difference_count == 0;
+        let report = serde_json::json!({
+            "verdict": if confirmed { "CONFIRMED" } else { "DIFFERS" },
+            "differing_loci_count": difference_count,
+            "differing_loci": differing_loci,
+            "oracle_reranked_model_total": reranked_model,
+            "folded_dp_model_total": folded_model_total,
+            "folded_dp_surrogate_total": dp_haploid.best_score,
+            "oracle_surrogate_total": reranked_surrogate,
+        });
+        let text = serde_json::to_string_pretty(&report)?;
+        std::fs::write(oracle_path, text.clone() + "\n")?;
+        eprintln!(
+            "[phasing] rerank oracle: {} ({} differing loci); oracle model {:.2} vs folded model {:.2} -> {}",
+            if confirmed { "CONFIRMED" } else { "DIFFERS" },
+            difference_count,
+            reranked_model,
+            folded_model_total,
+            oracle_path
+        );
+    }
 
     // Ploidy selection: the better track wins (identical tie handling to
     // the terminal-best rule; a bit-exact tie prefers the diploid track,
@@ -3989,10 +4119,11 @@ pub(in super) fn run_correlation_phasing(
 
     // ---------------------------------------- P5: authoritative rescore.
     let rescore_started = Instant::now();
-    let route = match (&reranked_route, selected_ploidy) {
-        (Some(route), "haploid") => route.clone(),
-        _ => dp.route.clone(),
-    };
+    // The STEP-4 fold: the production selection is ALWAYS the folded DP's
+    // argmin chain (the oracle's re-ranked route is reported, never
+    // selected — the oracle must be purely observational so a diagnostic
+    // run cannot change the production answer).
+    let route = dp.route.clone();
     // The boundary cost set matching the selected route's allele universe:
     // the re-ranked haploid chain's alleles are finalist states (only the
     // finalist matrices define their transition entries); the diploid track's
@@ -4001,12 +4132,7 @@ pub(in super) fn run_correlation_phasing(
     // matrix's entry can differ from the old one (a composition's realizing
     // pairs grew with the finalist universe) — the surrogate totals pair each
     // chain with its own universe's matrices, consistently.
-    let selected_costs: &[BoundaryTransitionCosts] =
-        if selected_ploidy == "haploid" && reranked_route.is_some() {
-            &finalist_transition_costs
-        } else {
-            &transition_costs
-        };
+    let selected_costs: &[BoundaryTransitionCosts] = &transition_costs;
     // A selected allele as public JSON, or the empty-slot ploidy marker.
     let allele_or_empty_json = |locus: usize, slot: usize| -> serde_json::Value {
         if route[locus][slot] == EMPTY_SLOT2 {
@@ -4893,7 +5019,10 @@ pub(in super) fn run_correlation_phasing(
                 "best_score_internal": dp.best_score,
                 "diploid_best_score_internal": dp_diploid.best_score,
                 "haploid_best_score_internal": dp_haploid.best_score,
-                "finalist_l_dp_best_internal": dp_finalist.as_ref().expect("the finalists report implies the finalist DP").best_score,
+                "finalist_l_dp_best_internal": dp_finalist
+                    .as_ref()
+                    .map(|outcome| outcome.best_score)
+                    .unwrap_or(f64::NAN),
                 "terminal_tie_count": dp.tie_count,
                 "dp_beats_incumbent": dp_beats_incumbent,
                 "wall_seconds": dp.wall_seconds,
