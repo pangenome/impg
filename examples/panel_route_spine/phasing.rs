@@ -1681,6 +1681,306 @@ pub(in super) fn run_phasing_chain_dp(
     })
 }
 
+/// STEP 4b (the folded DP's own posterior machinery, supervisor ruling):
+/// the exact backward pass over the SAME retained state universe the
+/// forward DP kept (the admissible suffix bound against the incumbent
+/// pruned provably-non-competitive states; the posterior is therefore the
+/// exact posterior of the folded DP over its retained universe — a state
+/// pruned by the bound lies in no chain at or below the incumbent, so its
+/// joint mass under the model's own likelihood scale is bounded by
+/// exp(-(incumbent - best)), a documented over-approximation of zero).
+/// joint(l, s) = alpha[s] + beta[l][s] is the best chain THROUGH state s;
+/// min over states of joint = the global best at EVERY locus (the best
+/// chain passes one state per locus).
+///
+/// The per-locus MARGINAL of a pair aggregates its states:
+///   - the min-marginal: the best chain constrained to that pair (the
+///     properly-conditioned ML quantity; its delta vs the global best is
+///     the conditional ambiguity of the locus — the switch-stability
+///     diagnostic);
+///   - the posterior mass: the sum of exp(-(joint - best)) over the
+///     pair's states, the model's own likelihood scale (the losses are
+///     negative log-likelihoods in the model's units; no temperature).
+///
+/// The exact posterior SAMPLE is drawn by backward sampling: the last
+/// locus's state from the joint (alpha + beta), then each predecessor from
+/// P(p | s*) proportional to exp(-(alpha[p] + trans(p, s*))) — exact for
+/// the chain's joint because, conditioned on the sampled successor, the
+/// future term cancels. The sampler is the deterministic splitmix64
+/// generator seeded with the PANEL's own documented syncmer seed (7) — no
+/// new constant; the sample is reproducible run to run.
+pub(in super) struct PhasingPosterior {
+    /// Per locus: (pair, min-marginal joint, posterior mass) rows for the
+    /// pairs of the retained states, sorted by min-marginal ascending.
+    pub(in super) locus_marginals: Vec<Vec<([usize; 2], f64, f64)>>,
+    /// The exact posterior samples (locus-indexed pair routes).
+    pub(in super) samples: Vec<Vec<[usize; 2]>>,
+    /// The global best chain total (recomputed through the backward pass;
+    /// must match the forward DP's best_score).
+    pub(in super) best_total: f64,
+    pub(in super) wall_seconds: f64,
+    pub(in super) backward_states: Vec<usize>,
+}
+
+/// The deterministic splitmix64 generator (the documented standard
+/// sequence; no tuning).
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// The panel's own documented syncmer seed (syng-k63-s8-seed7): the
+/// deterministic posterior sampler reuses it — no new constant.
+const POSTERIOR_SAMPLER_SEED: u64 = 7;
+
+pub(in super) fn phasing_posterior(
+    locus_count: usize,
+    tables: &[LocusStateTable],
+    layers: &[Vec<PhState>],
+    boundary_costs: &[BoundaryTransitionCosts],
+    haploid: bool,
+    sample_count: usize,
+    rss: &mut genome::PeriodicRssGuard,
+) -> io::Result<PhasingPosterior> {
+    let started = Instant::now();
+    ensure(
+        locus_count > 0 && layers.len() == locus_count && tables.len() == locus_count,
+        "posterior arity",
+    )?;
+    // Pair -> row maps (a pair appears once per table; the row order is the
+    // tables' own (first, second, pair) sort).
+    let row_of: Vec<HashMap<[usize; 2], usize>> = tables
+        .iter()
+        .map(|table| {
+            table
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(row, &(pair, _, _, _))| (pair, row))
+                .collect()
+        })
+        .collect();
+    // The backward pass over the retained universe: beta[l] is indexed by
+    // the table's own row order, +INFINITY at rows the forward pruned
+    // (they are outside the posterior universe); retained states carry the
+    // best continuation through retained successors only.
+    let mut beta: Vec<Vec<f64>> = vec![vec![f64::INFINITY; 0]; locus_count];
+    {
+        beta[locus_count - 1] = vec![f64::INFINITY; tables[locus_count - 1].rows.len()];
+        for state in layers[locus_count - 1].iter() {
+            let row = row_of[locus_count - 1][&state.pair];
+            beta[locus_count - 1][row] = 0.0;
+        }
+        for locus in (0..locus_count - 1).rev() {
+            rss.checkpoint("phasing_posterior_backward")?;
+            let boundary = &boundary_costs[locus];
+            let right_count = boundary.right_count as usize;
+            let next_beta = &beta[locus + 1];
+            let next_row_of = &row_of[locus + 1];
+            let mut current = vec![f64::INFINITY; tables[locus].rows.len()];
+            let zero_row = if haploid {
+                Some(vec![0.0f64; right_count])
+            } else {
+                None
+            };
+            for state in layers[locus].iter() {
+                let cost_matrix = if haploid {
+                    &boundary.cost_haploid
+                } else {
+                    &boundary.cost
+                };
+                let row_first = &cost_matrix
+                    [boundary.left_index[state.pair[0]] as usize * right_count..]
+                    [..right_count];
+                let row_second: &[f64] = match (&zero_row, haploid) {
+                    (Some(zero), true) => zero,
+                    _ => {
+                        &cost_matrix
+                            [boundary.left_index[state.pair[1]] as usize * right_count..]
+                            [..right_count]
+                    }
+                };
+                let mut best = f64::INFINITY;
+                for successor in layers[locus + 1].iter() {
+                    let row = next_row_of[&successor.pair];
+                    if !next_beta[row].is_finite() {
+                        continue;
+                    }
+                    // The cost matrix's columns are the DENSE right-member
+                    // indices (the same convention as the forward loop's
+                    // count-sorted `first` field); the haploid second slot
+                    // is the EMPTY sentinel and carries the shared zero
+                    // charge (never indexed — the raw EMPTY value is out
+                    // of the right_index domain).
+                    let second_charge = if haploid {
+                        0.0
+                    } else {
+                        row_second[boundary.right_index[successor.pair[1]] as usize]
+                    };
+                    let candidate = row_first[boundary.right_index[successor.pair[0]] as usize]
+                        + second_charge
+                        + successor.loss
+                        + next_beta[row];
+                    if candidate < best {
+                        best = candidate;
+                    }
+                }
+                if best.is_finite() {
+                    current[row_of[locus][&state.pair]] = best;
+                }
+            }
+            beta[locus] = current;
+        }
+    }
+    // joint over the retained states; the global best.
+    let mut joint: Vec<Vec<f64>> = Vec::with_capacity(locus_count);
+    let mut best_total = f64::INFINITY;
+    let mut backward_states: Vec<usize> = Vec::with_capacity(locus_count);
+    for locus in 0..locus_count {
+        let mut joints = Vec::with_capacity(layers[locus].len());
+        for state in layers[locus].iter().enumerate() {
+            let beta_value = beta[locus][row_of[locus][&state.1.pair]];
+            ensure(beta_value.is_finite(), "posterior joint over a betaless state")?;
+            let value = state.1.score + beta_value;
+            ensure(value.is_finite(), "posterior joint not finite")?;
+            if value < best_total {
+                best_total = value;
+            }
+            joints.push(value);
+        }
+        joint.push(joints);
+        backward_states.push(layers[locus].len());
+    }
+    let forward_best = layers[locus_count - 1]
+        .iter()
+        .map(|state| state.score)
+        .fold(f64::INFINITY, f64::min);
+    ensure(
+        (best_total - forward_best).abs() < 1e-9,
+        "the posterior best disagrees with the forward DP",
+    )?;
+    // Per-locus pair marginals: min-marginal and posterior mass.
+    let mut locus_marginals: Vec<Vec<([usize; 2], f64, f64)>> = Vec::with_capacity(locus_count);
+    for locus in 0..locus_count {
+        let mut by_pair: HashMap<[usize; 2], (f64, f64)> = HashMap::new();
+        for (index, state) in layers[locus].iter().enumerate() {
+            let value = joint[locus][index];
+            let entry = by_pair.entry(state.pair).or_insert((value, 0.0));
+            if value < entry.0 {
+                entry.0 = value;
+            }
+            // The model's own likelihood scale: exp(-(joint - best)).
+            entry.1 += (-(value - best_total)).exp();
+        }
+        let mut rows: Vec<([usize; 2], f64, f64)> = by_pair
+            .into_iter()
+            .map(|(pair, (min_marginal, mass))| (pair, min_marginal, mass))
+            .collect();
+        rows.sort_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        locus_marginals.push(rows);
+    }
+    // Exact posterior samples: backward sampling.
+    let mut samples: Vec<Vec<[usize; 2]>> = Vec::with_capacity(sample_count);
+    let mut sampler_state = POSTERIOR_SAMPLER_SEED;
+    for _ in 0..sample_count {
+        let mut route: Vec<[usize; 2]> = vec![[usize::MAX; 2]; locus_count];
+        let last = locus_count - 1;
+        let mut weights: Vec<f64> = Vec::with_capacity(layers[last].len());
+        for value in joint[last].iter() {
+            weights.push((-(value - best_total)).exp());
+        }
+        let total: f64 = weights.iter().sum();
+        ensure(total > 0.0, "posterior sample weights vanish")?;
+        let mut draw =
+            (splitmix64(&mut sampler_state) as f64) / (u64::MAX as f64) * total;
+        let mut chosen = layers[last].len() - 1;
+        for (index, weight) in weights.iter().enumerate() {
+            draw -= weight;
+            if draw <= 0.0 {
+                chosen = index;
+                break;
+            }
+        }
+        route[last] = layers[last][chosen].pair;
+        // Predecessors: P(p | s*) proportional to exp(-(alpha[p] + trans)).
+        for locus in (0..locus_count - 1).rev() {
+            let boundary = &boundary_costs[locus];
+            let right_count = boundary.right_count as usize;
+            let successor_pair = route[locus + 1];
+            let zero_row = if haploid {
+                Some(vec![0.0f64; right_count])
+            } else {
+                None
+            };
+            let mut weights: Vec<f64> = Vec::with_capacity(layers[locus].len());
+            let mut norm = f64::INFINITY;
+            for state in layers[locus].iter() {
+                let cost_matrix = if haploid {
+                    &boundary.cost_haploid
+                } else {
+                    &boundary.cost
+                };
+                let row_first = &cost_matrix
+                    [boundary.left_index[state.pair[0]] as usize * right_count..]
+                    [..right_count];
+                let row_second: &[f64] = match (&zero_row, haploid) {
+                    (Some(zero), true) => zero,
+                    _ => {
+                        &cost_matrix
+                            [boundary.left_index[state.pair[1]] as usize * right_count..]
+                            [..right_count]
+                    }
+                };
+                let second_charge = if haploid {
+                    0.0
+                } else {
+                    row_second[boundary.right_index[successor_pair[1]] as usize]
+                };
+                let weight = state.score
+                    + row_first[boundary.right_index[successor_pair[0]] as usize]
+                    + second_charge;
+                if weight < norm {
+                    norm = weight;
+                }
+                weights.push(weight);
+            }
+            ensure(norm.is_finite(), "posterior predecessor weights not finite")?;
+            let total: f64 = weights
+                .iter()
+                .map(|weight| (-(weight - norm)).exp())
+                .sum();
+            ensure(total > 0.0, "posterior predecessor weights vanish")?;
+            let mut draw =
+                (splitmix64(&mut sampler_state) as f64) / (u64::MAX as f64) * total;
+            let mut chosen = layers[locus].len() - 1;
+            let mut acc = 0.0f64;
+            for (index, weight) in weights.iter().enumerate() {
+                acc += (-(weight - norm)).exp();
+                if acc >= draw {
+                    chosen = index;
+                    break;
+                }
+            }
+            route[locus] = layers[locus][chosen].pair;
+        }
+        samples.push(route);
+    }
+    Ok(PhasingPosterior {
+        locus_marginals,
+        samples,
+        best_total,
+        wall_seconds: started.elapsed().as_secs_f64(),
+        backward_states,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The k-best finalist enumeration (supervisor ruling, genome/finalist-reranking).
 // ---------------------------------------------------------------------------
@@ -3276,6 +3576,44 @@ pub(in super) fn run_correlation_phasing(
         dp_haploid.wall_seconds
     );
     rss_probe(rss, "phasing_after_dp_haploid")?;
+
+    // -------------------------------- STEP 4b: the folded DP's own posterior
+    // machinery (forward-backward over the retained universe; the exact
+    // properly-conditioned ML per locus and exact posterior samples —
+    // backward sampling). Runs on the SELECTED (haploid) track. The
+    // sample count is an engineering knob (IMPG_POSTERIOR_SAMPLES, default
+    // 1 — one exact posterior sample; the MC-EM loop that would consume
+    // many is the documented escalation path, not implemented unbidden);
+    // IMPG_SPINE_POSTERIOR=0 disables the pass entirely (the scoreboard
+    // does not depend on it).
+    let posterior_samples: usize = std::env::var("IMPG_POSTERIOR_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    let posterior_enabled: bool = std::env::var("IMPG_SPINE_POSTERIOR")
+        .map(|value| value != "0")
+        .unwrap_or(true);
+    let spine_posterior: Option<PhasingPosterior> = if posterior_enabled {
+        let posterior = phasing_posterior(
+            locus_count,
+            &per_locus_haploid_tables,
+            &dp_haploid.layers,
+            &transition_costs,
+            true,
+            posterior_samples,
+            rss,
+        )?;
+        eprintln!(
+            "[phasing] posterior: best {:.2} (forward {:.2}), backward states {:?}, {:.2}s",
+            posterior.best_total,
+            dp_haploid.best_score,
+            posterior.backward_states,
+            posterior.wall_seconds
+        );
+        Some(posterior)
+    } else {
+        None
+    };
 
     // -------------------------------- P4b: the k-best finalist enumeration +
     // the model-of-record re-rank (supervisor ruling, genome/finalist-reranking).
@@ -5019,6 +5357,44 @@ pub(in super) fn run_correlation_phasing(
                 "best_score_internal": dp.best_score,
                 "diploid_best_score_internal": dp_diploid.best_score,
                 "haploid_best_score_internal": dp_haploid.best_score,
+                "posterior": spine_posterior
+                    .as_ref()
+                    .map(|posterior| {
+                        serde_json::json!({
+                            "best_total": posterior.best_total,
+                            "wall_seconds": posterior.wall_seconds,
+                            "backward_states": posterior.backward_states,
+                            "sample_count": posterior.samples.len(),
+                            "per_locus": posterior
+                                .locus_marginals
+                                .iter()
+                                .enumerate()
+                                .map(|(locus, rows)| {
+                                    let total_mass: f64 =
+                                        rows.iter().map(|&(_, _, mass)| mass).sum();
+                                    let runner = rows.get(1);
+                                    serde_json::json!({
+                                        "locus": locus,
+                                        "ml_pair": rows[0].0,
+                                        "ml_min_marginal": rows[0].1,
+                                        "runner_pair": runner
+                                            .map(|&(pair, _, _)| pair)
+                                            .unwrap_or([usize::MAX; 2]),
+                                        "runner_delta": runner
+                                            .map(|&(_, min_marginal, _)| min_marginal - rows[0].1),
+                                        "ml_mass_fraction": if total_mass > 0.0 {
+                                            rows[0].2 / total_mass
+                                        } else {
+                                            f64::NAN
+                                        },
+                                        "retained_pairs": rows.len(),
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                            "samples": posterior.samples,
+                        })
+                    })
+                    .unwrap_or(serde_json::Value::Null),
                 "finalist_l_dp_best_internal": dp_finalist
                     .as_ref()
                     .map(|outcome| outcome.best_score)
