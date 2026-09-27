@@ -597,6 +597,26 @@ impl AlleleCoveredInstances {
     }
 }
 
+/// The haploid table's admissibility decision for one DOMAIN allele: the
+/// class-level hygiene (owner decision (c)) applies to every allele
+/// EXCEPT the locus's native-backbone allele, which is scored regardless
+/// of its class's scorability — the exact mirror of the diploid side's
+/// treatment (the sweep seeds and the DP structurally retains the native
+/// backbone pair without the scorable check; the incumbent chain's
+/// admissibility requires its row scored and its state retained). Measured
+/// root cause (chrVI locus 15, the ITEM-1 diagnosis): a divergent-middle
+/// window's native row is a sub-read-length empty-profile fragment whose
+/// class aggregates the window's degenerate rows; the class-level skip
+/// left the haploid track without its incumbent chain (the "unscored
+/// backbone class" guard, 9 genome components). The backbone allele is a
+/// real chainable haplotype row, not a degenerate mini: scoring it cannot
+/// make a mini a winner (minis are not backbone alleles and stay INFINITY),
+/// and its loss carries the full window-omission charge when it explains
+/// nothing — the honest no-evidence penalty.
+fn haploid_allele_admissible(allele: usize, backbone_allele: usize, scorable_class: bool) -> bool {
+    scorable_class || allele == backbone_allele
+}
+
 pub(in super) fn haploid_allele_losses(
     // The COMBINED per-locus allele list: the domain rows (indices
     // 0..domain_alleles, the classing/sweeps universe — charged exactly as
@@ -605,6 +625,9 @@ pub(in super) fn haploid_allele_losses(
     // record-once form below).
     ranges: &[genome::SpanningTraversal],
     domain_alleles: usize,
+    // The locus's native-backbone allele (a DOMAIN row index): scored even
+    // when its class is unscorable (see `haploid_allele_admissible`).
+    backbone_allele: usize,
     locus_classes: &LocusClassing,
     window_obs_map: &HashMap<FeatureKey, f64>,
     // The windows' observed-feature indices (this locus = window_obs_map's;
@@ -748,7 +771,7 @@ pub(in super) fn haploid_allele_losses(
         let mut allele_profile: Option<Profile> = None;
         let loss = if allele < domain_alleles {
             let class = locus_classes.membership[allele];
-            if !scorable[class] {
+            if !haploid_allele_admissible(allele, backbone_allele, scorable[class]) {
                 exons.push(HaploidAlleleExon {
                     self_list: Vec::new(),
                     self_sum: 0.0,
@@ -889,11 +912,13 @@ pub(in super) fn haploid_allele_losses(
 /// with an EMPTY second slot, charged by its OWN oracle record-once loss
 /// (see `haploid_allele_losses`; the SAMPLE-SIDE cross-support backgrounds,
 /// owner-approved family, genome-wide form 2026-09-24: beta_f = base +
-/// Sum_r m_r*(1 - 1/t_r_genome)). Only scorable alleles are
+/// Sum_r m_r*(1 - 1/t_r_genome)). Only admissible alleles are
 /// haploid-admissible (the (c) hygiene applies to slot 1 unchanged: an
 /// empty-profile or sub-read-length mini must not become a zero-cost
 /// "haploid" winner — the empty slot is a ploidy statement, not an
-/// allele).
+/// allele — with the ONE structural exception of the locus's
+/// native-backbone allele, the mirror of the diploid side's structurally
+/// retained backbone pair; see `haploid_allele_admissible`).
 pub(in super) fn ordered_haploid_states(
     // The per-allele oracle record-once losses (precomputed before the
     // retention; see `haploid_allele_losses`).
@@ -3137,6 +3162,7 @@ pub(in super) fn run_correlation_phasing(
             haploid_allele_losses(
                 &combined[locus],
                 ranges[locus].len(),
+                backbone_chain[locus],
                 &locus_classes[locus],
                 &window_obs[locus],
                 &window_obs_index,
@@ -3566,7 +3592,43 @@ pub(in super) fn run_correlation_phasing(
     // threshold alongside the diploid incumbent.
     let mut incumbent_haploid = 0.0f64;
     for locus in 0..locus_count {
-        incumbent_haploid += haploid_loss_tables[locus][backbone_chain[locus]];
+        let allele = backbone_chain[locus];
+        if !haploid_loss_tables[locus][allele].is_finite() {
+            // ITEM-1 diagnostic: the backbone allele's haploid loss is
+            // unscored at this locus; report WHY before the guard fires.
+            let classing = &locus_classes[locus];
+            let class = classing.membership[allele];
+            let profile_len = classing.profiles[class].len();
+            let members: Vec<usize> = (0..classing.membership.len())
+                .filter(|&a| classing.membership[a] == class)
+                .collect();
+            let coverage = |a: usize| {
+                combined[locus][a]
+                    .segments
+                    .iter()
+                    .map(|s| s.end.saturating_sub(s.start))
+                    .sum::<u64>()
+            };
+            let mut min_member_coverage = u64::MAX;
+            let mut max_member_coverage = 0u64;
+            for &a in &members {
+                let c = coverage(a);
+                min_member_coverage = min_member_coverage.min(c);
+                max_member_coverage = max_member_coverage.max(c);
+            }
+            eprintln!(
+                "[phasing] ITEM-1 diag: locus {locus} backbone allele {allele} class {class} \
+                 profile_len {profile_len} members {} min_member_coverage {} \
+                 max_member_coverage {} native_coverage {} domain_alleles {} class_charge {}",
+                members.len(),
+                min_member_coverage,
+                max_member_coverage,
+                coverage(allele),
+                classing.membership.len(),
+                classing.class_charges[class],
+            );
+        }
+        incumbent_haploid += haploid_loss_tables[locus][allele];
     }
     for boundary in 0..locus_count - 1 {
         let costs = &transition_costs[boundary];
@@ -6149,6 +6211,29 @@ mod tests {
     /// is exactly the arithmetic that could not represent the
     /// decompose-level wins. Also locks the scorable hygiene: a retained
     /// allele whose loss is INFINITY (non-scorable) produces no state.
+    /// The haploid table's admissibility decision (the ITEM-1 backbone fix):
+    /// the class-level hygiene (c) excludes every allele of an unscorable
+    /// class EXCEPT the locus's native-backbone allele, mirroring the
+    /// diploid side's structural retention of the native pair (measured
+    /// root cause, chrVI locus 15: the divergent middle's native row is a
+    /// 71 bp empty-profile fragment whose class aggregates 2,944 degenerate
+    /// rows — the class-level skip left the haploid incumbent unscored and
+    /// fired the guard on 9 genome components).
+    #[test]
+    fn haploid_admissibility_retains_the_backbone_allele_over_class_hygiene() {
+        // An unscorable class: every allele inadmissible except the
+        // backbone allele.
+        assert!(!haploid_allele_admissible(0, 7, false));
+        assert!(!haploid_allele_admissible(1, 7, false));
+        assert!(haploid_allele_admissible(7, 7, false));
+        // A scorable class: every allele admissible, backbone or not.
+        assert!(haploid_allele_admissible(0, 7, true));
+        assert!(haploid_allele_admissible(7, 7, true));
+        // The structural exception is exactly the backbone allele — a
+        // degenerate mini sharing the backbone's class stays inadmissible.
+        assert!(!haploid_allele_admissible(8, 7, false));
+    }
+
     #[test]
     fn haploid_states_charge_per_allele_record_once_losses() {
         let locus_classes = LocusClassing {
