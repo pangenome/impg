@@ -90,19 +90,36 @@ pub struct ChainEntry {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AttestedComposition {
     pub left_source: usize,
-    pub left_exit: u64,
     pub right_source: usize,
-    pub right_entry: u64,
     pub left_forward: bool,
     pub right_forward: bool,
+    /// The reads attesting this source pair's junction (existence, not
+    /// magnitude — the placement-ambiguity cross-product is AGGREGATED
+    /// into this one entry, never materialized: the junction is the
+    /// source pair, and the exits/entries are the read-side anchor-point
+    /// ranges over the attesting placement pairs).
     pub attesting_reads: u64,
-    /// The MINIMUM inter-record read gap over the attesting reads (the
-    /// read's own gap between the left record's end and the right's start
-    /// — the tight upper bound of the true cut: the read's left material
-    /// extends at most gap bases past its last anchored position, so the
-    /// true left cut sits in [left_exit, left_exit + gap] and the right
-    /// cut in [right_entry - gap, right_entry]).
-    pub gap: i64,
+    /// The left-side exit-point range over the attesting pairs (the left
+    /// record's anchored extent ends; the true left cut sits in
+    /// [left_exit_min, left_exit_max + gap_max]).
+    pub left_exit_min: u64,
+    pub left_exit_max: u64,
+    /// The right-side entry-point range (the right record's anchored
+    /// extents start; the true right cut sits in
+    /// [right_entry_min - gap_max, right_entry_max]).
+    pub right_entry_min: u64,
+    pub right_entry_max: u64,
+    /// The WIDEST inter-record read gap over the attesting pairs (the
+    /// read's own gap between the left record's end and the right's
+    /// start — the bracket's constant-free enclosure bound).
+    pub gap_max: i64,
+    /// The window row's locus covering the side's role points when the
+    /// side is window-anchored (None = the side's points fall in no
+    /// window row of the run's loci). At least one side is always
+    /// anchored (the census's own bound); the materialization's locus
+    /// rule reads the pair.
+    pub left_window_locus: Option<usize>,
+    pub right_window_locus: Option<usize>,
 }
 
 /// The per-run read-adjacency derivation: per read, the position-ordered
@@ -325,6 +342,12 @@ pub fn build_junction_span_index(
     source_of_path: &[usize],
     reads: &[Vec<u8>],
     chains: &ReadChains,
+    // The run's per-locus window rows (the extension's own anchor bound:
+    // a cross-source composition matters only when a side's anchor point
+    // lands in a window row of one of the run's loci — the per-locus
+    // domain being extended; constant-free, the window structure IS the
+    // bound).
+    window_rows: &[Vec<SourceRange>],
     // Per canonical record tokens: the partitions its routed occurrences
     // touch (from the run's routing pass, min-anchor convention, exactly
     // the shares the pooled observations use).
@@ -498,7 +521,7 @@ pub fn build_junction_span_index(
         + index_entries * 12
         + record_reads.iter().map(|l| l.len() as u64 * 8).sum::<u64>()
         + paid_feature_incidences * 24;
-    let stats = serde_json::json!({
+    let mut stats = serde_json::json!({
         "reads": chains.chains.len(),
         "distinct_records": chains.record_tokens.len(),
         "records_with_placements": records_with_placements,
@@ -532,8 +555,17 @@ pub fn build_junction_span_index(
     // crossing records x per-side placement ambiguity).
     let attested_started = Instant::now();
     let mut attested_map: std::collections::BTreeMap<
-        (usize, u64, usize, u64, bool, bool),
-        (u64, i64),
+        (usize, usize, bool, bool),
+        (
+            u64,
+            i64,
+            u64,
+            u64,
+            u64,
+            u64,
+            Option<usize>,
+            Option<usize>,
+        ),
     > = std::collections::BTreeMap::new();
     // The routed-attestation filter's per-record touched sets (the
     // routing pass's own min-anchor disambiguation — the same convention
@@ -558,167 +590,290 @@ pub fn build_junction_span_index(
             .find(|&&(bs, be, _)| bs <= point && point < be)
             .map(|&(_, _, partition)| partition)
     };
+    // The distinct consecutive (record, form) instances with their
+    // per-gap read counts: the placement enumeration does not depend on
+    // the read, so it runs once per distinct form pair; the per-read
+    // geometry (the gap, hence the co-linear offset) is what the
+    // continuity test needs per instance.
+    let mut pair_instances: std::collections::BTreeMap<
+        (u32, u32, bool, bool),
+        std::collections::BTreeMap<i64, u64>,
+    > = std::collections::BTreeMap::new();
     for chain in chains.chains.iter() {
         for pair in chain.windows(2) {
             let (left_entry, right_entry) = (&pair[0], &pair[1]);
-            let left_list = &placements[left_entry.record as usize];
-            let right_list = &placements[right_entry.record as usize];
-            if left_list.is_empty() || right_list.is_empty() {
+            if placements[left_entry.record as usize].is_empty()
+                || placements[right_entry.record as usize].is_empty()
+            {
                 continue;
             }
-            // The routed-attestation prerequisite: BOTH records carry
-            // routed touched sets (a record the routing never attributed
-            // attests nothing).
-            let (Some(left_touched), Some(right_touched)) = (
-                routed[left_entry.record as usize],
-                routed[right_entry.record as usize],
-            ) else {
+            if routed[left_entry.record as usize].is_none()
+                || routed[right_entry.record as usize].is_none()
+            {
                 continue;
+            }
+            let gap = right_entry.read_start as i64 - left_entry.read_end as i64;
+            pair_instances
+                .entry((
+                    left_entry.record,
+                    right_entry.record,
+                    left_entry.mirrored,
+                    right_entry.mirrored,
+                ))
+                .or_default()
+                .entry(gap)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+    }
+    rss_probe(rss, "junction_attested_pairs")?;
+    // Per record: the ROUTED placements (the covering partition is in
+    // the record's routed touched set) with the WINDOW-ANCHOR bits for
+    // both role points. A placement with no window anchor can still
+    // pair with an anchored partner on the other side, so both are kept
+    // and the OR test applies at pair time.
+    let mut window_by_source: std::collections::HashMap<usize, Vec<(u64, u64, usize)>> =
+        std::collections::HashMap::new();
+    for (locus, locus_rows) in window_rows.iter().enumerate() {
+        for row in locus_rows {
+            if row.reverse || row.start >= row.end {
+                continue;
+            }
+            window_by_source
+                .entry(row.source)
+                .or_default()
+                .push((row.start, row.end, locus));
+        }
+    }
+    for rows in window_by_source.values_mut() {
+        rows.sort_unstable();
+    }
+    let window_locus_at = |source: usize, point: u64| -> Option<usize> {
+        window_by_source
+            .get(&source)?
+            .iter()
+            .rev()
+            .find(|&&(start, end, _)| start <= point && point < end)
+            .map(|&(_, _, locus)| locus)
+    };
+    struct RoutedPlacement {
+        start: u32,
+        mirrored: bool,
+        source: usize,
+        lo_locus: Option<usize>,
+        hi_locus: Option<usize>,
+    }
+    let routed_placements: Vec<Vec<RoutedPlacement>> = (0..chains.record_tokens.len())
+        .into_par_iter()
+        .map(|id| {
+            let touched = match routed[id] {
+                Some(touched) => touched,
+                None => return Vec::new(),
             };
-            // The SINGLE-SOURCE CONTINUITY test (the junction-spanning-read
-            // doctrine's own discriminator, constant-free): a consecutive
-            // record pair attests a junction only when NO single source
-            // carries BOTH records co-linearly — a read whose pair places
-            // on one source (the homologous continuation, native or any
-            // homolog copy) is within-source continuity, not a junction,
-            // and its cross-source placement mixes are placement
-            // ambiguity (measured: the routed-attested census still fired
-            // at all 38 loci — 163,810 compositions — because every
-            // multi-placed read pair carries same-source continuations
-            // AND homolog-mixed pairs; only the source-impossible pairs
-            // are junction attestations).
-            let left_offset =
-                right_entry.read_start as i64 - left_entry.read_start as i64;
-            let mut pair_attestations: Vec<(usize, u64, usize, u64, bool, bool, i64)> =
-                Vec::new();
-            let mut single_source_continuation = false;
-            for &(left_path, left_start, left_mirrored) in left_list {
-                let left_source = source_of_path[left_path as usize];
-                if left_source == usize::MAX {
+            let mut out: Vec<RoutedPlacement> = Vec::new();
+            for &(path, start, mirrored) in &placements[id] {
+                let source = source_of_path[path as usize];
+                if source == usize::MAX {
                     continue;
                 }
-                let left_forward = left_entry.mirrored == left_mirrored;
-                let (lo, hi) =
-                    extents[left_entry.record as usize][usize::from(left_mirrored)];
-                let left_exit = if left_forward {
-                    left_start as u64 + hi as u64
-                } else {
-                    left_start as u64 + lo as u64
+                let (lo, hi) = extents[id][usize::from(mirrored)];
+                let Some(partition) = covering_partition(path, start, lo) else {
+                    continue;
                 };
-                for &(right_path, right_start, right_mirrored) in right_list {
-                    if right_start as i64 - left_start as i64 != left_offset {
-                        continue;
+                if !touched.contains(&partition) {
+                    continue;
+                }
+                let lo_locus = window_locus_at(source, start as u64 + lo as u64);
+                let hi_locus = window_locus_at(source, start as u64 + hi as u64);
+                out.push(RoutedPlacement {
+                    start,
+                    mirrored,
+                    source,
+                    lo_locus,
+                    hi_locus,
+                });
+            }
+            out
+        })
+        .collect();
+    rss_probe(rss, "junction_routed_placements")?;
+    let mut continuity_killed_reads = 0u64;
+    let mut novel_pairs_enumerated = 0u64;
+    let mut unanchored_pair_skips = 0u64;
+    for ((left_record, right_record, left_mirrored, right_mirrored), gaps) in pair_instances {
+        let left_list = &placements[left_record as usize];
+        let right_list = &placements[right_record as usize];
+        let left_routed = &routed_placements[left_record as usize];
+        let right_routed = &routed_placements[right_record as usize];
+        // The SAME-SOURCE CONTINUITY test per observed gap (the read's
+        // own co-linear offset): a same-source placement pair carrying
+        // both records at that offset is the homologous continuation —
+        // those reads attest no junction. The right placements are
+        // looked up per path (binary search over the sorted list), so
+        // the scan is linear in the left placements, not their product.
+        let left_extent = extents[left_record as usize][usize::from(left_mirrored)];
+        let mut surviving: Vec<(i64, u64)> = Vec::new();
+        let mut all_continuation = true;
+        for (&gap, &reads) in gaps.iter() {
+            let offset = gap + (left_extent.1 - left_extent.0) as i64;
+            let mut continuation = false;
+            'pair_scan: for &(left_path, left_start, _) in left_list {
+                let lo = right_list.partition_point(|&(p, _, _)| p < left_path);
+                let hi = right_list.partition_point(|&(p, _, _)| p <= left_path);
+                for &(right_path, right_start, _) in &right_list[lo..hi] {
+                    let _ = right_path;
+                    if right_start as i64 - left_start as i64 == offset {
+                        continuation = true;
+                        break 'pair_scan;
                     }
-                    let right_source = source_of_path[right_path as usize];
-                    if right_source == usize::MAX {
-                        continue;
-                    }
-                    if right_source == left_source {
-                        single_source_continuation = true;
-                        continue;
-                    }
-                    // The routed-attestation attribution (owner ruling
-                    // 2026-09-28): both sides' covering partitions are in
-                    // their records' routed touched sets.
-                    let Some(left_partition) =
-                        covering_partition(left_path, left_start, lo)
-                    else {
-                        continue;
-                    };
-                    if !left_touched.contains(&left_partition) {
-                        continue;
-                    }
-                    let right_forward = right_entry.mirrored == right_mirrored;
-                    let (rlo, rhi) = extents[right_entry.record as usize]
-                        [usize::from(right_mirrored)];
-                    let Some(right_partition) =
-                        covering_partition(right_path, right_start, rlo)
-                    else {
-                        continue;
-                    };
-                    if !right_touched.contains(&right_partition) {
-                        continue;
-                    }
-                    let right_entry_point = if right_forward {
-                        right_start as u64 + rlo as u64
-                    } else {
-                        right_start as u64 + rhi as u64
-                    };
-                    let gap = right_entry.read_start as i64 - left_entry.read_end as i64;
-                    pair_attestations.push((
-                        left_source,
-                        left_exit,
-                        right_source,
-                        right_entry_point,
-                        left_forward,
-                        right_forward,
-                        gap,
-                    ));
                 }
             }
-            if single_source_continuation {
-                // Within-source continuity: the read's pair places on one
-                // source — no junction is spanned, whatever homolog-mixed
-                // placement pairs exist.
-                continue;
+            if continuation {
+                continuity_killed_reads += reads;
+            } else {
+                all_continuation = false;
+                surviving.push((gap, reads));
             }
-            let mut seen_here: std::collections::BTreeMap<
-                (usize, u64, usize, u64, bool, bool),
-                i64,
-            > = std::collections::BTreeMap::new();
-            for (left_source, left_exit, right_source, right_entry_point, left_forward, right_forward, gap) in
-                pair_attestations
-            {
-                seen_here
-                    .entry((
-                        left_source,
-                        left_exit,
-                        right_source,
-                        right_entry_point,
-                        left_forward,
-                        right_forward,
-                    ))
-                    .and_modify(|best| *best = (*best).min(gap))
-                    .or_insert(gap);
-            }
-            for (key, gap) in seen_here {
-                let entry = attested_map.entry(key).or_insert((0, i64::MAX));
-                entry.0 += 1;
-                entry.1 = entry.1.min(gap);
+        }
+        if all_continuation {
+            continue;
+        }
+        novel_pairs_enumerated += 1;
+        let reads_total: u64 = surviving.iter().map(|&(_, r)| r).sum();
+        let gap_max = surviving
+            .iter()
+            .map(|&(g, _)| g)
+            .max()
+            .unwrap_or(i64::MIN);
+        // The per-side, per-(source, forwardness) aggregation of the
+        // routed placements: the placement-ambiguity cross-product is
+        // AGGREGATED (min/max of the role points), never materialized.
+        // The anchor locus is the window row covering the side's ROLE
+        // point (the exit for the left role, the entry for the right).
+        let mut lefts: std::collections::BTreeMap<
+            (usize, bool),
+            (u64, u64, Option<usize>),
+        > = std::collections::BTreeMap::new();
+        for left in left_routed {
+            let left_forward = left_mirrored == left.mirrored;
+            let (lo, hi) = extents[left_record as usize][usize::from(left.mirrored)];
+            let exit = if left_forward {
+                left.start as u64 + hi as u64
+            } else {
+                left.start as u64 + lo as u64
+            };
+            let anchor_locus = if left_forward {
+                left.hi_locus
+            } else {
+                left.lo_locus
+            };
+            let entry = lefts
+                .entry((left.source, left_forward))
+                .or_insert((exit, exit, anchor_locus));
+            entry.0 = entry.0.min(exit);
+            entry.1 = entry.1.max(exit);
+        }
+        let mut rights: std::collections::BTreeMap<
+            (usize, bool),
+            (u64, u64, Option<usize>),
+        > = std::collections::BTreeMap::new();
+        for right in right_routed {
+            let right_forward = right_mirrored == right.mirrored;
+            let (rlo, rhi) = extents[right_record as usize][usize::from(right.mirrored)];
+            let entry_point = if right_forward {
+                right.start as u64 + rlo as u64
+            } else {
+                right.start as u64 + rhi as u64
+            };
+            let anchor_locus = if right_forward {
+                right.lo_locus
+            } else {
+                right.hi_locus
+            };
+            let entry = rights
+                .entry((right.source, right_forward))
+                .or_insert((entry_point, entry_point, anchor_locus));
+            entry.0 = entry.0.min(entry_point);
+            entry.1 = entry.1.max(entry_point);
+        }
+        // The cross-source source-pair groups with the window-anchor OR:
+        // at least one side's role points land in a window row of the
+        // run's loci (the per-locus domain being extended — the
+        // constant-free bound; the unanchored pairs carry no locus and
+        // cannot be materialized anywhere).
+        for (&(left_source, left_forward), &(lexit_min, lexit_max, llocus)) in &lefts {
+            for (&(right_source, right_forward), &(rentry_min, rentry_max, rlocus)) in &rights {
+                if right_source == left_source {
+                    continue;
+                }
+                if llocus.is_none() && rlocus.is_none() {
+                    unanchored_pair_skips += 1;
+                    continue;
+                }
+                let key = (left_source, right_source, left_forward, right_forward);
+                let entry = attested_map
+                    .entry(key)
+                    .or_insert((0, i64::MIN, lexit_min, lexit_max, rentry_min, rentry_max, None, None));
+                entry.0 += reads_total;
+                entry.1 = entry.1.max(gap_max);
+                entry.2 = entry.2.min(lexit_min);
+                entry.3 = entry.3.max(lexit_max);
+                entry.4 = entry.4.min(rentry_min);
+                entry.5 = entry.5.max(rentry_max);
+                if llocus.is_some() {
+                    entry.6 = llocus;
+                }
+                if rlocus.is_some() {
+                    entry.7 = rlocus;
+                }
             }
         }
     }
+    rss_probe(rss, "junction_attested_compositions")?;
     let attested: Vec<AttestedComposition> = attested_map
         .into_iter()
         .map(
             |(
+                (left_source, right_source, left_forward, right_forward),
                 (
-                    left_source,
-                    left_exit,
-                    right_source,
-                    right_entry,
-                    left_forward,
-                    right_forward,
+                    attesting_reads,
+                    gap_max,
+                    left_exit_min,
+                    left_exit_max,
+                    right_entry_min,
+                    right_entry_max,
+                    left_window_locus,
+                    right_window_locus,
                 ),
-                (attesting_reads, gap),
             )| AttestedComposition {
                 left_source,
-                left_exit,
                 right_source,
-                right_entry,
                 left_forward,
                 right_forward,
                 attesting_reads,
-                gap,
+                left_exit_min,
+                left_exit_max,
+                right_entry_min,
+                right_entry_max,
+                gap_max,
+                left_window_locus,
+                right_window_locus,
             },
         )
         .collect();
     let attested_seconds = attested_started.elapsed().as_secs_f64();
     eprintln!(
         "[junction] crossing-attested compositions: {} (cross-source, read-attested; \
-         {attested_seconds:.1}s)",
-        attested.len()
+         {attested_seconds:.1}s; novel pairs {}, continuity-killed reads {}, \
+         unanchored skips {})",
+        attested.len(),
+        novel_pairs_enumerated,
+        continuity_killed_reads,
+        unanchored_pair_skips
     );
+    stats["attested_novel_pairs"] = novel_pairs_enumerated.into();
+    stats["attested_continuity_killed_reads"] = continuity_killed_reads.into();
+    stats["attested_unanchored_skips"] = unanchored_pair_skips.into();
     Ok(JunctionSpanIndex {
         placements,
         extents,
