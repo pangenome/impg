@@ -1355,3 +1355,25 @@ past layer 21; when it lands it carries the confirmation gate + the
 composition harvest; the DOMINATION does not ride it (it launched
 before the ruling) — the whole-genome rerun after the gate carries all
 three levels.
+
+### 2.30 THE POLLING DISCIPLINE CORRECTED + THE Q2 CENSUS STAGED
+
+THE SHORT-CALL RULE APPLIED (supervisor, 2026-09-28): the long
+sleep-hold polls (sleep 560+) violated `timeout 60` — corrected: short
+polls only, code-side work between them. THE SHARE-ONLY FALLBACK ITEM
+in the same note is superseded (the domination — the level-3 proper —
+was ruled (a), implemented, and gated; the fallback analysis is moot).
+
+THE Q2 TRANSITION CENSUS STAGED (ready to run the moment chrIII
+lands, per the note): run-p1-q2flag.sh (the p1 slice under the OLD
+--window-domain-extension flag, no context-aware-domains) and
+q2-census-compare.py — the both-ways table: (a) OVER-ADMISSION (loci
+where the flag's D2/stranded machinery fires but the census attests
+nothing — the flag admits rows no read evidence supports); (b)
+UNDER-ADMISSION (loci where the census flags context-insufficiency
+the flag never sees). The comparison reads both runs' context_census
+per-locus rows (extension_rows, stranded_adjacent_rows,
+context_insufficient — schema verified against the live logs). The
+sequence when chrIII lands: score the confirmation gate -> run the
+q2flag p1 run (~16 min) -> the comparison -> the flag retirement ->
+the whole-genome rerun with all three DP levels.
