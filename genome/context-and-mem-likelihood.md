@@ -673,3 +673,56 @@ THE INSTRUMENTED RELAUNCH: chrVII then chrIV, SEQUENTIAL, single attempt
 each (the retry wrappers stay retired). Verified live: `.stages`
 heartbeats (cpu_s + stage marker), `.rss` poller, done/exit markers.
 chrVI reference under the no-waste fix: 940 s / 11.5 GB.
+
+### 2.15 THE PER-READ CENSUS (the chain-derived frame attribution) —
+IMPLEMENTED, MEASURED, AND THE GATE'S HONEST VERDICT
+
+The supervisor confirmed the chain-derived per-read attribution (the
+routing pass is per-RECORD from the start — nothing to retain; the
+read's own frames are derived IN the census by intersecting the read's
+full-side chains: prefix/suffix frame sets, span-co-linear extensions
+where span = walk start + the record's extent low end — the physical
+first-anchor path position; the correct comparator, NOT the walk start
+the old continuity test used).
+
+THE MEASURED LADDER OF FORMS (all at the p1 slice):
+- per-record routed attribution (the 9.38M form, committed 7908906):
+  9,380,413 aggregates, 143s census, 12.7M port-pair rows — the
+  materialization explosion (killed at classing).
+- per-read frames, both-sides-derived (n>=4 chains): 2,410 aggregates —
+  but ZERO for the truth's junctions (a 150bp read at k=63 holds 2-3
+  records; n>=4 is unsatisfiable for seam reads).
+- PER-SIDE DERIVATION (the final form): a DERIVED side (chain-
+  intersected) contributes all its frames; a RAW side (single record)
+  contributes only its WINDOW-ANCHORED placements (the anchor ties the
+  ambiguity to a materializable locus; no thresholds — the continuity
+  test kills the conserved noise: 61,059 reads). THE FRAME OFFSET F
+  (right_cut - left_cut = (right entry - left exit) - the read gap —
+  constant per physical junction) keys the junction and pins the
+  materialization's port pairs to the DIAGONAL rp = lp + F: 12,298
+  aggregates -> 45 port-pair rows (0.94s; the unconstrained
+  cross-product was 12.7M).
+
+THE GATE RUN (exit 0): chain row BIT-IDENTICAL for the fifth
+consecutive p1 run (0.58184602910041 / 0.4215 / 0.9567 / 2 sw / 14);
+truth copy-0 HELD at 8/15; the 45 port rows landed at full-loci 35/37
+(outside the p1 slice — the census's window-anchor set is the
+component's, not the slice's).
+
+**THE HONEST VERDICT ON GATE (i) (truth copy-0 at loci 0 and 14): the
+truth's cross-source seams are UNATTESTABLE BY CONSTRUCTION.** The
+seam-flank records straddle BOTH frames (junction A: 914 places on
+9564@[113851,113922] AND 9602@[102892,102963]; junction B: 2970/2971/
+2972/3230 place on both), and EVERY seam-crossing read is
+native-explainable: read 397 ([914,915,916]) is span-co-linear native
+9602; read 3381 ([5519,5520,2970,2971,2972]) is span-co-linear native
+9602; the 9564-specific records' reads end before the seam or continue
+natively on 9564. The sample's mosaic seams are COPY-CHOICE between
+SIMILAR haplotypes — the flanking material is shared, so no read chain
+can distinguish the seam from either native continuation. Under the
+crossing-record-attestation doctrine the honest output at these two loci
+is CONTEXT_INSUFFICIENT — the owner's own honest-untypable category,
+not a machinery gap. The gate's divergent-middle loci (p1 indices
+3/5/8/12/13) are a different question: their truth rows are native
+single-source rows (no junction), and their inexpressibility is the
+original D2/word-sharing class story, not the junction ladder's.

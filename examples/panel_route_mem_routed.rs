@@ -9482,10 +9482,26 @@ fn main() -> io::Result<()> {
                 } else {
                     Vec::new()
                 };
+                // THE FRAME-OFFSET DIAGONAL (the derived seam relation):
+                // a pair realizing THIS junction satisfies
+                // right_cut - left_cut == frame_offset, so the port
+                // cross-product collapses to the diagonal — each left
+                // port pins its right cut exactly (rp = lp + F); only
+                // the pairs where BOTH sides land on real ports
+                // compose rows (measured: the unconstrained cross-product
+                // was 12.7M rows; the diagonal admits the truth's own
+                // 113881 -> 102922 pair, whose offset IS the constant).
                 for left_port in &left_ports {
                     let left_cut = left_port.cut(graph.k);
-                    for right_port in &right_ports {
-                        let right_cut = right_port.cut(graph.k);
+                    let right_cut_target = (left_cut as i64
+                        + composition.frame_offset)
+                        .max(0) as u64;
+                    let found = right_ports
+                        .binary_search_by(|port| {
+                            port.cut(graph.k).cmp(&right_cut_target)
+                        });
+                    if let Ok(idx) = found {
+                        let right_cut = right_ports[idx].cut(graph.k);
                         let identity = format!(
                             "attested-port:{}:{}@{}>{}@{}",
                             locus, left_source, left_cut, right_source, right_cut,
@@ -9593,6 +9609,46 @@ fn main() -> io::Result<()> {
                 );
                 let crossing =
                     span.crossing_reads(&left_range, &right_range, &sources, &path_of_source)?;
+                // The ATTESTED aggregates for this queried junction's
+                // source pair (both orders; the diagnostic that closes
+                // the loop between the census's enumeration and the
+                // query): forms, frame offset, reads, exit/entry ranges,
+                // and the window-anchor loci.
+                let aggregates: Vec<serde_json::Value> = span
+                    .attested
+                    .iter()
+                    .filter(|agg| {
+                        (agg.left_source == left.0 && agg.right_source == right.0)
+                            || (agg.left_source == right.0 && agg.right_source == left.0)
+                    })
+                    .map(|agg| {
+                        serde_json::json!({
+                            "left_source": agg.left_source,
+                            "right_source": agg.right_source,
+                            "left_forward": agg.left_forward,
+                            "right_forward": agg.right_forward,
+                            "reads": agg.attesting_reads,
+                            "frame_offset": agg.frame_offset,
+                            "left_exit_min": agg.left_exit_min,
+                            "left_exit_max": agg.left_exit_max,
+                            "right_entry_min": agg.right_entry_min,
+                            "right_entry_max": agg.right_entry_max,
+                            "gap_max": agg.gap_max,
+                            "left_window_locus": agg.left_window_locus,
+                            "right_window_locus": agg.right_window_locus,
+                        })
+                    })
+                    .collect();
+                eprintln!(
+                    "[census] attested aggregates for {} sources {}->{}: {} entries",
+                    label,
+                    left.0,
+                    right.0,
+                    aggregates.len()
+                );
+                for agg in &aggregates {
+                    eprintln!("[census]   {}", serde_json::to_string(agg).unwrap_or_default());
+                }
                 let trace = if row.get("trace").and_then(|t| t.as_bool()).unwrap_or(false) {
                     Some(span.trace_junction(&left_range, &right_range, &path_of_source))
                 } else {
