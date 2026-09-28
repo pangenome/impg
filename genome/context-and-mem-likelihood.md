@@ -1091,3 +1091,63 @@ explosion's mechanism, now precisely named: 43,887 aggregates x
 ~290 unconstrained port pairs = 12.7M rows resident for all loci
 during staging/classing. The diagonal form replaced it before any
 further run.
+
+### 2.25 THE LAYER-60 DIAGNOSIS — THE STRUCTURAL FINDINGS, THE
+COMPOSITION INSTRUMENTATION, AND THE FIX DESIGN FOR APPROVAL
+
+THE SUPERVISOR'S TASK (top lane priority): (1) layer 60's composition,
+(2) why suffix_pruned never fires, (3) the re-run expectation.
+
+(2) ANSWERED BY CODE READING (phasing.rs, the phasing DP): the prune
+condition is `best[next] + suffix_from_locus[locus] > incumbent +
+eps`, where the incumbent is THE NATIVE-BACKBONE CHAIN'S TOTAL PHASING
+COST (summed over ALL loci + boundaries) and the suffix bound is the
+sum of the remaining loci's admissible FLOORS (sweeps.floor — near zero
+at well-explained loci). On a MOSAIC sample the native chain is far
+from optimal, so the condition degenerates to 'partial cost >
+(whole native total - small suffix)' — structurally rare: the bound is
+loose exactly because the incumbent is a bad chain. THE FIX DIRECTION
+(sanctioned in principle by the supervisor's message; the specific
+form escalated for approval): seed the incumbent with ANY VALID
+COMPLETE CHAIN's cost — the greedy per-locus-argmin chain is
+computable pre-DP in O(sum rows) and is answer-preserving by the same
+closed-form-bound argument (a real chain's cost bounds the argmin from
+above; any state whose admissible bound exceeds it cannot be the
+argmin). With a tight incumbent the pruning fires at every layer.
+
+(1) THE COMPOSITION INSTRUMENTATION IS IN (diagnostic-only,
+committed next): per locus, '[dp-table] locus N: diploid states D
+haploid H top classes [(class, members) x3]' — the measured degenerate
+layers (chrVII layer 60: 4,509,072; chrIV layers 51/92/106:
+4,977,760 / 4,070,661 / 2,431,360 — chrIV CARRIES THE SAME SIGNATURE,
+three times) are almost certainly ordered-PAIR cross-products of
+large classes (4,509,072 ~ 2,124^2; 4,977,760 ~ 2,231^2) — the print
+will name the classes on the next instrumented run. chrIV's timeline
+REFUTES the time-proportional-to-states assumption: its 4.98M-
+candidate layer 51 was CHEAP while its 67k-candidate layer 93 took
+296.2s — the cost driver is the TRANSITION STRUCTURE between adjacent
+state sets, not the raw count; the composition print plus a boundary
+profile will resolve which.
+
+THE PER-LAYER TIME FORMAT CORRECTED: the layer lines print CUMULATIVE
+elapsed — layer 60's OWN duration is 3,995.7s (the supervisor's
+'+3,996s of the 4,257s DP total = 94%'), not the 4,131.2s cumulative
+my §2.21 quoted; the correction is recorded. chrIV's whole DP was
+771.8s cumulative.
+
+THE OWNER'S SCALING VERDICT (framed honestly, per the supervisor):
+11,226s for a 1.1Mb chromosome at ~4x box contention is 'not stuck,
+practically stuck' at human scale — a 250Mb chromosome at this
+per-locus rate is megasecond territory. The profile says the cost is
+NOT diffuse: one degenerate layer (94% of chrVII's DP) plus the pre-DP
+stages (~7,000s — the classing/census lines are in the same .err,
+profiled the same way on the next run). Fix the degenerate class and
+the architecture is per-locus (parallelizable across loci) with
+bounded states — the honest path to human scale.
+
+(3) THE RE-RUN WAITS ON: the supervisor's confirmation of the
+incumbent-seed form (a DP-semantics change — the chain layer's
+selected row must stay bit-identical, which the answer-preserving
+argument guarantees but the gate must verify), the composition print's
+first harvest (the same re-run), and the box (the full-chrIII
+confirmation run is in flight; two heavy runs at 4x contention fight).

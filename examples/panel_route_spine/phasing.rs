@@ -3774,6 +3774,30 @@ pub(in super) fn run_correlation_phasing(
             Ok((diploid_table, haploid_table, haploid_class_loss))
         })
         .collect::<io::Result<_>>()?;
+    // THE DP-TABLE COMPOSITION DIAGNOSTIC (the layer-60 diagnosis,
+    // supervisor-ordered 2026-09-28): per locus, the diploid/haploid
+    // state counts and the top classes by member count — the measured
+    // degenerate layers (chrVII layer 60: 4.5M states; chrIV layers
+    // 51/92/106: 4.98M/4.07M/2.43M) are pair cross-products of large
+    // classes; this names the classes. Diagnostic-only.
+    for locus in 0..locus_count {
+        let (diploid_table, haploid_table, _) = &per_locus_builds[locus];
+        let membership = &locus_classes[locus].membership;
+        let mut class_members: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for &class in membership.iter() {
+            *class_members.entry(class).or_insert(0) += 1;
+        }
+        let mut top: Vec<(usize, usize)> = class_members.into_iter().collect();
+        top.sort_unstable_by_key(|&(_, members)| std::cmp::Reverse(members));
+        eprintln!(
+            "[dp-table] locus {}: diploid states {} haploid {} top classes {:?}",
+            locus,
+            diploid_table.rows.len(),
+            haploid_table.rows.len(),
+            &top[..top.len().min(3)]
+        );
+    }
     let mut per_locus_tables = Vec::with_capacity(locus_count);
     let mut per_locus_haploid_tables = Vec::with_capacity(locus_count);
     let mut haploid_loss_tables = Vec::with_capacity(locus_count);
