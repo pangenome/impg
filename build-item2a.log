@@ -1,0 +1,80 @@
+     |
+4507 |         for (rank, key) in self.ranking {
+     |              ^^^^ help: if this is intentional, prefix it with an underscore: `_rank`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:5030:9
+     |
+5030 |     let mut fnv_update = |value: &mut u64, bytes: &[u8]| {
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `aq`
+    --> examples/panel_route_mem_routed.rs:5349:24
+     |
+5349 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                        ^^ help: if this is intentional, prefix it with an underscore: `_aq`
+
+warning: unused variable: `ao`
+    --> examples/panel_route_mem_routed.rs:5349:28
+     |
+5349 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                            ^^ help: if this is intentional, prefix it with an underscore: `_ao`
+
+warning: unused variable: `bo`
+    --> examples/panel_route_mem_routed.rs:5350:48
+     |
+5350 |             (Some(&(_, aq, ao)), Some(&(_, bq, bo))) => {
+     |                                                ^^ help: if this is intentional, prefix it with an underscore: `_bo`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:7242:5
+     |
+7242 |     mut shared_piece_memo: Option<&mut HashMap<(usize, u64, u64), Profile>>,
+     |     ----^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:7247:5
+     |
+7247 |     mut shared_spelled_memo: Option<&mut SpelledMemo>,
+     |     ----^^^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_mem_routed.rs:7422:25
+     |
+7422 |                     let piece = (source, start, end, reverse, owner);
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `streamed`
+    --> examples/panel_route_mem_routed.rs:8757:17
+     |
+8757 |     if let Some(streamed) = &streamed_routing {
+     |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_streamed`
+
+warning: unused variable: `routing_seconds`
+    --> examples/panel_route_mem_routed.rs:8802:9
+     |
+8802 |     let routing_seconds = routing_started.elapsed().as_secs_f64();
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routing_seconds`
+
+warning: unused variable: `locus`
+    --> examples/panel_route_mem_routed.rs:9499:18
+     |
+9499 |     for (index, (locus, segments, identity, reverse)) in sample_candidates.iter().enumerate() {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_locus`
+
+warning: unused variable: `hi`
+    --> examples/panel_route_mem_routed.rs:9539:21
+     |
+9539 |                 let hi = lo + READ_LENGTH as u64;
+     |                     ^^ help: if this is intentional, prefix it with an underscore: `_hi`
+
+Some errors have detailed explanations: E0308, E0382.
+For more information about an error, try `rustc --explain E0308`.
+warning: `impg` (example "panel_route_mem_routed") generated 44 warnings
+error: could not compile `impg` (example "panel_route_mem_routed") due to 4 previous errors; 44 warnings emitted

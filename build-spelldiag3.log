@@ -1,0 +1,53 @@
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:857:5
+    |
+854 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+857 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:879:16
+    |
+879 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:880:14
+    |
+880 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `generate_multi_level_candidates` is never used
+    --> src/resolution.rs:3397:4
+     |
+3397 | fn generate_multi_level_candidates(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7171:4
+     |
+7171 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10712:4
+      |
+10712 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib) generated 6 warnings
+   Compiling impg v0.5.0 (/home/erikg/impg-genome-inference)
+    Finished `release` profile [optimized] target(s) in 3.19s

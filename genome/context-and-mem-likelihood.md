@@ -726,3 +726,45 @@ not a machinery gap. The gate's divergent-middle loci (p1 indices
 3/5/8/12/13) are a different question: their truth rows are native
 single-source rows (no junction), and their inexpressibility is the
 original D2/word-sharing class story, not the junction ladder's.
+
+### 2.16 THE CHECKER-SIDE FINDINGS (the truth-piece derivation) AND
+THE RESIDUE'S CLASSIFICATION
+
+THE CENSUS SCOPING FIX landed (the window-anchor set = the run's locus
+range, full-locus indices preserved): the port rows now land in-slice
+(9,973 rows at full loci 13-22 after clipping the bracket to the parent
+rows — the un-clipped form measured 'invalid source crop': exits
+spanning below the parent row's start produced inverted segments).
+Chain row bit-identical a sixth time.
+
+THE TRUTH-PIECE DIAGNOSTIC (bounded, per locus/copy) exposed TWO
+checker-side defects in reference_local_piece_lists:
+1. UNSORTED PIECES: the territory rows iterate in file order
+   (partition-major), and the in-domain check zips segments positionally
+   — multi-window chains failed EVEN WHERE THE DOMAIN CARRIED THE
+   EXACT CHAIN (locus 3's pieces measured [128754,138845) +
+   [145952,151830) + [138845,145952)).
+2. GLOBAL SORT IS WRONG TOO: the route's path order is SEGMENT-MAJOR
+   (seam B threads 9602's material BEFORE 9564's; a (source, start)
+   sort reverses the seam row). Fixed: segment-major, positional within
+   each route segment. Chain row bit-identical a seventh time.
+
+THE RESIDUE AT p1, CLASSIFIED (the honest measurement):
+- LOCI 0/14 copy-0: THE SEAM ROWS — cross-source compositions
+  (locus 14: 9602:[200187,207743) + 9564:[227721,230049); locus 0 adds
+  the continuing window chain) — the honest-untypable copy-choice seams
+  per the ruling (the bracket + read-length prediction still owed).
+- LOCI 5/6/10 (copy-1 at 5/6/10, copy-0 at 5): THE SCATTERED-PIECE
+  ARTIFACT — the piece derivation unions ALL segment-vs-territory
+  overlaps, including far-homolog rows (9564:[80018,90183) appearing at
+  loci whose axis interval is ~160kb away): at locus 5 the NATIVE ITSELF
+  measures 'unexpressible' (9564:[80018,90183) + 9564:[153973,159863))
+  — definitive proof this is checker-side, not a domain gap. The
+  territory's word-sharing rows (the D2 story) pull the far homologs.
+- LOCI 3/8/12/13 copy-0: SORTED CONTIGUOUS MULTI-WINDOW CHAINS STILL
+  UNMATCHED — e.g. locus 3 needs the 3-chain
+  9602:[128754,138845)+[138845,145952)+[145952,151830); locus 13 the
+  2-chain [190177,200187)+[200187,207743) (ending at the seam cut).
+  The pieces are territory-row intersections (the rows exist); the
+  domain lacks the STITCHED rows — the same-owner rung-1a built 2,660
+  chains but not these.

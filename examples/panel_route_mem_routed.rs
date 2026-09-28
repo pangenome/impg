@@ -9188,6 +9188,7 @@ fn main() -> io::Result<()> {
                     )
                 })
                 .collect();
+
             let source_of_path: Vec<usize> = {
                 let mut map = vec![usize::MAX; panel.name_map.path_to_name.len()];
                 for (source, &path) in path_of_source.iter().enumerate() {
@@ -9203,6 +9204,7 @@ fn main() -> io::Result<()> {
                 &reads_batch,
                 &read_chains,
                 &window_rows_snapshot,
+                (locus_lo, locus_hi),
                 &touched_by_tokens,
                 k,
                 &mut rss,
@@ -9455,29 +9457,34 @@ fn main() -> io::Result<()> {
                 }
                 let left_source = composition.left_source;
                 let right_source = composition.right_source;
-                // The read-bracket union, clipped to the parent rows.
+                // The read-bracket union, clipped to the parent rows on
+                // BOTH sides (the exits can span below the parent row's
+                // start when the anchor points reach into the adjacent
+                // row — an inverted segment is not a row).
+                let left_lower = composition.left_exit_min.max(left_start);
                 let left_upper = (composition.left_exit_max)
                     .saturating_add(composition.gap_max.max(0) as u64)
                     .min(left_end);
                 let right_lower = (composition.right_entry_min)
                     .saturating_sub(composition.gap_max.max(0) as u64)
                     .max(right_start);
-                let left_ports = if composition.left_exit_min < left_upper {
+                let right_upper = composition.right_entry_max.min(right_end);
+                let left_ports = if left_lower < left_upper {
                     ports_handle.forward_ports_inside(
                         &graph,
                         left_source,
-                        composition.left_exit_min,
+                        left_lower,
                         left_upper,
                     )?
                 } else {
                     Vec::new()
                 };
-                let right_ports = if right_lower < composition.right_entry_max {
+                let right_ports = if right_lower < right_upper {
                     ports_handle.forward_ports_inside(
                         &graph,
                         right_source,
                         right_lower,
-                        composition.right_entry_max,
+                        right_upper,
                     )?
                 } else {
                     Vec::new()

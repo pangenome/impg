@@ -1,0 +1,54 @@
+     Running unittests examples/canonical_scheme_probe.rs (target/release/examples/canonical_scheme_probe-fe5f7d3d8d260c5b)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/compare_gfa_paths.rs (target/release/examples/compare_gfa_paths-14e1fc75d5ed3042)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/genotyping_spell_dump.rs (target/release/examples/genotyping_spell_dump-7d7dd18863b38727)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/neighbor_merge_existing_gfa.rs (target/release/examples/neighbor_merge_existing_gfa-f3a5b05ea3728e52)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_assignment_rescore.rs (target/release/examples/panel_route_assignment_rescore-bd11d7300ddae83e)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+     Running unittests examples/panel_route_completion_probe.rs (target/release/examples/panel_route_completion_probe-d27a781ff0eb0f7e)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+     Running unittests examples/panel_route_component_rescore.rs (target/release/examples/panel_route_component_rescore-4db836faa39c2170)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+     Running unittests examples/panel_route_convex_diagnostic.rs (target/release/examples/panel_route_convex_diagnostic-c47e85a1cb69a79c)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_diploid_diagnostic.rs (target/release/examples/panel_route_diploid_diagnostic-bb45ec34a5b06b5d)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_diploid_search.rs (target/release/examples/panel_route_diploid_search-6672b94916aac834)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+     Running unittests examples/panel_route_evidence_topology.rs (target/release/examples/panel_route_evidence_topology-dea44a7dcbf0b13c)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_feature_occurrences.rs (target/release/examples/panel_route_feature_occurrences-07b27ce68e2ad589)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_genome_rescore.rs (target/release/examples/panel_route_genome_rescore-e47eb539139f0bd7)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+     Running unittests examples/panel_route_genome_smoke.rs (target/release/examples/panel_route_genome_smoke-630534c93e6073bc)
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+     Running unittests examples/panel_route_mem_routed.rs (target/release/examples/panel_route_mem_routed-9b9cd4aace20a08c)
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+     Running unittests examples/panel_route_residual_search.rs (target/release/examples/panel_route_residual_search-184702022fe7cd2b)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_seam_diagnostic.rs (target/release/examples/panel_route_seam_diagnostic-edfc7b084d26797e)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+     Running unittests examples/poasta_order_driver.rs (target/release/examples/poasta_order_driver-dd89b025fd233db7)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/pooled_region_decompose.rs (target/release/examples/pooled_region_decompose-9e21e5ddff0213b0)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+     Running unittests examples/povu_decomp_report.rs (target/release/examples/povu_decomp_report-68ca5da17043f5df)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/rc_view_probe.rs (target/release/examples/rc_view_probe-470f8ecc27b8ab00)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/route_identity.rs (target/release/examples/route_identity-cd7ce1c4e0ab736b)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/router_spell_diag.rs (target/release/examples/router_spell_diag-db23a7b495f8371f)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/syncmer_mirror_probe.rs (target/release/examples/syncmer_mirror_probe-63c31daf30f79c06)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/syng_anchor_probe.rs (target/release/examples/syng_anchor_probe-626a5f89be6cd5e2)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/syng_probe.rs (target/release/examples/syng_probe-40d7f35c6562e669)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/validate_gfa_path_sources.rs (target/release/examples/validate_gfa_path_sources-9d6021f57fcf9da1)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

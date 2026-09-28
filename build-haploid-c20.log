@@ -1,0 +1,290 @@
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:857:5
+    |
+854 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+857 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:879:16
+    |
+879 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:880:14
+    |
+880 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `generate_multi_level_candidates` is never used
+    --> src/resolution.rs:3397:4
+     |
+3397 | fn generate_multi_level_candidates(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7171:4
+     |
+7171 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10712:4
+      |
+10712 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib) generated 6 warnings
+   Compiling impg v0.5.0 (/home/erikg/impg-genome-inference)
+error[E0277]: the trait bound `f64: Ord` is not satisfied
+   --> examples/panel_route_spine/phasing.rs:585:12
+    |
+585 |     states.sort_unstable();
+    |            ^^^^^^^^^^^^^ the trait `Ord` is not implemented for `f64`
+    |
+    = help: the following other types implement trait `Ord`:
+              i128
+              i16
+              i32
+              i64
+              i8
+              isize
+              u128
+              u16
+            and 4 others
+    = note: required for `([usize; 2], f64)` to implement `Ord`
+note: required by a bound in `core::slice::<impl [T]>::sort_unstable`
+   --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/slice/mod.rs:3134:4
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:1427:13
+     |
+1427 |         let mut mode;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `evaluated_state_classes` is assigned to, but never used
+    --> examples/panel_route_diploid_search/genome.rs:4556:13
+     |
+4556 |         let mut evaluated_state_classes = 0usize;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_evaluated_state_classes` instead
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `evaluated_state_classes` is never read
+    --> examples/panel_route_diploid_search/genome.rs:4712:17
+     |
+4712 |                 evaluated_state_classes += 1;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:5392:5
+     |
+5392 |     mut load_profiles: F,
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: unused variable: `boundary`
+   --> examples/panel_route_spine/phasing.rs:245:5
+    |
+245 |     boundary: usize,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `overlap`
+   --> examples/panel_route_spine/phasing.rs:313:27
+    |
+313 |     for &(_, left, right, overlap) in canonical {
+    |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_overlap`
+
+error[E0382]: borrow of moved value: `dp_haploid`
+    --> examples/panel_route_spine/phasing.rs:2377:8
+     |
+1874 |       let dp_haploid = run_phasing_chain_dp(
+     |           ---------- move occurs because `dp_haploid` has type `PhasingDpOutcome`, which does not implement the `Copy` trait
+...
+1895 |               (dp_haploid, "haploid")
+     |                ---------- value moved here
+...
+2377 |       Ok(serde_json::json!({
+     |  ________^
+2378 | |         "model": "local-first-spine-v1-correlation-phasing",
+2379 | |         "stage1_sweep": stage1_summary,
+2380 | |         "phasing": {
+...    |
+2521 | |         "total_seconds": started.elapsed().as_secs_f64(),
+2522 | |     }))
+     | |______^ value borrowed here after move
+     |
+note: if `PhasingDpOutcome` implemented `Clone`, you could clone the value
+    --> examples/panel_route_spine/phasing.rs:1082:1
+     |
+1082 | pub(in super) struct PhasingDpOutcome {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+...
+1895 |             (dp_haploid, "haploid")
+     |              ---------- you could clone this value
+     = note: this error originates in the macro `$crate::json_internal` which comes from the expansion of the macro `serde_json::json` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0382]: borrow of moved value: `dp_diploid`
+    --> examples/panel_route_spine/phasing.rs:2377:8
+     |
+1858 |       let dp_diploid = run_phasing_chain_dp(
+     |           ---------- move occurs because `dp_diploid` has type `PhasingDpOutcome`, which does not implement the `Copy` trait
+...
+1897 |               (dp_diploid, "diploid")
+     |                ---------- value moved here
+...
+2377 |       Ok(serde_json::json!({
+     |  ________^
+2378 | |         "model": "local-first-spine-v1-correlation-phasing",
+2379 | |         "stage1_sweep": stage1_summary,
+2380 | |         "phasing": {
+...    |
+2521 | |         "total_seconds": started.elapsed().as_secs_f64(),
+2522 | |     }))
+     | |______^ value borrowed here after move
+     |
+note: if `PhasingDpOutcome` implemented `Clone`, you could clone the value
+    --> examples/panel_route_spine/phasing.rs:1082:1
+     |
+1082 | pub(in super) struct PhasingDpOutcome {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+...
+1897 |             (dp_diploid, "diploid")
+     |              ---------- you could clone this value
+     = note: this error originates in the macro `$crate::json_internal` which comes from the expansion of the macro `serde_json::json` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `piece`
+   --> examples/panel_route_spine/mod.rs:858:25
+    |
+858 |                     let piece = (source, start, end, reverse);
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:2233:34
+     |
+2233 |     let (mut margins_admissible, mut suffix_from_next) = compute_margins(&min_pair, &min_seam)?;
+     |                                  ----^^^^^^^^^^^^^^^^
+     |                                  |
+     |                                  help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:2245:9
+     |
+2245 |     let mut margins = compute_local_margins(&min_pair, &successors_ref, &viable);
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:1095:9
+     |
+1095 |     let mut push_anchor_events = |pos: u64, events: &mut Vec<u64>| {
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:1418:9
+     |
+1418 |     let mut keys: BTreeSet<&FeatureKey> = oracle.keys().chain(geometric.keys()).collect();
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:1899:9
+     |
+1899 |         mut self,
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `rank`
+    --> examples/panel_route_mem_routed.rs:1907:14
+     |
+1907 |         for (rank, key) in self.ranking {
+     |              ^^^^ help: if this is intentional, prefix it with an underscore: `_rank`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:2326:9
+     |
+2326 |     let mut fnv_update = |value: &mut u64, bytes: &[u8]| {
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `aq`
+    --> examples/panel_route_mem_routed.rs:2537:24
+     |
+2537 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                        ^^ help: if this is intentional, prefix it with an underscore: `_aq`
+
+warning: unused variable: `ao`
+    --> examples/panel_route_mem_routed.rs:2537:28
+     |
+2537 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                            ^^ help: if this is intentional, prefix it with an underscore: `_ao`
+
+warning: unused variable: `bo`
+    --> examples/panel_route_mem_routed.rs:2538:48
+     |
+2538 |             (Some(&(_, aq, ao)), Some(&(_, bq, bo))) => {
+     |                                                ^^ help: if this is intentional, prefix it with an underscore: `_bo`
+
+warning: unused variable: `start`
+    --> examples/panel_route_mem_routed.rs:3626:35
+     |
+3626 | ...                   for &(start, end, member) in &spans[..prefix] {
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_mem_routed.rs:4164:25
+     |
+4164 |                     let piece = (source, start, end, reverse);
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `routing_seconds`
+    --> examples/panel_route_mem_routed.rs:4663:9
+     |
+4663 |     let routing_seconds = routing_started.elapsed().as_secs_f64();
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routing_seconds`
+
+warning: unused variable: `locus`
+    --> examples/panel_route_mem_routed.rs:5226:18
+     |
+5226 |     for (index, (locus, segments, identity, reverse)) in sample_candidates.iter().enumerate() {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_locus`
+
+warning: unused variable: `hi`
+    --> examples/panel_route_mem_routed.rs:5266:21
+     |
+5266 |                 let hi = lo + READ_LENGTH as u64;
+     |                     ^^ help: if this is intentional, prefix it with an underscore: `_hi`
+
+Some errors have detailed explanations: E0277, E0382.
+For more information about an error, try `rustc --explain E0277`.
+warning: `impg` (example "panel_route_mem_routed") generated 22 warnings
+error: could not compile `impg` (example "panel_route_mem_routed") due to 3 previous errors; 22 warnings emitted

@@ -1291,10 +1291,10 @@ pub(super) fn reference_local_piece_lists(
     // intersect (the window-domain extension's owner-resolved charging;
     // every pre-extension territory row is owned by the locus's axis
     // partition, so the pieces are bit-identical there).
-    let mut local_pieces: Vec<[Vec<(usize, u64, u64, bool, u32)>; 2]> =
+    let mut local_pieces: Vec<[Vec<(usize, usize, u64, u64, bool, u32)>; 2]> =
         vec![[Vec::new(), Vec::new()]; locus_count];
     for (copy, route) in route_pair.iter().enumerate() {
-        for segment in &route.segments {
+        for (segment_index, segment) in route.segments.iter().enumerate() {
             for locus in 0..locus_count {
                 for interval in &territory[locus_offset + locus] {
                     if interval.source != segment.source {
@@ -1304,6 +1304,7 @@ pub(super) fn reference_local_piece_lists(
                     let hi = segment.end.min(interval.end);
                     if lo < hi {
                         local_pieces[locus][copy].push((
+                            segment_index,
                             segment.source,
                             lo,
                             hi,
@@ -1315,9 +1316,31 @@ pub(super) fn reference_local_piece_lists(
             }
         }
     }
+    let mut sorted_pieces: Vec<[Vec<(usize, u64, u64, bool, u32)>; 2]> =
+        vec![[Vec::new(), Vec::new()]; locus_count];
     for locus in 0..locus_count {
         for copy in 0..2 {
-            let raw_pieces = local_pieces[locus][copy].clone();
+            let mut raw_pieces = local_pieces[locus][copy].clone();
+            // SORT SEGMENT-MAJOR, POSITIONALLY WITHIN each route segment
+            // (the territory rows iterate in file order — partition-
+            // major, not positional): the allele is the truth route's
+            // OWN PATH ORDER — its segments in route order, each
+            // segment's pieces position-sorted. A global (source, start)
+            // sort measured WRONG for cross-source seam rows (the route
+            // threads 9602's material before 9564's at seam B while the
+            // source sort reverses it) and shuffled within-segment
+            // multi-window chains (locus 3: [128754,138845) +
+            // [145952,151830) + [138845,145952)) — the in-domain check
+            // zips segments positionally and failed even where the
+            // domain carried the exact chain.
+            raw_pieces.sort_unstable();
+            let raw_pieces: Vec<(usize, u64, u64, bool, u32)> = raw_pieces
+                .iter()
+                .map(|&(segment_index, source, lo, hi, reverse, partition)| {
+                    (source, lo, hi, reverse, partition)
+                })
+                .collect();
+            let _ = &raw_pieces;
             let mut merged: Vec<(usize, u64, u64, bool, u32)> = Vec::new();
             for piece in raw_pieces {
                 match merged.last_mut() {
@@ -1333,10 +1356,10 @@ pub(super) fn reference_local_piece_lists(
                     _ => merged.push(piece),
                 }
             }
-            local_pieces[locus][copy] = merged;
+            sorted_pieces[locus][copy] = merged;
         }
     }
-    local_pieces
+    sorted_pieces
 }
 
 /// Geometric profile of one arbitrary truth piece interval (standalone
@@ -4674,6 +4697,52 @@ pub(super) fn run_local_first_spine(
             _ => false,
         };
         let truth_alleles = truth_pair_alleles(locus);
+        // THE TRUTH-PIECE DIAGNOSTIC (the D2-mechanism question's bounded
+        // measurement): for every copy the domain cannot express, print
+        // the expected pieces and the domain's rows on the same sources —
+        // the exact row-bounds diff that decides whether the gap is a
+        // staged-row scope question or a composition form.
+        for copy in 0..2 {
+            if !truth_pieces[locus][copy].is_empty() {
+                eprintln!(
+                    "[truth-pieces] locus {} copy {} in_domain={}: expected {}",
+                    locus,
+                    copy,
+                    truth_alleles[copy].is_some(),
+                    truth_pieces[locus][copy]
+                        .iter()
+                        .map(|&(source, start, end, reverse, _owner)| {
+                            format!("{}:[{},{}):{}", source, start, end, reverse)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                );
+                let sources: std::collections::BTreeSet<usize> =
+                    truth_pieces[locus][copy]
+                        .iter()
+                        .map(|&(source, ..)| source)
+                        .collect();
+                for row in ranges[locus].iter() {
+                    if sources.contains(&row.segments[0].source) {
+                        eprintln!(
+                            "[truth-pieces]   domain row {} segs {}",
+                            row.identity,
+                            row.segments
+                                .iter()
+                                .map(|segment| format!(
+                                    "{}:[{},{}):{}",
+                                    segment.source,
+                                    segment.start,
+                                    segment.end,
+                                    segment.reverse
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(" + ")
+                        );
+                    }
+                }
+            }
+        }
         let truth_pair_viable = truth_alleles
             .iter()
             .all(|allele| allele.is_some_and(|allele| viable[locus][allele]));

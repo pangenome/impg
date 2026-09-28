@@ -353,8 +353,14 @@ pub fn build_junction_span_index(
     // a cross-source composition matters only when a side's anchor point
     // lands in a window row of one of the run's loci — the per-locus
     // domain being extended; constant-free, the window structure IS the
-    // bound).
+    // bound). `census_locus_range` restricts which loci's rows count as
+    // anchors — the DP sweeps only [lo, hi), so aggregates anchored
+    // outside it are pure noise (measured: the full component's window
+    // set put all 45 p1 port rows at out-of-slice loci 35/37). The row
+    // indices stay FULL-LOCUS — the materialization indexes the
+    // component's traversal arrays with them.
     window_rows: &[Vec<SourceRange>],
+    census_locus_range: (usize, usize),
     // Per canonical record tokens: the partitions its routed occurrences
     // touch (from the run's routing pass, min-anchor convention, exactly
     // the shares the pooled observations use).
@@ -602,6 +608,9 @@ pub fn build_junction_span_index(
     let mut window_by_source: std::collections::HashMap<usize, Vec<(u64, u64, usize)>> =
         std::collections::HashMap::new();
     for (locus, locus_rows) in window_rows.iter().enumerate() {
+        if locus < census_locus_range.0 || locus >= census_locus_range.1 {
+            continue;
+        }
         for row in locus_rows {
             if row.reverse || row.start >= row.end {
                 continue;
