@@ -6482,7 +6482,7 @@ mod tests {
         let locus_classes = LocusClassing {
             profiles: vec![Profile::new(), Profile::new()],
             membership: vec![1, 0, 1],
-            class_owners: vec![7, 9],
+            class_owners: vec![vec![7], vec![9]],
             class_charges: vec![0.0, 0.0],
             substage: [0.0; 4],
             split_seam_queries: 0,

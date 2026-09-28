@@ -598,9 +598,59 @@ quantities. Implementation begins at the p1 slice after ITEM 1's commit.
 
 ## In flight (ITEM 1 lane)
 
-- chrVI: past the DP (layer 15: 8,667,320 candidates, 16,652.9 s — the
-  degenerate-class member-pair enumeration, pre-existing structural
-  retention) and the haploid posterior (locus-15 haploid layer: 50 states,
-  0.0 s — the fix's design point); currently in the diploid posterior.
-- chrVII: DP layer 85/117.
-- Remaining queue: chrXII, chrXV, chrIV (run-rest.sh).
+- chrVI scored and committed (940 s / 11.5 GB under the no-waste fix;
+  row bit-identical). chrXII, chrXV scored. chrMT byte-identical
+  spot-check (130 s).
+- chrVII, chrIV: the supervisor killed all silent runs AND the retry
+  wrappers (they resurrected uninstrumented runs in a loop). The
+  STAGE-TIMER PRECONDITION is now ABSOLUTE: no full-component launches
+  until the stage timers + RSS accounting are committed; then the
+  instrumented relaunch (chrVI reference: 940 s order; timer-named heavy
+  layers get profiled on the slice). Watchdogs: CPU 30-min silent-kill,
+  RSS 40 GB.
+
+### 2.13 THE UNION-BRACKET GATE RUN — the measured result and the
+PARENT-ROW SCOPE GAP (the checkpoint)
+
+The union-bracket form (the sound read-bracket UNION: left bracket =
+[min exit, max exit + max gap), right = (min entry - max gap, max entry] —
+the intersection was unsound with reads whose left record SPANS the
+junction, pushing its lower bound past the true cut): **5,226 junctions
+-> 544 port-pair rows (6.12 s)** — bounded (the intersection's
+mis-implemented wide form measured 480M; the sound union is 6 orders
+below it). The chain row BIT-IDENTICAL for the FOURTH consecutive p1 run
+(0.58184602910041 / 0.4215 / 0.9567 / 2 sw / 14).
+
+**THE GATE EVIDENCE (honest):** truth copy-0 in domain HELD at 8/15;
+ALL 544 port-pair rows landed at ONE locus (p1 index 20); the truth's
+cross-source junction loci (0 and 14) did NOT advance. **THE DIAGNOSIS
+(the parent-row scope gap):** the truth's junction compositions are among
+the 893 UNMAPPED — their stranded parent rows are NOT in the staged set:
+at locus 0 the donor's row [9602: 102922-108949] fails the staged
+extension's coordinate-overlap admission test ([102922,108949] does not
+overlap the window [110035,120043] IN THE REFERENCE FRAME — the donor's
+source coordinate frame does not align with the reference axis; the
+overlap test compares foreign-row coordinates directly against
+reference-window coordinates, so frame-misaligned stranded material is
+never staged). The window-domain extension's overlap heuristic is the
+OLD flag's scope; the crossing-attested census supersedes it.
+
+**THE LOOP-CLOSURE FIX (specified, the next rung):** the materialization's
+parent-row table becomes the TERRITORY (the full per-source row tiling —
+`territory.path_intervals` carries every partition's rows for every
+source, and the attesting reads' placement points identify their own
+parents), not the coordinate-overlap staged set: for each attested
+composition, the parent rows on both sides come from the territory, the
+junction's locus is the side that lands in a window row, the bracket +
+port cuts as measured, and the materialized 2-segment rows ENTER the
+locus's domain as newly-admitted staged rows (their partitions from the
+territory rows — the owner-set charging handles the mixed owners). The
+truth's junction parents are exactly the rows its crossing reads place
+on — the census finds them; the coordinate-overlap test never could.
+
+The cut-gap measurement (riding with the gate per the order): the
+port_cut_probe measured the truth's cross-source junctions at EXACT
+port positions (both sides; §2.12) — the port-expressible form is
+available; the loop-closure fix is what admits the parent rows so the
+port cuts can compose the truth's pieces.
+

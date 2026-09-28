@@ -9327,6 +9327,361 @@ fn main() -> io::Result<()> {
             summary["attested_flagged_loci"] = serde_json::to_value(&flagged)
                 .expect("serialize");
         }
+        // RUNG 1b, THE ATTESTED MATERIALIZATION (the expressibility bound's
+        // product, owner ruling 2026-09-28): for every CROSS-SOURCE
+        // crossing-attested composition that maps onto the locus structure
+        // (a side in a window row, a side in a staged row, or both in
+        // window rows), materialize the 2-segment junction-partial row at
+        // the attested cut — bounded by the measured attested set
+        // (20,162 compositions component-wide; ~500/locus), never the
+        // word cross-product. Forward-forward compositions only (the
+        // mixed-orientation counts are reported; the mosaic's chrIII
+        // junctions are forward).
+        {
+            // The combined row table per source: (start, end, locus,
+            // partition) over the window rows AND the staged rows.
+            let mut rows_by_source: BTreeMap<
+                usize,
+                Vec<(u64, u64, usize, usize)>,
+            > = BTreeMap::new();
+            for (locus, rows) in window_rows_snapshot.iter().enumerate() {
+                for row in rows {
+                    rows_by_source
+                        .entry(row.source)
+                        .or_default()
+                        .push((row.start, row.end, locus, row.partition));
+                }
+            }
+            for (locus, rows) in staged.added.iter().enumerate() {
+                for row in rows {
+                    if row.reverse || row.start >= row.end {
+                        continue;
+                    }
+                    rows_by_source
+                        .entry(row.source)
+                        .or_default()
+                        .push((row.start, row.end, locus, row.partition));
+                }
+            }
+            for rows in rows_by_source.values_mut() {
+                rows.sort_unstable();
+            }
+            let row_at = |source: usize, point: u64| {
+                rows_by_source.get(&source).and_then(|rows| {
+                    let idx = rows.partition_point(|&(start, _, _, _)| start < point);
+                    idx.checked_sub(1)
+                        .map(|i| rows[i])
+                        .filter(|&(_, end, _, _)| point <= end)
+                })
+            };
+            let mut materialized = vec![0u64; window_rows_snapshot.len()];
+            let mut mixed_orientation = 0u64;
+            let mut unmapped = 0u64;
+            let mut seen: BTreeSet<(usize, usize, u64, usize, u64)> = BTreeSet::new();
+            for composition in &span.attested {
+                if !(composition.left_forward && composition.right_forward) {
+                    mixed_orientation += 1;
+                    continue;
+                }
+                let Some((left_start, _, left_locus, left_partition)) =
+                    row_at(composition.left_source, composition.left_exit)
+                else {
+                    unmapped += 1;
+                    continue;
+                };
+                let Some((_, right_end, right_locus, right_partition)) =
+                    row_at(composition.right_source, composition.right_entry)
+                else {
+                    unmapped += 1;
+                    continue;
+                };
+                if left_locus != right_locus {
+                    unmapped += 1;
+                    continue;
+                }
+                if !seen.insert((
+                    left_locus,
+                    composition.left_source,
+                    composition.left_exit,
+                    composition.right_source,
+                    composition.right_entry,
+                )) {
+                    continue;
+                }
+                let left_half = SourceRange {
+                    partition: left_partition,
+                    occurrence: 0,
+                    source: composition.left_source,
+                    start: left_start,
+                    end: composition.left_exit,
+                    reverse: false,
+                };
+                let right_half = SourceRange {
+                    partition: right_partition,
+                    occurrence: 0,
+                    source: composition.right_source,
+                    start: composition.right_entry,
+                    end: right_end,
+                    reverse: false,
+                };
+                let identity = format!(
+                    "attested:{}:{}@{}>{}@{}",
+                    left_locus,
+                    composition.left_source,
+                    composition.left_exit,
+                    composition.right_source,
+                    composition.right_entry,
+                );
+                materialized[left_locus] += 1;
+                traversals[left_locus].push(genome::SpanningTraversal {
+                    partition: left_partition,
+                    identity,
+                    segments: vec![left_half, right_half],
+                });
+            }
+            genome::retain_native_endpoint_candidates(
+                &mut traversals,
+                target.id,
+                target.length,
+            )?;
+            let materialized_total: u64 = materialized.iter().sum();
+            eprintln!(
+                "[context-domains] rung 1b (attested): {} junction-partial rows \
+                 (mixed-orientation skipped {}, unmapped {})",
+                materialized_total, mixed_orientation, unmapped
+            );
+            if let Some(summary) = &mut context_ladder_summary {
+                summary["rung1b_attested_per_locus"] =
+                    serde_json::to_value(&materialized).expect("serialize");
+                summary["rung1b_attested_total"] = materialized_total.into();
+                summary["rung1b_mixed_orientation"] = mixed_orientation.into();
+                summary["rung1b_unmapped"] = unmapped.into();
+            }
+        }
+        // RUNG 1b, THE PORT-CUT MATERIALIZATION (the cut-semantics fork's
+        // decided form, owner ruling 2026-09-28: the truth's cross-source
+        // mosaic junctions sit at EXACT port positions — measured by the
+        // port_cut_probe — so the port cuts inside the crossing reads'
+        // INTERSECTED BRACKET express the truth's pieces exactly). The
+        // bracket (the owner's derived bound, constant-free): each crossing
+        // read's left record ends before the true cut (its extent end) and
+        // its right record starts after it (its extent start); the
+        // intersection over reads gives left_cut >= max(left exits) and
+        // right_cut <= min(right entries). The candidates are the PORTS
+        // inside the bracket on each side (the split machinery's own cut
+        // convention); the composed rows are the port-pair realizations.
+        {
+            // The combined row table per source (the same lookup the
+            // attested materialization uses).
+            let mut rows_by_source: BTreeMap<
+                usize,
+                Vec<(u64, u64, usize, usize)>,
+            > = BTreeMap::new();
+            for (locus, rows) in window_rows_snapshot.iter().enumerate() {
+                for row in rows {
+                    rows_by_source
+                        .entry(row.source)
+                        .or_default()
+                        .push((row.start, row.end, locus, row.partition));
+                }
+            }
+            for (locus, rows) in staged.added.iter().enumerate() {
+                for row in rows {
+                    if row.reverse || row.start >= row.end {
+                        continue;
+                    }
+                    rows_by_source
+                        .entry(row.source)
+                        .or_default()
+                        .push((row.start, row.end, locus, row.partition));
+                }
+            }
+            for rows in rows_by_source.values_mut() {
+                rows.sort_unstable();
+            }
+            let row_at = |source: usize, point: u64| {
+                rows_by_source.get(&source).and_then(|rows| {
+                    let idx = rows.partition_point(|&(start, _, _, _)| start < point);
+                    idx.checked_sub(1)
+                        .map(|i| rows[i])
+                        .filter(|&(_, end, _, _)| point <= end)
+                })
+            };
+            let rung1b_started = Instant::now();
+            // The junction groups: (locus, left source, right source) ->
+            // (max left exit, min right entry, left row, right row).
+            let mut junctions: BTreeMap<
+                (usize, usize, usize),
+                (
+                    u64,
+                    u64,
+                    u64,
+                    i64,
+                    (u64, u64, usize, usize),
+                    (u64, u64, usize, usize),
+                ),
+            > = BTreeMap::new();
+            for composition in &span.attested {
+                if !(composition.left_forward && composition.right_forward) {
+                    continue;
+                }
+                let Some((left_start, _, left_locus, left_partition)) =
+                    row_at(composition.left_source, composition.left_exit)
+                else {
+                    continue;
+                };
+                let Some((_, right_end, right_locus, right_partition)) =
+                    row_at(composition.right_source, composition.right_entry)
+                else {
+                    continue;
+                };
+                if left_locus != right_locus {
+                    continue;
+                }
+                let key = (
+                    left_locus,
+                    composition.left_source,
+                    composition.right_source,
+                );
+                // The PARENT rows' full bounds (row_at's own row), not the
+                // composition's cuts â the bracket windows are
+                // [max_exit, left_row.end) and [right_row.start, min_entry).
+                let left_row = (
+                    left_start,
+                    row_at(composition.left_source, composition.left_exit)
+                        .map(|(_, end, _, _)| end)
+                        .unwrap_or(composition.left_exit),
+                    left_locus,
+                    left_partition,
+                );
+                let right_row = (
+                    row_at(composition.right_source, composition.right_entry)
+                        .map(|(start, _, _, _)| start)
+                        .unwrap_or(composition.right_entry),
+                    right_end,
+                    right_locus,
+                    right_partition,
+                );
+                junctions
+                    .entry(key)
+                    .and_modify(
+                        |(min_exit, max_exit, max_entry, max_gap, _, _)| {
+                            *min_exit = (*min_exit).min(composition.left_exit);
+                            *max_exit = (*max_exit).max(composition.left_exit);
+                            *max_entry = (*max_entry).max(composition.right_entry);
+                            *max_gap = (*max_gap).max(composition.gap);
+                        },
+                    )
+                    .or_insert((
+                        composition.left_exit,
+                        composition.left_exit,
+                        composition.right_entry,
+                        composition.gap,
+                        left_row,
+                        right_row,
+                    ));
+            }
+            let mut ports_handle =
+                routes::Ports::open_without_global_verification(&options.routes, &graph)?;
+            let mut port_rows = vec![0u64; window_rows_snapshot.len()];
+            let mut port_pairs = 0u64;
+            for (
+                (locus, left_source, right_source),
+                (min_exit, max_exit, max_entry, max_gap, left_row, right_row),
+            ) in &junctions
+            {
+                // The read-bracket UNION (the sound form — the intersection
+                // is unsound with reads whose left record SPANS the junction:
+                // their left extent ends PAST the true cut, pushing the
+                // intersection's lower bound above it; every genuine
+                // bracketing read's interval is contained in the union,
+                // so the union contains the true cut): left bracket =
+                // [min exit, max exit + max gap); right bracket =
+                // (min entry - max gap, max entry]. Widths stay within the
+                // reads' own excursion (~a read length), so the port
+                // content stays bounded.
+                let left_upper = (*max_exit)
+                    .saturating_add((*max_gap).max(0) as u64)
+                    .min(left_row.1);
+                let right_lower = (*max_entry)
+                    .saturating_sub((*max_gap).max(0) as u64)
+                    .max(right_row.0);
+                let left_ports = if min_exit < &left_upper {
+                    ports_handle.forward_ports_inside(
+                        &graph,
+                        *left_source,
+                        *min_exit,
+                        left_upper,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let right_ports = if right_lower < *max_entry {
+                    ports_handle.forward_ports_inside(
+                        &graph,
+                        *right_source,
+                        right_lower,
+                        *max_entry,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                for left_port in &left_ports {
+                    let left_cut = left_port.cut(graph.k);
+                    for right_port in &right_ports {
+                        let right_cut = right_port.cut(graph.k);
+                        let identity = format!(
+                            "attested-port:{}:{}@{}>{}@{}",
+                            locus, left_source, left_cut, right_source, right_cut,
+                        );
+                        port_pairs += 1;
+                        port_rows[*locus] += 1;
+                        traversals[*locus].push(genome::SpanningTraversal {
+                            partition: left_row.3,
+                            identity,
+                            segments: vec![
+                                SourceRange {
+                                    partition: left_row.3,
+                                    occurrence: 0,
+                                    source: *left_source,
+                                    start: left_row.0,
+                                    end: left_cut,
+                                    reverse: false,
+                                },
+                                SourceRange {
+                                    partition: right_row.3,
+                                    occurrence: 0,
+                                    source: *right_source,
+                                    start: right_cut,
+                                    end: right_row.1,
+                                    reverse: false,
+                                },
+                            ],
+                        });
+                    }
+                }
+            }
+            genome::retain_native_endpoint_candidates(
+                &mut traversals,
+                target.id,
+                target.length,
+            )?;
+            let port_rows_total: u64 = port_rows.iter().sum();
+            let port_seconds = rung1b_started.elapsed().as_secs_f64();
+            eprintln!(
+                "[context-domains] rung 1b (port cuts): {} junctions -> {} port-pair rows \
+                 ({port_seconds:.2}s)",
+                junctions.len(),
+                port_pairs
+            );
+            if let Some(summary) = &mut context_ladder_summary {
+                summary["rung1b_port_junctions"] = junctions.len().into();
+                summary["rung1b_port_pairs"] = port_pairs.into();
+                summary["rung1b_port_per_locus"] =
+                    serde_json::to_value(&port_rows).expect("serialize");
+                summary["rung1b_port_wall_seconds"] = port_seconds.into();
+            }
+        }
     }
 
     // ------------------------------------------------- standalone census mode

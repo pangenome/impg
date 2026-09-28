@@ -96,6 +96,13 @@ pub struct AttestedComposition {
     pub left_forward: bool,
     pub right_forward: bool,
     pub attesting_reads: u64,
+    /// The MINIMUM inter-record read gap over the attesting reads (the
+    /// read's own gap between the left record's end and the right's start
+    /// — the tight upper bound of the true cut: the read's left material
+    /// extends at most gap bases past its last anchored position, so the
+    /// true left cut sits in [left_exit, left_exit + gap] and the right
+    /// cut in [right_entry - gap, right_entry]).
+    pub gap: i64,
 }
 
 /// The per-run read-adjacency derivation: per read, the position-ordered
@@ -526,7 +533,7 @@ pub fn build_junction_span_index(
     let attested_started = Instant::now();
     let mut attested_map: std::collections::BTreeMap<
         (usize, u64, usize, u64, bool, bool),
-        u64,
+        (u64, i64),
     > = std::collections::BTreeMap::new();
     // The routed-attestation filter's per-record touched sets (the
     // routing pass's own min-anchor disambiguation — the same convention
@@ -582,7 +589,7 @@ pub fn build_junction_span_index(
             // are junction attestations).
             let left_offset =
                 right_entry.read_start as i64 - left_entry.read_start as i64;
-            let mut pair_attestations: Vec<(usize, u64, usize, u64, bool, bool)> =
+            let mut pair_attestations: Vec<(usize, u64, usize, u64, bool, bool, i64)> =
                 Vec::new();
             let mut single_source_continuation = false;
             for &(left_path, left_start, left_mirrored) in left_list {
@@ -637,6 +644,7 @@ pub fn build_junction_span_index(
                     } else {
                         right_start as u64 + rhi as u64
                     };
+                    let gap = right_entry.read_start as i64 - left_entry.read_end as i64;
                     pair_attestations.push((
                         left_source,
                         left_exit,
@@ -644,6 +652,7 @@ pub fn build_junction_span_index(
                         right_entry_point,
                         left_forward,
                         right_forward,
+                        gap,
                     ));
                 }
             }
@@ -653,12 +662,29 @@ pub fn build_junction_span_index(
                 // placement pairs exist.
                 continue;
             }
-            let mut seen_here: std::collections::BTreeSet<
+            let mut seen_here: std::collections::BTreeMap<
                 (usize, u64, usize, u64, bool, bool),
-            > = std::collections::BTreeSet::new();
-            seen_here.extend(pair_attestations);
-            for key in seen_here {
-                *attested_map.entry(key).or_insert(0) += 1;
+                i64,
+            > = std::collections::BTreeMap::new();
+            for (left_source, left_exit, right_source, right_entry_point, left_forward, right_forward, gap) in
+                pair_attestations
+            {
+                seen_here
+                    .entry((
+                        left_source,
+                        left_exit,
+                        right_source,
+                        right_entry_point,
+                        left_forward,
+                        right_forward,
+                    ))
+                    .and_modify(|best| *best = (*best).min(gap))
+                    .or_insert(gap);
+            }
+            for (key, gap) in seen_here {
+                let entry = attested_map.entry(key).or_insert((0, i64::MAX));
+                entry.0 += 1;
+                entry.1 = entry.1.min(gap);
             }
         }
     }
@@ -674,7 +700,7 @@ pub fn build_junction_span_index(
                     left_forward,
                     right_forward,
                 ),
-                attesting_reads,
+                (attesting_reads, gap),
             )| AttestedComposition {
                 left_source,
                 left_exit,
@@ -683,6 +709,7 @@ pub fn build_junction_span_index(
                 left_forward,
                 right_forward,
                 attesting_reads,
+                gap,
             },
         )
         .collect();
