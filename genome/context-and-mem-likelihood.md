@@ -434,15 +434,63 @@ sample has FEW junctions — chrIII: 2 breakpoints — so few loci extend:
 the economics restored). The Q2 verification obligation transfers to the
 attested set at the tract loci.
 
-NEXT STEP (the handoff): implement the crossing-attestation census as a
-span-index method (the record-driven enumeration: per read chain, per
-consecutive record pair, per placement pair on different sources — the
-composition set derived FROM the records, never the word cross-product),
-measure at p1 + full chrIII, then wire the two-rung materialization behind
-the same flag. The gates unchanged: the p1 inexpressible count (14/15)
-collapses; the truth pair enters the domain; the chain row
-unchanged-or-better; then full chrIII; then the transition census both
-ways.
+### 2.10 THE NO-WASTE DP-LAYER FIX + THE CENSUS'S FINAL FORM (the owner's
+2026-09-28 rulings, implemented and measured)
+
+**THE NO-WASTE DP FIX** (the owner's bar: ~100s/layer; the 10-14h
+chrVII/chrIV layers were "orders of magnitude over"): the diploid table's
+member cross-product for an UNSCORABLE backbone class is the measured
+waste — chrVI locus 15: a 2,944-member empty-profile class whose seeded
+native-pair loss (10,470 nats) sits WITHIN the margin (26,031), so the
+MARGIN retention enumerated all 2,944² = 8,667,320 ordered member-pair
+states (a 16,652.9 s single-threaded layer, twice per run: the forward
+layer + the diploid posterior's boundary pass). The fix (member-level,
+in `ordered_pair_states`): an unscorable class's pair entry enumerates
+ONLY the backbone allele's own pair (the incumbent chain's row — the
+hygiene (c)'s own intent; the minis are pass-through structure); scorable
+classes keep the full legitimate cross-product. Every locus whose
+backbone class is scorable is bit-identical BY CONSTRUCTION.
+
+- **BIT-IDENTITY SPOT-CHECK PASSED**: chrMT under the fixed binary —
+  selected acc_H 0.9922837527537212 / 0 sw — byte-equal to the step45
+  lane's published row; wall 130 s.
+- chrVI re-measure launched (the layer-15 cost under the fix; twice
+  interrupted by the external kill sweep — see §1.6).
+- **chrVII/chrIV relaunches HELD** per the ruling until the fix's DP cost
+  is measured on a small component.
+
+**THE CENSUS'S FINAL FORM** (three constant-free tightenings, each
+measured): (1) the exact co-linearity filter (a placement pair attests
+only when its inter-placement path offset equals the read's own
+inter-record offset — without it the census OOM-killed at ~2.5 GB
+enumerating every homolog cross-product); (2) the ROUTED-ATTRIBUTION
+filter (the routing's own min-anchor touched sets — measured NOT to
+tighten: 163,810 vs 164,785 — the routing is itself homolog-ambiguous);
+(3) the SINGLE-SOURCE CONTINUITY test (the junction-spanning-read
+doctrine's own discriminator: a record pair attests a junction only when
+NO single source carries both records co-linearly — a within-source
+continuation is not a junction): **164,785 → 20,162 compositions**
+(78,669 read attestations). The remaining 20k are the panel's own
+read-covered junctions (the rung-(i) co-occurrence territory) plus the
+mosaic's novel junctions (rung (ii)).
+
+**THE RULING'S CRITICAL CHECK PASSED**: the 7 remaining inexpressible p1
+loci (0, 3, 5, 8, 12, 13, 14) all carry their stranded-attested
+compositions under the final census (793, 970, 32, 387, 288, 366, 403) —
+the routing's attribution does NOT drop the truth's junction
+compositions at the divergent middle.
+
+**THE PARTIAL GATE WIN stands** (measured twice, chain row BIT-IDENTICAL
+0.58184602910041 / 0.4215 / 0.9567 / 2 sw / 14): the ladder's staged
+admission + rung-1a chains (both ploidy tracks) + arity-N classing moved
+the truth's copy-0 into the domain at 8/15 p1 loci (was 2/15); the
+remaining 7 need rung 1b — whose bound is now the measured attested set.
+
+NEXT: rung 1b's materialization at the flagged loci from the attested
+compositions (the two rungs: (i) the co-occurring panel junctions — the
+same-path test; (ii) the novel attested — no single-source continuation),
+then the ITEM-2 gates (truth copy-0 in domain at all 15; the chain row
+unchanged-or-better), then full chrIII, then the transition census.
 
 ### 2.8 THE LADDER's original D2-driven form (superseded by §2.9's ruling)
 

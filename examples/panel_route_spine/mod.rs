@@ -67,11 +67,17 @@ fn intern_history(
 pub(super) struct LocusClassing {
     pub(super) profiles: Vec<Profile>,
     pub(super) membership: Vec<usize>,
-    /// Per-class OWNING universe partition (the window-domain extension's
-    /// owner-resolved charging; the owning partition enters the class key,
-    /// so classes stay owner-homogeneous; every class of the pre-extension
-    /// model is owned by the locus's axis partition).
-    pub(super) class_owners: Vec<u32>,
+    /// Per-class OWNING universe partition SET (the window-domain
+    /// extension's owner-resolved charging, generalized to the context-aware
+    /// domains' mixed-owner rows: the sorted distinct set over the class's
+    /// segments' owners; the set enters the class key, so classes stay
+    /// owner-homogeneous; every class of the pre-extension model is the
+    /// singleton of the locus's axis partition). A single-owner class's
+    /// observed side is its partition's routed share bit-identically; a
+    /// multi-owner class's observed side is the record-once site map over
+    /// the union — the established Fix-1 multi-owner form (the haploid
+    /// stitched path's own convention).
+    pub(super) class_owners: Vec<Vec<u32>>,
     /// Per-CLASS restricted interior-junction charge (the additive novel-
     /// junction term folded into the exhaustive class-pair table; zero for
     /// every class whose alleles carry no novel-only interior junction).
@@ -170,36 +176,39 @@ pub(super) fn class_locus_alleles(
     let mut junction_pairs: BTreeMap<(Vec<u8>, Vec<u8>), (Vec<(SourceRange, SourceRange)>, bool)> =
         BTreeMap::new();
     for traversal in locus_ranges {
-        if traversal.segments.len() == 2 {
+        if traversal.segments.len() >= 2 {
             for segment in &traversal.segments {
                 if segment.start < segment.end {
                     partial_keys.insert((segment.source, segment.start, segment.end));
                 }
             }
-            let junction = (
-                segment_flank(
-                    sources,
-                    flank_memo,
-                    &traversal.segments[0],
-                    false,
-                    READ_LENGTH - 1,
-                )?,
-                segment_flank(
-                    sources,
-                    flank_memo,
-                    &traversal.segments[1],
-                    true,
-                    READ_LENGTH - 1,
-                )?,
-            );
-            junctions.insert(junction.clone());
-            let entry = junction_pairs.entry(junction).or_default();
-            entry
-                .0
-                .push((traversal.segments[0].clone(), traversal.segments[1].clone()));
-            let gap = junction::segment_pair_gap(&traversal.segments[0], &traversal.segments[1]);
-            if gap.is_some_and(|value| value >= 0) {
-                entry.1 = true;
+            // Every CONSECUTIVE segment pair is an interior junction (the
+            // arity-N generalization: the 2-segment form's single junction
+            // is the arity-2 instance, bit-identically).
+            for pair in traversal.segments.windows(2) {
+                let junction = (
+                    segment_flank(
+                        sources,
+                        flank_memo,
+                        &pair[0],
+                        false,
+                        READ_LENGTH - 1,
+                    )?,
+                    segment_flank(
+                        sources,
+                        flank_memo,
+                        &pair[1],
+                        true,
+                        READ_LENGTH - 1,
+                    )?,
+                );
+                junctions.insert(junction.clone());
+                let entry = junction_pairs.entry(junction).or_default();
+                entry.0.push((pair[0].clone(), pair[1].clone()));
+                let gap = junction::segment_pair_gap(&pair[0], &pair[1]);
+                if gap.is_some_and(|value| value >= 0) {
+                    entry.1 = true;
+                }
             }
         }
     }
@@ -243,17 +252,29 @@ pub(super) fn class_locus_alleles(
             let profile = seam_profiles_by_junction
                 .get(junction)
                 .ok_or_else(|| invalid("split junction seam missing"))?;
-            // The junction's realizing pairs share one owning partition
-            // (mixed-owner split admission is excluded); the crossing
-            // reads' share target is that owner.
-            let owner = pairs[0].0.partition as u32;
-            let owner_partition = crate::owner_universe_partition(owner, component_locus_to_partition);
+            // The junction's share target: the UNION of the realizing
+            // segment pairs' owners (the mixed-owner generalization of the
+            // single-owner rule — every realizing pair shares one owner
+            // there, reducing bit-identically; the context-aware domains'
+            // mixed realizing pairs charge the union, the crossing reads'
+            // own touched-partition set).
+            let mut owner_set: BTreeSet<u32> = BTreeSet::new();
+            for (left, right) in pairs {
+                owner_set.insert(left.partition as u32);
+                owner_set.insert(right.partition as u32);
+            }
+            let owner_partitions: Vec<u32> = owner_set
+                .iter()
+                .map(|&owner| {
+                    crate::owner_universe_partition(owner, component_locus_to_partition)
+                })
+                .collect();
             let outcome = span.restricted_charge(
                 profile,
                 pairs,
                 sources,
                 path_of_source,
-                &[owner_partition],
+                &owner_partitions,
                 model,
             )?;
             Ok((junction.clone(), outcome))
@@ -269,29 +290,29 @@ pub(super) fn class_locus_alleles(
     let classing_started = Instant::now();
     let mut class_profiles: Vec<Profile> = Vec::new();
     let mut class_charges: Vec<f64> = Vec::new();
-    let mut class_owners: Vec<u32> = Vec::new();
-    let mut class_buckets: HashMap<(u64, u64, u32), Vec<usize>> = HashMap::new();
+    let mut class_owners: Vec<Vec<u32>> = Vec::new();
+    let mut class_buckets: HashMap<(u64, u64, Vec<u32>), Vec<usize>> = HashMap::new();
     let mut membership = vec![0usize; locus_ranges.len()];
     for (chunk_base, chunk) in locus_ranges.chunks(2048).enumerate() {
-        let built: Vec<(Profile, u64, f64, u32)> = chunk
+        let built: Vec<(Profile, u64, f64, Vec<u32>)> = chunk
             .par_iter()
             .map(|traversal| {
-                // The candidate's OWNING universe partition: every segment
-                // of a well-formed traversal shares one owner (single-
-                // segment domain rows and the anchor-owned split candidates
-                // alike).
+                // The candidate's OWNING universe partition SET: the
+                // sorted distinct owners over its segments (single-segment
+                // domain rows and same-owner split candidates keep the
+                // singleton set — the pre-extension model's own form — and
+                // the context-aware domains' mixed-owner rows carry the
+                // union, charged record-once downstream).
                 let owner = {
-                    let first = traversal.segments[0].partition as u32;
-                    if !traversal
-                        .segments
-                        .iter()
-                        .all(|segment| segment.partition as u32 == first)
-                    {
-                        return Err(invalid(
-                            "spine allele mixes candidate rows of distinct owning partitions",
-                        ));
+                    let mut set: Vec<u32> = Vec::new();
+                    for segment in &traversal.segments {
+                        let owner = segment.partition as u32;
+                        if !set.contains(&owner) {
+                            set.push(owner);
+                        }
                     }
-                    first
+                    set.sort_unstable();
+                    set
                 };
                 let mut charge = 0.0f64;
                 let profile = if traversal.segments.len() == 1 {
@@ -305,61 +326,58 @@ pub(super) fn class_locus_alleles(
                             .ok_or_else(|| invalid("spine allele interval missing parent data"))?
                     }
                 } else {
-                    ensure(
-                        traversal.segments.len() == 2,
-                        "spine allele has unsupported segment arity"
-                    )?;
-                    let left_segment = &traversal.segments[0];
-                    let right_segment = &traversal.segments[1];
-                    let mut parts: Vec<&Profile> = Vec::with_capacity(3);
-                    if left_segment.start < left_segment.end {
-                        let key = (left_segment.source, left_segment.start, left_segment.end);
-                        parts.push(
-                            partials
-                                .get(&key)
-                                .ok_or_else(|| invalid("split partial missing"))?,
-                        );
-                    }
-                    if right_segment.start < right_segment.end {
-                        let key = (right_segment.source, right_segment.start, right_segment.end);
-                        parts.push(
-                            partials
-                                .get(&key)
-                                .ok_or_else(|| invalid("split partial missing"))?,
-                        );
-                    }
-                    let junction = (
-                        segment_flank(
-                            sources,
-                            flank_memo,
-                            left_segment,
-                            false,
-                            READ_LENGTH - 1,
-                        )?,
-                        segment_flank(
-                            sources,
-                            flank_memo,
-                            right_segment,
-                            true,
-                            READ_LENGTH - 1,
-                        )?,
-                    );
-                    match junction_outcomes.get(&junction) {
-                        // Novel-only interior junction: the seam profile is
-                        // NOT part of the allele's predicted profile; its
-                        // restricted charge is the allele's additive term.
-                        Some(outcome) => {
-                            charge = outcome.charge;
-                        }
-                        // Pooled (panel-attested) interior junction: the
-                        // seam profile stays merged, charged against the
-                        // partition's pooled shares exactly as before.
-                        None => {
+                    // Arity N: every segment's partial profile, then every
+                    // consecutive interior junction's seam (the arity-2
+                    // order [left partial, right partial, seam] preserved
+                    // bit-identically; longer chains append in segment then
+                    // junction order).
+                    let mut parts: Vec<&Profile> =
+                        Vec::with_capacity(2 * traversal.segments.len() - 1);
+                    for segment in &traversal.segments {
+                        if segment.start < segment.end {
+                            let key = (segment.source, segment.start, segment.end);
                             parts.push(
-                                seam_profiles_by_junction
-                                    .get(&junction)
-                                    .ok_or_else(|| invalid("split junction seam missing"))?,
+                                partials
+                                    .get(&key)
+                                    .ok_or_else(|| invalid("split partial missing"))?,
                             );
+                        }
+                    }
+                    for pair in traversal.segments.windows(2) {
+                        let junction = (
+                            segment_flank(
+                                sources,
+                                flank_memo,
+                                &pair[0],
+                                false,
+                                READ_LENGTH - 1,
+                            )?,
+                            segment_flank(
+                                sources,
+                                flank_memo,
+                                &pair[1],
+                                true,
+                                READ_LENGTH - 1,
+                            )?,
+                        );
+                        match junction_outcomes.get(&junction) {
+                            // Novel-only interior junction: the seam profile
+                            // is NOT part of the allele's predicted profile;
+                            // its restricted charge is the allele's additive
+                            // term.
+                            Some(outcome) => {
+                                charge += outcome.charge;
+                            }
+                            // Pooled (panel-attested) interior junction: the
+                            // seam profile stays merged, charged against the
+                            // partition's pooled shares exactly as before.
+                            None => {
+                                parts.push(
+                                    seam_profiles_by_junction
+                                        .get(&junction)
+                                        .ok_or_else(|| invalid("split junction seam missing"))?,
+                                );
+                            }
                         }
                     }
                     merge_profiles(&parts)?
@@ -373,7 +391,7 @@ pub(super) fn class_locus_alleles(
             // classes stay charge- and owner-homogeneous and the class-pair
             // table with charges folded in remains exact at allele
             // granularity.
-            let key = (signature, charge.to_bits(), owner);
+            let key = (signature, charge.to_bits(), owner.clone());
             let class = if let Some(class) = class_buckets
                 .get(&key)
                 .and_then(|bucket| {
@@ -1227,7 +1245,13 @@ pub(super) fn native_backbone_chain(
         };
         let class = locus_classes[locus].membership[native];
         let profile = &locus_classes[locus].profiles[class];
-        let owner = locus_classes[locus].class_owners[class];
+        // The native backbone's class is owner-singleton by construction
+        // (the backbone rows are single-segment native rows; the class key
+        // carries the owner set, so a mixed-owner chain never shares the
+        // backbone's class).
+        let owner = *locus_classes[locus].class_owners[class]
+            .first()
+            .expect("native backbone class owner singleton");
         total += merged_pair_loss_multiplicity(
             profile,
             profile,
@@ -3619,11 +3643,11 @@ pub(super) fn build_spine_boundary_draft(
     model: &ScoreModel,
     span: &JunctionSpanIndex,
     path_of_source: &[usize],
-    // Per-allele OWNING universe partitions (the window-domain extension's
-    // owner-resolved charging; the pre-extension model's every allele is
-    // owned by its locus's axis partition).
-    left_owners: &[u32],
-    right_owners: &[u32],
+    // Per-allele OWNING universe partition SETS (the window-domain
+    // extension's owner-resolved charging, generalized to the
+    // context-aware domains' mixed-owner rows).
+    left_owners: &[Vec<u32>],
+    right_owners: &[Vec<u32>],
     routed_equal: &crate::RoutedObs,
     component_locus_to_partition: &[u32],
     left_ranges: &[genome::SpanningTraversal],
@@ -3683,8 +3707,8 @@ pub(super) fn build_spine_boundary_draft(
                 .expect("nonempty traversal")
                 .clone(),
         ));
-        composition_owners[id as usize].insert(left_owners[left]);
-        composition_owners[id as usize].insert(right_owners[right]);
+        composition_owners[id as usize].extend(left_owners[left].iter().copied());
+        composition_owners[id as usize].extend(right_owners[right].iter().copied());
         if phasing::cooccurrence_gap(&left_ranges[left], &right_ranges[right])
             .is_some_and(|gap| gap >= 0)
         {
@@ -3752,8 +3776,8 @@ pub(super) fn finalize_spine_boundary(
     draft: SpineBoundaryDraft,
     left_ranges: &[genome::SpanningTraversal],
     right_ranges: &[genome::SpanningTraversal],
-    left_owners: &[u32],
-    right_owners: &[u32],
+    left_owners: &[Vec<u32>],
+    right_owners: &[Vec<u32>],
     routed_equal: &crate::RoutedObs,
     component_locus_to_partition: &[u32],
     model: &ScoreModel,
@@ -3781,8 +3805,8 @@ pub(super) fn finalize_spine_boundary(
                 links.iter().zip(link_composition.iter())
             {
                 if composition as usize == id {
-                    owners.insert(left_owners[left]);
-                    owners.insert(right_owners[right]);
+                    owners.extend(left_owners[left].iter().copied());
+                    owners.extend(right_owners[right].iter().copied());
                 }
             }
             let mut merged: HashMap<FeatureKey, f64> = HashMap::new();
@@ -4196,13 +4220,13 @@ pub(super) fn run_local_first_spine(
             .next()
             .ok_or_else(|| invalid("spine boundary link cardinality mismatch"))?;
         ensure(!links.is_empty(), "spine boundary {boundary} has no legal links")?;
-        let left_owners: Vec<u32> = ranges[boundary]
+        let left_owners: Vec<Vec<u32>> = ranges[boundary]
             .iter()
-            .map(crate::traversal_owner)
+            .map(crate::traversal_owner_set)
             .collect();
-        let right_owners: Vec<u32> = ranges[boundary + 1]
+        let right_owners: Vec<Vec<u32>> = ranges[boundary + 1]
             .iter()
-            .map(crate::traversal_owner)
+            .map(crate::traversal_owner_set)
             .collect();
         let draft = build_spine_boundary_draft(
             panel,
@@ -4263,10 +4287,10 @@ pub(super) fn run_local_first_spine(
     let finalize_started = Instant::now();
     let mut boundaries: Vec<SpineBoundary> = Vec::with_capacity(locus_count - 1);
     for (boundary, draft) in boundary_drafts.into_iter().enumerate() {
-        let left_owners: Vec<u32> =
-            ranges[boundary].iter().map(crate::traversal_owner).collect();
-        let right_owners: Vec<u32> =
-            ranges[boundary + 1].iter().map(crate::traversal_owner).collect();
+        let left_owners: Vec<Vec<u32>> =
+            ranges[boundary].iter().map(crate::traversal_owner_set).collect();
+        let right_owners: Vec<Vec<u32>> =
+            ranges[boundary + 1].iter().map(crate::traversal_owner_set).collect();
         let boundary_data = finalize_spine_boundary(
             draft,
             &ranges[boundary],
@@ -4301,6 +4325,7 @@ pub(super) fn run_local_first_spine(
             LocusFolded::build_backgrounds(
                 &locus_classes[locus].profiles,
                 &locus_classes[locus].class_owners,
+                Some(site),
                 routed_equal,
                 component_locus_to_partition,
                 &backgrounds,
@@ -5201,13 +5226,13 @@ pub(super) fn run_local_first_spine(
                 !links.is_empty(),
                 "spine boundary {boundary} lost all legal links after splits",
             )?;
-            let left_owners: Vec<u32> = ranges[boundary]
+            let left_owners: Vec<Vec<u32>> = ranges[boundary]
                 .iter()
-                .map(crate::traversal_owner)
+                .map(crate::traversal_owner_set)
                 .collect();
-            let right_owners: Vec<u32> = ranges[boundary + 1]
+            let right_owners: Vec<Vec<u32>> = ranges[boundary + 1]
                 .iter()
-                .map(crate::traversal_owner)
+                .map(crate::traversal_owner_set)
                 .collect();
             fresh_drafts.insert(
                 boundary,
@@ -5253,6 +5278,7 @@ pub(super) fn run_local_first_spine(
             folded[locus] = LocusFolded::build_backgrounds(
                 &locus_classes[locus].profiles,
                 &locus_classes[locus].class_owners,
+                Some(site),
                 routed_equal,
                 component_locus_to_partition,
                 &backgrounds,
@@ -5262,10 +5288,10 @@ pub(super) fn run_local_first_spine(
                 .map(|(tables, _)| tables)?;
         }
         for (boundary, draft) in fresh_drafts {
-            let left_owners: Vec<u32> =
-                ranges[boundary].iter().map(crate::traversal_owner).collect();
-            let right_owners: Vec<u32> =
-                ranges[boundary + 1].iter().map(crate::traversal_owner).collect();
+            let left_owners: Vec<Vec<u32>> =
+                ranges[boundary].iter().map(crate::traversal_owner_set).collect();
+            let right_owners: Vec<Vec<u32>> =
+                ranges[boundary + 1].iter().map(crate::traversal_owner_set).collect();
             let boundary_data = finalize_spine_boundary(
                 draft,
                 &ranges[boundary],
@@ -5451,23 +5477,49 @@ pub(super) fn run_local_first_spine(
                 backgrounds.scan_extend(panel, missing, k, model)?;
             }
         }
-        let owner_first = crate::traversal_owner(&ranges[locus][route[locus][0]]);
-        let owner_second = crate::traversal_owner(&ranges[locus][route[locus][1]]);
+        let owner_first = crate::traversal_owner_set(&ranges[locus][route[locus][0]]);
+        let owner_second = crate::traversal_owner_set(&ranges[locus][route[locus][1]]);
         if owner_first == owner_second {
+            let owner_obs = if owner_first.len() == 1 {
+                crate::owner_routed_obs(
+                    routed_equal,
+                    owner_first[0],
+                    component_locus_to_partition,
+                )
+                .clone()
+            } else {
+                // Equal MULTI-owner sets (the context-aware domains' rows):
+                // the shared union's record-once map (the Fix-1 form; the
+                // singleton case above is its bit-identical reduction).
+                site.site_map(owner_first.iter().map(|&owner| {
+                    crate::owner_universe_partition(owner, component_locus_to_partition)
+                }))
+            };
             m1_local_total += merged_pair_loss_multiplicity(
                 &first,
                 &second,
-                crate::owner_routed_obs(routed_equal, owner_first, component_locus_to_partition),
+                &owner_obs,
                 model,
                 &backgrounds,
             )?;
         } else {
             // Fix 1 (record-once mixed-owner charging): the merged pair
             // charge's observed side attributes each record ONCE.
-            let obs_site = site.site_map([
-                crate::owner_universe_partition(owner_first, component_locus_to_partition),
-                crate::owner_universe_partition(owner_second, component_locus_to_partition),
-            ]);
+            let mut union: Vec<u32> = owner_first
+                .iter()
+                .chain(owner_second.iter())
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let obs_site = site.site_map(
+                union
+                    .iter()
+                    .map(|&owner| {
+                        crate::owner_universe_partition(owner, component_locus_to_partition)
+                    })
+                    .collect::<Vec<_>>(),
+            );
             m1_local_total += merged_pair_loss_multiplicity(
                 &first,
                 &second,

@@ -80,6 +80,24 @@ pub struct ChainEntry {
     pub read_end: u32,
 }
 
+/// One CROSSING-RECORD-ATTESTED composition (ITEM 2's expressibility
+/// bound, owner ruling 2026-09-28): the junction between `left_source`'s
+/// material exiting at `left_exit` and `right_source`'s entering at
+/// `right_entry`, attested by `attesting_reads` distinct observed reads
+/// (each read's consecutive record pair placing anchor mass on both
+/// sides). The orientation flags are the placement forwardness per side
+/// (a false-forward side reads its source right-to-left).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AttestedComposition {
+    pub left_source: usize,
+    pub left_exit: u64,
+    pub right_source: usize,
+    pub right_entry: u64,
+    pub left_forward: bool,
+    pub right_forward: bool,
+    pub attesting_reads: u64,
+}
+
 /// The per-run read-adjacency derivation: per read, the position-ordered
 /// record chain, over a canonical-record table. Verifies against the sample
 /// index's stats exactly like the record re-derivation it replaces (reads,
@@ -230,6 +248,19 @@ struct SpanRecord {
 }
 
 pub struct JunctionSpanIndex {
+    /// The CROSSING-RECORD-ATTESTED composition set (ITEM 2's expressibility
+    /// bound, owner ruling 2026-09-28): every (left source, left exit
+    /// point, right source, right entry point, forwardness) composition
+    /// attested by at least one observed record — a read's CONSECUTIVE
+    /// record pair whose placements put the left record's anchor mass on
+    /// the left source and the right record's on the right source, the
+    /// pair straddling the junction (the record-once adjacency the crossing
+    /// queries price). Existence, not magnitude — constant-free and tight
+    /// by construction (the bound is crossing records x per-side placement
+    /// ambiguity). The `left_forward`/`right_forward` flags are the
+    /// placement orientations (the record's walk form matching its
+    /// placement): a false-forward side reads its source right-to-left.
+    pub(in crate) attested: Vec<AttestedComposition>,
     /// Per record: verified in-window placements `(path, start, mirrored)`,
     /// sorted by (path, start, mirrored). `mirrored` is the orientation the
     /// placement was verified in: the record's canonical walk (false) or
@@ -485,6 +516,182 @@ pub fn build_junction_span_index(
         index_entries,
         started.elapsed().as_secs_f64()
     );
+    // The CROSSING-RECORD-ATTESTED composition set (the expressibility
+    // bound's census): every cross-source junction attested by a read's
+    // consecutive record pair — the left record placing on one source, the
+    // right on another (the same-source novel junctions are the rung-(i)
+    // co-occurrence case, not attested here). Existence, not magnitude;
+    // the per-composition read count is kept for the report (the bound is
+    // crossing records x per-side placement ambiguity).
+    let attested_started = Instant::now();
+    let mut attested_map: std::collections::BTreeMap<
+        (usize, u64, usize, u64, bool, bool),
+        u64,
+    > = std::collections::BTreeMap::new();
+    // The routed-attestation filter's per-record touched sets (the
+    // routing pass's own min-anchor disambiguation — the same convention
+    // the observed side charges with; owner ruling 2026-09-28): a
+    // placement is ROUTED-ATTRIBUTED iff the partition covering its
+    // anchor extent is in its record's routed touched set. Precomputed
+    // per record id once.
+    let routed: Vec<Option<&std::collections::BTreeSet<u32>>> = (0..chains
+        .record_tokens
+        .len())
+        .map(|id| touched_by_tokens.get(&chains.record_tokens[id]))
+        .collect();
+    // The partition covering a placement's anchor extent on its path
+    // (the interval containing the extent's low end; the territory's own
+    // per-path interval lists).
+    let covering_partition = |path: u32, start: u32, lo: u32| -> Option<u32> {
+        let point = start as u64 + lo as u64;
+        territory
+            .path_intervals
+            .get(path as usize)?
+            .iter()
+            .find(|&&(bs, be, _)| bs <= point && point < be)
+            .map(|&(_, _, partition)| partition)
+    };
+    for chain in chains.chains.iter() {
+        for pair in chain.windows(2) {
+            let (left_entry, right_entry) = (&pair[0], &pair[1]);
+            let left_list = &placements[left_entry.record as usize];
+            let right_list = &placements[right_entry.record as usize];
+            if left_list.is_empty() || right_list.is_empty() {
+                continue;
+            }
+            // The routed-attestation prerequisite: BOTH records carry
+            // routed touched sets (a record the routing never attributed
+            // attests nothing).
+            let (Some(left_touched), Some(right_touched)) = (
+                routed[left_entry.record as usize],
+                routed[right_entry.record as usize],
+            ) else {
+                continue;
+            };
+            // The SINGLE-SOURCE CONTINUITY test (the junction-spanning-read
+            // doctrine's own discriminator, constant-free): a consecutive
+            // record pair attests a junction only when NO single source
+            // carries BOTH records co-linearly — a read whose pair places
+            // on one source (the homologous continuation, native or any
+            // homolog copy) is within-source continuity, not a junction,
+            // and its cross-source placement mixes are placement
+            // ambiguity (measured: the routed-attested census still fired
+            // at all 38 loci — 163,810 compositions — because every
+            // multi-placed read pair carries same-source continuations
+            // AND homolog-mixed pairs; only the source-impossible pairs
+            // are junction attestations).
+            let left_offset =
+                right_entry.read_start as i64 - left_entry.read_start as i64;
+            let mut pair_attestations: Vec<(usize, u64, usize, u64, bool, bool)> =
+                Vec::new();
+            let mut single_source_continuation = false;
+            for &(left_path, left_start, left_mirrored) in left_list {
+                let left_source = source_of_path[left_path as usize];
+                if left_source == usize::MAX {
+                    continue;
+                }
+                let left_forward = left_entry.mirrored == left_mirrored;
+                let (lo, hi) =
+                    extents[left_entry.record as usize][usize::from(left_mirrored)];
+                let left_exit = if left_forward {
+                    left_start as u64 + hi as u64
+                } else {
+                    left_start as u64 + lo as u64
+                };
+                for &(right_path, right_start, right_mirrored) in right_list {
+                    if right_start as i64 - left_start as i64 != left_offset {
+                        continue;
+                    }
+                    let right_source = source_of_path[right_path as usize];
+                    if right_source == usize::MAX {
+                        continue;
+                    }
+                    if right_source == left_source {
+                        single_source_continuation = true;
+                        continue;
+                    }
+                    // The routed-attestation attribution (owner ruling
+                    // 2026-09-28): both sides' covering partitions are in
+                    // their records' routed touched sets.
+                    let Some(left_partition) =
+                        covering_partition(left_path, left_start, lo)
+                    else {
+                        continue;
+                    };
+                    if !left_touched.contains(&left_partition) {
+                        continue;
+                    }
+                    let right_forward = right_entry.mirrored == right_mirrored;
+                    let (rlo, rhi) = extents[right_entry.record as usize]
+                        [usize::from(right_mirrored)];
+                    let Some(right_partition) =
+                        covering_partition(right_path, right_start, rlo)
+                    else {
+                        continue;
+                    };
+                    if !right_touched.contains(&right_partition) {
+                        continue;
+                    }
+                    let right_entry_point = if right_forward {
+                        right_start as u64 + rlo as u64
+                    } else {
+                        right_start as u64 + rhi as u64
+                    };
+                    pair_attestations.push((
+                        left_source,
+                        left_exit,
+                        right_source,
+                        right_entry_point,
+                        left_forward,
+                        right_forward,
+                    ));
+                }
+            }
+            if single_source_continuation {
+                // Within-source continuity: the read's pair places on one
+                // source — no junction is spanned, whatever homolog-mixed
+                // placement pairs exist.
+                continue;
+            }
+            let mut seen_here: std::collections::BTreeSet<
+                (usize, u64, usize, u64, bool, bool),
+            > = std::collections::BTreeSet::new();
+            seen_here.extend(pair_attestations);
+            for key in seen_here {
+                *attested_map.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    let attested: Vec<AttestedComposition> = attested_map
+        .into_iter()
+        .map(
+            |(
+                (
+                    left_source,
+                    left_exit,
+                    right_source,
+                    right_entry,
+                    left_forward,
+                    right_forward,
+                ),
+                attesting_reads,
+            )| AttestedComposition {
+                left_source,
+                left_exit,
+                right_source,
+                right_entry,
+                left_forward,
+                right_forward,
+                attesting_reads,
+            },
+        )
+        .collect();
+    let attested_seconds = attested_started.elapsed().as_secs_f64();
+    eprintln!(
+        "[junction] crossing-attested compositions: {} (cross-source, read-attested; \
+         {attested_seconds:.1}s)",
+        attested.len()
+    );
     Ok(JunctionSpanIndex {
         placements,
         extents,
@@ -492,6 +699,7 @@ pub fn build_junction_span_index(
         record_reads,
         chains: chains.chains.clone(),
         records,
+        attested,
         stats,
     })
 }

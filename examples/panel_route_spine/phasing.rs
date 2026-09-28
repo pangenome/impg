@@ -498,6 +498,17 @@ pub(in super) fn ordered_pair_states(
     membership: &[usize],
     backbone_allele: usize,
     margin: f64,
+    // The no-waste structural retention (the DP-layer waste fix, owner
+    // bar 2026-09-28): the structurally-retained backbone class pair
+    // (retained OUTSIDE the margin) of an UNSCORABLE class contributes
+    // ONLY the backbone allele's own pair — the degenerate member
+    // cross-product is the measured 8.7M-state waste per tract locus
+    // (chrVI locus 15: a 2,944-member empty-profile class, 8,667,320
+    // candidate states, a 16,652.9 s single-threaded layer). Scorable
+    // classes keep the full legitimate member cross-product (the
+    // candidate population), so every locus whose backbone class is
+    // scorable is bit-identical by construction.
+    scorable: &[bool],
 ) -> Vec<([usize; 2], f64)> {
     let classes = locus_classes.profiles.len();
     let backbone_class = membership[backbone_allele];
@@ -508,6 +519,22 @@ pub(in super) fn ordered_pair_states(
     let mut states: Vec<([usize; 2], f64)> = Vec::new();
     for [first, second] in retained_class_pairs(sweep, classes, backbone_class, margin) {
         let loss = sweep.table[class_pair_index(first, second)];
+        // The no-waste rule: an UNSCORABLE class's pair entries carry the
+        // seeded native pair loss (the sweep seeds the native pair without
+        // the scorable check), but the class's OTHER members are the
+        // degenerate mini population — enumerating their cross-product is
+        // the measured 8.7M-state waste per tract locus (chrVI locus 15:
+        // a 2,944-member empty-profile class, 8,667,320 candidate states,
+        // a 16,652.9 s single-threaded layer — retained via the MARGIN
+        // rule there, so the structural-retention condition alone misses
+        // it). Only the backbone allele's own pair (the incumbent chain's
+        // row) is enumerated; scorable classes keep the full legitimate
+        // cross-product (so every locus whose backbone class is scorable
+        // is bit-identical by construction).
+        if first == second && first == backbone_class && !scorable[first] {
+            states.push(([backbone_allele, backbone_allele], loss));
+            continue;
+        }
         if first == second {
             let list = &members[first];
             for (offset, &left) in list.iter().enumerate() {
@@ -783,9 +810,29 @@ pub(in super) fn haploid_allele_losses(
                 });
                 continue;
             }
-            let owner = locus_classes.class_owners[class];
-            let owner_obs =
-                crate::owner_routed_obs(routed_equal, owner, component_locus_to_partition);
+            // The allele's OWN owner set (the class's set — identical by
+            // the owner-homogeneous class key — but derived per allele so
+            // the mixed-owner rows take the same branch as the stitched
+            // candidates below: the singleton's routed share, the union's
+            // record-once site map).
+            let owner_set = crate::traversal_owner_set(&ranges[allele]);
+            let owner_obs: &HashMap<FeatureKey, f64> = if owner_set.len() == 1 {
+                crate::owner_routed_obs(
+                    routed_equal,
+                    owner_set[0],
+                    component_locus_to_partition,
+                )
+            } else {
+                let key: Vec<u32> = owner_set
+                    .iter()
+                    .map(|&owner| {
+                        crate::owner_universe_partition(owner, component_locus_to_partition)
+                    })
+                    .collect();
+                owner_set_memo
+                    .entry(key.clone())
+                    .or_insert_with(|| site.site_map(key.iter().copied()))
+            };
             let profile = crate::oracle_allele_profile(
                 panel,
                 sources,
@@ -1023,10 +1070,11 @@ pub(in super) fn build_boundary_transition_draft(
     model: &ScoreModel,
     span: &JunctionSpanIndex,
     path_of_source: &[usize],
-    // Per-allele OWNING universe partitions (the window-domain extension's
-    // owner-resolved charging).
-    left_owners: &[u32],
-    right_owners: &[u32],
+    // Per-allele OWNING universe partition SETS (the window-domain
+    // extension's owner-resolved charging, generalized to the
+    // context-aware domains' mixed-owner rows).
+    left_owners: &[Vec<u32>],
+    right_owners: &[Vec<u32>],
     component_locus_to_partition: &[u32],
     ranges_left: &[genome::SpanningTraversal],
     ranges_right: &[genome::SpanningTraversal],
@@ -1200,8 +1248,9 @@ pub(in super) fn build_boundary_transition_draft(
             } else {
                 composition_pairs[composition as usize].push((dense_left as u32, dense_right as u32));
             }
-            composition_owners[composition as usize].insert(left_owners[left]);
-            composition_owners[composition as usize].insert(right_owners[right]);
+            composition_owners[composition as usize].extend(left_owners[left].iter().copied());
+            composition_owners[composition as usize]
+                .extend(right_owners[right].iter().copied());
             pair_composition[dense_left * sorted_right.len() + dense_right] = composition;
             pair_kind[dense_left * sorted_right.len() + dense_right] = u8::from(cooccurring);
         }
@@ -2923,10 +2972,10 @@ pub(in super) fn run_correlation_phasing(
             !links.is_empty(),
             "phasing boundary {boundary} lost all legal links after partials",
         )?;
-        let left_owners: Vec<u32> =
-            ranges[boundary].iter().map(crate::traversal_owner).collect();
-        let right_owners: Vec<u32> =
-            ranges[boundary + 1].iter().map(crate::traversal_owner).collect();
+        let left_owners: Vec<Vec<u32>> =
+            ranges[boundary].iter().map(crate::traversal_owner_set).collect();
+        let right_owners: Vec<Vec<u32>> =
+            ranges[boundary + 1].iter().map(crate::traversal_owner_set).collect();
         rebuild_drafts.insert(
             boundary,
             build_spine_boundary_draft(
@@ -2970,6 +3019,7 @@ pub(in super) fn run_correlation_phasing(
         folded[locus] = LocusFolded::build_backgrounds(
             &locus_classes[locus].profiles,
             &locus_classes[locus].class_owners,
+            Some(site),
             routed_equal,
             component_locus_to_partition,
             backgrounds,
@@ -2979,10 +3029,10 @@ pub(in super) fn run_correlation_phasing(
             .map(|(tables, _)| tables)?;
     }
     for (boundary, draft) in rebuild_drafts {
-        let left_owners: Vec<u32> =
-            ranges[boundary].iter().map(crate::traversal_owner).collect();
-        let right_owners: Vec<u32> =
-            ranges[boundary + 1].iter().map(crate::traversal_owner).collect();
+        let left_owners: Vec<Vec<u32>> =
+            ranges[boundary].iter().map(crate::traversal_owner_set).collect();
+        let right_owners: Vec<Vec<u32>> =
+            ranges[boundary + 1].iter().map(crate::traversal_owner_set).collect();
         boundaries[boundary] = finalize_spine_boundary(
             draft,
             &ranges[boundary],
@@ -3442,11 +3492,11 @@ pub(in super) fn run_correlation_phasing(
             .collect::<Vec<_>>()
     );
     let finalist_union_sets: Vec<HashSet<usize>> = finalist_state_sets.clone();
-    let locus_owners_all: Vec<Vec<u32>> = (0..locus_count)
+    let locus_owners_all: Vec<Vec<Vec<u32>>> = (0..locus_count)
         .map(|locus| {
             combined[locus]
                 .iter()
-                .map(crate::traversal_owner)
+                .map(crate::traversal_owner_set)
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -3651,6 +3701,7 @@ pub(in super) fn run_correlation_phasing(
     let per_locus_builds: Vec<(LocusStateTable, LocusStateTable, Vec<f64>)> = (0..locus_count)
         .into_par_iter()
         .map(|locus| {
+            let scorable = scorable_classes(&locus_classes[locus], &ranges[locus]);
             let states = ordered_pair_states(
                 locus,
                 &locus_classes[locus],
@@ -3658,6 +3709,7 @@ pub(in super) fn run_correlation_phasing(
                 &membership_slices[locus],
                 backbone_chain[locus],
                 margins[locus],
+                &scorable,
             );
             let haploid_states = ordered_haploid_states(
                 &haploid_losses[locus],
@@ -4963,23 +5015,45 @@ pub(in super) fn run_correlation_phasing(
                 model,
             )?;
         } else {
-            let owner_first = traversal_owner(&combined[locus][route_rows[locus][0]]);
-            let owner_second = traversal_owner(&combined[locus][route_rows[locus][1]]);
+            let owner_first = crate::traversal_owner_set(&combined[locus][route_rows[locus][0]]);
+            let owner_second = crate::traversal_owner_set(&combined[locus][route_rows[locus][1]]);
             if owner_first == owner_second {
+                let owner_obs = if owner_first.len() == 1 {
+                    owner_routed_obs(
+                        routed_equal,
+                        owner_first[0],
+                        component_locus_to_partition,
+                    )
+                    .clone()
+                } else {
+                    // Equal MULTI-owner sets (the context-aware domains'
+                    // rows): the shared union's record-once map (the Fix-1
+                    // form; the singleton case is its bit-identical
+                    // reduction).
+                    site.site_map(owner_first.iter().map(|&owner| {
+                        crate::owner_universe_partition(owner, component_locus_to_partition)
+                    }))
+                };
                 m1_local_total += merged_pair_loss_multiplicity(
                     &first,
                     &second,
-                    owner_routed_obs(routed_equal, owner_first, component_locus_to_partition),
+                    &owner_obs,
                     model,
                     backgrounds,
                 )?;
             } else {
                 // Fix 1 (record-once mixed-owner charging): the merged pair
                 // charge's observed side attributes each record ONCE.
-                let obs_site = site.site_map([
-                    crate::owner_universe_partition(owner_first, component_locus_to_partition),
-                    crate::owner_universe_partition(owner_second, component_locus_to_partition),
-                ]);
+                let union: Vec<u32> = owner_first
+                    .iter()
+                    .chain(owner_second.iter())
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let obs_site = site.site_map(union.iter().map(|&owner| {
+                    crate::owner_universe_partition(owner, component_locus_to_partition)
+                }));
                 m1_local_total += merged_pair_loss_multiplicity(
                     &first,
                     &second,

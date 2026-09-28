@@ -398,6 +398,118 @@ pub fn build_window_domain_extension(
     })
 }
 
+/// The D2-driven filter of a staged window-domain extension (the context-
+/// aware domains ladder, ITEM 2 rung 2): the staged rows are admitted ONLY
+/// at the D2-flagged loci (the stranded-adjacency trigger — a locus whose
+/// staged rows share a port word with its own window rows), and pure-new
+/// groups enter the component universe ONLY when they own at least one
+/// admitted row (their appended-partition ordinals re-indexed in the
+/// surviving sorted-name order, with the surviving added rows' `partition`
+/// and occurrence ids rewritten to match — the occurrence encoding is the
+/// staged form's own, so the rewrite is exact). Dual-role owners keep their
+/// axis slots. Loci where D2 does not fire keep NOTHING: their domains,
+/// territories, universes and shares are bit-identical to the pre-extension
+/// model (the gate-iii regression form).
+pub fn filter_window_domain_extension(
+    extension: &WindowDomainExtension,
+    extend_locus: &[bool],
+) -> WindowDomainExtension {
+    ensure(
+        extension.component_loci == extend_locus.len(),
+        "D2 flag cardinality mismatch",
+    )
+    .expect("staged extension locus cardinality");
+    // The staged pure-new groups that own at least one admitted row, in the
+    // staged (sorted-name) order, with their NEW ordinal block ids.
+    let mut kept_rows_by_old_ordinal: BTreeMap<usize, BTreeSet<(usize, u64, u64)>> =
+        BTreeMap::new();
+    for (locus, &admit) in extend_locus.iter().enumerate() {
+        if !admit {
+            continue;
+        }
+        for row in &extension.added[locus] {
+            if (row.partition as usize) >= extension.component_loci {
+                let ordinal = row.partition as usize - extension.component_loci;
+                kept_rows_by_old_ordinal
+                    .entry(ordinal)
+                    .or_default()
+                    .insert((row.source, row.start, row.end));
+            }
+        }
+    }
+    let mut new_ordinal: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut pure_new = Vec::new();
+    for (ordinal, (group, rows)) in extension.pure_new.iter().enumerate() {
+        if let Some(kept) = kept_rows_by_old_ordinal.get(&ordinal) {
+            new_ordinal.insert(group.as_str(), new_ordinal.len());
+            pure_new.push((
+                group.clone(),
+                rows.iter().filter(|row| kept.contains(row)).copied().collect::<Vec<_>>(),
+            ));
+        }
+    }
+    // The kept added rows per locus, owner encoding rewritten to the new
+    // ordinals (dual-role rows keep their axis-slot owner and staged id).
+    let mut added: Vec<Vec<SourceRange>> = Vec::with_capacity(extension.component_loci);
+    for (locus, &admit) in extend_locus.iter().enumerate() {
+        if !admit {
+            added.push(Vec::new());
+            continue;
+        }
+        let mut kept: Vec<SourceRange> = Vec::new();
+        for row in &extension.added[locus] {
+            if (row.partition as usize) < extension.component_loci {
+                kept.push(row.clone());
+                continue;
+            }
+            let old_ordinal = row.partition as usize - extension.component_loci;
+            let group = extension
+                .pure_new
+                .get(old_ordinal)
+                .map(|(group, _)| group.as_str())
+                .expect("staged extension pure-new ordinal");
+            let new = *new_ordinal.get(group).expect("surviving group ordinal");
+            let line_number = row
+                .occurrence
+                .checked_sub(WINDOW_DOMAIN_ADDED_OCCURRENCE_BASE)
+                .and_then(|value| value.checked_sub(old_ordinal * 10_000_000))
+                .expect("staged extension occurrence encoding");
+            kept.push(SourceRange {
+                partition: extension.component_loci + new,
+                occurrence: WINDOW_DOMAIN_ADDED_OCCURRENCE_BASE + new * 10_000_000 + line_number,
+                ..row.clone()
+            });
+        }
+        added.push(kept);
+    }
+    // Dual-role owners keep their slots; the map keeps the groups whose
+    // rows survive somewhere (the ownership report's own survivor set).
+    let mut dual_role = BTreeMap::new();
+    for (group, slot) in &extension.dual_role {
+        let survives = extension
+            .added
+            .iter()
+            .zip(extend_locus.iter())
+            .any(|(rows, &admit)| {
+                admit
+                    && rows
+                        .iter()
+                        .any(|row| row.partition as usize == *slot && row.start < row.end)
+            });
+        if survives {
+            dual_role.insert(group.clone(), *slot);
+        }
+    }
+    WindowDomainExtension {
+        component_loci: extension.component_loci,
+        pure_new,
+        dual_role,
+        added,
+        duplicate_row_identities: extension.duplicate_row_identities,
+        overlapping_row_pairs: extension.overlapping_row_pairs,
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DomainCompletionException {
     pub source: usize,

@@ -89,6 +89,18 @@ struct Options {
     /// component-family rows). The genome universe is not extended.
     #[arg(long)]
     window_domain_extension: bool,
+    /// Context-aware domains (ITEM 2, the D2-driven ladder): the staged
+    /// window-domain extension's rows are admitted ONLY at loci whose D2
+    /// signal fires (a staged row sharing a port word with the locus's own
+    /// window rows — the stranded-adjacency trigger, TRIGGER-B), together
+    /// with their observed mass (the established owner-resolved charging)
+    /// and the window-spanning same-source chains over the extended domain
+    /// (the stitched form, both ploidy tracks). Requires the spine path and
+    /// the component routing universe; subsumes --window-domain-extension
+    /// (the flag stays for the Q2 transition census; both given = the
+    /// ladder governs).
+    #[arg(long, requires = "spine")]
+    context_aware_domains: bool,
     /// Run only the routing stage (inputs -> domain -> records -> territory
     /// index -> routing -> share accumulation -> genome-universe placement
     /// pass), print the routing summary JSON (the reconciliation gate's
@@ -4145,6 +4157,23 @@ pub(crate) fn traversal_owner(traversal: &genome::SpanningTraversal) -> u32 {
     traversal.segments[0].partition as u32
 }
 
+/// A traversal's OWNING universe partition SET: the sorted distinct owners
+/// over its segments (the context-aware domains' mixed-owner rows — the
+/// stitched chains and the extended-domain splits — carry the union; a
+/// single-owner row keeps the singleton set whose first element is
+/// `traversal_owner`'s value).
+pub(crate) fn traversal_owner_set(traversal: &genome::SpanningTraversal) -> Vec<u32> {
+    let mut set: Vec<u32> = Vec::new();
+    for segment in &traversal.segments {
+        let owner = segment.partition as u32;
+        if !set.contains(&owner) {
+            set.push(owner);
+        }
+    }
+    set.sort_unstable();
+    set
+}
+
 pub(crate) fn owner_routed_obs<'a>(
     routed_equal: &'a RoutedObs,
     owner: u32,
@@ -4534,9 +4563,11 @@ struct LocusFolded {
     /// pre-extension model shares the locus's axis partition, so the values
     /// are bit-identical there).
     prepared: Vec<Vec<(u32, u64, f64)>>,
-    /// Per-class owning universe partition (component-universe encoding;
-    /// see `owner_universe_partition`).
-    owners: Vec<u32>,
+    /// Per-class owning universe partition SETS (component-universe
+    /// encoding; see `owner_universe_partition` — singleton sets are the
+    /// pre-extension model's own form; the context-aware domains' mixed-
+    /// owner classes carry the union).
+    owners: Vec<Vec<u32>>,
     /// True iff every class's rows share one owning partition — the
     /// pre-extension shape, where the per-fid loss tables and the merged
     /// single-map pair charge stay bit-identical.
@@ -4555,13 +4586,15 @@ struct LocusFolded {
 impl LocusFolded {
     fn build(
         classes: &[Profile],
-        owners: &[u32],
+        owners: &[Vec<u32>],
+        site: Option<&SiteObserved>,
         routed_equal: &RoutedObs,
         component_locus_to_partition: &[u32],
     ) -> io::Result<Self> {
         Self::build_inner(
             classes,
             owners,
+            site,
             routed_equal,
             component_locus_to_partition,
             None,
@@ -4572,7 +4605,8 @@ impl LocusFolded {
     /// charging path's local tables).
     fn build_backgrounds(
         classes: &[Profile],
-        owners: &[u32],
+        owners: &[Vec<u32>],
+        site: Option<&SiteObserved>,
         routed_equal: &RoutedObs,
         component_locus_to_partition: &[u32],
         backgrounds: &FeatureBackgrounds,
@@ -4580,6 +4614,7 @@ impl LocusFolded {
         Self::build_inner(
             classes,
             owners,
+            site,
             routed_equal,
             component_locus_to_partition,
             Some(backgrounds),
@@ -4588,7 +4623,8 @@ impl LocusFolded {
 
     fn build_inner(
         classes: &[Profile],
-        owners: &[u32],
+        owners: &[Vec<u32>],
+        site: Option<&SiteObserved>,
         routed_equal: &RoutedObs,
         component_locus_to_partition: &[u32],
         backgrounds: Option<&FeatureBackgrounds>,
@@ -4597,10 +4633,29 @@ impl LocusFolded {
             classes.len() == owners.len(),
             "folded class/owner cardinality mismatch",
         )?;
-        let single_owner = owners.iter().all(|&owner| owner == owners.first().copied().unwrap_or(0));
-        let class_obs = owners
+        let single_owner = owners.first().is_some_and(|first| {
+            owners.iter().all(|owner| owner == first)
+        });
+        // Per-class observed sides: the singleton's routed share
+        // (bit-identical to the pre-extension model) or the multi-owner
+        // union's record-once site map (the Fix-1 form).
+        let class_obs: Vec<std::borrow::Cow<'_, HashMap<FeatureKey, f64>>> = owners
             .iter()
-            .map(|&owner| owner_routed_obs(routed_equal, owner, component_locus_to_partition))
+            .map(|set| match set.as_slice() {
+                [single] => std::borrow::Cow::Borrowed(owner_routed_obs(
+                    routed_equal,
+                    *single,
+                    component_locus_to_partition,
+                )),
+                _ => {
+                    let site = site.expect(
+                        "multi-owner classes require the record-once site map builder",
+                    );
+                    std::borrow::Cow::Owned(site.site_map(set.iter().map(|&owner| {
+                        owner_universe_partition(owner, component_locus_to_partition)
+                    })))
+                }
+            })
             .collect::<Vec<_>>();
         let mut interned: HashMap<&FeatureKey, u32> = HashMap::new();
         let mut order: Vec<&FeatureKey> = Vec::new();
@@ -4819,7 +4874,7 @@ fn prepared_pair_loss_folded(
 struct LazyPairTable<'a> {
     classes: usize,
     prepared: &'a [Vec<(u32, u64, f64)>],
-    owners: &'a [u32],
+    owners: &'a [Vec<u32>],
     entries_by_fid: &'a [Option<FeatureBackgroundEntry>],
     loss_tables: &'a [Vec<f64>],
     values: Vec<f64>,
@@ -4832,7 +4887,7 @@ impl<'a> LazyPairTable<'a> {
     fn new(
         classes: usize,
         prepared: &'a [Vec<(u32, u64, f64)>],
-        owners: &'a [u32],
+        owners: &'a [Vec<u32>],
         entries_by_fid: &'a [Option<FeatureBackgroundEntry>],
         loss_tables: &'a [Vec<f64>],
         model: &'a ScoreModel,
@@ -4854,7 +4909,7 @@ impl<'a> LazyPairTable<'a> {
     fn from_full(
         classes: usize,
         prepared: &'a [Vec<(u32, u64, f64)>],
-        owners: &'a [u32],
+        owners: &'a [Vec<u32>],
         entries_by_fid: &'a [Option<FeatureBackgroundEntry>],
         loss_tables: &'a [Vec<f64>],
         values: Vec<f64>,
@@ -5563,7 +5618,10 @@ fn run_routed_dp(
         membership: Vec<usize>,
         /// Per-class owning universe partition (the window-domain
         /// extension's owner-resolved charging; the owning partition enters
-        /// the class key, so classes stay owner-homogeneous).
+        /// the class key, so classes stay owner-homogeneous). The DP path's
+        /// own admission keeps every class owner-singleton (mixed-owner
+        /// split admission is excluded there), so the folded machinery's
+        /// set form receives these as singletons.
         class_owners: Vec<u32>,
     }
     let mut locus_classes: Vec<LocusClasses> = Vec::with_capacity(locus_count);
@@ -6006,9 +6064,17 @@ fn run_routed_dp(
     let folded: Vec<LocusFolded> = (0..locus_count)
         .into_par_iter()
         .map(|locus| {
+            // The DP path's own admission keeps classes owner-singleton
+            // (mixed-owner split admission is excluded there); the folded
+            // machinery's set form receives the singletons directly.
             LocusFolded::build(
                 &locus_classes[locus].profiles,
-                &locus_classes[locus].class_owners,
+                &locus_classes[locus]
+                    .class_owners
+                    .iter()
+                    .map(|&owner| vec![owner])
+                    .collect::<Vec<_>>(),
+                None,
                 routed_equal,
                 component_locus_to_partition,
             )
@@ -8005,7 +8071,11 @@ fn main() -> io::Result<()> {
         .filter(|lane| lane.name.splitn(3, '#').nth(2) == Some(component_suffix))
         .map(|lane| lane.id)
         .collect::<BTreeSet<_>>();
-    let extension = if options.window_domain_extension {
+    ensure(
+        !options.context_aware_domains || options.routing_universe == "component",
+        "the context-aware domains ladder requires the component routing universe",
+    )?;
+    let extension = if options.window_domain_extension || options.context_aware_domains {
         Some(genome::build_window_domain_extension(
             &axis,
             &options.bed_directory,
@@ -8018,7 +8088,7 @@ fn main() -> io::Result<()> {
     };
     if let Some(extension) = &extension {
         eprintln!(
-            "[window-domain] extension: {} pure-new groups, {} dual-role groups, \
+            "[window-domain] staged extension: {} pure-new groups, {} dual-role groups, \
              {} added row pairs, duplicate row identities {}, overlapping row pairs {}",
             extension.pure_new.len(),
             extension.dual_role.len(),
@@ -8034,6 +8104,132 @@ fn main() -> io::Result<()> {
     // candidate domain is exactly Policy A's anchor BED + overlapping
     // component-family rows).
     genome::complete_forward_source_paths(&mut component_ranges, &component_sources)?;
+    // The context-aware domains ladder (ITEM 2, TRIGGER-B): the staged
+    // rows are admitted ONLY at the D2-flagged loci. The trigger is the
+    // stranded-adjacency signal measured PRE-ADMISSION at the panel's own
+    // attestation granularity — a staged row sharing a port word with the
+    // locus's own window rows (the pre-DP structural universe, a superset
+    // of the reported Stage-3.5 census's scorable attestation, so the
+    // ladder fires at every census-flagged locus). Truth-free and
+    // constant-free; loci where D2 does not fire keep NOTHING (their
+    // domains, territories, universes and shares stay bit-identical to
+    // the pre-extension model).
+    let mut context_ladder_summary: Option<serde_json::Value> = None;
+    let mut context_extend_locus: Option<Vec<bool>> = None;
+    let extension = if options.context_aware_domains {
+        let ladder_started = Instant::now();
+        let staged = extension
+            .as_ref()
+            .expect("the staged extension is built for the ladder");
+        let component_loci = staged.component_loci;
+        let census: Vec<(u64, usize, u64, bool)> = (0..component_loci)
+            .into_par_iter()
+            .map_init(
+                || {
+                    routes::Ports::open_without_global_verification(&options.routes, &graph)
+                        .expect("the ladder census opens the panel's port index")
+                },
+                |ports, locus| -> io::Result<(u64, usize, u64, bool)> {
+                    let staged_forward: Vec<&SourceRange> = staged.added[locus]
+                        .iter()
+                        .filter(|row| !row.reverse && row.start < row.end)
+                        .collect();
+                    if staged_forward.is_empty() {
+                        return Ok((0, 0, 0, false));
+                    }
+                    let mut attested: BTreeSet<Vec<u8>> = BTreeSet::new();
+                    for range in &component_ranges[locus] {
+                        if range.reverse || range.start >= range.end {
+                            continue;
+                        }
+                        for port in
+                            ports.forward_ports_inside(&graph, range.source, range.start, range.end)?
+                        {
+                            attested.insert(port.word);
+                        }
+                    }
+                    let attested_words = attested.len() as u64;
+                    let mut stranded_adjacent = 0u64;
+                    let mut fires = false;
+                    for row in staged_forward {
+                        let mut hit = false;
+                        for port in
+                            ports.forward_ports_inside(&graph, row.source, row.start, row.end)?
+                        {
+                            if attested.contains(&port.word) {
+                                hit = true;
+                                break;
+                            }
+                        }
+                        if hit {
+                            stranded_adjacent += 1;
+                            fires = true;
+                        }
+                    }
+                    Ok((attested_words, staged.added[locus].len() / 2, stranded_adjacent, fires))
+                },
+            )
+            .collect::<io::Result<Vec<_>>>()?;
+        let extend_locus: Vec<bool> = census.iter().map(|&(_, _, _, fires)| fires).collect();
+        let d2_loci: Vec<usize> = extend_locus
+            .iter()
+            .enumerate()
+            .filter(|&(_, &fires)| fires)
+            .map(|(locus, _)| locus)
+            .collect();
+        let ladder_seconds = ladder_started.elapsed().as_secs_f64();
+        eprintln!(
+            "[context-domains] D2 census: {} of {} loci flagged (stranded-adjacency \
+             trigger; {ladder_seconds:.2}s)",
+            d2_loci.len(),
+            component_loci,
+        );
+        context_ladder_summary = Some(serde_json::json!({
+            "d2_loci": d2_loci,
+            "d2_locus_count": d2_loci.len(),
+            "per_locus": (0..component_loci)
+                .map(|locus| serde_json::json!({
+                    "locus": locus,
+                    "attested_words": census[locus].0,
+                    "staged_rows": census[locus].1,
+                    "stranded_adjacent_rows": census[locus].2,
+                    "extend": census[locus].3,
+                }))
+                .collect::<Vec<_>>(),
+            "census_wall_seconds": ladder_seconds,
+        }));
+        context_extend_locus = Some(extend_locus);
+        Some(genome::filter_window_domain_extension(
+            staged,
+            &context_extend_locus
+                .as_ref()
+                .expect("the D2 flags are kept for the chain admission"),
+        ))
+    } else {
+        extension
+    };
+    if let Some(extension) = &extension {
+        eprintln!(
+            "[window-domain] extension: {} pure-new groups, {} dual-role groups, \
+             {} added row pairs, duplicate row identities {}, overlapping row pairs {}",
+            extension.pure_new.len(),
+            extension.dual_role.len(),
+            extension.added.iter().map(Vec::len).sum::<usize>() / 2,
+            extension.duplicate_row_identities,
+            extension.overlapping_row_pairs,
+        );
+    }
+    // The window's OWN rows per locus (the anchor BED + completion rows,
+    // BEFORE any extension admission) — rung 1b's composition base.
+    let window_rows_snapshot: Vec<Vec<SourceRange>> = component_ranges
+        .iter()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| !row.reverse && row.start < row.end)
+                .cloned()
+                .collect()
+        })
+        .collect();
     if let Some(extension) = &extension {
         for (locus, added) in extension.added.iter().enumerate() {
             component_ranges[locus].extend(added.iter().cloned());
@@ -8050,6 +8246,169 @@ fn main() -> io::Result<()> {
         })
         .collect::<Vec<_>>();
     genome::retain_native_endpoint_candidates(&mut traversals, target.id, target.length)?;
+    // The ladder's rung 1a: the window-spanning same-source chains over the
+    // EXTENDED domain at the D2-flagged loci (the stitched form — the
+    // structural spanning rows of multi-row sources, now on BOTH ploidy
+    // tracks; the haploid track's own augmentation dedups against these).
+    // Structurally bounded (same-source, gap-0 adjacency, window-spanning
+    // chains only); no constants.
+    if options.context_aware_domains {
+        let chains_started = Instant::now();
+        let extend_locus = context_extend_locus
+            .as_ref()
+            .expect("the D2 flags are kept for the chain admission");
+        let mut chains_per_locus = vec![0u64; traversals.len()];
+        for locus in 0..traversals.len() {
+            if !extend_locus.get(locus).copied().unwrap_or(false) {
+                continue;
+            }
+            let window = &component_axis[locus];
+            let chains = genome::stitched_candidates(
+                locus,
+                &traversals[locus],
+                window.start,
+                window.end,
+            );
+            for chain in chains {
+                if !traversals[locus]
+                    .iter()
+                    .any(|row| row.segments == chain.segments)
+                {
+                    chains_per_locus[locus] += 1;
+                    traversals[locus].push(chain);
+                }
+            }
+        }
+        genome::retain_native_endpoint_candidates(&mut traversals, target.id, target.length)?;
+        // Rung 1b: the D2 compositions' SPLIT ROWS — for every admitted
+        // stranded row sharing a port word with a window row, the
+        // [SUPERSEDED, measured dead end, kept env-gated OFF: the
+        // word-sharing cross-product generated 39,839,840 rows at p1 — the
+        // owner's crossing-record-attestation ruling (2026-09-28) replaces
+        // this form; enable only to reproduce the measurement.]
+        // 2-segment rows realizing the composition at the shared word's
+        // cuts, BOTH orientations (the junction-partial expression: the
+        // cross-source structural rows the truth's mid-locus junction
+        // partials require; the same-source spanning case is rung 1a's
+        // chains). The split identity and geometry are the split
+        // machinery's own (downstream treats them identically); bounded by
+        // the shared-word structure (only word-sharing row pairs compose;
+        // the full structural cross-product is never materialized).
+        let rung1b_started = Instant::now();
+        let rung1b_word_sharing = std::env::var("IMPG_RUNG1B_WORDSHARING").is_ok();
+        let mut rung1b_per_locus = vec![0u64; traversals.len()];
+        if rung1b_word_sharing {
+            let mut ladder_ports =
+                routes::Ports::open_without_global_verification(&options.routes, &graph)?;
+            let k = panel.syncmer_length_bp() as u64;
+            for locus in 0..traversals.len() {
+                if !extend_locus.get(locus).copied().unwrap_or(false) {
+                    continue;
+                }
+                // The window rows' port words, indexed by word (the
+                // composition base is the anchor universe — the pre-
+                // extension window rows — so the compositions are exactly
+                // the D2 stranded-adjacency pairs).
+                let mut by_word: BTreeMap<Vec<u8>, Vec<(&SourceRange, u64)>> = BTreeMap::new();
+                for range in &window_rows_snapshot[locus] {
+                    for port in ladder_ports.forward_ports_inside(
+                        &graph,
+                        range.source,
+                        range.start,
+                        range.end,
+                    )? {
+                        let cut = port.cut(k);
+                        by_word
+                            .entry(port.word)
+                            .or_default()
+                            .push((range, cut));
+                    }
+                }
+                let stranded: Vec<&SourceRange> = extension
+                    .as_ref()
+                    .expect("the filtered extension is present under the ladder")
+                    .added[locus]
+                    .iter()
+                    .filter(|row| !row.reverse && row.start < row.end)
+                    .collect();
+                let mut seen: BTreeSet<String> = BTreeSet::new();
+                for stranded_row in stranded {
+                    for port in ladder_ports.forward_ports_inside(
+                        &graph,
+                        stranded_row.source,
+                        stranded_row.start,
+                        stranded_row.end,
+                    )? {
+                        let Some(window_side) = by_word.get(&port.word) else {
+                            continue;
+                        };
+                        let stranded_cut = port.cut(k);
+                        for (window_row, window_cut) in window_side {
+                            for (left, left_cut, right, right_cut) in [
+                                (*window_row, *window_cut, stranded_row, stranded_cut),
+                                (stranded_row, stranded_cut, *window_row, *window_cut),
+                            ] {
+                                if left.source == right.source && left_cut >= right_cut {
+                                    continue;
+                                }
+                                let identity = format!(
+                                    "split:{}:{}:{}-{}@{}>{}:{}-{}@{}",
+                                    locus,
+                                    left.occurrence,
+                                    left.start,
+                                    left.end,
+                                    left_cut,
+                                    right.occurrence,
+                                    right.start,
+                                    right.end,
+                                    right_cut,
+                                );
+                                if !seen.insert(identity.clone()) {
+                                    continue;
+                                }
+                                let mut left_half = left.clone();
+                                left_half.end = left_cut;
+                                let mut right_half = right.clone();
+                                right_half.start = right_cut;
+                                rung1b_per_locus[locus] += 1;
+                                traversals[locus].push(genome::SpanningTraversal {
+                                    partition: left_half.partition,
+                                    identity,
+                                    segments: vec![left_half, right_half],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        genome::retain_native_endpoint_candidates(&mut traversals, target.id, target.length)?;
+        let rung1b_total: u64 = rung1b_per_locus.iter().sum();
+        let rung1b_seconds = rung1b_started.elapsed().as_secs_f64();
+        eprintln!(
+            "[context-domains] rung 1b: {} D2 composition split rows ({rung1b_seconds:.2}s)",
+            rung1b_total
+        );
+        if let Some(summary) = &mut context_ladder_summary {
+            summary["rung1b_per_locus"] = serde_json::to_value(rung1b_per_locus)
+                .expect("rung-1b counts serialize");
+            summary["rung1b_total"] = rung1b_total.into();
+            summary["rung1b_wall_seconds"] = rung1b_seconds.into();
+        }
+        let chains_total: u64 = chains_per_locus.iter().sum();
+        let chains_seconds = chains_started.elapsed().as_secs_f64();
+        eprintln!(
+            "[context-domains] rung 1a: {} stitched chains over the extended domain \
+             ({chains_seconds:.2}s)",
+            chains_total
+        );
+        if let Some(summary) = &mut context_ladder_summary {
+            summary["chains_per_locus"] =
+                serde_json::to_value(chains_per_locus).expect("chain counts serialize");
+            summary["chains_total"] = chains_total.into();
+            summary["chains_wall_seconds"] = chains_seconds.into();
+        }
+    }
     if locus_hi == usize::MAX {
         locus_hi = traversals.len();
     }
@@ -8856,6 +9215,120 @@ fn main() -> io::Result<()> {
             None
         };
 
+    // ---------------------------------------- the ladder's Stage-B measurement
+    // (ITEM 2, the owner's MEASURE-BEFORE-MATERIALIZE ruling): the
+    // crossing-attested compositions mapped onto the locus structure — a
+    // composition is STRANDED-ATTESTED at locus ℓ when one side's (source,
+    // point) falls inside one of ℓ's own window rows and the other side
+    // inside one of ℓ's staged rows (the stranded material the flag
+    // provided); IN-WINDOW-NOVEL when both sides fall inside ℓ's own rows
+    // (a cross-source junction inside the window — the truth's mid-locus
+    // case). Reported per locus; NOTHING is materialized or admitted by
+    // this step (the gating decision follows the measurement).
+    if options.context_aware_domains {
+        let span = span_index
+            .as_ref()
+            .expect("the ladder requires the span index");
+        let staged = extension
+            .as_ref()
+            .expect("the staged extension is present under the ladder");
+        // Per-source sorted row tables (the BED tiling is disjoint per
+        // source: one binary search per side).
+        let mut window_by_source: BTreeMap<usize, Vec<(u64, u64, usize)>> = BTreeMap::new();
+        for (locus, rows) in window_rows_snapshot.iter().enumerate() {
+            for row in rows {
+                window_by_source
+                    .entry(row.source)
+                    .or_default()
+                    .push((row.start, row.end, locus));
+            }
+        }
+        let mut staged_by_source: BTreeMap<usize, Vec<(u64, u64, usize)>> = BTreeMap::new();
+        for (locus, rows) in staged.added.iter().enumerate() {
+            for row in rows {
+                if row.reverse || row.start >= row.end {
+                    continue;
+                }
+                staged_by_source
+                    .entry(row.source)
+                    .or_default()
+                    .push((row.start, row.end, locus));
+            }
+        }
+        for table in [&mut window_by_source, &mut staged_by_source] {
+            for rows in table.values_mut() {
+                rows.sort_unstable();
+            }
+        }
+        let lookup =
+            |table: &BTreeMap<usize, Vec<(u64, u64, usize)>>, source: usize, point: u64| {
+                table
+                    .get(&source)
+                    .and_then(|rows| {
+                        let idx = rows.partition_point(|&(start, _, _)| start < point);
+                        idx.checked_sub(1).map(|i| rows[i])
+                    })
+                    .filter(|&(_, end, _)| point <= end)
+                    .map(|(_, _, locus)| locus)
+            };
+        let mut stranded_attested = vec![0u64; window_rows_snapshot.len()];
+        let mut in_window_novel = vec![0u64; window_rows_snapshot.len()];
+        let mut attested_with_reads = 0u64;
+        for composition in &span.attested {
+            attested_with_reads += composition.attesting_reads;
+            let left_window =
+                lookup(&window_by_source, composition.left_source, composition.left_exit);
+            let right_window =
+                lookup(&window_by_source, composition.right_source, composition.right_entry);
+            let left_staged =
+                lookup(&staged_by_source, composition.left_source, composition.left_exit);
+            let right_staged =
+                lookup(&staged_by_source, composition.right_source, composition.right_entry);
+            if let (Some(locus), Some(_)) | (Some(_), Some(locus)) =
+                (left_window, right_staged)
+            {
+                stranded_attested[locus] += 1;
+            } else if let (Some(locus), Some(_)) | (Some(_), Some(locus)) =
+                (left_staged, right_window)
+            {
+                stranded_attested[locus] += 1;
+            } else if let (Some(locus), Some(_)) = (left_window, right_window) {
+                if left_window == right_window {
+                    in_window_novel[locus] += 1;
+                }
+            }
+        }
+        let flagged: Vec<usize> = stranded_attested
+            .iter()
+            .enumerate()
+            .filter(|&(_, &count)| count > 0)
+            .map(|(locus, _)| locus)
+            .collect();
+        eprintln!(
+            "[context-domains] attested census: {} compositions ({} read attestations), \
+             stranded-attested loci {:?}, in-window-novel loci {:?}",
+            span.attested.len(),
+            attested_with_reads,
+            flagged,
+            in_window_novel
+                .iter()
+                .enumerate()
+                .filter(|&(_, &count)| count > 0)
+                .map(|(locus, _)| locus)
+                .collect::<Vec<_>>()
+        );
+        if let Some(summary) = &mut context_ladder_summary {
+            summary["attested_compositions"] = span.attested.len().into();
+            summary["attested_read_total"] = attested_with_reads.into();
+            summary["attested_stranded_per_locus"] =
+                serde_json::to_value(&stranded_attested).expect("serialize");
+            summary["attested_in_window_novel_per_locus"] =
+                serde_json::to_value(&in_window_novel).expect("serialize");
+            summary["attested_flagged_loci"] = serde_json::to_value(&flagged)
+                .expect("serialize");
+        }
+    }
+
     // ------------------------------------------------- standalone census mode
     if let Some(census_path) = &options.spine_census_junctions {
         let span = span_index
@@ -9092,6 +9565,7 @@ fn main() -> io::Result<()> {
                     "features": genome_background.len(),
                 },
                 "spine": spine_summary,
+                "context_domains": context_ladder_summary,
                 "routing": routing_summary,
             }))?
         );
