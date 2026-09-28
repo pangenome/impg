@@ -3019,6 +3019,175 @@ pub(in super) fn run_correlation_phasing(
     );
     rss_probe(rss, "phasing_after_rebuild")?;
 
+    // ---------------------------------------- Stage 3.5: the context-sufficiency
+    // census (ITEM 2, TRIGGER-B per the owner's ruling 2026-09-27:
+    // extension triggers on EXPRESSIBILITY, never on near-tie ambiguity —
+    // within-swing near-ties are the chain layer's designed work). Per
+    // locus, truth-free and constant-free, at the panel's own attestation
+    // granularity (the port word — the branch k-mer the panel's paths
+    // share; read-side crossing tests were measured far too permissive for
+    // a census: multi-placement record chains cross thousands of homolog
+    // row pairs per locus):
+    //  - D1 (the inside-window expressibility gap): a port word carried
+    //    by >= 2 ports across the locus's scorable forward single-segment
+    //    rows (a real panel branch inside the window: an exit and an
+    //    entry side at a legal cut order exist) that NO realized
+    //    2-segment row expresses at its interior junction.
+    //  - D2 (the stranded-adjacency gap): the window-domain extension rows
+    //    in the domain that share a port word with a window row — the
+    //    stranded-donor-row service the extension flag provided, measured
+    //    per locus (0 when the flag is off; the ladder's rung 2 admits
+    //    exactly these rows at census-flagged loci).
+    //  - the ambiguity diagnostic (reported, never driving): the local
+    //    sweep's second-best delta vs the local seam swing —
+    //    unambiguous / locally_decisive / chain_resolved_near_tie.
+    // Measurement-only in this step: nothing downstream reads the census
+    // (the extension ladder that consumes it is the next step).
+    let census_started = Instant::now();
+    let mut context_census: Vec<serde_json::Value> = Vec::with_capacity(locus_count);
+    let mut census_d1_fires: Vec<usize> = Vec::new();
+    let mut census_d2_fires: Vec<usize> = Vec::new();
+    for locus in 0..locus_count {
+        // The census universe: the SCORABLE forward single-segment rows
+        // (the hygiene (c) rule's own scorability — empty-profile and
+        // sub-read-length minis are pass-through structure, never
+        // haplotype material).
+        let scorable = scorable_classes(&locus_classes[locus], &ranges[locus]);
+        let membership = &locus_classes[locus].membership;
+        let structural: Vec<usize> = ranges[locus]
+            .iter()
+            .enumerate()
+            .filter(|(allele, traversal)| {
+                traversal.segments.len() == 1
+                    && !traversal.segments[0].reverse
+                    && traversal.segments[0].start < traversal.segments[0].end
+                    && membership.get(*allele).is_some_and(|&class| scorable[class])
+            })
+            .map(|(allele, _)| allele)
+            .collect();
+        // The attested word multiset over the window rows: word ->
+        // (allele, cut) occurrences (the port-word attestation unit).
+        let mut attested: std::collections::BTreeMap<Vec<u8>, Vec<(usize, u64)>> =
+            std::collections::BTreeMap::new();
+        for &allele in &structural {
+            let range = &ranges[locus][allele].segments[0];
+            for port in
+                ports.forward_ports_inside(graph, range.source, range.start, range.end)?
+            {
+                let cut = port.cut(*k);
+                attested.entry(port.word).or_default().push((allele, cut));
+            }
+        }
+        // The expressed words: the interior-junction port words of the
+        // realized 2-segment rows (the split machinery's left cut is the
+        // first segment's end).
+        let mut expressed: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+        let mut expressed_split_rows: u64 = 0;
+        for traversal in &ranges[locus] {
+            if traversal.segments.len() != 2 {
+                continue;
+            }
+            expressed_split_rows += 1;
+            if let Some(port) = ports.at_cut(
+                graph,
+                traversal.segments[0].source,
+                traversal.segments[0].end,
+                false,
+            )? {
+                expressed.insert(port.word);
+            }
+        }
+        let mut missing_words: Vec<serde_json::Value> = Vec::new();
+        for (word, carriers) in &attested {
+            if carriers.len() < 2 || expressed.contains(word) {
+                continue;
+            }
+            if missing_words.len() < 8 {
+                missing_words.push(serde_json::json!({
+                    "carriers": carriers.len(),
+                    "sample": carriers.iter().take(2)
+                        .map(|&(allele, cut)| (
+                            ranges[locus][allele].segments[0].source, cut))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+        }
+        let missing_structural_words = attested
+            .iter()
+            .filter(|(word, carriers)| carriers.len() >= 2 && !expressed.contains(*word))
+            .count() as u64;
+        // D2: extension rows (occurrence ids at the extension base)
+        // sharing a port word with a window row.
+        const EXTENSION_OCCURRENCE_BASE: usize = 100_000_000_000;
+        let extension_rows: Vec<usize> = ranges[locus]
+            .iter()
+            .enumerate()
+            .filter(|(_, traversal)| {
+                traversal.segments.len() == 1
+                    && !traversal.segments[0].reverse
+                    && traversal.segments[0].start < traversal.segments[0].end
+                    && traversal.segments[0].occurrence >= EXTENSION_OCCURRENCE_BASE
+            })
+            .map(|(allele, _)| allele)
+            .collect();
+        let mut stranded_adjacent: u64 = 0;
+        for &allele in &extension_rows {
+            let range = &ranges[locus][allele].segments[0];
+            let words = ports.forward_ports_inside(graph, range.source, range.start, range.end)?;
+            if words.iter().any(|port| attested.contains_key(&port.word)) {
+                stranded_adjacent += 1;
+            }
+        }
+        // The ambiguity diagnostic (reported, never driving): the local
+        // sweep's second-best delta vs the local seam swing.
+        let swing = margins[locus] - sweeps[locus].min_viable_loss;
+        let ambiguity = match sweeps[locus].second_loss {
+            None => "unambiguous",
+            Some(second) if second > swing => "locally_decisive",
+            Some(_) => "chain_resolved_near_tie",
+        };
+        let d1_fires = missing_structural_words > 0;
+        let d2_fires = stranded_adjacent > 0;
+        if d1_fires {
+            census_d1_fires.push(locus);
+        }
+        if d2_fires {
+            census_d2_fires.push(locus);
+        }
+        context_census.push(serde_json::json!({
+            "locus": locus,
+            "full_locus": *locus_offset + locus,
+            "axis_interval": [axis_slice[locus].start, axis_slice[locus].end],
+            "structural_rows": structural.len(),
+            "attested_words": attested.len(),
+            "expressed_split_rows": expressed_split_rows,
+            "missing_structural_words": missing_structural_words,
+            "missing_word_sample": missing_words,
+            "extension_rows": extension_rows.len(),
+            "stranded_adjacent_rows": stranded_adjacent,
+            "context_insufficient": d1_fires || d2_fires,
+            "ambiguity": ambiguity,
+            "second_best_delta": sweeps[locus].second_loss,
+            "local_swing": swing,
+        }));
+    }
+    let census_seconds = census_started.elapsed().as_secs_f64();
+    eprintln!(
+        "[phasing] stage3.5 context census: D1 (missing structural words) at {:?} loci, \
+         D2 (stranded adjacency) at {:?} loci ({census_seconds:.2}s)",
+        census_d1_fires, census_d2_fires
+    );
+    rss_probe(rss, "phasing_context_census")?;
+    // The census joins the stage-1 summary (measurement-only; nothing
+    // downstream reads it — the extension ladder that consumes it is the
+    // next step).
+    stage1_summary["context_census"] = serde_json::json!({
+        "per_locus": context_census,
+        "d1_fires": census_d1_fires,
+        "d2_fires": census_d2_fires,
+        "wall_seconds": census_seconds,
+    });
+
     // Same-owner stitched spanning candidates (supervisor ruling,
     // genome/stitching-omission-alignment 2026-09-24): chains of ADJACENT
     // same-source forward rows whose union contains the window's axis

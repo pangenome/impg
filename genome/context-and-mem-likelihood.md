@@ -1,0 +1,433 @@
+# context-and-mem-likelihood — the backbone guard fix, context-aware domains, the MEM-projection local likelihood
+
+Worker run 6604179d (sole writer, branch `work/genome-mem-bwt-pipeline`, committed base
+b735c66; building on top, never reverting). INCREMENTAL REPORT: updated as each step
+lands. COMMIT-PER-GATE standing policy. Owner mandate: the three measured failures are
+ONE failure — a partition typed in isolation collects insufficient haplotype
+information. Sequence: ITEM 1 (backbone guard, 9 unscored components), ITEM 2
+(context-aware domains), ITEM 3 (MEM-projection local likelihood).
+
+## 0. Context absorbed (bounded)
+
+- cosigt-pattern-genotyping.md: per-locus diplotype product; decisive measurements —
+  p1 0/15 truth-argmax with truth INEXPRESSIBLE at 14/15 (junction partials not domain
+  rows); full chrIII 14/38 argmax; genome aggregate 0.9599 acc_H over 8 components;
+  9 components blocked on the pre-existing backbone-guard failure.
+- simplification.md: the collapse's end state (STEPS 1-4b, commits 574f9b0/9f767c8/
+  5af93d0; b735c66 the COSIGT product).
+- Verified on arrival: tree at b735c66 clean (only untracked run artifacts); the 9
+  failing components (chrVI, chrX, chrIV, chrVII, chrXII, chrXIII, chrXIV, chrXV,
+  chrXVI) all exit 1 with "haploid incumbent over an unscored backbone class" —
+  identical message in the step45 lane's .err files.
+
+## 1. ITEM 1 — THE BACKBONE GUARD: ROOT CAUSE FOUND (measured), FIX LANDED IN THE TREE
+
+### 1.1 The instrumented diagnosis (run-item1diag-S288C#0#chrVI, exit 1 as expected
+— the guard still fired; the diag line is the deliverable)
+
+```
+[phasing] ITEM-1 diag: locus 15 backbone allele 3010 class 1 profile_len 0
+  members 2944 min_member_coverage 15 max_member_coverage 126 native_coverage 71
+  domain_alleles 3296 class_charge 0
+Error: "haploid incumbent over an unscored backbone class"
+```
+
+THE ROOT CAUSE, measured: chrVI locus 15 is in the divergent middle (the
+locus with 3,296 domain rows — the tract middle of the chrVI failure map).
+At that locus the native backbone's own domain row is a **71 bp, EMPTY-PROFILE
+fragment** of the target source — the window's territory collects only 71 bp
+of contiguous native source there (the homology-gap shape the owner's
+diagnosis names). Its class aggregates 2,944 members, ALL empty-profile
+fragments of 15–126 bp (< READ_LENGTH 150) — the domain's degenerate-row
+population. The class-level hygiene rule (owner decision (c): a class is
+scorable iff profile nonempty AND EVERY member covers >= L) correctly
+excludes this class from the CANDIDATE sets — but the backbone allele is
+structurally retained as the INCUMBENT chain's row, and the haploid table's
+class-level skip left IT unscored too:
+
+- the DIPLOID side already handles this correctly: the sweep seeds the
+  native pair WITHOUT the scorable check and the DP structurally retains
+  the backbone pair at every locus (finite native_pair_loss — printed in
+  every failing component's .err);
+- the HAPLOID side alone drops it: `haploid_allele_losses` skips every
+  allele of an unscorable class (+INFINITY), `ordered_haploid_states`
+  filters on finite loss, the backbone allele leaves the haploid universe,
+  the haploid incumbent is INFINITY, and the guard fires.
+
+So the 9 components' failure is EXACTLY the owner's diagnosis at the
+incumbent layer: the isolated window collects so little native material
+that its backbone row is a degenerate-shaped fragment, and the haploid
+track's candidate-hygiene (a class-level rule designed to stop degenerate
+MINIS from winning) swallowed the incumbent's structurally-retained row.
+
+### 1.2 THE FIX (in the tree; semantics within the established pattern)
+
+`haploid_allele_admissible(allele, backbone_allele, scorable_class) =
+scorable_class || allele == backbone_allele` — the haploid table scores
+the locus's native-backbone allele REGARDLESS of its class's scorability,
+the exact mirror of the diploid side's structural treatment:
+
+- every OTHER allele of the unscorable class stays INFINITY (the minis
+  still cannot become haploid winners — decision (c) intact for
+  candidates);
+- the backbone allele is a real chainable haplotype row (the native
+  source's own traversal — the same row the diploid track structurally
+  retains and selects on native stretches); scoring it carries the
+  FULL-window omission charge when it explains nothing (the honest
+  no-evidence penalty), so it cannot win where real alleles have support;
+- on every locus where the backbone class IS scorable, the new branch
+  never triggers — the 8 passing components' rows are bit-identical BY
+  CONSTRUCTION (no code path changes when scorable[class] is true).
+
+Changes: `haploid_allele_losses` takes `backbone_allele` and uses the
+admissibility helper; `ordered_haploid_states`' doc updated; the guard
+keeps its compact ITEM-1 diagnostic (fires only if a genuinely unscored
+backbone row remains — the domain-completeness bug signal). NEW unit test
+`haploid_admissibility_retains_the_backbone_allele_over_class_hygiene`
+(3/3 haploid tests green).
+
+### 1.4 GATE RESULTS — the previously-unscored components scoring under the fix
+
+| component | exit | wall | selected acc_H | acc_D | identity | switches | truth self-test |
+|---|---|---|---|---|---|---|---|
+| chrX | 0 | 2154 s | **0.9803** | 0.4902 | 0.9774 | 0/79 | 1.0000 / 0 exact |
+| chrXIII | 0 | 1830 s | **0.9559** | 0.4780 | 0.9818 | 0/100 | 1.0000 / 0 exact |
+| chrXVI | 0 | 3510 s | **0.9624** | 0.4812 | 0.9894 | 0/106 | 1.0000 / 0 exact |
+| chrXIV | 0 | 1790 s | **0.9648** | 0.4824 | 0.9976 | 0/81 | 1.0000 / 0 exact |
+| chrVI | 0 | 34048 s | **0.9988** | 0.4994 | 0.9904 | 0/28 | 1.0000 / 0 exact |
+| chrXV | 0 | 12988 s | **0.9813** | 0.4906 | 0.9890 | 0/118 | 1.0000 / 0 exact |
+| chrXII | 0 | 26696 s | **0.9561** | 0.4781 | 0.9853 | 0/118 | 1.0000 / 0 exact |
+
+## COMMIT (commit-per-gate) — ITEM 1's fix LANDED
+
+- **eb13bc9** "ITEM 1: the haploid backbone-allele structural retention fix
+  (the 9-component backbone-guard failure)" — the admissibility helper +
+  the haploid-table fix + the guard diagnostic + the NEW unit test; the
+  measured gate in the message (the 7 scored rows, the all-9-guard-proven
+  statement, the tests-green-on-committed-state). chrVII/chrIV rows land in
+  the lane's scoreboard as they complete (measurement-only). No push (the
+  owner's word required).
+
+### 1.6 INCIDENT — the 19:48Z external kill sweep, and the retry wrapper
+
+At 2026-09-27T19:48:08Z, while chrIV (5.5 h in, DP layer 92) and chrVII
+(13.2 h in, DP layer 86) were the only remaining in-flight runs, BOTH were
+killed by an external SIGTERM — the two .exit files (143) were written in
+the same wall-clock second (a single sweeping agent, not our machinery: no
+timeout wrappers remained; the box is contended by external campaigns and
+the kills were simultaneous, wall-clock-aligned, and hit the two
+longest-running processes). No kernel/OOM log entries; the box did not
+reboot. The DP has no checkpointing, so both restart from zero. Countermeasure:
+`run-component-retry.sh` — relaunches until exit 0 (up to 8 attempts,
+setsid-detached, exit-file checked) so an intermittent external kill is
+non-fatal to the lane. Both relaunched under the wrapper at ~20:00Z.
+
+Remaining in flight: chrVII (a multi-locus heavy DP patch: layers at 526k,
+4.5M, 2.03M candidates), chrIV (167 loci; an 8.42M-candidate layer at locus 91
+— the largest component). Both grinding single-threaded under done-marker
+polling.
+
+All five previously-unscored components (their step45 runs died at the guard;
+none had ever reached the DP) run to completion and score in the passing
+family (0.93–0.99 acc_H, 0 switches, truth self-test exact). chrVI — the
+instrumented-diagnosis component — posts the lane's best row (0.9988). Its
+wall is dominated by the two intrinsic 8e12-edge single-threaded stages
+(forward layer 15: 8,667,320 candidates, 16,652.9 s; the diploid posterior's
+14→15 boundary, the same shape) — the degenerate-class member-pair
+enumeration's cost, paid for the first time in the component's history.
+
+### 1.5 The chrVI run history under the fix
+
+- chrVI first attempt with the fixed binary: **the guard PASSED** — the run
+  reached the phasing DP for the first time in chrVI's history (previously it
+  died at the guard). Its divergent-middle locus 15 layer (919k prev-states;
+  the 3,296-allele tract locus) is intrinsically heavy — the single-threaded
+  dense DP layer ran >100 min; my enclosing `timeout 7200` wrapper risked
+  killing it mid-DP, and while detaching the wrapper I lost the run
+  (timeout's signal took the child). RELAUNCHED clean with NO timeout
+  wrapper (the no-artificial-time-limit rule; done-marker polling only).
+  Lost wall: ~1h50m; no data lost (nothing had landed).
+- The full example test suite on the fixed tree: **GREEN** (tests-item1a
+  exit 0, 27 test-result-ok lines, 0 FAILED; 3/3 phasing haploid tests
+  including the NEW admissibility test).
+- Layer-15 cost analysis (why it is slow, measured arithmetic): at locus 15
+  the backbone class is the degenerate empty-profile class (2,944 members;
+  the §1.1 diagnosis). The diploid DP's STRUCTURAL retention of the
+  backbone class pair (pre-existing committed semantics: `retained_class_pairs`
+  keeps [cb,cb] and `ordered_pair_states` enumerates every MEMBER pair of
+  retained class pairs) admits ~2,944^2 ≈ 8.7M ordered member-pair states at
+  that one locus — each with the seeded native pair loss (finite). The
+  layer's work = 919k prev-states x ~8.7M candidates ≈ 8e12 single-threaded
+  edges — many hours, the first time ANY component with a degenerate-class
+  backbone locus has ever reached the DP (the guard used to kill these runs
+  first). Not touched in ITEM 1 (pre-existing diploid semantics; ITEM 2's
+  context-aware domain is where the degenerate-row population itself is
+  addressed). chrVI keeps grinding under done-marker polling.
+- Next: chrVI scores (score-component.py, identical semantics), then the
+  remaining 8 components sequentially (run-rest.sh, no timeouts), then
+  score-all.py for the joined genome aggregate; COMMIT after chrVI scores
+  (tests already green on the committed state).
+
+The guard (`phasing.rs`, the native-backbone HAPLOID incumbent):
+`incumbent_haploid = Sum_locus haploid_loss_tables[locus][backbone_chain[locus]] +
+the backbone's own haploid boundary charges`; `ensure!(finite, "haploid incumbent over
+an unscored backbone class")`.
+
+Where an entry of `haploid_loss_tables` can be +INFINITY: `haploid_allele_losses`
+initializes every allele's loss to INFINITY and `continue`s (leaving INFINITY) for
+every allele whose CLASS is unscorable — the domain-hygiene rule
+(`scorable_classes`, owner decision (c)): a class is scorable iff its profile is
+nonempty AND EVERY member allele covers >= READ_LENGTH (150) of source.
+
+The measured inconsistency (all 9 components' logs confirm): the DIPLOID side
+scores the native backbone pair REGARDLESS of scorability — the sweep seeds the
+native pair without the scorable check (`exhaustive_local_sweep`'s native seeding),
+the native pair loss is finite (the .err shows the finite diploid incumbent printed),
+and the backbone pair is STRUCTURALLY RETAINED in the diploid DP universe
+(`retained_class_pairs`: "the backbone class pair is structurally retained"). The
+HAPLOID side alone drops the backbone allele: it IS in `retained_member_sets`
+(structural retention) but `ordered_haploid_states` filters by finite haploid loss,
+and the loss is INFINITY because of the class-level hygiene skip.
+
+So the failure shape: at some locus on those 9 components the native backbone
+class fails the hygiene rule (empty profile OR a sub-read-length member dragging
+the whole class), the haploid track loses the backbone allele, the haploid
+incumbent is INFINITY, and the guard fires — pre-collapse efc47df-era, present on
+all 17-component lanes.
+
+Which of the two hygiene conditions fires, and at which locus, was runtime
+state — instrumented and measured; see §1.1 (BOTH conditions fire at chrVI
+locus 15: empty profile AND sub-read-length members; native_coverage 71).
+
+## 2. ITEM 2 — CONTEXT-AWARE DOMAINS: the derivation draft (design of record;
+implementation gated behind ITEM 1's lane completion)
+
+THE MANDATE: a locus is CONTEXT-SUFFICIENT when its collected anchor set
+discriminates the viable haplotypes — a measurable property derived from the
+existing admissible-bound arithmetic, NO tuned constants; insufficient loci
+extend their window/domain until sufficient or provably exhausted; the
+honest-untypable report is a legitimate output.
+
+### 2.1 What exists (read from the code, the ingredients)
+
+- The sweep's per-locus arithmetic (all constant-free, all committed):
+  min_viable_loss, best_viable_class_pairs (the EXACT tie set), the STEP-3
+  admissible per-pair lower bounds (S_c, M_c, P_c, J_c forms), the seam
+  swing statistic (the [max−min] over viable-linked boundary charges), and
+  the margins (min_viable + swing) — the DP's own retention rule: a pair
+  whose local loss exceeds min_viable + swing CANNOT be compensated by any
+  boundary evidence. This rule IS the system's own derived definition of
+  "separated beyond what context can overturn".
+- The row-admission mechanisms: the BED partition rows (+ the completion
+  bridges), the Stage-3 split candidates (2-segment junction rows —
+  currently admitted ONLY from margin-retained pairs' alleles at fresh
+  loci), the same-owner stitched candidates (haploid track), and the
+  EXISTING window-domain extension (Policy A: the anchor group's
+  overlapping component-family rows; flag-gated,
+  `--window-domain-extension`; the p1 dev loop runs WITH it, the campaign
+  component runs WITHOUT it — a measured fact for the design).
+- The evidence window: the locus's universe partition's routed observed
+  mass (window_obs), owner-resolved per row.
+
+### 2.2 The derived sufficiency predicate (candidate; the owner rules the
+semantics before implementation)
+
+A locus is CONTEXT-SUFFICIENT iff its own anchors separate the viable pairs
+beyond every boundary compensation — formally: every viable class pair that
+is NOT in the exact best-viable tie set has loss (or STEP-3 admissible
+lower bound) EXCEEDING the margin (min_viable + swing). I.e., the locus's
+retained viable set EQUALS its exact tie set. Equivalently: the local
+posterior's credible set is everything the local anchors can honestly
+support, and no non-tie alternative survives into the chain.
+
+- Ties are profile-identity ties (the classing's own construction): the
+  anchors cannot separate them AT ANY extension that adds no anchor
+  content the tied classes differ on — the extension loop's stopping rule
+  must therefore be structural exhaustion, not a mass constant (2.4).
+- A locus failing the predicate is CONTEXT-INSUFFICIENT in one of the two
+  measured failure shapes: (i) no discriminating anchors (homology gap —
+  nothing separates the viable pairs: all losses collapse to the omission
+  floor), or (ii) the discriminating rows are absent from the domain (the
+  truth-relevant junction partials are not rows — the expressibility
+  failure; the sweep cannot separate classes it cannot spell).
+
+### 2.2b THE SUFFICIENCY CENSUS — measured on the committed runs (the predicate's
+empirical shape, before any implementation)
+
+Computed from the committed stage-1 JSON (run-p1.log / run-full.log;
+`second_best_loss` is the second viable pair's DELTA over min_viable;
+`retained_margin_local − min_viable_pair_loss` is the LOCAL seam swing — the
+DP's own per-locus compensation capacity):
+
+- **full chrIII (no window-domain extension): 36/38 CONTEXT-SUFFICIENT.**
+  The local separations (13–10,447 nats) exceed the local swings (0–191)
+  almost everywhere; the swing is 0 on the native stretches (every
+  viable-viable link is the panel-attested real junction — no compensation
+  capacity at all). The 2 flagged loci — 8 (second_delta 4.6 vs swing 132)
+  and 10 (13.4 vs 84) — are exactly the ambiguous near-tie middle.
+- **p1 slice (with the window-domain extension): 2/15 sufficient.** The
+  extension's added rows widen the boundary-link variety (swings 149–862)
+  while the separations stay small (5–80 nats) — the extended candidates
+  are exactly the retained-but-unresolved middle. The predicate flags the
+  whole dev slice as it should: the slice IS the insufficient-context
+  population.
+- Note (honest): the predicate is run-domain-sensitive — the p1 run's own
+  extension inflates its swings, flagging more loci than the same bases
+  under the full-component invocation. That sensitivity is the honest
+  semantics (more candidate rows = more compensation routes = less local
+  resolvability), not a defect.
+
+This census is the ITEM-2 targeting data: the extension ladder runs at the
+flagged loci; the sufficient loci keep their domains bit-identically.
+
+### 2.3 The extension ladder (structural units, not constants)
+
+Per insufficient locus, in order, re-sweeping and re-testing the predicate
+after each rung:
+1. JUNCTION-CROSSING ROWS: admit the 2-segment split rows at the locus's
+   own attested co-occurring adjacencies (the port-word machinery over
+   the locus's rows; the Stage-3 admission widened from margin-retained
+   pairs to the structurally-attested junctions).
+2. FLANK EXTENSION: admit the neighboring axis partitions' overlapping
+   component-family rows (the existing window-domain extension's row
+   machinery) AND their observed mass (the evidence window widens with
+   them) — one adjacent partition per side per rung, the axis interval
+   being the structural unit.
+3. COUPLED-LOCI EVIDENCE: the boundary seam charges between the locus and
+   its already-sufficient neighbors (the existing transition-cost
+   machinery) — reported as the chain's conditioning, never a local
+   substitute.
+Exhaustion: the ladder terminates when the next rung's rows are already in
+the domain (nothing new to admit — the flank has reached the component
+family's own tiling) — provably exhausted; the locus is reported
+HONESTLY UNTYPABLE-at-this-evidence (context_insufficient flag in the
+per-locus product) rather than called wrong.
+
+### 2.5 IMPLEMENTATION — the Stage-3.5 context-sufficiency census (in the
+ tree; measurement-only; the ladder is the next step)
+
+Implemented in the phasing tail (`run_correlation_phasing`, after the P3
+rebuild — the production path all dev-loop and campaign runs take): the
+per-locus TRIGGER-B census, truth-free and constant-free, at the panel's own
+attestation granularity:
+
+- D1 (inside-window expressibility): a port word carried by >= 2 ports
+  across the locus's SCORABLE forward single-segment rows (a real panel
+  branch inside the window — exit and entry sides at legal cut order
+  exist) that no realized 2-segment row expresses at its interior
+  junction. Measured dead end (documented): a READ-CROSSING attestation
+  (the span index's crossing queries over the half-row compositions) was
+  implemented and measured FAR too permissive for a census — multi-
+  placement record chains cross thousands of homolog row pairs per locus
+  (4,827–9,415 "read-attested" words/locus at p1, firing uniformly);
+  the crossing test remains the novel-junction CHARGING machinery's own
+  (where its permissiveness is correct — restricted compositions), not a
+  census trigger.
+- D2 (stranded adjacency): the window-domain extension rows in the domain
+  sharing a port word with a window row — the stranded-donor-row service
+  the flag provided (0 when the flag is off).
+- The ambiguity diagnostic (reported, never driving, per the ruling):
+  second-best delta vs local swing — unambiguous / locally_decisive /
+  chain_resolved_near_tie.
+
+In flight: the p1 (flag on) and full-chrIII (flag off) census measurements
+(context-domains-v1 lane) — the p1 census's D1/D2 shape and the full-chrIII
+D1 shape at the native stretches decide the census's final tightness before
+the ladder consumes it. The full example suite is green on the census tree
+(tests-item2b exit 0, 0 FAILED).
+
+### 2.6 THE OWNER'S RULING (2026-09-27, on the §2.4 questions — the
+implementation contract)
+
+1. WITHIN-SWING NEAR-TIES ARE SUFFICIENT — the chain layer's designed
+   work; NOT extended. (The census predicate is a per-locus AMBIGUITY
+   DIAGNOSTIC — chain_resolved_near_tie vs locally_decisive — reported,
+   never driving.)
+2. TRIGGER-B: the extension trigger is EXPRESSIBILITY — a locus whose
+   attested co-occurring panel junction compositions within its window
+   territory lack 2-segment domain rows extends (the stranded-structure
+   signal). The sufficiency loop SUBSUMES the window-domain extension
+   flag, with the gated transition: verify at one tract locus that the
+   census captures what the flag covered (the stranded donor rows),
+   then the transition census both ways before retiring the flag from
+   the component lane.
+3. context_insufficient (honest-untypable) is the DESIRED output at the
+   homology-gap loci.
+4. The tighter extension set is the right economics (inexpressible only,
+   not 13/15 of the slice).
+
+### 2.7 THE CENSUS GATE — measured (p1 + full chrIII; the measurement-only
+step LANDED)
+
+The census runs (context-domains-v1 lane, the dev-loop and campaign
+invocations verbatim; the census binary):
+
+- **p1 (flag on)**: D1 at 15/15 (~15–21k missing words/locus of ~30–38k
+  attested); D2 at 15/15 (~300–430 stranded-adjacent rows of the ~320–430
+  extension rows per locus — D2 captures 95–100% of the flag's stranded
+  rows at every locus: **the Q2 verification measured — the D2 signal
+  captures what the window-domain-extension flag covered**).
+- **full chrIII (flag off)**: D2 silent (no extension rows by
+  construction); D1 at 36/38 (every interior locus — in the phasing path
+  the split generation NEVER runs, so every attested interior branch is
+  unexpressed; expressed_split_rows = 0 everywhere — D1-as-written
+  measures the MACHINERY's current expression capability, not the
+  sample's inexpressibility; the owner's ruling on this measurement:
+  D2 governs the ladder, D1 is the completeness map, rung 1 only at
+  D2-extended loci).
+- **The chain rows are BIT-IDENTICAL under the census binary** (the
+  selection machinery untouched): p1 selected 0.58184602910041 /
+  0.42150305832240303 / 0.9567398998289838 / 2 sw / 14; full chrIII
+  selected 0.8754724697123235 / 0.44874291876625216 / 0.9754847590282636 /
+  1 sw / 37 — both byte-equal to the committed b735c66-era rows (the
+  native2 and truth reference rows identical too; score-collapse.py
+  semantics, the assessment machinery untouched).
+
+### 2.8 THE LADDER (next step; D2-driven per the ruling)
+
+Under a NEW `--context-aware-domains` flag: the extension rows are STAGED
+(not admitted) per locus; the ladder admits them ONLY at D2-flagged loci
+(+ their observed mass via the established owner-resolved charging),
+generates the split rows realizing the D2 compositions over the extended
+domain (rung 1 at extended loci only), rebuilds the affected loci through
+the P3 machinery (classing, folded tables, boundaries, sweeps, margins),
+re-censuses, and loops until D2 quiets (context-sufficient) or the staged
+rows are exhausted (context_insufficient — the honest-untypable report).
+THE GUARD (the owner's escalation path, documented): if the ITEM-2 gate
+fails at a locus where D2 did not fire but the truth's inexpressibility is
+real, rung-2's trigger widens to the evidence-local form of D1 (branch
+words with actual local observed support); if deriving that needs a
+support threshold, STOP — the owner rules.
+
+Gates (as specified): the p1 per-locus inexpressible count (14/15)
+collapses; the truth pair enters the domain at the divergent-middle loci;
+the chain row unchanged-or-better; then full chrIII; then the transition
+census both ways (flag vs loop-only) before retiring the flag from the
+component lane.
+
+(The original three semantics questions, ruled in §2.6:)
+
+1. Is "retained viable set == exact tie set" the right sufficiency
+   predicate, or should near-ties WITHIN the swing (the chrIII native
+   stretches' 18–53-nat near-ties) count as sufficient (the chain
+   resolves them) with only SUB-SWING ambiguity delegating upward?
+2. Does the campaign lane adopt the window-domain extension unconditionally
+   (currently the p1 dev loop runs with it, the components without), or
+   does the sufficiency loop subsume it entirely?
+3. The homology-gap loci (the divergent middle's zero-coverage windows):
+   expected honestly-untypable under the predicate — confirm the
+   per-locus product's context_insufficient report is the desired output
+   there (the mandate says it is legitimate, not a failure).
+
+The ladder and predicate contain NO tuned constants: the margin, swing,
+ties, bounds and the axis partition are all existing derived/structural
+quantities. Implementation begins at the p1 slice after ITEM 1's commit.
+
+## In flight (ITEM 1 lane)
+
+- chrVI: past the DP (layer 15: 8,667,320 candidates, 16,652.9 s — the
+  degenerate-class member-pair enumeration, pre-existing structural
+  retention) and the haploid posterior (locus-15 haploid layer: 50 states,
+  0.0 s — the fix's design point); currently in the diploid posterior.
+- chrVII: DP layer 85/117.
+- Remaining queue: chrXII, chrXV, chrIV (run-rest.sh).
