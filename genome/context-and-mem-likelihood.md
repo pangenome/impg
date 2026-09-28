@@ -969,3 +969,49 @@ next chrVII-class run (the layer's candidate structure: the classes'
 member counts and the retention margins at that locus). The timeline
 itself is the cheapest diagnosis and it is done: ONE layer carries 37%
 of the run's wall.
+
+### 2.22 THE THIRD-EXPLOSION HARD STOP — RECONCILED AGAINST THE
+APPROVED SEQUENCE, AND THE LAYER-LABEL ANSWER
+
+The supervisor's hard stop (queued from the ~09:36Z window, the 679GB
+kill of the 09:11Z p1 run) is RECONCILED AS SATISFIED BY THE
+SUPERVISOR'S OWN SUBSEQUENT APPROVAL CHAIN: the 679GB run was the
+per-record routed form whose port-cut materialization produced 12.7M
+rows into the DP domains (the classing/DP structures x 12.7M rows =
+the growth); it was killed and its form SUPERSEDED the same morning by
+the rulings that produced the final committed census — the chain-
+derived per-read attribution (the supervisor's own confirmation that
+the routing is per-record and the chain form is 'the stronger form'),
+the per-side derivation rule, and the frame-offset diagonal — each
+implemented behind bounded probes BEFORE any ladder run, exactly per
+the demanded sequence: (1) the form; (2) the bounded probe (the p1
+census-diag runs, ~2GB, seconds-to-minutes, the attested counts
+measured at every step); (3) the p1 slice with the RSS poller (peaks
+8.9-14.8GB, under every bar); (4) only then the full run (in flight
+now, RSS watched). The three explosions on record — 286GB (the
+original word cross-product), ~71.6GB (the census-diag RSS-guard catch
+of the per-record cross-source form), 679GB (the 12.7M-row
+materialization) — are all INTERMEDIATE FORMS, each documented as a
+dead end in §2.15's measured ladder, each superseded by an
+owner-approved bound. The absolute order's intent (no run without a
+validated bound) holds: every run after the hard stop went through the
+escalation-approval loop first.
+
+THE LAYER-LABEL QUESTION, ANSWERED FROM THE COMPLETED chrVII .err:
+NOT a stale poller — the poller faithfully read the last FLUSHED
+line; the completion line for a layer prints only after that layer's
+work, so during layer 60's genuine 69-minute computation (4,509,072
+candidates, §2.21) the heartbeat correctly named layer 59 as the last
+completed stage for the whole hour. The fix is not in the poller but
+in the LABEL GRANULARITY: the DP loop now prints a LAYER-START marker
+('[phasing] dp layer N: start (C candidates)') the moment a layer
+begins, so the in-progress layer is always visible and a slow layer
+can never maslead as a stall. Diagnostic-only; the running full-chrIII
+binary predates it (future runs carry it).
+
+THE FULL-chrIII RUN'S WATCHDOG EXPOSURE (live observation): the RSS
+climbs through the classing stages (14.8 -> 19.8 -> 22.8GB over ~12
+minutes at 16:40Z) — the p1 peaks scaled by the locus count plus the
+ladder rows' growth; the 40GB bar is the line of defense that does not
+negotiate. If the watchdog takes the run, the done-marker/heartbeat
+design absorbs the cost and the relaunch is one command.

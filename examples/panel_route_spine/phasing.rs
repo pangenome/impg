@@ -1630,6 +1630,14 @@ pub(in super) fn run_phasing_chain_dp(
     }
     for locus in 1..locus_count {
         rss.checkpoint("phasing_dp_hot_loop")?;
+        // THE LAYER-START MARKER (the stage-label fix, supervisor
+        // 2026-09-28): the completion line prints only after the layer's
+        // work, so a slow layer (measured: chrVII layer 60 ran 69 minutes)
+        // left the heartbeat naming the PREVIOUS layer for its whole
+        // duration — a genuine stage, mislabeled. The start marker makes
+        // the in-progress layer visible the moment it begins; the
+        // poller's last-flushed line is then always current.
+        eprintln!("[phasing] dp layer {locus}: start ({} candidates)", per_locus_tables[locus].rows.len());
         let previous = layers.last().expect("layer");
         let table = &per_locus_tables[locus];
         let boundary = &boundary_costs[locus - 1];
