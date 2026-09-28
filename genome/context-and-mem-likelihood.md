@@ -894,3 +894,39 @@ some loci with the SAME CALLS (acc unchanged) and more exact material
 the bit-identity condition named the chain row; the identity metric is
 an auxiliary field — the shift is an improvement, but it is the
 owner's call whether the incumbent-path stability clause covers it.
+
+### 2.20 THE GATE ACCEPTED — THE RECORDING CONDITION AND THE
+CONFIRMATION RUN
+
+ITEM 2's p1 GATE ACCEPTED (supervisor, 2026-09-28): 11/15 with the
+only remaining falses being exactly the four seam loci — the gate
+passed in its final honest form. THE IDENTITY SHIFT ACCEPTED as the
+honest consequence, with the anatomy recorded (per the condition; the
+previous per-locus artifacts were overwritten by the successive gate
+runs, so the call stability rests on the aggregate bit-identity):
+- p1 locus 3 (full 15): selected allele 872 — the merged row
+  [128754,156413)@9602 (the maximal form; the split 2-chain
+  stitch:15:9602:138845-151830 was the previously available form).
+- p1 locus 8 (full 20): selected allele 1153 — the maximal chain
+  (the merged row [156413,172876) chaining through [172876,178652)
+  and [178652,190177); the previously available form was the split
+  4-chain stitch:20:9602:166355-190177).
+- The CALLS: acc_H 0.58184602910041 and acc_D 0.42150305832240303
+  bit-identical across all nine runs including the maximal-row pass —
+  the same calls, more exact material; the identity improvement
+  0.9567 -> 0.9733 is the merged rows' spelled sequence agreeing with
+  the truth's local material more exactly.
+
+THE CONFIRMATION RUN (the full chromosome with the ladder) LAUNCHED:
+run-full-ladder.sh (the full-chrIII invocation + --context-aware-
+domains + the stage-timer heartbeat); the watchdog contract holds
+(cpu_s + stage markers + RSS verified ticking).
+
+THE OWNER'S ADDED CONTEXT (recorded for planning): the DIPLOID
+validation is queued after ITEM 3 (a two-route mosaic with mixed
+dosage — sample-side, no new syng; per-partition accuracy under
+best-case 2x2 assignment + switches separately; honest-untypable
+brackets scale with the breakpoint count — counted separately from
+decision errors). The chrVII layer-60 degeneracy diagnosis is owed
+with the full-chrIII work (bounds-at-construction; which row class
+escapes the retention machinery).
