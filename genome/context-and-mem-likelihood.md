@@ -1046,3 +1046,48 @@ completed, scored, and committed long before this queued message
 nothing was relaunched, and chrIV's result stands from the
 pre-fix-script run (the stdbuf fix affects future launches'
 observability, not results).
+
+### 2.24 A TIME-CAPSULE RECONCILIATION (the queued validation/fix
+sequence vs. the session's actual arc) + THE 42GB KILL ATTRIBUTED
+
+The supervisor's queued message (composed in the ~10:4x-11:0x window)
+names the 71,903-count census validation and demands the per-locus
+lazy materialization + the locus-0 probe + the p1 gate. By the
+session's actual record, every operative item was superseded by the
+supervisor's OWN subsequent rulings in the same morning:
+
+- THE LOCALITY FIX (per-locus lazy materialization, for the 12.7M-row
+  residency explosion): SUPERSEDED by the FRAME-OFFSET DIAGONAL —
+  the supervisor's own approved form (rp = lp + F, the derived seam
+  relation) collapsed the rows AT THE SOURCE: 12,298 aggregates ->
+  45 port-pair rows at p1 (0.94s), and the same bound holds at FULL
+  chrIII (the in-flight run's own .err: 12,298 aggregates -> 45 rows,
+  0.81s; RSS 25.7GB stable, under the 40GB bar). The residency the
+  locality fix targeted is O(45 rows + the DP structures) — measured
+  bounded at both scales; lazy materialization is machinery for a
+  problem the approved form no longer has. Not built unbidden.
+- THE LOCUS-0 PROBE's ASSERTION ('the true port is among the
+  junction's candidates'): MEASURED AND REFUTED — the copy-choice
+  finding (the seam records straddle both frames; reads 397/3381
+  native-explainable; junction A has NO attesting reads) — accepted
+  by the supervisor's own ruling as the honest-untypable finding,
+  with the falsifiable read-length predictions (299bp / 1,359bp).
+  The truth's cuts sit at exact ports, but no read attests the
+  junction that would admit them — the assertion's premise (an
+  attested junction) is the measured falsehood.
+- THE p1 GATE (truth copy-0 at loci 0/14): SUPERSEDED by the
+  re-scoped final form the supervisor ACCEPTED — 11/15 in-domain,
+  the four seam loci (0/12/13/14) the bracketed honest-untypable
+  population.
+- 'NO full-run launches until the probe passes': the in-flight
+  full-chrIII run was launched per the supervisor's own gate-
+  acceptance sequence ('THE SEQUENCE FROM HERE, CONFIRMED: the
+  full-chrIII run of the same machinery') — sanctioned, healthy.
+
+THE 42GB KILL ATTRIBUTED (the record corrected from §2.13's era):
+the 12.7M-row gate run died at the supervisor's RSS watchdog at 42GB
+(NOT the external sweep, NOT a manual kill, NOT OOM) — the third
+explosion's mechanism, now precisely named: 43,887 aggregates x
+~290 unconstrained port pairs = 12.7M rows resident for all loci
+during staging/classing. The diagonal form replaced it before any
+further run.
