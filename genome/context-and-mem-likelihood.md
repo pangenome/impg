@@ -1291,3 +1291,67 @@ collapse the degenerate layers' wall times; if the transition
 structure still carries the cost, the interface level needs the
 owner's ruling on the marginal-mass semantics (drop with a documented
 over-approximation like the bound prune, or share-only).
+
+### 2.29 THE THREE-LEVEL DIRECTIVE'S MEASUREMENT — AND THE
+DOMINATION (LEVEL 3) IMPLEMENTED, GATED, AND CHECKED
+
+THE LEVELS-1+2 INSUFFICIENCY MEASUREMENT (from the live chrIII re-run,
+unambiguous at layer 14): the seeded + block-floored binary ran 592.1s
+vs the pre-seed 537.4s — suffix_pruned 0 AND block_pruned 0 — despite
+the incumbent seed firing massively (diploid 380,955 -> 42,381, a 9x
+tighter bound). THE DEGENERATE POPULATION IS COST-ADMISSIBLE: the
+states are cheap, their bounds sit far below ANY cost-based incumbent.
+No cost bound can exclude what is genuinely cheap — the exclusion must
+be STRUCTURAL. The composition harvest (the same run): chrIII locus
+14's 1,215,551 diploid states spread over hundreds of viable class
+pairs with 12-18-member top classes — a broad admissible pair space,
+not one giant class.
+
+THE OWNER'S RULING (a): the DOMINATION form, with the marginal
+over-approximation shipped as a documented product bound. THE ARC'S
+SUMMARY SENTENCE, recorded as directed: BOUNDS EXCLUDE THE EXPENSIVE;
+STRUCTURE EXCLUDES THE REDUNDANT.
+
+THE IMPLEMENTATION (phasing.rs): per layer, the kept states group by
+their boundary INTERFACE — and the gate itself exposed the first
+design flaw: row-INDEX keys are injective per allele pair, so the
+groups were singletons and nothing fired on chrMT; the correct key is
+the charge CONTENT (the boundary cost rows interned by value —
+homologous alleles with identical charges share every downstream
+candidate's cost). Within a content-group only the best-scoring member
+can be any next state's predecessor-argmin; the rest drop with the
+retention bound factor (the sum of exp(-(score difference)) over the
+dropped, ties contributing exp(0)=1 each — the dropped members'
+backward values are IDENTICAL within the group, so each marginal is
+exactly exp(-delta) x the dominator's).
+
+THE GATE (chrMT, all three conditions):
+- ROW-IDENTITY: 0.9922837527537212 / 0 switches / 13 boundaries —
+  bit-identical, with the DP wall 0.41s -> 0.05s and the state
+  collapse 93-99% per layer (12,104 -> 12 kept at layer 1's groups:
+  312 -> 12; 12,104 -> 870 groups; 15,976 -> 749; 18,848 -> 167 —
+  interface ratios 14:1 to 113:1, the speed endgame's measurement).
+- THE ONE-LOCUS MARGINAL CHECK (with IMPG_DP_DOMINATION=off as the
+  comparator): at three loci the ml-mass-fraction shift sits inside
+  the documented bound (locus 1: shift 0.49999 <= 0.92308; locus 2:
+  0.000023 <= 0.99813; locus 3: 0.25 <= 0.98702) — and the data shows
+  the semantics honestly: at tied loci the marginals now concentrate
+  on the dominator instead of splitting among provably-equivalent
+  alternatives (locus 1's factor 12 = 13 tied pairs), which is exactly
+  'exact over the retained space, with the bound stated'.
+- THE PRODUCT BOUND SHIPS: the genotype calls' chain_layer now
+  carries interface_domination per locus — the dropped counts, the
+  retained-bound factors, and the interface counts for both tracks.
+
+(c) PARKED (one paragraph, as directed): exactly-degenerate classes
+(identical profiles AND identical boundary behavior, dedup to a
+representative with multiplicity-preserved mass) would be answer-
+preserving for the marginals too — the dropped members' marginals are
+exactly reconstructible — but it needs the boundary-cost structure
+measured and does not block the finish line.
+
+THE chrIII CONFIRMATION RUN: the in-flight re-run (seeded binary) is
+past layer 21; when it lands it carries the confirmation gate + the
+composition harvest; the DOMINATION does not ride it (it launched
+before the ruling) — the whole-genome rerun after the gate carries all
+three levels.

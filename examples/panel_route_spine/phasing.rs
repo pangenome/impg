@@ -1550,6 +1550,23 @@ pub(in super) struct PhasingDpOutcome {
     pub(in super) candidate_counts: Vec<usize>,
     pub(in super) transitions: Vec<u64>,
     pub(in super) suffix_pruned: Vec<u64>,
+    /// THE INTERFACE-DOMINATED RETENTION BOUND (owner ruling (a),
+    /// 2026-09-28 — the product-honesty condition): per locus, the
+    /// number of kept states dropped as interface-dominated (a worse-
+    /// scoring member of a group sharing the boundary rows through
+    /// which every downstream candidate is strictly worse) and the
+    /// retained-mass bound factor — the dropped members' marginal
+    /// contributions sum to at most (the factor) x (the dominator's
+    /// mass), the same documented-over-approximation form the bound
+    /// prune ships. 'Exact over the retained space, with the bound
+    /// stated' — the marginal fields carry these; no silent shifts.
+    pub(in super) domination_dropped: Vec<u64>,
+    pub(in super) domination_bound_factor: Vec<f64>,
+    /// Per layer: the DISTINCT INTERFACES among the kept states vs the
+    /// kept state count — the transition-collapse ratio (the speed
+    /// endgame's measurement: transitions computed per (distinct
+    /// interface, next state) instead of per (state, next state)).
+    pub(in super) interface_counts: Vec<u64>,
     pub(in super) wall_seconds: f64,
     /// The full DP layers (score, pair, pred, own local loss per surviving
     /// state) — the k-best finalist enumeration's input.
@@ -1566,6 +1583,9 @@ impl Clone for PhasingDpOutcome {
             candidate_counts: self.candidate_counts.clone(),
             transitions: self.transitions.clone(),
             suffix_pruned: self.suffix_pruned.clone(),
+            domination_dropped: self.domination_dropped.clone(),
+            domination_bound_factor: self.domination_bound_factor.clone(),
+            interface_counts: self.interface_counts.clone(),
             wall_seconds: self.wall_seconds,
             layers: self.layers.clone(),
         }
@@ -1666,6 +1686,130 @@ pub(in super) fn run_phasing_chain_dp(
     let mut candidate_counts = Vec::with_capacity(locus_count);
     let mut transitions = Vec::with_capacity(locus_count);
     let mut suffix_pruned = Vec::with_capacity(locus_count);
+    let mut domination_dropped: Vec<u64> = Vec::with_capacity(locus_count);
+    let mut domination_bound_factor: Vec<f64> = Vec::with_capacity(locus_count);
+    let mut interface_counts: Vec<u64> = Vec::with_capacity(locus_count);
+
+    // THE INTERFACE-DOMINATION REDUCTION (owner ruling (a), 2026-09-28):
+    // within a group of kept states sharing the same boundary interface —
+    // the cost-matrix rows their pair alleles index on the NEXT boundary —
+    // every downstream candidate is (this state's score) + (the shared
+    // rows' charges) + (the next state's terms): the group's best-scoring
+    // member strictly dominates the rest for every transition, so the
+    // dominated members can never be a predecessor-argmin and are dropped
+    // from the layer. The chain result is provably intact; the dropped
+    // members' marginal contributions are bounded — their backward
+    // values are IDENTICAL within the group (the same rows), so each
+    // dropped member's marginal is exactly exp(-(score difference)) x
+    // the dominator's — and the per-locus bound factor (the sum of
+    // those exponentials) ships with the marginals: exact over the
+    // retained space, with the bound stated. The LAST locus's layer is
+    // never reduced (no next boundary, no transitions out).
+    // The one-locus empirical check's toggle (owner ruling (a),
+    // condition 2): IMPG_DP_DOMINATION=off runs the DP without the
+    // interface-domination reduction so one locus's marginals can be
+    // compared WITH vs WITHOUT and the shift verified inside the
+    // documented bound — once, in the gate commit.
+    static DOMINATION_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let domination_off = *DOMINATION_OFF.get_or_init(|| {
+        std::env::var("IMPG_DP_DOMINATION").is_ok_and(|value| value == "off")
+    });
+    let dominate_layer = |haploid: bool,
+                          boundary: Option<&BoundaryTransitionCosts>,
+                          layer: Vec<PhState>|
+     -> (Vec<PhState>, u64, f64, u64) {
+        if domination_off {
+            return (layer, 0, 0.0, 0);
+        }
+        let Some(boundary) = boundary else {
+            return (layer, 0, 0.0, 0);
+        };
+        // THE INTERFACE IS THE CHARGE CONTENT, NOT THE ROW INDEX (the
+        // gate itself exposed the flaw: row indices are injective per
+        // allele pair, so index-keyed groups are singletons and the
+        // domination never fires). The owner's 'terminal features at
+        // the seam': states whose boundary charge ROWS are equal
+        // content-wise — homologous alleles with identical charges —
+        // share every downstream candidate's cost. Intern the rows by
+        // content once per boundary; the interface key is the interned
+        // content ids.
+        let right_count = boundary.right_count as usize;
+        let row_count = if right_count > 0 {
+            let matrix = if haploid {
+                &boundary.cost_haploid
+            } else {
+                &boundary.cost
+            };
+            matrix.len() / right_count
+        } else {
+            0
+        };
+        let mut row_intern: std::collections::BTreeMap<Vec<u64>, usize> =
+            std::collections::BTreeMap::new();
+        let row_content_id: Vec<usize> = (0..row_count)
+            .map(|row| {
+                let matrix = if haploid {
+                    &boundary.cost_haploid
+                } else {
+                    &boundary.cost
+                };
+                let bits: Vec<u64> = matrix[row * right_count..(row + 1) * right_count]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect();
+                let next = row_intern.len();
+                *row_intern.entry(bits).or_insert(next)
+            })
+            .collect();
+        let interface_of = |pair: [usize; 2]| -> (usize, usize) {
+            if haploid {
+                (row_content_id[boundary.left_index[pair[0]] as usize], 0)
+            } else {
+                (
+                    row_content_id[boundary.left_index[pair[0]] as usize],
+                    row_content_id[boundary.left_index[pair[1]] as usize],
+                )
+            }
+        };
+        // Group the members by interface.
+        let mut groups: std::collections::BTreeMap<(usize, usize), Vec<&PhState>> =
+            std::collections::BTreeMap::new();
+        for state in &layer {
+            groups.entry(interface_of(state.pair)).or_default().push(state);
+        }
+        let interfaces = groups.len() as u64;
+        let mut kept: Vec<PhState> = Vec::with_capacity(interfaces as usize);
+        let mut dropped = 0u64;
+        let mut factor_sum = 0.0f64;
+        for (_, members) in groups {
+            let best = members
+                .iter()
+                .map(|state| state.score)
+                .fold(f64::INFINITY, f64::min);
+            let mut kept_one = false;
+            for state in members {
+                if !kept_one && state.score == best {
+                    kept.push(PhState {
+                        score: state.score,
+                        pair: state.pair,
+                        pred: state.pred,
+                        loss: state.loss,
+                    });
+                    kept_one = true;
+                } else {
+                    dropped += 1;
+                    // The retention bound: the dropped member's marginal
+                    // contribution is at most exp(-(score difference)) x
+                    // the dominator's (their backward values are
+                    // identical within the group; ties contribute
+                    // exp(0) = 1 each).
+                    let delta = state.score - best;
+                    factor_sum += (-(delta)).exp();
+                }
+            }
+        }
+        (kept, dropped, factor_sum, interfaces)
+    };
 
     // ---- initial layer.
     {
@@ -1682,6 +1826,16 @@ pub(in super) fn run_phasing_chain_dp(
             }
         }
         ensure(!layer.is_empty(), "phasing DP initial layer is empty")?;
+        let next_boundary = boundary_costs.first().map(|boundary| boundary);
+        let (layer, dropped, factor, interfaces) =
+            dominate_layer(haploid, next_boundary, layer);
+        domination_dropped.push(dropped);
+        domination_bound_factor.push(factor);
+        interface_counts.push(if interfaces > 0 {
+            interfaces
+        } else {
+            layer.len() as u64
+        });
         state_counts.push(layer.len());
         candidate_counts.push(table.rows.len());
         transitions.push(table.rows.len() as u64);
@@ -1826,6 +1980,19 @@ pub(in super) fn run_phasing_chain_dp(
             block_pruned,
             started.elapsed().as_secs_f64()
         );
+        // THE DOMINATION REDUCTION (ruling (a)): reduce this layer by
+        // interface domination against the NEXT boundary (the last
+        // locus has none and is never reduced).
+        let next_boundary = boundary_costs.get(locus).map(|boundary| boundary);
+        let (layer, dropped, factor, interfaces) =
+            dominate_layer(haploid, next_boundary, layer);
+        domination_dropped.push(dropped);
+        domination_bound_factor.push(factor);
+        interface_counts.push(if interfaces > 0 {
+            interfaces
+        } else {
+            layer.len() as u64
+        });
         state_counts.push(layer.len());
         candidate_counts.push(states.len());
         transitions.push(previous.len() as u64 * states.len() as u64);
@@ -1861,6 +2028,9 @@ pub(in super) fn run_phasing_chain_dp(
     route.reverse();
     ensure(route.len() == locus_count, "phasing DP backtrack arity")?;
     Ok(PhasingDpOutcome {
+        domination_dropped,
+        domination_bound_factor,
+        interface_counts,
         route,
         best_score: best,
         tie_count: tied.len(),
@@ -4052,10 +4222,16 @@ pub(in super) fn run_correlation_phasing(
         rss,
     )?;
     eprintln!(
-        "[phasing] diploid DP done: best {:.2}, states {:?}, {:.2}s",
+        "[phasing] diploid DP done: best {:.2}, states {:?}, {:.2}s; \
+         interface-dominated: dropped {:?} (bound factors {:?}), \
+         interfaces {:?} of states {:?}",
         dp_diploid.best_score,
         dp_diploid.state_counts,
-        dp_diploid.wall_seconds
+        dp_diploid.wall_seconds,
+        dp_diploid.domination_dropped,
+        dp_diploid.domination_bound_factor,
+        dp_diploid.interface_counts,
+        dp_diploid.state_counts
     );
     rss_probe(rss, "phasing_after_dp_diploid")?;
     let dp_haploid = run_phasing_chain_dp(
@@ -4068,10 +4244,16 @@ pub(in super) fn run_correlation_phasing(
         rss,
     )?;
     eprintln!(
-        "[phasing] haploid DP done: best {:.2}, states {:?}, {:.2}s",
+        "[phasing] haploid DP done: best {:.2}, states {:?}, {:.2}s; \
+         interface-dominated: dropped {:?} (bound factors {:?}), \
+         interfaces {:?} of states {:?}",
         dp_haploid.best_score,
         dp_haploid.state_counts,
-        dp_haploid.wall_seconds
+        dp_haploid.wall_seconds,
+        dp_haploid.domination_dropped,
+        dp_haploid.domination_bound_factor,
+        dp_haploid.interface_counts,
+        dp_haploid.state_counts
     );
     rss_probe(rss, "phasing_after_dp_haploid")?;
 
@@ -6300,6 +6482,31 @@ pub(in super) fn run_correlation_phasing(
                     ],
                     "diploid_marginals": diploid_chain,
                     "haploid_marginals": haploid_chain,
+                    // THE INTERFACE-DOMINATION RETENTION BOUND (owner
+                    // ruling (a), 2026-09-28, condition 1 — the
+                    // product-honesty field): the marginal machinery is
+                    // exact over the retained space; the states dropped
+                    // as interface-dominated contribute at most
+                    // (retained_bound_factor) x (their dominator's
+                    // mass) — the same documented-over-approximation
+                    // form the bound prune ships. 'Exact over the
+                    // retained space, with the bound stated.'
+                    "interface_domination": {
+                        "diploid_dropped": dp_diploid.domination_dropped.get(locus).copied().unwrap_or(0),
+                        "diploid_retained_bound_factor": dp_diploid
+                            .domination_bound_factor
+                            .get(locus)
+                            .copied()
+                            .unwrap_or(0.0),
+                        "diploid_interfaces": dp_diploid.interface_counts.get(locus).copied().unwrap_or(0),
+                        "haploid_dropped": dp_haploid.domination_dropped.get(locus).copied().unwrap_or(0),
+                        "haploid_retained_bound_factor": dp_haploid
+                            .domination_bound_factor
+                            .get(locus)
+                            .copied()
+                            .unwrap_or(0.0),
+                        "haploid_interfaces": dp_haploid.interface_counts.get(locus).copied().unwrap_or(0),
+                    },
                 },
                 "truth": {
                     "pair_alleles": [
