@@ -1188,3 +1188,56 @@ the per-layer timing measures whether the state collapse alone
 collapses the WALL TIME (the chrIV finding says the transition
 structure may carry the cost — the gate for part 2 is the layer's
 wall time, not its candidate count).
+
+### 2.27 THE OWNER DOCTRINE CORRECTION — BOUNDS-AT-CONSTRUCTION, AND
+THE HYPOTHESIS CHECKS MEASURED
+
+THE REFRAME (owner doctrine, via the supervisor): the problem is NOT
+'add pruning to the DP' — the 4.5M states were CONSTRUCTED AND
+EVALUATED while almost certainly false: degenerate pointless work by
+the standing rule NEVER ENUMERATE WHAT YOU HAVE ALREADY EXCLUDED.
+The fix is BOUNDS-AT-CONSTRUCTION: a candidate state whose closed-
+form admissible bound cannot reach the incumbent is never built, never
+scored — the same answer-preserving bound arithmetic the sweep applies
+to class pairs (92-99.99% provably pruned before scoring) must gate
+the DP layer's state generation. The suffix_pruned counter reading
+zero on every layer of every run means the gate is ABSENT, not merely
+unfired. The greedy-chain seed (§2.26) is thereby a bound-TIGHTENING
+complement — it makes the construction gate's incumbent tight — but
+it is not itself the owner's fix; the construction gate is.
+
+THE HYPOTHESIS CHECKS, MEASURED BEFORE IMPLEMENTING:
+- THE LEGACY-FLAG HYPOTHESIS REFUTED: chrVII's lane invocation
+  carries NO --window-domain-extension and NO --context-aware-domains
+  (verified in the lane script) — the 4.5M states come from the
+  NATIVE class structure itself, not the extension/ladder rows. The
+  flag-retirement case is NOT made by chrVII's degeneracy.
+- THE CLASS-STRUCTURE HYPOTHESIS SUPPORTED: the degenerate loci are
+  CLASS-DENSE — chrVII locus 60 carries 959 classes (5.3x the
+  chromosome mean of 180.1); locus 85 (the 2.03M-candidate layer)
+  carries 1,073 (the chromosome max). The 4,509,072 states ~ 2,124^2:
+  the member cross-product of retained class pairs with ~2,124-member
+  degenerate classes. The dp-table composition print names the exact
+  classes on the instrumented re-run.
+
+THE BAR (owner, recorded): chrVI's 940s was the BEST result, not an
+acceptable one — seconds-class is the expectation; after the layer-60
+fix, chrVII AND chrVI get re-run against the same bar; every stage in
+the pre-DP ~7,000s gets the same treatment (profile from the .err,
+then bound at construction); no stage is excused by the box again.
+THE BOX CORRECTION (supervisor): the box is IDLE (load ~4 on 256
+cores) — the earlier contention claims were stale and are retracted;
+launch calculus changes accordingly.
+
+THE CONSTRUCTION-GATE DESIGN (for the composition harvest, then
+implementation): the per-state admissible bound = the prefix floors
+(sum of the earlier loci's sweep floors + the boundary floors) + the
+in-boundary floor + the state's own loss + suffix_from_locus[locus],
+compared against the incumbent (native or greedy-seeded, whichever is
+tighter) with the existing eps and strict inequality — all computable
+before the DP's evaluation; the state table is filtered at
+construction so the DP's transition sweep never sees excluded states.
+The in-flight full-chrIII run (the confirmation gate) runs the
+pre-seed binary — its DP grinds the degenerate layers at full cost
+(cumulative 2,653.7s at layer 20); per the supervisor's order it lands
+solo before any relaunch.
