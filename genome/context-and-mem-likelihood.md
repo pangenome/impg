@@ -523,10 +523,38 @@ truth's exact pieces. THE FORK (escalated to the owner):
     any expressible structure become the honest-untypable population
     (the mandate's own legitimate output);
 (c) the owner's alternative.
-The next measurement either way: the cut-gap distribution (the distance
-from each attested cut to the nearest port position and to the truth's
-junction — at one tract locus) — it decides whether (a) can pass the gate
-or the gate's inexpressible count becomes the honest-untypable count.
+### 2.12 THE CUT-GAP MEASUREMENT — the fork DECIDED (empirically, for the
+owner's option (a))
+
+The probe (examples/port_cut_probe.rs, diagnostic-only): for each of the
+8 truth interior junctions, the panel port index queried at the truth's
+EXACT junction cuts:
+
+- **The two CROSS-SOURCE mosaic junctions (junction 0 at p1 locus 0 and
+  junction 7 at p1 locus 14) sit at EXACT PORT POSITIONS ON BOTH SIDES**
+  (9564@113881 + 9602@102922; 9602@207743 + 9564@227721 — exact_at_cut
+  TRUE, ~280-300 ports within the +-2 kb window each) — the mosaic's
+  breakpoints were constructed at panel branch contexts, so the PORT-CUT
+  MATERIALIZATION (the owner's option (a), with the intersected-bracket
+  bound) can express the truth's pieces EXACTLY at those loci — the gate
+  CAN pass there.
+- The six SAME-SOURCE boundary junctions (9602-9602, all
+  owner_boundary: true) are NOT at ports (nearest ~2 kb away) — they are
+  the same-source spanning structures rung 1a (the stitched chains) and
+  the completion-bridge machinery express, not port cuts.
+
+THE NEXT IMPLEMENTATION (specified, not yet built): materialize, at each
+read-attested junction, the port cuts INSIDE THE INTERSECTED BRACKET (the
+owner's derived bound: each crossing read brackets the true cut between
+its last left-anchor position and its first right-anchor position; the
+intersection over reads tightens to the minimal bracket; the candidates
+are the ports inside it — constant-free). Expected shape from the
+measurement: the two cross-source junctions' brackets contain their exact
+ports; the same-source structures route through rung 1a. Then the ITEM-2
+gates (truth copy-0 in domain — the 8/15 + the two port-exact loci =
+10/15 with the same-source cases left to the stitched/completion forms;
+the chain row unchanged-or-better), then full chrIII, then the transition
+census.
 
 ### 2.8 THE LADDER's original D2-driven form (superseded by §2.9's ruling)
 
