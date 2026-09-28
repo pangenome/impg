@@ -930,3 +930,42 @@ brackets scale with the breakpoint count — counted separately from
 decision errors). The chrVII layer-60 degeneracy diagnosis is owed
 with the full-chrIII work (bounds-at-construction; which row class
 escapes the retention machinery).
+
+### 2.21 THE RECORD CORRECTED — WHAT THE SWEEPS ACTUALLY KILL — AND
+THE chrVII LAYER-60 TIMELINE PROFILE
+
+THE RECORD CORRECTION (the supervisor's retraction, 2026-09-28): the
+~08:22Z sweep kill hit the POLLER SCRIPTS, not the run — the
+instrumented chrVII main (pid 2928753, setsid-detached) ran through
+uninterrupted to completion (exit 0, wall 11,226s, scored 0.9762 / 0
+switches). THE LESSON, corrected both ways: the heartbeat gap was the
+pollers' death misread as the run's; and the sweep's actual kill
+surface is wrappers and pollers, not the setsid-detached mains. (A
+second-order artifact worth recording: my own `pgrep -f` lane checks
+can self-match the pattern in my own shell command line — the
+duplicate-check in this pass initially reported a live chrVII from a
+self-match; direct `ps` enumeration is the reliable form. No duplicate
+ever existed; no relaunch was needed.)
+
+THE chrVII LAYER TIMELINE (the completed run's .err, the named-stage
+diagnosis the owner's bar requires — profiled, not ground through):
+
+    layer 55:   158,064 candidates  (16.4s)
+    layer 58:   224,779            (17.1s)
+    layer 59:   526,192            (135.5s)   <- 2.3x candidates, 8x time
+    layer 60: 4,509,072            (4,131.2s) <- 69 min = 37% of the run
+    layer 61:     1,784            (instant)
+    layer 62:    47,308            (instant)
+
+suffix_pruned = 0 at EVERY layer. Layer 60's anatomy: states ==
+candidates (the HAPLOID candidate enumeration itself explodes — a
+DISTINCT class from the no-waste fix's diploid member cross-product,
+which paired 8.6M states at chrVI's locus 15; here the candidates
+themselves are 4.5M at one layer, and the suffix pruning never fires).
+THE NAMED DIAGNOSIS ITEM (owed with the full-chrIII work, per the
+standing steer): which row class escapes the retention machinery at
+layer 60 — bounds-at-construction, measured on a bounded slice of the
+next chrVII-class run (the layer's candidate structure: the classes'
+member counts and the retention margins at that locus). The timeline
+itself is the cheapest diagnosis and it is done: ONE layer carries 37%
+of the run's wall.
