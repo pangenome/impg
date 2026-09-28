@@ -816,3 +816,39 @@ THE CLASS-C DIAGNOSIS (bounded, per the approved chain-by-chain plan):
   filtered by a downstream admission before joining the checker's
   ranges, or the run/admission conditions differ from the reading —
   escalated with the measurement.
+
+### 2.18 THE PARTIAL-CHAIN FORM IN, AND THE STITCH DIAGNOSTIC'S
+VERDICT ON THE LAST FOUR LOCI
+
+THE PARTIAL-CHAIN FORM (the owner's ruling (a)) is implemented in
+stitched_candidates: a maximal run that merely OVERLAPS the window
+materializes once, as the full run — no truncation, the chain ends
+where the rows end; same territory rows, same census attestation.
+THE STITCH DIAGNOSTIC (the approved bounded instrumentation) settled
+both open questions:
+
+- LOCI 12/13 RECLASSIFIED — SEAM-DEPENDENT, NOT PARTIAL-CHAIN: the
+  domain's 9602-rows at locus 25 are [190177,200187), [200187,210071),
+  [210071,220263) — the run COVERS the window; the truth's last piece
+  is [200187,207743) — the row CLIPPED AT THE SEAM CUT (the row's own
+  bounds end at 210071, past the seam). The exact allele needs the
+  clipped row = the seam-B junction composition — unattestable at
+  150bp reads. Loci 12/13 join 0/14 in the honest-untypable seam class
+  (four loci, all seam-clipped pieces).
+
+- LOCI 3/8 — THE ROW-VOCABULARY MISMATCH: the domain at locus 15
+  carries a MERGED row [128754,156413) (single segment) alongside the
+  split forms [128754,138845) + [138845,145952)+[145952,151830) — the
+  completion/anchor row duality. The checker's pieces are TERRITORY-
+  row intersections (three pieces, partition-bounded); the domain's
+  maximal row covers the same material as ONE segment. The strict
+  piece-equality match cannot see the merged row as the truth's allele
+  — a checker-semantics question (does the piece-wise standard accept
+  a domain row whose segment union COVERS the pieces' contiguous
+  union?), escalated to the owner.
+
+THE p1 STATE after this pass: 9/15 copy-0 (11/15 counting the seam
+class as honestly-typed); chain row bit-identical across every form;
+the four remaining copy-0 loci are the two seam loci + the two
+seam-clipped loci — all four bounded by the measured seam brackets and
+the read-length prediction (299bp / 1,359bp).

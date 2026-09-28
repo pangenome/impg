@@ -950,10 +950,29 @@ pub fn stitched_candidates(
             if !boundary {
                 continue;
             }
+            // THE STITCH DIAGNOSTIC (the class-C bounded measurement,
+            // supervisor-approved 2026-09-28): the run structure, the
+            // window, and the admission decisions — measured, no
+            // guessing.
+            eprintln!(
+                "[stitch] locus {} source {} window [{},{}): run {:?}",
+                locus,
+                source,
+                window_start,
+                window_end,
+                &ordered[run_start..position]
+            );
             // Every contiguous subchain [a..=b] of the run whose union
             // [ordered[a].0, ordered[b].1) contains the window.
+            let mut covering_built = false;
             for first in run_start..position {
                 if ordered[first].0 > window_start {
+                    eprintln!(
+                        "[stitch]   first {} starts {} > window_start {} — break",
+                        first,
+                        ordered[first].0,
+                        window_start
+                    );
                     break;
                 }
                 let mut covering = None;
@@ -963,7 +982,10 @@ pub fn stitched_candidates(
                         break;
                     }
                 }
-                let Some(last) = covering else { continue };
+                let Some(last) = covering else {
+                    eprintln!("[stitch]   first {}: no covering last", first);
+                    continue;
+                };
                 for end in last..position {
                     // A single row is already a candidate — only chains of
                     // two or more segments are stitched forms.
@@ -978,8 +1000,53 @@ pub fn stitched_candidates(
                         ordered[end].1,
                         end - first + 1,
                     );
+                    covering_built = true;
                     result.entry(identity.clone()).or_insert_with(|| {
                         let segments: Vec<SourceRange> = ordered[first..=end]
+                            .iter()
+                            .map(|key| intervals[key].clone())
+                            .collect();
+                        let partition = segments[0].partition;
+                        SpanningTraversal {
+                            partition,
+                            identity,
+                            segments,
+                        }
+                    });
+                }
+            }
+            // THE PARTIAL-CHAIN FORM (the owner's ruling (a),
+            // 2026-09-28): a maximal run that merely OVERLAPS the
+            // window materializes ONCE, as the FULL RUN — no arbitrary
+            // truncation, the chain ends where the rows end. A window
+            // where the mosaic carries less material than the reference
+            // (a deletion) has the partial chain AS its allele — a
+            // deletion is a real allele, and the data prices extent
+            // (the observed profile shows the deletion's absence; a
+            // full-window row predicting material there loses to the
+            // partial row; a degenerate sliver leaves observed reads
+            // unexplained). Same territory rows as the covering chains;
+            // the pieces' junctions attest per the census.
+            if !covering_built && position - run_start >= 2 {
+                let overlaps = ordered[run_start..position].iter().any(|&(lo, hi)| {
+                    lo < window_end && hi > window_start
+                });
+                if overlaps {
+                    let identity = format!(
+                        "stitch:{}:{}:{}-{}:{}",
+                        locus,
+                        source,
+                        ordered[run_start].0,
+                        ordered[position - 1].1,
+                        position - run_start,
+                    );
+                    eprintln!(
+                        "[stitch]   partial-chain form: run overlaps but does not \
+                         contain — building the full run {}",
+                        identity
+                    );
+                    result.entry(identity.clone()).or_insert_with(|| {
+                        let segments: Vec<SourceRange> = ordered[run_start..position]
                             .iter()
                             .map(|key| intervals[key].clone())
                             .collect();
@@ -7911,9 +7978,15 @@ mod tests {
         // even though source 6's row is adjacent-compatible by coordinates.
         let single = vec![row(2, 5, 100, 200, false), row(4, 6, 200, 300, false)];
         assert!(stitched_candidates(9, &single, 150, 250).is_empty());
-        // Gapped same-source rows are not stitched here (a gap would be a
-        // novel junction, outside this step's admission).
-        assert!(stitched_candidates(9, &rows, 150, 400).is_empty());
+        // Gapped same-source rows: the run does not CONTAIN the window,
+        // but under the partial-chain form (owner ruling 2026-09-28 — a
+        // window where the mosaic carries less material than the
+        // reference has the partial chain as its allele; a deletion is a
+        // real allele) a multi-row run that merely OVERLAPS the window
+        // materializes once, as the full run. The rows here: source 5's
+        // [100,200)+[200,300) run vs the window [150,400) — union
+        // [100,300) overlaps — the full run is admitted.
+        assert_eq!(stitched_candidates(9, &rows, 150, 400).len(), 1);
         // Reverse rows never stitch.
         assert!(stitched_candidates(9, &[row(2, 5, 100, 200, true), row(3, 5, 200, 300, true)], 150, 250).is_empty());
     }
