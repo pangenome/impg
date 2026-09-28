@@ -383,7 +383,68 @@ invocations verbatim; the census binary):
   native2 and truth reference rows identical too; score-collapse.py
   semantics, the assessment machinery untouched).
 
-### 2.8 THE LADDER (next step; D2-driven per the ruling)
+### 2.9 THE LADDER — implemented, measured to TWO dead ends, and the
+owner's FINAL RULING on the expressibility bound (the handoff state)
+
+The ladder is IMPLEMENTED in the UNCOMMITTED tree (everything behind
+`--context-aware-domains`, default OFF — the production paths, the campaign
+lane, and the committed state untouched; the committed state stands at
+4ef0ec0 = the census):
+
+- The flag + the STAGED extension (built unconditionally under the flag,
+  admitted only per the D2 filter — `filter_window_domain_extension` with
+  pure-new group ordinal re-indexing).
+- Rung 1a: the window-spanning same-source chains over the extended domain
+  at flagged loci (6,475 at p1).
+- The class_owners generalization to owner SETS (the mixed-owner rows'
+  record-once charging — the Fix-1 form; singleton classes reduce
+  bit-identically), arity-N interior junctions in the classing, and the
+  owner-set forms through the boundary/rescore machinery (the sibling
+  continuation's work, completed and fixed to compile by this run).
+- Rung 1b (this run's addition): the cross-source D2 composition split
+  rows — the junction-partial expression.
+
+MEASURED DEAD ENDS (both principled, both documented per the guardrail):
+1. The pre-admission D2 census (staged rows sharing a port word with ANY
+   window row) flags 38/38 full-component loci — the word-sharing
+   attestation measures PANEL HOMOLOGY DENSITY, not sample junction
+   evidence (the owner's reclassification: a diagnostic, like D1's
+   completeness map, never the driver).
+2. Rung 1b as word-sharing-bounded materialization generated 39,839,840
+   split rows at p1 (269.8 s, RSS 21 GiB and climbing — killed). The
+   port-word cross-product is dense: every stranded row shares many words
+   with many window rows.
+
+THE OWNER'S FINAL RULING (2026-09-28, the expressibility bound): the
+CROSSING-RECORD ATTESTATION — a junction-partial composition (A-half,
+B-half, cut) materializes IFF an observed span-index record places anchor
+mass on BOTH halves across the junction, with the halves from different
+sources. Existence, not magnitude — constant-free and tight by construction
+(the bound is crossing-records x per-side placement ambiguity, not
+word-sharing density; the truth's 2 chrIII breakpoints have spanning
+records at 10x coverage BY CONSTRUCTION). TWO RUNGS inside 1b: (i) the
+same-path co-occurrence compositions (panel-attested, cheap), (ii) the
+crossing-attested novel compositions (the mosaic's junctions — the gate's
+target). MEASURE BEFORE MATERIALIZE: count the crossing-attested
+compositions at p1 and full chrIII FIRST; if the count still explodes
+(placement ambiguity x crossing records), escalate with that measurement
+— no thresholds. The extension ladder's DRIVER becomes the
+attested-composition set (loci with attested compositions extend; the
+sample has FEW junctions — chrIII: 2 breakpoints — so few loci extend:
+the economics restored). The Q2 verification obligation transfers to the
+attested set at the tract loci.
+
+NEXT STEP (the handoff): implement the crossing-attestation census as a
+span-index method (the record-driven enumeration: per read chain, per
+consecutive record pair, per placement pair on different sources — the
+composition set derived FROM the records, never the word cross-product),
+measure at p1 + full chrIII, then wire the two-rung materialization behind
+the same flag. The gates unchanged: the p1 inexpressible count (14/15)
+collapses; the truth pair enters the domain; the chain row
+unchanged-or-better; then full chrIII; then the transition census both
+ways.
+
+### 2.8 THE LADDER's original D2-driven form (superseded by §2.9's ruling)
 
 Under a NEW `--context-aware-domains` flag: the extension rows are STAGED
 (not admitted) per locus; the ladder admits them ONLY at D2-flagged loci
