@@ -4639,6 +4639,23 @@ pub(super) fn run_local_first_spine(
     // Per copy: the domain allele index whose segments exactly equal the
     // truth's merged local pieces (None when the truth piece is not a
     // parent-domain allele — junction partials, merged multi-row spans).
+    // THE EXISTENTIAL IN-DOMAIN PREDICATE (owner ruling (b) 2026-09-28):
+    // the truth is in-domain at a locus for a copy iff THERE EXISTS a
+    // single domain row or a stitched chain whose material is exactly
+    // the truth's local material there, read through the DOMAIN'S OWN
+    // ROW VOCABULARY: (1) every candidate segment lies within a truth
+    // route segment (same source, forward, bounds inside the route
+    // segment — the route's own ends clip the vocabulary, so a row
+    // extending past a mosaic seam is never an expression of the
+    // truth's local material), and (2) every truth piece (the
+    // traversal-local territory intersection, class-B filtered) is
+    // covered by some candidate segment (the PIECE-WISE standard —
+    // the domain's merged/completion row covers what the territory
+    // rows split, and the split chains cover what they chain; ANY
+    // exact expression qualifies, no canonical form). A piece with no
+    // covering domain row is the loud uncovered-material failure class
+    // (reported by the truth-piece diagnostic), never a silent drop.
+    let truth_route_pair = [&truth_route_a, &truth_route_b];
     let truth_pair_alleles = |locus: usize| -> [Option<usize>; 2] {
         let mut found: [Option<usize>; 2] = [None, None];
         for copy in 0..2 {
@@ -4650,17 +4667,30 @@ pub(super) fn run_local_first_spine(
                 continue;
             }
             found[copy] = ranges[locus].iter().position(|traversal| {
-                traversal.segments.len() == pieces.len()
-                    && traversal
-                        .segments
-                        .iter()
-                        .zip(pieces.iter())
-                        .all(|(segment, piece)| {
-                            segment.source == piece.0
-                                && segment.start == piece.1
-                                && segment.end == piece.2
-                                && segment.reverse == piece.3
+                // (1) Every candidate segment lies within a route segment.
+                let within_route = traversal.segments.iter().all(|segment| {
+                    !segment.reverse
+                        && truth_route_pair[copy].segments.iter().any(|route_segment| {
+                            route_segment.source == segment.source
+                                && !route_segment.reverse
+                                && route_segment.start <= segment.start
+                                && segment.end <= route_segment.end
                         })
+                });
+                if !within_route {
+                    return false;
+                }
+                // (2) Every truth piece is covered by some candidate
+                // segment (piece-wise).
+                pieces.iter().all(|&(source, lo, hi, reverse)| {
+                    !reverse
+                        && traversal.segments.iter().any(|segment| {
+                            segment.source == source
+                                && !segment.reverse
+                                && segment.start <= lo
+                                && hi <= segment.end
+                        })
+                })
             });
         }
         found

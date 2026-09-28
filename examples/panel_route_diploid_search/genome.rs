@@ -941,7 +941,32 @@ pub fn stitched_candidates(
     }
     let mut result = BTreeMap::<String, SpanningTraversal>::new();
     for (source, intervals) in by_source {
-        let ordered: Vec<(u64, u64)> = intervals.keys().copied().collect();
+        // THE MAXIMAL-ROW FILTER (the row-duality resolution, owner
+        // ruling (b) 2026-09-28): the domain carries both merged/
+        // completion rows and their split forms for the same material;
+        // in coordinate order the split forms INTERLEAVE and break the
+        // adjacency runs, so the chain over the merged form never
+        // builds (measured at locus 20: [156413,172876) never chains
+        // with [172876,178652) because [166355,172843) sorts between
+        // them). A split row whose material is CONTAINED in another
+        // row of the same source is a redundant EXPRESSION — its
+        // features are identical to the containing row's — so chains
+        // build over the maximal rows only; non-contained splits keep
+        // chaining exactly as before.
+        let contained: std::collections::BTreeSet<(u64, u64)> = intervals
+            .keys()
+            .filter(|&&(lo, hi)| {
+                intervals
+                    .keys()
+                    .any(|&(lo2, hi2)| (lo2, hi2) != (lo, hi) && lo2 <= lo && hi <= hi2)
+            })
+            .copied()
+            .collect();
+        let ordered: Vec<(u64, u64)> = intervals
+            .keys()
+            .copied()
+            .filter(|key| !contained.contains(key))
+            .collect();
         // Maximal runs of adjacent rows (left end == right start).
         let mut run_start = 0usize;
         for position in 1..=ordered.len() {

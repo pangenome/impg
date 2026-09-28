@@ -852,3 +852,45 @@ class as honestly-typed); chain row bit-identical across every form;
 the four remaining copy-0 loci are the two seam loci + the two
 seam-clipped loci — all four bounded by the measured seam brackets and
 the read-length prediction (299bp / 1,359bp).
+
+### 2.19 THE EXISTENTIAL CHECKER (owner ruling (b)) — THE p1 GATE'S
+FINAL HONEST FORM
+
+THE EXISTENTIAL IN-DOMAIN PREDICATE: the truth is in-domain iff THERE
+EXISTS a single domain row or a stitched chain whose material is
+exactly the truth's local material, read through the domain's own row
+vocabulary: (1) every candidate segment lies WITHIN a truth route
+segment (same source, forward, bounds inside — the route's own ends
+clip the vocabulary, so a row extending past a mosaic seam is never an
+expression), and (2) every truth piece (the traversal-local territory
+intersection) is covered by some candidate segment (the PIECE-WISE
+standard — the merged/completion row covers what the territory rows
+split; ANY exact expression qualifies; uncovered pieces are the loud
+uncovered-material class).
+
+THE MAXIMAL-ROW FILTER (the row-duality resolution): the domain's
+merged and split forms for the same material interleave in coordinate
+order and break the adjacency runs (measured at locus 20:
+[156413,172876) never chained with [172876,178652) because
+[166355,172843) sorted between them); chains now build over the
+MAXIMAL rows — a contained split is a redundant expression (identical
+features), and non-contained splits chain exactly as before.
+
+THE RESULT (p1, the gate's expected final form): **truth copy-0
+IN-DOMAIN 11/15, both copies 11/15 — the ONLY remaining falses are
+EXACTLY the four seam loci (0, 12, 13, 14)**, all with seam-clipped
+pieces, all bounded by the measured brackets (173bp / 1,233bp
+conserved gaps) and the falsifiable read-length predictions (299bp /
+1,359bp). The domain expresses everything the evidence can attest;
+what remains inexpressible is provably unattestable at this read
+length.
+
+THE ROW SHIFT (reported, not tuned away): the scoreboard fields are
+bit-identical (acc_H 0.58184602910041, acc_D 0.42150305832240303, 2
+switches, 14 boundaries) but the selected row's IDENTITY metric moved
+0.9567398998289838 -> 0.9733139172863219 — the maximal chains won
+some loci with the SAME CALLS (acc unchanged) and more exact material
+(the merged rows match the truth's material more exactly). Escalated:
+the bit-identity condition named the chain row; the identity metric is
+an auxiliary field — the shift is an improvement, but it is the
+owner's call whether the incumbent-path stability clause covers it.
