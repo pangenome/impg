@@ -1714,13 +1714,48 @@ pub(in super) fn run_phasing_chain_dp(
         } else {
             None
         };
+        // THE BLOCK FLOORS (owner directive level 2, 2026-09-28): whole
+        // blocks of transitions are bounded away before any per-pair
+        // work when the block's floor cannot beat the incumbent — the
+        // same answer-preserving closed-form bound the sweep applies to
+        // class pairs, applied at the (previous state, next group)
+        // granularity: the floor = the previous state's score + its
+        // first-row charge to the group's column + the second row's
+        // GLOBAL MINIMUM (a valid lower bound on every second charge)
+        // + the group's minimum local loss + the suffix bound. A block
+        // above the incumbent lies in no chain at or below it — the
+        // per-pair work is provably pointless and is skipped entirely.
+        let cost_matrix = if haploid {
+            &boundary.cost_haploid
+        } else {
+            &boundary.cost
+        };
+        let row_count = if right_count > 0 {
+            cost_matrix.len() / right_count
+        } else {
+            0
+        };
+        let row_mins: Vec<f64> = (0..row_count)
+            .map(|row| {
+                cost_matrix[row * right_count..(row + 1) * right_count]
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect();
+        let group_min_loss: Vec<f64> = (0..right_count)
+            .map(|column| {
+                let start = group_start[column];
+                let end = group_start[column + 1];
+                states[start..end]
+                    .iter()
+                    .map(|&(_, _, _, loss)| loss)
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect();
+        let mut block_pruned = 0u64;
         for (previous_index, state) in previous.iter().enumerate() {
             let base = state.score;
-            let cost_matrix = if haploid {
-                &boundary.cost_haploid
-            } else {
-                &boundary.cost
-            };
             let row_first = &cost_matrix
                 [boundary.left_index[state.pair[0]] as usize * right_count..][..right_count];
             let row_second: &[f64] = match (&zero_row, haploid) {
@@ -1730,11 +1765,25 @@ pub(in super) fn run_phasing_chain_dp(
                         [..right_count]
                 }
             };
+            let row_second_min = if haploid {
+                0.0f64
+            } else {
+                row_mins[boundary.left_index[state.pair[1]] as usize]
+            };
             // Per first-column group: hoist the constant prefix, then stream
-            // the group's ascending second columns.
+            // the group's ascending second columns. THE BLOCK FLOOR first:
+            // skip the whole group when its floor cannot reach the
+            // incumbent.
             for column in 0..right_count {
                 let start = group_start[column];
                 if start == group_start[column + 1] {
+                    continue;
+                }
+                if base + row_first[column] + row_second_min + group_min_loss[column]
+                    + suffix_from_locus[locus]
+                    > incumbent + BOUND_PRUNE_EPSILON
+                {
+                    block_pruned += (group_start[column + 1] - start) as u64;
                     continue;
                 }
                 let prefix = base + row_first[column];
@@ -1770,10 +1819,11 @@ pub(in super) fn run_phasing_chain_dp(
         }
         ensure(!layer.is_empty(), "phasing DP layer {locus} is empty")?;
         eprintln!(
-            "[phasing] dp layer {locus}: candidates {} states {} suffix_pruned {} ({:.1}s)",
+            "[phasing] dp layer {locus}: candidates {} states {} suffix_pruned {} block_pruned {} ({:.1}s)",
             states.len(),
             layer.len(),
             pruned,
+            block_pruned,
             started.elapsed().as_secs_f64()
         );
         state_counts.push(layer.len());

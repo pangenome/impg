@@ -1241,3 +1241,53 @@ The in-flight full-chrIII run (the confirmation gate) runs the
 pre-seed binary — its DP grinds the degenerate layers at full cost
 (cumulative 2,653.7s at layer 20); per the supervisor's order it lands
 solo before any relaunch.
+
+### 2.28 THE OWNER'S THREE-LEVEL DIRECTIVE — LEVEL 2 (BLOCK FLOORS)
+IMPLEMENTED AND GATED
+
+The owner approved the transition-computation collapse as the third
+level of the doctrine: (1) the incumbent seed prunes states (done,
+§2.26); (2) BLOCK FLOORS on transition pairs; (3) INTERFACE-BASED
+cost computation. The endgame: bounded states per locus, transitions
+only among bound-admitted pairs, costs read off interfaces — the
+phasing semantics intact, only the waste dead; the per-component
+target ~100-300s.
+
+LEVEL 2 IMPLEMENTED (code-side while the full-chrIII run stays solo,
+per the directive): at each (previous state, next group) block, the
+floor = the previous state's score + its first-row charge to the
+group's column + the second row's GLOBAL MINIMUM (a valid lower bound
+on every second charge) + the group's minimum local loss + the suffix
+bound; a block above the incumbent is skipped ENTIRELY — no per-pair
+work — the same answer-preserving closed-form bound the sweep applies
+to class pairs. The row minima and group minima are precomputed once
+per layer (O(matrix) and O(states)). The block_pruned counter joins
+the layer line.
+
+THE chrMT GATE (level 2): the row BIT-IDENTICAL again —
+0.9922837527537212 / 0 switches / 13 boundaries, wall 179s — with the
+block floors firing (layer 2: 4,384 block-pruned pair-transitions;
+layer 13: 868) alongside the living suffix pruning.
+
+LEVEL 3 (INTERFACE COSTS) — THE DESIGN FINDING TO RULE ON before
+implementation: the pure-sharing form (compute each distinct
+(row, column) charge once, share across states with the same
+interface) saves only row lookups — the candidate updates per
+(previous, next) pair remain, so the wall-time win is small; the
+DOMINATION form (within an interface group — same boundary rows —
+keep only the best-scoring previous state, since every other member
+produces strictly worse candidates through every transition) is where
+the real collapse lives, but it DROPS states that can still lie on
+chains at or below the incumbent — the posterior's marginal masses
+sum over kept states, so dropping them changes the masses (NOT
+answer-preserving for the marginals; the chain argmin is unaffected —
+the dropped states can never be a predecessor argmin). The
+distinction matters: the suffix/bound prunes are justified by 'no
+chain at or below the incumbent', the interface-domination is only
+'no BEST chain through this interface' — a weaker claim. THE
+SEQUENCE'S OWN MEASUREMENT decides: the first instrumented chrVII
+re-run (composition + state collapse) tells whether levels 1+2 alone
+collapse the degenerate layers' wall times; if the transition
+structure still carries the cost, the interface level needs the
+owner's ruling on the marginal-mass semantics (drop with a documented
+over-approximation like the bound prune, or share-only).
