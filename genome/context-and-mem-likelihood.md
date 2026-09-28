@@ -1377,3 +1377,40 @@ context_insufficient — schema verified against the live logs). The
 sequence when chrIII lands: score the confirmation gate -> run the
 q2flag p1 run (~16 min) -> the comparison -> the flag retirement ->
 the whole-genome rerun with all three DP levels.
+
+
+## THE FINISH STRETCH (owner directive, 2026-09-28) — the lane's
+convergence plan, recorded as the working contract:
+
+1. ITEM 2 CLOSES when the chrIII confirmation lands: score the gate,
+   the Q2 transition census both ways (staged: run-p1-q2flag.sh +
+   q2-census-compare.py), the flag retirement, COMMIT.
+   Finish-stretch discipline: GATE-BLOCKING DEFECTS ONLY; anything else
+   gets a one-line report entry and is not chased.
+2. ITEM 3 (the MEM-projection local likelihood) starts the moment
+   Item 2 commits — the last big scientific piece: per-record
+   positional evidence against the pair's spelled MEM spans; the S2
+   machinery as foundation (the InstanceStructure record-level
+   coverage, window_instances); Poisson bones; NO constants. Gate on
+   p1 (the truth's nats gaps shrink toward truth-argmax where
+   expressible; scoreboards improve-or-hold), then full chrIII.
+   COMMIT.
+3. ITEM 4 (END markers) is small and the machinery exists: the
+   continuation-exhaustion census emits END records, checked against
+   the panel's path termini, mismatches as findings. Gate on chrIII +
+   chrMT. COMMIT.
+4. THE WHOLE-GENOME RERUN is the FINISH LINE: all components, the
+   final scoreboard (aggregate acc_H + switches), the per-component
+   WALL TIMES on the same run — the speed verdict lands for free, no
+   separate campaign. (Record note: the directive's 'domination needs
+   a ruling' is stale — the ruling (a) is in hand and the domination
+   is gated and committed (b2f670c); the deferred item is the parked
+   (c) exact-dedup form. The rerun carries all three levels.)
+5. THE DIPLOID VALIDATION is the final milestone: the two-route
+   mixed-dosage sample (no new syng), the 2x2 best-assignment
+   scoreboard, dosage columns live, honest brackets counted
+   separately. Its spec lands with the rerun's report.
+
+No scope beyond the five. Report at each gate, commit per gate; when
+the whole-genome scoreboard is in the report the lane is DONE and we
+present for the push to PR #243.
