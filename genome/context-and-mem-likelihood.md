@@ -1015,3 +1015,34 @@ minutes at 16:40Z) — the p1 peaks scaled by the locus count plus the
 ladder rows' growth; the 40GB bar is the line of defense that does not
 negotiate. If the watchdog takes the run, the done-marker/heartbeat
 design absorbs the cost and the relaunch is one command.
+
+### 2.23 THE BUFFERING DIAGNOSIS RECONCILED, AND THE OBSERVABILITY FIXES
+APPLIED TO EVERY LAUNCH LINE
+
+The supervisor's stdout-block-buffering diagnosis of the live
+'layer 59 for 50 minutes' scare is RECONCILED with the completed
+run's timeline: BOTH effects were real. During the live watch, the
+stage label lagged partly from buffering (the .err measured one
+~5KB flush) and partly from the completion-only layer prints; the
+COMPLETED file is fully flushed and its timeline is ground truth —
+layer 60's 69-minute computation (4,509,072 candidates, §2.21) is
+genuine, not a buffering artifact. The two fixes compose: the
+LAYER-START marker (committed 2f5388d) makes the in-progress layer
+print the moment it begins; the stdbuf fix makes every line flush
+when written.
+
+THE FIXES APPLIED (per the supervisor's fix-forward, every future
+launch): stdbuf -oL -eL on the binary launch lines of the lane
+script (the committed copy genome/instrumented/run-component.sh and
+the lane copy), run-p1-ladder.sh, run-p1-census-diag.sh, and
+run-full-ladder.sh; and the stage heartbeat now carries its own
+staleness: 'stage: <label> (last-flushed Xs ago)' — the label's age
+is computed from the .err's mtime each tick, so a buffered or slow
+stage can never maslead as current. The chrVII/chrIV guidance items
+in the same message are moot on the record: both components
+completed, scored, and committed long before this queued message
+(chrvII 0.9762/0sw wall 11,226s; chrIV 0.9645/0sw wall 5,659s; the
+10-component aggregate 0.9687/0 switches) — no kill was needed,
+nothing was relaunched, and chrIV's result stands from the
+pre-fix-script run (the stdbuf fix affects future launches'
+observability, not results).

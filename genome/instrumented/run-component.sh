@@ -13,6 +13,7 @@ P="run-$TAG-$COMP"
 rm -f "$P.exit" "$P.done" "$P.rss"
 start=$(date +%s)
 IMPG_MULTIPLICITY_VARIANT=gentle-beta taskset -c 240-243 nice -n 10 \
+  stdbuf -oL -eL \
   /home/erikg/impg-genome-inference/target/release/examples/panel_route_mem_routed \
   --panel /home/erikg/yeast/syng-k63-s8-seed7-acgt-only-pos64/yeast235.syng \
   --routes /home/erikg/yeast/genome-panel-routes-rebuild-v1/routes \
@@ -41,7 +42,8 @@ poller=$!
     ticks=$(awk '{print $14+$15}' /proc/$pid/stat 2>/dev/null) || continue
     cpu_s=$(( ${ticks:-0} / 100 ))
     stage=$(grep -a -oE '^\[[^]]+\][^:]{0,40}' "$P.err" 2>/dev/null | tail -1)
-    echo "$(date -u +%FT%TZ) cpu_s=$cpu_s stage=$stage" >> "$P.stages"
+    err_age=$(( $(date +%s) - $(stat -c %Y "$P.err" 2>/dev/null || date +%s) ))
+    echo "$(date -u +%FT%TZ) cpu_s=$cpu_s stage=$stage (last-flushed ${err_age}s ago)" >> "$P.stages"
     sleep 30
   done ) &
 timer=$!
