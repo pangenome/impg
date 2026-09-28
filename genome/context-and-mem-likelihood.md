@@ -1151,3 +1151,40 @@ selected row must stay bit-identical, which the answer-preserving
 argument guarantees but the gate must verify), the composition print's
 first harvest (the same re-run), and the box (the full-chrIII
 confirmation run is in flight; two heavy runs at 4x contention fight).
+
+### 2.26 THE GREEDY-CHAIN INCUMBENT SEED — IMPLEMENTED, GATED
+BIT-IDENTICAL, AND THE PRUNING IS ALIVE
+
+The supervisor approved the seed (answer-preserving form, three
+conditions: transition costs included in the realized total; the
+chrMT bit-identity gate first; the composition print stays
+diagnostic-only) and it is implemented in phasing.rs:
+greedy_chain_incumbent_seed — per locus, the state minimizing (local
+loss + the DP's own transition charge from the previous choice), the
+coupling charges included exactly as the DP charges them; the seed
+is min(native-backbone total, greedy total) — both real chains, the
+pruning uses the tighter.
+
+THE chrMT GATE (165s): the diploid incumbent tightened 95,254.28 ->
+67,987.60 (28.5% — the greedy chain beats the native backbone by
+27k nats even on the near-native chrMT sample); the haploid seed
+found nothing better (min kept the native). **THE ROW BIT-IDENTICAL:
+0.9922837527537212 / 0 switches / 13 boundaries — the exact reference
+value.** THE PRUNING IS ALIVE for the first time in the lane's
+history: layer 1: 54 candidates -> 29 states (25 pruned); layer 2:
+158 -> 11 (147); layer 3: 279 -> 6 (273); the suffix_pruned counters
+now count. The answer-preserving argument holds empirically.
+
+(Process note recorded: my first chrMT gate launch violated the
+standing rule — a `timeout 60` wrapper killed the run at 60s; the
+relaunch without the wrapper ran clean in 165s. The rule exists for
+exactly this.)
+
+THE SEQUENCE FROM HERE (per the supervisor): the full-chrIII
+confirmation run lands first (solo — no heavy runs beside it); then
+the instrumented chrVII re-run carries BOTH harvests — the
+composition print names the degenerate classes at layers 60/85, and
+the per-layer timing measures whether the state collapse alone
+collapses the WALL TIME (the chrIV finding says the transition
+structure may carry the cost — the gate for part 2 is the layer's
+wall time, not its candidate count).

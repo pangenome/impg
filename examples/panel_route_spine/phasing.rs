@@ -1587,6 +1587,66 @@ impl Clone for PhasingDpOutcome {
 /// cross-support backgrounds under the haploid track, the panel
 /// backgrounds under the diploid track (Step B, owner-approved
 /// 2026-09-23).
+/// THE CHAIN-GREEDY INCUMBENT SEED (supervisor-approved 2026-09-28): a
+/// REAL chain's realized total under the DP's own cost model — per
+/// locus, the state minimizing (local loss + the transition charge
+/// from the previous choice), WITH the coupling charges included (a
+/// chain that ignores them is not a valid bound). Any state whose
+/// admissible bound exceeds a real chain's total is provably
+/// unselectable — the same closed-form argument as the native-backbone
+/// incumbent, tightened exactly where the sample is not native (the
+/// mosaic loci, where the backbone's own total is a loose bound and
+/// the suffix pruning structurally never fired). Returns None when no
+/// greedy realization exists (an all-incompatible boundary); the
+/// caller then keeps the native incumbent.
+fn greedy_chain_incumbent_seed(
+    per_locus_tables: &[LocusStateTable],
+    boundary_costs: &[BoundaryTransitionCosts],
+    haploid: bool,
+) -> Option<f64> {
+    let mut total = 0.0f64;
+    let mut prev: Option<[usize; 2]> = None;
+    for (locus, table) in per_locus_tables.iter().enumerate() {
+        let mut best_here: Option<(f64, [usize; 2])> = None;
+        for &(pair, first, second, loss) in &table.rows {
+            if !loss.is_finite() {
+                continue;
+            }
+            let mut cost_here = loss;
+            if let Some(previous_pair) = prev {
+                let boundary = &boundary_costs[locus - 1];
+                let right_count = boundary.right_count as usize;
+                let cost_matrix = if haploid {
+                    &boundary.cost_haploid
+                } else {
+                    &boundary.cost
+                };
+                let row_first = &cost_matrix
+                    [boundary.left_index[previous_pair[0] as usize] as usize * right_count..]
+                    [..right_count];
+                cost_here += row_first[first as usize];
+                if !haploid {
+                    let row_second = &cost_matrix
+                        [boundary.left_index[previous_pair[1] as usize] as usize * right_count..]
+                        [..right_count];
+                    cost_here += row_second[second as usize];
+                }
+            }
+            if !cost_here.is_finite() {
+                continue;
+            }
+            match best_here {
+                Some((best, _)) if best <= cost_here => {}
+                _ => best_here = Some((cost_here, pair)),
+            }
+        }
+        let (_, chosen) = best_here?;
+        total += best_here?.0;
+        prev = Some(chosen);
+    }
+    Some(total)
+}
+
 pub(in super) fn run_phasing_chain_dp(
     locus_count: usize,
     per_locus_tables: &[LocusStateTable],
@@ -3906,12 +3966,38 @@ pub(in super) fn run_correlation_phasing(
     eprintln!(
         "[phasing] incumbents: diploid {incumbent_phasing:.2} haploid {incumbent_haploid:.2}"
     );
+    // THE INCUMBENT SEED (supervisor-approved): the greedy chain's
+    // realized total tightens the native-backbone bound — both are
+    // real chains, the pruning uses the tighter, and the answer-
+    // preserving argument is unchanged (any state whose admissible
+    // bound exceeds a real chain's total lies in no chain at or below
+    // it).
+    let diploid_incumbent_seeded = greedy_chain_incumbent_seed(
+        &per_locus_tables,
+        &transition_costs,
+        false,
+    )
+    .map_or(incumbent_phasing, |greedy| incumbent_phasing.min(greedy));
+    eprintln!(
+        "[phasing] incumbent seed: diploid native {incumbent_phasing:.2} -> {diploid_incumbent_seeded:.2}"
+    );
+    let haploid_incumbent_seeded = greedy_chain_incumbent_seed(
+        &per_locus_haploid_tables,
+        &transition_costs,
+        true,
+    )
+    .map_or(haploid_prune_incumbent, |greedy| {
+        haploid_prune_incumbent.min(greedy)
+    });
+    eprintln!(
+        "[phasing] incumbent seed: haploid native {haploid_prune_incumbent:.2} -> {haploid_incumbent_seeded:.2}"
+    );
     let dp_diploid = run_phasing_chain_dp(
         locus_count,
         &per_locus_tables,
         &transition_costs,
         &suffix_from_locus,
-        incumbent_phasing,
+        diploid_incumbent_seeded,
         false,
         rss,
     )?;
@@ -3927,7 +4013,7 @@ pub(in super) fn run_correlation_phasing(
         &per_locus_haploid_tables,
         &transition_costs,
         &suffix_haploid_from_locus,
-        haploid_prune_incumbent,
+        haploid_incumbent_seeded,
         true,
         rss,
     )?;
