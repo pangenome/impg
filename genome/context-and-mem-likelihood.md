@@ -454,10 +454,17 @@ backbone class is scorable is bit-identical BY CONSTRUCTION.
 - **BIT-IDENTITY SPOT-CHECK PASSED**: chrMT under the fixed binary —
   selected acc_H 0.9922837527537212 / 0 sw — byte-equal to the step45
   lane's published row; wall 130 s.
-- chrVI re-measure launched (the layer-15 cost under the fix; twice
-  interrupted by the external kill sweep — see §1.6).
-- **chrVII/chrIV relaunches HELD** per the ruling until the fix's DP cost
-  is measured on a small component.
+- **THE DEGENERATE-CASE RE-MEASURE (chrVI, the measured worst layer)**:
+  layer 15 candidates 8,667,320 → **185**; the layer's cumulative DP wall
+  16,652.9 s → **42.6 s** (within the ~100 s/layer bar); the whole run
+  34,048 s → **940 s** (36x). The selected row BIT-IDENTICAL
+  (acc_H 0.9988325802186795, acc_D 0.49941629010933974, 0 sw — byte-equal;
+  identity differs at the 12th decimal, a summation-order artifact) —
+  the minis were never selected; the waste was pure enumeration.
+- chrVII/chrIV relaunches un-held after the re-measure (05:13Z, setsid
+  + nohup double-detached retry wrappers — the same degenerate-shape
+  layers collapse under the fix: chrVII's 4.5M and chrIV's 8.42M
+  candidate layers were the same unscorable-cross-product form).
 
 **THE CENSUS'S FINAL FORM** (three constant-free tightenings, each
 measured): (1) the exact co-linearity filter (a placement pair attests
@@ -486,11 +493,40 @@ admission + rung-1a chains (both ploidy tracks) + arity-N classing moved
 the truth's copy-0 into the domain at 8/15 p1 loci (was 2/15); the
 remaining 7 need rung 1b — whose bound is now the measured attested set.
 
-NEXT: rung 1b's materialization at the flagged loci from the attested
-compositions (the two rungs: (i) the co-occurring panel junctions — the
-same-path test; (ii) the novel attested — no single-source continuation),
-then the ITEM-2 gates (truth copy-0 in domain at all 15; the chain row
-unchanged-or-better), then full chrIII, then the transition census.
+### 2.11 RUNG 1b, THE ATTESTED MATERIALIZATION — implemented and measured
+(the cut-semantics fork escalated)
+
+Implemented (in the Stage-B block, uncommitted-behind-the-flag): for every
+cross-source crossing-attested composition mapping onto the locus structure
+(a side in a window row, a side in a staged row, or both in window rows),
+the 2-segment junction-partial row at the attested cut — bounded by the
+measured attested set (NEVER the word cross-product): **6,465 rows at p1**
+(12,804 mixed-orientation compositions skipped and reported; 893
+unmapped), forward-forward only. The chain row stays BIT-IDENTICAL
+(0.58184602910041 / 0.4215 / 0.9567 / 2 sw / 14 — third consecutive
+bit-identical p1 run).
+
+**THE MEASURED GATE RESULT: truth copy-0 in domain HELD at 8/15** — the
+materialized rows did not bring the remaining 7 loci's truth pieces into
+the domain. THE CAUSE (the cut-semantics fork): the attested cuts are
+READ-ESTIMATED (each crossing read's left-record extent end / right-record
+extent start), while the truth's pieces require EXACT segment matches at
+the truth's junction position — a per-read MEM boundary generally does not
+coincide with the true junction cut, so the materialized halves miss the
+truth's exact pieces. THE FORK (escalated to the owner):
+(a) ALSO materialize at the PORT-POSITION cuts (the panel's own branch
+    k-mer positions — the split machinery's cut convention) near the
+    read-attested junctions: bounded (attested junctions x nearby ports),
+    and it hits the truth's cut IFF the truth's junction sits at a panel
+    port position — a measurable property of the truth's construction;
+(b) accept read-estimated cuts: the loci where no materialized cut matches
+    any expressible structure become the honest-untypable population
+    (the mandate's own legitimate output);
+(c) the owner's alternative.
+The next measurement either way: the cut-gap distribution (the distance
+from each attested cut to the nearest port position and to the truth's
+junction — at one tract locus) — it decides whether (a) can pass the gate
+or the gate's inexpressible count becomes the honest-untypable count.
 
 ### 2.8 THE LADDER's original D2-driven form (superseded by §2.9's ruling)
 
