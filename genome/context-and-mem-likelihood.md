@@ -654,3 +654,22 @@ port positions (both sides; §2.12) — the port-expressible form is
 available; the loop-closure fix is what admits the parent rows so the
 port cuts can compose the truth's pieces.
 
+### 2.14 THE CHECKPOINT COMMITS + THE INSTRUMENTED RELAUNCH
+
+Per the supervisor's consolidated order: the gate result taken (§2.13);
+ITEM 2 committed per commit-per-gate with the honest evidence
+(`fdcc461`: the union-bracket port cuts + the gap-carrying census + the
+arity-N test fixture fix; tests green 28 ok / 0 FAILED — the first
+test-suite pass after the session's runs exposed a stale `class_owners:
+vec![7, 9]` fixture that failed the TEST profile's compile — the
+arity-N generalization had changed the field to owner SETS); the
+stage-timer + RSS accounting committed (`ee3f52a`: genome/instrumented/
+run-component.sh — a 30 s CPU-seconds + latest-stage-marker heartbeat
+to `.stages` alongside the 5 s `.rss` poller; one cleanup bug found and
+fixed before launch: the committed copy initially DROPPED the echo line
+— caught by verifying the heartbeat file actually ticked).
+
+THE INSTRUMENTED RELAUNCH: chrVII then chrIV, SEQUENTIAL, single attempt
+each (the retry wrappers stay retired). Verified live: `.stages`
+heartbeats (cpu_s + stage marker), `.rss` poller, done/exit markers.
+chrVI reference under the no-waste fix: 940 s / 11.5 GB.
