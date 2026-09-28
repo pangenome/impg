@@ -40,9 +40,34 @@ fn main() -> io::Result<()> {
         .cloned()
         .unwrap_or_default();
     println!("probe: {} truth junction rows", rows.len());
+    // THE SEAM BRACKET (the supervisor's class-A deliverable): for each
+    // truth junction, measure the CONSERVED-GAP extent — the identity
+    // run between the two frames spanning the seam — by direct sequence
+    // comparison around the aligned cut positions. The seam is
+    // unlocalizable within the bracket (every read spanning only
+    // bracket material is native-explainable on either frame); the
+    // falsifiable prediction: reads longer than the bracket plus one
+    // divergent anchor (k-mer) on each side WOULD attest the seam.
+    let lanes: Vec<(String, u64)> = graph
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.clone(), lane.length))
+        .collect();
+    let sources =
+        impg::genome_inference::panel_routes::Sources::open(&graph.source_paths, lanes)?;
+    let k = graph.k;
+    let window = 3000u64;
     for (index, row) in rows.iter().enumerate() {
         let field = |name: &str| -> Option<(usize, u64, u64, bool)> {
             let node = row.get(name)?;
+            if let (Some(s), Some(st), Some(e), Some(r)) = (
+                node.get("source")?.as_u64(),
+                node.get("start")?.as_u64(),
+                node.get("end")?.as_u64(),
+                node.get("reverse")?.as_bool(),
+            ) {
+                return Some((s as usize, st, e, r));
+            }
             Some((
                 node.get(0)?.as_u64()? as usize,
                 node.get(1)?.as_u64()?,
@@ -58,6 +83,60 @@ fn main() -> io::Result<()> {
         // start on the right source).
         let left_cut = left.2;
         let right_cut = right.1;
+        // The frames' local offset at the seam: left position x on the
+        // left source corresponds to x + (right_cut - left_cut) on the
+        // right source.
+        let offset = right_cut as i64 - left_cut as i64;
+        let fetch_left = sources.fetch(left.0, left_cut.saturating_sub(window), (left_cut + window).min(u64::MAX))?;
+        let fetch_right = sources.fetch(right.0, right_cut.saturating_sub(window), (right_cut + window).min(u64::MAX))?;
+        // Identity runs outward from the seam, on both sides.
+        let at = |seq: &[u8], pos: u64, base_lo: u64| -> u8 {
+            seq[(pos - base_lo) as usize]
+        };
+        let left_lo = left_cut.saturating_sub(window);
+        let right_lo = right_cut.saturating_sub(window);
+        let left_hi = left_lo + fetch_left.len() as u64 - 1;
+        let right_hi = right_lo + fetch_right.len() as u64 - 1;
+        // Walk left from the seam while both frames carry the same base.
+        let mut left_run = 0u64;
+        loop {
+            let i = left_run;
+            if left_cut < left_lo + i + 1 || right_cut < right_lo + i + 1 {
+                break;
+            }
+            if at(&fetch_left, left_cut - i - 1, left_lo)
+                != at(&fetch_right, right_cut - i - 1, right_lo)
+            {
+                break;
+            }
+            left_run += 1;
+        }
+        // Walk right from the seam while both frames carry the same base.
+        let mut right_run = 0u64;
+        loop {
+            let i = right_run;
+            if left_cut + i > left_hi || right_cut + i > right_hi {
+                break;
+            }
+            if at(&fetch_left, left_cut + i, left_lo)
+                != at(&fetch_right, right_cut + i, right_lo)
+            {
+                break;
+            }
+            right_run += 1;
+        }
+        let bracket_lo = left_cut - left_run;
+        let bracket_hi = left_cut + right_run;
+        let gap = left_run + right_run;
+        let need = gap + 2 * k;
+        println!(
+            "seam-bracket {index}: left source {} cut {left_cut}, right source {} cut {right_cut}, \
+             offset {offset}: conserved gap = {gap} bp (left_run {left_run} + right_run {right_run}); \
+             bracket [{bracket_lo}, {bracket_hi}] on the left frame; \
+             required bridging read >= {need} bp",
+            left.0,
+            right.0,
+        );
         let mut near = |source: usize, cut: u64, label: &str, reverse: bool| {
             let lo = cut.saturating_sub(2_000);
             let hi = cut + 2_000;

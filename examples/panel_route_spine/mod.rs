@@ -1286,6 +1286,7 @@ pub(super) fn reference_local_piece_lists(
     route_pair: [&routes::Route; 2],
     locus_count: usize,
     locus_offset: usize,
+    axis_slice: &[genome::AxisInterval],
 ) -> Vec<[Vec<(usize, u64, u64, bool, u32)>; 2]> {
     // Pieces carry the OWNING universe partition of the territory row they
     // intersect (the window-domain extension's owner-resolved charging;
@@ -1356,6 +1357,28 @@ pub(super) fn reference_local_piece_lists(
                     _ => merged.push(piece),
                 }
             }
+            // THE TRAVERSAL-LOCALITY FILTER (the owner's approved class-B
+            // fix, 2026-09-28): the allele at a locus is what the truth's
+            // path TRAVERSES there — not the union of every segment-
+            // vs-territory overlap. The territory's word-sharing rows pull
+            // FAR-HOMOLOG material (measured: the NATIVE ITSELF scored
+            // unexpressible at locus 17 via 9564:[80018,90183) — a
+            // word-sharing homolog row ~76kb from the locus's axis
+            // interval); word-sharing is not membership. On the axis's
+            // reference frame (the native route's own source — the only
+            // frame whose projection is identity) a piece is traversal-
+            // local iff its span overlaps the locus's axis interval.
+            // Other sources' pieces keep all runs (their projections are
+            // not identity; the measured artifacts are all ref-side).
+            // (axis_slice is the run's own local locus array — the
+            // territory above is full-component and needs the offset;
+            // the axis does not.)
+            let native_source = route_pair[1].segments[0].source;
+            let axis_lo = axis_slice[locus].start;
+            let axis_hi = axis_slice[locus].end;
+            merged.retain(|&(source, lo, hi, ..)| {
+                source != native_source || (lo < axis_hi && hi > axis_lo)
+            });
             sorted_pieces[locus][copy] = merged;
         }
     }
@@ -4413,6 +4436,7 @@ pub(super) fn run_local_first_spine(
         [&truth_route_a, &truth_route_b],
         locus_count,
         locus_offset,
+        axis_slice,
     );
     let reference_partitions: Vec<u32> = (0..locus_count)
         .map(|locus| component_locus_to_partition[locus_offset + locus])
@@ -4717,6 +4741,40 @@ pub(super) fn run_local_first_spine(
                         .collect::<Vec<_>>()
                         .join(" + ")
                 );
+                for piece in &truth_pieces[locus][copy] {
+                    let exact: Vec<usize> = ranges[locus]
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, row)| {
+                            row.segments.len() == 1
+                                && row.segments[0].source == piece.0
+                                && row.segments[0].start == piece.1
+                                && row.segments[0].end == piece.2
+                                && !row.segments[0].reverse
+                        })
+                        .map(|(index, _)| index)
+                        .collect();
+                    let as_first_segment: Vec<String> = ranges[locus]
+                        .iter()
+                        .filter(|row| {
+                            row.segments.len() > 1
+                                && row.segments[0].source == piece.0
+                                && row.segments[0].start == piece.1
+                                && row.segments[0].end == piece.2
+                                && !row.segments[0].reverse
+                        })
+                        .map(|row| row.identity.clone())
+                        .collect();
+                    eprintln!(
+                        "[truth-pieces]   piece {}:[{},{}): exact single rows {:?}, \
+                         multi rows starting here {:?}",
+                        piece.0,
+                        piece.1,
+                        piece.2,
+                        exact,
+                        as_first_segment
+                    );
+                }
                 let sources: std::collections::BTreeSet<usize> =
                     truth_pieces[locus][copy]
                         .iter()

@@ -768,3 +768,51 @@ THE RESIDUE AT p1, CLASSIFIED (the honest measurement):
   The pieces are territory-row intersections (the rows exist); the
   domain lacks the STITCHED rows — the same-owner rung-1a built 2,660
   chains but not these.
+
+### 2.17 THE CLASS-B FIX MEASURED (9/15), THE SEAM BRACKETS, AND THE
+CLASS-C DIAGNOSIS
+
+THE ITEM-1 GATE COMPLETED: chrVII scored 0.9762 (0 switches) and chrIV
+0.9645 (0 switches) under the instrumented relaunch; the lane aggregate
+(10 components scored) = **genome_acc_H 0.9687 / 0 switches / 925
+boundaries** — all 9 backbone-guard components pass the ITEM-1 gate.
+
+THE CLASS-B FIX (the traversal-locality filter — the owner's approved
+form: on the axis's reference frame a piece is traversal-local iff its
+span overlaps the locus's axis interval; word-sharing is not
+membership; per-PIECE source test, the axis is the run's local array):
+**truth copy-0 8/15 -> 9/15; both copies 6/15 -> 9/15** (loci 5/6/10
+fixed); chain row bit-identical an EIGHTH consecutive time.
+
+THE SEAM BRACKETS (the class-A deliverable, measured by direct sequence
+comparison at the aligned cut positions — the port_cut_probe's new
+seam-bracket mode):
+- Seam A (9564@113881 -> 9602@102922, offset -10,959): conserved gap
+  173bp (88 left + 85 right), bracket [113793, 113966] on 9564's frame.
+- Seam B (9602@207743 -> 9564@227721, offset +19,978): conserved gap
+  1,233bp (584 + 649), bracket [207159, 208392] on 9602's frame.
+THE FALSIFIABLE PREDICTION (on record): reads >= gap + 2k (k=63)
+would attest the seams — 299bp for seam A, 1,359bp for seam B. At the
+sample's 150bp reads neither seam is attestable — the copy-choice
+finding is now a measured, testable property of the read length.
+
+THE CLASS-C DIAGNOSIS (bounded, per the approved chain-by-chain plan):
+- LOCI 12/13 (full 24/25): the truth's alleles are PARTIAL chains —
+  their unions END at the seam-B cut (locus 13: [190177,200187) +
+  [200187,207743) = union [190177,207743) = ref-frame [201,136,
+  218,702) while the axis window is [210,052, 220,062] — the window
+  extends PAST the truth's material (the mosaic's deletion); the
+  stitched_candidates containment condition (chain union contains the
+  window) STRUCTURALLY EXCLUDES every partial chain. Also: locus 13's
+  piece [200187,207743) has NO row in the domain at all (it ends at
+  the seam cut — the last window row before the divergence).
+- LOCI 3/8 (full 15/20): the puzzle — all component rows exist in the
+  domain (locus 3: rows [128754,138845), [138845,145952),
+  [145952,151830) at indices 436/1147/865) and a 2-chain
+  stitch:15:9602:138845-151830 EXISTS, but the needed 3-chain
+  [128754..151830) does not — the code path (stitched_candidates:
+  first in run_start..position, last covering the window, every end in
+  last..position) should build it. Either the 3-chain is built and
+  filtered by a downstream admission before joining the checker's
+  ranges, or the run/admission conditions differ from the reading —
+  escalated with the measurement.
