@@ -119,6 +119,13 @@ for locus, inferred_route in zip(loci, route):
             row['assignment'] = 'direct' if direct >= swapped else 'swapped'
         elif len(scores) == 1:
             row['candidate_only_accuracy'] = max(scores[0])
+            row['candidate_truth_match'] = ('S288C' if scores[0][0] > scores[0][1]
+                                            else 'SK1' if scores[0][1] > scores[0][0]
+                                            else 'ambiguous')
+            row['candidate_truth_accuracies'] = dict(zip(('S288C', 'SK1'), scores[0]))
+            row['candidate_assigned_dosage'] = ({name: (len(doses) if name == row['candidate_truth_match'] else 0)
+                                                 for name in doses}
+                                                if row['candidate_truth_match'] != 'ambiguous' else None)
     rows.append(row)
 
 exact = [x for x in rows if x['exact_homolog']]
@@ -142,10 +149,12 @@ summary = {'component': COMP, 'tag': TAG, 'exit': (BASE / f'run-{TAG}-{COMP}.exi
            'two_slot_windows': len(paired), 'candidate_only_windows': len(candidates),
            'pair_accuracy_attested_only': sum(x['pair_accuracy'] for x in paired) / len(paired) if paired else None,
            'candidate_accuracy_attested_only': sum(x['candidate_only_accuracy'] for x in candidates) / len(candidates) if candidates else None,
+           'candidate_truth_match_counts': {slot: sum(x['candidate_truth_match'] == slot for x in candidates)
+                                            for slot in ('S288C', 'SK1', 'ambiguous')},
            'switches_per_haplotype': switches if comparisons else None,
            'switch_boundaries': comparisons,
            'truth_dosage': truth_dosage,
-           'selected_single_class_dosage': 2.0 if rescore['selected_ploidy'] == 'haploid' else None,
+           'selected_single_class_dosage': float(len(doses)) if rescore['selected_ploidy'] == 'haploid' else None,
            'rows': rows}
 assert summary['exit'] == '0'
 print(json.dumps(summary, indent=2))
