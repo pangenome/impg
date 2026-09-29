@@ -3263,6 +3263,32 @@ pub(crate) fn merged_single_loss_sample_with_omission(
     )
 }
 
+/// The stitched rows' WINDOW-SCOPED omission form (the table-consistency
+/// fix, owner ruling (A) 2026-09-28): the self/owner charge over the
+/// FULL chain profile — every feature is charged exactly once, at the
+/// locus that admits the row — plus the per-window omission addend whose
+/// "predicted" test sees only the row's WINDOW-CLIPPED sub-profile: the
+/// same per-window scope the domain rows get by construction and the
+/// chain-level rescore gives every chain. A whole-chain profile at the
+/// omission test would credit window W's observed features for material
+/// the chain spells only OUTSIDE W (word-key adjacency, not placement —
+/// the measured full-chrIII defect: cross-window stitches at loci
+/// 10/25/36 dodged their windows' omission charges, won the DP at zero
+/// external identity, and the rescore billed the same chains 2.76M
+/// nats).
+pub(crate) fn merged_single_loss_sample_window_scoped_omission(
+    profile_full: &Profile,
+    profile_window: &Profile,
+    obs_row: &HashMap<FeatureKey, f64>,
+    window_obs: &HashMap<FeatureKey, f64>,
+    sample: &SampleSideBackgrounds,
+    model: &ScoreModel,
+) -> io::Result<f64> {
+    let mut loss = merged_single_loss_sample(profile_full, obs_row, sample, model)?;
+    loss += omission_charge_addend(profile_window, window_obs, sample);
+    Ok(loss)
+}
+
 /// The chain-level form (see `omission_charge_addend_except`): the row keeps
 /// its current charge bit-exactly and pays the omission cost of the window's
 /// observed features it neither predicts nor is exonerated from by the

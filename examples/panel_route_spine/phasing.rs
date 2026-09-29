@@ -677,6 +677,10 @@ pub(in super) fn haploid_allele_losses(
     // path map (the spelled spans' coordinates).
     window_instances: Option<&crate::InstanceStructure>,
     path_of_source: &[usize],
+    // The locus's axis interval (the window the omission scope clips to;
+    // the sources' aligned coordinates share this frame).
+    window_start: u64,
+    window_end: u64,
 ) -> io::Result<(Vec<f64>, Vec<HaploidAlleleExon>)> {
     let alleles = ranges.len();
     ensure(
@@ -912,8 +916,54 @@ pub(in super) fn haploid_allele_losses(
                     .entry(key.clone())
                     .or_insert_with(|| site.site_map(key.iter().copied()))
             };
-            let loss = crate::merged_single_loss_sample_with_omission(
+            // THE WINDOW-CLIPPED SUB-PROFILE (the table-consistency fix,
+            // owner ruling (A) 2026-09-28): the stitched chain's material
+            // can exceed this locus's window (the covering form contains
+            // it; the partial form overlaps it). The m1's own chain-level
+            // accounting prices each window's omission against the chain's
+            // material AT THAT WINDOW; the omission test below therefore
+            // sees only the segments clipped to the window's axis interval
+            // (the sources' aligned coordinates share the axis frame —
+            // the same frame the stitch admission's containment test
+            // uses). The self charge keeps the FULL chain profile so every
+            // feature is charged exactly once, at the locus that admits
+            // the row.
+            let mut clipped_segments: Vec<SourceRange> = Vec::new();
+            for segment in &traversal.segments {
+                let lo = segment.start.max(window_start);
+                let hi = segment.end.min(window_end);
+                if lo < hi {
+                    let mut piece = segment.clone();
+                    piece.start = lo;
+                    piece.end = hi;
+                    clipped_segments.push(piece);
+                }
+            }
+            let window_profile = if clipped_segments.is_empty() {
+                // Admission guarantees window overlap; an empty clip is a
+                // defensive INFINITY (a row placing no material in the
+                // window cannot explain any of it — no free windows).
+                exons.push(HaploidAlleleExon {
+                    self_list: Vec::new(),
+                    self_sum: 0.0,
+                    left: None,
+                    right: None,
+                    self_instances: AlleleCoveredInstances::default(),
+                    left_instances: None,
+                    right_instances: None,
+                });
+                continue;
+            } else {
+                let clipped = genome::SpanningTraversal {
+                    partition: traversal.partition,
+                    identity: format!("{}#w{}", traversal.identity, locus),
+                    segments: clipped_segments,
+                };
+                crate::oracle_allele_profile(panel, sources, &clipped, &mut oracle_memo)?
+            };
+            let loss = crate::merged_single_loss_sample_window_scoped_omission(
                 &profile,
+                &window_profile,
                 owner_obs,
                 window_obs_map,
                 sample,
@@ -3685,6 +3735,8 @@ pub(in super) fn run_correlation_phasing(
                 sources,
                 window_instances,
                 path_of_source,
+                axis_slice[locus].start,
+                axis_slice[locus].end,
             )
         })
         .collect::<io::Result<_>>()?;
