@@ -780,6 +780,13 @@ pub(in super) fn haploid_allele_losses(
     // convention the decompose charges the truth's multi-owner rows with).
     let mut owner_set_memo: HashMap<Vec<u32>, HashMap<FeatureKey, f64>> = HashMap::new();
     let mut losses = vec![f64::INFINITY; alleles];
+    // The one-locus loss decomposition dump (diagnostic-only; the loss
+    // values are unchanged — the split is computed alongside for the
+    // named locus only).
+    let decomp_locus: Option<usize> = std::env::var("IMPG_LOSS_DECOMP_LOCUS")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let window_obs_mass: f64 = window_obs_map.values().sum();
     let exon = |profile: &Profile, window: usize| -> (Vec<u32>, f64) {
         let obs = &obs_index[window];
         let mut list: Vec<u32> = Vec::new();
@@ -850,6 +857,31 @@ pub(in super) fn haploid_allele_losses(
                 sample,
                 model,
             )? + locus_classes.class_charges[class];
+            if decomp_locus == Some(locus) {
+                let (self_term, omission_term) = crate::single_loss_decompose(
+                    &profile,
+                    &profile,
+                    owner_obs,
+                    window_obs_map,
+                    sample,
+                    model,
+                )?;
+                let window_keys = window_obs_map.len();
+                let overlap = window_obs_map
+                    .keys()
+                    .filter(|key| profile.contains_key(*key))
+                    .count();
+                let overlap_mass: f64 = window_obs_map
+                    .iter()
+                    .filter(|(key, _)| profile.contains_key(*key))
+                    .map(|(_, &mass)| mass)
+                    .sum();
+                eprintln!(
+                    "[loss-decomp] locus {locus} allele {allele} domain self {self_term:.2} omission {omission_term:.2} class_charge {:.2} loss {loss:.2} profile {} window_mass {window_obs_mass:.2} window_keys {window_keys} overlap_keys {overlap} overlap_mass {overlap_mass:.2}",
+                    locus_classes.class_charges[class],
+                    profile.len()
+                );
+            }
             allele_profile = Some(profile);
             loss
         } else {
@@ -969,6 +1001,20 @@ pub(in super) fn haploid_allele_losses(
                 sample,
                 model,
             )?;
+            if decomp_locus == Some(locus) {
+                let (self_term, omission_term) = crate::single_loss_decompose(
+                    &profile,
+                    &window_profile,
+                    owner_obs,
+                    window_obs_map,
+                    sample,
+                    model,
+                )?;
+                eprintln!(
+                    "[loss-decomp] locus {locus} allele {allele} stitched self {self_term:.2} omission {omission_term:.2} loss {loss:.2} profile {} window_mass {window_obs_mass:.2}",
+                    profile.len()
+                );
+            }
             allele_profile = Some(profile);
             loss
         };

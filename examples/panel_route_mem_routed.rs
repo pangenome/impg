@@ -3263,6 +3263,24 @@ pub(crate) fn merged_single_loss_sample_with_omission(
     )
 }
 
+/// The per-allele single-loss DECOMPOSITION (diagnostic-only, the
+/// one-locus dump for the truth-row mispricing investigation, owner
+/// ruling (A) 2026-09-28): the self/owner term and the per-window
+/// omission term computed separately, same arithmetic spellings as the
+/// combined form (the loss itself is unchanged bit-exactly).
+pub(crate) fn single_loss_decompose(
+    profile_full: &Profile,
+    profile_omission: &Profile,
+    obs_row: &HashMap<FeatureKey, f64>,
+    window_obs: &HashMap<FeatureKey, f64>,
+    sample: &SampleSideBackgrounds,
+    model: &ScoreModel,
+) -> io::Result<(f64, f64)> {
+    let self_term = merged_single_loss_sample(profile_full, obs_row, sample, model)?;
+    let omission_term = omission_charge_addend(profile_omission, window_obs, sample);
+    Ok((self_term, omission_term))
+}
+
 /// The stitched rows' WINDOW-SCOPED omission form (the table-consistency
 /// fix, owner ruling (A) 2026-09-28): the self/owner charge over the
 /// FULL chain profile — every feature is charged exactly once, at the

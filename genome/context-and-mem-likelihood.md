@@ -1414,3 +1414,73 @@ convergence plan, recorded as the working contract:
 No scope beyond the five. Report at each gate, commit per gate; when
 the whole-genome scoreboard is in the report the lane is DONE and we
 present for the push to PR #243.
+
+
+### 2.31 THE FULL-CHRIII CONFIRMATION, THE TABLE-CONSISTENCY FIX, AND THE
+BRANCH-2 RULING (the finish stretch's first gate cycle, 2026-09-28/29)
+
+THE CONFIRMATION RUN (pid 4174000, wall 7,710s, exit 0): the in-domain
+gate PASSES at full-chromosome scale — 70/76 truth rows in-domain, the 6
+falses EXACTLY the two copy-choice seam neighborhoods (loci 10-12 at
+seam A, 24-26 at seam B), matching the p1 anatomy and the read-length
+predictions (reads >=299bp / >=1,359bp). The expression machinery is
+CONFIRMED at scale. The row, however, regressed externally:
+0.8008425521934321 / 2sw / 37 vs the baseline 0.8751597451294649 / 1sw /
+37 — three windows (10, 25, 36) selected zero-identity material
+(source-19 reversed, source-2579, source-524 stitched chains), four
+improved (locus 8: 0.6301 -> 1.0000, plus 12/13/34).
+
+THE DP-LEVEL CHANGES MEASURED INNOCENT: seed/block-floor/domination all
+show zero effect at chrIII (suffix_pruned 0, block_pruned 0, states ==
+candidates at every layer — chrIII's interfaces are all
+distinct-content; the domination never fired). The regression is ITEM
+2's own row vocabulary + pricing.
+
+THE OMISSION-SCOPE FIX (ruling (A), commit dd582bf): the haploid
+oracle's stitched branch charged the per-window omission against the
+WHOLE-chain profile — a cross-window stitch's ~32k of material
+word-key 'explains' window features it places no material over. Fixed:
+self/owner on the full chain profile (each feature once, at the
+admitting locus), omission on the window-clipped sub-profile. Gates:
+chrMT bit-identical 0.9922837527537212/0sw/13; p1 bit-identical
+0.58184602910041/2sw/14 (id 0.9733); tests exit 0. THE RE-RUN (wall
+7,290s): the row BIT-IDENTICAL to the pre-fix run — the DP total the
+same to 14 digits (2759332.6509004002). The loophole was real but NOT
+OPERATIVE for this defect: the selected rows' out-of-window material
+contributed zero window-feature matches.
+
+THE ONE-EVALUATOR PREMISE PROVEN: the DP's best_score_internal equals
+the rescore's external m1 EXACTLY at full-chromosome scale — the
+collapse's fold verified; the tables ARE the model of record's losses;
+the model ITSELF prefers this chain.
+
+THE DECOMPOSITION (ruling (A) diagnostic, the 9-13 slice with
+IMPG_LOSS_DECOMP_LOCUS, run-decomp-9-13): at locus 10 the truth piece
+9564:[95771,100062) (allele 3004, retained, in-domain, oracle loss
+95,493.83, RANK 708/1210) decomposes as self 1,315.0 + omission
+94,178.8 — THE OMISSION DOMINATES 72x. The window's observed universe:
+7,077 distinct keys, mass 28,288.7. The truth row's profile: 340 keys,
+overlap 219 keys / overlap mass 290.9 — 1.03% of the window's observed
+mass. The best rows explain 17.4% (4,927/28,289). NO row in the
+vocabulary explains the window: the winner is decided among rows that
+all fail, by paralogous key-sharing with the pooled universe.
+
+BRANCH 2 CONFIRMED (the structural window-mass attribution, per the
+ruling's decision tree): the truth's keys ARE observed (219/340 — no
+keying bug; the matching works); the window's universe is 20x richer
+than any row's profile because the observed mass pools BOTH copies'
+reads + background at a diploid sample's window — no haploid single can
+explain it. The truth ranked 708th at its own window is the known
+objective-vs-truth anti-correlation at full scale. STOP PATCHING the
+window-mass instrument; the designed replacement is ITEM 3 (the
+MEM-projection local likelihood: per-record positional evidence against
+the pair's spelled spans — source-specific records place on their true
+frames and credit them directly). THIS DECOMPOSITION IS ITEM 3'S GATE
+EVIDENCE.
+
+THE WHOLE-GENOME RERUN LAUNCHED (03:19:41Z, rerun-lane): all 17
+components sequentially under the committed machinery, per-component
+walls + the aggregate scoreboard on the same run. The honest current
+row is the baseline: chrIII 0.8008-class is the machinery's true
+current behavior. ITEM 3 is the first iteration on it. The Q2 census +
+flag retirement ride the rerun.
