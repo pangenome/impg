@@ -1690,3 +1690,35 @@ object for a 256-core chrIV-class run is the DRAFTS' pair
 enumerations (the boundary drafts' construction), not the matrices;
 the domination's interface-collapse would not shrink the drafts
 themselves.
+
+
+### 2.36 THE PARTITION/WINDOW PERSPECTIVE — THE TYPED RECORD (the
+owner's docs directive, 2026-09-29)
+
+The partition-vs-window discussion is now preserved verbatim-in-substance
+in the typed docs: `docs/syng-gmem-bwt/partition-native-spine.md` is the
+architecture note of record — the two frames (the DP's spine is REFERENCE
+WINDOWS on the axis; the material is PARTITION-TERRITORY ROWS in
+per-source frames — the duality is the architecture's remaining
+structural debt), the seam's measured costs (every ITEM-2 defect class:
+the frame-alignment failures on novel junctions — the truth's own
+junction failed the old co-linearity test by 10,959bp; the
+coordinate-overlap staging's stranded attested rows; the truth-piece
+vocabulary mismatch; and the capstone, the window's observed universe
+pooling cross-source mass — 7,077 keys / 28,289 mass vs any single row's
+~17% best, the 72x omission decomposition that is ITEM 3's gate
+evidence), the path (ITEM 3 de-weights the window — it becomes the DP's
+chunking grain, not the evidence's frame; the endgame is the owner's
+standing de-novo-out-of-the-graph directive — the partition/block
+graph's own adjacency as the DP's spine, the reference axis demoted to
+diagnostics/scaffolding), what the arc already built for it (the
+territory tables, the attested census, maximal rows, partial chains, the
+honest-untypable brackets, ITEM 4's END markers — a partition-native
+spine's components, already in the tree), and the timing
+recommendations marked planning-relevant (the window-spine machinery is
+working and fast — iterate on it; ITEM 3 next; then the partition-spine
+migration as a planned iteration with the baseline in hand; the diploid
+validation before the migration unless the owner reorders — the note
+records the standing option). Cross-referenced from
+`system-description.md`'s header. The perspective survives session
+compaction and worker turnover as the owner asked.

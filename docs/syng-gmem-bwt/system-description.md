@@ -7,6 +7,10 @@ and what remains open. It supersedes no prior document; it sits above them (the
 chronological design record lives in `partition-local-diplotype-inference.md` and the
 per-arc reports under `genome/` in the session artifacts).
 
+> The DP's spine-vs-material frame duality — the partition/window perspective, its
+> measured seam costs, and the partition-native endgame path — is the architecture
+> note of record in `partition-native-spine.md`.
+
 ## 1. Goal
 
 Infer a sample genome from raw MEM evidence against a pangenome — without closest-reference
