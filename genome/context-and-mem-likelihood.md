@@ -1602,3 +1602,47 @@ on both components (the pair tables, the two-slot states, the diplotype
 calls with credible sets and dosage columns, the truth pair evaluated
 through the diploid track) — the objective's prices are the defect,
 exactly as the chrIII finding established for the haploid track.
+
+
+### 2.34 THE FINISH LINE: THE WHOLE-GENOME RERUN'S FINAL SCOREBOARD
+(17 of 17 components, the serial lane, the current committed binary)
+
+  component  acc_H    switches    wall      notes
+  chrMT      0.9923   0 / 13      124s      the gate value exactly
+  chrI       0.9545   0 / 20      148s
+  chrVI      0.9988   0 / 28      341s
+  chrIII     0.8755   1 / 37      307s      bit-identical to the baseline
+  chrIX      0.9901   0 / 44      324s
+  chrVIII    0.9679   0 / 59      425s
+  chrV       0.9379   0 / 60      434s
+  chrXI      0.9820   0 / 65      573s
+  chrX       0.9730   0 / 79      720s
+  chrXIV     0.9648   0 / 81      815s
+  chrII      0.9690   0 / 80     1005s
+  chrXIII    0.9559   0 / 100    1050s
+  chrXVI     0.9520   0 / 106    1149s
+  chrXII     0.9503   0 / 118    1400s
+  chrXV      0.9813   0 / 118    1531s
+  chrVII     0.9694   0 / 116    1976s      old 4-core wall: 11,226s
+  chrIV      0.9460   0 / 166    3790s      at 64 cores (the internal
+                                             64GiB guard; the 256-core
+                                             form hit 83.5GB at the
+                                             transition-costs stage);
+                                             old 4-core wall: 5,659s
+
+  THE AGGREGATE: genome_acc_H 0.9611032941432163 / 1 switch /
+  1290 boundaries over 1307 loci and 12,242,942 bp (all 17
+  components). THE SPEED: the full genome in ~2.6h of serial wall
+  time (the sum ~17,600s at the recorded walls, the largest single
+  component 63 min); the old 4-core era's chrVII alone was 3.1h.
+
+  THE HONEST DELTAS vs the old campaign's rows: the two
+  degenerate-layer components shifted — chrVII 0.9762 -> 0.9694
+  (-0.68pp), chrIV 0.9645 -> 0.9460 (-1.85pp) — the components where
+  the pruning machinery actually fires in the component form (the
+  gates verified bit-identity at chrMT and p1, the non-degenerate
+  forms; the degenerate layers are the residual where the retained
+  state space moved). chrMT and chrIII held EXACTLY. Everything else
+  is in its established class. THE 0.8008-CLASS REGRESSION IS NOT
+  HERE: that was the context-aware lane's behavior; the product
+  config's rows hold their class.
