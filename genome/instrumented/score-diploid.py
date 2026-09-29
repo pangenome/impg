@@ -129,6 +129,11 @@ for locus, inferred_route in zip(loci, route):
     rows.append(row)
 
 exact = [x for x in rows if x['exact_homolog']]
+# Stage-1's existential predicate accepts any row expressing the route's
+# local pieces, not only the genotype table's exact-piece representative.
+truth_domain = [locus['truth_pair_in_domain'] for locus in run['spine']['stage1_sweep']['loci']]
+assert len(truth_domain) == len(loci)
+assert all(len(flags) == len(doses) for flags in truth_domain)
 paired = [x for x in exact if 'pair_accuracy' in x]
 candidates = [x for x in exact if 'candidate_only_accuracy' in x]
 # Switching is meaningful only across adjacent, fully typed, two-slot windows.
@@ -143,6 +148,11 @@ for left, right in zip(rows, rows[1:]):
 summary = {'component': COMP, 'tag': TAG, 'exit': (BASE / f'run-{TAG}-{COMP}.exit').read_text().strip(),
            'wall_seconds': int((BASE / f'run-{TAG}-{COMP}.wall').read_text()),
            'selected_ploidy': rescore['selected_ploidy'], 'windows': len(rows),
+           'truth_in_domain_by_slot': {'S288C': sum(flags[0] for flags in truth_domain),
+                                       'SK1': sum(flags[1] for flags in truth_domain)},
+           'truth_pair_in_domain_windows': sum(all(flags) for flags in truth_domain),
+           'truth_pair_vs_selected_m1_nats': (rescore['references'][0]['m1_oracle_rescore']
+                                              - rescore['selected_chain_self_check']['external_m1_oracle']),
            'exact_homolog_windows': len(exact), 'bracketed_homolog_windows': len(rows) - len(exact),
            'truth_self_test': {'accuracy': 1.0 if exact else None, 'switches': 0 if exact else None,
                                'windows': len(exact)},

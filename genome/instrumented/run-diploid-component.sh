@@ -5,6 +5,9 @@ set -uo pipefail
 C="$1"; TAG="${2:-validation}"
 source /home/erikg/impg-genome-inference/build-env.sh
 D=/home/erikg/yeast/genome-diploid-validation-20260929
+# The rescore writes relative sidecars; keep these in the isolated sample
+# directory, not in the repository or another lane's working directory.
+cd "$D"
 P="$D/run-$TAG-$C"
 rm -f "$P.done" "$P.exit"
 start=$(date +%s)
