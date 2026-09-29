@@ -1122,8 +1122,15 @@ pub(in super) struct BoundaryTransitionCosts {
 /// `finalize_boundary_transition_costs`: their features must be in the
 /// multiplicity-background scan before they are charged.
 pub(in super) struct BoundaryTransitionDraft {
+    // Enumerated once per exact terminal interface group, not per allele
+    // cross-product. Equal groups share endpoints, flank, and owner set;
+    // the dense materialization below expands these charges on demand.
     pair_composition: Vec<u32>,
     pair_kind: Vec<u8>,
+    left_group: Vec<u32>,
+    right_group: Vec<u32>,
+    left_group_size: Vec<u64>,
+    right_group_size: Vec<u64>,
     composition_pooled: Vec<bool>,
     /// Per composition: the DISTINCT owning universe partitions of its
     /// realizing allele pairs (the owner-resolved observed sides).
@@ -1239,15 +1246,55 @@ pub(in super) fn build_boundary_transition_draft(
         head_ids[allele] = intern_right(head, &mut right_flanks, &mut right_flank_index);
     }
 
-    // Compositions per retained pair: (left flank id, right flank id).
+    // Exact terminal interfaces: these are the ONLY fields read by the
+    // co-occurrence, composition, owner-charge, and restricted-crossing
+    // calculations. The full allele index still maps to its group's cost
+    // when the DP asks for the dense matrix. Keep first-seen representatives
+    // in dense-index order so composition insertion order is unchanged.
+    let mut left_groups: BTreeMap<(usize, u64, u64, bool, u32, Vec<u32>), u32> = BTreeMap::new();
+    let mut right_groups: BTreeMap<(usize, u64, u64, bool, u32, Vec<u32>), u32> = BTreeMap::new();
+    let mut left_group = Vec::with_capacity(sorted_left.len());
+    let mut right_group = Vec::with_capacity(sorted_right.len());
+    let mut left_representatives = Vec::new();
+    let mut right_representatives = Vec::new();
+    let mut left_group_size: Vec<u64> = Vec::new();
+    let mut right_group_size: Vec<u64> = Vec::new();
+    for &allele in &sorted_left {
+        let end = ranges_left[allele].segments.last().expect("nonempty traversal");
+        let key = (end.source, end.start, end.end, end.reverse, tail_ids[allele],
+                   left_owners[allele].clone());
+        let group = *left_groups.entry(key).or_insert_with(|| {
+            let id = left_representatives.len() as u32;
+            left_representatives.push(allele);
+            left_group_size.push(0);
+            id
+        });
+        left_group_size[group as usize] += 1;
+        left_group.push(group);
+    }
+    for &allele in &sorted_right {
+        let start = ranges_right[allele].segments.first().expect("nonempty traversal");
+        let key = (start.source, start.start, start.end, start.reverse, head_ids[allele],
+                   right_owners[allele].clone());
+        let group = *right_groups.entry(key).or_insert_with(|| {
+            let id = right_representatives.len() as u32;
+            right_representatives.push(allele);
+            right_group_size.push(0);
+            id
+        });
+        right_group_size[group as usize] += 1;
+        right_group.push(group);
+    }
+
+    // Compositions per retained interface-group pair: (left flank, right flank).
     let mut composition_owners: Vec<BTreeSet<u32>> = Vec::new();
     let mut composition_ids: HashMap<(u32, u32), u32> = HashMap::new();
     let mut compositions: Vec<(u32, u32)> = Vec::new();
     let mut pair_composition: Vec<u32> =
-        vec![u32::MAX; sorted_left.len() * sorted_right.len()];
+        vec![u32::MAX; left_representatives.len() * right_representatives.len()];
     // Dense-pair evidence kinds: 1 = co-occurring (gap-filled real junction),
     // 0 = novel junction (including same-source overlaps).
-    let mut pair_kind: Vec<u8> = vec![0; sorted_left.len() * sorted_right.len()];
+    let mut pair_kind: Vec<u8> = vec![0; pair_composition.len()];
     // Per composition: pooled flag (some realizing pair is co-occurring)
     // and the realizing dense pairs (for the restricted charge's event
     // union over novel-only compositions).
@@ -1260,16 +1307,17 @@ pub(in super) fn build_boundary_transition_draft(
     let mut novel_pairs = 0u64;
     let mut overlap_novel = 0u64;
     let mut empty_tail_pairs = 0u64;
-    for (dense_left, &left) in sorted_left.iter().enumerate() {
-        for (dense_right, &right) in sorted_right.iter().enumerate() {
+    for (dense_left, &left) in left_representatives.iter().enumerate() {
+        for (dense_right, &right) in right_representatives.iter().enumerate() {
+            let multiplicity = left_group_size[dense_left] * right_group_size[dense_right];
             let gap = cooccurrence_gap(&ranges_left[left], &ranges_right[right]);
             let (left_id, right_id) = match gap {
                 Some(gap) if gap >= 0 => {
-                    cooc_pairs += 1;
+                    cooc_pairs += multiplicity;
                     if gap == 0 {
-                        cooc_gap_zero += 1;
+                        cooc_gap_zero += multiplicity;
                     } else {
-                        cooc_gap_positive += 1;
+                        cooc_gap_positive += multiplicity;
                     }
                     let exit = ranges_left[left]
                         .segments
@@ -1316,15 +1364,15 @@ pub(in super) fn build_boundary_transition_draft(
                     (tail_ids[left], right_id)
                 }
                 _ => {
-                    novel_pairs += 1;
+                    novel_pairs += multiplicity;
                     if gap.is_some() {
-                        overlap_novel += 1;
+                        overlap_novel += multiplicity;
                     }
                     (tail_ids[left], head_ids[right])
                 }
             };
             if left_flanks[left_id as usize].is_empty() {
-                empty_tail_pairs += 1;
+                empty_tail_pairs += multiplicity;
             }
             let composition = match composition_ids.get(&(left_id, right_id)) {
                 Some(&id) => id,
@@ -1347,8 +1395,8 @@ pub(in super) fn build_boundary_transition_draft(
             composition_owners[composition as usize].extend(left_owners[left].iter().copied());
             composition_owners[composition as usize]
                 .extend(right_owners[right].iter().copied());
-            pair_composition[dense_left * sorted_right.len() + dense_right] = composition;
-            pair_kind[dense_left * sorted_right.len() + dense_right] = u8::from(cooccurring);
+            pair_composition[dense_left * right_representatives.len() + dense_right] = composition;
+            pair_kind[dense_left * right_representatives.len() + dense_right] = u8::from(cooccurring);
         }
     }
     let composition_count = compositions.len();
@@ -1358,10 +1406,15 @@ pub(in super) fn build_boundary_transition_draft(
     let novel_riding_pooled: u64 = pair_kind
         .iter()
         .zip(pair_composition.iter())
-        .filter(|(&kind, &composition)| {
+        .enumerate()
+        .filter(|(_, (&kind, &composition))| {
             kind == 0 && composition_pooled[composition as usize]
         })
-        .count() as u64;
+        .map(|(index, _)| {
+            let right_count = right_representatives.len();
+            left_group_size[index / right_count] * right_group_size[index % right_count]
+        })
+        .sum();
     let composition_profiles: Vec<Profile> = (0..composition_count)
         .into_par_iter()
         .map(|id| {
@@ -1390,12 +1443,12 @@ pub(in super) fn build_boundary_transition_draft(
                 .iter()
                 .map(|&(dense_left, dense_right)| {
                     (
-                        ranges_left[sorted_left[dense_left as usize]]
+                        ranges_left[left_representatives[dense_left as usize]]
                             .segments
                             .last()
                             .expect("nonempty traversal")
                             .clone(),
-                        ranges_right[sorted_right[dense_right as usize]]
+                        ranges_right[right_representatives[dense_right as usize]]
                             .segments
                             .first()
                             .expect("nonempty traversal")
@@ -1421,6 +1474,10 @@ pub(in super) fn build_boundary_transition_draft(
     Ok(BoundaryTransitionDraft {
         pair_composition,
         pair_kind,
+        left_group,
+        right_group,
+        left_group_size,
+        right_group_size,
         composition_pooled,
         composition_owners,
         profiles: composition_profiles,
@@ -1468,9 +1525,15 @@ pub(in super) fn materialize_boundary_matrices(
     let right_count = draft.right_count;
     let mut cost = vec![f64::INFINITY; left_count * right_count];
     let mut cost_haploid = vec![f64::INFINITY; left_count * right_count];
-    for (index, &composition) in draft.pair_composition.iter().enumerate() {
-        cost[index] = charges.scores[composition as usize].0;
-        cost_haploid[index] = charges.scores_haploid[composition as usize].0;
+    let group_right_count = draft.right_group_size.len();
+    for (dense_left, &left_group) in draft.left_group.iter().enumerate() {
+        for (dense_right, &right_group) in draft.right_group.iter().enumerate() {
+            let composition = draft.pair_composition
+                [left_group as usize * group_right_count + right_group as usize] as usize;
+            let index = dense_left * right_count + dense_right;
+            cost[index] = charges.scores[composition].0;
+            cost_haploid[index] = charges.scores_haploid[composition].0;
+        }
     }
     BoundaryTransitionCosts {
         cost,
@@ -1497,6 +1560,10 @@ pub(in super) fn charge_boundary_compositions(
     let BoundaryTransitionDraft {
         pair_composition,
         pair_kind,
+        left_group: _,
+        right_group: _,
+        left_group_size,
+        right_group_size,
         composition_pooled,
         composition_owners,
         profiles,
@@ -1576,8 +1643,8 @@ pub(in super) fn charge_boundary_compositions(
     // matrices to O(compositions) per boundary).
     let mut floor = f64::INFINITY;
     let mut floor_haploid = f64::INFINITY;
-    let mut cooc_costs: Vec<f64> = Vec::new();
-    let mut novel_costs: Vec<f64> = Vec::new();
+    let mut cooc_costs: Vec<(f64, u64)> = Vec::new();
+    let mut novel_costs: Vec<(f64, u64)> = Vec::new();
     for (index, (&composition, &kind)) in pair_composition
         .iter()
         .zip(pair_kind.iter())
@@ -1591,29 +1658,43 @@ pub(in super) fn charge_boundary_compositions(
         )?;
         floor = floor.min(value);
         floor_haploid = floor_haploid.min(value_haploid);
+        let group_right_count = right_group_size.len();
+        let weight = left_group_size[index / group_right_count]
+            * right_group_size[index % group_right_count];
         if kind == 1 {
-            cooc_costs.push(value);
+            cooc_costs.push((value, weight));
         } else {
-            novel_costs.push(value);
+            novel_costs.push((value, weight));
         }
     }
-    let distribution = |values: &mut Vec<f64>| -> serde_json::Value {
-        values.sort_by(|left, right| left.total_cmp(right));
+    let distribution = |values: &mut Vec<(f64, u64)>| -> serde_json::Value {
+        values.sort_by(|left, right| left.0.total_cmp(&right.0));
         if values.is_empty() {
             return serde_json::Value::Null;
         }
+        let count: u64 = values.iter().map(|(_, weight)| *weight).sum();
+        let mut before = 0u64;
+        let median = values.iter().find_map(|&(value, weight)| {
+            let in_range = before + weight > count / 2;
+            before += weight;
+            in_range.then_some(value)
+        }).expect("nonempty weighted distribution");
         serde_json::json!({
-            "count": values.len(),
-            "min": values[0],
-            "median": values[values.len() / 2],
-            "max": values[values.len() - 1],
-            "negative_count": values.iter().filter(|&&value| value < 0.0).count(),
+            "count": count,
+            "min": values[0].0,
+            "median": median,
+            "max": values[values.len() - 1].0,
+            "negative_count": values.iter().filter(|(value, _)| *value < 0.0)
+                .map(|(_, weight)| *weight).sum::<u64>(),
         })
     };
     let stats = serde_json::json!({
         "retained_left": left_count,
         "retained_right": right_count,
         "retained_pairs": left_count * right_count,
+        "terminal_interface_groups_left": left_group_size.len(),
+        "terminal_interface_groups_right": right_group_size.len(),
+        "enumerated_interface_pairs": pair_composition.len(),
         "cooccurring_pairs": cooc_pairs,
         "cooccurring_gap_zero": cooc_gap_zero,
         "cooccurring_gap_positive": cooc_gap_positive,
