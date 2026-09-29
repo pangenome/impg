@@ -1536,3 +1536,69 @@ aggregate 14-component mean is ~620s. The big three (IV 1.57Mb, XV/VII
 the serial lane records their walls and RSS peaks (the raised bar
 covers the territory-heavy peaks; chrII peaked 47GB, chrXVI 21GB in the
 light class).
+
+
+### 2.33 THE DIPLOID VALIDATION SMOKE (owner greenlight 2026-09-29):
+THE SAMPLE, TWO SMOKE COMPONENTS, AND THE ANSWER TO THE OWNER'S QUESTION
+
+THE SAMPLE (genome-diploid-validation-20260929): two DIFFERENT panel
+haplotype routes per component — slot 1 = S288C#0#chr*, slot 2 =
+SK1#0#chr* (both strains carry all 17 chromosomes; 34 paths total) —
+MIXED DOSAGE by construction: 6x slot 1 / 4x slot 2 of the same 10x
+total, 813,680 reads, THE SAME read model as the haploid sample
+(uniform start positions, 50% reverse complement, error-free, all-I
+qualities, @sim-N headers, seeded). NO seams (each slot a pure route);
+NO new syng. The membwt built (build-sample, exit 0).
+
+THE SMOKE RUNS (the production config, both reference pairs populated):
+chrMT and chrI, the truth pair = (S288C route, SK1 route).
+
+THE DELTA TABLE (the owner's question: 'really bad, or marginally
+worse?'):
+
+                              chrMT (85kb)     chrI (220kb)
+  selected ploidy              HAPLOID (wrong)  HAPLOID (wrong)
+  track gap (diploid-haploid)  ~51k nats        ~196k nats
+  truth pair vs best single    +29.6k worse     +165k worse
+    (the m1's own prices)
+  heterozygous pairs called    0 / 14          0 / 21
+  structure matches            0 / 8            0 / 17
+  dosage recovered             2.0 one class    2.0 one class
+  true dosage                  1.2 / 0.8        1.2 / 0.8
+  external best-single acc     0.9778 / 13      0.9993 / 18
+  pooled evaluator prefers     the truth pair   the truth pair
+
+THE ANSWER HAS TWO PARTS:
+(1) THE CONSENSUS SEQUENCE IS NOT BAD AT ALL: the machinery's haploid
+call tracks the diploid mixture's consensus material at 0.98-0.9993
+best-single accuracy (the near-identical-paralog rows measure
+sequence-correct; the third-source labels are the established panel
+ambiguity).
+(2) THE DIPLOID SEMANTICS ARE ENTIRELY ABSENT FROM THE CALLS — the
+'really bad' end, at BOTH scales: the ploidy is wrong on both
+components; the second haplotype is never expressed (0 heterozygous
+pairs called anywhere, even internally); the dosage columns are LIVE
+(the machinery reports them) but read 2.0-on-one-class against the
+true 1.2/0.8; and the objective PRICES the true pair 30k-165k nats
+WORSE than the single slot-1 route. THE MECHANISM IS THE SAME
+INSTRUMENT LIMITATION AS ITEM 3'S GATE EVIDENCE: the m1's feature-key
+accounting cannot distinguish a 6x+4x mixture from the best single
+when the strains share ~99% of their vocabulary — the single collects
+the overset credit on the shared features (its q is underset at 6x
+while the observed mass is 10x) while the true pair pays the
+pair/ownership charges. The pooled evaluator prefers the truth pair
+on BOTH components (the two-evaluator split, consistent with every
+previous finding).
+
+THE DESIGNED REPLACEMENT COVERS THIS TOO: ITEM 3's MEM-projection
+likelihood (per-record positional evidence against the pair's spelled
+spans) distinguishes the pair from the single BY CONSTRUCTION — the
+SK1-specific records place on SK1's span and credit the pair; under
+the current window-mass instrument they credit whichever single shares
+the words. THE DIPLOID VALIDATION IS ITEM 3'S SECOND GATE EVIDENCE.
+
+THE DIPLOID MACHINERY ITSELF IS NOT BROKEN: both tracks ran end-to-end
+on both components (the pair tables, the two-slot states, the diplotype
+calls with credible sets and dosage columns, the truth pair evaluated
+through the diploid track) — the objective's prices are the defect,
+exactly as the chrIII finding established for the haploid track.
