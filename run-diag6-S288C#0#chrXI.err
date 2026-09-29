@@ -1,0 +1,679 @@
+read GBWT with 10024605 vertices and 24005160 edges from /home/erikg/yeast/syng-k63-s8-seed7-acgt-only-pos64/yeast235.syng.1gbwt
+[rss] input_load: resident-peak 1061 MiB
+[rss] candidate_domain: resident-peak 1066 MiB
+[rss] sample_read_buffer: resident-peak 1209 MiB
+[rss] junction_read_chains: resident-peak 1220 MiB
+[rss] junction_read_chains: resident-peak 1227 MiB
+[rss] junction_read_chains: resident-peak 1233 MiB
+[rss] junction_read_chains: resident-peak 1242 MiB
+[rss] junction_read_chains: resident-peak 1248 MiB
+[rss] junction_read_chains: resident-peak 1253 MiB
+[rss] junction_read_chains: resident-peak 1265 MiB
+[rss] junction_read_chains: resident-peak 1271 MiB
+[rss] junction_read_chains: resident-peak 1275 MiB
+[rss] junction_read_chains: resident-peak 1282 MiB
+[rss] junction_read_chains: resident-peak 1285 MiB
+[rss] junction_read_chains: resident-peak 1291 MiB
+[rss] junction_read_chains: resident-peak 1299 MiB
+[rss] junction_read_chains: resident-peak 1315 MiB
+[rss] junction_read_chains: resident-peak 1319 MiB
+[rss] junction_read_chains: resident-peak 1326 MiB
+[rss] junction_read_chains: resident-peak 1329 MiB
+[rss] junction_read_chains: resident-peak 1336 MiB
+[rss] junction_read_chains: resident-peak 1340 MiB
+[rss] junction_read_chains: resident-peak 1345 MiB
+[rss] junction_read_chains: resident-peak 1351 MiB
+[rss] junction_read_chains: resident-peak 1355 MiB
+[rss] junction_read_chains: resident-peak 1362 MiB
+[rss] junction_read_chains: resident-peak 1366 MiB
+[rss] sample_record_rederivation: resident-peak 1377 MiB
+[rss] territory_index: resident-peak 2106 MiB
+[rss] route_search: resident-peak 2124 MiB
+[rss] share_accumulation: resident-peak 2137 MiB
+[rss] site_observed_maps: resident-peak 2312 MiB
+[rss] genome_background_batch: resident-peak 2621 MiB
+[rss] genome_background_batch: resident-peak 2684 MiB
+[rss] genome_background_batch: resident-peak 2714 MiB
+[rss] genome_background_batch: resident-peak 2741 MiB
+[rss] genome_background_batch: resident-peak 2819 MiB
+[rss] genome_background_batch: resident-peak 2858 MiB
+[rss] genome_background_batch: resident-peak 2886 MiB
+[rss] genome_background_batch: resident-peak 2903 MiB
+[rss] genome_background_batch: resident-peak 2936 MiB
+[rss] genome_background_batch: resident-peak 3058 MiB
+[rss] genome_background_batch: resident-peak 3108 MiB
+[rss] genome_background_batch: resident-peak 3139 MiB
+[rss] genome_background_batch: resident-peak 3172 MiB
+[rss] genome_background_batch: resident-peak 3195 MiB
+[rss] genome_background_batch: resident-peak 3231 MiB
+[rss] genome_background_batch: resident-peak 3261 MiB
+[rss] genome_background_batch: resident-peak 3290 MiB
+[rss] genome_background_batch: resident-peak 3350 MiB
+[rss] genome_background_batch: resident-peak 3384 MiB
+[rss] genome_background_batch: resident-peak 3422 MiB
+[rss] genome_background_batch: resident-peak 3432 MiB
+[rss] genome_background_batch: resident-peak 3462 MiB
+[rss] genome_background_batch: resident-peak 3480 MiB
+[rss] genome_background_batch: resident-peak 3520 MiB
+[rss] genome_background_batch: resident-peak 3553 MiB
+[rss] genome_background_batch: resident-peak 3553 MiB
+[rss] genome_background_batch: resident-peak 3570 MiB
+[rss] genome_background_batch: resident-peak 3605 MiB
+[rss] genome_background_batch: resident-peak 3645 MiB
+[rss] genome_background_batch: resident-peak 3689 MiB
+[rss] genome_background_batch: resident-peak 3702 MiB
+[rss] genome_background_batch: resident-peak 3721 MiB
+[rss] genome_background_batch: resident-peak 3729 MiB
+[rss] genome_background_batch: resident-peak 3758 MiB
+[rss] genome_background_batch: resident-peak 3792 MiB
+[rss] genome_background_batch: resident-peak 3833 MiB
+[rss] genome_background_batch: resident-peak 3876 MiB
+[rss] genome_background_batch: resident-peak 3895 MiB
+[rss] genome_background_batch: resident-peak 3895 MiB
+[rss] genome_background_pass: resident-peak 3895 MiB
+[rss] junction_span_placements: resident-peak 3895 MiB
+[rss] junction_span_index: resident-peak 3916 MiB
+[junction] span index: 815601 reads, 448174 records (26174 placed, 3942326 placements, 3942326 index entries) (0.5s)
+[rss] junction_placement_infos: resident-peak 4142 MiB
+[rss] junction_attested_compositions: resident-peak 4142 MiB
+[junction] crossing-attested compositions: 2019 (cross-source, read-attested; 0.9s; novel pairs 338, continuity-killed reads 48576, unanchored skips 0, mixed-orientation positions 42533)
+[junction] span index built in 1.6s
+[rss] spine_classing_locus_0: resident-peak 4179 MiB
+[rss] spine_classing_locus_1: resident-peak 4179 MiB
+[rss] spine_classing_locus_2: resident-peak 4181 MiB
+[rss] spine_classing_locus_3: resident-peak 4182 MiB
+[rss] spine_classing_locus_4: resident-peak 4183 MiB
+[rss] spine_classing_locus_5: resident-peak 4185 MiB
+[rss] spine_classing_locus_6: resident-peak 4215 MiB
+[rss] spine_classing_locus_7: resident-peak 4219 MiB
+[rss] spine_classing_locus_8: resident-peak 4220 MiB
+[rss] spine_classing_locus_9: resident-peak 4223 MiB
+[rss] spine_classing_locus_10: resident-peak 4240 MiB
+[rss] spine_classing_locus_11: resident-peak 4267 MiB
+[rss] spine_classing_locus_12: resident-peak 4298 MiB
+[rss] spine_classing_locus_13: resident-peak 4345 MiB
+[rss] spine_classing_locus_14: resident-peak 4353 MiB
+[rss] spine_classing_locus_15: resident-peak 4379 MiB
+[rss] spine_classing_locus_16: resident-peak 4400 MiB
+[rss] spine_classing_locus_17: resident-peak 4435 MiB
+[rss] spine_classing_locus_18: resident-peak 4485 MiB
+[rss] spine_classing_locus_19: resident-peak 4543 MiB
+[rss] spine_classing_locus_20: resident-peak 4548 MiB
+[rss] spine_classing_locus_21: resident-peak 4577 MiB
+[rss] spine_classing_locus_22: resident-peak 4603 MiB
+[rss] spine_classing_locus_23: resident-peak 4675 MiB
+[rss] spine_classing_locus_24: resident-peak 4699 MiB
+[rss] spine_classing_locus_25: resident-peak 4707 MiB
+[rss] spine_classing_locus_26: resident-peak 4762 MiB
+[rss] spine_classing_locus_27: resident-peak 4798 MiB
+[rss] spine_classing_locus_28: resident-peak 4846 MiB
+[rss] spine_classing_locus_29: resident-peak 4869 MiB
+[rss] spine_classing_locus_30: resident-peak 4908 MiB
+[rss] spine_classing_locus_31: resident-peak 4913 MiB
+[rss] spine_classing_locus_32: resident-peak 4995 MiB
+[rss] spine_classing_locus_33: resident-peak 5056 MiB
+[rss] spine_classing_locus_34: resident-peak 5068 MiB
+[rss] spine_classing_locus_35: resident-peak 5105 MiB
+[rss] spine_classing_locus_36: resident-peak 5131 MiB
+[rss] spine_classing_locus_37: resident-peak 5156 MiB
+[rss] spine_classing_locus_38: resident-peak 5325 MiB
+[rss] spine_classing_locus_39: resident-peak 5325 MiB
+[rss] spine_classing_locus_40: resident-peak 5325 MiB
+[rss] spine_classing_locus_41: resident-peak 5326 MiB
+[rss] spine_classing_locus_42: resident-peak 5378 MiB
+[rss] spine_classing_locus_43: resident-peak 5385 MiB
+[rss] spine_classing_locus_44: resident-peak 5396 MiB
+[rss] spine_classing_locus_45: resident-peak 5417 MiB
+[rss] spine_classing_locus_46: resident-peak 5583 MiB
+[rss] spine_classing_locus_47: resident-peak 5583 MiB
+[rss] spine_classing_locus_48: resident-peak 5590 MiB
+[rss] spine_classing_locus_49: resident-peak 5595 MiB
+[rss] spine_classing_locus_50: resident-peak 5634 MiB
+[rss] spine_classing_locus_51: resident-peak 5730 MiB
+[rss] spine_classing_locus_52: resident-peak 5871 MiB
+[rss] spine_classing_locus_53: resident-peak 5871 MiB
+[rss] spine_classing_locus_54: resident-peak 5871 MiB
+[rss] spine_classing_locus_55: resident-peak 5872 MiB
+[rss] spine_classing_locus_56: resident-peak 5873 MiB
+[rss] spine_classing_locus_57: resident-peak 5908 MiB
+[rss] spine_classing_locus_58: resident-peak 5932 MiB
+[rss] spine_classing_locus_59: resident-peak 5955 MiB
+[rss] spine_classing_locus_60: resident-peak 5973 MiB
+[rss] spine_classing_locus_61: resident-peak 6146 MiB
+[rss] spine_classing_locus_62: resident-peak 6146 MiB
+[rss] spine_classing_locus_63: resident-peak 6390 MiB
+[rss] spine_classing_locus_64: resident-peak 6390 MiB
+[rss] spine_classing_locus_65: resident-peak 6390 MiB
+[spine] classing done: [1, 170, 183, 159, 157, 146, 204, 175, 155, 149, 138, 152, 146, 175, 159, 153, 164, 153, 164, 189, 167, 182, 162, 166, 172, 161, 162, 165, 171, 197, 203, 169, 187, 183, 157, 172, 170, 188, 207, 165, 163, 157, 183, 176, 157, 173, 205, 171, 190, 173, 175, 205, 195, 164, 149, 166, 157, 179, 173, 156, 148, 193, 151, 191, 168, 1] classes (subtotals parents 2.10s sweeps 3.45s partials+seams 0.00s classing 8.90s)
+[rss] spine_boundary_0: resident-peak 6390 MiB
+[rss] spine_boundary_1: resident-peak 6390 MiB
+[rss] spine_boundary_2: resident-peak 6390 MiB
+[rss] spine_boundary_3: resident-peak 6390 MiB
+[rss] spine_boundary_4: resident-peak 6390 MiB
+[rss] spine_boundary_5: resident-peak 6390 MiB
+[rss] spine_boundary_6: resident-peak 6390 MiB
+[rss] spine_boundary_7: resident-peak 6390 MiB
+[rss] spine_boundary_8: resident-peak 6390 MiB
+[rss] spine_boundary_9: resident-peak 6390 MiB
+[rss] spine_boundary_10: resident-peak 6390 MiB
+[rss] spine_boundary_11: resident-peak 6390 MiB
+[rss] spine_boundary_12: resident-peak 6390 MiB
+[rss] spine_boundary_13: resident-peak 6398 MiB
+[rss] spine_boundary_14: resident-peak 6398 MiB
+[rss] spine_boundary_15: resident-peak 6398 MiB
+[rss] spine_boundary_16: resident-peak 6399 MiB
+[rss] spine_boundary_17: resident-peak 6399 MiB
+[rss] spine_boundary_18: resident-peak 6399 MiB
+[rss] spine_boundary_19: resident-peak 6399 MiB
+[rss] spine_boundary_20: resident-peak 6399 MiB
+[rss] spine_boundary_21: resident-peak 6399 MiB
+[rss] spine_boundary_22: resident-peak 6399 MiB
+[rss] spine_boundary_23: resident-peak 6400 MiB
+[rss] spine_boundary_24: resident-peak 6400 MiB
+[rss] spine_boundary_25: resident-peak 6400 MiB
+[rss] spine_boundary_26: resident-peak 6400 MiB
+[rss] spine_boundary_27: resident-peak 6400 MiB
+[rss] spine_boundary_28: resident-peak 6400 MiB
+[rss] spine_boundary_29: resident-peak 6400 MiB
+[rss] spine_boundary_30: resident-peak 6400 MiB
+[rss] spine_boundary_31: resident-peak 6400 MiB
+[rss] spine_boundary_32: resident-peak 6404 MiB
+[rss] spine_boundary_33: resident-peak 6404 MiB
+[rss] spine_boundary_34: resident-peak 6404 MiB
+[rss] spine_boundary_35: resident-peak 6404 MiB
+[rss] spine_boundary_36: resident-peak 6405 MiB
+[rss] spine_boundary_37: resident-peak 6405 MiB
+[rss] spine_boundary_38: resident-peak 6405 MiB
+[rss] spine_boundary_39: resident-peak 6405 MiB
+[rss] spine_boundary_40: resident-peak 6405 MiB
+[rss] spine_boundary_41: resident-peak 6405 MiB
+[rss] spine_boundary_42: resident-peak 6405 MiB
+[rss] spine_boundary_43: resident-peak 6405 MiB
+[rss] spine_boundary_44: resident-peak 6405 MiB
+[rss] spine_boundary_45: resident-peak 6405 MiB
+[rss] spine_boundary_46: resident-peak 6405 MiB
+[rss] spine_boundary_47: resident-peak 6405 MiB
+[rss] spine_boundary_48: resident-peak 6405 MiB
+[rss] spine_boundary_49: resident-peak 6405 MiB
+[rss] spine_boundary_50: resident-peak 6405 MiB
+[rss] spine_boundary_51: resident-peak 6405 MiB
+[rss] spine_boundary_52: resident-peak 6405 MiB
+[rss] spine_boundary_53: resident-peak 6406 MiB
+[rss] spine_boundary_54: resident-peak 6406 MiB
+[rss] spine_boundary_55: resident-peak 6406 MiB
+[rss] spine_boundary_56: resident-peak 6408 MiB
+[rss] spine_boundary_57: resident-peak 6408 MiB
+[rss] spine_boundary_58: resident-peak 6408 MiB
+[rss] spine_boundary_59: resident-peak 6408 MiB
+[rss] spine_boundary_60: resident-peak 6408 MiB
+[rss] spine_boundary_61: resident-peak 6408 MiB
+[rss] spine_boundary_62: resident-peak 6415 MiB
+[rss] spine_boundary_63: resident-peak 6415 MiB
+[rss] spine_boundary_64: resident-peak 6415 MiB
+[backgrounds] multiplicity scan: 1738957 universe features, 10.54s
+[rss] spine_background_scan: resident-peak 10929 MiB
+[junction] boundary: 1 compositions (1 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 56 compositions (56 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 32 compositions (32 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 19 compositions (19 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 33 compositions (33 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 22 compositions (22 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 38 compositions (38 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 43 compositions (43 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 32 compositions (32 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 17 compositions (17 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 13 compositions (13 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 12 compositions (12 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 32 compositions (32 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 29 compositions (29 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 22 compositions (22 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 25 compositions (25 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 13 compositions (13 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 27 compositions (27 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 15 compositions (15 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 30 compositions (30 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 22 compositions (22 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 53 compositions (53 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 42 compositions (42 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 26 compositions (26 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 34 compositions (34 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 59 compositions (59 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 13 compositions (13 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 42 compositions (42 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 16 compositions (16 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 37 compositions (35 pooled, 2 novel-only, 0 novel with crossing reads)
+[junction] boundary: 58 compositions (58 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 22 compositions (22 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 50 compositions (50 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 26 compositions (26 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 35 compositions (35 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 33 compositions (33 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 18 compositions (18 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 64 compositions (64 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 45 compositions (45 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 34 compositions (34 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 7 compositions (7 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 25 compositions (25 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 18 compositions (18 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 58 compositions (58 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 13 compositions (13 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 33 compositions (33 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 14 compositions (14 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 24 compositions (24 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 61 compositions (61 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 44 compositions (36 pooled, 8 novel-only, 8 novel with crossing reads)
+[junction] boundary: 31 compositions (31 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 35 compositions (35 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 27 compositions (27 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 25 compositions (25 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 23 compositions (23 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 10 compositions (10 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 60 compositions (24 pooled, 36 novel-only, 0 novel with crossing reads)
+[junction] boundary: 41 compositions (41 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 49 compositions (49 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 27 compositions (27 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 24 compositions (24 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 28 compositions (28 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 14 compositions (14 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 29 compositions (29 pooled, 0 novel-only, 0 novel with crossing reads)
+[junction] boundary: 1 compositions (1 pooled, 0 novel-only, 0 novel with crossing reads)
+[spine] boundaries done: compositions [1, 56, 32, 19, 33, 22, 38, 43, 32, 17, 13, 12, 32, 29, 22, 25, 13, 27, 15, 30, 22, 53, 42, 26, 34, 59, 13, 42, 16, 37, 58, 22, 50, 26, 35, 33, 18, 64, 45, 34, 7, 25, 18, 58, 13, 33, 14, 24, 61, 44, 31, 35, 27, 25, 23, 10, 60, 41, 49, 27, 24, 28, 14, 29, 1]
+[spine] native backbone incumbent 658395.88
+[sweep] summaries: grid evals 8639695 (0.00s), classes (0.00s), total 0.00s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.00s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 1, exact 1 (core 1 + margin 0), bound-pruned 0
+[rss] spine_sweep_locus_0: resident-peak 12078 MiB
+[sweep] summaries: grid evals 110468820 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.03s
+[sweep] bound prune: class pairs 14535, exact 8303 (core 45 + margin 8258), bound-pruned 6232
+[rss] spine_sweep_locus_1: resident-peak 12078 MiB
+[sweep] summaries: grid evals 140935372 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.03s
+[sweep] bound prune: class pairs 16653, exact 6131 (core 89 + margin 6042), bound-pruned 10522
+[rss] spine_sweep_locus_2: resident-peak 12078 MiB
+[sweep] summaries: grid evals 49967062 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12720, exact 3396 (core 1922 + margin 1474), bound-pruned 9324
+[rss] spine_sweep_locus_3: resident-peak 12078 MiB
+[sweep] summaries: grid evals 203781238 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 12403, exact 7117 (core 62 + margin 7055), bound-pruned 5286
+[rss] spine_sweep_locus_4: resident-peak 12078 MiB
+[sweep] summaries: grid evals 47183818 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 10731, exact 5951 (core 5700 + margin 251), bound-pruned 4780
+[rss] spine_sweep_locus_5: resident-peak 12078 MiB
+[sweep] summaries: grid evals 335422321 (0.01s), classes (0.02s), total 0.04s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.05s
+[sweep] bound prune: class pairs 20910, exact 6338 (core 7 + margin 6331), bound-pruned 14572
+[rss] spine_sweep_locus_6: resident-peak 12078 MiB
+[sweep] summaries: grid evals 155232577 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 15225, exact 3253 (core 103 + margin 3150), bound-pruned 11972
+[rss] spine_sweep_locus_7: resident-peak 12078 MiB
+[sweep] summaries: grid evals 70445865 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12090, exact 1637 (core 21 + margin 1616), bound-pruned 10453
+[rss] spine_sweep_locus_8: resident-peak 12078 MiB
+[sweep] summaries: grid evals 65064180 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 11175, exact 82 (core 51 + margin 31), bound-pruned 11093
+[rss] spine_sweep_locus_9: resident-peak 12078 MiB
+[sweep] summaries: grid evals 38837228 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 9591, exact 6602 (core 76 + margin 6526), bound-pruned 2989
+[rss] spine_sweep_locus_10: resident-peak 12078 MiB
+[sweep] summaries: grid evals 46597308 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 11628, exact 4878 (core 8 + margin 4870), bound-pruned 6750
+[rss] spine_sweep_locus_11: resident-peak 12078 MiB
+[sweep] summaries: grid evals 51554910 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 10731, exact 2340 (core 50 + margin 2290), bound-pruned 8391
+[rss] spine_sweep_locus_12: resident-peak 12078 MiB
+[sweep] summaries: grid evals 98315512 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 15400, exact 3066 (core 95 + margin 2971), bound-pruned 12334
+[rss] spine_sweep_locus_13: resident-peak 12078 MiB
+[sweep] summaries: grid evals 69454541 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12720, exact 2491 (core 29 + margin 2462), bound-pruned 10229
+[rss] spine_sweep_locus_14: resident-peak 12078 MiB
+[sweep] summaries: grid evals 76151460 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 11781, exact 9348 (core 138 + margin 9210), bound-pruned 2433
+[rss] spine_sweep_locus_15: resident-peak 12078 MiB
+[sweep] summaries: grid evals 77924669 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 13366, exact 8941 (core 124 + margin 8817), bound-pruned 4425
+[rss] spine_sweep_locus_16: resident-peak 12078 MiB
+[sweep] summaries: grid evals 49208844 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 11781, exact 463 (core 397 + margin 66), bound-pruned 11318
+[rss] spine_sweep_locus_17: resident-peak 12078 MiB
+[sweep] summaries: grid evals 64393893 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 13530, exact 4102 (core 38 + margin 4064), bound-pruned 9428
+[rss] spine_sweep_locus_18: resident-peak 12078 MiB
+[sweep] summaries: grid evals 126461262 (0.01s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 17955, exact 2646 (core 285 + margin 2361), bound-pruned 15309
+[rss] spine_sweep_locus_19: resident-peak 12078 MiB
+[sweep] summaries: grid evals 63093774 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 14028, exact 7163 (core 84 + margin 7079), bound-pruned 6865
+[rss] spine_sweep_locus_20: resident-peak 12078 MiB
+[sweep] summaries: grid evals 80792775 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 16653, exact 1157 (core 35 + margin 1122), bound-pruned 15496
+[rss] spine_sweep_locus_21: resident-peak 12078 MiB
+[sweep] summaries: grid evals 53777939 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 13041, exact 854 (core 18 + margin 836), bound-pruned 12187
+[rss] spine_sweep_locus_22: resident-peak 12078 MiB
+[sweep] summaries: grid evals 119337300 (0.01s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 13695, exact 285 (core 37 + margin 248), bound-pruned 13410
+[rss] spine_sweep_locus_23: resident-peak 12078 MiB
+[sweep] summaries: grid evals 82630205 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.03s
+[sweep] bound prune: class pairs 14706, exact 6285 (core 38 + margin 6247), bound-pruned 8421
+[rss] spine_sweep_locus_24: resident-peak 12078 MiB
+[sweep] summaries: grid evals 60269587 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12880, exact 2335 (core 22 + margin 2313), bound-pruned 10545
+[rss] spine_sweep_locus_25: resident-peak 12078 MiB
+[sweep] summaries: grid evals 74647716 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 13041, exact 5068 (core 32 + margin 5036), bound-pruned 7973
+[rss] spine_sweep_locus_26: resident-peak 12078 MiB
+[sweep] summaries: grid evals 80895090 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 13530, exact 828 (core 23 + margin 805), bound-pruned 12702
+[rss] spine_sweep_locus_27: resident-peak 12078 MiB
+[sweep] summaries: grid evals 78741213 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 14706, exact 3570 (core 119 + margin 3451), bound-pruned 11136
+[rss] spine_sweep_locus_28: resident-peak 12078 MiB
+[sweep] summaries: grid evals 131820451 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 19503, exact 11272 (core 31 + margin 11241), bound-pruned 8231
+[rss] spine_sweep_locus_29: resident-peak 12078 MiB
+[sweep] summaries: grid evals 158448908 (0.01s), classes (0.02s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 20503, exact 2926 (core 5 + margin 2921), bound-pruned 17577
+[rss] spine_sweep_locus_30: resident-peak 12078 MiB
+[sweep] summaries: grid evals 90929019 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 14365, exact 1020 (core 98 + margin 922), bound-pruned 13345
+[rss] spine_sweep_locus_31: resident-peak 12078 MiB
+[sweep] summaries: grid evals 92258705 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.03s
+[sweep] bound prune: class pairs 17391, exact 12581 (core 126 + margin 12455), bound-pruned 4810
+[rss] spine_sweep_locus_32: resident-peak 12078 MiB
+[sweep] summaries: grid evals 124844219 (0.01s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 16836, exact 6795 (core 278 + margin 6517), bound-pruned 10041
+[rss] spine_sweep_locus_33: resident-peak 12078 MiB
+[sweep] summaries: grid evals 74806878 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12403, exact 2869 (core 1260 + margin 1609), bound-pruned 9534
+[rss] spine_sweep_locus_34: resident-peak 12078 MiB
+[sweep] summaries: grid evals 109450674 (0.01s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 14878, exact 1540 (core 185 + margin 1355), bound-pruned 13338
+[rss] spine_sweep_locus_35: resident-peak 12078 MiB
+[sweep] summaries: grid evals 71403856 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 14365, exact 3976 (core 27 + margin 3949), bound-pruned 10389
+[rss] spine_sweep_locus_36: resident-peak 12078 MiB
+[sweep] summaries: grid evals 106528619 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 17766, exact 649 (core 8 + margin 641), bound-pruned 17117
+[rss] spine_sweep_locus_37: resident-peak 12078 MiB
+[sweep] summaries: grid evals 520331527 (0.01s), classes (0.02s), total 0.03s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.07s
+[sweep] bound prune: class pairs 21528, exact 15924 (core 12 + margin 15912), bound-pruned 5604
+[rss] spine_sweep_locus_38: resident-peak 12078 MiB
+[sweep] summaries: grid evals 46597424 (0.00s), classes (0.00s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 13695, exact 2650 (core 19 + margin 2631), bound-pruned 11045
+[rss] spine_sweep_locus_39: resident-peak 12078 MiB
+[sweep] summaries: grid evals 41272492 (0.00s), classes (0.00s), total 0.00s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 13366, exact 4359 (core 182 + margin 4177), bound-pruned 9007
+[rss] spine_sweep_locus_40: resident-peak 12078 MiB
+[sweep] summaries: grid evals 41877781 (0.00s), classes (0.00s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12403, exact 2296 (core 155 + margin 2141), bound-pruned 10107
+[rss] spine_sweep_locus_41: resident-peak 12078 MiB
+[sweep] summaries: grid evals 62878845 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.03s
+[sweep] bound prune: class pairs 16836, exact 14736 (core 32 + margin 14704), bound-pruned 2100
+[rss] spine_sweep_locus_42: resident-peak 12078 MiB
+[sweep] summaries: grid evals 59579116 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 15576, exact 6282 (core 6 + margin 6276), bound-pruned 9294
+[rss] spine_sweep_locus_43: resident-peak 12078 MiB
+[sweep] summaries: grid evals 55240540 (0.00s), classes (0.00s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 12403, exact 6104 (core 6104 + margin 0), bound-pruned 6299
+[rss] spine_sweep_locus_44: resident-peak 12078 MiB
+[sweep] summaries: grid evals 69048804 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 15051, exact 12270 (core 96 + margin 12174), bound-pruned 2781
+[rss] spine_sweep_locus_45: resident-peak 12078 MiB
+[sweep] summaries: grid evals 145255285 (0.01s), classes (0.02s), total 0.03s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.04s
+[sweep] bound prune: class pairs 21115, exact 18222 (core 10 + margin 18212), bound-pruned 2893
+[rss] spine_sweep_locus_46: resident-peak 12078 MiB
+[sweep] summaries: grid evals 40388992 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 14706, exact 11666 (core 203 + margin 11463), bound-pruned 3040
+[rss] spine_sweep_locus_47: resident-peak 12078 MiB
+[sweep] summaries: grid evals 109067178 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 18145, exact 7564 (core 7 + margin 7557), bound-pruned 10581
+[rss] spine_sweep_locus_48: resident-peak 12078 MiB
+[sweep] summaries: grid evals 61264426 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 15051, exact 7192 (core 217 + margin 6975), bound-pruned 7859
+[rss] spine_sweep_locus_49: resident-peak 12078 MiB
+[sweep] summaries: grid evals 104473059 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 15400, exact 517 (core 30 + margin 487), bound-pruned 14883
+[rss] spine_sweep_locus_50: resident-peak 12078 MiB
+[sweep] summaries: grid evals 261068787 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 20910, exact 128 (core 102 + margin 26), bound-pruned 20782
+[rss] spine_sweep_locus_51: resident-peak 12078 MiB
+[sweep] summaries: grid evals 216770220 (0.00s), classes (0.01s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 18915, exact 2694 (core 647 + margin 2047), bound-pruned 16221
+[rss] spine_sweep_locus_52: resident-peak 12078 MiB
+[sweep] summaries: grid evals 47359731 (0.00s), classes (0.00s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 13530, exact 4386 (core 149 + margin 4237), bound-pruned 9144
+[rss] spine_sweep_locus_53: resident-peak 12078 MiB
+[sweep] summaries: grid evals 39404148 (0.00s), classes (0.00s), total 0.00s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 11175, exact 550 (core 23 + margin 527), bound-pruned 10625
+[rss] spine_sweep_locus_54: resident-peak 12078 MiB
+[sweep] summaries: grid evals 65402817 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 13861, exact 133 (core 37 + margin 96), bound-pruned 13728
+[rss] spine_sweep_locus_55: resident-peak 12078 MiB
+[sweep] summaries: grid evals 42107317 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12403, exact 441 (core 181 + margin 260), bound-pruned 11962
+[rss] spine_sweep_locus_56: resident-peak 12078 MiB
+[sweep] summaries: grid evals 152992916 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 16110, exact 1788 (core 240 + margin 1548), bound-pruned 14322
+[rss] spine_sweep_locus_57: resident-peak 12078 MiB
+[sweep] summaries: grid evals 72386916 (0.00s), classes (0.00s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 15051, exact 405 (core 23 + margin 382), bound-pruned 14646
+[rss] spine_sweep_locus_58: resident-peak 12078 MiB
+[sweep] summaries: grid evals 45287753 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 12246, exact 4307 (core 260 + margin 4047), bound-pruned 7939
+[rss] spine_sweep_locus_59: resident-peak 12078 MiB
+[sweep] summaries: grid evals 41239800 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 11026, exact 2402 (core 393 + margin 2009), bound-pruned 8624
+[rss] spine_sweep_locus_60: resident-peak 12078 MiB
+[sweep] summaries: grid evals 218687214 (0.01s), classes (0.02s), total 0.02s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 18721, exact 84 (core 37 + margin 47), bound-pruned 18637
+[rss] spine_sweep_locus_61: resident-peak 12078 MiB
+[sweep] summaries: grid evals 62656236 (0.00s), classes (0.00s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.01s
+[sweep] bound prune: class pairs 11325, exact 1528 (core 43 + margin 1485), bound-pruned 9797
+[rss] spine_sweep_locus_62: resident-peak 12078 MiB
+[sweep] summaries: grid evals 334442291 (0.01s), classes (0.02s), total 0.03s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 18336, exact 2346 (core 107 + margin 2239), bound-pruned 15990
+[rss] spine_sweep_locus_63: resident-peak 12078 MiB
+[sweep] summaries: grid evals 127355996 (0.00s), classes (0.01s), total 0.01s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.01s
+[sweep] pass 2 (margin fill): 0.02s
+[sweep] bound prune: class pairs 14196, exact 12967 (core 23 + margin 12944), bound-pruned 1229
+[rss] spine_sweep_locus_64: resident-peak 12078 MiB
+[sweep] summaries: grid evals 15134323 (0.00s), classes (0.00s), total 0.00s
+[sweep] order build: 0.00s
+[sweep] pass 1 (exact core): 0.00s
+[sweep] pass 2 (margin fill): 0.00s
+[sweep] bound prune: class pairs 1, exact 1 (core 1 + margin 0), bound-pruned 0
+[rss] spine_sweep_locus_65: resident-peak 12078 MiB
+[spine] exhaustive sweep done: 942297 class pairs, 6748180 allele pairs, 6.24s
+Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }

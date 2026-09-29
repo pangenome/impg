@@ -1484,3 +1484,55 @@ walls + the aggregate scoreboard on the same run. The honest current
 row is the baseline: chrIII 0.8008-class is the machinery's true
 current behavior. ITEM 3 is the first iteration on it. The Q2 census +
 flag retirement ride the rerun.
+
+
+### 2.32 THE WHOLE-GENOME RERUN: THE RACE, THE SERIAL LANE, AND THE
+SCOREBOARD ASSEMBLING (2026-09-29, the finish stretch)
+
+THE PARALLEL RERUN'S FAILURE INVENTORY (measured): the 7-wide lane's 8
+exit-1s + chrIV's exit-1 are a GENUINE CONCURRENCY RACE at the post-DP
+end-stage — measured three ways: chrIII SOLO passes clean (exit 0, 313s),
+7-wide fails, 2-wide fails; the victim is whichever run is at its
+reference-rescore end-stage while another run starts or ends. The racing
+file remains UNNAMED (the strace repro was too slow under -f
+thread-following and was killed; a one-line entry per the finish-stretch
+discipline). chrVII/chrXV were RSS-killed at 43GB by the old 40GB bar
+(the supervisor has raised it to 120GB — legitimate territory-heavy peaks
+run higher on the wide-core lanes). chrV was misread as a silent kill
+early on — CORRECTED: it passed cleanly (exit 0, wall 434s).
+
+THE FIX: THE SERIAL LANE (run-serial-lane.sh) — each component ALONE on
+the full box (0-255 cores), the measured-safe form; every component so
+far lands clean.
+
+THE HEADLINE: chrIII's clean serial rerun scored 0.8754724697123235 /
+1sw / 37 — BIT-IDENTICAL TO THE FULL-ROW BASELINE. The 0.8008-class
+regression was the CONTEXT-AWARE lane's behavior (the extension
+vocabulary), NOT the component lane's: the product config under the
+current committed binary (seed + block floors + domination + the
+window-scoped omission fix) reproduces the baseline row EXACTLY.
+
+THE SCOREBOARD SO FAR (14 of 17 clean; IV in flight, then XV, VII —
+each with the full box; walls are the serial full-box runs):
+  MT    0.9923  0sw/13   124s
+  I     0.9545  0sw/20   148s
+  VI    0.9988  0sw/28   341s
+  III   0.8755  1sw/37   307s   (= the baseline row exactly)
+  IX    0.9901  0sw/44   324s
+  VIII  0.9679  0sw/59   425s
+  V     0.9379  0sw/60   434s
+  XI    0.9820  0sw/65   573s
+  X     0.9730  0sw/79   720s
+  II    0.9690  0sw/80  1005s
+  XIV   0.9648  0sw/81   815s
+  XIII  0.9559  0sw/100 1050s
+  XVI   0.9520  0sw/106 1149s
+  XII   0.9503  0sw/118 1400s
+
+THE SPEED STORY: every light/medium component lands in 2-24 MINUTES on
+the full box (the old 4-core era: chrXII-class walls were hours); the
+aggregate 14-component mean is ~620s. The big three (IV 1.57Mb, XV/VII
+1.09Mb) are the remaining walls — measured data per the owner's ruling;
+the serial lane records their walls and RSS peaks (the raised bar
+covers the territory-heavy peaks; chrII peaked 47GB, chrXVI 21GB in the
+light class).
