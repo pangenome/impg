@@ -1295,28 +1295,54 @@ pub(crate) fn event_boundaries(
     start_hi: usize,
 ) -> io::Result<Vec<u64>> {
     ensure(
-        read_length > 0
-            && sequence.len() >= read_length
-            && start_lo < start_hi
+        read_length > 0 && sequence.len() >= read_length && start_lo < start_hi
             && start_hi <= sequence.len() - read_length + 1,
         "invalid event profile start range",
     )?;
     let views = mem_records::raw_mem_anchor_positions(panel, sequence)?;
+    event_boundaries_from_views(panel, sequence.len(), read_length, start_lo, start_hi, &views)
+}
+
+fn event_boundaries_from_views(
+    panel: &SyngIndex,
+    sequence_length: usize,
+    read_length: usize,
+    start_lo: usize,
+    start_hi: usize,
+    views: &[Vec<u64>; 2],
+) -> io::Result<Vec<u64>> {
+    ensure(
+        read_length > 0
+            && sequence_length >= read_length
+            && start_lo < start_hi
+            && start_hi <= sequence_length - read_length + 1,
+        "invalid event profile start range",
+    )?;
     let length = read_length as u64;
     let k = panel.syncmer_length_bp() as u64;
     let lo = start_lo as u64;
     let hi = start_hi as u64;
     let mut events = vec![lo, hi];
-    for positions in &views {
-        for &position in positions {
-            for event in [
-                (position + k).saturating_sub(length),
-                position.saturating_add(1),
-            ] {
-                if event > lo && event < hi {
-                    events.push(event);
-                }
-            }
+    for positions in views {
+        // Both event positions are monotone in the already-sorted raw
+        // anchors. Only anchors with an enter/leave inside this chunk can
+        // affect its event runs; scanning every genome anchor for every
+        // 512-start chunk made the old rescore quadratic in copy length.
+        let first_enter = positions.partition_point(|&position| {
+            (position + k).saturating_sub(length) <= lo
+        });
+        for &position in &positions[first_enter..] {
+            let event = (position + k).saturating_sub(length);
+            if event >= hi { break; }
+            events.push(event);
+        }
+        let first_leave = positions.partition_point(|&position| {
+            position.saturating_add(1) <= lo
+        });
+        for &position in &positions[first_leave..] {
+            let event = position.saturating_add(1);
+            if event >= hi { break; }
+            events.push(event);
         }
     }
     events.sort_unstable();
@@ -1355,7 +1381,24 @@ pub fn profile_event_runs(
         max_features > 0 && max_features <= MAX_FEATURES,
         "invalid event profile limits",
     )?;
-    let events = event_boundaries(panel, sequence, read_length, start_lo, start_hi)?;
+    let views = mem_records::raw_mem_anchor_positions(panel, sequence)?;
+    profile_event_runs_with_views(panel, sequence, read_length, start_lo, start_hi, max_features, &views)
+}
+
+fn profile_event_runs_with_views(
+    panel: &SyngIndex,
+    sequence: &[u8],
+    read_length: usize,
+    start_lo: usize,
+    start_hi: usize,
+    max_features: usize,
+    views: &[Vec<u64>; 2],
+) -> io::Result<(Profile, ProfileCost)> {
+    ensure(
+        max_features > 0 && max_features <= MAX_FEATURES,
+        "invalid event profile limits",
+    )?;
+    let events = event_boundaries_from_views(panel, sequence.len(), read_length, start_lo, start_hi, views)?;
     let mut profile = Profile::new();
     for run in events.windows(2) {
         let start = run[0] as usize;
@@ -6459,17 +6502,28 @@ pub fn external_rescore_components(
         .map_err(|_| invalid("read length exceeds address space"))?;
     let mut runs = Vec::new();
     let mut cost = ProfileCost::default();
+    let mut anchor_build_seconds = 0.0;
+    let mut event_profile_seconds = 0.0;
+    let mut start_count = 0usize;
     for (component, sequences) in components.iter().enumerate() {
         for (copy, &sequence) in sequences.iter().enumerate() {
             if sequence.len() < read_length {
                 continue;
             }
             let starts = sequence.len() - read_length + 1;
+            start_count += starts;
+            // Full-copy raw anchor views are a pure function of this spelled
+            // molecule. The old per-512-start loop re-extracted both views
+            // from the ENTIRE molecule for every chunk (quadratic replay).
+            let anchor_started = Instant::now();
+            let views = mem_records::raw_mem_anchor_positions(panel, sequence)?;
+            anchor_build_seconds += anchor_started.elapsed().as_secs_f64();
+            let profile_started = Instant::now();
             let mut lo = 0;
             while lo < starts {
                 let mut hi = (lo + 512).min(starts);
                 let (profile, next) = loop {
-                    match profile_event_runs(panel, sequence, read_length, lo, hi, MAX_FEATURES) {
+                    match profile_event_runs_with_views(panel, sequence, read_length, lo, hi, MAX_FEATURES, &views) {
                         Ok(value) => break value,
                         Err(error)
                             if error.to_string() == "budget: maximal_mem_subwalk_features"
@@ -6493,9 +6547,11 @@ pub fn external_rescore_components(
                 runs.push(path);
                 lo = hi;
             }
+            event_profile_seconds += profile_started.elapsed().as_secs_f64();
         }
     }
     let initial_runs = runs.len();
+    let merge_started = Instant::now();
     let mut round = 0usize;
     while runs.len() > 1 {
         let mut next = Vec::new();
@@ -6519,6 +6575,11 @@ pub fn external_rescore_components(
         fs::remove_file(path)?;
     }
     ensure(loss.is_finite(), "nonfinite external complete rescore")?;
+    eprintln!(
+        "[rescore-index] {} starts={} runs={} anchor_build_s={:.3} event_profile_s={:.3} merge_and_observed_s={:.3}",
+        directory.display(), start_count, initial_runs,
+        anchor_build_seconds, event_profile_seconds, merge_started.elapsed().as_secs_f64()
+    );
     Ok((loss, cost, initial_runs))
 }
 
@@ -6671,6 +6732,40 @@ mod tests {
             fs::write(&sidecar, corrupted).unwrap();
             let error = cache.get_if_cached("allele:a").unwrap_err();
             assert!(error.to_string().contains("records sidecar key mismatch"));
+        }
+    }
+
+    #[test]
+    fn event_boundaries_reuse_sorted_raw_views_without_changing_any_chunk() {
+        let sequence = dna(2200, 731);
+        let panel = SyngIndex::build(
+            SyncmerParams::default(),
+            [("s".into(), sequence.clone())].into_iter(),
+        );
+        let views = mem_records::raw_mem_anchor_positions(&panel, &sequence).unwrap();
+        let starts = sequence.len() - 150 + 1;
+        for lo in (0..starts).step_by(512) {
+            let hi = (lo + 512).min(starts);
+            let mut expected = vec![lo as u64, hi as u64];
+            for positions in &views {
+                for &position in positions {
+                    for event in [
+                        (position + panel.syncmer_length_bp() as u64).saturating_sub(150),
+                        position.saturating_add(1),
+                    ] {
+                        if event > lo as u64 && event < hi as u64 {
+                            expected.push(event);
+                        }
+                    }
+                }
+            }
+            expected.sort_unstable();
+            expected.dedup();
+            assert_eq!(event_boundaries_from_views(&panel, sequence.len(), 150, lo, hi, &views).unwrap(), expected);
+            assert_eq!(
+                profile_event_runs_with_views(&panel, &sequence, 150, lo, hi, MAX_FEATURES, &views).unwrap(),
+                profile_event_runs(&panel, &sequence, 150, lo, hi, MAX_FEATURES).unwrap()
+            );
         }
     }
 
