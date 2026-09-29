@@ -5533,12 +5533,19 @@ pub(in super) fn run_correlation_phasing(
         .into_iter()
         .sum();
     let diploid_effective = dp_diploid.best_score + diploid_omission_addend;
-    let selected_ploidy =
-        if (reranked_surrogate.total_cmp(&diploid_effective)).is_lt() {
-            "haploid"
-        } else {
-            "diploid"
-        };
+    // Diagnostic only: select the existing two-real-slot DP rather than the
+    // empty-slot haploid track. Neither track's tables nor ranking change.
+    let force_diploid_diagnostic = std::env::var("IMPG_FORCE_DIPLOID_DIAGNOSTIC")
+        .as_deref()
+        == Ok("1");
+    let selected_ploidy = if force_diploid_diagnostic {
+        eprintln!("[phasing] FORCE_DIPLOID_DIAGNOSTIC: selecting two-real-slot DP");
+        "diploid"
+    } else if (reranked_surrogate.total_cmp(&diploid_effective)).is_lt() {
+        "haploid"
+    } else {
+        "diploid"
+    };
     let dp = if selected_ploidy == "haploid" {
         dp_haploid.clone()
     } else {
