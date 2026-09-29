@@ -1646,3 +1646,47 @@ exactly as the chrIII finding established for the haploid track.
   is in its established class. THE 0.8008-CLASS REGRESSION IS NOT
   HERE: that was the context-aware lane's behavior; the product
   config's rows hold their class.
+
+
+### 2.35 THE BOUNDARY-MATRICES STREAMING (the memory endgame,
+supervisor-directed 2026-09-29) — SHIPPED, GATED, AND THE REFINED
+ARITHMETIC MEASURED ON chrIV
+
+THE IMPLEMENTATION (commit 3f85488): the transition-costs stage charges
+the boundary COMPOSITIONS in parallel (O(compositions) per boundary —
+small) with the drafts, charges, indexes, floors, and stats resident;
+the dense [left x right] pair matrices materialize ON DEMAND from the
+kept draft + charges (the cheap O(pairs) fan-out, no recomputation)
+inside a 4-entry LRU window. The DP, posterior, incumbent walks, and
+census all read boundaries sequentially — the matrix memory is O(one
+matrix) instead of O(166 matrices). The floors are the realized-pair
+minima, bit-identical to the dense matrices' minima. GATES: chrMT
+bit-identical 0.9922837527537212/0sw/13; p1 bit-identical
+0.58184602910041/2sw/14; the full test suite green.
+
+THE REFINED ARITHMETIC (the 256-core measurement): with the matrices
+STREAMED AWAY, the phasing_after_costs peak DID NOT MOVE — 83.25GB vs
+the old 83.4GB, the guard firing at the same checkpoint. THE ~500MB-
+per-boundary objects at the peak are NOT the matrices: they are the
+DRAFTS (the retained-pair enumerations, pair_composition ~25M entries
+per degenerate boundary) plus the 256-thread parallel working sets.
+The matrices were a second, overlapping residency the streaming removed
+for HEADROOM, not for the 256-core peak itself.
+
+THE 64-CORE FORM (the proven width): chrIV-stream landed clean —
+wall 2,821s (vs 3,790s pre-streaming, -26%), the DP total
+BIT-IDENTICAL (-675,736.89, the third run with the same answer), the
+row IDENTICAL (0.9460/0sw/167 windows), the peak ~51GB (the drafts'
+residency — the dominant term at every width; the matrices' share is
+now streamed). THE DEGENERATE LAYER: layer 51 kept all 4,977,760
+states (the domination did NOT fire — chrIV's component-lane
+interfaces are distinct like chrIII's) and completed in 19.2s at 64
+cores; the component lane's degeneracy is LIGHT — the heavy DP walls
+measured in the item-2 era were the CONTEXT-AWARE lane's extension
+vocabulary, not the product config's.
+
+ONE-LINE ENTRY (per the finish-stretch discipline): the next memory
+object for a 256-core chrIV-class run is the DRAFTS' pair
+enumerations (the boundary drafts' construction), not the matrices;
+the domination's interface-collapse would not shrink the drafts
+themselves.
