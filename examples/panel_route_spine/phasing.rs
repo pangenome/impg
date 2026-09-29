@@ -1443,14 +1443,57 @@ pub(in super) fn build_boundary_transition_draft(
 /// Transition-cost finalize: the POOLED composition losses under the
 /// per-feature multiplicity backgrounds, the dense cost matrix, and the
 /// boundary's transition statistics.
-pub(in super) fn finalize_boundary_transition_costs(
-    draft: BoundaryTransitionDraft,
+/// The boundary's COMPOSITION-level charges (the streaming split, the
+/// memory endgame 2026-09-29): the per-composition scores (the expensive
+/// pooled/novel charging), the realized-pair floors (bit-identical to the
+/// dense matrices' minima — every dense entry is its pair's composition's
+/// score, and the retained pairs cover the full cross product), and the
+/// boundary's stats. SMALL: O(compositions), not O(left x right).
+pub(in super) struct BoundaryCompositionCharges {
+    pub(in super) scores: Vec<(f64, u64)>,
+    pub(in super) scores_haploid: Vec<(f64, u64)>,
+    pub(in super) floor: f64,
+    pub(in super) floor_haploid: f64,
+    pub(in super) stats: serde_json::Value,
+}
+
+/// The dense [left x right] matrices materialized from the draft's pair
+/// enumeration and the composition charges (the cheap fan-out: O(pairs)
+/// fills, no recomputation — the on-demand path for the streaming store).
+pub(in super) fn materialize_boundary_matrices(
+    draft: &BoundaryTransitionDraft,
+    charges: &BoundaryCompositionCharges,
+) -> BoundaryTransitionCosts {
+    let left_count = draft.left_count;
+    let right_count = draft.right_count;
+    let mut cost = vec![f64::INFINITY; left_count * right_count];
+    let mut cost_haploid = vec![f64::INFINITY; left_count * right_count];
+    for (index, &composition) in draft.pair_composition.iter().enumerate() {
+        cost[index] = charges.scores[composition as usize].0;
+        cost_haploid[index] = charges.scores_haploid[composition as usize].0;
+    }
+    BoundaryTransitionCosts {
+        cost,
+        cost_haploid,
+        left_index: draft.left_index.clone(),
+        right_index: draft.right_index.clone(),
+        right_count: right_count as u32,
+        stats: charges.stats.clone(),
+    }
+}
+
+/// The composition charging + floors + stats (see
+/// `BoundaryCompositionCharges`). Takes the draft BY REFERENCE — the
+/// streaming store keeps the draft for on-demand materialization.
+#[allow(clippy::too_many_arguments)]
+pub(in super) fn charge_boundary_compositions(
+    draft: &BoundaryTransitionDraft,
     routed_equal: &crate::RoutedObs,
     component_locus_to_partition: &[u32],
     model: &ScoreModel,
     backgrounds: &FeatureBackgrounds,
     sample: &SampleSideBackgrounds,
-) -> io::Result<BoundaryTransitionCosts> {
+) -> io::Result<BoundaryCompositionCharges> {
     let BoundaryTransitionDraft {
         pair_composition,
         pair_kind,
@@ -1477,7 +1520,7 @@ pub(in super) fn finalize_boundary_transition_costs(
     // are background-invariant and identical; pooled (co-occurring)
     // compositions charge the sample-side cross-support backgrounds (the
     // haploid single-allele convention).
-    let mut composition_scores_haploid = novel_scores;
+    let mut composition_scores_haploid = novel_scores.clone();
     for id in 0..composition_count {
         if composition_pooled[id] {
             // Owner-resolved pooled charge: the composition's realizing
@@ -1524,17 +1567,36 @@ pub(in super) fn finalize_boundary_transition_costs(
         .iter()
         .map(|&id| composition_scores[id].1)
         .collect();
-    let mut cost = vec![f64::INFINITY; left_count * right_count];
-    let mut cost_haploid = vec![f64::INFINITY; left_count * right_count];
-    for (index, &composition) in pair_composition.iter().enumerate() {
-        cost[index] = composition_scores[composition as usize].0;
-        cost_haploid[index] = composition_scores_haploid[composition as usize].0;
+    // THE REALIZED-PAIR FLOORS (bit-identical to the dense matrices'
+    // minima): every dense entry equals its pair's composition's score
+    // and the retained pairs cover the full [left x right] cross product,
+    // so the minimum over the pair enumeration IS the matrices' minimum —
+    // computed WITHOUT materializing the O(left x right) matrices (the
+    // streaming memory endgame: the costs stage's peak drops from all-166
+    // matrices to O(compositions) per boundary).
+    let mut floor = f64::INFINITY;
+    let mut floor_haploid = f64::INFINITY;
+    let mut cooc_costs: Vec<f64> = Vec::new();
+    let mut novel_costs: Vec<f64> = Vec::new();
+    for (index, (&composition, &kind)) in pair_composition
+        .iter()
+        .zip(pair_kind.iter())
+        .enumerate()
+    {
+        let value = composition_scores[composition as usize].0;
+        let value_haploid = composition_scores_haploid[composition as usize].0;
+        ensure(
+            value.is_finite() && value_haploid.is_finite(),
+            "phasing boundary cost matrix has unscored entries",
+        )?;
+        floor = floor.min(value);
+        floor_haploid = floor_haploid.min(value_haploid);
+        if kind == 1 {
+            cooc_costs.push(value);
+        } else {
+            novel_costs.push(value);
+        }
     }
-    ensure(
-        cost.iter().all(|value| value.is_finite())
-            && cost_haploid.iter().all(|value| value.is_finite()),
-        "phasing boundary cost matrix has unscored entries",
-    )?;
     let distribution = |values: &mut Vec<f64>| -> serde_json::Value {
         values.sort_by(|left, right| left.total_cmp(right));
         if values.is_empty() {
@@ -1548,15 +1610,6 @@ pub(in super) fn finalize_boundary_transition_costs(
             "negative_count": values.iter().filter(|&&value| value < 0.0).count(),
         })
     };
-    let mut cooc_costs: Vec<f64> = Vec::new();
-    let mut novel_costs: Vec<f64> = Vec::new();
-    for (index, &kind) in pair_kind.iter().enumerate() {
-        if kind == 1 {
-            cooc_costs.push(cost[index]);
-        } else {
-            novel_costs.push(cost[index]);
-        }
-    }
     let stats = serde_json::json!({
         "retained_left": left_count,
         "retained_right": right_count,
@@ -1580,14 +1633,251 @@ pub(in super) fn finalize_boundary_transition_costs(
         "cooccurring_cost_distribution": distribution(&mut cooc_costs),
         "novel_cost_distribution": distribution(&mut novel_costs),
     });
-    Ok(BoundaryTransitionCosts {
-        cost,
-        cost_haploid,
-        left_index,
-        right_index,
-        right_count: right_count as u32,
+    let _ = (left_index, right_index);
+    Ok(BoundaryCompositionCharges {
+        scores: composition_scores,
+        scores_haploid: composition_scores_haploid,
+        floor,
+        floor_haploid,
         stats,
     })
+}
+
+/// The full eager form (the probe-only lanes): charge + materialize in
+/// one pass, the established external behavior.
+#[allow(clippy::too_many_arguments)]
+pub(in super) fn finalize_boundary_transition_costs(
+    draft: BoundaryTransitionDraft,
+    routed_equal: &crate::RoutedObs,
+    component_locus_to_partition: &[u32],
+    model: &ScoreModel,
+    backgrounds: &FeatureBackgrounds,
+    sample: &SampleSideBackgrounds,
+) -> io::Result<BoundaryTransitionCosts> {
+    let charges = charge_boundary_compositions(
+        &draft,
+        routed_equal,
+        component_locus_to_partition,
+        model,
+        backgrounds,
+        sample,
+    )?;
+    Ok(materialize_boundary_matrices(&draft, &charges))
+}
+
+/// The boundary's small resident indexing (the DP table builders' input:
+/// the allele-to-dense-row/col maps and the dense width).
+pub(in super) struct BoundaryIndexes {
+    pub(in super) left_index: Vec<u32>,
+    pub(in super) right_index: Vec<u32>,
+    pub(in super) right_count: u32,
+}
+
+/// THE STREAMING BOUNDARY-COSTS STORE (the memory endgame,
+/// supervisor-directed 2026-09-29): the composition charges, the
+/// indexes, the floors, and the stats stay RESIDENT (O(compositions)
+/// per boundary — small); the dense [left x right] matrices are
+/// materialized ON DEMAND from the kept drafts and charges (the cheap
+/// O(pairs) fan-out, no recomputation) and held in a small LRU window.
+/// Every access pattern in the machinery is sequential (the DP walks
+/// boundaries in layer order; the posterior walks them backward; the
+/// incumbent walks and the census read one boundary at a time), so a
+/// window of a few boundaries bounds the matrices' memory at
+/// O(window x one matrix) instead of O(boundaries x matrices) — the
+/// measured chrIV failure held ~500MB x 166 matrices simultaneously
+/// (83.4GB, over the internal guard) while the DP touches one at a
+/// time.
+pub(in super) struct BoundaryCostsStore {
+    drafts: Vec<BoundaryTransitionDraft>,
+    charges: Vec<BoundaryCompositionCharges>,
+    indexes: Vec<BoundaryIndexes>,
+    floors: Vec<f64>,
+    floors_haploid: Vec<f64>,
+    window_capacity: usize,
+    /// The eager mode's pre-built matrices (the probe-only coupling
+    /// lane); `None` in the production streaming mode.
+    eager: Option<Vec<std::sync::Arc<BoundaryTransitionCosts>>>,
+    window: std::sync::Mutex<(
+        std::collections::BTreeMap<usize, std::sync::Arc<BoundaryTransitionCosts>>,
+        std::collections::VecDeque<usize>,
+    )>,
+}
+
+impl BoundaryCostsStore {
+    /// Build the store: the parallel COMPOSITION-CHARGING pass (small
+    /// per boundary) — the matrices are NOT built here.
+    #[allow(clippy::too_many_arguments)]
+    pub(in super) fn build(
+        drafts: Vec<BoundaryTransitionDraft>,
+        routed_equal: &crate::RoutedObs,
+        component_locus_to_partition: &[u32],
+        model: &ScoreModel,
+        backgrounds: &FeatureBackgrounds,
+        sample: &SampleSideBackgrounds,
+    ) -> io::Result<Self> {
+        let charges: Vec<BoundaryCompositionCharges> = drafts
+            .par_iter()
+            .map(|draft| {
+                charge_boundary_compositions(
+                    draft,
+                    routed_equal,
+                    component_locus_to_partition,
+                    model,
+                    backgrounds,
+                    sample,
+                )
+            })
+            .collect::<io::Result<_>>()?;
+        let indexes: Vec<BoundaryIndexes> = drafts
+            .iter()
+            .map(|draft| BoundaryIndexes {
+                left_index: draft.left_index.clone(),
+                right_index: draft.right_index.clone(),
+                right_count: draft.right_count as u32,
+            })
+            .collect();
+        let floors: Vec<f64> = charges.iter().map(|charge| charge.floor).collect();
+        let floors_haploid: Vec<f64> = charges
+            .iter()
+            .map(|charge| charge.floor_haploid)
+            .collect();
+        ensure(
+            floors
+                .iter()
+                .chain(floors_haploid.iter())
+                .all(|value| value.is_finite()),
+            "phasing boundary floor over an unscored matrix",
+        )?;
+        Ok(BoundaryCostsStore {
+            drafts,
+            charges,
+            indexes,
+            floors,
+            floors_haploid,
+            window_capacity: 4,
+            eager: None,
+            window: std::sync::Mutex::new((
+                std::collections::BTreeMap::new(),
+                std::collections::VecDeque::new(),
+            )),
+        })
+    }
+
+    pub(in super) fn len(&self) -> usize {
+        self.eager.as_ref().map_or(self.drafts.len(), |eager| eager.len())
+    }
+
+    /// The eager adapter (the probe-only coupling lane): pre-built
+    /// matrices wrapped as-is — `matrix` serves them directly, the
+    /// window is unused. The production lane never touches this.
+    pub(in super) fn from_eager(
+        matrices: Vec<BoundaryTransitionCosts>,
+    ) -> io::Result<Self> {
+        let floors = matrices
+            .iter()
+            .map(|costs| costs.cost.iter().copied().fold(f64::INFINITY, f64::min))
+            .collect::<Vec<f64>>();
+        let floors_haploid = matrices
+            .iter()
+            .map(|costs| {
+                costs
+                    .cost_haploid
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect::<Vec<f64>>();
+        ensure(
+            floors
+                .iter()
+                .chain(floors_haploid.iter())
+                .all(|value| value.is_finite()),
+            "phasing boundary floor over an unscored matrix",
+        )?;
+        let n = matrices.len();
+        Ok(BoundaryCostsStore {
+            drafts: Vec::new(),
+            charges: (0..n)
+                .map(|_| BoundaryCompositionCharges {
+                    scores: Vec::new(),
+                    scores_haploid: Vec::new(),
+                    floor: 0.0,
+                    floor_haploid: 0.0,
+                    stats: serde_json::Value::Null,
+                })
+                .collect(),
+            indexes: matrices
+                .iter()
+                .map(|costs| BoundaryIndexes {
+                    left_index: costs.left_index.clone(),
+                    right_index: costs.right_index.clone(),
+                    right_count: costs.right_count,
+                })
+                .collect(),
+            floors,
+            floors_haploid,
+            eager: Some(
+                matrices
+                    .into_iter()
+                    .map(std::sync::Arc::new)
+                    .collect::<Vec<_>>(),
+            ),
+            window_capacity: 0,
+            window: std::sync::Mutex::new((
+                std::collections::BTreeMap::new(),
+                std::collections::VecDeque::new(),
+            )),
+        })
+    }
+
+    /// The boundary's resident stats (the JSON section's per-boundary
+    /// record — no matrix needed).
+    pub(in super) fn stats(&self, boundary: usize) -> &serde_json::Value {
+        &self.charges[boundary].stats
+    }
+
+    /// The boundary's resident indexing.
+    pub(in super) fn indexes(&self, boundary: usize) -> &BoundaryIndexes {
+        &self.indexes[boundary]
+    }
+
+    /// Materialize-on-demand with the LRU window (a miss pays the cheap
+    /// O(pairs) fan-out from the kept draft + charges; an eviction drops
+    /// the store's Arc — live consumers keep theirs until scope end).
+    pub(in super) fn matrix(
+        &self,
+        boundary: usize,
+    ) -> io::Result<std::sync::Arc<BoundaryTransitionCosts>> {
+        if let Some(eager) = &self.eager {
+            return Ok(std::sync::Arc::clone(&eager[boundary]));
+        }
+        let mut window = self
+            .window
+            .lock()
+            .map_err(|_| invalid("boundary costs store window poisoned"))?
+        ;
+        if let Some(matrix) = window.0.get(&boundary) {
+            return Ok(std::sync::Arc::clone(matrix));
+        }
+        let matrix =
+            std::sync::Arc::new(materialize_boundary_matrices(
+                &self.drafts[boundary],
+                &self.charges[boundary],
+            ));
+        window.0.insert(boundary, std::sync::Arc::clone(&matrix));
+        window.1.push_back(boundary);
+        while window.1.len() > self.window_capacity {
+            if let Some(evict) = window.1.pop_front() {
+                if evict != boundary {
+                    window.0.remove(&evict);
+                } else {
+                    window.1.push_front(evict);
+                    break;
+                }
+            }
+        }
+        Ok(matrix)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1717,9 +2007,9 @@ impl Clone for PhasingDpOutcome {
 /// caller then keeps the native incumbent.
 fn greedy_chain_incumbent_seed(
     per_locus_tables: &[LocusStateTable],
-    boundary_costs: &[BoundaryTransitionCosts],
+    boundary_costs: &BoundaryCostsStore,
     haploid: bool,
-) -> Option<f64> {
+) -> io::Result<Option<f64>> {
     let mut total = 0.0f64;
     let mut prev: Option<[usize; 2]> = None;
     for (locus, table) in per_locus_tables.iter().enumerate() {
@@ -1730,7 +2020,7 @@ fn greedy_chain_incumbent_seed(
             }
             let mut cost_here = loss;
             if let Some(previous_pair) = prev {
-                let boundary = &boundary_costs[locus - 1];
+                let boundary = &*boundary_costs.matrix(locus - 1)?;
                 let right_count = boundary.right_count as usize;
                 let cost_matrix = if haploid {
                     &boundary.cost_haploid
@@ -1756,17 +2046,19 @@ fn greedy_chain_incumbent_seed(
                 _ => best_here = Some((cost_here, pair)),
             }
         }
-        let (_, chosen) = best_here?;
-        total += best_here?.0;
+        let Some((best_cost, chosen)) = best_here else {
+            return Ok(None);
+        };
+        total += best_cost;
         prev = Some(chosen);
     }
-    Some(total)
+    Ok(Some(total))
 }
 
 pub(in super) fn run_phasing_chain_dp(
     locus_count: usize,
     per_locus_tables: &[LocusStateTable],
-    boundary_costs: &[BoundaryTransitionCosts],
+    boundary_costs: &BoundaryCostsStore,
     suffix_from_locus: &[f64],
     incumbent: f64,
     haploid: bool,
@@ -1922,9 +2214,13 @@ pub(in super) fn run_phasing_chain_dp(
             }
         }
         ensure(!layer.is_empty(), "phasing DP initial layer is empty")?;
-        let next_boundary = boundary_costs.first().map(|boundary| boundary);
+        let next_boundary = if boundary_costs.len() > 0 {
+            Some(boundary_costs.matrix(0)?)
+        } else {
+            None
+        };
         let (layer, dropped, factor, interfaces) =
-            dominate_layer(haploid, next_boundary, layer);
+            dominate_layer(haploid, next_boundary.as_deref(), layer);
         domination_dropped.push(dropped);
         domination_bound_factor.push(factor);
         interface_counts.push(if interfaces > 0 {
@@ -1950,7 +2246,7 @@ pub(in super) fn run_phasing_chain_dp(
         eprintln!("[phasing] dp layer {locus}: start ({} candidates)", per_locus_tables[locus].rows.len());
         let previous = layers.last().expect("layer");
         let table = &per_locus_tables[locus];
-        let boundary = &boundary_costs[locus - 1];
+        let boundary = &*boundary_costs.matrix(locus - 1)?;
         let right_count = boundary.right_count as usize;
         let mut best = vec![f64::INFINITY; table.rows.len()];
         let mut pred = vec![u32::MAX; table.rows.len()];
@@ -2079,9 +2375,13 @@ pub(in super) fn run_phasing_chain_dp(
         // THE DOMINATION REDUCTION (ruling (a)): reduce this layer by
         // interface domination against the NEXT boundary (the last
         // locus has none and is never reduced).
-        let next_boundary = boundary_costs.get(locus).map(|boundary| boundary);
+        let next_boundary = if locus < boundary_costs.len() {
+            Some(boundary_costs.matrix(locus)?)
+        } else {
+            None
+        };
         let (layer, dropped, factor, interfaces) =
-            dominate_layer(haploid, next_boundary, layer);
+            dominate_layer(haploid, next_boundary.as_deref(), layer);
         domination_dropped.push(dropped);
         domination_bound_factor.push(factor);
         interface_counts.push(if interfaces > 0 {
@@ -2202,7 +2502,7 @@ pub(in super) fn phasing_posterior(
     locus_count: usize,
     tables: &[LocusStateTable],
     layers: &[Vec<PhState>],
-    boundary_costs: &[BoundaryTransitionCosts],
+    boundary_costs: &BoundaryCostsStore,
     haploid: bool,
     sample_count: usize,
     rss: &mut genome::PeriodicRssGuard,
@@ -2238,7 +2538,7 @@ pub(in super) fn phasing_posterior(
         }
         for locus in (0..locus_count - 1).rev() {
             rss.checkpoint("phasing_posterior_backward")?;
-            let boundary = &boundary_costs[locus];
+            let boundary = &*boundary_costs.matrix(locus)?;
             let right_count = boundary.right_count as usize;
             let next_beta = &beta[locus + 1];
             // One row/index lookup per STATE, not per edge — the dense-
@@ -2415,7 +2715,7 @@ pub(in super) fn phasing_posterior(
         route[last] = layers[last][chosen].pair;
         // Predecessors: P(p | s*) proportional to exp(-(alpha[p] + trans)).
         for locus in (0..locus_count - 1).rev() {
-            let boundary = &boundary_costs[locus];
+            let boundary = &*boundary_costs.matrix(locus)?;
             let right_count = boundary.right_count as usize;
             let successor_pair = route[locus + 1];
             let zero_row = if haploid {
@@ -2546,7 +2846,7 @@ struct NodeStream {
 /// and the finalist stop threshold is at or below it (verified in-run).
 pub(in super) struct FinalistEnumerator<'a> {
     layers: &'a [Vec<PhState>],
-    boundary_costs: &'a [BoundaryTransitionCosts],
+    boundary_costs: &'a BoundaryCostsStore,
     /// streams[offset[locus] + row]: the node's lazy k-best stream.
     streams: Vec<NodeStream>,
     offsets: Vec<usize>,
@@ -2562,7 +2862,7 @@ pub(in super) struct FinalistEnumerator<'a> {
 impl<'a> FinalistEnumerator<'a> {
     pub(in super) fn new(
         layers: &'a [Vec<PhState>],
-        boundary_costs: &'a [BoundaryTransitionCosts],
+        boundary_costs: &'a BoundaryCostsStore,
     ) -> Self {
         let mut offsets = Vec::with_capacity(layers.len() + 1);
         let mut total = 0usize;
@@ -2583,7 +2883,10 @@ impl<'a> FinalistEnumerator<'a> {
     }
 
     fn transition(&self, locus: usize, pred_row: usize, row: usize) -> f64 {
-        let costs = &self.boundary_costs[locus - 1];
+        let Ok(costs) = self.boundary_costs.matrix(locus - 1) else {
+            return f64::INFINITY;
+        };
+        let costs = &*costs;
         let left = self.layers[locus - 1][pred_row].pair[0];
         let right = self.layers[locus][row].pair[0];
         costs.cost_haploid
@@ -3987,20 +4290,21 @@ pub(in super) fn run_correlation_phasing(
         backgrounds.scan_extend(panel, features, *k, model)?;
     }
     let backgrounds_shared: &FeatureBackgrounds = &**backgrounds;
-    let transition_costs: Vec<BoundaryTransitionCosts> = transition_drafts
-        .into_par_iter()
-        .enumerate()
-        .map(|(boundary, draft)| {
-            finalize_boundary_transition_costs(
-                draft,
-                routed_equal,
-                component_locus_to_partition,
-                model,
-                backgrounds_shared,
-                sample_backgrounds,
-            )
-        })
-        .collect::<io::Result<_>>()?;
+    // THE STREAMING STORE (the memory endgame): the composition charging
+    // runs in parallel over the drafts (O(compositions) per boundary —
+    // small); the dense pair matrices are NOT built here — they
+    // materialize on demand inside the DP's LRU window (one-at-a-time
+    // working set instead of all-166-held; the measured chrIV failure
+    // was 83.4GB of simultaneously-held matrices the DP touched
+    // sequentially).
+    let transition_costs = BoundaryCostsStore::build(
+        transition_drafts,
+        routed_equal,
+        component_locus_to_partition,
+        model,
+        backgrounds_shared,
+        sample_backgrounds,
+    )?;
     let finalist_transition_costs: Vec<BoundaryTransitionCosts> = if folded_production {
         Vec::new()
     } else {
@@ -4019,27 +4323,11 @@ pub(in super) fn run_correlation_phasing(
             })
             .collect::<io::Result<_>>()?
     };
-    let boundary_floors: Vec<f64> = transition_costs
-        .iter()
-        .map(|costs| costs.cost.iter().copied().fold(f64::INFINITY, f64::min))
-        .collect();
-    let boundary_floors_haploid: Vec<f64> = transition_costs
-        .iter()
-        .map(|costs| {
-            costs
-                .cost_haploid
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, f64::min)
-        })
-        .collect();
-    ensure(
-        boundary_floors
-            .iter()
-            .chain(boundary_floors_haploid.iter())
-            .all(|value| value.is_finite()),
-        "phasing boundary floor over an unscored matrix",
-    )?;
+    // The floors are the store's RESIDENT realized-pair minima
+    // (bit-identical to the dense matrices' minima — computed at the
+    // charging pass without materializing the matrices).
+    let boundary_floors: Vec<f64> = transition_costs.floors.clone();
+    let boundary_floors_haploid: Vec<f64> = transition_costs.floors_haploid.clone();
     let mut suffix_from_locus = vec![0.0f64; locus_count];
     {
         let mut local_suffix = 0.0f64;
@@ -4070,7 +4358,7 @@ pub(in super) fn run_correlation_phasing(
             .ok_or_else(|| invalid("phasing backbone pair loss missing"))?;
     }
     for boundary in 0..locus_count - 1 {
-        let costs = &transition_costs[boundary];
+        let costs = &*transition_costs.matrix(boundary)?;
         let row = costs.left_index[backbone_chain[boundary]] as usize * costs.right_count as usize;
         let column = costs.right_index[backbone_chain[boundary + 1]] as usize;
         incumbent_phasing += 2.0 * costs.cost[row + column];
@@ -4111,7 +4399,7 @@ pub(in super) fn run_correlation_phasing(
                     1,
                 )
             } else {
-                let costs = &transition_costs[locus - 1];
+                let costs = transition_costs.indexes(locus - 1);
                 let right_index = &costs.right_index;
                 LocusStateTable::build(
                     states
@@ -4136,7 +4424,7 @@ pub(in super) fn run_correlation_phasing(
                     1,
                 )
             } else {
-                let costs = &transition_costs[locus - 1];
+                let costs = transition_costs.indexes(locus - 1);
                 let right_index = &costs.right_index;
                 LocusStateTable::build(
                     haploid_states
@@ -4262,7 +4550,7 @@ pub(in super) fn run_correlation_phasing(
         incumbent_haploid += haploid_loss_tables[locus][allele];
     }
     for boundary in 0..locus_count - 1 {
-        let costs = &transition_costs[boundary];
+        let costs = &*transition_costs.matrix(boundary)?;
         let row = costs.left_index[backbone_chain[boundary]] as usize * costs.right_count as usize;
         let column = costs.right_index[backbone_chain[boundary + 1]] as usize;
         incumbent_haploid += costs.cost_haploid[row + column];
@@ -4294,7 +4582,7 @@ pub(in super) fn run_correlation_phasing(
         &per_locus_tables,
         &transition_costs,
         false,
-    )
+    )?
     .map_or(incumbent_phasing, |greedy| incumbent_phasing.min(greedy));
     eprintln!(
         "[phasing] incumbent seed: diploid native {incumbent_phasing:.2} -> {diploid_incumbent_seeded:.2}"
@@ -4303,7 +4591,7 @@ pub(in super) fn run_correlation_phasing(
         &per_locus_haploid_tables,
         &transition_costs,
         true,
-    )
+    )?
     .map_or(haploid_prune_incumbent, |greedy| {
         haploid_prune_incumbent.min(greedy)
     });
@@ -4492,10 +4780,11 @@ pub(in super) fn run_correlation_phasing(
             .as_deref()
             == Some("1");
     let coupling_started = Instant::now();
-    let coupling_transition_costs: Vec<BoundaryTransitionCosts> = if skip_coupling {
+    let coupling_transition_costs = if skip_coupling {
         eprintln!("[phasing] coupling transition matrices: SKIPPED (probe-only/oracle-off mode)");
-        Vec::new()
+        BoundaryCostsStore::from_eager(Vec::new())?
     } else {
+    BoundaryCostsStore::from_eager(
     (0..locus_count - 1)
         .into_par_iter()
         .map(|boundary| {
@@ -4524,6 +4813,7 @@ pub(in super) fn run_correlation_phasing(
             )
         })
         .collect::<Vec<_>>()
+    )?
     };
     eprintln!(
         "[phasing] coupling transition matrices: {:.2}s",
@@ -4547,22 +4837,13 @@ pub(in super) fn run_correlation_phasing(
         finalist_local_floors.iter().all(|value| value.is_finite()),
         "finalist local floor over an empty finalist table",
     )?;
-    let finalist_boundary_floors: Vec<f64> = if coupling_transition_costs.is_empty() {
+    let finalist_boundary_floors: Vec<f64> = if coupling_transition_costs.len() == 0 {
         // The probe-only mode: the floors are unreachable (the enumeration
         // is skipped below); zeros keep the layout.
         eprintln!("[phasing] finalist boundary floors: SKIPPED (probe-only mode)");
         vec![0.0; locus_count.saturating_sub(1)]
     } else {
-        coupling_transition_costs
-            .iter()
-            .map(|costs| {
-                costs
-                    .cost_haploid
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min)
-            })
-            .collect()
+        coupling_transition_costs.floors_haploid.clone()
     };
     ensure(
         finalist_boundary_floors.iter().all(|value| value.is_finite()),
@@ -4695,14 +4976,17 @@ pub(in super) fn run_correlation_phasing(
     // tables: the surrogate's local losses plus the COUPLING transitions
     // (path-order accumulation — the DP's own form).
     let chain_coupling = |alleles: &[usize]| -> f64 {
-        if coupling_transition_costs.is_empty() {
+        if coupling_transition_costs.len() == 0 {
             return 0.0; // the probe-only mode: no coupling matrices built
         }
         let mut total = 0.0f64;
         for (locus, &allele) in alleles.iter().enumerate() {
             total += haploid_losses[locus][allele];
             if locus > 0 {
-                let costs = &coupling_transition_costs[locus - 1];
+                let Ok(costs) = coupling_transition_costs.matrix(locus - 1) else {
+                    return f64::NAN;
+                };
+                let costs = &*costs;
                 total += costs.cost_haploid[costs.left_index[alleles[locus - 1]] as usize
                     * costs.right_count as usize
                     + costs.right_index[allele] as usize];
@@ -5281,7 +5565,7 @@ pub(in super) fn run_correlation_phasing(
     // matrix's entry can differ from the old one (a composition's realizing
     // pairs grew with the finalist universe) — the surrogate totals pair each
     // chain with its own universe's matrices, consistently.
-    let selected_costs: &[BoundaryTransitionCosts] = &transition_costs;
+    let selected_costs = &transition_costs;
     // A selected allele as public JSON, or the empty-slot ploidy marker.
     let allele_or_empty_json = |locus: usize, slot: usize| -> serde_json::Value {
         if route[locus][slot] == EMPTY_SLOT2 {
@@ -5334,7 +5618,7 @@ pub(in super) fn run_correlation_phasing(
                     if crossing.distinct_reads > 0 {
                         census_novel_spanning += 1;
                     }
-                    let costs = &selected_costs[boundary];
+                    let costs = &*selected_costs.matrix(boundary)?;
                     let row =
                         costs.left_index[route[boundary][copy]] as usize * costs.right_count as usize;
                     let column = costs.right_index[route[boundary + 1][copy]] as usize;
@@ -5389,7 +5673,7 @@ pub(in super) fn run_correlation_phasing(
     // same accumulation order — the cost set changes only which entries are
     // defined).
     let mut surrogate_route_m1 = |route_rows: &[[usize; 2]],
-                              costs_set: &[BoundaryTransitionCosts]|
+                              costs_set: &BoundaryCostsStore|
      -> io::Result<(f64, f64)> {
     let mut oracle_memo: HashMap<String, Profile> = HashMap::new();
     let mut m1_local_total = 0.0f64;
@@ -5524,7 +5808,7 @@ pub(in super) fn run_correlation_phasing(
     let haploid_selected = (0..locus_count).all(|locus| route_rows[locus][1] == EMPTY_SLOT2);
     let mut m1_oracle = m1_local_total;
     for boundary in 0..locus_count - 1 {
-        let costs = &costs_set[boundary];
+        let costs = &*costs_set.matrix(boundary)?;
         let cost_matrix = if haploid_selected {
             &costs.cost_haploid
         } else {
@@ -6676,7 +6960,8 @@ pub(in super) fn run_correlation_phasing(
                 "wall_seconds": option_a_seconds + rebuild_seconds,
             },
             "transition_costs": {
-                "boundaries": transition_costs.iter().map(|costs| costs.stats.clone())
+                "boundaries": (0..transition_costs.len())
+                    .map(|boundary| transition_costs.stats(boundary).clone())
                     .collect::<Vec<_>>(),
                 "boundary_observation_floors": boundary_floors,
                 "wall_seconds": costs_seconds,
@@ -7017,6 +7302,7 @@ mod tests {
                 stats: serde_json::Value::Null,
             },
         ];
+        let costs = BoundaryCostsStore::from_eager(costs).unwrap();
         // The DP's own layers (the same accumulation order the forward pass
         // uses: prefix + transition + own loss).
         let mut layers: Vec<Vec<PhState>> = Vec::new();
@@ -7034,8 +7320,9 @@ mod tests {
         );
         for locus in 1..3 {
             let previous = layers.last().expect("layer");
-            let matrix = &costs[locus - 1].cost_haploid;
-            let right_count = costs[locus - 1].right_count as usize;
+            let boundary = costs.matrix(locus - 1).unwrap();
+            let matrix = &boundary.cost_haploid;
+            let right_count = boundary.right_count as usize;
             let mut layer = Vec::new();
             for (allele, &loss) in losses[locus].iter().enumerate() {
                 let mut best = f64::INFINITY;
@@ -7119,6 +7406,7 @@ mod tests {
             right_count: 2,
             stats: serde_json::Value::Null,
         }];
+        let costs = BoundaryCostsStore::from_eager(costs).unwrap();
         let layers = vec![
             losses[0]
                 .iter()
@@ -7360,6 +7648,7 @@ mod tests {
             right_count: 2,
             stats: serde_json::Value::Null,
         }];
+        let costs = BoundaryCostsStore::from_eager(costs.into_iter().collect::<Vec<_>>()).unwrap();
         let mut rss = genome::PeriodicRssGuard::new(None, 1);
         let dp = run_phasing_chain_dp(
             2,
@@ -7475,6 +7764,7 @@ mod tests {
             right_count: 2,
             stats: serde_json::Value::Null,
         }];
+        let costs = BoundaryCostsStore::from_eager(costs.into_iter().collect::<Vec<_>>()).unwrap();
         let mut rss = genome::PeriodicRssGuard::new(None, 1);
         let posterior = phasing_posterior(2, &tables, &layers, &costs, false, 0, &mut rss)
             .expect("the betaless state excludes itself, not a failure");
@@ -7520,6 +7810,7 @@ mod tests {
             right_count: 2,
             stats: serde_json::Value::Null,
         }];
+        let costs = BoundaryCostsStore::from_eager(costs.into_iter().collect::<Vec<_>>()).unwrap();
         let mut rss = genome::PeriodicRssGuard::new(None, 1);
         let dp = run_phasing_chain_dp(
             2,
