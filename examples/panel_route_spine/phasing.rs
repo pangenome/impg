@@ -2810,6 +2810,16 @@ fn splitmix64(state: &mut u64) -> u64 {
 /// deterministic posterior sampler reuses it — no new constant.
 const POSTERIOR_SAMPLER_SEED: u64 = 7;
 
+// Along a chain, each forward edge adds first charge, second charge, and
+// successor loss; the backward pass adds the same three terms in reverse
+// order. One joint sum and its comparison subtraction add two roundings.
+// Bound the two accumulated floating-point errors by that many epsilons
+// times the scale of the compared complete-chain scores.
+fn posterior_forward_roundoff_bound(locus_count: usize, backward: f64, forward: f64) -> f64 {
+    let rounded_sums = 6 * (locus_count - 1) + 2;
+    rounded_sums as f64 * f64::EPSILON * backward.abs().max(forward.abs())
+}
+
 pub(in super) fn phasing_posterior(
     locus_count: usize,
     tables: &[LocusStateTable],
@@ -2971,9 +2981,13 @@ pub(in super) fn phasing_posterior(
         .iter()
         .map(|state| state.score)
         .fold(f64::INFINITY, f64::min);
+    let roundoff_bound = posterior_forward_roundoff_bound(locus_count, best_total, forward_best);
     ensure(
-        (best_total - forward_best).abs() < 1e-9,
-        "the posterior best disagrees with the forward DP",
+        (best_total - forward_best).abs() <= roundoff_bound,
+        &format!(
+            "the posterior best disagrees with the forward DP: backward_best={best_total:.17e} forward_best={forward_best:.17e} delta={:.17e} bound={roundoff_bound:.17e} loci={locus_count}",
+            best_total - forward_best
+        ),
     )?;
     // Per-locus pair marginals: min-marginal and posterior mass.
     let mut locus_marginals: Vec<Vec<([usize; 2], f64, f64)>> = Vec::with_capacity(locus_count);
@@ -8012,6 +8026,24 @@ mod tests {
         // The mirror direction: a''s LEFT cover at window b; window b
         // observes nothing (empty keys) — no backward credit.
         // (full_left/shares_left empty; left_exon_a.self_instances empty.)
+    }
+
+    /// chrXII's 119-locus -1.47M-nat posterior and forward scores differ by
+    /// six ULPs from addition order, not by model nats. Three rounded adds
+    /// per boundary in EACH full-path pass plus one joint add and comparison
+    /// subtraction give (6*(119-1)+2)*EPSILON*max(abs(scores)) as the bound.
+    /// A one-nat discrepancy still fails closed; short chains keep a tighter
+    /// bound than a fixed large-scale tolerance.
+    #[test]
+    fn posterior_forward_guard_accepts_roundoff_but_rejects_model_disagreement() {
+        let backward = -1_467_469.418_684_371_28_f64;
+        let forward = -1_467_469.418_684_369_88_f64;
+        let tolerance = posterior_forward_roundoff_bound(119, backward, forward);
+        assert!(tolerance >= (backward - forward).abs());
+        assert!(tolerance < 0.000_001);
+        assert!((backward - (forward + 1.0)).abs() >
+                posterior_forward_roundoff_bound(119, backward, forward + 1.0));
+        assert_eq!(posterior_forward_roundoff_bound(1, 0.0, 0.0), 0.0);
     }
 
     /// The per-locus genotype-call machinery's exact posterior (COSIGT
