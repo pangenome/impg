@@ -40,14 +40,24 @@ rows=[]
 for component in components:
     tag='smoke2' if component in ('chrI','chrMT') else 'fleet'
     x=json.loads((D/f'distance-{tag}-{component}.json').read_text())
-    rows.append({k:x[k] for k in ('component','distance','error_bp','truth_bp','correct_truth_bp',
-                                  'covered_truth_bp','uncovered_truth_bp','inserted_query_bp',
+    rows.append({k:x[k] for k in ('component','distance','error_bp','truth_bp',
+                                  'chosen_configuration','slot_to_truth','configurations',
+                                  'correct_truth_bp','covered_truth_bp','uncovered_truth_bp',
+                                  'assigned_truth_concordance','inserted_query_bp',
                                   'unaligned_query_bp','duplicated_truth_bp',
+                                  'other_truth_block_count','other_truth_query_bp',
                                   'candidate_alignment_blocks','selected_alignment_blocks',
-                                  'selected_ploidy','truth_self_error_bp','truth_swapped_error_bp')})
+                                  'selected_ploidy','truth_self_error_bp','truth_swapped_error_bp')}
+                | {'single_slot_ancestry_or_crossover_count':
+                   len(x['events']['single_slot_ancestry_or_crossover']),
+                   'two_slot_phase_switch_count': len(x['events']['two_slot_phase_switch'])})
 total_error=sum(x['error_bp'] for x in rows)
 total_truth=sum(x['truth_bp'] for x in rows)
-summary={'distance':total_error/total_truth,'error_bp':total_error,'truth_bp':total_truth,
+summary={'yardstick':'best_global_two_slot_assignment',
+         'distance':total_error/total_truth,'error_bp':total_error,'truth_bp':total_truth,
+         'configurations_per_component':2,
+         'other_truth_charge_treatment':
+         'ancestry only; fixed-assigned-truth disagreement and omission remain charged',
          'components':rows}
 (D/'distance-genome.json').write_text(json.dumps(summary,indent=2)+'\n')
 print('Genome aligned diploid distance:', summary['distance'],

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Assessment-only, block-assigned sequence distance to both simulation haplotypes.
+"""Assessment-only diploid distance under the best global two-slot assignment.
 
-Usage: score-diploid-distance.py chrMT smoke2. This never changes production
-selection, the old assessment records, or the original wall measurements.
+Usage: score-diploid-distance.py chrMT smoke2. Both slot-to-truth permutations
+are scored separately; other-truth crossover blocks are diagnostics, not
+coverage credit for a second molecule. Production outputs are untouched.
 """
 import bisect
 import json
@@ -48,20 +49,21 @@ def candidate(query, truth_index, truth, hit):
     assert reference_consumed == t_end - t_start and query_consumed == q_end - q_start
     correct = sum(n for n, op in ops if op == '=')
     inserted = sum(n for n, op in ops if op == 'I')
-    # A chosen aligned query block avoids its query-only omission charge;
-    # matched truth bases additionally avoid truth omission. Insertions still
-    # cost one, so this is the exact additive improvement in distance.
+    # Local scheduling gain before cross-window truth-position deduplication:
+    # a mapped query block avoids an unaligned-query charge and each matched
+    # truth base avoids an omission. The final union is scored separately.
     gain = correct + (q_end - q_start) - inserted
     return {'q_start': q_start, 'q_end': q_end, 't_start': t_start, 't_end': t_end,
             'truth_index': truth_index, 'strand': hit.strand, 'ops': ops,
             'edits': edits, 'correct': correct, 'inserted': inserted, 'gain': gain}
 
 
-def select_blocks(query, aligners, truths):
+def select_blocks(query, aligners, truths, allowed_truth_indices=(0, 1)):
     # Assembly mappers may omit a perfectly identical full chromosome over
     # repetitive rDNA (chrXII), even when the two literal strings are equal.
     # Exact identity is a valid alignment certificate without seed mapping.
-    for truth_index, truth in enumerate(truths):
+    for truth_index in allowed_truth_indices:
+        truth = truths[truth_index]
         if query == truth:
             length = len(query)
             return [{'q_start': 0, 'q_end': length, 't_start': 0, 't_end': length,
@@ -69,15 +71,16 @@ def select_blocks(query, aligners, truths):
                      'ops': [(length, '=')], 'edits': 0, 'correct': length,
                      'inserted': 0, 'gain': 2 * length}], 1
     options = []
-    for truth_index, (aligner, truth) in enumerate(zip(aligners, truths)):
+    for truth_index in allowed_truth_indices:
+        aligner, truth = aligners[truth_index], truths[truth_index]
         for hit in aligner.map(query):
             if hit.q_en > hit.q_st and hit.r_en > hit.r_st:
                 options.append(candidate(query, truth_index, truth, hit))
     options.sort(key=lambda c: (c['q_end'], c['q_start'], c['truth_index'],
                                 c['t_start'], c['strand']))
-    # Weighted interval scheduling: exact best nonoverlapping placement of
-    # each query's reported assembly-alignment blocks, permitting changes of
-    # truth haplotype or strand at any block boundary.
+    # Weighted interval scheduling over the reported mapper blocks. The
+    # distance call restricts this to ONE assigned truth per inferred slot;
+    # the separate diagnostic call may identify other-truth ancestry.
     ends = [c['q_end'] for c in options]
     best = [0] * (len(options) + 1)
     pred = [0] * len(options)
@@ -103,16 +106,35 @@ def select_blocks(query, aligners, truths):
     return selected, len(options)
 
 
-def score_blocks(inferred, truths, aligners):
-    # Each inferred entry is (locus, slot, spelled sequence). A physical
-    # truth base can receive credit only once, even when windows overlap.
+def score_blocks(inferred, truths, aligners, slot_to_truth=(0, 1), ancestry=False):
+    # Each inferred entry is (locus, slot, spelled sequence). A whole slot
+    # has exactly ONE assigned truth for this configuration, including when
+    # it is empty. Physical truth bases receive credit once across windows.
     correct_positions = [bytearray(len(seq)) for seq in truths]
     covered_positions = [bytearray(len(seq)) for seq in truths]
     inserted = unaligned_query = duplicated_truth = candidate_hits = 0
     assignments = []
+    other_truth_blocks = []
+    ancestry_assignments = []
     for locus, slot, sequence in inferred:
-        blocks, count = select_blocks(sequence, aligners, truths)
+        assert slot in (0, 1)
+        assigned = slot_to_truth[slot]
+        blocks, count = select_blocks(sequence, aligners, truths, (assigned,))
         candidate_hits += count
+        if ancestry:
+            diagnostic, _ = select_blocks(sequence, aligners, truths)
+            for block in diagnostic:
+                ancestry_assignments.append((locus, slot, block))
+                if block['truth_index'] != assigned:
+                    other_truth_blocks.append({
+                        'locus': locus, 'slot': slot,
+                        'assigned_truth': TRUTH_NAMES[assigned],
+                        'other_truth': TRUTH_NAMES[block['truth_index']],
+                        'query_interval': [block['q_start'], block['q_end']],
+                        'other_truth_interval': [block['t_start'], block['t_end']],
+                        'strand': block['strand'], 'correct_bp': block['correct'],
+                        'edits': block['edits'],
+                        'charged_only_by_assigned_truth_comparison': True})
         unaligned_query += len(sequence) - sum(c['q_end'] - c['q_start'] for c in blocks)
         for block in blocks:
             target = block['truth_index']
@@ -139,32 +161,67 @@ def score_blocks(inferred, truths, aligners):
     correct = [sum(positions) for positions in correct_positions]
     covered = [sum(positions) for positions in covered_positions]
     total_truth = sum(map(len, truths))
-    # All unaccounted truth bases cost one: mismatches, deletions and missing
-    # second-copy sequence alike. Query-only bases are additional errors.
+    # All unaccounted ASSIGNED truth bases cost one: mismatches, deletions
+    # and the empty second molecule alike. Query-only bases are additional
+    # errors. Other-truth diagnostic blocks never contribute coverage.
     # Selected routes are window-indexed, not physical assemblies. Overlap
     # of their truth bases is procedural and receives no second error charge;
     # the haploid scorer also unions truth positions once per material.
     errors = total_truth - sum(correct) + inserted + unaligned_query
     events = {'single_slot_ancestry_or_crossover': [], 'two_slot_phase_switch': []}
-    for slot in sorted({entry['slot'] for entry in assignments}):
-        ordered = sorted((entry for entry in assignments if entry['slot'] == slot),
-                         key=lambda entry: (entry['locus'], entry['query_interval'][0]))
-        for prev, curr in zip(ordered, ordered[1:]):
-            if prev['truth'] != curr['truth']:
-                key = ('single_slot_ancestry_or_crossover' if slot == 0
-                       else 'two_slot_phase_switch')
-                events[key].append({'slot': slot, 'before_locus': prev['locus'],
-                                    'after_locus': curr['locus'],
-                                    'from': prev['truth'], 'to': curr['truth']})
+    if ancestry:
+        for slot in (0, 1):
+            ordered = sorted(((locus, block) for locus, s, block in ancestry_assignments
+                              if s == slot), key=lambda entry: (entry[0], entry[1]['q_start']))
+            for (prev_locus, prev), (curr_locus, curr) in zip(ordered, ordered[1:]):
+                if prev['truth_index'] != curr['truth_index']:
+                    # A truth-label transition in an isolated slot is ancestry,
+                    # never a measured switch between two inferred molecules.
+                    events['single_slot_ancestry_or_crossover'].append({
+                        'slot': slot, 'before_locus': prev_locus, 'after_locus': curr_locus,
+                        'from': TRUTH_NAMES[prev['truth_index']],
+                        'to': TRUTH_NAMES[curr['truth_index']]})
     return {'distance': errors / total_truth, 'error_bp': errors,
-            'truth_bp': total_truth, 'correct_truth_bp': dict(zip(TRUTH_NAMES, correct)),
+            'truth_bp': total_truth, 'slot_to_truth': [TRUTH_NAMES[i] for i in slot_to_truth],
+            'correct_truth_bp': dict(zip(TRUTH_NAMES, correct)),
             'covered_truth_bp': dict(zip(TRUTH_NAMES, covered)),
             'uncovered_truth_bp': dict(zip(TRUTH_NAMES,
                                           [len(seq) - bp for seq, bp in zip(truths, covered)])),
             'inserted_query_bp': inserted, 'unaligned_query_bp': unaligned_query,
             'duplicated_truth_bp': duplicated_truth, 'candidate_alignment_blocks': candidate_hits,
             'selected_alignment_blocks': len(assignments), 'events': events,
+            'other_truth_blocks': other_truth_blocks,
+            'other_truth_block_count': len(other_truth_blocks),
+            'other_truth_query_bp': sum(block['query_interval'][1] - block['query_interval'][0]
+                                        for block in other_truth_blocks),
             'assignments': assignments}
+
+
+def best_configuration(inferred, truths, aligners):
+    configurations = [score_blocks(inferred, truths, aligners, mapping)
+                      for mapping in ((0, 1), (1, 0))]
+    chosen = min(range(2), key=lambda index: (configurations[index]['error_bp'], index))
+    scored = score_blocks(inferred, truths, aligners,
+                          (0, 1) if chosen == 0 else (1, 0), ancestry=True)
+    assert scored['error_bp'] == configurations[chosen]['error_bp']
+    scored['chosen_configuration'] = chosen
+    configuration_rows = []
+    for result in configurations:
+        row = {key: result[key] for key in
+               ('slot_to_truth', 'distance', 'error_bp', 'truth_bp',
+                'correct_truth_bp', 'covered_truth_bp', 'uncovered_truth_bp',
+                'inserted_query_bp', 'unaligned_query_bp')}
+        row['assigned_truth_concordance'] = {
+            name: result['correct_truth_bp'][name] / result['covered_truth_bp'][name]
+            if result['covered_truth_bp'][name] else None for name in TRUTH_NAMES}
+        configuration_rows.append(row)
+    scored['configurations'] = configuration_rows
+    scored['assigned_truth_concordance'] = configuration_rows[chosen]['assigned_truth_concordance']
+    scored['other_truth_charge_treatment'] = (
+        'other-truth alignments identify ancestry only; they never cover the other truth '
+        'or credit a second molecule; differences and unaligned query against the '
+        'globally assigned truth remain charged by the fixed-configuration distance')
+    return scored
 
 
 def main(component, tag):
@@ -206,11 +263,12 @@ def main(component, tag):
     assert all(aligners)
     # Truth self/permutation gates use the same complete-haplotype mapper and
     # edit parser; skipped query spans, target omissions or inversions fail.
-    self_score = score_blocks([(0, 0, truths[0]), (0, 1, truths[1])], truths, aligners)
-    swap_score = score_blocks([(0, 0, truths[1]), (0, 1, truths[0])], truths, aligners)
+    self_score = best_configuration([(0, 0, truths[0]), (0, 1, truths[1])], truths, aligners)
+    swap_score = best_configuration([(0, 0, truths[1]), (0, 1, truths[0])], truths, aligners)
     assert self_score['error_bp'] == swap_score['error_bp'] == 0
+    assert self_score['chosen_configuration'] == 0 and swap_score['chosen_configuration'] == 1
     assert self_score['unaligned_query_bp'] == swap_score['unaligned_query_bp'] == 0
-    scored = score_blocks(inferred, truths, aligners)
+    scored = best_configuration(inferred, truths, aligners)
     scored.update({'component': component, 'tag': tag, 'run_exit': (BASE / f'run-{tag}-{component}.exit').read_text().strip(),
                    'original_wall_seconds': int((BASE / f'run-{tag}-{component}.wall').read_text()),
                    'selected_ploidy': run['spine']['phasing']['rescore']['selected_ploidy'],
