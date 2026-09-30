@@ -2,8 +2,10 @@
 """Regression tests for the attested per-locus injective diploid yardstick."""
 import importlib.util
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     'score_diploid_genotype', Path(__file__).with_name('score-diploid-genotype.py'))
@@ -67,6 +69,18 @@ class InjectiveGenotypeDistanceTest(unittest.TestCase):
         self.assertEqual(result['truth_bp'], 400)
         self.assertIsNone(result['rows'][2]['truth_allele_bp']['SK1'])
         self.assertNotIn('error_bp', result['rows'][2])
+
+    def test_truth_piece_parser_never_invents_unseen_second_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'run-test-chrI.err').write_text(
+                '[truth-pieces] locus 0 copy 0 in_domain=true: expected 5:[0,4):false\n'
+                '[truth-pieces] locus 1 copy 0 in_domain=true: expected 5:[4,8):false\n'
+                '[truth-pieces] locus 1 copy 1 in_domain=false: expected '
+                '7:[0,3):true + 8:[9,12):false\n')
+            with patch.object(score, 'BASE', Path(directory)):
+                pieces = score.truth_piece_lists('chrI', 'test', 2)
+        self.assertEqual(pieces[0], [[(5, 0, 4, False)], None])
+        self.assertEqual(pieces[1][1], [(7, 0, 3, True), (8, 9, 12, False)])
 
     def test_reverse_strand_ortholog_is_oriented_before_genotype_matching(self):
         first = 'A' * 100

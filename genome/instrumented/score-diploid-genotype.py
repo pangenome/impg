@@ -6,6 +6,8 @@ missing correspondence is bracketed, not silently treated as an empty allele.
 Usage: score-diploid-genotype.py chrMT smoke2
 """
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +15,8 @@ from pathlib import Path
 import edlib
 import mappy
 
-BASE = Path('/home/erikg/yeast/genome-diploid-validation-20260929')
+OLD_BASE = Path('/home/erikg/yeast/genome-diploid-validation-20260929')
+BASE = Path(os.environ.get('IMPG_DIPLOID_VALIDATION_DIR', str(OLD_BASE)))
 CORE = Path('/home/erikg/impg/target/experiments/genome-mem-bwt-pipeline/genome-genotyping-v1-item1/sources-core.fa')
 NAMES = Path('/home/erikg/yeast/syng-k63-s8-seed7-acgt-only-pos64/yeast235.syng.names')
 TRUTH_NAMES = ('S288C', 'SK1')
@@ -66,6 +69,25 @@ def spell(slot, source):
         sequence = source[segment['source']][segment['start']:segment['end']]
         pieces.append(rc(sequence) if segment.get('reverse') else sequence)
     return ''.join(pieces) or None
+
+
+def truth_piece_lists(component, tag, loci):
+    """Parse the Item-2 oracle's expected source intervals, never a guessed SK1 projection."""
+    expected = [[None, None] for _ in range(loci)]
+    text = (BASE / f'run-{tag}-{component}.err').read_text()
+    rows = re.findall(r'^\[truth-pieces\] locus (\d+) copy ([01]) in_domain=(?:true|false): expected (.*)$',
+                      text, re.MULTILINE)
+    for index, copy, detail in rows:
+        locus, slot = int(index), int(copy)
+        assert locus < loci and expected[locus][slot] is None
+        pieces = []
+        for piece in detail.split(' + '):
+            match = re.fullmatch(r'(\d+):\[(\d+),(\d+)\):(true|false)', piece)
+            assert match, (locus, piece)
+            source, start, end, reverse = match.groups()
+            pieces.append((int(source), int(start), int(end), reverse == 'true'))
+        expected[locus][slot] = pieces
+    return expected
 
 
 def load_source(route, truths, component):
@@ -165,19 +187,52 @@ def main(component, tag):
     source = load_source(route, truths, component)
     mapper = mappy.Aligner(seq=truths[1], preset='asm5')
     assert mapper
-    old = json.loads((BASE / f'score-{tag}-{component}.json').read_text())
+    old_tag = (tag if BASE == OLD_BASE else
+               'smoke2' if component in ('chrI', 'chrMT') else 'fleet')
+    old = json.loads((OLD_BASE / f'score-{old_tag}-{component}.json').read_text())
     assert len(old['rows']) == len(loci)
     scored = score_loci(loci, route, truths, source, mapper,
                         [row['exact_homolog'] for row in old['rows']])
     assert scored['assessable_loci'] == old['exact_homolog_windows']
     assert scored['bracketed_loci'] == old['bracketed_homolog_windows']
     assert spine['phasing']['rescore']['references'][0]['label'] == 'truth'
+    truth_pieces = truth_piece_lists(component, tag, len(loci))
+    pair_in_domain = 0
+    pair_exact = 0
+    balanced_class_dosage_loci = 0
+    for index, row in enumerate(scored['rows']):
+        domain = spine['stage1_sweep']['loci'][index]['truth_pair_in_domain']
+        both = all(domain)
+        pair_in_domain += both
+        expected = truth_pieces[index]
+        if both:
+            assert all(expected), (component, index, expected)
+            selected = [[(part['source'], part['start'], part['end'],
+                          part.get('reverse', False)) for part in slot['segments']]
+                        if isinstance(slot, dict) else [] for slot in route[index]]
+            row['exact_truth_pair_when_expressible'] = sorted(selected) == sorted(expected)
+            pair_exact += row['exact_truth_pair_when_expressible']
+        else:
+            row['exact_truth_pair_when_expressible'] = None
+        row['truth_pair_in_candidate_domain'] = both
+        row['expected_truth_piece_count'] = [len(pieces or []) for pieces in expected]
+        dosage = sorted(row['called_dosage_classes']) == [1, 1]
+        balanced_class_dosage_loci += dosage
+        row['balanced_called_dosage_classes'] = dosage
+    sample_truth = json.loads((BASE / 'private-truth/truth-diploid.json').read_text())
+    doses = [next(entry['dose'] for entry in sample_truth[key]
+                  if entry['component'] == component) for key in ('slot1', 'slot2')]
+    truth_dosage = {name: 2 * dose / sum(doses) for name, dose in zip(TRUTH_NAMES, doses)}
+    selected_ploidy = spine['phasing']['rescore']['selected_ploidy']
     scored.update({'component': component, 'tag': tag,
+                   'truth_pair_in_domain_loci': pair_in_domain,
+                   'exact_truth_pair_when_expressible_loci': pair_exact,
+                   'balanced_called_dosage_class_loci': balanced_class_dosage_loci,
                    'product_run_exit': (BASE / f'run-{tag}-{component}.exit').read_text().strip(),
                    'product_wall_seconds': int((BASE / f'run-{tag}-{component}.wall').read_text()),
-                   'selected_ploidy': spine['phasing']['rescore']['selected_ploidy'],
-                   'truth_dosage': old['truth_dosage'],
-                   'selected_single_class_dosage': old['selected_single_class_dosage'],
+                   'selected_ploidy': selected_ploidy,
+                   'truth_dosage': truth_dosage,
+                   'selected_single_class_dosage': 2.0 if selected_ploidy == 'haploid' else None,
                    'yardstick': 'injective_per_locus_genotype_on_attested_SK1_homologs',
                    'bracket_policy': 'unattested SK1 orthology has no assigned local allele; not scored'})
     assert scored['product_run_exit'] == '0'
