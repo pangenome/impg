@@ -45,7 +45,8 @@ for C in chrVI chrIII chrIX chrVIII chrV chrXI chrX chrII chrXIV chrXIII chrXVI 
   mv "$A.json.tmp" "$A.json"
   touch "$A.done"
 done
-IMPG_DIPLOID_VALIDATION_DIR="$D" bash "$ROOT/genome/instrumented/run-diploid-genotype.sh" \
+IMPG_DIPLOID_VALIDATION_DIR="$D" IMPG_DIPLOID_GENOTYPE_TAG=balanced \
+  bash "$ROOT/genome/instrumented/run-diploid-genotype.sh" \
   > "$D/genotype-distance-fleet-summary.out" 2> "$D/genotype-distance-fleet-summary.err"
 status=$?
 if [ "$status" != 0 ]; then

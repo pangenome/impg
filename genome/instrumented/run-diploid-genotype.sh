@@ -10,8 +10,8 @@ for route in json.load(open(sys.argv[1]))['slot1']:
 PY
 )
 for component in "${components[@]}"; do
-    tag=fleet
-    if [[ "$component" == chrI || "$component" == chrMT ]]; then tag=smoke2; fi
+    tag="${IMPG_DIPLOID_GENOTYPE_TAG:-fleet}"
+    if [[ -z "${IMPG_DIPLOID_GENOTYPE_TAG:-}" && ( "$component" == chrI || "$component" == chrMT ) ]]; then tag=smoke2; fi
     prefix="$D/genotype-distance-$tag-$component"
     rm -f "$prefix.done" "$prefix.exit"
     start=$(date +%s)
@@ -33,12 +33,12 @@ for component in "${components[@]}"; do
     fi
 done
 python3 -B - "$D" "${components[@]}" <<'PY'
-import json,sys
+import json,os,sys
 from pathlib import Path
 D=Path(sys.argv[1]); components=sys.argv[2:]
 rows=[]
 for component in components:
-    tag='smoke2' if component in ('chrI','chrMT') else 'fleet'
+    tag=os.environ.get('IMPG_DIPLOID_GENOTYPE_TAG') or ('smoke2' if component in ('chrI','chrMT') else 'fleet')
     x=json.loads((D/f'genotype-distance-{tag}-{component}.json').read_text())
     rows.append({k:x[k] for k in ('component','error_bp','truth_bp','distance','assessable_loci',
                                   'bracketed_loci','bracketed_S288C_axis_bp',
