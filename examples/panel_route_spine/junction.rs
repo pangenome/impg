@@ -1031,6 +1031,29 @@ const SPAN_SCAN_SLACK: u64 = READ_LENGTH as u64 + 128;
 const SHARED_CONTEXT_CAP: u64 = READ_LENGTH as u64 + 128;
 
 impl JunctionSpanIndex {
+    /// Diagnostic upper bound for restricted-charge evidence on selected
+    /// features. Any one composition's crossing reads are a subset of ALL
+    /// read instances of placed records, and each restricted record share is
+    /// in [0, 1]; counting every occurrence is therefore conservative.
+    pub fn observed_feature_upper_bounds(
+        &self,
+        features: &HashSet<FeatureKey>,
+    ) -> HashMap<FeatureKey, f64> {
+        let mut upper = HashMap::new();
+        for (record, data) in self.records.iter().enumerate() {
+            let instances = self.record_reads[record].len() as f64;
+            if instances == 0.0 {
+                continue;
+            }
+            for feature in &data.features {
+                if features.contains(feature) {
+                    *upper.entry(feature.clone()).or_insert(0.0) += instances;
+                }
+            }
+        }
+        upper
+    }
+
     /// Exit flank window of a left segment, in its path's coordinates: the
     /// last `take` bases of the segment's material in molecule orientation,
     /// take = min(L149, segment length) — mirroring `segment_flank`'s crop

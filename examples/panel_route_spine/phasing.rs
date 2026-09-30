@@ -1784,6 +1784,16 @@ pub(in super) struct BoundaryCostsStore {
     )>,
 }
 
+/// Exact continuous lower envelope of the restricted fractional loss for
+/// observed evidence at most `observed_upper` and nonnegative exposure.
+fn restricted_observation_envelope(observed_upper: f64, beta: f64) -> f64 {
+    if observed_upper <= beta {
+        0.0
+    } else {
+        observed_upper - beta - observed_upper * (observed_upper / beta).ln()
+    }
+}
+
 impl BoundaryCostsStore {
     /// Build the store: the parallel COMPOSITION-CHARGING pass (small
     /// per boundary) — the matrices are NOT built here.
@@ -1798,15 +1808,24 @@ impl BoundaryCostsStore {
     ) -> io::Result<Self> {
         let charges: Vec<BoundaryCompositionCharges> = drafts
             .par_iter()
-            .map(|draft| {
-                charge_boundary_compositions(
+            .enumerate()
+            .map(|(boundary, draft)| {
+                let measure = std::env::var_os("IMPG_KNEE_BOUND_DIAG_DIR").is_some()
+                    && [50usize, 91, 105].contains(&boundary);
+                let started = Instant::now();
+                let charge = charge_boundary_compositions(
                     draft,
                     routed_equal,
                     component_locus_to_partition,
                     model,
                     backgrounds,
                     sample,
-                )
+                );
+                if measure {
+                    eprintln!("[knee-bound-cost] boundary={boundary} composition_charge_seconds={:.6}",
+                        started.elapsed().as_secs_f64());
+                }
+                charge
             })
             .collect::<io::Result<_>>()?;
         let indexes: Vec<BoundaryIndexes> = drafts
@@ -1842,6 +1861,191 @@ impl BoundaryCostsStore {
                 std::collections::VecDeque::new(),
             )),
         })
+    }
+
+    /// Post-charge observation only. This has no effect on selection or
+    /// stored product fields: the entire pair universe is already charged.
+    pub(in super) fn write_knee_curve(
+        &self,
+        boundary: usize,
+        left_allele: usize,
+        right_allele: usize,
+        haploid: bool,
+        path: &std::path::Path,
+    ) -> io::Result<()> {
+        let draft = &self.drafts[boundary];
+        let charges = &self.charges[boundary];
+        let scores = if haploid { &charges.scores_haploid } else { &charges.scores };
+        let mut pair_counts = vec![0u64; scores.len()];
+        let width = draft.right_group_size.len();
+        for (index, &composition) in draft.pair_composition.iter().enumerate() {
+            pair_counts[composition as usize] += draft.left_group_size[index / width]
+                * draft.right_group_size[index % width];
+        }
+        let mut ordered: Vec<usize> = (0..scores.len()).collect();
+        ordered.sort_by(|&left, &right| scores[left].0.total_cmp(&scores[right].0)
+            .then_with(|| left.cmp(&right)));
+        let min_score = scores[ordered[0]].0;
+        let normalizer: f64 = ordered.iter().map(|&id| {
+            pair_counts[id] as f64 * (-(scores[id].0 - min_score)).exp()
+        }).sum();
+        ensure(normalizer.is_finite() && normalizer > 0.0,
+            "knee observation has no finite pair mass")?;
+        let total_pairs: u64 = pair_counts.iter().sum();
+        let left_dense = draft.left_index[left_allele] as usize;
+        let right_dense = draft.right_index[right_allele] as usize;
+        ensure(left_dense != u32::MAX as usize && right_dense != u32::MAX as usize,
+            "knee selected allele absent from retained pair universe")?;
+        let left_group = draft.left_group[left_dense] as usize;
+        let right_group = draft.right_group[right_dense] as usize;
+        let chosen_id = draft.pair_composition[left_group * width + right_group] as usize;
+        let chosen_score = scores[chosen_id].0;
+        let mut cumulative_pairs = 0u64;
+        let mut cumulative_mass = 0.0f64;
+        let mut prefixes: Vec<serde_json::Value> = Vec::new();
+        let targets = [0.5, 0.9, 0.99, 0.999];
+        let mut curve = Vec::with_capacity(ordered.len());
+        let mut gap = (0.0f64, 0u64, 0.0f64, 0.0f64);
+        let mut selected_rank_end = 0u64;
+        let mut weighted_x = 0.0f64;
+        let mut weighted_y = 0.0f64;
+        let mut weighted_xx = 0.0f64;
+        let mut weighted_yy = 0.0f64;
+        let mut weighted_xy = 0.0f64;
+        for (i, &id) in ordered.iter().enumerate() {
+            let score = scores[id].0;
+            let weight = pair_counts[id];
+            let x = draft.profiles[id].len() as f64;
+            let y = -score;
+            let w = weight as f64;
+            weighted_x += w * x;
+            weighted_y += w * y;
+            weighted_xx += w * x * x;
+            weighted_yy += w * y * y;
+            weighted_xy += w * x * y;
+            if i > 0 {
+                let separation = score - scores[ordered[i - 1]].0;
+                if separation > gap.0 {
+                    gap = (separation, cumulative_pairs, cumulative_mass, scores[ordered[i - 1]].0);
+                }
+            }
+            cumulative_pairs += weight;
+            cumulative_mass += w * (-(score - min_score)).exp() / normalizer;
+            if score <= chosen_score {
+                selected_rank_end = cumulative_pairs;
+            }
+            for &target in &targets {
+                if cumulative_mass >= target && !prefixes.iter().any(|row: &serde_json::Value| row["mass_target"] == target) {
+                    prefixes.push(serde_json::json!({"mass_target": target,
+                        "pairs": cumulative_pairs, "pair_fraction": cumulative_pairs as f64 / total_pairs as f64,
+                        "score_at_prefix": score}));
+                }
+            }
+            curve.push(serde_json::json!({"loss": score,
+                "log_mass_relative_to_best": min_score - score,
+                "pairs": weight, "cumulative_pairs": cumulative_pairs,
+                "cumulative_normalized_mass": cumulative_mass}));
+        }
+        let n = total_pairs as f64;
+        let variance_x = weighted_xx / n - (weighted_x / n).powi(2);
+        let variance_y = weighted_yy / n - (weighted_y / n).powi(2);
+        let profile_len_loss_correlation = (variance_x > 0.0 && variance_y > 0.0).then(||
+            (weighted_xy / n - weighted_x * weighted_y / (n * n))
+                / (variance_x * variance_y).sqrt());
+        let result = serde_json::json!({
+            "boundary": boundary, "pair_count": total_pairs,
+            "composition_count": scores.len(), "track": if haploid {"haploid"} else {"diploid_slot0"},
+            "observable": "post_charge_conditional_boundary_pair_boltzmann_mass_not_chain_posterior",
+            "normalization": "count_per_composition * exp(-(exact_boundary_loss - min_exact_loss))",
+            "min_exact_loss": min_score, "prefixes": prefixes,
+            "dominant_gap": {"loss_gap": gap.0, "pairs_before_gap": gap.1,
+                "mass_before_gap": gap.2, "loss_before_gap": gap.3},
+            "selected_chain_slot0_pair": {"left_allele": left_allele, "right_allele": right_allele,
+                "exact_boundary_loss": chosen_score, "rank_end_including_ties": selected_rank_end,
+                "within_dominant_gap_prefix": chosen_score <= gap.3},
+            "available_before_charging": {"pair_specific_admissible_floor": null,
+                "reason": "existing boundary floor is the minimum of realized composition scores AFTER charging; novel-only scores also run restricted_charge during draft construction"},
+            "profile_feature_count_vs_negative_exact_loss_weighted_pearson": profile_len_loss_correlation,
+            "realized_boundary_floor": if haploid { charges.floor_haploid } else { charges.floor },
+            "curve_by_exact_composition": curve,
+        });
+        std::fs::write(path, serde_json::to_vec(&result).map_err(io::Error::other)?)?;
+        Ok(())
+    }
+
+    /// Observational lower envelope for restricted (novel-only) charges.
+    /// Predicted profiles are ALREADY BUILT here: this pilot checks whether
+    /// record-side upper observations yield a useful floor before paying the
+    /// exact crossing-read charge, not whether profiles are cheap to build.
+    pub(in super) fn write_bound_pilot(
+        &self,
+        boundary: usize,
+        upper: &HashMap<FeatureKey, f64>,
+        model: &ScoreModel,
+        upper_build_seconds: f64,
+        path: &std::path::Path,
+    ) -> io::Result<()> {
+        let started = Instant::now();
+        let draft = &self.drafts[boundary];
+        let charges = &self.charges[boundary];
+        let mut composition_weights = vec![0u64; charges.scores.len()];
+        let width = draft.right_group_size.len();
+        for (index, &id) in draft.pair_composition.iter().enumerate() {
+            composition_weights[id as usize] += draft.left_group_size[index / width]
+                * draft.right_group_size[index % width];
+        }
+        let mut min_bound = f64::INFINITY;
+        let mut min_exact = f64::INFINITY;
+        let mut violations = 0u64;
+        let mut weighted_gap = 0.0f64;
+        let mut max_gap = 0.0f64;
+        let mut novel_pairs = 0u64;
+        let mut bound_rows = Vec::new();
+        for &id in &draft.novel_only {
+            let mut lower = 0.0f64;
+            for key in draft.profiles[id].keys() {
+                let observed_upper = upper.get(key).copied().unwrap_or(0.0);
+                lower += restricted_observation_envelope(observed_upper, model.background);
+            }
+            let exact = charges.scores[id].0;
+            let gap = exact - lower;
+            if gap < -1e-7 {
+                violations += 1;
+            }
+            min_bound = min_bound.min(lower);
+            min_exact = min_exact.min(exact);
+            max_gap = max_gap.max(gap);
+            let weight = composition_weights[id];
+            novel_pairs += weight;
+            weighted_gap += gap * weight as f64;
+            bound_rows.push((lower, weight));
+        }
+        let novel_floor_certificate_pairs = bound_rows.iter()
+            .filter(|(lower, _)| *lower > min_exact)
+            .map(|(_, weight)| *weight).sum::<u64>();
+        let result = serde_json::json!({
+            "boundary": boundary,
+            "restricted_only": true,
+            "novel_compositions": draft.novel_only.len(),
+            "novel_pairs": novel_pairs,
+            "pooled_compositions_without_this_certificate": charges.scores.len() - draft.novel_only.len(),
+            "observed_upper_feature_count": upper.len(),
+            "bound_after_exact_profile_before_exact_crossing_charge": true,
+            "upper_scan_and_feature_collection_seconds": upper_build_seconds,
+            "bound_eval_seconds": started.elapsed().as_secs_f64(),
+            "min_continuous_envelope": min_bound,
+            "min_realized_novel_charge": min_exact,
+            "min_bound_minus_realized_floor": min_bound - min_exact,
+            "weighted_mean_exact_minus_bound": weighted_gap / novel_pairs as f64,
+            "max_exact_minus_bound": max_gap,
+            "lower_bound_violations": violations,
+            "novel_pairs_certified_above_realized_novel_floor": novel_floor_certificate_pairs,
+            "novel_pair_fraction_certified_above_novel_floor": novel_floor_certificate_pairs as f64 / novel_pairs as f64,
+            "proof_scope": "restricted crossing share <= 1 per placed record instance; all placed record instances counted per feature; continuous minimum of s-O log(1+s/beta) <= any nonnegative exposure",
+            "not_certified": "pooled multiplicity backgrounds, pre-profile feature superset, chain-level local/suffix bound and unseen pair tail mass",
+        });
+        std::fs::write(path, serde_json::to_vec(&result).map_err(io::Error::other)?)?;
+        Ok(())
     }
 
     pub(in super) fn len(&self) -> usize {
@@ -2357,6 +2561,20 @@ pub(in super) fn run_phasing_chain_dp(
         } else {
             &boundary.cost
         };
+        let measure_reads = std::env::var_os("IMPG_KNEE_BOUND_DIAG_DIR").is_some()
+            && [50usize, 91, 105].contains(&(locus - 1));
+        let mut read_positions = measure_reads.then(|| vec![false; cost_matrix.len()]);
+        let mut distinct_candidate_addresses = 0usize;
+        let mut candidate_address_reads = 0u64;
+        let mut read_candidate = |index: usize| {
+            if let Some(positions) = read_positions.as_mut() {
+                candidate_address_reads += 1;
+                if !positions[index] {
+                    positions[index] = true;
+                    distinct_candidate_addresses += 1;
+                }
+            }
+        };
         let row_count = if right_count > 0 {
             cost_matrix.len() / right_count
         } else {
@@ -2406,6 +2624,7 @@ pub(in super) fn run_phasing_chain_dp(
                 if start == group_start[column + 1] {
                     continue;
                 }
+                read_candidate(boundary.left_index[state.pair[0]] as usize * right_count + column);
                 if base + row_first[column] + row_second_min + group_min_loss[column]
                     + suffix_from_locus[locus]
                     > incumbent + BOUND_PRUNE_EPSILON
@@ -2418,6 +2637,10 @@ pub(in super) fn run_phasing_chain_dp(
                 let best_slice = &mut best[start..group_start[column + 1]];
                 let pred_slice = &mut pred[start..group_start[column + 1]];
                 for (offset, &(_, _, second, loss)) in rows.iter().enumerate() {
+                    if !haploid {
+                        read_candidate(boundary.left_index[state.pair[1]] as usize * right_count
+                            + second as usize);
+                    }
                     let candidate = prefix + row_second[second as usize] + loss;
                     if candidate < best_slice[offset] {
                         best_slice[offset] = candidate;
@@ -2445,6 +2668,14 @@ pub(in super) fn run_phasing_chain_dp(
             });
         }
         ensure(!layer.is_empty(), "phasing DP layer {locus} is empty")?;
+        if measure_reads {
+            eprintln!(
+                "[knee-dp-read] boundary={} track={} matrix_pairs={} row_min_full_scan={} previous_interface_full_scan={} distinct_candidate_pair_addresses={} candidate_pair_address_reads={} block_pruned_state_visits={}",
+                locus - 1, if haploid { "haploid" } else { "diploid" },
+                cost_matrix.len(), cost_matrix.len(), cost_matrix.len(),
+                distinct_candidate_addresses, candidate_address_reads, block_pruned
+            );
+        }
         eprintln!(
             "[phasing] dp layer {locus}: candidates {} states {} suffix_pruned {} block_pruned {} ({:.1}s)",
             states.len(),
@@ -4290,7 +4521,10 @@ pub(in super) fn run_correlation_phasing(
     let transition_drafts: Vec<BoundaryTransitionDraft> = (0..locus_count - 1)
         .into_par_iter()
         .map(|boundary| {
-            build_boundary_transition_draft(
+            let measure = std::env::var_os("IMPG_KNEE_BOUND_DIAG_DIR").is_some()
+                && [50usize, 91, 105].contains(&boundary);
+            let started = Instant::now();
+            let draft = build_boundary_transition_draft(
                 panel,
                 sources,
                 flank_memo,
@@ -4304,7 +4538,12 @@ pub(in super) fn run_correlation_phasing(
                 &combined[boundary + 1],
                 &retained_union_sets[boundary],
                 &retained_union_sets[boundary + 1],
-            )
+            );
+            if measure {
+                eprintln!("[knee-bound-cost] boundary={boundary} draft_profile_and_exact_restricted_charge_seconds={:.6}",
+                    started.elapsed().as_secs_f64());
+            }
+            draft
         })
         .collect::<io::Result<_>>()?;
     // -------------------------------- P4b gate (the STEP-4 fold).
@@ -4403,6 +4642,32 @@ pub(in super) fn run_correlation_phasing(
         backgrounds_shared,
         sample_backgrounds,
     )?;
+    if let Ok(dir) = std::env::var("IMPG_KNEE_BOUND_DIAG_DIR") {
+        std::fs::create_dir_all(&dir)?;
+        let upper_started = Instant::now();
+        let boundaries = [50usize, 91, 105];
+        let mut feature_set = HashSet::new();
+        for &boundary in &boundaries {
+            if boundary >= transition_costs.len() {
+                continue;
+            }
+            for &id in &transition_costs.drafts[boundary].novel_only {
+                feature_set.extend(transition_costs.drafts[boundary].profiles[id].keys().cloned());
+            }
+        }
+        let upper = span.observed_feature_upper_bounds(&feature_set);
+        let upper_build_seconds = upper_started.elapsed().as_secs_f64();
+        for &boundary in &boundaries {
+            if boundary >= transition_costs.len() {
+                continue;
+            }
+            let path = std::path::Path::new(&dir).join(format!("bound-{boundary}.json"));
+            transition_costs.write_bound_pilot(
+                boundary, &upper, model, upper_build_seconds, &path,
+            )?;
+            eprintln!("[knee-bound-pilot] boundary {boundary} -> {}", path.display());
+        }
+    }
     let finalist_transition_costs: Vec<BoundaryTransitionCosts> = if folded_production {
         Vec::new()
     } else {
@@ -5654,6 +5919,21 @@ pub(in super) fn run_correlation_phasing(
         dp.best_score,
         dp.wall_seconds
     );
+    if let Ok(directory) = std::env::var("IMPG_KNEE_DIAG_DIR") {
+        std::fs::create_dir_all(&directory)?;
+        for boundary in [50usize, 91, 105] {
+            if boundary + 1 >= locus_count {
+                continue;
+            }
+            let path = std::path::Path::new(&directory)
+                .join(format!("boundary-{boundary}.json"));
+            transition_costs.write_knee_curve(
+                boundary, dp.route[boundary][0], dp.route[boundary + 1][0],
+                selected_ploidy == "haploid", &path,
+            )?;
+            eprintln!("[knee-curve] boundary {boundary} -> {}", path.display());
+        }
+    }
 
     // ---------------------------------------- P5: authoritative rescore.
     let rescore_started = Instant::now();
@@ -7307,6 +7587,22 @@ fn segment_list_json(traversal: &genome::SpanningTraversal) -> serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_observation_envelope_bounds_crossing_shares_without_predicted_exposure() {
+        for beta in [0.1, 1.0, 4.0] {
+            for upper in [0.0, beta / 2.0, beta, beta * 2.0, 1000.0] {
+                let floor = restricted_observation_envelope(upper, beta);
+                for observed in [0.0, upper / 2.0, upper] {
+                    for signal in [0.0, beta / 2.0, beta, upper, 1000.0] {
+                        let exact = signal - observed * (signal / beta).ln_1p();
+                        assert!(floor <= exact + 1e-10,
+                            "beta={beta} upper={upper} observed={observed} signal={signal}: floor={floor} exact={exact}");
+                    }
+                }
+            }
+        }
+    }
 
     /// The DP path's evaluator identity (owner ruling,
     /// dp-evaluator-consistency, 2026-09-24): the haploid track's states
