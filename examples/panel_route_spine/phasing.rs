@@ -4142,7 +4142,24 @@ pub(in super) fn run_correlation_phasing(
             (full, shares)
         })
         .collect();
-    let haploid_oracle: Vec<(Vec<f64>, Vec<HaploidAlleleExon>)> = (0..locus_count)
+    // Each locus holds large profile/span memos until it returns. The measured
+    // 16-worker gate lowers chrIV peak RSS by ~16GB at +38s wall, without
+    // narrowing other phases or changing any charge.
+    let oracle_width = match std::env::var("IMPG_HAPLOID_ORACLE_THREADS") {
+        Ok(width) => width
+            .parse::<usize>()
+            .map_err(|_| io::Error::other("invalid haploid oracle thread width"))?,
+        Err(_) => 16,
+    };
+    ensure(oracle_width > 0, "haploid oracle thread width must be positive")?;
+    // AGC's per-thread decompressors have global-pool-sized slots indexed by
+    // rayon::current_thread_index(). A scoped pool must not exceed that width.
+    let oracle_width = oracle_width.min(rayon::current_num_threads());
+    let oracle_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(oracle_width)
+        .build()
+        .map_err(io::Error::other)?;
+    let haploid_oracle: Vec<(Vec<f64>, Vec<HaploidAlleleExon>)> = oracle_pool.install(|| (0..locus_count)
         .into_par_iter()
         .map(|locus| {
             let scorable = scorable_classes(&locus_classes[locus], &ranges[locus]);
@@ -4169,7 +4186,7 @@ pub(in super) fn run_correlation_phasing(
                 axis_slice[locus].end,
             )
         })
-        .collect::<io::Result<_>>()?;
+        .collect::<io::Result<_>>())?;
     let haploid_oracle_seconds = haploid_oracle_started.elapsed().as_secs_f64();
     eprintln!(
         "[phasing] haploid oracle allele losses: {:.2}s",
