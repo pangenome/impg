@@ -1393,13 +1393,29 @@ fn mask_and_update_regions(
         }
 
         // Step 5: Efficiently update missing regions for this sequence
+        //
+        // Only the missing ranges that meet [lo, hi), the span of the masks just
+        // added, are rebuilt; the rest are spliced back untouched. Rebuilding
+        // the whole list (as before) re-inserted every missing range of every
+        // sequence a window touched, so a partner chromosome that masking had cut
+        // into 10^5 pieces cost 10^5 inserts per window -- 85% of a journal
+        // replay, and why replaying 7% of the 581-genome run took 8 h.
+        // Equivalent because, entering this step, missing is disjoint from the
+        // OLD masks (every mask insert, here and in the stall guard, is followed
+        // by subtracting it from missing) and no two missing ranges touch
+        // (SortedRanges::insert merges touching ranges). So a range outside
+        // [lo, hi) comes back from the full rebuild unchanged, and pieces of the
+        // ranges inside cannot merge with it.
         if let Some(missing) = missing_regions.get_mut(&seq_id) {
             if let Some(masked) = masked_regions.get(&seq_id) {
-                // Temporarily take ownership of the ranges to avoid cloning
-                let original_missing = std::mem::take(&mut missing.ranges);
-
-                // Clear current missing ranges and rebuild
-                missing.ranges.clear();
+                let lo = mask_buffer.iter().map(|&(s, _)| s).min().unwrap_or(i32::MAX);
+                let hi = mask_buffer.iter().map(|&(_, e)| e).max().unwrap_or(i32::MIN);
+                // Ranges are sorted, disjoint and non-touching, so their ends
+                // are sorted too and both bounds are binary searches.
+                let first = missing.ranges.partition_point(|&(_, e)| e <= lo);
+                let last = missing.ranges.partition_point(|&(s, _)| s < hi).max(first);
+                let original_missing: Vec<(i32, i32)> = missing.ranges[first..last].to_vec();
+                let mut rebuilt = SortedRanges::new();
 
                 for (miss_start, miss_end) in original_missing {
                     let mut current = miss_start;
@@ -1436,7 +1452,7 @@ fn mask_and_update_regions(
 
                         if current < mask_start {
                             // Found a gap - this part is still missing
-                            missing.insert((current, mask_start));
+                            rebuilt.insert((current, mask_start));
                         }
 
                         current = current.max(mask_end);
@@ -1445,9 +1461,10 @@ fn mask_and_update_regions(
 
                     // Check for remaining gap at the end
                     if current < miss_end {
-                        missing.insert((current, miss_end));
+                        rebuilt.insert((current, miss_end));
                     }
                 }
+                missing.ranges.splice(first..last, rebuilt.ranges);
 
                 // Remove sequence if no more missing regions
                 if missing.is_empty() {

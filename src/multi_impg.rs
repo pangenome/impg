@@ -810,20 +810,27 @@ impl MultiImpg {
         subset_filter: Option<&SubsetFilter>,
         use_dfs: bool,
     ) -> Vec<AdjustedInterval> {
-        // Initialize visited ranges
-        let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
-            m.iter().map(|(&k, v)| (k, v.clone())).collect()
-        } else {
-            (0..self.seq_index.len() as u32)
-                .into_par_iter()
-                .map(|id| (id, SortedRanges::new()))
-                .collect()
-        };
+        // Visited ranges start as a copy of the masks, but each sequence is
+        // copied on first touch rather than all of them up front. The eager copy
+        // cloned every mask of every sequence for every query: partition calls
+        // this once per window with masks that only grow, so each window cost
+        // O(all masked ranges) -- quadratic over a run, and nearly all of a
+        // 581-genome partition's time once past the first few percent. A
+        // sequence the walk never reaches is never read, so the lazy copy gives
+        // exactly what the eager one did.
+        fn visited_entry<'a>(
+            visited: &'a mut FxHashMap<u32, SortedRanges>,
+            masked: Option<&FxHashMap<u32, SortedRanges>>,
+            id: u32,
+        ) -> &'a mut SortedRanges {
+            visited
+                .entry(id)
+                .or_insert_with(|| masked.and_then(|m| m.get(&id)).cloned().unwrap_or_default())
+        }
+        let mut visited_ranges: FxHashMap<u32, SortedRanges> = FxHashMap::default();
 
         // Filter input range
-        let filtered_input_range = visited_ranges
-            .entry(target_id)
-            .or_insert_with(SortedRanges::new)
+        let filtered_input_range = visited_entry(&mut visited_ranges, masked_regions, target_id)
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
@@ -913,9 +920,7 @@ impl MultiImpg {
                 }
 
                 // Only add non-overlapping portions to the stack for further exploration
-                let ranges = visited_ranges
-                    .entry(query_id)
-                    .or_insert_with(SortedRanges::new);
+                let ranges = visited_entry(&mut visited_ranges, masked_regions, query_id);
 
                 let new_ranges = ranges.insert_with_boundary_snap(
                     (adjusted_query_start, adjusted_query_end),
