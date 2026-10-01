@@ -31,6 +31,7 @@
 
 use super::*;
 pub(crate) mod junction;
+mod cosine_probe;
 mod phasing;
 
 use junction::{JunctionSpanIndex, RestrictedCharge};

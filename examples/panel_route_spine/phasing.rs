@@ -4997,6 +4997,15 @@ pub(in super) fn run_correlation_phasing(
         dp_diploid.state_counts
     );
     rss_probe(rss, "phasing_after_dp_diploid")?;
+    if let Ok(path) = std::env::var("IMPG_COSINE_DIAG_OUTPUT") {
+        super::cosine_probe::dump(
+            &path, panel, sources, path_of_source, ranges, locus_classes,
+            sweeps, viable, truth_pieces, &dp_diploid.route, window_obs,
+            window_instances.ok_or_else(|| invalid("cosine diagnostic needs record placements"))?,
+            model.depth, locus_offset,
+        )?;
+        eprintln!("[cosine-probe] wrote {path}");
+    }
     let dp_haploid = run_phasing_chain_dp(
         locus_count,
         &per_locus_haploid_tables,
