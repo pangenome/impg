@@ -6,6 +6,8 @@ C="$1"; TAG="${2:-balanced}"
 source /home/erikg/impg-genome-inference/build-env.sh
 D=/home/erikg/yeast/genome-balanced-diploid-validation-20260930
 cd "$D"
+# The diagnostic's relative rescore scratch must not refresh production scratch.
+if [[ -n "${IMPG_COSINE_DIAG_OUTPUT:-}" ]]; then mkdir -p "$D/cosine-diagnostic-scratch/$C" && cd "$D/cosine-diagnostic-scratch/$C" || exit 1; fi
 P="$D/run-$TAG-$C"
 rm -f "$P.done" "$P.exit"
 start=$(date +%s)
