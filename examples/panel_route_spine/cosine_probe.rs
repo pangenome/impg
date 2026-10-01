@@ -1,5 +1,6 @@
-//! Quarantined, read-only coverage-vector diagnostic (IMPG_COSINE_DIAG_OUTPUT).
-//! No score here feeds a sweep, DP, posterior, or product column.
+//! Quarantined coverage-vector diagnostics (IMPG_COSINE_DIAG_OUTPUT and
+//! IMPG_COSINE_EXHAUSTIVE_OUTPUT). Saved reads and product scores are not
+//! modified; no cosine score feeds a sweep, DP, posterior, or product column.
 use super::*;
 use std::io::{self, BufWriter, Write};
 
