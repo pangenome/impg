@@ -481,3 +481,693 @@ pub(super) fn dump_exhaustive(
     report.flush()?;
     competitors.flush()
 }
+
+// ---------------------------------------------------------------------------
+// Graph-space condensation (owner greenlight 2026-10-01). Both observed
+// read evidence and per-candidate expected usage live on the panel graph's
+// OWN shared coordinates: nodes are the syng syncmer segments (signed node
+// ids, 1-based, sign = storage strand; identity frame-independent, shared
+// across paths wherever sequence is conserved), and edges are the
+// adjacencies between consecutive covered nodes along a placement path —
+// so two conserved placements collapse onto the SAME node/edge features
+// while diverged material keeps its own. Observed node mass: each
+// contributing routed record's equal share m/t, once per graph node whose
+// k-mer window is fully contained in the union of the record's routed
+// placement spans (all features, both frames, merged per path); a record
+// placing on several conserved paths votes a shared node ONCE. Observed
+// edge mass: the adjacencies the records span — consecutive contained
+// steps of one placement — same share, once per record per edge. A
+// junction adjacency no single record spans would need the span index's
+// chain-pair channel; the pure-route domain cannot contain one (admissible
+// rows are `single:` or strictly adjacent same-source `stitch:`, so every
+// spelled adjacency is same-path continuous), and the audited per-locus
+// `multi_segment_rows`/`disjoint_material_rows` counts report that
+// structure instead of assuming it. Expected usage: depth per covered
+// copy with repeat-visit multiplicity; cosine factored per row exactly as
+// the row-space pilot (`cosine_probe.rs` factorization), in TWO separate
+// arms — nodes-only and nodes+edges — so the edge layer's contribution is
+// a measured number. Assessment-side only; no thresholds, no constants.
+// ---------------------------------------------------------------------------
+
+/// A shared graph segment key: the syncmer node id, unsigned (the sign is
+/// the storage orientation; the physical segment identity is the abs id).
+type GraphNode = u32;
+/// An unpacked shared adjacency: two consecutive covered node ids.
+type GraphEdge = (u32, u32);
+/// A shared adjacency key, packed for the O(rows^2) pair walk.
+type PackedEdge = u64;
+
+fn pack_edge(left: GraphNode, right: GraphNode) -> PackedEdge {
+    (left as u64) << 32 | right as u64
+}
+
+/// One candidate row's graph usage: sorted distinct keys with repeat-visit
+/// multiplicity (a row whose spelled material visits the same shared
+/// segment/adjacency twice expects 2x depth there).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GraphUsage {
+    nodes: Vec<(GraphNode, u32)>,
+    edges: Vec<(PackedEdge, u32)>,
+}
+
+/// The window-contained step subrange of `steps` (sorted by bp): steps
+/// whose full k-mer window [bp, bp + k) lies inside [lo, hi). Containment,
+/// not overlap, is the shared-segment coverage convention on both the
+/// observed and expected sides.
+fn contained_steps(steps: &[(u64, i32)], k: u64, lo: u64, hi: u64) -> std::ops::Range<usize> {
+    let start = steps.partition_point(|&(bp, _)| bp < lo);
+    let end = steps.partition_point(|&(bp, _)| bp.saturating_add(k) <= hi);
+    start..end.max(start)
+}
+
+/// Sorted-key multiset intersection weight: Sum mult_a * mult_b over equal
+/// keys (the <e_i, e_j> of the graph factorization, before depth scaling).
+fn multiset_overlap(left: &[(u64, u32)], right: &[(u64, u32)]) -> f64 {
+    let (mut i, mut j, mut total) = (0usize, 0usize, 0u64);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                total += left[i].1 as u64 * right[j].1 as u64;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    total as f64
+}
+
+/// Per-locus graph row with the factored statistics. `node_dot`/`edge_dot`
+/// are <x, e_i> over the observed mass; the norms are ||e_i||^2 per layer.
+/// Node keys are widened to u64 (and edges packed) so the O(rows^2) pair
+/// walk stays scalar.
+struct GraphRow {
+    nodes: Vec<(u64, u32)>,
+    edges: Vec<(PackedEdge, u32)>,
+    node_dot: f64,
+    edge_dot: f64,
+    node_norm: f64,
+    edge_norm: f64,
+    members: Vec<usize>,
+}
+
+struct GraphSpace {
+    rows: Vec<GraphRow>,
+    observed_node_norm: f64,
+    observed_edge_norm: f64,
+}
+
+impl GraphSpace {
+    /// One arm's pair score; `None` fails closed on a zero observed or
+    /// expected norm (no silent award). Used for the assessment-side truth
+    /// scores; the exhaustive pair walk inlines the same arithmetic with
+    /// the overlaps shared between the two arms.
+    fn cosine(&self, first: usize, second: usize, depth: f64, edges: bool) -> Option<f64> {
+        let (a, b) = (&self.rows[first], &self.rows[second]);
+        let node_overlap = multiset_overlap(&a.nodes, &b.nodes);
+        let edge_overlap = if edges {
+            multiset_overlap(&a.edges, &b.edges)
+        } else {
+            0.0
+        };
+        let (dot, expected_norm, observed_norm) = if edges {
+            (
+                a.node_dot + b.node_dot + a.edge_dot + b.edge_dot,
+                a.node_norm + b.node_norm + a.edge_norm + b.edge_norm
+                    + 2.0 * depth * depth * (node_overlap + edge_overlap),
+                self.observed_node_norm + self.observed_edge_norm,
+            )
+        } else {
+            (
+                a.node_dot + b.node_dot,
+                a.node_norm + b.node_norm + 2.0 * depth * depth * node_overlap,
+                self.observed_node_norm,
+            )
+        };
+        (observed_norm > 0.0 && expected_norm > 0.0)
+            .then(|| dot / (observed_norm * expected_norm).sqrt())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dump_graph_exhaustive(
+    path: &str,
+    panel: &SyngIndex,
+    ranges: &[Vec<genome::SpanningTraversal>],
+    path_of_source: &[usize],
+    truth_pieces: &[[Vec<(usize, u64, u64, bool, u32)>; 2]],
+    instances: &crate::InstanceStructure,
+    k: u64,
+    depth: f64,
+    locus_offset: usize,
+) -> io::Result<()> {
+    let mut report = BufWriter::new(std::fs::File::create(path)?);
+    let mut competitors =
+        BufWriter::new(std::fs::File::create(format!("{path}.competitors.jsonl"))?);
+    for (locus, candidates) in ranges.iter().enumerate() {
+        // Per path: the candidate rows' merged material intervals and the
+        // contributing records' merged placement spans (all features, both
+        // frames, unioned per path — the record votes its share at a shared
+        // segment once, however many subwalks or conserved paths cover it).
+        struct PathWork {
+            rows: Vec<(usize, u64, u64)>,
+            records: Vec<(usize, u64, u64)>,
+        }
+        impl Default for PathWork {
+            fn default() -> Self {
+                PathWork { rows: Vec::new(), records: Vec::new() }
+            }
+        }
+        let mut paths: std::collections::BTreeMap<usize, PathWork> =
+            std::collections::BTreeMap::new();
+        let mut row_materials: Vec<Material> = Vec::with_capacity(candidates.len());
+        for (index, row) in candidates.iter().enumerate() {
+            let material = row_material(row, path_of_source);
+            for &(path, lo, hi) in &material {
+                paths
+                    .entry(path)
+                    .or_default()
+                    .rows
+                    .push((index, lo, hi));
+            }
+            row_materials.push(material);
+        }
+        let mut records: Vec<u32> = instances.window_records[locus]
+            .values()
+            .flat_map(|ids| ids.iter().copied())
+            .collect();
+        records.sort_unstable();
+        records.dedup();
+        for &record in &records {
+            let mut per_path: std::collections::BTreeMap<usize, Vec<(u64, u64)>> =
+                std::collections::BTreeMap::new();
+            for spans in instances.record_spans[record as usize].values() {
+                for &(path, lo, hi) in spans {
+                    per_path.entry(path).or_default().push((lo, hi));
+                }
+            }
+            for (path, mut intervals) in per_path {
+                merge_intervals(&mut intervals);
+                for (lo, hi) in intervals {
+                    paths
+                        .entry(path)
+                        .or_default()
+                        .records
+                        .push((record as usize, lo, hi));
+                }
+            }
+        }
+        // One bounding-range path walk per path; per-interval window
+        // containment extracts nodes and the adjacencies between
+        // consecutive contained steps.
+        let mut row_nodes: Vec<std::collections::BTreeMap<GraphNode, u32>> =
+            vec![std::collections::BTreeMap::new(); candidates.len()];
+        let mut row_edges: Vec<std::collections::BTreeMap<PackedEdge, u32>> =
+            vec![std::collections::BTreeMap::new(); candidates.len()];
+        let mut record_nodes: HashMap<u32, std::collections::BTreeSet<GraphNode>> =
+            HashMap::new();
+        let mut record_edges: HashMap<u32, std::collections::BTreeSet<PackedEdge>> =
+            HashMap::new();
+        for (path, work) in &paths {
+            let lo_min = work
+                .rows
+                .iter()
+                .chain(work.records.iter())
+                .map(|&(_, lo, _)| lo)
+                .min()
+                .unwrap_or(0);
+            let hi_max = work
+                .rows
+                .iter()
+                .chain(work.records.iter())
+                .map(|&(_, _, hi)| hi)
+                .max()
+                .unwrap_or(0);
+            if hi_max <= lo_min {
+                continue;
+            }
+            let mut steps: Vec<(u64, i32)> = panel
+                .walk_path_range(*path, lo_min, hi_max)?
+                .into_iter()
+                .map(|(node, bp)| (bp, node))
+                .collect();
+            steps.sort_unstable_by_key(|&(bp, _)| bp);
+            let mut add_interval =
+                |lo: u64, hi: u64, nodes: &mut dyn FnMut(GraphNode), edges: &mut dyn FnMut(GraphEdge)| {
+                    let window = contained_steps(&steps, k, lo, hi);
+                    let mut previous: Option<GraphNode> = None;
+                    for &(_, node) in &steps[window] {
+                        let key = node.unsigned_abs();
+                        if let Some(left) = previous.take() {
+                            edges((left, key));
+                        }
+                        previous = Some(key);
+                        nodes(key);
+                    }
+                };
+            for &(row_index, lo, hi) in &work.rows {
+                let nodes = &mut row_nodes[row_index];
+                let edges = &mut row_edges[row_index];
+                add_interval(
+                    lo,
+                    hi,
+                    &mut |key| *nodes.entry(key).or_default() += 1,
+                    &mut |(left, right)| *edges.entry(pack_edge(left, right)).or_default() += 1,
+                );
+            }
+            for &(record, lo, hi) in &work.records {
+                let record = record as u32;
+                let nodes = record_nodes.entry(record).or_default();
+                let edges = record_edges.entry(record).or_default();
+                add_interval(
+                    lo,
+                    hi,
+                    &mut |key| {
+                        nodes.insert(key);
+                    },
+                    &mut |(left, right)| {
+                        edges.insert(pack_edge(left, right));
+                    },
+                );
+            }
+        }
+        // The fixed observation universe: the nodes/edges covered by ANY
+        // candidate row's spelled material (mass outside it is dropped,
+        // exactly the row-space candidate-material convention).
+        let mut universe_nodes: std::collections::BTreeSet<GraphNode> =
+            std::collections::BTreeSet::new();
+        let mut universe_edges: std::collections::BTreeSet<PackedEdge> =
+            std::collections::BTreeSet::new();
+        for nodes in &row_nodes {
+            universe_nodes.extend(nodes.keys().copied());
+        }
+        for edges in &row_edges {
+            universe_edges.extend(edges.keys().copied());
+        }
+        // Observed mass: per record, its routed share once per covered
+        // universe segment/adjacency (the record-once dedup across paths
+        // IS the near-twin collapse: one read, one shared segment, one
+        // vote, whatever the number of conserved placements).
+        let mut observed_nodes: HashMap<GraphNode, f64> = HashMap::new();
+        let mut observed_edges: HashMap<PackedEdge, f64> = HashMap::new();
+        let mut observed_node_mass = 0.0;
+        let mut observed_edge_mass = 0.0;
+        for &record in &records {
+            let share = instances.record_shares[record as usize];
+            if let Some(nodes) = record_nodes.get(&record) {
+                for &node in nodes {
+                    if universe_nodes.contains(&node) {
+                        *observed_nodes.entry(node).or_default() += share;
+                        observed_node_mass += share;
+                    }
+                }
+            }
+            if let Some(edges) = record_edges.get(&record) {
+                for &edge in edges {
+                    if universe_edges.contains(&edge) {
+                        *observed_edges.entry(edge).or_default() += share;
+                        observed_edge_mass += share;
+                    }
+                }
+            }
+        }
+        let observed_node_norm: f64 =
+            observed_nodes.values().map(|mass| mass * mass).sum();
+        let observed_edge_norm: f64 =
+            observed_edges.values().map(|mass| mass * mass).sum();
+        // Exact-usage coalescing (a twin that spells the same segments and
+        // adjacencies is ONE graph row; identities stay inspectable via
+        // `members`).
+        let mut groups: std::collections::BTreeMap<GraphUsage, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, (nodes, edges)) in row_nodes.iter().zip(&row_edges).enumerate() {
+            groups
+                .entry(GraphUsage {
+                    nodes: nodes.iter().map(|(&key, &mult)| (key, mult)).collect(),
+                    edges: edges.iter().map(|(&key, &mult)| (key, mult)).collect(),
+                })
+                .or_default()
+                .push(index);
+        }
+        let graph_rows = groups.len();
+        let rows: Vec<GraphRow> = groups
+            .into_iter()
+            .map(|(usage, members)| {
+                let node_dot = usage
+                    .nodes
+                    .iter()
+                    .map(|&(key, mult)| {
+                        observed_nodes.get(&key).copied().unwrap_or(0.0) * depth * mult as f64
+                    })
+                    .sum();
+                let edge_dot = usage
+                    .edges
+                    .iter()
+                    .map(|&(key, mult)| {
+                        observed_edges.get(&key).copied().unwrap_or(0.0) * depth * mult as f64
+                    })
+                    .sum();
+                let node_norm: f64 = depth
+                    * depth
+                    * usage
+                        .nodes
+                        .iter()
+                        .map(|&(_, mult)| mult as f64 * mult as f64)
+                        .sum::<f64>();
+                let edge_norm: f64 = depth
+                    * depth
+                    * usage
+                        .edges
+                        .iter()
+                        .map(|&(_, mult)| mult as f64 * mult as f64)
+                        .sum::<f64>();
+                GraphRow {
+                    nodes: usage
+                        .nodes
+                        .into_iter()
+                        .map(|(key, mult)| (key as u64, mult))
+                        .collect(),
+                    edges: usage.edges,
+                    node_dot,
+                    edge_dot,
+                    node_norm,
+                    edge_norm,
+                    members,
+                }
+            })
+            .collect();
+        let space = GraphSpace {
+            rows,
+            observed_node_norm,
+            observed_edge_norm,
+        };
+        let mut id_to_row = vec![0usize; candidates.len()];
+        for (index, row) in space.rows.iter().enumerate() {
+            for &id in &row.members {
+                id_to_row[id] = index;
+            }
+        }
+        let truth = [0, 1].map(|copy| truth_index(candidates, &truth_pieces[locus][copy]));
+        let pair_truth = match (truth[0], truth[1]) {
+            (Some(a), Some(b)) => Some((id_to_row[a], id_to_row[b])),
+            _ => None,
+        };
+        let truth_nodes_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, false));
+        let truth_combined_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, true));
+        // Exhaustive assessment: every unordered graph-row pair, both arms.
+        // The overlaps are computed once per pair and shared by both arms'
+        // scores (the row-space factorization, one arithmetic pass).
+        let mut counts = [(0u64, 0u64); 2];
+        let mut eligible = [0u64; 2];
+        let mut best: [Option<(f64, [usize; 2])>; 2] = [None, None];
+        let mut competitor_entries = 0u64;
+        for second in 0..graph_rows {
+            for first in 0..=second {
+                let (a, b) = (&space.rows[first], &space.rows[second]);
+                let node_overlap = multiset_overlap(&a.nodes, &b.nodes);
+                let edge_overlap = multiset_overlap(&a.edges, &b.edges);
+                let nodes_score = (space.observed_node_norm > 0.0
+                    && a.node_norm + b.node_norm + 2.0 * depth * depth * node_overlap > 0.0)
+                    .then(|| {
+                        (a.node_dot + b.node_dot)
+                            / (space.observed_node_norm
+                                * (a.node_norm + b.node_norm
+                                    + 2.0 * depth * depth * node_overlap))
+                                .sqrt()
+                    });
+                let expected_combined = a.node_norm
+                    + b.node_norm
+                    + a.edge_norm
+                    + b.edge_norm
+                    + 2.0 * depth * depth * (node_overlap + edge_overlap);
+                let combined_score =
+                    (space.observed_node_norm + space.observed_edge_norm > 0.0
+                        && expected_combined > 0.0)
+                        .then(|| {
+                            (a.node_dot + b.node_dot + a.edge_dot + b.edge_dot)
+                                / ((space.observed_node_norm + space.observed_edge_norm)
+                                    * expected_combined)
+                                    .sqrt()
+                        });
+                for (arm_index, score) in [nodes_score, combined_score].into_iter().enumerate() {
+                    if let Some(score) = score {
+                        eligible[arm_index] += 1;
+                        if best[arm_index].is_none_or(|(old, _)| score > old) {
+                            best[arm_index] = Some((score, [first, second]));
+                        }
+                    }
+                }
+                if let (Some(truth_value), Some(score)) = (truth_nodes_score, nodes_score) {
+                    if score > truth_value + 1e-12 {
+                        counts[0].0 += 1;
+                    } else if (score - truth_value).abs() <= 1e-12 {
+                        counts[0].1 += 1;
+                    }
+                }
+                if let (Some(truth_value), Some(score)) = (truth_combined_score, combined_score) {
+                    if score > truth_value + 1e-12 {
+                        counts[1].0 += 1;
+                    } else if (score - truth_value).abs() <= 1e-12 {
+                        counts[1].1 += 1;
+                    }
+                }
+                let better_nodes = truth_nodes_score
+                    .zip(nodes_score)
+                    .is_some_and(|(t, s)| s > t + 1e-12);
+                let better_combined = truth_combined_score
+                    .zip(combined_score)
+                    .is_some_and(|(t, s)| s > t + 1e-12);
+                if better_nodes || better_combined {
+                    let ids = [space.rows[first].members[0], space.rows[second].members[0]];
+                    let mut arms = Vec::new();
+                    if better_nodes {
+                        arms.push("nodes");
+                    }
+                    if better_combined {
+                        arms.push("combined");
+                    }
+                    serde_json::to_writer(&mut competitors, &serde_json::json!({
+                        "locus": locus + locus_offset,
+                        "arms": arms,
+                        "row_indices": ids,
+                        "identities": [candidates[ids[0]].identity, candidates[ids[1]].identity],
+                        "node_counts": [space.rows[first].nodes.len(), space.rows[second].nodes.len()],
+                        "edge_counts": [space.rows[first].edges.len(), space.rows[second].edges.len()],
+                        "nodes_cosine": nodes_score,
+                        "combined_cosine": combined_score,
+                        "truth_nodes_cosine": truth_nodes_score,
+                        "truth_combined_cosine": truth_combined_score,
+                    }))?;
+                    writeln!(competitors)?;
+                    competitor_entries += 1;
+                }
+            }
+        }
+        let mut identity_kinds: HashMap<&str, u64> = HashMap::new();
+        for row in candidates.iter() {
+            *identity_kinds
+                .entry(row.identity.split(':').next().unwrap_or("?"))
+                .or_default() += 1;
+        }
+        let multi_segment_rows = candidates
+            .iter()
+            .filter(|row| row.segments.len() > 1)
+            .count();
+        // Rows whose spelled material is NOT path-continuous: these would
+        // be the only place a junction adjacency that no single record
+        // spans could hide (measured audit of the chain-channel claim).
+        let disjoint_material_rows = candidates
+            .iter()
+            .zip(&row_materials)
+            .filter(|(row, material)| {
+                row.segments.iter().map(|s| s.end.saturating_sub(s.start)).sum::<u64>()
+                    > row_material_merged_bp(material)
+            })
+            .count();
+        let ranks = [
+            truth_nodes_score.map(|_| counts[0].0 + 1),
+            truth_combined_score.map(|_| counts[1].0 + 1),
+        ];
+        serde_json::to_writer(&mut report, &serde_json::json!({
+            "locus": locus + locus_offset,
+            "physical_rows": candidates.len(),
+            "identity_kinds": identity_kinds.iter().map(|(kind, count)| (kind, count))
+                .collect::<Vec<_>>(),
+            "multi_segment_rows": multi_segment_rows,
+            "disjoint_material_rows": disjoint_material_rows,
+            "record_count": records.len(),
+            "graph_rows": graph_rows,
+            "node_universe_count": universe_nodes.len(),
+            "edge_universe_count": universe_edges.len(),
+            "observed_node_mass": observed_node_mass,
+            "observed_edge_mass": observed_edge_mass,
+            "observed_node_norm": observed_node_norm,
+            "observed_edge_norm": observed_edge_norm,
+            "eligible_pairs_nodes": eligible[0],
+            "eligible_pairs_combined": eligible[1],
+            "competitor_entries": competitor_entries,
+            "truth_piece_presence": truth_pieces[locus].iter().map(|v| !v.is_empty())
+                .collect::<Vec<_>>(),
+            "truth_pair_expressible": pair_truth.is_some(),
+            "truth_rows": truth,
+            "truth_graph_rows": pair_truth.map(|(a, b)| [a, b]),
+            "nodes_truth_cosine": truth_nodes_score,
+            "nodes_truth_rank": ranks[0],
+            "nodes_truth_tied_pairs": truth_nodes_score.map(|_| counts[0].1),
+            "nodes_higher_competitors": truth_nodes_score.map(|_| counts[0].0),
+            "nodes_best_cosine": best[0].map(|(score, _)| score),
+            "nodes_best_row_indices": best[0].map(|(_, indices)| indices
+                .map(|index| space.rows[index].members[0])),
+            "combined_truth_cosine": truth_combined_score,
+            "combined_truth_rank": ranks[1],
+            "combined_truth_tied_pairs": truth_combined_score.map(|_| counts[1].1),
+            "combined_higher_competitors": truth_combined_score.map(|_| counts[1].0),
+            "combined_best_cosine": best[1].map(|(score, _)| score),
+            "combined_best_row_indices": best[1].map(|(_, indices)| indices
+                .map(|index| space.rows[index].members[0])),
+            "rank_delta_combined_vs_nodes": match (ranks[0], ranks[1]) {
+                (Some(a), Some(b)) => Some(b as i64 - a as i64),
+                _ => None,
+            },
+        }))?;
+        writeln!(report)?;
+    }
+    report.flush()?;
+    competitors.flush()
+}
+
+/// Total bp of a row's merged per-path material (the path-continuity audit
+/// above: a strictly adjacent same-source stitch merges to its full bp
+/// count; a gapped or overlapping row does not).
+fn row_material_merged_bp(material: &Material) -> u64 {
+    material.iter().map(|&(_, lo, hi)| hi - lo).sum()
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::{
+        contained_steps, multiset_overlap, pack_edge, row_material_merged_bp, GraphRow,
+        GraphSpace, GraphUsage,
+    };
+
+    fn dense_dot(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| x * y).sum()
+    }
+
+    /// The factored pair arithmetic must equal the direct dense-vector
+    /// cosine over the combined node+edge space (and over the node space
+    /// alone for the nodes-only arm) on a hand-checkable example with a
+    /// repeat-visit multiplicity and a shared segment.
+    #[test]
+    fn graph_factored_pair_scores_match_direct_dense_vectors() {
+        // Universe: nodes {1,2,3}, edge {(1,2)}; observed mass n1=2,
+        // n2=3, e12=1. Row A: nodes {1:1,2:1}, edge {(1,2):1}; row B:
+        // nodes {2:2,3:1} (node 2 visited twice), no edges.
+        let observed_nodes = [(1u32, 2.0f64), (2, 3.0)];
+        let observed_edges = [(pack_edge(1, 2), 1.0f64)];
+        let depth = 15.0;
+        let row = |nodes: Vec<(u32, u32)>, edges: Vec<((u32, u32), u32)>| GraphRow {
+            node_dot: nodes.iter().map(|&(key, mult)| {
+                observed_nodes.iter().find(|&&(n, _)| n == key)
+                    .map_or(0.0, |&(_, m)| m) * depth * mult as f64
+            }).sum(),
+            edge_dot: edges.iter().map(|&((a, b), mult)| {
+                observed_edges.iter().find(|&&(e, _)| e == pack_edge(a, b))
+                    .map_or(0.0, |&(_, m)| m) * depth * mult as f64
+            }).sum(),
+            node_norm: depth * depth
+                * nodes.iter().map(|&(_, mult)| mult as f64 * mult as f64).sum::<f64>(),
+            edge_norm: depth * depth
+                * edges.iter().map(|&(_, mult)| mult as f64 * mult as f64).sum::<f64>(),
+            nodes: nodes.into_iter().map(|(key, mult)| (key as u64, mult)).collect(),
+            edges: edges.into_iter().map(|((a, b), mult)| (pack_edge(a, b), mult)).collect(),
+            members: vec![],
+        };
+        let space = GraphSpace {
+            rows: vec![
+                row(vec![(1, 1), (2, 1)], vec![((1, 2), 1)]),
+                row(vec![(2, 2), (3, 1)], vec![]),
+            ],
+            observed_node_norm: observed_nodes.iter().map(|&(_, m)| m * m).sum(),
+            observed_edge_norm: observed_edges.iter().map(|&(_, m)| m * m).sum(),
+        };
+        // Dense combined space (n1, n2, n3, e12).
+        let observed = [2.0, 3.0, 0.0, 1.0];
+        let expected_pair = [15.0, 45.0, 15.0, 15.0];
+        let direct_combined = dense_dot(&observed, &expected_pair)
+            / (dense_dot(&observed, &observed)
+                * dense_dot(&expected_pair, &expected_pair)).sqrt();
+        assert!((space.cosine(0, 1, depth, true).unwrap() - direct_combined).abs() < 1e-14);
+        // Dense node space alone (n1, n2, n3).
+        let observed_nodes_dense = [2.0, 3.0, 0.0];
+        let expected_nodes_dense = [15.0, 45.0, 15.0];
+        let direct_nodes = dense_dot(&observed_nodes_dense, &expected_nodes_dense)
+            / (dense_dot(&observed_nodes_dense, &observed_nodes_dense)
+                * dense_dot(&expected_nodes_dense, &expected_nodes_dense)).sqrt();
+        assert!((space.cosine(0, 1, depth, false).unwrap() - direct_nodes).abs() < 1e-14);
+        // The self-pair (diplotype of two identical copies) doubles the
+        // expected mass: dense [30,90,30,30] vs the same observation.
+        let expected_double = [30.0, 90.0, 30.0, 30.0];
+        let direct_double = dense_dot(&observed, &expected_double)
+            / (dense_dot(&observed, &observed)
+                * dense_dot(&expected_double, &expected_double)).sqrt();
+        assert!((space.cosine(0, 0, depth, true).unwrap() - direct_double).abs() < 1e-14);
+    }
+
+    #[test]
+    fn contained_steps_requires_full_window_containment() {
+        // k = 4; steps at bp 0, 4, 8, 12.
+        let steps: Vec<(u64, i32)> = vec![(0, 1), (4, 2), (8, 3), (12, 4)];
+        // [4, 12): the steps at 4 and 8 fit (8+4<=12), the step at 12 does
+        // not (12+4>12), the step at 0 does not (0<4).
+        let window = contained_steps(&steps, 4, 4, 12);
+        assert_eq!(&steps[window], &[(4u64, 2i32), (8, 3)]);
+        // [0, 16): everything.
+        let window = contained_steps(&steps, 4, 0, 16);
+        assert_eq!(&steps[window], &steps);
+        // A window no step fits fails closed.
+        let window = contained_steps(&steps, 4, 5, 6);
+        assert!(window.is_empty());
+    }
+
+    #[test]
+    fn multiset_overlap_multiplies_repeat_visits() {
+        // Row A visits node 1 twice and node 2 once; row B visits node 1
+        // once: overlap 2*1 on node 1, nothing elsewhere.
+        let left = vec![(1u64, 2u32), (2, 1)];
+        let right = vec![(1u64, 1u32)];
+        assert_eq!(multiset_overlap(&left, &right), 2.0);
+        assert_eq!(multiset_overlap(&right, &left), 2.0);
+        assert_eq!(multiset_overlap(&left, &left), 5.0);
+    }
+
+    #[test]
+    fn packed_edges_order_by_path_position() {
+        // The traversal (7, 9) is a different adjacency than (9, 7).
+        assert_ne!(pack_edge(7, 9), pack_edge(9, 7));
+        assert_eq!(pack_edge(7, 9), (7u64 << 32) | 9);
+    }
+
+    #[test]
+    fn graph_usage_rows_coalesce_only_on_exact_key_equality() {
+        let twin = GraphUsage {
+            nodes: vec![(1, 1), (2, 1)],
+            edges: vec![(super::pack_edge(1, 2), 1)],
+        };
+        let rearranged = GraphUsage {
+            nodes: vec![(1, 1), (2, 1)],
+            edges: vec![(super::pack_edge(2, 1), 1)],
+        };
+        // Same segments, different adjacency: NOT coalesced (the edge layer
+        // keeps rearranged spellings distinct).
+        assert_ne!(twin, rearranged);
+        // A repeat visit is a distinct usage vector too.
+        let repeated = GraphUsage {
+            nodes: vec![(1, 2), (2, 1)],
+            edges: vec![(super::pack_edge(1, 2), 1)],
+        };
+        assert_ne!(twin, repeated);
+        assert_eq!(twin, twin.clone());
+    }
+}

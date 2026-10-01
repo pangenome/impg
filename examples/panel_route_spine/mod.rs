@@ -4465,6 +4465,22 @@ pub(super) fn run_local_first_spine(
         )?;
         rss_probe(rss, "cosine_exhaustive_pilot")?;
     }
+    // Graph-space condensation gate (owner greenlight 2026-10-01): the
+    // SAME pure-route domain, observed/expected on the panel graph's shared
+    // node/edge coordinates, exhaustive over all pairs, with nodes-only and
+    // nodes+edges as separate measured arms. Assessment-side only.
+    if let Ok(path) = std::env::var("IMPG_COSINE_GRAPH_OUTPUT") {
+        ensure(
+            std::env::var_os("IMPG_COSINE_DOMAIN_PILOT").is_some(),
+            "graph-space cosine receipt requires the pure-material domain gate",
+        )?;
+        cosine_probe::dump_graph_exhaustive(
+            &path, panel, &ranges, path_of_source, &truth_pieces,
+            window_instances.ok_or_else(|| invalid("graph cosine pilot needs record placements"))?,
+            k, model.depth, locus_offset,
+        )?;
+        rss_probe(rss, "cosine_graph_exhaustive_pilot")?;
+    }
     let reference_partitions: Vec<u32> = (0..locus_count)
         .map(|locus| component_locus_to_partition[locus_offset + locus])
         .collect();
