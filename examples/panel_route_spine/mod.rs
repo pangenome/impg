@@ -4198,6 +4198,20 @@ pub(super) fn run_local_first_spine(
         axis_slice.len() == locus_count,
         "axis/spine domain cardinality mismatch",
     )?;
+    // The owner-gated pure-route pilot subtracts constructed port-cut and
+    // partial rows BEFORE profiling. The original mosaic/attested lanes stay
+    // untouched until their separate validation; this never reads truth.
+    if std::env::var_os("IMPG_COSINE_DOMAIN_PILOT").is_some() {
+        let before: usize = ranges.iter().map(Vec::len).sum();
+        for rows in &mut ranges {
+            rows.retain(cosine_probe::physical_material_row);
+            ensure(!rows.is_empty(), "cosine material domain lost a locus")?;
+        }
+        eprintln!(
+            "[cosine-domain] physical rows: {before} -> {}",
+            ranges.iter().map(Vec::len).sum::<usize>()
+        );
+    }
     let flank_memo: FlankMemo = std::sync::Mutex::new(HashMap::new());
     let mut ports = routes::Ports::open_without_global_verification(routes_dir, graph)?;
     let truth_spec = reference_specs
@@ -4439,6 +4453,18 @@ pub(super) fn run_local_first_spine(
         locus_offset,
         axis_slice,
     );
+    if let Ok(path) = std::env::var("IMPG_COSINE_EXHAUSTIVE_OUTPUT") {
+        ensure(
+            std::env::var_os("IMPG_COSINE_DOMAIN_PILOT").is_some(),
+            "exhaustive cosine receipt requires the pure-material domain gate",
+        )?;
+        cosine_probe::dump_exhaustive(
+            &path, &ranges, path_of_source, &truth_pieces,
+            window_instances.ok_or_else(|| invalid("cosine pilot needs record placements"))?,
+            model.depth, locus_offset,
+        )?;
+        rss_probe(rss, "cosine_exhaustive_pilot")?;
+    }
     let reference_partitions: Vec<u32> = (0..locus_count)
         .map(|locus| component_locus_to_partition[locus_offset + locus])
         .collect();

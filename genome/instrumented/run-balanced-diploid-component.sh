@@ -6,8 +6,10 @@ C="$1"; TAG="${2:-balanced}"
 source /home/erikg/impg-genome-inference/build-env.sh
 D=/home/erikg/yeast/genome-balanced-diploid-validation-20260930
 cd "$D"
-# The diagnostic's relative rescore scratch must not refresh production scratch.
-if [[ -n "${IMPG_COSINE_DIAG_OUTPUT:-}" ]]; then mkdir -p "$D/cosine-diagnostic-scratch/$C" && cd "$D/cosine-diagnostic-scratch/$C" || exit 1; fi
+# Diagnostic scratch must not refresh the preserved balanced sidecars.
+if [[ -n "${IMPG_COSINE_DIAG_OUTPUT:-}${IMPG_COSINE_DOMAIN_PILOT:-}" ]]; then mkdir -p "$D/cosine-diagnostic-scratch/$C" && cd "$D/cosine-diagnostic-scratch/$C" || exit 1; fi
+EXTRA=()
+if [[ -n "${IMPG_COSINE_DOMAIN_PILOT:-}" ]]; then EXTRA+=(--spine-sweep-only); fi
 P="$D/run-$TAG-$C"
 rm -f "$P.done" "$P.exit"
 start=$(date +%s)
@@ -21,7 +23,7 @@ IMPG_FORCE_DIPLOID_DIAGNOSTIC=1 IMPG_MULTIPLICITY_VARIANT=gentle-beta \
   --sample "$D/sample/sample.membwt" --reads "$D/reads.fastq.gz" \
   --axis /home/erikg/yeast/genome-mem-bwt-bootstrap-20260911T055203Z/reference-axis-v1.json \
   --bed-directory /home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results \
-  --component "S288C#0#$C" --depth 15 --routing-universe component --spine --spine-phasing \
+  --component "S288C#0#$C" --depth 15 --routing-universe component --spine --spine-phasing "${EXTRA[@]}" \
   --reference-pair "truth:$D/routes/S288C-$C.json:$D/routes/SK1-$C.json" \
   --reference-pair "native2:$D/routes/SK1-$C.json:$D/routes/SK1-$C.json" \
   --reference-pair "haploid_truth:$D/routes/S288C-$C.json:$D/routes/empty.json" \
