@@ -2610,6 +2610,12 @@ pub(crate) fn build_in_window_obs(
     // maps are bit-identical with and without it.
     spans_out: Option<&mut RecordPlacementSpans>,
     records_out: Option<&mut WindowRecordLists>,
+    // OUT (the option-b read-matched convention): per record, per verified
+    // occurrence, the merged union of the occurrence's anchor k-mer windows
+    // — the material the record ACTUALLY matched, never the chained span
+    // between anchors. Collected in the SAME pass (same enumeration, same
+    // accumulation order) so the two span emissions stay consistent.
+    matched_out: Option<&mut RecordMatchedSpans>,
 ) -> io::Result<Vec<HashMap<FeatureKey, f64>>> {
     // partition -> the loci whose owner set contains it (a partition owns
     // rows in few windows; dual-role groups appear in their anchored window
@@ -2623,13 +2629,16 @@ pub(crate) fn build_in_window_obs(
     let mut maps: Vec<HashMap<FeatureKey, f64>> =
         (0..window_owner_sets.len()).map(|_| HashMap::new()).collect();
     let collect_instances = spans_out.is_some();
+    let collect_matched = matched_out.is_some();
     let mut record_spans: RecordPlacementSpans = Vec::with_capacity(routed.len());
+    let mut record_matched: RecordMatchedSpans = Vec::with_capacity(routed.len());
     let mut window_records: WindowRecordLists =
         (0..window_owner_sets.len()).map(|_| HashMap::new()).collect();
     for (record_index, record) in routed.iter().enumerate() {
         // The record's placement-span slot is pushed FIRST so the index
         // alignment with the routed slice survives the skip paths.
         record_spans.push(HashMap::new());
+        record_matched.push(Vec::new());
         let anchors = match decode_tokens(&record.tokens) {
             Ok(anchors) => anchors,
             Err(_) => continue,
@@ -2672,6 +2681,33 @@ pub(crate) fn build_in_window_obs(
         for (walk, positions) in orientations {
             let n_walk = walk.len();
             for &(path_idx, occurrence_start) in positions {
+                if collect_matched {
+                    // THE READ-MATCHED CONVENTION: the occurrence's matched
+                    // material is the union of its anchors' k-mer windows;
+                    // overlapping/abutting windows merge (contiguous matched
+                    // material), a positive gap splits the interval (the
+                    // chained span between anchors is NOT matched — the
+                    // GBWT only verified the anchors at the read's
+                    // offsets). One interval list per occurrence, never
+                    // merged across placements.
+                    let mut windows: Vec<(u64, u64)> = walk
+                        .iter()
+                        .map(|&(_, rel)| {
+                            (occurrence_start.saturating_add(rel), occurrence_start.saturating_add(rel).saturating_add(k))
+                        })
+                        .collect();
+                    windows.sort_unstable();
+                    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
+                    for (lo, hi) in windows {
+                        match merged.last_mut() {
+                            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+                            _ => merged.push((lo, hi)),
+                        }
+                    }
+                    for (lo, hi) in merged {
+                        record_matched[record_index].push((path_idx, lo, hi));
+                    }
+                }
                 // Per-anchor partition lists, computed once per occurrence.
                 let anchor_parts: Vec<Vec<u32>> = walk
                     .iter()
@@ -2737,6 +2773,9 @@ pub(crate) fn build_in_window_obs(
     if let Some(out) = records_out {
         *out = window_records;
     }
+    if let Some(out) = matched_out {
+        *out = record_matched;
+    }
     Ok(maps)
 }
 
@@ -2782,6 +2821,36 @@ pub(crate) struct SpelledSpan {
 /// reference these indices).
 pub(crate) type RecordPlacementSpans = Vec<HashMap<FeatureKey, Vec<(usize, u64, u64)>>>;
 
+/// Per record: the READ-MATCHED observation intervals (the owner-approved
+/// option-b convention, 2026-11-05) — per verified occurrence, the MERGED
+/// union of that occurrence's ANCHOR k-mer windows [start+rel, start+rel+k),
+/// one (path, lo, hi) per maximal matched interval. THE CONVENTION (a
+/// rule, not a threshold): a record's share mass credits only the material
+/// it actually matched — the anchors' own k-mer spans, the exact matches
+/// the MEM extraction verified — never the span-containment credit the
+/// haploid-era placement convention gave it across the flanks it chained
+/// (a MEM may chain conserved-flank anchors ACROSS another strain's variant
+/// region: the GBWT requires only the anchors at the read's offsets, so
+/// the intervening panel-path material is unverified and unmatched, and
+/// must contribute nothing). Overlapping or exactly abutting anchor windows
+/// merge into one interval (contiguous matched material); a positive gap
+/// between windows splits it (unmatched material votes nothing, including
+/// no edge traversal across the junction). Intervals are kept PER
+/// OCCURRENCE — two placements of the same record never merge, because a
+/// junction vote requires ONE placement's matched material on both abutting
+/// sides.
+pub(crate) type RecordMatchedSpans = Vec<Vec<(usize, u64, u64)>>;
+
+/// The process-wide read-matched observation gate (owner-approved option
+/// b). When set, the in-window pass ALSO emits the records' read-matched
+/// intervals and the graph-space instrument (GraphLocus::build) credits
+/// observed mass and edge votes from them instead of the placement-span
+/// convention. Assessment-side only; production runs never set it.
+pub(crate) fn read_matched_observation() -> bool {
+    static GATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GATE.get_or_init(|| std::env::var_os("IMPG_COSINE_READ_MATCHED").is_some())
+}
+
 /// Per window, per feature: the contributing RECORDS' indices (one entry
 /// per (record, locus, feature) — the established record-once mass
 /// semantics; the record's equal share rides its index).
@@ -2795,6 +2864,10 @@ pub(crate) struct InstanceStructure {
     pub(crate) record_spans: RecordPlacementSpans,
     pub(crate) record_shares: Vec<f64>,
     pub(crate) window_records: WindowRecordLists,
+    /// The records' READ-MATCHED observation intervals (option b; empty
+    /// unless `IMPG_COSINE_READ_MATCHED` gated the pass — the placement
+    /// spans above stay the S2/production convention, bit-identical).
+    pub(crate) record_matched_spans: RecordMatchedSpans,
 }
 
 /// The coverage test (ONE spelling for the S2 rule): the record's own
@@ -8939,7 +9012,10 @@ fn main() -> io::Result<()> {
     // The in-window observed attribution consults the (materialized)
     // territory index; the streamed genome diagnostics pass has none (and
     // exits before any consumer of the window profiles), so it is skipped
-    // there.
+    // there. The option-b read-matched interval emission rides the SAME
+    // pass when its gate is set (assessment-side only).
+    let mut instance_matched: RecordMatchedSpans = Vec::new();
+    let collect_read_matched = read_matched_observation();
     let window_obs: Vec<HashMap<FeatureKey, f64>> = if streamed_genome_routing {
         Vec::new()
     } else {
@@ -8950,6 +9026,11 @@ fn main() -> io::Result<()> {
             &window_owner_sets,
             Some(&mut instance_spans),
             Some(&mut window_records),
+            if collect_read_matched {
+                Some(&mut instance_matched)
+            } else {
+                None
+            },
         )?
     };
     // The records' equal shares (the mass each record's index carries; the
@@ -8962,6 +9043,7 @@ fn main() -> io::Result<()> {
         record_spans: instance_spans,
         record_shares,
         window_records,
+        record_matched_spans: instance_matched,
     };
     rss_probe(&mut rss, "site_observed_maps")?;
 
@@ -10903,6 +10985,7 @@ mod multiplicity_background_tests {
             &owner_sets,
             Some(&mut instance_spans),
             Some(&mut window_records),
+            None,
         )
         .unwrap();
         let record_shares = vec![10.0f64, 8.0];
@@ -10910,6 +10993,7 @@ mod multiplicity_background_tests {
             record_spans: instance_spans,
             record_shares,
             window_records,
+            record_matched_spans: Vec::new(),
         };
         // MASS CONSERVATION: the contributing records' shares sum to the
         // observed map's mass, exactly.
@@ -11027,12 +11111,14 @@ mod multiplicity_background_tests {
             &owner_sets,
             Some(&mut instance_spans2),
             Some(&mut window_records2),
+            None,
         )
         .unwrap();
         let instances2 = InstanceStructure {
             record_spans: instance_spans2,
             record_shares: vec![6.0f64],
             window_records: window_records2,
+            record_matched_spans: Vec::new(),
         };
         for locus in 0..2 {
             let flood_window = merged_single_loss_sample_with_omission_instances(
@@ -11104,12 +11190,14 @@ mod multiplicity_background_tests {
             &owner_sets,
             Some(&mut instance_spans),
             Some(&mut window_records),
+            None,
         )
         .unwrap();
         let instances = InstanceStructure {
             record_spans: instance_spans,
             record_shares: vec![10.0f64],
             window_records,
+            record_matched_spans: Vec::new(),
         };
         let profile = Profile::new();
         let feature = &features[features.len() - 1];
@@ -11207,7 +11295,7 @@ mod multiplicity_background_tests {
         };
         let owner_sets = vec![BTreeSet::from([1u32]), BTreeSet::from([2u32])];
         let maps =
-            build_in_window_obs(&[record_a, record_b], &index, 63, &owner_sets, None, None).unwrap();
+            build_in_window_obs(&[record_a, record_b], &index, 63, &owner_sets, None, None, None).unwrap();
         assert_eq!(maps.len(), 2);
         for feature in &features {
             assert_eq!(maps[0][feature], 5.0f64); // A: 10 / 1 touched partition
@@ -11243,7 +11331,7 @@ mod multiplicity_background_tests {
             reverse_positions: Vec::new(),
         };
         let owner_sets = vec![BTreeSet::from([1u32])];
-        let maps = build_in_window_obs(&[record], &index, 63, &owner_sets, None, None).unwrap();
+        let maps = build_in_window_obs(&[record], &index, 63, &owner_sets, None, None, None).unwrap();
         assert_eq!(maps[0].len(), distinct.len());
         for feature in &distinct {
             assert_eq!(maps[0][*feature], 8.0f64);
@@ -11374,6 +11462,92 @@ mod multiplicity_background_tests {
         assert_eq!(forward, vec![(0usize, 100u64)]);
         assert_eq!(reverse, vec![(0usize, 500u64)]);
         assert_eq!(occ, BTreeMap::from([(1u32, 2u64)]));
+    }
+}
+
+#[cfg(test)]
+mod read_matched_emission_tests {
+    use super::*;
+
+    /// THE READ-MATCHED CONVENTION (option b), emission side: per verified
+    /// occurrence, the record's matched intervals are the merged union of
+    /// its anchors' OWN k-mer windows — overlapping and exactly-abutting
+    /// windows form one interval (contiguous matched material); a positive
+    /// gap splits it (the chained span between anchors is unmatched and
+    /// credits nothing). Occurrences never merge with each other, even
+    /// when their matched intervals abut end-to-end on the same path. The
+    /// placement spans (the S2 convention) keep the full chained extents,
+    /// bit-identical with the pre-option-b emission.
+    #[test]
+    fn matched_spans_are_merged_anchor_windows_per_occurrence() {
+        let index = TerritoryIndex {
+            territories: Vec::new(),
+            entries: Vec::new(),
+            path_intervals: vec![vec![(0u64, 1000u64, 1u32)]],
+        };
+        // Anchors at read offsets 0 and 10 (k=63 windows [0,63) and
+        // [10,73): overlapping — one merged interval) plus a CHAINED
+        // anchor at offset 120 (window [120,183): 47bp of UNMATCHED
+        // material between it and the first two — the haploid-era span
+        // [0,183) chained straight across it).
+        let walk = vec![(5i32, 0u64), (7, 10), (-3, 120)];
+        let record = RoutedRecord {
+            tokens: impg::sample_mem_bwt::encode_walk(&walk).unwrap(),
+            multiplicity: 4,
+            occurrences: BTreeMap::from([(1u32, 2u64)]),
+            total_occurrences: 2,
+            // The second occurrence starts exactly where the first's
+            // first matched interval ends (90+73 = 163): under a
+            // cross-occurrence merge the two would fuse; the convention
+            // keeps them separate (no placement spans the seam).
+            forward_positions: vec![(0usize, 90u64), (0usize, 163u64)],
+            reverse_positions: Vec::new(),
+        };
+        let owner_sets = vec![BTreeSet::from([1u32])];
+        let mut instance_spans: RecordPlacementSpans = Vec::new();
+        let mut window_records: WindowRecordLists = Vec::new();
+        let mut matched: RecordMatchedSpans = Vec::new();
+        build_in_window_obs(
+            &[record],
+            &index,
+            63,
+            &owner_sets,
+            Some(&mut instance_spans),
+            Some(&mut window_records),
+            Some(&mut matched),
+        )
+        .unwrap();
+        assert_eq!(
+            matched,
+            vec![vec![
+                // Occurrence 1 (start 90): windows [90,153)+[100,163)
+                // merge; the chained anchor's window [210,273) stays
+                // separate across its unmatched gap.
+                (0usize, 90u64, 163u64),
+                (0usize, 210u64, 273u64),
+                // Occurrence 2 (start 163): abuts occurrence 1's first
+                // interval END-TO-END and still stays separate.
+                (0usize, 163u64, 236u64),
+                (0usize, 283u64, 346u64),
+            ]],
+            "matched spans are per-occurrence merged anchor windows"
+        );
+        // The placement spans keep the chained extents (bit-identical S2
+        // convention): the whole-walk feature's spans cover [90,273) and
+        // [163,346), straight across the unmatched gaps.
+        let mut chained: Vec<(usize, u64, u64)> = instance_spans[0]
+            .values()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        chained.sort_unstable();
+        chained.dedup();
+        assert!(
+            chained.contains(&(0usize, 90u64, 273u64)),
+            "the placement spans still chain across the variant gap: {chained:?}"
+        );
+        assert!(chained.contains(&(0usize, 163u64, 346u64)));
+        assert_eq!(chained.last(), Some(&(0usize, 283u64, 346u64)));
     }
 }
 

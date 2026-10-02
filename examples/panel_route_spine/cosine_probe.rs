@@ -220,7 +220,10 @@ pub(super) fn dump(
 
 #[cfg(test)]
 mod tests {
-    use super::{material_coverage_bins, material_overlap, merge_intervals, physical_material_row, CoverageSpace};
+    use super::{
+        material_coverage_bins, material_overlap, merge_intervals, physical_material_row,
+        record_observation_intervals, CoverageSpace,
+    };
     use crate::{genome, FeatureKey, InstanceStructure, SourceRange};
     use std::collections::{BTreeSet, HashMap};
 
@@ -233,6 +236,7 @@ mod tests {
             record_spans: vec![record_spans],
             record_shares: vec![2.0],
             window_records: vec![HashMap::from([(vec![1], vec![0]), (vec![2], vec![0])])],
+            record_matched_spans: Vec::new(),
         };
         let ranges = [genome::SpanningTraversal {
             partition: 0,
@@ -284,6 +288,7 @@ mod tests {
         let instances = InstanceStructure {
             record_spans: vec![spans], record_shares: vec![2.0],
             window_records: vec![HashMap::from([(vec![1], vec![0])])],
+            record_matched_spans: Vec::new(),
         };
         let rows = vec![row("a", 0, 5), row("b", 3, 8), row("a_duplicate", 0, 5)];
         let space = CoverageSpace::new(&rows, &[0], &instances, 0, 15.0);
@@ -304,6 +309,50 @@ mod tests {
         let mut spans = vec![(11, 14), (10, 12), (20, 22), (14, 16)];
         merge_intervals(&mut spans);
         assert_eq!(spans, vec![(10, 16), (20, 22)]);
+    }
+
+    /// THE READ-MATCHED OBSERVED CONVENTION (option b), interval side: under
+    /// the gate a record's observation intervals are its matched spans
+    /// AS EMITTED — per occurrence, never merged across placements (two
+    /// placements of one record abutting end-to-end stay two intervals, so
+    /// no edge vote forms at their seam) — while the default keeps the
+    /// placement-span convention bit-identical (all feature spans merged
+    /// per path, including the chained extent across unmatched gaps).
+    #[test]
+    fn read_matched_intervals_stay_per_occurrence_unmerged() {
+        let mut record_spans = HashMap::new();
+        // The placement convention: two feature subwalk spans on path 0
+        // (the chained extents, including the unmatched gap inside), one
+        // on path 1.
+        record_spans.insert(
+            vec![1u64] as FeatureKey,
+            vec![(0usize, 0u64, 150u64), (0usize, 200u64, 350u64), (1usize, 0u64, 100u64)],
+        );
+        let instances = InstanceStructure {
+            record_spans: vec![record_spans],
+            record_shares: vec![2.0],
+            window_records: vec![HashMap::from([(vec![1], vec![0])])],
+            // The read-matched emission: two occurrences on path 0 whose
+            // matched intervals ABBUT end-to-end ([0,63) then [63,126)),
+            // plus one on path 1.
+            record_matched_spans: vec![vec![(0, 0, 63), (0, 63, 126), (1, 10, 73)]],
+        };
+        let merged = record_observation_intervals(&instances, 0, false);
+        assert_eq!(
+            merged.get(&0).cloned().unwrap(),
+            vec![(0u64, 150u64), (200u64, 350u64)],
+            "the placement convention merges the overlapping feature spans per \
+             path; disjoint chained extents stay separate spans (containment \
+             credit in either one)"
+        );
+        assert_eq!(merged.get(&1).cloned().unwrap(), vec![(0u64, 100u64)]);
+        let matched = record_observation_intervals(&instances, 0, true);
+        assert_eq!(
+            matched.get(&0).cloned().unwrap(),
+            vec![(0u64, 63u64), (63u64, 126u64)],
+            "the read-matched convention keeps per-occurrence intervals UNMERGED even when they abut: no placement spans the seam, so no edge vote forms there"
+        );
+        assert_eq!(matched.get(&1).cloned().unwrap(), vec![(10u64, 73u64)]);
     }
 }
 
@@ -1037,6 +1086,66 @@ fn window_incidence(path_len: u64, window_lo: u64, window_hi: u64) -> f64 {
 /// order and BTreeSets in key order; only the observed-norm sums keep
 /// the stage-1 HashMap iteration order and its documented cross-run ULP
 /// tolerance).
+/// The READ-MATCHED observed convention (owner-approved option b,
+/// 2026-11-05), stated as a rule in graph coordinates — no thresholds:
+///
+/// MATCHED MATERIAL: a record's share mass credits only the material it
+/// actually matched — its anchors' own k-mer spans (the exact matches the
+/// MEM extraction verified), at each verified occurrence. The haploid-era
+/// placement convention credited every panel key CONTAINED in the chained
+/// placement span, which chains a read's conserved-flank anchors ACROSS
+/// other strains' variant regions (the GBWT only requires the anchors at
+/// the read's offsets, so the intervening panel-path material is
+/// unmatched) — that span-containment credit is the measured 21-34%
+/// SMEAR. Under the read-matched convention the record's observation
+/// intervals are the merged unions of its anchors' windows PER OCCURRENCE:
+/// overlapping or exactly abutting anchor windows merge (contiguous matched
+/// material); a positive gap splits the interval, and unmatched gaps
+/// contribute nothing. Partial overlaps credit by the established
+/// containment convention: a panel key is credited iff its full k-mer
+/// window lies inside ONE occurrence's matched interval.
+///
+/// EDGE VOTES: a record votes for an edge traversal (the adjacency between
+/// two consecutive panel steps) only where it genuinely spans the junction
+/// with matched material on BOTH abutting sides — i.e. both steps' windows
+/// lie inside the SAME occurrence's matched interval. A chain that bridged
+/// a variant region no longer votes: the two flank intervals are separate,
+/// and so are the placements of one record (two occurrences never merge,
+/// because no single placement spans their seam).
+///
+/// The placement-span convention (the S2/production semantics) stays the
+/// default, bit-identical: per record, the placement spans of all features
+/// and both frames, merged per path.
+fn record_observation_intervals(
+    instances: &crate::InstanceStructure,
+    record: u32,
+    read_matched: bool,
+) -> std::collections::BTreeMap<usize, Vec<(u64, u64)>> {
+    let mut per_path: std::collections::BTreeMap<usize, Vec<(u64, u64)>> =
+        std::collections::BTreeMap::new();
+    if read_matched {
+        // The matched intervals arrive PER OCCURRENCE and are returned
+        // UNMERGED: two placements of one record never fuse, and a gap
+        // inside one placement stays a gap (no node credit and no edge
+        // vote across it). An empty matched-span list credits nothing —
+        // fail-closed (the emission runs in the same process under the
+        // same gate, so emptiness means the record matched nothing).
+        for &(path, lo, hi) in &instances.record_matched_spans[record as usize] {
+            per_path.entry(path).or_default().push((lo, hi));
+        }
+        return per_path;
+    }
+    for spans in instances.record_spans[record as usize].values() {
+        for &(path, lo, hi) in spans {
+            per_path.entry(path).or_default().push((lo, hi));
+        }
+    }
+    for intervals in per_path.values_mut() {
+        merge_intervals(intervals);
+    }
+    per_path
+}
+
 struct GraphLocus {
     records: Vec<u32>,
     record_nodes: HashMap<u32, std::collections::BTreeSet<GraphNode>>,
@@ -1095,16 +1204,12 @@ impl GraphLocus {
             .collect();
         records.sort_unstable();
         records.dedup();
+        // The observation convention is read once per locus: the placement-
+        // span default (bit-identical with the committed receipts) or the
+        // option-b read-matched intervals (env-gated, assessment-side).
+        let read_matched = crate::read_matched_observation();
         for &record in &records {
-            let mut per_path: std::collections::BTreeMap<usize, Vec<(u64, u64)>> =
-                std::collections::BTreeMap::new();
-            for spans in instances.record_spans[record as usize].values() {
-                for &(path, lo, hi) in spans {
-                    per_path.entry(path).or_default().push((lo, hi));
-                }
-            }
-            for (path, mut intervals) in per_path {
-                merge_intervals(&mut intervals);
+            for (path, intervals) in record_observation_intervals(instances, record, read_matched) {
                 for (lo, hi) in intervals {
                     paths
                         .entry(path)
