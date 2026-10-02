@@ -2895,6 +2895,279 @@ pub(crate) fn read_matched_observation() -> bool {
 /// semantics; the record's equal share rides its index).
 pub(crate) type WindowRecordLists = Vec<HashMap<FeatureKey, Vec<u32>>>;
 
+// ---------------------------------------------------------------------------
+// THE MULTI-MATCHING CENSUS (assessment-side emission; the owner's
+// 2026-11-05 question: is the genuinely-matched off-truth-route mass
+// LOCAL — other strains' near-identical versions of the same region — or
+// REMOTE — distant paralogs/repeats leaking mass into a locus's
+// universe?). One JSONL line per routed record, index-aligned with the
+// slice the likelihood receipts' record ids reference: the record's
+// multiplicity, equal-share denominator t_r and share, and its FULL
+// verified occurrence structure — per occurrence the panel location
+// (path, start, orientation), the read-matched observation interval(s)
+// (the merged union of the occurrence's anchor k-mer windows, the option-b
+// convention), the touched component partitions, and the covered
+// shared-segment nodes in path order per interval (abs ids, the same
+// full-window containment rule the graph instrument credits) — plus the
+// exact PAIR-BIN counts of the record's occurrence set (every pair of
+// occurrences classified by distance, coalescing counted separately as
+// the benign case). Env-gated `IMPG_COSINE_MULTI_CENSUS=<path>` and
+// requires the read-matched gate (the census is defined under the
+// read-matched convention); production runs never set it. A pure
+// emission: no threshold, no selection change, no observed-side effect.
+// ---------------------------------------------------------------------------
+
+/// The distance bins of the multi-matching census, one per PAIR of a
+/// record's verified occurrences, classified from most local to most
+/// remote. COALESCED pairs (node-set intersection non-empty — the panel
+/// graph's own copy collapsing of identical sequence) are counted
+/// separately as the benign case, cross-tabulated by their physical
+/// relation; NON-coalesced pairs bin purely physically: same component
+/// window territory (any strain's copy), adjacent window (component
+/// partition ids differing by exactly 1), same component chromosome but
+/// farther, different chromosome/contig. The returned index selects the
+/// named bin in `MULTI_CENSUS_PAIR_BINS`.
+pub(crate) const MULTI_CENSUS_PAIR_BINS: [&str; 8] = [
+    "coalesced_same_window",
+    "coalesced_adjacent_window",
+    "coalesced_same_contig_far",
+    "coalesced_other_contig",
+    "same_window",
+    "adjacent_window",
+    "same_contig_far",
+    "other_contig",
+];
+
+/// The pair-bin classifier (pure; unit-tested). `nodes_*` are the two
+/// occurrences' covered shared-segment ids, `partitions_*` their touched
+/// component partitions (sorted), `same_component_contig` whether BOTH
+/// occurrences sit on paths of the component's own chromosome/contig.
+pub(crate) fn multi_census_pair_bin(
+    nodes_a: &[u32],
+    nodes_b: &[u32],
+    partitions_a: &[u32],
+    partitions_b: &[u32],
+    same_component_contig: bool,
+) -> usize {
+    // Coalescing: any shared covered segment (the graph's own collapsing
+    // of identical sequence across paths — the benign case).
+    let coalesced = nodes_a.iter().any(|&node| nodes_b.contains(&node));
+    let physical = if partitions_a
+        .iter()
+        .any(|&partition| partitions_b.contains(&partition))
+    {
+        0 // same component window territory (any strain's copy of it)
+    } else if partitions_a
+        .iter()
+        .any(|&left| partitions_b.iter().any(|&right| left.abs_diff(right) == 1))
+    {
+        1 // adjacent window (component partition ids differ by exactly 1)
+    } else if same_component_contig {
+        2 // same chromosome, farther than adjacent
+    } else {
+        3 // different chromosome/contig
+    };
+    if coalesced {
+        physical
+    } else {
+        physical + 4
+    }
+}
+
+/// The multi-matching census emission (see the block comment above).
+pub(crate) fn dump_multi_census(
+    path: &str,
+    routed: &[RoutedRecord],
+    index: &TerritoryIndex,
+    panel: &SyngIndex,
+    k: u64,
+    component_contig: &str,
+) -> io::Result<()> {
+    ensure(
+        read_matched_observation(),
+        "the multi-matching census requires the read-matched gate \
+         (IMPG_COSINE_READ_MATCHED): it is defined under the option-b \n\
+         convention",
+    )?;
+    use std::io::Write;
+    let mut out = io::BufWriter::new(std::fs::File::create(path)?);
+    // One scratch occurrence under construction.
+    struct CensusOcc {
+        path: usize,
+        start: u64,
+        orientation: u8,
+        intervals: Vec<(u64, u64)>,
+        partitions: Vec<u32>,
+    }
+    for (record_index, record) in routed.iter().enumerate() {
+        let mut occurrences: Vec<CensusOcc> = Vec::new();
+        let mut anchor_count = 0usize;
+        if let Ok(anchors) = decode_tokens(&record.tokens) {
+            anchor_count = anchors.len();
+            if !anchors.is_empty() {
+                let rc_anchors = reverse_complement_walk(&anchors, k);
+                let orientations: [(&[(i32, u64)], &[(usize, u64)], u8); 2] = [
+                    (&anchors, &record.forward_positions, 0),
+                    (&rc_anchors, &record.reverse_positions, 1),
+                ];
+                for (walk, positions, orientation) in orientations {
+                    for &(path, start) in positions {
+                        // The read-matched observation intervals: the
+                        // merged union of the occurrence's anchor k-mer
+                        // windows (identical to the gate's emission —
+                        // overlapping/abutting windows merge, a positive
+                        // gap splits).
+                        let mut windows: Vec<(u64, u64)> = walk
+                            .iter()
+                            .map(|&(_, rel)| {
+                                (
+                                    start.saturating_add(rel),
+                                    start.saturating_add(rel).saturating_add(k),
+                                )
+                            })
+                            .collect();
+                        windows.sort_unstable();
+                        let mut intervals: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
+                        for (lo, hi) in windows {
+                            match intervals.last_mut() {
+                                Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+                                _ => intervals.push((lo, hi)),
+                            }
+                        }
+                        // The occurrence's touched component partitions
+                        // (the same anchor-span territory-touch rule the
+                        // routing's occurrence map applies).
+                        let mut partitions: Vec<u32> = Vec::new();
+                        for &(_, rel) in walk {
+                            for partition in index.partitions_at(path, start + rel, k) {
+                                if !partitions.contains(&partition) {
+                                    partitions.push(partition);
+                                }
+                            }
+                        }
+                        partitions.sort_unstable();
+                        occurrences.push(CensusOcc {
+                            path,
+                            start,
+                            orientation,
+                            intervals,
+                            partitions,
+                        });
+                    }
+                }
+            }
+        }
+        // The per-occurrence covered shared-segment nodes: one path walk
+        // per path over the union of that path's occurrence intervals,
+        // then the contained steps per interval (path order, abs ids).
+        let mut occurrence_nodes: Vec<Vec<Vec<u32>>> =
+            vec![Vec::with_capacity(1); occurrences.len()];
+        let mut by_path: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (position, occ) in occurrences.iter().enumerate() {
+            by_path.entry(occ.path).or_default().push(position);
+        }
+        for (path, members) in &by_path {
+            let lo_min = members
+                .iter()
+                .flat_map(|&position| occurrences[position].intervals.iter().map(|&(lo, _)| lo))
+                .min()
+                .unwrap_or(0);
+            let hi_max = members
+                .iter()
+                .flat_map(|&position| occurrences[position].intervals.iter().map(|&(_, hi)| hi))
+                .max()
+                .unwrap_or(0);
+            if hi_max <= lo_min {
+                continue;
+            }
+            let mut steps: Vec<(u64, i32)> = panel
+                .walk_path_range(*path, lo_min, hi_max)?
+                .into_iter()
+                .map(|(node, bp)| (bp, node))
+                .collect();
+            steps.sort_unstable_by_key(|&(bp, _)| bp);
+            for &position in members {
+                for &(lo, hi) in &occurrences[position].intervals {
+                    let start = steps.partition_point(|&(bp, _)| bp < lo);
+                    let end = steps.partition_point(|&(bp, _)| bp.saturating_add(k) <= hi);
+                    let contained = &steps[start..end.max(start)];
+                    occurrence_nodes[position]
+                        .push(contained.iter().map(|&(_, node)| node.unsigned_abs()).collect());
+                }
+            }
+        }
+        // The exact pair-bin counts over every pair of occurrences.
+        let mut pair_bins = [0u64; MULTI_CENSUS_PAIR_BINS.len()];
+        let contigs: Vec<bool> = occurrences
+            .iter()
+            .map(|occ| {
+                panel.name_map.path_to_name[occ.path]
+                    .rsplit('#')
+                    .next()
+                    .map(|contig| contig == component_contig)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let occurrence_node_sets: Vec<std::collections::BTreeSet<u32>> = occurrence_nodes
+            .iter()
+            .map(|intervals| intervals.iter().flatten().copied().collect())
+            .collect();
+        for left in 0..occurrences.len() {
+            for right in left + 1..occurrences.len() {
+                // The pair's covered segments: the occurrence's contained
+                // path steps (the same containment rule the graph
+                // instrument credits; computed above per occurrence).
+                let bin = multi_census_pair_bin(
+                    &occurrence_node_sets[left].iter().copied().collect::<Vec<_>>(),
+                    &occurrence_node_sets[right].iter().copied().collect::<Vec<_>>(),
+                    &occurrences[left].partitions,
+                    &occurrences[right].partitions,
+                    contigs[left] && contigs[right],
+                );
+                pair_bins[bin] += 1;
+            }
+        }
+        let occurrences_json: Vec<serde_json::Value> = occurrences
+            .iter()
+            .enumerate()
+            .map(|(position, occ)| {
+                serde_json::json!({
+                    "path": occ.path,
+                    "start": occ.start,
+                    "orientation": occ.orientation,
+                    "partitions": occ.partitions,
+                    "intervals": occurrence_nodes[position]
+                        .iter()
+                        .map(|nodes| serde_json::json!(nodes))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let pair_bins_json: serde_json::Value = MULTI_CENSUS_PAIR_BINS
+            .iter()
+            .enumerate()
+            .map(|(bin, name)| {
+                (name.to_string(), serde_json::json!(pair_bins[bin]))
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into();
+        let line = serde_json::json!({
+            "record": record_index,
+            "multiplicity": record.multiplicity,
+            "t_r": record.occurrences.len(),
+            "share": record.multiplicity as f64 / record.occurrences.len() as f64,
+            "total_occurrences": record.total_occurrences,
+            "anchors": anchor_count,
+            "occurrences": occurrences_json,
+            "pair_bins": pair_bins_json,
+        });
+        writeln!(out, "{}", line)?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
 /// The S2 instance structure as one bundle (the threaded parameter): the
 /// records' global placement spans, their equal shares, and the windows'
 /// contributing record lists.
@@ -9086,6 +9359,33 @@ fn main() -> io::Result<()> {
     };
     rss_probe(&mut rss, "site_observed_maps")?;
 
+    // THE MULTI-MATCHING CENSUS (assessment-side emission; see
+    // dump_multi_census): the owner's LOCAL-vs-REMOTE question about the
+    // genuinely-matched off-truth-route mass. One JSONL line per routed
+    // record, index-aligned with the receipts' record ids. Env-gated;
+    // production runs never set it.
+    if let Ok(census_path) = std::env::var("IMPG_COSINE_MULTI_CENSUS") {
+        ensure(
+            !streamed_genome_routing,
+            "the multi-matching census requires a materialized component universe",
+        )?;
+        let component_contig = options
+            .component
+            .rsplit('#')
+            .next()
+            .unwrap_or(options.component.as_str())
+            .to_string();
+        dump_multi_census(
+            &census_path,
+            &routed_records,
+            &territory,
+            &panel,
+            k,
+            &component_contig,
+        )?;
+        rss_probe(&mut rss, "multi_census")?;
+    }
+
     // --------------------------------------------- genome-universe placement pass
     // (the haploid GENOME-WIDE cross-support background — the owner-decided
     // candidate family 1, "genome-wide touched set"): per-record touched
@@ -11501,6 +11801,66 @@ mod multiplicity_background_tests {
         assert_eq!(forward, vec![(0usize, 100u64)]);
         assert_eq!(reverse, vec![(0usize, 500u64)]);
         assert_eq!(occ, BTreeMap::from([(1u32, 2u64)]));
+    }
+}
+
+#[cfg(test)]
+mod multi_census_tests {
+    use super::*;
+
+    /// The multi-matching census's pair-bin classifier (the owner's
+    /// LOCAL-vs-REMOTE question): coalesced pairs (shared covered
+    /// segments — the graph's own copy collapsing) bin separately from
+    /// non-coalesced pairs, cross-tabulated by the physical relation of
+    /// the two occurrences; the physical classes run same window ->
+    /// adjacent window -> same component chromosome far -> different
+    /// chromosome/contig.
+    #[test]
+    fn multi_census_pair_bins_classify_local_to_remote() {
+        // Bin indices: 0 coalesced_same_window, 1 coalesced_adjacent,
+        // 2 coalesced_same_contig_far, 3 coalesced_other_contig,
+        // 4 same_window, 5 adjacent_window, 6 same_contig_far,
+        // 7 other_contig.
+        // Coalesced + same window (conserved copies across strains).
+        assert_eq!(
+            multi_census_pair_bin(&[7, 9], &[9, 11], &[3], &[3], true),
+            0
+        );
+        // Coalesced + adjacent windows (a shared segment crossing a seam).
+        assert_eq!(
+            multi_census_pair_bin(&[7], &[7, 8], &[3], &[4], true),
+            1
+        );
+        // Coalesced + same component contig, farther than adjacent.
+        assert_eq!(
+            multi_census_pair_bin(&[7], &[7, 12], &[3], &[9], true),
+            2
+        );
+        // Coalesced + different contig (a remote paralog the graph shares
+        // sequence with).
+        assert_eq!(
+            multi_census_pair_bin(&[7], &[7], &[3], &[], false),
+            3
+        );
+        // Non-coalesced + same window (divergent twins of one region).
+        assert_eq!(
+            multi_census_pair_bin(&[7, 9], &[11, 13], &[3], &[3], true),
+            4
+        );
+        // Non-coalesced + adjacent windows.
+        assert_eq!(
+            multi_census_pair_bin(&[7], &[11], &[3], &[4], true),
+            5
+        );
+        // Non-coalesced + same component contig, far.
+        assert_eq!(
+            multi_census_pair_bin(&[7], &[11], &[3], &[9], true),
+            6
+        );
+        // Non-coalesced + different contig, one side touching no component
+        // partition at all (an occurrence outside the component's
+        // territories).
+        assert_eq!(multi_census_pair_bin(&[7], &[11], &[3], &[], false), 7);
     }
 }
 
