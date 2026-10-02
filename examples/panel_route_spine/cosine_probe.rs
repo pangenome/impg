@@ -2115,8 +2115,15 @@ fn likelihood_arm_nll(
         return None;
     }
     let beta = arm_mass / universe_keys as f64;
+    // The explained-rate budget: the class's rates sum to the locus's mass
+    // budget M over its keys (the normalization) — but ONLY when the class
+    // has positive total incidence. An incidence-free class (an
+    // empty-usage row pair, or usage whose every key no read placement
+    // can cover) predicts mass NOWHERE: its rates are all zero, its keys
+    // carry no explained budget, and every observed count is background.
+    let explained_budget = if class_exposure > 0.0 { arm_mass } else { 0.0 };
     let constant =
-        arm_mass + gamma_total + universe_keys as f64 * beta - arm_mass * beta.ln();
+        explained_budget + gamma_total + universe_keys as f64 * beta - arm_mass * beta.ln();
     let mass_term = if acc.covered_mass > 0.0 {
         acc.covered_mass * (class_exposure * beta / arm_mass).ln()
     } else {
@@ -2650,14 +2657,40 @@ pub(super) fn dump_graph_likelihood(
                 }
                 _ => None,
             };
-        // The best genuinely divergent rivals, NAMED: every class holding a
-        // outside the called clusters, with identities, distance and both
-        // the relative and absolute likelihood.
+        // The best genuinely divergent rivals, NAMED: the classes holding
+        // the best likelihood outside the called clusters. The selection is
+        // by ABSOLUTE log-likelihood equality (bit-exact), not the relative
+        // score: the relative likelihoods underflow to 0.0 for classes more
+        // than ~745 log units below the winner, and a 0.0-valued a would
+        // otherwise name every underflowed class as the rival. The
+        // relative score (the forced two-way a of the product algebra) is
+        // carried beside the absolute value.
+        let best_outside_log_likelihood = cluster.as_ref().and_then(|state| {
+            spectrum
+                .iter()
+                .zip(&state.excluded)
+                .filter(|(_, excluded)| !**excluded)
+                .map(|(entry, _)| {
+                    // Every spectrum entry is an eligible class (pushed only
+                    // for Some(score) classes).
+                    class_log_likelihoods[entry.5]
+                        .expect("spectrum entries are eligible classes")
+                })
+                .max_by(|a, b| a.partial_cmp(b).expect("finite log-likelihoods"))
+        });
+        let alternative_log_gap = match (best_outside_log_likelihood, winner) {
+            (Some(best_outside), Some(_)) => Some(called_score - best_outside),
+            _ => None,
+        };
         let mut qual_alternative_classes: Vec<serde_json::Value> = Vec::new();
-        if let (Some(state), Some(alternative)) = (&cluster, cluster_alternative) {
+        if let (Some(state), Some(best_outside)) = (&cluster, best_outside_log_likelihood) {
             for (index, entry) in spectrum.iter().enumerate() {
                 let &(distance, score, signature_distance, first, second, class_index) = entry;
-                if !state.excluded[index] && score == alternative {
+                if !state.excluded[index]
+                    && class_log_likelihoods[class_index]
+                        .expect("spectrum entries are eligible classes")
+                        == best_outside
+                {
                     qual_alternative_classes.push(serde_json::json!({
                         "spectrum_index": index,
                         "distance": distance,
@@ -2770,13 +2803,21 @@ pub(super) fn dump_graph_likelihood(
                 named_classes.push((first, second));
             }
         }
-        if let (Some(state), Some(alternative)) = (&cluster, cluster_alternative) {
+        if let (Some(state), Some(best_outside)) = (&cluster, best_outside_log_likelihood) {
+            // The named rival for the per-record sidecar: the FIRST a-holder
+            // in spectrum order (the NEAREST divergent material among the
+            // best-likelihood rivals — deterministic, no threshold).
             for (entry, excluded) in spectrum.iter().zip(&state.excluded) {
-                if !excluded && entry.1 == alternative {
+                if !excluded
+                    && class_log_likelihoods[entry.5]
+                        .expect("spectrum entries are eligible classes")
+                        == best_outside
+                {
                     let (first, second) = (entry.3, entry.4);
                     if !named_classes.contains(&(first, second)) {
                         named_classes.push((first, second));
                     }
+                    break;
                 }
             }
         }
@@ -2982,6 +3023,7 @@ pub(super) fn dump_graph_likelihood(
                 .collect::<Vec<_>>(),
             "qual_tied_class_bands": qual_tied_class_bands,
             "qual_alternative_similarity": cluster_alternative,
+            "qual_alternative_log_gap": alternative_log_gap,
             "qual_alternative_classes": qual_alternative_classes,
             "qual_called_class_count": called.len(),
             "qual_called_classes": qual_called_classes,
@@ -3248,6 +3290,47 @@ mod graph_tests {
             (decomposed - total).abs() < 1e-9,
             "per-record sum {decomposed} vs class NLL {total}"
         );
+    }
+
+    /// An incidence-free class (an empty-usage row pair — a real domain
+    /// member: candidate intervals too short to contain any syncmer window)
+    /// predicts mass nowhere: its rates are all zero, it explains no budget,
+    /// and the whole universe sits at the background. The factored form must
+    /// NOT charge the explained-rate budget M for such a class.
+    #[test]
+    fn likelihood_incidence_free_class_charges_no_budget() {
+        let universe = [(1u64, 2.0f64), (2, 1.0), (3, 0.0)];
+        let arm_mass: f64 = 3.0;
+        let observed = |key: u64| {
+            universe.iter().find(|&&(k, _)| k == key).map_or(0.0, |&(_, c)| c)
+        };
+        let empty = exposure_row(vec![], vec![]);
+        let acc = likelihood_arm_merge(
+            (&empty.nodes, &empty.node_exposure),
+            (&empty.nodes, &empty.node_exposure),
+            &observed,
+        );
+        assert_eq!(acc.keys, 0);
+        let beta = arm_mass / 3.0;
+        let gamma: f64 = universe
+            .iter()
+            .map(|&(_, c)| crate::ln_gamma_observation(c))
+            .sum();
+        let nll = likelihood_arm_nll(arm_mass, 3, gamma, &acc, 0.0).unwrap();
+        // Dense: every universe key at the background rate.
+        let dense = 3.0 * beta - arm_mass * beta.ln() + gamma;
+        assert!((nll - dense).abs() < 1e-12, "factored {nll} vs dense {dense}");
+        // A class with usage must pay strictly more than the empty class
+        // when its keys carry no observed mass (the zero-count structure).
+        let unobserved_row = exposure_row(vec![(3, 1)], vec![1.0]);
+        let acc2 = likelihood_arm_merge(
+            (&unobserved_row.nodes, &unobserved_row.node_exposure),
+            (&empty.nodes, &empty.node_exposure),
+            &observed,
+        );
+        let nll2 =
+            likelihood_arm_nll(arm_mass, 3, gamma, &acc2, 1.0).unwrap();
+        assert!(nll2 > nll, "zero-count usage must be penalized: {nll2} vs {nll}");
     }
 
     /// The read-covering incidence: the number of read-start positions

@@ -790,4 +790,271 @@ for component, expected in [('chrMT', 8), ('chrI', 17)]:
           f'knee spectra {sum(1 for row in crows if row["qual_knee_distance"] is not None)}'
           f'/{len(crows)}, no-knee spectra '
           f'{sum(1 for row in crows if row["qual_spectrum_shape"] == "no_knee")}/{len(crows)}')
+    # --- QUAL receipts phase IV: the PER-RECORD LIKELIHOOD era (the
+    # 2026-10-02 owner go-ahead; the comparison becomes a per-record
+    # Poisson likelihood at read granularity in the graph's coordinates,
+    # the condensed node+edge coordinates unchanged). The checker
+    # re-derives spot class NLLs from the ingredients sidecar, the
+    # ranking/called-set/QUAL/posterior from the emitted class arrays,
+    # the knee from the emitted spectrum, the exact per-record identity,
+    # and prints the two blind-spot before/after tables and the QUAL
+    # distribution against the cosine-era band 3.01-3.56.
+    lprefix = D / f'run-cosine-likelihood-pilot-{component}'
+    assert Path(f'{lprefix}.done').exists()
+    assert Path(f'{lprefix}.exit').read_text().strip() == '0'
+    lrows = [json.loads(line) for line in (D / f'cosine-graph-likelihood-{component}.jsonl').open()]
+    assert len(lrows) == len(rows)
+    ling = {}
+    with (D / f'cosine-graph-likelihood-{component}.jsonl.ingredients.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            ling[entry['locus']] = entry
+    lrecords = {}
+    with (D / f'cosine-graph-likelihood-{component}.jsonl.records.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            lrecords[entry['locus']] = entry
+
+    def ingredient_class(g, pair):
+        """The merged incidence profile of one class from the ingredients."""
+        E = {}
+        for r in pair:
+            for k, mult, e in g['rows'][r]['nodes']:
+                E[('n', k)] = E.get(('n', k), 0.0) + e
+            for k, mult, e in g['rows'][r]['edges']:
+                E[('e', k)] = E.get(('e', k), 0.0) + e
+        return E
+
+    def ingredient_nll(g, pair, want_parts=False):
+        """The independent dense re-derivation of one class's log-likelihood
+        from the ingredients: per-key Poisson deviance over the whole
+        universe (budget-calibrated rate on the class's keys, uniform
+        background elsewhere), ascending key order. Returns
+        (log_likelihood, (zero_count_keys, covered_mass, unexplained_mass))
+        with None wherever the class fails closed."""
+        Cn = {k: c for k, c in g['universe_nodes']}
+        Ce = {k: c for k, c in g['universe_edges']}
+        arm_mass = sum(Cn.values()) + sum(Ce.values())
+        if arm_mass <= 0.0:
+            return None, None
+        beta = arm_mass / (len(Cn) + len(Ce))
+        E = ingredient_class(g, pair)
+        Q = sum(E.values())
+        zero_count_keys = 0
+        covered_mass = 0.0
+        for key in E:
+            c = Cn.get(key[1], 0.0) if key[0] == 'n' else Ce.get(key[1], 0.0)
+            if c > 0.0:
+                if E[key] <= 0.0 or Q <= 0.0:
+                    return None, None
+                covered_mass += c
+            else:
+                zero_count_keys += 1
+        nll = 0.0
+        for key in sorted(set(E) | {('n', k) for k in Cn} | {('e', k) for k in Ce}):
+            c = Cn.get(key[1], 0.0) if key[0] == 'n' else Ce.get(key[1], 0.0)
+            if key in E:
+                rate = arm_mass * E[key] / Q if Q > 0.0 else 0.0
+            else:
+                rate = beta
+            if c == 0.0:
+                nll += rate
+            else:
+                nll += rate - c * math.log(rate) + math.lgamma(c + 1.0)
+        if want_parts:
+            return -nll, (zero_count_keys, covered_mass, arm_mass - covered_mass)
+        return -nll, None
+
+    lik_truth_ranks = []
+    lik_quals = []
+    blindspot1_rows = []
+    for crow, lrow in zip(crows, lrows):
+        assert crow['locus'] == lrow['locus']
+        locus = lrow['locus']
+        g = ling[locus]
+        # Domain identity vs the cluster receipts: the same pure-route
+        # domain, the same coalescing, the same observation universe.
+        for field in ('physical_rows', 'graph_rows', 'record_count',
+                      'node_universe_count', 'edge_universe_count',
+                      'observed_node_mass', 'observed_edge_mass',
+                      'multi_segment_rows', 'disjoint_material_rows',
+                      'truth_piece_presence', 'truth_pair_expressible',
+                      'truth_graph_rows'):
+            assert crow[field] == lrow[field], (component, field, locus)
+        assert sorted(map(list, crow['identity_kinds'])) == sorted(map(list, lrow['identity_kinds']))
+        for field in ('observed_node_norm', 'observed_edge_norm'):
+            old, new = crow[field], lrow[field]
+            assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, locus)
+        # Exhaustive enumeration bound.
+        pairs = lrow['graph_rows'] * (lrow['graph_rows'] + 1) // 2
+        assert lrow['class_count'] == pairs == len(lrow['class_row_pairs'])
+        assert lrow['class_count'] == len(lrow['class_log_likelihoods'])
+        assert lrow['class_count'] == len(lrow['class_log_likelihoods_nodes'])
+        assert lrow['eligible_classes'] <= pairs
+        # Spot NLL re-derivation from the ingredients: the winner, the
+        # truth, and a deterministic sample (first, middle, last, every
+        # 257th eligible class).
+        logLs = lrow['class_log_likelihoods']
+        eligible_indices = [i for i, s in enumerate(logLs) if s is not None]
+        sample = {0, pairs - 1, pairs // 2}
+        sample |= {i for i in range(0, pairs, max(1, pairs // 8))}
+        sample |= {eligible_indices[i] for i in range(0, len(eligible_indices), 257)}
+        for i in sorted(sample):
+            emitted = logLs[i]
+            rederived, _ = ingredient_nll(g, lrow['class_row_pairs'][i])
+            if emitted is None:
+                assert rederived is None, (component, locus, i)
+            else:
+                assert rederived is not None, (component, locus, i)
+                assert abs(emitted - rederived) <= 1e-9 * max(1.0, abs(emitted)), \
+                    (component, locus, i, emitted, rederived)
+        # Ranking/called-set re-derivation from the class arrays (exact
+        # IEEE comparisons; no epsilon in the likelihood era).
+        best = max((s for s in logLs if s is not None), default=None)
+        if best is not None:
+            assert best == lrow['best_log_likelihood']
+            called = [i for i, s in enumerate(logLs) if s == best]
+            assert len(called) == lrow['qual_called_class_count']
+            assert [lrow['class_row_pairs'][i] for i in called] == \
+                [entry['row_indices'] for entry in lrow['qual_called_classes']]
+        if lrow['truth_log_likelihood'] is not None:
+            tp = tuple(sorted(lrow['truth_graph_rows']))
+            ti = next(i for i, p in enumerate(lrow['class_row_pairs'])
+                      if tuple(sorted(p)) == tp)
+            truthL = logLs[ti]
+            assert truthL == lrow['truth_log_likelihood']
+            higher = sum(1 for s in logLs if s is not None and s > truthL)
+            tied = sum(1 for i, s in enumerate(logLs)
+                       if s is not None and s == truthL and i != ti)
+            assert higher == lrow['higher_likelihood_competitors'], (component, locus)
+            assert higher + 1 == lrow['truth_rank']
+            assert tied == lrow['truth_tied_classes']
+            lik_truth_ranks.append((locus, lrow['truth_rank'], truthL))
+        # The QUAL block: knee from the emitted distance spectrum, the
+        # exclusion union, k, a (relative likelihood, underflow-honest),
+        # p = 1/(k + a) with L_win = 1, QUAL, and the posterior.
+        if best is not None:
+            dists = lrow['qual_distance_spectrum']
+            assert len(dists) == lrow['qual_spectrum_classes']
+            has_knee, cut = knee_cut(dists)
+            assert has_knee == (lrow['qual_knee_distance'] is not None)
+            if has_knee:
+                assert abs(cut - lrow['qual_knee_distance']) <= 1e-12 * max(1.0, cut)
+            applied_cut = lrow['qual_knee_distance'] or 0.0
+            excluded = [d <= applied_cut for d in dists]
+            for band in lrow['qual_tied_class_bands']:
+                for index, distance in enumerate(band['band_distances']):
+                    if distance <= applied_cut:
+                        excluded[index] = True
+            assert sum(excluded) + 1 == lrow['qual_cluster_size'], (component, locus)
+            assert lrow['qual_cluster_k'] >= 1
+            outside = [i for i in range(len(dists)) if not excluded[i]]
+            if outside:
+                a_rel = max(lrow['qual_distance_spectrum_scores'][i] for i in outside)
+                expected_a = lrow['qual_alternative_similarity']
+                assert expected_a is not None
+                assert abs(a_rel - expected_a) <= 1e-15 + 1e-12 * a_rel
+                p = 1.0 / (lrow['qual_cluster_k'] + a_rel)
+            else:
+                assert lrow['qual_alternative_similarity'] is None
+                p = 1.0 / lrow['qual_cluster_k']
+            assert abs(p - lrow['qual_p']) <= 1e-12 * max(1.0, p)
+            if p < 1.0:
+                assert abs(lrow['qual'] - (-10.0 * math.log10(1.0 - p))) <= 1e-9
+                assert not lrow['qual_unbounded']
+            else:
+                assert lrow['qual'] is None and lrow['qual_unbounded']
+            # The full-domain flat-prior posterior of the top cluster.
+            rels = [math.exp(s - best) for s in logLs if s is not None]
+            total = sum(rels)
+            logsumexp = best + math.log(total)
+            assert abs(logsumexp - lrow['qual_posterior_logsumexp']) <= 1e-9 * max(1.0, abs(logsumexp))
+            band_mass = 1.0 + sum(lrow['qual_distance_spectrum_scores'][i]
+                                  for i in range(len(dists)) if dists[i] <= applied_cut)
+            posterior = band_mass / total
+            assert abs(posterior - lrow['qual_posterior_top_cluster']) <= 1e-9, (component, locus)
+            lik_quals.append((locus, lrow['qual'], lrow['qual_unbounded'],
+                              lrow['qual_alternative_log_gap']))
+        # The exact per-record identity, spot-checked on the first named
+        # class of the records sidecar: the sum of the emitted per-record
+        # terms reconstitutes the class NLL.
+        rec = lrecords[locus]
+        if rec['classes']:
+            cls = rec['classes'][0]
+            total = sum(entry['per_record_nll'] for entry in cls['per_record'])
+            nll = -cls['log_likelihood']
+            assert abs(total - nll) <= 1e-6 * max(1.0, abs(nll)), (component, locus, total, nll)
+            assert len(cls['per_record']) == lrow['record_count']
+        # BLIND SPOT 1 (the before/after): the cluster era's NAMED best
+        # divergent rivals (the 78.8-99.99%-of-max-cosine classes differing
+        # on 0.7%-90% of the observed mass) - their likelihood-era rank and
+        # log-gap, joined by row indices (the domains are deterministic).
+        for rival in crow['qual_alternative_classes']:
+            pair = tuple(sorted(rival['row_indices']))
+            ri = next((i for i, p in enumerate(lrow['class_row_pairs'])
+                       if tuple(sorted(p)) == pair), None)
+            assert ri is not None, (component, locus, pair)
+            rl = logLs[ri]
+            rederived, parts = ingredient_nll(g, lrow['class_row_pairs'][ri], want_parts=True)
+            if rl is None:
+                assert rederived is None
+                rank, gap = 'ineligible', None
+            else:
+                assert rederived is not None
+                rank = 1 + sum(1 for s in logLs if s is not None and s > rl)
+                gap = best - rl
+            arm_mass = crow['observed_node_mass'] + crow['observed_edge_mass']
+            blindspot1_rows.append({
+                'locus': locus,
+                'identities': rival['identities'],
+                'cosine_fraction_of_max': rival['similarity'] / crow['qual_best_similarity'],
+                'distance_share': rival['distance'] / arm_mass,
+                'new_rank': rank,
+                'new_log_gap_to_winner': gap,
+                'parts': parts,
+                'arm_mass': arm_mass,
+            })
+    print(f'{component} phase IV: spot NLL re-derivations, ranking, knee/k/a/p/posterior and '
+          f'per-record identity reconciled on {len(lrows)} loci')
+    finite = [q for _, q, _, _ in lik_quals if q is not None]
+    unbounded_gaps = [gap for _, _, unb, gap in lik_quals if unb and gap is not None]
+    finite_text = (f'[{min(finite):.2f}..{max(finite):.2f}] median '
+                   f'{sorted(finite)[len(finite)//2]:.2f}') if finite else '[]'
+    gap_text = (f'[{min(unbounded_gaps):.1f}..{max(unbounded_gaps):.1f}]'
+                if unbounded_gaps else '[]')
+    print(f'{component} likelihood QUAL distribution: {len(finite)} finite {finite_text}, '
+          f'{sum(1 for _, _, unb, _ in lik_quals if unb)} unbounded '
+          f'(best-divergent-rival log-gaps {gap_text}) '
+          f'vs the cosine-era band 3.01-3.56')
+    rank1 = sum(1 for _, r, _ in lik_truth_ranks if r == 1)
+    print(f'{component} likelihood truth rank1 (bit-exact unique): {rank1}/{expected}; '
+          f'ranks by locus: ' + ', '.join(f'{l}:{r}' for l, r, _ in lik_truth_ranks))
+    print(f'{component} BLIND SPOT 1 (the cosine-era named divergent rivals, before/after):')
+    for entry in blindspot1_rows:
+        parts = entry['parts']
+        covered_text = ('ineligible (cannot explain observed mass on a '
+                        'zero-incidence key)') if parts is None else (
+            f"covers {parts[1]:.1f} of {entry['arm_mass']:.1f} observed mass "
+            f"({100*parts[1]/entry['arm_mass']:.1f}%), "
+            f"{parts[0]} predicted-unobserved keys")
+        rank = entry['new_rank']
+        gap = entry['new_log_gap_to_winner']
+        gap_text = 'ineligible' if gap is None else f'log-gap {gap:.1f}'
+        print(f"  locus {entry['locus']}: cosine {100*entry['cosine_fraction_of_max']:.2f}% of max "
+              f"(differing material {100*entry['distance_share']:.1f}% of observed mass) -> "
+              f"likelihood rank {rank}, {gap_text}; {covered_text}")
+    print(f'{component} BLIND SPOT 2 (predicted-but-unobserved, the likelihood winners):')
+    for lrow in lrows:
+        if lrow['best_log_likelihood'] is None:
+            continue
+        g = ling[lrow['locus']]
+        winner_pair = lrow['class_row_pairs'][
+            next(i for i, s in enumerate(lrow['class_log_likelihoods'])
+                 if s == lrow['best_log_likelihood'])]
+        logL, parts = ingredient_nll(g, winner_pair, want_parts=True)
+        arm_mass = lrow['observed_node_mass'] + lrow['observed_edge_mass']
+        print(f"  locus {lrow['locus']}: winner rows {list(winner_pair)} pays the zero-count "
+              f"structure on {parts[0]} predicted-unobserved keys while explaining "
+              f"{parts[1]:.1f} of {arm_mass:.1f} observed share mass "
+              f"({100*parts[1]/arm_mass:.1f}%); leaves {parts[2]:.1f} at the background")
 print('all checks passed')
