@@ -8289,7 +8289,17 @@ fn main() -> io::Result<()> {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    genome::retain_native_endpoint_candidates(&mut traversals, target.id, target.length)?;
+    // The port-viability remedy (owner-approved subtraction, 2026-10-02):
+    // the haploid-era NATIVE ENDPOINT retain is subtracted from the
+    // remedied diagnostic domain (env-gated; production runs never set
+    // this). A local diplotype window allele has no whole-molecule
+    // endpoint obligation; the rule's measured effect at the component's
+    // edge loci was to remove every non-target-edge row (chrMT locus0:
+    // 49 of 50 rows, locus13: 20 of 21 — both degenerate single-class
+    // domains for that reason alone).
+    if std::env::var_os("IMPG_COSINE_REMEDIED_DOMAIN").is_none() {
+        genome::retain_native_endpoint_candidates(&mut traversals, target.id, target.length)?;
+    }
     // The ladder's rung 1a: the window-spanning same-source chains over the
     // EXTENDED domain at the D2-flagged loci (the stitched form — the
     // structural spanning rows of multi-row sources, now on BOTH ploidy
@@ -11364,5 +11374,66 @@ mod multiplicity_background_tests {
         assert_eq!(forward, vec![(0usize, 100u64)]);
         assert_eq!(reverse, vec![(0usize, 500u64)]);
         assert_eq!(occ, BTreeMap::from([(1u32, 2u64)]));
+    }
+}
+
+#[cfg(test)]
+mod port_remedy_tests {
+    use super::*;
+
+    /// The port-viability remedy's L-LOCALITY subtraction, measured on the
+    /// chrMT locus4 shape: the truth copy1 territory row SK1:[25770,27195)
+    /// does not overlap the S288C-coordinate axis window [27497,28757), so
+    /// the traversal-locality retain AS AIMED (route_pair[1]'s source — for
+    /// the balanced truth pair that is the SK1 route) removes the true
+    /// window ortholog piece (a coordinate-frame rejection; the row's own
+    /// frame is offset from the axis frame). Under the remedied-domain
+    /// gate the retain is subtracted and the piece survives — the exact
+    /// reversal measured at chrMT locus4 (non-expressible under the rule,
+    /// expressible under the remedy).
+    #[test]
+    fn locality_retain_subtracted_under_remedied_domain() {
+        let territory = vec![vec![SourceRange {
+            partition: 0,
+            occurrence: 1,
+            source: 9614,
+            start: 25770,
+            end: 27195,
+            reverse: false,
+        }]];
+        let route_a = routes::Route {
+            segments: vec![routes::Segment { source: 9580, start: 0, end: 85793, reverse: false }],
+        };
+        let route_b = routes::Route {
+            segments: vec![routes::Segment { source: 9614, start: 0, end: 84638, reverse: false }],
+        };
+        let axis = vec![genome::AxisInterval {
+            component: "S288C#0#chrMT".to_string(),
+            start: 27497,
+            end: 28757,
+            group: "partition15582".to_string(),
+            reference_occurrence: 0,
+            reference_strand: "+".to_string(),
+            orientations: Default::default(),
+        }];
+        let key = "IMPG_COSINE_REMEDIED_DOMAIN";
+        // The un-subtracted rule (the production behavior, unchanged): the
+        // retain removes the SK1 piece — the measured chrMT locus4 rejection.
+        std::env::remove_var(key);
+        let ruled = spine::reference_local_piece_lists(
+            &territory, [&route_a, &route_b], 1, 0, &axis,
+        );
+        assert!(ruled[0][1].is_empty(), "the aimed retain keeps the piece");
+        // The remedied gate subtracts the retain: the piece survives.
+        std::env::set_var(key, "1");
+        let remedied = spine::reference_local_piece_lists(
+            &territory, [&route_a, &route_b], 1, 0, &axis,
+        );
+        std::env::remove_var(key);
+        assert_eq!(remedied[0][1].len(), 1);
+        assert_eq!(
+            (remedied[0][1][0].0, remedied[0][1][0].1, remedied[0][1][0].2),
+            (9614, 25770, 27195)
+        );
     }
 }

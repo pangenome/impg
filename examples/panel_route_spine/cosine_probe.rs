@@ -3046,6 +3046,77 @@ pub(super) fn dump_graph_likelihood(
 }
 
 // ---------------------------------------------------------------------------
+// PORT-VIABILITY REMEDY (owner-approved subtraction, 2026-10-02): the
+// material-grouping helper for the dead-end subtraction. The diversity-
+// bounded ruling says IDENTICAL MATERIAL COALESCES, so the seam rule must
+// subtract dead-end MATERIAL, not dead-end physical expressions: a row
+// whose usage-identical twin carries a legal seam link is chainable
+// through that twin (measured: chrI locus17's truth SK1 row
+// [166812,178118) has a dead-end forward expression and a one-link
+// reverse-orientation twin — the material is chainable and must stay;
+// subtracting the forward expression alone changes no score but breaks the
+// truth assessment's exact-piece anchor). One bounding-range walk per
+// (path, locus), the same shape as GraphLocus::build's row side.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn row_material_group_ids(
+    panel: &SyngIndex,
+    candidates: &[genome::SpanningTraversal],
+    path_of_source: &[usize],
+    k: u64,
+) -> io::Result<Vec<usize>> {
+    let mut paths: std::collections::BTreeMap<usize, Vec<(usize, u64, u64)>> =
+        std::collections::BTreeMap::new();
+    for (index, row) in candidates.iter().enumerate() {
+        for &(path, lo, hi) in &row_material(row, path_of_source) {
+            paths.entry(path).or_default().push((index, lo, hi));
+        }
+    }
+    let mut row_nodes: Vec<std::collections::BTreeMap<GraphNode, u32>> =
+        vec![std::collections::BTreeMap::new(); candidates.len()];
+    let mut row_edges: Vec<std::collections::BTreeMap<PackedEdge, u32>> =
+        vec![std::collections::BTreeMap::new(); candidates.len()];
+    for (path, work) in &paths {
+        let lo_min = work.iter().map(|&(_, lo, _)| lo).min().unwrap_or(0);
+        let hi_max = work.iter().map(|&(_, _, hi)| hi).max().unwrap_or(0);
+        if hi_max <= lo_min {
+            continue;
+        }
+        let mut steps: Vec<(u64, i32)> = panel
+            .walk_path_range(*path, lo_min, hi_max)?
+            .into_iter()
+            .map(|(node, bp)| (bp, node))
+            .collect();
+        steps.sort_unstable_by_key(|&(bp, _)| bp);
+        for &(row_index, lo, hi) in work {
+            let window = contained_steps(&steps, k, lo, hi);
+            let mut previous: Option<GraphNode> = None;
+            for &(_, node) in &steps[window] {
+                let key = node.unsigned_abs();
+                if let Some(left) = previous.take() {
+                    *row_edges[row_index].entry(pack_edge(left, key)).or_default() += 1;
+                }
+                previous = Some(key);
+                *row_nodes[row_index].entry(key).or_default() += 1;
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<(Vec<(GraphNode, u32)>, Vec<(PackedEdge, u32)>), usize> =
+        std::collections::BTreeMap::new();
+    let mut ids = Vec::with_capacity(candidates.len());
+    for (nodes, edges) in row_nodes.iter().zip(&row_edges) {
+        let signature = (
+            nodes.iter().map(|(&key, &mult)| (key, mult)).collect::<Vec<_>>(),
+            edges.iter().map(|(&key, &mult)| (key, mult)).collect::<Vec<_>>(),
+        );
+        let next = groups.len();
+        ids.push(*groups.entry(signature).or_insert(next));
+    }
+    Ok(ids)
+}
+
+// ---------------------------------------------------------------------------
 // Port-viability remedy, stage 1 (owner go 2026-10-02): the ADMISSION-RULE
 // diagnostic. The haploid-era door rules measured 497/502 truth-pair
 // rejections genome-wide; this dump carries, per locus, (a) every physical

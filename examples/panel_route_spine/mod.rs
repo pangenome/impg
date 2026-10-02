@@ -1374,12 +1374,25 @@ pub(super) fn reference_local_piece_lists(
             // (axis_slice is the run's own local locus array — the
             // territory above is full-component and needs the offset;
             // the axis does not.)
+            //
+            // PORT-VIABILITY REMEDY (owner-approved subtraction,
+            // 2026-10-02): under the remedied diagnostic domain this
+            // retain is SUBTRACTED. As aimed (route_pair[1]'s source) it
+            // applies the axis-frame overlap test to the SECOND route's
+            // source — for the balanced truth pair that is SK1, whose
+            // coordinate frame is NOT the axis frame: measured, it
+            // rejected chrMT locus4's true window ortholog piece
+            // SK1:[25770,27195) against the S288C-coordinate window
+            // [27497,28757) — the locus's only rejection cause (its
+            // territory row exists). Production runs never set the env.
             let native_source = route_pair[1].segments[0].source;
             let axis_lo = axis_slice[locus].start;
             let axis_hi = axis_slice[locus].end;
-            merged.retain(|&(source, lo, hi, ..)| {
-                source != native_source || (lo < axis_hi && hi > axis_lo)
-            });
+            if std::env::var_os("IMPG_COSINE_REMEDIED_DOMAIN").is_none() {
+                merged.retain(|&(source, lo, hi, ..)| {
+                    source != native_source || (lo < axis_hi && hi > axis_lo)
+                });
+            }
             sorted_pieces[locus][copy] = merged;
         }
     }
@@ -4209,6 +4222,88 @@ pub(super) fn run_local_first_spine(
         }
         eprintln!(
             "[cosine-domain] physical rows: {before} -> {}",
+            ranges.iter().map(Vec::len).sum::<usize>()
+        );
+    }
+    // PORT-VIABILITY REMEDY (owner-approved subtraction, 2026-10-02): the
+    // remedied diagnostic domain subtracts DEAD-END MATERIAL — usage groups
+    // (identical material coalesces, per the diversity-bounded ruling) in
+    // which NO physical expression has an immediate legal seam link on
+    // either side (no incoming link at the left boundary, no outgoing link
+    // at the right; the component's own port-word/same-source seam graph,
+    // exactly the product's kept structural rule in its weakest form).
+    // This is a strict SUBSET of what the product's own viability door
+    // already rejects (a row with no links fails both reachability arms);
+    // the instrument's exhaustive domain had been MORE permissive than the
+    // product's structural door. Measured effect (the Python closed-form
+    // preview over the committed receipts): chrMT locus3's smear conduit
+    // (CDN_1a:[45216,52519), every expression in=0/out=0) leaves the
+    // universe with its mass and the truth pair takes rank 1; chrI loci
+    // 12 and 17 close the same way (locus17's truth SK1 material survives
+    // through its one-link reverse-orientation twin — the material-level
+    // semantics the ruling requires). The overgrown global-reachability
+    // rule (both-chromosome-ends, 449/502 truth-pair rejections) STAYS
+    // SUBTRACTED from this door — it is not applied here at all. Truth is
+    // never read. Env-gated; production runs never set this.
+    if std::env::var_os("IMPG_COSINE_REMEDIED_DOMAIN").is_some() {
+        let before: usize = ranges.iter().map(Vec::len).sum();
+        let mut remedy_ports =
+            routes::Ports::open_without_global_verification(routes_dir, graph)?;
+        let mut has_left: Vec<Vec<bool>> =
+            ranges.iter().map(|rows| vec![false; rows.len()]).collect();
+        let mut has_right: Vec<Vec<bool>> =
+            ranges.iter().map(|rows| vec![false; rows.len()]).collect();
+        for boundary in 0..locus_count.saturating_sub(1) {
+            let links = genome::port_word_seams(
+                &axis_slice[boundary..boundary + 2],
+                &ranges[boundary..boundary + 2],
+                graph,
+                &mut remedy_ports,
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("remedy boundary link cardinality mismatch"))?;
+            for &(left, right) in &links {
+                has_right[boundary][left] = true;
+                has_left[boundary + 1][right] = true;
+            }
+        }
+        for locus in 0..locus_count {
+            // Material groups over the locus's rows: subtract a whole
+            // group iff every one of its physical expressions is a
+            // dead-end (no link on either side).
+            let groups = cosine_probe::row_material_group_ids(
+                panel, &ranges[locus], path_of_source, k,
+            )?;
+            let group_count = groups.iter().copied().max().map_or(0, |id| id + 1);
+            let mut group_alive = vec![false; group_count];
+            for (allele, &group) in groups.iter().enumerate() {
+                group_alive[group] |= has_left[locus][allele] || has_right[locus][allele];
+            }
+            let survivors: Vec<bool> = groups
+                .iter()
+                .map(|&group| group_alive[group])
+                .collect();
+            let kept: usize = survivors.iter().filter(|&value| *value).count();
+            ensure(kept > 0, "remedied domain lost a locus: no seam-linked material")?;
+            if kept < survivors.len() {
+                eprintln!(
+                    "[remedied-domain] locus {locus}: dead-end material subtracted {} -> {}",
+                    survivors.len(),
+                    kept
+                );
+            }
+            let mut write = 0;
+            for read in 0..ranges[locus].len() {
+                if survivors[read] {
+                    ranges[locus].swap(write, read);
+                    write += 1;
+                }
+            }
+            ranges[locus].truncate(write);
+        }
+        eprintln!(
+            "[remedied-domain] seam-linked rows: {before} -> {}",
             ranges.iter().map(Vec::len).sum::<usize>()
         );
     }
