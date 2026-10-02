@@ -402,7 +402,8 @@ for component, expected in [('chrMT', 8), ('chrI', 17)]:
         assert len(entries_here) == (expected_count or 0)
         old_entries = tie_stream.get(drow['locus'], [])
         assert len(old_entries) == len(entries_here)
-        truth_rows = sorted(drow['truth_graph_rows'])
+        truth_rows = (sorted(drow['truth_graph_rows'])
+                      if drow['truth_graph_rows'] is not None else [])
         truth_entries = 0
         for old_entry, entry in zip(old_entries, entries_here):
             assert sorted(entry['row_indices']) == sorted(old_entry['row_indices'])
