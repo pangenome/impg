@@ -2630,6 +2630,11 @@ pub(crate) fn build_in_window_obs(
         (0..window_owner_sets.len()).map(|_| HashMap::new()).collect();
     let collect_instances = spans_out.is_some();
     let collect_matched = matched_out.is_some();
+    // The option-b census (assessment-side measurement, printed to the run
+    // log): per pass, how much of the records' chained placement extent is
+    // genuinely matched anchor material and how many occurrences carry
+    // intra-record unmatched gaps. Zero cost when the gate is unset.
+    let mut matched_census = MatchedCensus::default();
     let mut record_spans: RecordPlacementSpans = Vec::with_capacity(routed.len());
     let mut record_matched: RecordMatchedSpans = Vec::with_capacity(routed.len());
     let mut window_records: WindowRecordLists =
@@ -2704,8 +2709,20 @@ pub(crate) fn build_in_window_obs(
                             _ => merged.push((lo, hi)),
                         }
                     }
+                    let mut matched_bp = 0u64;
                     for (lo, hi) in merged {
+                        matched_bp += hi - lo;
                         record_matched[record_index].push((path_idx, lo, hi));
+                    }
+                    if let Some(&( _, last_rel)) = walk.last() {
+                        let span_bp =
+                            last_rel + k - walk[0].1;
+                        matched_census.occurrences += 1;
+                        matched_census.span_bp += span_bp;
+                        matched_census.matched_bp += matched_bp;
+                        if matched_bp < span_bp {
+                            matched_census.gapped_occurrences += 1;
+                        }
                     }
                 }
                 // Per-anchor partition lists, computed once per occurrence.
@@ -2776,6 +2793,16 @@ pub(crate) fn build_in_window_obs(
     if let Some(out) = matched_out {
         *out = record_matched;
     }
+    if collect_matched {
+        eprintln!(
+            "[read-matched] records {} occurrences {} gapped-occurrences {} span-bp {} matched-bp {}",
+            routed.len(),
+            matched_census.occurrences,
+            matched_census.gapped_occurrences,
+            matched_census.span_bp,
+            matched_census.matched_bp
+        );
+    }
     Ok(maps)
 }
 
@@ -2840,6 +2867,18 @@ pub(crate) type RecordPlacementSpans = Vec<HashMap<FeatureKey, Vec<(usize, u64, 
 /// junction vote requires ONE placement's matched material on both abutting
 /// sides.
 pub(crate) type RecordMatchedSpans = Vec<Vec<(usize, u64, u64)>>;
+
+/// The option-b emission census (assessment-side, printed to the run log):
+/// the records' chained placement extent vs the genuinely matched anchor
+/// material, and how many verified occurrences carry intra-record
+/// unmatched gaps (the span-containment credit the convention removes).
+#[derive(Default)]
+struct MatchedCensus {
+    occurrences: u64,
+    gapped_occurrences: u64,
+    span_bp: u64,
+    matched_bp: u64,
+}
 
 /// The process-wide read-matched observation gate (owner-approved option
 /// b). When set, the in-window pass ALSO emits the records' read-matched
