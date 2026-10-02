@@ -4500,6 +4500,34 @@ pub(super) fn run_local_first_spine(
         )?;
         rss_probe(rss, "cosine_graph_likelihood_pilot")?;
     }
+    // Port-viability remedy, stage 1 (owner go 2026-10-02): the
+    // admission-rule diagnostic over the SAME pure-route domain — every
+    // row's door attributes (seam links, reachability, span feasibility),
+    // the truth pair's admission path (territory rows, raw pieces, admitted
+    // pieces), and every universe key's positions on the truth's full
+    // routes. Assessment-side only; no product structure reads it.
+    if let Ok(path) = std::env::var("IMPG_COSINE_ADMISSION_DIAGNOSTIC") {
+        ensure(
+            std::env::var_os("IMPG_COSINE_DOMAIN_PILOT").is_some(),
+            "admission diagnostic requires the pure-material domain gate",
+        )?;
+        cosine_probe::dump_admission_diagnostic(
+            &path,
+            panel,
+            &ranges,
+            path_of_source,
+            territory,
+            [&truth_route_a, &truth_route_b],
+            &truth_pieces,
+            &successors_ref,
+            window_instances.ok_or_else(|| invalid("admission diagnostic needs record placements"))?,
+            k,
+            model.depth,
+            locus_offset,
+            axis_slice,
+        )?;
+        rss_probe(rss, "cosine_admission_diagnostic")?;
+    }
     let reference_partitions: Vec<u32> = (0..locus_count)
         .map(|locus| component_locus_to_partition[locus_offset + locus])
         .collect();

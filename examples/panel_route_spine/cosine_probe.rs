@@ -3045,6 +3045,249 @@ pub(super) fn dump_graph_likelihood(
     ingredients.flush()
 }
 
+// ---------------------------------------------------------------------------
+// Port-viability remedy, stage 1 (owner go 2026-10-02): the ADMISSION-RULE
+// diagnostic. The haploid-era door rules measured 497/502 truth-pair
+// rejections genome-wide; this dump carries, per locus, (a) every physical
+// row's door attributes (immediate seam-link degrees at both boundaries,
+// forward/backward reachability, local span feasibility, viability),
+// (b) the truth pair's own admission path (territory rows on the truth
+// sources, the raw route-∩-territory pieces BEFORE the traversal-locality
+// retain, and the pieces as admitted), and (c) every universe key's
+// positions on the truth's FULL routes, so the checker can attribute each
+// locus's observed mass to truth material by window and name the rule
+// that rejects or cripples the truth pair. Assessment-side only; nothing
+// feeds a sweep, DP, posterior or product column.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dump_admission_diagnostic(
+    path: &str,
+    panel: &SyngIndex,
+    ranges: &[Vec<genome::SpanningTraversal>],
+    path_of_source: &[usize],
+    territory: &[Vec<SourceRange>],
+    truth_routes: [&routes::Route; 2],
+    truth_pieces: &[[Vec<(usize, u64, u64, bool, u32)>; 2]],
+    successors: &[Vec<Vec<(usize, f64)>>],
+    instances: &crate::InstanceStructure,
+    k: u64,
+    depth: f64,
+    locus_offset: usize,
+    axis_slice: &[genome::AxisInterval],
+) -> io::Result<()> {
+    let mut report = BufWriter::new(std::fs::File::create(path)?);
+    let locus_count = ranges.len();
+    // The truth routes' full-molecule node/edge projection: key -> (copy,
+    // path bp) occurrences, walked once per copy segment (the assessment
+    // side's own coordinates; no product structure reads it).
+    let mut truth_node_pos: HashMap<GraphNode, Vec<(u8, u64)>> = HashMap::new();
+    let mut truth_edge_pos: HashMap<PackedEdge, Vec<(u8, u64)>> = HashMap::new();
+    for (copy, route) in truth_routes.iter().enumerate() {
+        let copy = copy as u8;
+        for segment in &route.segments {
+            if segment.start >= segment.end {
+                continue;
+            }
+            let path = path_of_source[segment.source];
+            let mut steps: Vec<(u64, i32)> = panel
+                .walk_path_range(path, segment.start, segment.end)?
+                .into_iter()
+                .map(|(node, bp)| (bp, node))
+                .collect();
+            steps.sort_unstable_by_key(|&(bp, _)| bp);
+            for &(bp, node) in &steps {
+                truth_node_pos.entry(node.unsigned_abs()).or_default().push((copy, bp));
+            }
+            for pair in steps.windows(2) {
+                let (left_bp, left) = pair[0];
+                let (_, right) = pair[1];
+                truth_edge_pos
+                    .entry(pack_edge(left.unsigned_abs(), right.unsigned_abs()))
+                    .or_default()
+                    .push((copy, left_bp));
+            }
+        }
+    }
+    // The reachability arms of spine_viability, kept separate so each
+    // failing truth row attributes to forward, backward or both.
+    let mut forward: Vec<Vec<bool>> = ranges.iter().map(|l| vec![true; l.len()]).collect();
+    for locus in (0..locus_count.saturating_sub(1)).rev() {
+        for (allele, list) in successors[locus].iter().enumerate() {
+            forward[locus][allele] = list.iter().any(|&(next, _)| forward[locus + 1][next]);
+        }
+    }
+    let mut backward: Vec<Vec<bool>> = ranges.iter().map(|l| vec![false; l.len()]).collect();
+    if locus_count > 0 {
+        backward[0].iter_mut().for_each(|value| *value = true);
+    }
+    for locus in 1..locus_count {
+        for (allele, list) in successors[locus - 1].iter().enumerate() {
+            if backward[locus - 1][allele] {
+                for &(next, _) in list {
+                    backward[locus][next] = true;
+                }
+            }
+        }
+    }
+    serde_json::to_writer(
+        &mut report,
+        &serde_json::json!({
+            "kind": "admission-diagnostic-header",
+            "k": k,
+            "read_length": READ_LENGTH,
+            "locus_offset": locus_offset,
+            "truth_routes": (0..2).map(|copy| serde_json::json!({
+                "copy": copy,
+                "segments": truth_routes[copy].segments.iter().map(|segment|
+                    serde_json::json!({
+                        "source": segment.source,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "reverse": segment.reverse,
+                    })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "axis": axis_slice.iter().map(|interval| serde_json::json!({
+                "start": interval.start, "end": interval.end,
+                "group": interval.group,
+            })).collect::<Vec<_>>(),
+        }),
+    )?;
+    writeln!(report)?;
+    for locus in 0..locus_count {
+        let candidates = &ranges[locus];
+        let locus_data = GraphLocus::build(candidates, path_of_source, instances, locus, panel, k, depth)?;
+        let GraphLocus {
+            universe_nodes,
+            universe_edges,
+            observed_nodes,
+            observed_edges,
+            ..
+        } = locus_data;
+        // Per-row immediate seam-link degrees at the two boundaries of the
+        // locus (the kept structural rule's own quantities).
+        let mut in_links = vec![0u64; candidates.len()];
+        let mut out_links = vec![0u64; candidates.len()];
+        if locus > 0 {
+            for list in &successors[locus - 1] {
+                for &(next, _) in list {
+                    in_links[next] += 1;
+                }
+            }
+        }
+        if locus + 1 < locus_count {
+            for (allele, list) in successors[locus].iter().enumerate() {
+                out_links[allele] = list.len() as u64;
+            }
+        }
+        let rows: Vec<serde_json::Value> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                serde_json::json!({
+                    "index": index,
+                    "identity": row.identity,
+                    "segments": row.segments.iter().map(|segment| serde_json::json!({
+                        "source": segment.source,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "reverse": segment.reverse,
+                        "partition": segment.partition,
+                    })).collect::<Vec<_>>(),
+                    "material": row_material(row, path_of_source),
+                    "in_links": in_links[index],
+                    "out_links": out_links[index],
+                    "forward": forward[locus][index],
+                    "backward": backward[locus][index],
+                    "span_feasible": crate::spans_feasible_local(&row.segments),
+                })
+            })
+            .collect();
+        // The truth pair's admission path at this locus: the territory rows
+        // on each copy's route sources, the raw route-∩-territory pieces
+        // (before sort/merge/locality), and the pieces as admitted.
+        let territory_rows: Vec<Vec<serde_json::Value>> = (0..2)
+            .map(|copy| {
+                territory[locus_offset + locus]
+                    .iter()
+                    .filter(|interval| {
+                        truth_routes[copy]
+                            .segments
+                            .iter()
+                            .any(|segment| segment.source == interval.source)
+                    })
+                    .map(|interval| serde_json::json!({
+                        "source": interval.source,
+                        "start": interval.start,
+                        "end": interval.end,
+                        "reverse": interval.reverse,
+                        "partition": interval.partition,
+                    }))
+                    .collect()
+            })
+            .collect();
+        let raw_pieces: Vec<Vec<serde_json::Value>> = (0..2)
+            .map(|copy| {
+                truth_routes[copy]
+                    .segments
+                    .iter()
+                    .flat_map(|segment| {
+                        territory[locus_offset + locus]
+                            .iter()
+                            .filter(|interval| {
+                                interval.source == segment.source
+                                    && segment.start.max(interval.start) < segment.end.min(interval.end)
+                            })
+                            .map(|interval| serde_json::json!({
+                                "source": segment.source,
+                                "start": segment.start.max(interval.start),
+                                "end": segment.end.min(interval.end),
+                                "reverse": segment.reverse,
+                                "partition": interval.partition,
+                            }))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            })
+            .collect();
+        let truth_row_indices: Vec<Option<usize>> = (0..2)
+            .map(|copy| truth_index(candidates, &truth_pieces[locus][copy]))
+            .collect();
+        serde_json::to_writer(
+            &mut report,
+            &serde_json::json!({
+                "kind": "admission-diagnostic-locus",
+                "locus": locus + locus_offset,
+                "rows": rows,
+                "truth": {
+                    "territory_rows": territory_rows,
+                    "raw_pieces": raw_pieces,
+                    "pieces": (0..2).map(|copy| {
+                        truth_pieces[locus][copy].iter().map(|&(source, lo, hi, reverse, partition)|
+                            serde_json::json!({
+                                "source": source, "start": lo, "end": hi,
+                                "reverse": reverse, "partition": partition,
+                            })).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>(),
+                    "row_indices": truth_row_indices,
+                },
+                "universe_nodes": universe_nodes.iter().map(|&key| serde_json::json!([
+                    key,
+                    observed_nodes.get(&key).copied().unwrap_or(0.0),
+                    truth_node_pos.get(&key).cloned().unwrap_or_default(),
+                ])).collect::<Vec<_>>(),
+                "universe_edges": universe_edges.iter().map(|&key| serde_json::json!([
+                    key,
+                    observed_edges.get(&key).copied().unwrap_or(0.0),
+                    truth_edge_pos.get(&key).cloned().unwrap_or_default(),
+                ])).collect::<Vec<_>>(),
+            }),
+        )?;
+        writeln!(report)?;
+    }
+    report.flush()
+}
+
 #[cfg(test)]
 mod graph_tests {
     use super::{

@@ -3918,7 +3918,7 @@ fn profile_equivalence(
 // Routed-evidence DP (the M1 additive model of Milestone 0.5).
 // ---------------------------------------------------------------------------
 
-fn spans_feasible_local(segments: &[SourceRange]) -> bool {
+pub(crate) fn spans_feasible_local(segments: &[SourceRange]) -> bool {
     for i in 0..segments.len() {
         for j in i + 1..segments.len() {
             if segments[i].source == segments[j].source
