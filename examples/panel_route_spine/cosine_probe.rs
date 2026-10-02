@@ -610,6 +610,153 @@ impl GraphSpace {
     }
 }
 
+/// Multiset sum of two sorted usage vectors: a diplotype CLASS's total
+/// usage (both copies merged; a double-copy class merges a row with
+/// itself, doubling its multiplicities).
+fn merged_multiset(left: &[(u64, u32)], right: &[(u64, u32)]) -> Vec<(u64, u32)> {
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut merged: Vec<(u64, u32)> = Vec::with_capacity(left.len() + right.len());
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => {
+                merged.push(left[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(right[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push((left[i].0, left[i].1 + right[j].1));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    merged
+}
+
+/// Symmetric multiset distance between two sorted usage vectors:
+/// (number of keys whose multiplicities differ, total absolute
+/// multiplicity difference). (0, 0) means bit-identical usage.
+fn multiset_distance(left: &[(u64, u32)], right: &[(u64, u32)]) -> (u64, u64) {
+    let (mut i, mut j, mut keys, mut mass) = (0usize, 0usize, 0u64, 0u64);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => {
+                keys += 1;
+                mass += left[i].1 as u64;
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                keys += 1;
+                mass += right[j].1 as u64;
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                if left[i].1 != right[j].1 {
+                    keys += 1;
+                    mass += (left[i].1 as i64 - right[j].1 as i64).unsigned_abs();
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    keys += (left.len() - i) as u64;
+    mass += left[i..].iter().map(|&(_, mult)| mult as u64).sum::<u64>();
+    keys += (right.len() - j) as u64;
+    mass += right[j..].iter().map(|&(_, mult)| mult as u64).sum::<u64>();
+    (keys, mass)
+}
+
+/// Deterministic FNV-1a hash over a row's exact sorted node+edge usage —
+/// a receipt aid for comparing class signatures across entries. The
+/// coalescing itself is exact structural equality, never this hash.
+fn usage_hash(row: &GraphRow) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &(key, mult) in row.nodes.iter().chain(row.edges.iter()) {
+        for part in [key, mult as u64] {
+            hash ^= part;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+/// How many physical candidate-row pairs coalesce into ONE material class
+/// (the owner's "effectively the same" made countable): a two-row class
+/// merges members_a x members_b physical pairs; a double-copy class merges
+/// a row's members with themselves, m*(m+1)/2 pairs, not m*m.
+fn class_physical_pairs(same_row: bool, members_a: usize, members_b: usize) -> u64 {
+    if same_row {
+        members_a as u64 * (members_a as u64 + 1) / 2
+    } else {
+        members_a as u64 * members_b as u64
+    }
+}
+
+/// Observed mass on the keys where two sorted usage multisets differ,
+/// weighted by the multiplicity difference: the maximum |dot| contribution
+/// the usage difference can carry. Exactly 0.0 means every differing
+/// segment/adjacency holds NO observed read mass — no read breaks a tie
+/// between the two usages.
+fn differing_observed_mass(
+    left: &[(u64, u32)],
+    right: &[(u64, u32)],
+    observed: &dyn Fn(u64) -> f64,
+) -> f64 {
+    let (mut i, mut j, mut total) = (0usize, 0usize, 0.0f64);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => {
+                total += observed(left[i].0) * left[i].1 as f64;
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                total += observed(right[j].0) * right[j].1 as f64;
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let delta = (left[i].1 as i64 - right[j].1 as i64).unsigned_abs();
+                if delta > 0 {
+                    total += observed(left[i].0) * delta as f64;
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    while i < left.len() {
+        total += observed(left[i].0) * left[i].1 as f64;
+        i += 1;
+    }
+    while j < right.len() {
+        total += observed(right[j].0) * right[j].1 as f64;
+        j += 1;
+    }
+    total
+}
+
+/// The called material class's share of the domain's total similarity:
+/// the class's OWN similarity value over the summed similarity of every
+/// distinct material class, each summed once (deterministic pair-walk
+/// order). Member multiplicity never enters — nine route identities over
+/// one material class carry ONE class value, not nine. None fails closed
+/// when there is no similarity mass at all.
+fn qual_share(best: f64, total: f64) -> Option<f64> {
+    (total > 0.0).then(|| best / total)
+}
+
+/// Phred-scaled QUAL from the class share. None = unbounded (share 1: the
+/// called classes hold all the domain's similarity mass); emitted as
+/// null, never clamped — no free parameters, no cap.
+fn qual_from_share(share: f64) -> Option<f64> {
+    (share < 1.0).then(|| -10.0 * (1.0 - share).log10())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn dump_graph_exhaustive(
     path: &str,
@@ -625,6 +772,10 @@ pub(super) fn dump_graph_exhaustive(
     let mut report = BufWriter::new(std::fs::File::create(path)?);
     let mut competitors =
         BufWriter::new(std::fs::File::create(format!("{path}.competitors.jsonl"))?);
+    // Classes within the stage-1 1e-12 window of the truth class (including
+    // the truth class itself): the tie-evidence stream for the exact-tie
+    // vs near-identical-signature question. Diagnostic only.
+    let mut ties = BufWriter::new(std::fs::File::create(format!("{path}.ties.jsonl"))?);
     for (locus, candidates) in ranges.iter().enumerate() {
         // Per path: the candidate rows' merged material intervals and the
         // contributing records' merged placement spans (all features, both
@@ -875,6 +1026,23 @@ pub(super) fn dump_graph_exhaustive(
         };
         let truth_nodes_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, false));
         let truth_combined_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, true));
+        // Product QUAL state (material-class semantics). The exhaustive
+        // walk below sums every distinct class's combined-arm similarity
+        // exactly once and collects the classes at the bit-identical
+        // maximum. Exact-tie convention: identical f64 score values — every
+        // score is finite, non-negative, NaN-free, and -0.0 cannot arise
+        // (non-negative dots over positive norms), so IEEE-754 equality IS
+        // bit identity here; NO epsilon constant enters the product call.
+        let truth_merged_nodes = pair_truth.map(|(a, b)| {
+            merged_multiset(&space.rows[a].nodes, &space.rows[b].nodes)
+        });
+        let truth_merged_edges = pair_truth.map(|(a, b)| {
+            merged_multiset(&space.rows[a].edges, &space.rows[b].edges)
+        });
+        let mut combined_total = 0.0f64;
+        let mut called_score = f64::NEG_INFINITY;
+        let mut called: Vec<[usize; 2]> = Vec::new();
+        let mut ties_streamed = 0u64;
         // Exhaustive assessment: every unordered graph-row pair, both arms.
         // The overlaps are computed once per pair and shared by both arms'
         // scores (the row-space factorization, one arithmetic pass).
@@ -910,6 +1078,75 @@ pub(super) fn dump_graph_exhaustive(
                                     * expected_combined)
                                     .sqrt()
                         });
+                // Product QUAL accumulation: one value per distinct material
+                // class, summed in the deterministic enumeration order; the
+                // called set is the classes at the bit-identical maximum.
+                if let Some(score) = combined_score {
+                    combined_total += score;
+                    if score > called_score {
+                        called_score = score;
+                        called.clear();
+                        called.push([first, second]);
+                    } else if score == called_score {
+                        called.push([first, second]);
+                    }
+                }
+                // Tie-evidence stream: every class inside the stage-1 1e-12
+                // window of the truth class (a diagnostic convention; the
+                // product called set above is bit-exact only), carrying the
+                // measured ULP delta and the node/edge usage distance versus
+                // the truth class's total usage.
+                if let (Some(truth_value), Some(score)) = (truth_combined_score, combined_score) {
+                    if (score - truth_value).abs() <= 1e-12 {
+                        let (ta, tb) = pair_truth.unwrap();
+                        let merged_nodes = merged_multiset(&a.nodes, &b.nodes);
+                        let merged_edges = merged_multiset(&a.edges, &b.edges);
+                        let node_distance =
+                            multiset_distance(&merged_nodes, truth_merged_nodes.as_ref().unwrap());
+                        let edge_distance =
+                            multiset_distance(&merged_edges, truth_merged_edges.as_ref().unwrap());
+                        // The observed mass sitting on the differing segments:
+                        // 0.0 means no read's evidence distinguishes the two
+                        // classes (the tie is unbreakable by this sample).
+                        let node_differing_mass = differing_observed_mass(
+                            &merged_nodes,
+                            truth_merged_nodes.as_ref().unwrap(),
+                            &|key| {
+                                observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0)
+                            },
+                        );
+                        let edge_differing_mass = differing_observed_mass(
+                            &merged_edges,
+                            truth_merged_edges.as_ref().unwrap(),
+                            &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                        );
+                        serde_json::to_writer(&mut ties, &serde_json::json!({
+                            "locus": locus + locus_offset,
+                            "row_indices": [first, second],
+                            "identities": [candidates[a.members[0]].identity,
+                                           candidates[b.members[0]].identity],
+                            "nodes_cosine": nodes_score,
+                            "combined_cosine": combined_score,
+                            "truth_combined_cosine": truth_combined_score,
+                            "combined_ulp_delta":
+                                (score.to_bits() as i64 - truth_value.to_bits() as i64).abs(),
+                            "combined_bit_exact": score.to_bits() == truth_value.to_bits(),
+                            "shared_rows_with_truth": usize::from(first == ta)
+                                + usize::from(first == tb)
+                                + usize::from(second == ta)
+                                + usize::from(second == tb),
+                            "node_distance_vs_truth_class": [node_distance.0, node_distance.1],
+                            "edge_distance_vs_truth_class": [edge_distance.0, edge_distance.1],
+                            "node_differing_observed_mass_vs_truth": node_differing_mass,
+                            "edge_differing_observed_mass_vs_truth": edge_differing_mass,
+                            "row_member_counts": [a.members.len(), b.members.len()],
+                            "is_truth_class": (first == ta && second == tb)
+                                || (first == tb && second == ta),
+                        }))?;
+                        writeln!(ties)?;
+                        ties_streamed += 1;
+                    }
+                }
                 for (arm_index, score) in [nodes_score, combined_score].into_iter().enumerate() {
                     if let Some(score) = score {
                         eligible[arm_index] += 1;
@@ -989,6 +1226,86 @@ pub(super) fn dump_graph_exhaustive(
             truth_nodes_score.map(|_| counts[0].0 + 1),
             truth_combined_score.map(|_| counts[1].0 + 1),
         ];
+        // Product QUAL (material-class semantics): the called set is the
+        // distinct material classes at the bit-identical maximum; the
+        // share is the called class's own value over the total similarity
+        // of every distinct class; QUAL = -10*log10(1 - share). Unbounded
+        // (share 1) and empty-domain loci emit null, never a clamp.
+        let share = (!called.is_empty())
+            .then(|| qual_share(called_score, combined_total))
+            .flatten();
+        let qual = share.and_then(qual_from_share);
+        let qual_unbounded = share.is_some_and(|value| value >= 1.0);
+        let truth_in_called_set = pair_truth.map(|(ta, tb)| {
+            called.iter().any(|&[first, second]| {
+                (first == ta && second == tb) || (first == tb && second == ta)
+            })
+        });
+        let first_called_nodes = called.first().map(|&[first, second]| {
+            merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes)
+        });
+        let first_called_edges = called.first().map(|&[first, second]| {
+            merged_multiset(&space.rows[first].edges, &space.rows[second].edges)
+        });
+        let mut qual_called_physical_pairs = 0u64;
+        let qual_called_classes: Vec<serde_json::Value> = called
+            .iter()
+            .enumerate()
+            .map(|(position, &[first, second])| {
+                let (row_a, row_b) = (&space.rows[first], &space.rows[second]);
+                let physical =
+                    class_physical_pairs(first == second, row_a.members.len(), row_b.members.len());
+                qual_called_physical_pairs += physical;
+                let node_distance = if position == 0 {
+                    [0u64, 0u64]
+                } else {
+                    let merged = merged_multiset(&row_a.nodes, &row_b.nodes);
+                    let distance = multiset_distance(&merged, first_called_nodes.as_ref().unwrap());
+                    [distance.0, distance.1]
+                };
+                let edge_distance = if position == 0 {
+                    [0u64, 0u64]
+                } else {
+                    let merged = merged_multiset(&row_a.edges, &row_b.edges);
+                    let distance = multiset_distance(&merged, first_called_edges.as_ref().unwrap());
+                    [distance.0, distance.1]
+                };
+                let node_differing_mass = if position == 0 {
+                    0.0
+                } else {
+                    differing_observed_mass(
+                        &merged_multiset(&row_a.nodes, &row_b.nodes),
+                        first_called_nodes.as_ref().unwrap(),
+                        &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                    )
+                };
+                let edge_differing_mass = if position == 0 {
+                    0.0
+                } else {
+                    differing_observed_mass(
+                        &merged_multiset(&row_a.edges, &row_b.edges),
+                        first_called_edges.as_ref().unwrap(),
+                        &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                    )
+                };
+                serde_json::json!({
+                    "row_indices": [first, second],
+                    "combined_cosine": (!called.is_empty()).then_some(called_score),
+                    "row_member_counts": [row_a.members.len(), row_b.members.len()],
+                    "physical_pair_members": physical,
+                    "row_node_counts": [row_a.nodes.len(), row_b.nodes.len()],
+                    "row_edge_counts": [row_a.edges.len(), row_b.edges.len()],
+                    "row_usage_hashes": [usage_hash(row_a), usage_hash(row_b)],
+                    "node_distance_to_first_called_class": node_distance,
+                    "edge_distance_to_first_called_class": edge_distance,
+                    "node_differing_observed_mass_to_first_called": node_differing_mass,
+                    "edge_differing_observed_mass_to_first_called": edge_differing_mass,
+                    "is_truth_class": pair_truth.is_some_and(|(ta, tb)| {
+                        (first == ta && second == tb) || (first == tb && second == ta)
+                    }),
+                })
+            })
+            .collect();
         serde_json::to_writer(&mut report, &serde_json::json!({
             "locus": locus + locus_offset,
             "physical_rows": candidates.len(),
@@ -1030,11 +1347,29 @@ pub(super) fn dump_graph_exhaustive(
                 (Some(a), Some(b)) => Some(b as i64 - a as i64),
                 _ => None,
             },
+            // Product QUAL block (nodes+edges arm; the stage-1 machinery).
+            // `qual_similarity_total` sums each distinct material class's
+            // similarity exactly once; classes failing the zero-norm guard
+            // carry no similarity value and contribute nothing. The called
+            // set is the bit-identical maximum (class signatures, not
+            // member route identities). Unbounded QUAL (share 1) is null
+            // plus `qual_unbounded` — never clamped.
+            "qual_similarity_total": (!called.is_empty()).then_some(combined_total),
+            "qual_best_similarity": (!called.is_empty()).then_some(called_score),
+            "qual_called_class_count": called.len(),
+            "qual_called_classes": qual_called_classes,
+            "qual_called_physical_pairs": qual_called_physical_pairs,
+            "qual_truth_in_called_set": truth_in_called_set,
+            "qual_share": share,
+            "qual_unbounded": qual_unbounded,
+            "qual": qual,
+            "combined_ties_with_truth_streamed": ties_streamed,
         }))?;
         writeln!(report)?;
     }
     report.flush()?;
-    competitors.flush()
+    competitors.flush()?;
+    ties.flush()
 }
 
 /// Total bp of a row's merged per-path material (the path-continuity audit
@@ -1169,5 +1504,114 @@ mod graph_tests {
         };
         assert_ne!(twin, repeated);
         assert_eq!(twin, twin.clone());
+    }
+
+    /// A clean k-way material-class tie holding ALL the domain's similarity
+    /// lands EXACTLY at the derived bound Q = -10*log10(1 - 1/k), and extra
+    /// zero-similarity classes do not dilute the share.
+    #[test]
+    fn qual_all_mass_k_way_class_tie_lands_at_derived_bound() {
+        for (k, s) in [(2u64, 0.5f64), (3, 0.25), (5, 0.03125), (9, 0.0078125)] {
+            let total = std::iter::repeat(s).take(k as usize).sum::<f64>();
+            let share = super::qual_share(s, total).unwrap();
+            assert_eq!(share, 1.0 / k as f64);
+            let qual = super::qual_from_share(share).unwrap();
+            assert_eq!(qual, -10.0 * (1.0 - 1.0 / k as f64).log10());
+            // Zero-similarity classes contribute nothing to the total.
+            let with_zeros = total + 0.0 + 0.0;
+            assert_eq!(super::qual_share(s, with_zeros).unwrap(), share);
+            // Any competitor mass strictly LOWERS the share, so measured Q
+            // sits strictly BELOW the bound (the theorem direction).
+            let diluted = super::qual_share(s, total + s / 4.0).unwrap();
+            assert!(diluted < 1.0 / k as f64);
+            assert!(super::qual_from_share(diluted).unwrap() < qual);
+        }
+    }
+
+    /// QUAL rises monotonically with the share; a separated unique top
+    /// scores far above a near-tie; the exact k=2 all-mass bound is the
+    /// ceiling a 2-way tie can never exceed.
+    #[test]
+    fn qual_monotonic_in_share_and_separated_beats_near_tie() {
+        let near_tie = super::qual_from_share(0.5).unwrap();
+        let separated = super::qual_from_share(0.99).unwrap();
+        assert!(near_tie < separated);
+        assert!((near_tie - 3.010299956639812).abs() < 1e-9); // -10*log10(1/2)
+        // share 0.99: exactly 1% of the domain mass sits outside the called
+        // class, so Q is a hair above Q20 (1 - 0.99 is not exactly 0.01 in
+        // binary; the expected value is derived, not hardcoded).
+        assert!((separated - (-10.0 * (1.0 - 0.99f64).log10())).abs() < 1e-12);
+        assert!(separated > 19.9);
+        for (low, high) in [(0.1f64, 0.2), (0.2, 0.5), (0.5, 0.9), (0.9, 0.999)] {
+            assert!(super::qual_from_share(low).unwrap() < super::qual_from_share(high).unwrap());
+        }
+        // A 2-way tie with any competitor mass lands strictly below the
+        // all-mass bound -10*log10(1 - 1/2).
+        let bound = -10.0 * (1.0 - 0.5f64).log10();
+        let diluted = super::qual_from_share(super::qual_share(0.5, 1.0 + 0.5).unwrap()).unwrap();
+        assert!(diluted < bound);
+    }
+
+    /// Unbounded (share 1) and no-mass (total 0) loci fail closed to None —
+    /// no clamped or invented value is ever emitted.
+    #[test]
+    fn qual_unbounded_and_empty_domain_fail_closed() {
+        assert_eq!(super::qual_share(1.0, 1.0), Some(1.0));
+        assert_eq!(super::qual_from_share(1.0), None);
+        assert_eq!(super::qual_share(0.0, 0.0), None);
+        assert_eq!(super::qual_share(0.5, 0.0), None);
+    }
+
+    /// The class-multiplicity and signature-distance helpers: a double-copy
+    /// class merges m members into m*(m+1)/2 physical pairs (never m*m),
+    /// merged usage doubles self-multiplicity, and the symmetric distance is
+    /// (0, 0) only on identical multisets.
+    #[test]
+    fn class_multiplicity_and_signature_distance_helpers() {
+        assert_eq!(super::class_physical_pairs(true, 3, 3), 6);
+        assert_eq!(super::class_physical_pairs(false, 3, 5), 15);
+        let usage = vec![(1u64, 1u32), (2, 2)];
+        assert_eq!(
+            super::merged_multiset(&usage, &usage),
+            vec![(1u64, 2u32), (2, 4)]
+        );
+        assert_eq!(
+            super::merged_multiset(&usage, &[(1u64, 1u32), (3, 1)]),
+            vec![(1u64, 2u32), (2, 2), (3, 1)]
+        );
+        assert_eq!(super::multiset_distance(&usage, &usage), (0, 0));
+        assert_eq!(super::multiset_distance(&usage, &[(1u64, 1u32)]), (1, 2));
+        assert_eq!(super::multiset_distance(&usage, &[(1u64, 2u32)]), (2, 3));
+        // Observed mass on differing keys: zero when every differing key is
+        // unobserved, nonzero otherwise, weighted by the multiplicity delta.
+        let observed = |key: u64| if key == 1 { 2.5 } else { 0.0 };
+        assert_eq!(
+            // keys 2 and 3 differ (multiplicity 2 swapped); key 1 agrees —
+            // every DIFFERING key is unobserved, so no read breaks the tie.
+            super::differing_observed_mass(&usage, &[(1u64, 1u32), (3, 2)], &observed),
+            0.0
+        );
+        assert_eq!(
+            super::differing_observed_mass(&[(1u64, 2u32), (2, 1)], &[(1u64, 1u32), (2, 1)], &observed),
+            2.5 // key 1 differs by one visit carrying 2.5 mass
+        );
+        assert_eq!(super::differing_observed_mass(&usage, &usage, &observed), 0.0);
+        let row = |nodes: Vec<(u32, u32)>, edges: Vec<((u32, u32), u32)>| GraphRow {
+            node_dot: 0.0,
+            edge_dot: 0.0,
+            node_norm: 0.0,
+            edge_norm: 0.0,
+            nodes: nodes.into_iter().map(|(key, mult)| (key as u64, mult)).collect(),
+            edges: edges
+                .into_iter()
+                .map(|((a, b), mult)| (super::pack_edge(a, b), mult))
+                .collect(),
+            members: vec![],
+        };
+        let left = row(vec![(1, 1)], vec![((1, 2), 1)]);
+        let twin = row(vec![(1, 1)], vec![((1, 2), 1)]);
+        let different_edge = row(vec![(1, 1)], vec![((2, 1), 1)]);
+        assert_eq!(super::usage_hash(&left), super::usage_hash(&twin));
+        assert_ne!(super::usage_hash(&left), super::usage_hash(&different_edge));
     }
 }
