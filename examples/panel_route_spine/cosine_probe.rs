@@ -740,16 +740,16 @@ fn differing_observed_mass(
     total
 }
 
-/// The DELTA-FORM confidence in the emitted single-material draw. The
-/// called set's confidence over its best alternative is the forced two-way
-/// normalization k*s_win vs a (class mass, exclusive hypotheses); within a
-/// bit-tied called set the truth is uniform (measured tie anatomy: the
-/// differing nodes/edges carry zero observed read mass), so
-/// p = (k*s_win/(k*s_win + a)) * (1/k) = s_win/(k*s_win + a), with k the
-/// DISTINCT material classes bit-tied at the maximum s_win and a the best
-/// similarity among ALL classes outside the called set (a = 0 if none).
-/// None fails closed when there is no similarity mass at all (s_win = 0
-/// and a = 0) or no called class.
+/// The confidence in the emitted single-material draw under the forced
+/// two-way normalization of the k bit-tied maximum hypotheses against the
+/// best alternative a: p = s_win / (k*s_win + a). The delta and cluster
+/// forms share this algebra — the delta form passes the bit-tied CLASS
+/// count as k, the cluster form (the owner's ruling below) passes the
+/// DIVERGENT-CLUSTER count. Within a bit-tied set the truth is uniform
+/// (measured tie anatomy: the differing nodes/edges carry zero observed
+/// read mass), so p = (k*s_win/(k*s_win + a)) * (1/k). None fails closed
+/// when there is no similarity mass at all (s_win = 0 and a = 0) or no
+/// called class.
 fn qual_p(s_win: f64, called_classes: usize, alternative: Option<f64>) -> Option<f64> {
     if called_classes == 0 {
         return None;
@@ -765,6 +765,232 @@ fn qual_p(s_win: f64, called_classes: usize, alternative: Option<f64>) -> Option
 /// parameters, no cap.
 fn qual_from_p(p: f64) -> Option<f64> {
     (p < 1.0).then(|| -10.0 * (1.0 - p).log10())
+}
+
+/// The median of a non-empty f64 slice (the average of the two middle
+/// values for an even count). Inputs here are relative jumps in [0, 1]
+/// by construction — finite, non-negative, NaN-free — so a total sort is
+/// exact. The median is the derived "typical" jump the knee must dominate:
+/// no threshold, no constant.
+fn median_of(values: &mut [f64]) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).expect("finite relative jumps"));
+    let middle = values.len() / 2;
+    if values.len() % 2 == 1 {
+        values[middle]
+    } else {
+        (values[middle - 1] + values[middle]) / 2.0
+    }
+}
+
+/// The KNEE of a sorted non-decreasing distance spectrum — the derived
+/// cluster-cut rule, with NO tuning constants. A winner's near-identical
+/// band is a dense run of small distances followed by the divergent tail,
+/// so the band-to-tail transition is the MAXIMAL RELATIVE JUMP
+/// r_i = (d_{i+1} - d_i)/d_{i+1} ∈ [0, 1] between consecutive distances
+/// (0/0 := 0); ties resolve to the LARGEST index so the band absorbs the
+/// full dense run, and the cut distance is d_{i*} — the last band point —
+/// so the called cluster is every class within the cut. A spectrum whose
+/// maximal relative jump does not exceed the MEDIAN relative jump is
+/// scale-free (exact geometric growth: every jump equal) and HAS NO KNEE
+/// — a measurement, not an error: the cut then stays at 0 (the
+/// bit-identical innermost level) and the caller reports the nearest
+/// strictly-positive distance as the fallback. The exactly-zero distances
+/// (bit-identical material, or differing material carrying no observed
+/// mass) are the innermost band and are always inside the cluster, so the
+/// knee is derived over the STRICTLY-POSITIVE distances only — a jump out
+/// of an exact zero is the maximal relative jump r = 1 by definition and
+/// would otherwise pin the cut at the zero boundary and split the band.
+/// With fewer than two positive distances there is no jump that can
+/// dominate the median, so no knee is claimed.
+struct KneeCut {
+    has_knee: bool,
+    cut: f64,
+}
+
+fn spectrum_knee(sorted: &[f64]) -> KneeCut {
+    let positives: Vec<f64> = sorted.iter().copied().filter(|&d| d > 0.0).collect();
+    if positives.len() < 2 {
+        return KneeCut { has_knee: false, cut: 0.0 };
+    }
+    let jumps: Vec<f64> = positives
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]) / pair[1])
+        .collect();
+    let mut center = jumps.clone();
+    let typical = median_of(&mut center);
+    let (mut best, mut best_index) = (f64::NEG_INFINITY, 0usize);
+    for (index, &jump) in jumps.iter().enumerate() {
+        if jump >= best {
+            best = jump;
+            best_index = index;
+        }
+    }
+    if best > typical {
+        KneeCut { has_knee: true, cut: positives[best_index] }
+    } else {
+        KneeCut { has_knee: false, cut: 0.0 }
+    }
+}
+
+/// The SIGNATURE-COSINE distance between two class usage signatures:
+/// 1 - cosine of the RAW node+edge usage multisets (multiplicity vectors;
+/// the per-copy depth is a common positive factor and cancels, so raw
+/// multiplicities give the same cosine). The second view of material
+/// distance — scale-free and evidence-independent — reported beside the
+/// observed-mass distance, which is the one the cluster cut uses.
+fn signature_cosine_distance(
+    nodes_a: &[(u64, u32)],
+    edges_a: &[(u64, u32)],
+    nodes_b: &[(u64, u32)],
+    edges_b: &[(u64, u32)],
+) -> f64 {
+    let norm = |nodes: &[(u64, u32)], edges: &[(u64, u32)]| {
+        nodes.iter().map(|&(_, mult)| mult as f64 * mult as f64).sum::<f64>()
+            + edges.iter().map(|&(_, mult)| mult as f64 * mult as f64).sum::<f64>()
+    };
+    let (norm_a, norm_b) = (norm(nodes_a, edges_a), norm(nodes_b, edges_b));
+    if norm_a == 0.0 && norm_b == 0.0 {
+        return 0.0; // two empty signatures are the same (empty) usage
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 1.0; // an empty signature shares nothing with a nonempty one
+    }
+    let overlap = multiset_overlap(nodes_a, nodes_b) + multiset_overlap(edges_a, edges_b);
+    1.0 - overlap / (norm_a * norm_b).sqrt()
+}
+
+/// The CLUSTER-FORM confidence in the emitted single-material draw (the
+/// owner's ruling, 2026-10-01: the near-twin runner-ups are not real
+/// alternatives — "there's 10 sequences that are almost identical and we
+/// pick one of them; they shouldn't get penalized as if they're not" — so
+/// the quality must measure the separation from the NEXT ACTUALLY
+/// DIVERGENT cluster of sequences, not from the ninth twin; picking any
+/// member of a near-identical band is a fine sequence call). The delta
+/// form's formula is UNCHANGED but applied BETWEEN CLUSTERS:
+/// p = s_win/(k*s_win + a), where s_win is the bit-identical maximum
+/// similarity, k is the number of DIVERGENT clusters whose best candidates
+/// bit-tie the maximum (the bit-tied called classes clustered by the same
+/// near-identity relation — single-linkage components at the knee cut,
+/// chains included — the winner's own cluster counts), and a is the best
+/// similarity among classes OUTSIDE the near-identical called cluster(s) —
+/// the best genuinely divergent rival. Members of the called cluster(s)
+/// never supply a, never count in k, never lower QUAL; bit-identical
+/// classes (distance 0) are innermost and always inside the cluster.
+/// Derivation: the hypotheses are the k divergent tied-maximum clusters
+/// (each carrying s_win) and the best divergent rival (carrying a); the
+/// forced two-way normalization k*s_win vs a with uniform truth inside a
+/// bit-tied cluster gives the confidence in the single emitted material
+/// draw p = (k*s_win/(k*s_win + a))*(1/k) = s_win/(k*s_win + a) — the
+/// delta form's algebra with clusters as the units.
+struct ClusterQual {
+    /// The knee distance of the winner's spectrum (None: no knee — a
+    /// measurement; the cut then stays at the bit-identical level 0).
+    knee: Option<f64>,
+    /// The cluster cut actually applied (the knee distance, or 0 without a
+    /// knee: the bit-identical innermost coalescing).
+    cut: f64,
+    shape: &'static str,
+    /// Classes in the winner's near-identical cluster (the winner itself
+    /// included).
+    cluster_size: usize,
+    /// The number of DIVERGENT clusters whose best candidates bit-tie the
+    /// maximum.
+    k: usize,
+    /// Exclusion mask over `spectrum` (true = inside a called cluster:
+    /// supplies no alternative, counts in no k).
+    excluded: Vec<bool>,
+    /// The best similarity among classes OUTSIDE the called cluster(s)
+    /// (None iff every eligible class is inside; Some(0.0) when the best
+    /// divergent rival carries no similarity).
+    alternative: Option<f64>,
+    p: Option<f64>,
+}
+
+fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64])]) -> ClusterQual {
+    let mut sorted: Vec<f64> = spectrum.iter().map(|&(distance, _)| distance).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
+    let knee_cut = spectrum_knee(&sorted);
+    let cut = knee_cut.cut;
+    let mut excluded = vec![false; spectrum.len()];
+    let mut band = 0usize;
+    for (index, &(distance, _)) in spectrum.iter().enumerate() {
+        if distance <= cut {
+            excluded[index] = true;
+            band += 1;
+        }
+    }
+    for (_, band_distances) in tied {
+        for (index, &distance) in band_distances.iter().enumerate() {
+            if distance <= cut {
+                excluded[index] = true;
+            }
+        }
+    }
+    // k: single-linkage components over the called classes (the winner is
+    // node 0, tied class i is node i + 1). Two called classes are
+    // near-identical iff their distance <= cut; chains count (a divergent
+    // twin of the winner's twin is NOT a new cluster).
+    let mut parent: Vec<usize> = (0..=tied.len()).collect();
+    let mut root = |parent: &mut Vec<usize>, node: usize| {
+        let mut current = node;
+        while parent[current] != current {
+            current = parent[current];
+        }
+        let mut walked = node;
+        while parent[walked] != current {
+            let next = parent[walked];
+            parent[walked] = current;
+            walked = next;
+        }
+        current
+    };
+    for (left, (index_left, _)) in tied.iter().enumerate() {
+        // winner (0) vs tied class left + 1: the tied class's own
+        // distance-to-winner entry in the spectrum.
+        if spectrum[*index_left].0 <= cut {
+            let (a, b) = (root(&mut parent, 0), root(&mut parent, left + 1));
+            if a != b {
+                parent[a] = b;
+            }
+        }
+        for (right, (index_right, _)) in tied.iter().enumerate().skip(left + 1) {
+            if tied[left].1[*index_right] <= cut {
+                let (a, b) =
+                    (root(&mut parent, left + 1), root(&mut parent, right + 1));
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+    }
+    let mut roots: Vec<usize> = (0..=tied.len()).map(|node| root(&mut parent, node)).collect();
+    roots.sort_unstable();
+    roots.dedup();
+    let k = roots.len();
+    let mut alternative: Option<f64> = None;
+    for (index, &(_, score)) in spectrum.iter().enumerate() {
+        if !excluded[index] {
+            alternative = Some(alternative.map_or(score, |value| value.max(score)));
+        }
+    }
+    let shape = if spectrum.is_empty() {
+        "single_class"
+    } else if knee_cut.has_knee {
+        "knee"
+    } else {
+        "no_knee"
+    };
+    let p = qual_p(s_win, k, alternative);
+    ClusterQual {
+        knee: knee_cut.has_knee.then_some(cut),
+        cut,
+        shape,
+        cluster_size: 1 + band,
+        k,
+        excluded,
+        alternative,
+        p,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1036,11 +1262,12 @@ pub(super) fn dump_graph_exhaustive(
         };
         let truth_nodes_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, false));
         let truth_combined_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, true));
-        // Product QUAL state (material-class semantics, DELTA FORM). The
+        // Product QUAL state (material-class semantics, CLUSTER FORM). The
         // exhaustive walk below collects the classes at the bit-identical
-        // maximum and tracks the best similarity among ALL classes outside
-        // the called set (every such class scores strictly below the max,
-        // so it is the largest below-maximum value). Exact-tie convention:
+        // maximum and stores every eligible class's similarity for the
+        // post-walk cluster analysis (the material-distance spectrum from
+        // the winner, the derived knee cut, the divergent-cluster count k
+        // and the best genuinely divergent rival a). Exact-tie convention:
         // identical f64 score values — every score is finite, non-negative,
         // NaN-free, and -0.0 cannot arise (non-negative dots over positive
         // norms), so IEEE-754 equality IS bit identity here; NO epsilon
@@ -1054,12 +1281,12 @@ pub(super) fn dump_graph_exhaustive(
         let mut combined_total = 0.0f64;
         let mut called_score = f64::NEG_INFINITY;
         let mut called: Vec<[usize; 2]> = Vec::new();
-        // The best similarity among ALL distinct classes OUTSIDE the called
-        // set (None while no class outside the eventual called set has
-        // produced a similarity value). Diagnostic continuity: the total is
-        // still emitted (`qual_similarity_total`) but the delta-form QUAL
-        // does NOT use it — it was the falsified share form's denominator.
-        let mut alternative_score: Option<f64> = None;
+        // Every eligible material class (its row pair and similarity), in
+        // the deterministic enumeration order — the input of the winner's
+        // distance spectrum. Diagnostic continuity: the total is still
+        // emitted (`qual_similarity_total`) but no QUAL form uses it — it
+        // was the falsified share form's denominator.
+        let mut eligible_classes: Vec<(usize, usize, f64)> = Vec::new();
         let mut ties_streamed = 0u64;
         // Exhaustive assessment: every unordered graph-row pair, both arms.
         // The overlaps are computed once per pair and shared by both arms'
@@ -1098,27 +1325,17 @@ pub(super) fn dump_graph_exhaustive(
                         });
                 // Product QUAL accumulation: one value per distinct material
                 // class; the called set is the classes at the bit-identical
-                // maximum, and the best below-maximum value is the
-                // alternative a (a displaced maximum becomes it).
+                // maximum, and every eligible class's similarity is stored
+                // for the post-walk cluster analysis.
                 if let Some(score) = combined_score {
                     combined_total += score;
+                    eligible_classes.push((first, second, score));
                     if score > called_score {
-                        if called_score.is_finite() {
-                            alternative_score = Some(
-                                alternative_score.map_or(called_score, |value| {
-                                    value.max(called_score)
-                                }),
-                            );
-                        }
                         called_score = score;
                         called.clear();
                         called.push([first, second]);
                     } else if score == called_score {
                         called.push([first, second]);
-                    } else {
-                        alternative_score = Some(
-                            alternative_score.map_or(score, |value| value.max(score)),
-                        );
                     }
                 }
                 // Tie-evidence stream: every class inside the stage-1 1e-12
@@ -1256,21 +1473,6 @@ pub(super) fn dump_graph_exhaustive(
             truth_nodes_score.map(|_| counts[0].0 + 1),
             truth_combined_score.map(|_| counts[1].0 + 1),
         ];
-        // Product QUAL (material-class semantics, DELTA FORM): the called
-        // set is the distinct material classes at the bit-identical maximum;
-        // p = s_win / (k*s_win + a) with k the called-class count and a the
-        // best similarity outside the called set; QUAL = -10*log10(1 - p).
-        // Unbounded (p = 1: k = 1, a = 0) and massless loci emit null,
-        // never a clamp. Member multiplicity enters NOWHERE — k counts
-        // DISTINCT classes only, so coalesced member-level ties cannot
-        // lower QUAL.
-        let confidence = (!called.is_empty())
-            .then(|| qual_p(called_score, called.len(), alternative_score))
-            .flatten();
-        let qual = confidence.and_then(qual_from_p);
-        let qual_unbounded = confidence.is_some_and(|value| value >= 1.0);
-        let qual_delta = (!called.is_empty())
-            .then(|| alternative_score.map(|best_alternative| called_score - best_alternative));
         let truth_in_called_set = pair_truth.map(|(ta, tb)| {
             called.iter().any(|&[first, second]| {
                 (first == ta && second == tb) || (first == tb && second == ta)
@@ -1282,6 +1484,175 @@ pub(super) fn dump_graph_exhaustive(
         let first_called_edges = called.first().map(|&[first, second]| {
             merged_multiset(&space.rows[first].edges, &space.rows[second].edges)
         });
+        // Product QUAL (material-class semantics, CLUSTER FORM — the
+        // owner's ruling: the near-twin runner-ups are not real
+        // alternatives; the quality measures the separation from the NEXT
+        // ACTUALLY DIVERGENT cluster, not from the ninth twin). The called
+        // set is unchanged (distinct classes at the bit-identical maximum).
+        // The MATERIAL DISTANCE between two classes is the observed read
+        // mass carried on the symmetric difference of their node+edge
+        // usage signatures (the same routed-share units the cosines use),
+        // with the signature-cosine distance as a second view. The cluster
+        // cut is the derived knee of the winner's sorted distance
+        // spectrum; k = the number of DIVERGENT clusters whose best
+        // candidates bit-tie the maximum; a = the best similarity OUTSIDE
+        // the near-identical called cluster(s); p = s_win/(k*s_win + a),
+        // QUAL = -10*log10(1 - p). Members of the called cluster never
+        // supply a, never count in k, never lower QUAL. Bit-identical
+        // classes (distance 0) are innermost: always in the cluster.
+        // Unbounded (p = 1) and massless loci emit null, never a clamp.
+        // Member multiplicity enters NOWHERE.
+        let winner = called.first().copied();
+        // The winner's distance spectrum: (material distance, similarity,
+        // signature-cosine distance, row pair) per eligible class other
+        // than the winner, sorted by distance — the per-locus evidence of
+        // where the dense near-identical band ends and where the cut
+        // lands.
+        let mut spectrum: Vec<(f64, f64, f64, usize, usize)> = Vec::new();
+        if let (
+            Some([winner_first, winner_second]),
+            Some(winner_nodes),
+            Some(winner_edges),
+        ) = (
+            winner,
+            first_called_nodes.as_ref(),
+            first_called_edges.as_ref(),
+        ) {
+            for &(first, second, score) in &eligible_classes {
+                if first == winner_first && second == winner_second {
+                    continue;
+                }
+                let nodes = merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes);
+                let edges = merged_multiset(&space.rows[first].edges, &space.rows[second].edges);
+                let distance = differing_observed_mass(
+                    &nodes,
+                    winner_nodes,
+                    &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                ) + differing_observed_mass(
+                    &edges,
+                    winner_edges,
+                    &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                );
+                let signature_distance =
+                    signature_cosine_distance(&nodes, &edges, winner_nodes, winner_edges);
+                spectrum.push((distance, score, signature_distance, first, second));
+            }
+        }
+        spectrum.sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+        // Per other bit-tied called class: its spectrum index (for the k
+        // components) and its distances to every spectrum member (for the
+        // band exclusion).
+        let mut tied_bands: Vec<(usize, Vec<f64>)> = Vec::new();
+        for &[first, second] in called.iter().skip(1) {
+            let index = spectrum
+                .iter()
+                .position(|&(_, _, _, a, b)| a == first && b == second)
+                .expect("called class missing from the winner's spectrum");
+            let nodes = merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes);
+            let edges = merged_multiset(&space.rows[first].edges, &space.rows[second].edges);
+            let band: Vec<f64> = spectrum
+                .iter()
+                .map(|&(_, _, _, other_first, other_second)| {
+                    let other_nodes = merged_multiset(
+                        &space.rows[other_first].nodes,
+                        &space.rows[other_second].nodes,
+                    );
+                    let other_edges = merged_multiset(
+                        &space.rows[other_first].edges,
+                        &space.rows[other_second].edges,
+                    );
+                    differing_observed_mass(
+                        &nodes,
+                        &other_nodes,
+                        &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                    ) + differing_observed_mass(
+                        &edges,
+                        &other_edges,
+                        &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                    )
+                })
+                .collect();
+            tied_bands.push((index, band));
+        }
+        let tied_refs: Vec<(usize, &[f64])> = tied_bands
+            .iter()
+            .map(|(index, band)| (*index, band.as_slice()))
+            .collect();
+        let cluster = (!called.is_empty()).then(|| {
+            let pairs: Vec<(f64, f64)> = spectrum
+                .iter()
+                .map(|&(distance, score, _, _, _)| (distance, score))
+                .collect();
+            cluster_form_qual(called_score, &pairs, &tied_refs)
+        });
+        let cluster_knee = cluster.as_ref().and_then(|state| state.knee);
+        let cluster_shape = cluster.as_ref().map(|state| state.shape);
+        let cluster_size = cluster.as_ref().map(|state| state.cluster_size);
+        let cluster_k = cluster.as_ref().map(|state| state.k);
+        let cluster_alternative = cluster.as_ref().and_then(|state| state.alternative);
+        let cluster_excluded = cluster
+            .as_ref()
+            .map(|state| state.excluded.iter().filter(|excluded| **excluded).count());
+        let confidence = cluster.as_ref().and_then(|state| state.p);
+        let qual = confidence.and_then(qual_from_p);
+        let qual_unbounded = confidence.is_some_and(|value| value >= 1.0);
+        let qual_delta = cluster_alternative.map(|best_alternative| called_score - best_alternative);
+        // The best genuinely divergent rival, NAMED: every class achieving a
+        // outside the called clusters, with its distance and identities.
+        let mut qual_alternative_classes: Vec<serde_json::Value> = Vec::new();
+        if let (Some(state), Some(alternative)) = (&cluster, cluster_alternative) {
+            for (index, ((distance, score, signature_distance, first, second), excluded)) in
+                spectrum.iter().zip(&state.excluded).enumerate()
+            {
+                if !excluded && *score == alternative {
+                    let (first, second) = (*first, *second);
+                    qual_alternative_classes.push(serde_json::json!({
+                        "spectrum_index": index,
+                        "distance": distance,
+                        "signature_distance": signature_distance,
+                        "similarity": score,
+                        "row_indices": [first, second],
+                        "identities": [candidates[space.rows[first].members[0]].identity,
+                                       candidates[space.rows[second].members[0]].identity],
+                    }));
+                }
+            }
+        }
+        let spectrum_zero_distance = (!called.is_empty())
+            .then(|| spectrum.iter().filter(|&&(distance, ..)| distance == 0.0).count());
+        let nearest_rival_distance = spectrum
+            .iter()
+            .find(|&&(distance, ..)| distance > 0.0)
+            .map(|&(distance, ..)| distance);
+        // Second view (diagnostic only): the same derived knee on the
+        // signature-cosine distance spectrum; the cluster cut uses the
+        // observed-mass distance.
+        let mut signature_sorted: Vec<f64> = spectrum
+            .iter()
+            .map(|&(_, _, signature, _, _)| signature)
+            .collect();
+        signature_sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite signature distances"));
+        let signature_view = (!spectrum.is_empty()).then(|| spectrum_knee(&signature_sorted))
+            .map(|knee| {
+                let cluster_size = 1 + spectrum
+                    .iter()
+                    .filter(|&&(_, _, signature, _, _)| signature <= knee.cut)
+                    .count();
+                (knee.has_knee, knee.cut, cluster_size)
+            });
+        let qual_tied_class_bands: Vec<serde_json::Value> = called
+            .iter()
+            .skip(1)
+            .zip(&tied_bands)
+            .map(|(&[first, second], (index, band))| {
+                serde_json::json!({
+                    "row_indices": [first, second],
+                    "spectrum_index": index,
+                    "distance_to_winner": spectrum[*index].0,
+                    "band_distances": band,
+                })
+            })
+            .collect();
         let mut qual_called_physical_pairs = 0u64;
         let qual_called_classes: Vec<serde_json::Value> = called
             .iter()
@@ -1382,20 +1753,49 @@ pub(super) fn dump_graph_exhaustive(
                 (Some(a), Some(b)) => Some(b as i64 - a as i64),
                 _ => None,
             },
-            // Product QUAL block (nodes+edges arm; the stage-1 machinery).
-            // The called set is the bit-identical maximum (class signatures,
-            // not member route identities); k = `qual_called_class_count`,
-            // s_win = `qual_best_similarity`, a = `qual_alternative_similarity`
-            // (null when every class outside the called set carries no
-            // similarity value, i.e. a = 0), p = s_win/(k*s_win + a),
+            // Product QUAL block (nodes+edges arm; the stage-1 machinery),
+            // CLUSTER FORM. The called set is the bit-identical maximum
+            // (class signatures, not member route identities). The cluster
+            // cut is the derived knee of the winner's material-distance
+            // spectrum (`qual_knee_distance`, null = no knee — a
+            // measurement); `qual_cluster_size` counts the classes within
+            // the cut (the winner included); k = `qual_cluster_k` DIVERGENT
+            // clusters whose best candidates bit-tie the maximum;
+            // a = `qual_alternative_similarity` is the best similarity
+            // OUTSIDE the near-identical called cluster(s) (null = none,
+            // i.e. a = 0); p = s_win/(k*s_win + a),
             // QUAL = -10*log10(1 - p). Unbounded (p = 1) is null plus
             // `qual_unbounded` — never clamped. `qual_similarity_total`
             // remains a diagnostic emission only: the total was the
-            // FALSIFIED share form's denominator and no longer enters the
-            // product formula.
+            // FALSIFIED share form's denominator and no QUAL form uses it.
+            // The full sorted material-distance spectrum (with aligned
+            // similarities and signature-cosine distances) is the
+            // per-locus evidence of where the cut lands; the best divergent
+            // rivals are named in `qual_alternative_classes`.
             "qual_similarity_total": (!called.is_empty()).then_some(combined_total),
             "qual_best_similarity": (!called.is_empty()).then_some(called_score),
-            "qual_alternative_similarity": (!called.is_empty()).then_some(alternative_score).flatten(),
+            "qual_spectrum_shape": cluster_shape,
+            "qual_knee_distance": cluster_knee,
+            "qual_cluster_size": cluster_size,
+            "qual_cluster_k": cluster_k,
+            "qual_spectrum_classes": (!called.is_empty()).then_some(spectrum.len()),
+            "qual_spectrum_zero_distance_classes": spectrum_zero_distance,
+            "qual_nearest_rival_distance": nearest_rival_distance,
+            "qual_excluded_class_count": cluster_excluded,
+            "qual_distance_spectrum": spectrum.iter().map(|&(distance, ..)| distance)
+                .collect::<Vec<_>>(),
+            "qual_distance_spectrum_scores": spectrum.iter().map(|&(_, score, ..)| score)
+                .collect::<Vec<_>>(),
+            "qual_signature_distance_spectrum": spectrum
+                .iter()
+                .map(|&(_, _, signature, ..)| signature)
+                .collect::<Vec<_>>(),
+            "qual_signature_view_knee": signature_view.map(|(has_knee, _, _)| has_knee),
+            "qual_signature_view_knee_distance": signature_view.map(|(_, cut, _)| cut),
+            "qual_signature_view_cluster_size": signature_view.map(|(_, _, size)| size),
+            "qual_tied_class_bands": qual_tied_class_bands,
+            "qual_alternative_similarity": cluster_alternative,
+            "qual_alternative_classes": qual_alternative_classes,
             "qual_delta_similarity": qual_delta,
             "qual_called_class_count": called.len(),
             "qual_called_classes": qual_called_classes,
@@ -1678,5 +2078,159 @@ mod graph_tests {
         let different_edge = row(vec![(1, 1)], vec![((2, 1), 1)]);
         assert_eq!(super::usage_hash(&left), super::usage_hash(&twin));
         assert_ne!(super::usage_hash(&left), super::usage_hash(&different_edge));
+    }
+
+    /// The derived knee rule: the maximal relative jump between consecutive
+    /// strictly-positive distances, with ties resolved to the largest
+    /// index; a jump that does not exceed the median jump is scale-free
+    /// and NO knee is claimed; the exactly-zero band never pins the cut.
+    #[test]
+    fn spectrum_knee_derived_rule() {
+        // Dense near-identical band then a divergent tail: the cut is the
+        // LAST band point before the maximal relative jump.
+        let knee = super::spectrum_knee(&[0.0, 0.0, 0.001, 0.002, 5.0, 8.0, 12.0]);
+        assert!(knee.has_knee);
+        assert!((knee.cut - 0.002).abs() < 1e-12);
+        // The zero band never pins the cut (bit-identical material is
+        // innermost, always in the cluster): positives [0.5, 1, 500] give
+        // jumps 0.5 and 0.998, so the knee is 1.0, not 0.5.
+        let knee = super::spectrum_knee(&[0.0, 0.5, 1.0, 500.0]);
+        assert!(knee.has_knee);
+        assert!((knee.cut - 1.0).abs() < 1e-12);
+        // Exact geometric growth is scale-free: every relative jump equals
+        // the median, so no knee exists — a measurement, not an error.
+        assert!(!super::spectrum_knee(&[1.0, 10.0, 100.0, 1000.0]).has_knee);
+        // Fewer than two strictly-positive distances: no knee claimed.
+        assert!(!super::spectrum_knee(&[0.0, 0.0]).has_knee);
+        assert!(!super::spectrum_knee(&[0.0, 7.0]).has_knee);
+        assert!(!super::spectrum_knee(&[]).has_knee);
+        // Max-jump ties resolve to the LARGEST index so the band absorbs
+        // the full dense run: [1, 2, 3, 30, 300] gives jumps
+        // 0.5, 1/3, 0.9, 0.9 — the tie between 3→30 and 30→300 cuts at 30.
+        let knee = super::spectrum_knee(&[1.0, 2.0, 3.0, 30.0, 300.0]);
+        assert!(knee.has_knee);
+        assert!((knee.cut - 30.0).abs() < 1e-12);
+        // A flat all-zero spectrum (every class bit-identical): no knee,
+        // cut 0 — the whole domain is one cluster by the distance rule.
+        let knee = super::spectrum_knee(&[0.0, 0.0, 0.0]);
+        assert!(!knee.has_knee);
+        assert_eq!(knee.cut, 0.0);
+    }
+
+    /// The signature-cosine distance (the second view): 0 on identical
+    /// signatures, 1 on disjoint ones, hand-computed in between; depth
+    /// cancels because it is a common factor of both raw signatures.
+    #[test]
+    fn signature_cosine_distance_second_view() {
+        let nodes = vec![(1u64, 1u32), (2, 1)];
+        let edges = vec![(pack_edge(1, 2), 1u32)];
+        assert_eq!(
+            super::signature_cosine_distance(&nodes, &edges, &nodes, &edges),
+            0.0
+        );
+        let other_nodes = vec![(3u64, 1u32)];
+        let other_edges = vec![(pack_edge(3, 4), 1u32)];
+        assert_eq!(
+            super::signature_cosine_distance(&nodes, &edges, &other_nodes, &other_edges),
+            1.0
+        );
+        // a = {1:1, 2:1} + edge(1,2) (||a||² = 3); b = {1:2, 2:1} + edge(1,2)
+        // (||b||² = 6); overlap = 1*2 + 1*1 + 1*1 = 4.
+        let doubled = vec![(1u64, 2u32), (2, 1)];
+        let expected = 1.0 - 4.0 / (3.0f64 * 6.0f64).sqrt();
+        assert!(
+            (super::signature_cosine_distance(&nodes, &edges, &doubled, &edges) - expected).abs()
+                < 1e-15
+        );
+        assert_eq!(super::signature_cosine_distance(&[], &[], &nodes, &edges), 1.0);
+        assert_eq!(super::signature_cosine_distance(&[], &[], &[], &[]), 0.0);
+    }
+
+    /// The CLUSTER-FORM reductions, measured on synthetic domains (the
+    /// owner's ruling made countable): (i) an all-near-identical domain
+    /// with a far divergent tail rates HIGH; (ii) a bit-tie of divergent
+    /// materials keeps the honest low bound; (iii) a divergent near-score
+    /// rival supplies a and keeps Q low; (iv) bit-identical members are
+    /// invisible. Plus the divergent-cluster k semantics (single-linkage
+    /// chains) and monotonicity in a at cluster level.
+    #[test]
+    fn cluster_form_qual_owner_reductions() {
+        let s = 0.5f64;
+        // (i) The owner's ten-sequences case: nine near-identical twins
+        // (small observed mass on differing material) form ONE cluster —
+        // the knee absorbs them — and the far rival supplies a, so the
+        // call rates HIGH.
+        let mut spectrum = Vec::new();
+        for _ in 0..9 {
+            spectrum.push((0.001, 0.4999));
+        }
+        spectrum.push((50.0, 0.05));
+        spectrum.push((80.0, 0.04));
+        let cluster = super::cluster_form_qual(s, &spectrum, &[]);
+        assert_eq!(cluster.cluster_size, 10); // the winner + nine twins
+        assert_eq!(cluster.k, 1);
+        assert_eq!(cluster.alternative, Some(0.05));
+        assert!(cluster.p.unwrap() > 0.9); // s/(s + 0.05) = 0.909
+        assert_eq!(cluster.shape, "knee");
+        // (ii) A bit-tie of DIVERGENT materials: no knee on the two-point
+        // spectrum, the tie partner sits outside the winner's cluster, so
+        // k = 2 and p lands at the honest 1/2 bound (Q = 3.01).
+        let spectrum = vec![(50.0, s)];
+        let tied = vec![(0usize, vec![0.0f64])]; // the partner's band: itself
+        let tied_refs: Vec<(usize, &[f64])> =
+            tied.iter().map(|(i, b)| (*i, b.as_slice())).collect();
+        let cluster = super::cluster_form_qual(s, &spectrum, &tied_refs);
+        assert_eq!(cluster.cluster_size, 1);
+        assert_eq!(cluster.k, 2);
+        assert_eq!(cluster.alternative, None);
+        assert_eq!(cluster.p, Some(0.5));
+        // (iii) A divergent NEAR-SCORE rival: no knee, it stays outside the
+        // cluster, supplies a ≈ s_win, and Q stays low.
+        let cluster = super::cluster_form_qual(s, &[(50.0, 0.499)], &[]);
+        assert_eq!(cluster.cluster_size, 1);
+        assert_eq!(cluster.k, 1);
+        assert_eq!(cluster.alternative, Some(0.499));
+        assert!(cluster.p.unwrap() < 0.51);
+        assert_eq!(cluster.shape, "no_knee");
+        // (iv) Bit-identical members are invisible: distance 0 always
+        // lands inside the cluster (no knee needed), never supplies a,
+        // never counts in k.
+        let cluster = super::cluster_form_qual(s, &[(0.0, 0.4), (0.0, 0.3), (5.0, 0.25)], &[]);
+        assert_eq!(cluster.cluster_size, 3);
+        assert_eq!(cluster.k, 1);
+        assert_eq!(cluster.alternative, Some(0.25));
+        // A bit-tied class INSIDE the winner's band does not count in k; a
+        // chained twin (near the winner's twin, far from the winner) joins
+        // the SAME cluster by single linkage.
+        // spectrum: T1 at 0.5 (in band, knee cut 0.5), T2 at 100 (far),
+        // rival at 150; d(T1, T2) = 0.4 chains T2 into the winner cluster.
+        let spectrum = vec![(0.5, s), (100.0, s), (150.0, 0.1)];
+        let tied = vec![
+            (0usize, vec![0.0f64, 0.4, 30.0]), // T1's band
+            (1usize, vec![0.4f64, 0.0, 30.0]), // T2's band
+        ];
+        let tied_refs: Vec<(usize, &[f64])> =
+            tied.iter().map(|(i, b)| (*i, b.as_slice())).collect();
+        let cluster = super::cluster_form_qual(s, &spectrum, &tied_refs);
+        assert_eq!(cluster.k, 1); // winner—T1 in band; T2 chains through T1
+        assert_eq!(cluster.cluster_size, 2); // T2 is outside the winner's band
+        assert_eq!(cluster.alternative, Some(0.1)); // the rival supplies a
+        // Monotonicity in a at cluster level: a closer divergent rival
+        // (higher similarity) lowers p.
+        let far = super::cluster_form_qual(s, &[(0.001, 0.4999), (50.0, 0.05), (80.0, 0.02)], &[]);
+        let near = super::cluster_form_qual(s, &[(0.001, 0.4999), (50.0, 0.4), (80.0, 0.02)], &[]);
+        assert!(far.p.unwrap() > near.p.unwrap());
+        // A divergent bit-tie with a far tail: k = 2 clusters bit-tie the
+        // max and the tail supplies a — p = s/(2s + a) stays low even
+        // though the tail is far (the REAL ambiguity is the divergent
+        // tie, exactly what must be kept).
+        let spectrum = vec![(50.0, s), (200.0, 0.1)];
+        let tied = vec![(0usize, vec![0.0f64, 200.0])];
+        let tied_refs: Vec<(usize, &[f64])> =
+            tied.iter().map(|(i, b)| (*i, b.as_slice())).collect();
+        let cluster = super::cluster_form_qual(s, &spectrum, &tied_refs);
+        assert_eq!(cluster.k, 2);
+        assert_eq!(cluster.alternative, Some(0.1));
+        assert!(cluster.p.unwrap() < 0.5);
     }
 }

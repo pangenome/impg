@@ -15,18 +15,27 @@ still reconciles them — stage-1 reproduction, the share re-derivation, the
 called-set machinery, the k-way bound and the tie-evidence stream — so the
 falsified form's artifacts remain auditable.
 
-QUAL phase II (the DELTA FORM, the current product semantics): p = s_win /
+QUAL phase II (the DELTA FORM receipts, kept on disk as the record): p = s_win /
 (k*s_win + a) with k = distinct material classes bit-tied at the maximum
 s_win and a = the best similarity among ALL classes outside the called set
-(a = 0 if none); QUAL = -10*log10(1 - p). The new receipts must reproduce
-every stage-1 measurement and every stage-2 machinery field of the committed
-share-form receipts exactly (integers/booleans/masks; documented cross-run
-ULP tolerance on the HashMap-ordered float sums), the checker re-derives p
-(exact IEEE arithmetic), the Phred QUAL, the unbounded/massless null
-emission, the k-way derived bound Q <= -10*log10(1 - 1/k) (equality iff
-a = 0), measured monotonicity in a and k across loci, and reconciles the
-tie-evidence stream against both the stage-1 tied-pairs counter and the
-committed share-form stream.
+(a = 0 if none); QUAL = -10*log10(1 - p). The checker still reconciles
+them against stage-1 and the share-form machinery.
+
+QUAL phase III (the CLUSTER FORM, the current product semantics — the
+owner's ruling that the near-twin runner-ups are not real alternatives):
+the same formula applied BETWEEN CLUSTERS. The material distance between
+two classes is the observed mass on the symmetric difference of their
+node+edge usage signatures (signature-cosine distance as a second view);
+the cluster cut is the DERIVED KNEE of the winner's sorted distance
+spectrum (maximal relative jump between consecutive strictly-positive
+distances, ties to the largest index; no knee when the maximal jump does
+not exceed the median jump); k = DIVERGENT clusters whose best candidates
+bit-tie the maximum; a = the best similarity OUTSIDE the near-identical
+called cluster(s). The checker re-derives the knee, the cluster size, the
+exclusion union, k, a, p and QUAL from the emitted per-locus spectrum
+fail-closed, reconciles stage-1 and stage-2 machinery against the delta
+receipts, and prints the per-locus cluster tables plus the re-rated QUAL
+distribution against the delta-form band.
 """
 import json
 import math
@@ -57,6 +66,25 @@ STAGE1_FLOAT_ULP = [
     'observed_node_norm', 'observed_edge_norm', 'nodes_truth_cosine',
     'combined_truth_cosine', 'nodes_best_cosine', 'combined_best_cosine',
 ]
+
+
+def knee_cut(distances):
+    """The derived knee rule, mirrored from the Rust `spectrum_knee`: the
+    maximal relative jump between consecutive STRICTLY-POSITIVE sorted
+    distances (0/0 := 0), ties resolved to the largest index; no knee when
+    fewer than two positive distances exist or the maximal jump does not
+    exceed the median jump. Returns (has_knee, cut)."""
+    positives = [d for d in distances if d > 0.0]
+    if len(positives) < 2:
+        return False, 0.0
+    jumps = [(b - a) / b for a, b in zip(positives, positives[1:])]
+    ordered = sorted(jumps)
+    mid = len(ordered) // 2
+    typical = ordered[mid] if len(ordered) % 2 else 0.5 * (ordered[mid - 1] + ordered[mid])
+    best = max(jumps)
+    if best > typical:
+        return True, positives[max(i for i, j in enumerate(jumps) if j == best)]
+    return False, 0.0
 
 for component, expected in [('chrMT', 8), ('chrI', 17)]:
     prefix = D / f'run-cosine-graph-pilot-{component}'
@@ -494,4 +522,272 @@ for component, expected in [('chrMT', 8), ('chrI', 17)]:
     for locus, k, p_value, counterfactual in wide_loci:
         print(f'{component} measured k-monotonicity at locus {locus}: k={k} p={p_value:.6f} < '
               f'counterfactual k=1 p={counterfactual:.6f} (same s_win, a)')
+
+    # --- QUAL receipts phase III: the CLUSTER FORM (current product semantics) ---
+    # p = s_win/(k*s_win + a) BETWEEN CLUSTERS: the material distance is the
+    # observed mass on the symmetric difference of the node+edge usage
+    # signatures; the cluster cut is the derived knee of the winner's
+    # sorted distance spectrum; k = DIVERGENT clusters whose best
+    # candidates bit-tie the maximum; a = the best similarity OUTSIDE the
+    # near-identical called cluster(s). Everything re-derived from the
+    # emitted per-locus spectrum, fail-closed.
+    cprefix = D / f'run-cosine-graph-qual-cluster-pilot-{component}'
+    assert Path(f'{cprefix}.done').exists()
+    assert Path(f'{cprefix}.exit').read_text().strip() == '0'
+    crows = [json.loads(line) for line in (D / f'cosine-graph-qual-cluster-{component}.jsonl').open()]
+    assert len(crows) == len(rows)
+    ctie_stream = {}
+    with (D / f'cosine-graph-qual-cluster-{component}.jsonl.ties.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            ctie_stream.setdefault(entry['locus'], []).append(entry)
+    for prior, drow, crow in zip(rows, drows, crows):
+        assert prior['locus'] == drow['locus'] == crow['locus']
+        # Stage-1 fields reproduce the committed exhaustive receipts.
+        for field in STAGE1_EXACT:
+            assert prior[field] == crow[field], (component, field, crow['locus'])
+        for field in STAGE1_FLOAT_ULP:
+            old, new = prior[field], crow[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, crow['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, crow['locus'])
+        assert sorted(map(list, prior['identity_kinds'])) == sorted(map(list, crow['identity_kinds']))
+        # Stage-2 machinery reproduces the delta receipts exactly; the
+        # falsified share field never returns.
+        assert 'qual_share' not in crow
+        for field in ('qual_called_class_count', 'qual_called_physical_pairs',
+                      'qual_truth_in_called_set', 'combined_ties_with_truth_streamed'):
+            assert drow[field] == crow[field], (component, field, crow['locus'])
+        for field in ('qual_similarity_total', 'qual_best_similarity'):
+            old, new = drow[field], crow[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, crow['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, crow['locus'])
+        assert len(drow['qual_called_classes']) == len(crow['qual_called_classes'])
+        for old_cls, new_cls in zip(drow['qual_called_classes'], crow['qual_called_classes']):
+            for field in ('row_indices', 'row_member_counts', 'physical_pair_members',
+                          'row_node_counts', 'row_edge_counts', 'row_usage_hashes',
+                          'node_distance_to_first_called_class',
+                          'edge_distance_to_first_called_class',
+                          'node_differing_observed_mass_to_first_called',
+                          'edge_differing_observed_mass_to_first_called',
+                          'is_truth_class'):
+                assert old_cls[field] == new_cls[field], (component, field, crow['locus'])
+        # The tie-evidence stream is identical to the delta receipts
+        # (integers exact, floats within the documented cross-run ULP
+        # tolerance — reconciled below via the same fields).
+        centries = ctie_stream.get(crow['locus'], [])
+        dentries = dtie_stream.get(crow['locus'], [])
+        assert crow['combined_ties_with_truth_streamed'] == len(centries) == len(dentries)
+        for dentry, entry in zip(dentries, centries):
+            assert sorted(entry['row_indices']) == sorted(dentry['row_indices'])
+            for field in ('combined_bit_exact', 'combined_ulp_delta', 'is_truth_class',
+                          'shared_rows_with_truth', 'node_distance_vs_truth_class',
+                          'edge_distance_vs_truth_class',
+                          'node_differing_observed_mass_vs_truth',
+                          'edge_differing_observed_mass_vs_truth', 'row_member_counts'):
+                assert entry[field] == dentry[field], (component, field, crow['locus'])
+        # Cluster re-derivation from the emitted spectrum.
+        eligible = crow['eligible_pairs_combined']
+        if eligible == 0:
+            assert crow['qual_called_class_count'] == 0
+            for field in ('qual_spectrum_shape', 'qual_knee_distance', 'qual_cluster_size',
+                          'qual_cluster_k', 'qual_spectrum_classes',
+                          'qual_spectrum_zero_distance_classes',
+                          'qual_excluded_class_count', 'qual_nearest_rival_distance',
+                          'qual_alternative_similarity', 'qual_delta_similarity',
+                          'qual_p', 'qual', 'qual_signature_view_knee',
+                          'qual_signature_view_knee_distance',
+                          'qual_signature_view_cluster_size'):
+                assert crow[field] is None, (component, field, crow['locus'])
+            assert crow['qual_unbounded'] is False
+            assert crow['qual_distance_spectrum'] == []
+            assert crow['qual_distance_spectrum_scores'] == []
+            assert crow['qual_signature_distance_spectrum'] == []
+            assert crow['qual_tied_class_bands'] == []
+            assert crow['qual_alternative_classes'] == []
+            continue
+        spec_d = crow['qual_distance_spectrum']
+        spec_s = crow['qual_distance_spectrum_scores']
+        spec_sig = crow['qual_signature_distance_spectrum']
+        assert len(spec_d) == len(spec_s) == len(spec_sig) == eligible - 1
+        assert all(a <= b for a, b in zip(spec_d, spec_d[1:]))  # sorted spectrum
+        has_knee, cut = knee_cut(spec_d)
+        assert crow['qual_knee_distance'] == (cut if has_knee else None)
+        assert crow['qual_spectrum_shape'] == (
+            'single_class' if not spec_d else ('knee' if has_knee else 'no_knee'))
+        assert crow['qual_spectrum_classes'] == len(spec_d)
+        in_band = [d <= cut for d in spec_d]
+        assert crow['qual_cluster_size'] == 1 + sum(in_band)
+        assert crow['qual_spectrum_zero_distance_classes'] == sum(d == 0.0 for d in spec_d)
+        nearest = next((d for d in spec_d if d > 0.0), None)
+        assert crow['qual_nearest_rival_distance'] == nearest
+        # Exclusion: the union of the near-identity bands of ALL called
+        # classes (the winner's band plus every tied class's band).
+        excluded = list(in_band)
+        bands = crow['qual_tied_class_bands']
+        assert len(bands) == crow['qual_called_class_count'] - 1
+        for band in bands:
+            assert len(band['band_distances']) == len(spec_d)
+            index = band['spectrum_index']
+            assert spec_d[index] == band['distance_to_winner']
+            assert band['band_distances'][index] == 0.0
+            for i, distance in enumerate(band['band_distances']):
+                if distance <= cut:
+                    excluded[i] = True
+        assert crow['qual_excluded_class_count'] == sum(excluded)
+        outside = [s for s, e in zip(spec_s, excluded) if not e]
+        alternative = max(outside) if outside else None
+        assert crow['qual_alternative_similarity'] == alternative
+        # k: single-linkage components among the called classes (the winner
+        # plus the tied classes) under near-identity distance <= cut.
+        n = 1 + len(bands)
+        parent = list(range(n))
+
+        def find(node):
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if i == 0:
+                    distance = bands[j - 1]['distance_to_winner']
+                elif j == 0:
+                    distance = bands[i - 1]['distance_to_winner']
+                else:
+                    distance = bands[i - 1]['band_distances'][bands[j - 1]['spectrum_index']]
+                if distance <= cut:
+                    parent[find(i)] = find(j)
+        k_clusters = len({find(i) for i in range(n)})
+        assert crow['qual_cluster_k'] == k_clusters
+        best = crow['qual_best_similarity']
+        assert alternative is None or alternative < best
+        denominator = k_clusters * best + (alternative or 0.0)
+        if denominator <= 0.0:
+            assert best == 0.0
+            assert crow['qual_p'] is None and crow['qual'] is None
+            assert crow['qual_unbounded'] is False
+        else:
+            p = best / denominator
+            assert crow['qual_p'] == p  # exact IEEE re-derivation
+            assert crow['qual_delta_similarity'] == (
+                None if alternative is None else best - alternative)
+            if p >= 1.0:
+                assert crow['qual_unbounded'] is True and crow['qual'] is None
+                assert k_clusters == 1 and not alternative  # only k=1 with a = 0
+            else:
+                expected_qual = -10.0 * math.log10(1.0 - p)
+                assert crow['qual'] is not None
+                assert abs(crow['qual'] - expected_qual) <= 1e-9 * max(1.0, abs(expected_qual))
+                assert crow['qual_unbounded'] is False
+                if k_clusters >= 2:
+                    bound = -10.0 * math.log10(1.0 - 1.0 / k_clusters)
+                    assert crow['qual'] <= bound + 1e-9, (component, crow['locus'])
+        # The best genuinely divergent rival is NAMED, and every class
+        # achieving it is listed (naming the top competitors as before).
+        achievers = [i for i, (s, e) in enumerate(zip(spec_s, excluded))
+                     if not e and s == alternative]
+        assert len(crow['qual_alternative_classes']) == len(achievers)
+        for i, entry in zip(achievers, crow['qual_alternative_classes']):
+            assert entry['spectrum_index'] == i
+            assert entry['distance'] == spec_d[i]
+            assert entry['signature_distance'] == spec_sig[i]
+            assert entry['similarity'] == alternative
+            assert len(entry['identities']) == 2
+        # Reduction (iv) audit: bit-identical (distance-0) classes are
+        # inside the cluster and never supply the alternative.
+        assert all(excluded[i] for i, d in enumerate(spec_d) if d == 0.0)
+        # Second view: the same derived knee on the signature-cosine
+        # distances (diagnostic; the product cut uses the material
+        # distance). An empty spectrum emits nulls.
+        if spec_sig:
+            sig_has_knee, sig_cut = knee_cut(sorted(spec_sig))
+            assert crow['qual_signature_view_knee'] == sig_has_knee
+            assert crow['qual_signature_view_knee_distance'] == (sig_cut if sig_has_knee else None)
+            assert crow['qual_signature_view_cluster_size'] == 1 + sum(s <= sig_cut for s in spec_sig)
+        else:
+            assert crow['qual_signature_view_knee'] is None
+            assert crow['qual_signature_view_knee_distance'] is None
+            assert crow['qual_signature_view_cluster_size'] is None
+        # Measured cluster-level monotonicity in a: absorbing the best
+        # divergent rival into the band (a falls to the next-best outside
+        # similarity) strictly raises the confidence.
+        if crow['qual_p'] is not None and alternative is not None and len(outside) >= 2:
+            next_best = sorted(outside)[-2]
+            if next_best < alternative:
+                assert best / (k_clusters * best + next_best) > crow['qual_p'], \
+                    (component, crow['locus'])
+    csurvivors = [row for row in crows if row['truth_pair_expressible']]
+    print(f'{component} CLUSTER-FORM QUAL table (shape, cluster size, knee distance, k, '
+          f's_win, a, a/s_win, p, QUAL, nearest rival distance; truth-expressible loci):')
+    for row in csurvivors:
+        alt = row['qual_alternative_similarity']
+        best = row['qual_best_similarity']
+        a_str = 'none(0)' if alt is None else f'{alt:.6f}'
+        ratio = 'inf' if alt is None else f'{alt / best:.4f}'
+        knee = row['qual_knee_distance']
+        knee_str = 'none' if knee is None else f'{knee:.4f}'
+        nearest = row['qual_nearest_rival_distance']
+        near_str = 'n/a' if nearest is None else f'{nearest:.4f}'
+        qual = 'inf' if row['qual_unbounded'] else (
+            '%.2f' % row['qual'] if row['qual'] is not None else 'null')
+        rivals = ' | '.join(e['identities'][0] for e in row['qual_alternative_classes'][:2])
+        print(f"  locus {row['locus']}: {row['qual_spectrum_shape']}, "
+              f"cluster {row['qual_cluster_size']}/{row['qual_spectrum_classes'] + 1}, "
+              f"knee {knee_str}, k {row['qual_cluster_k']}, s_win {best:.6f}, a {a_str} "
+              f"(a/s_win {ratio}), p {row['qual_p']:.6f}, QUAL {qual}, "
+              f"nearest rival {near_str}, truth-in "
+              f"{'YES' if row['qual_truth_in_called_set'] else 'no'}; top divergent: {rivals}")
+
+    def cluster_summary(qual_list):
+        finite = sorted(q for q in qual_list if q is not None)
+        if not finite:
+            return 'none finite'
+        mid = len(finite) // 2
+        median = finite[mid] if len(finite) % 2 else 0.5 * (finite[mid - 1] + finite[mid])
+        return f'min {finite[0]:.4f}, median {median:.4f}, max {finite[-1]:.4f}'
+
+    cluster_quals = [row['qual'] for row in crows]
+    cluster_unbounded = sum(1 for row in crows if row['qual_unbounded'])
+    print(f'{component} QUAL distributions side by side (all {len(crows)} loci): '
+          f'delta form {sum(q is not None for q in delta_quals)} finite '
+          f'[{cluster_summary(delta_quals)}], {delta_unbounded} unbounded VS cluster form '
+          f'{sum(q is not None for q in cluster_quals)} finite '
+          f'[{cluster_summary(cluster_quals)}], {cluster_unbounded} unbounded')
+    re_rated = sum(1 for d, c in zip(delta_quals, cluster_quals) if d != c)
+    print(f'{component} re-rated loci (cluster QUAL != delta QUAL): {re_rated}/{len(crows)}')
+    # Measured monotonicity in a at cluster level: across all k = 1 loci,
+    # p = s_win/(s_win + a) falls as the a/s_win ratio rises.
+    singles = []
+    for row in crows:
+        if row['qual_p'] is None or row['qual_cluster_k'] != 1:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity']
+        ratio = 0.0 if alt is None else alt / best
+        singles.append((ratio, row['qual_p']))
+    singles.sort(key=lambda item: item[0])
+    for (r0, p0), (r1, p1) in zip(singles, singles[1:]):
+        assert p1 <= p0 * (1.0 + 1e-9) + 1e-15, (component, r0, r1, p0, p1)
+    # Measured monotonicity in k at cluster level: at each k >= 2 locus the
+    # counterfactual k = 1 confidence with the same (s_win, a) is higher.
+    for row in crows:
+        k = row['qual_cluster_k']
+        if row['qual_p'] is None or k is None or k < 2:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity'] or 0.0
+        counterfactual = best / (best + alt)
+        assert counterfactual > row['qual_p'], (component, row['locus'])
+    in_set = sum(1 for row in csurvivors if row['qual_truth_in_called_set'])
+    print(f'{component} cluster-form summary: truth-in-called-set {in_set}/{expected} '
+          f'(unchanged by the formula), loci with >=2 divergent tied clusters '
+          f'{sum(1 for row in crows if (row["qual_cluster_k"] or 0) >= 2)}/{len(crows)}, '
+          f'knee spectra {sum(1 for row in crows if row["qual_knee_distance"] is not None)}'
+          f'/{len(crows)}, no-knee spectra '
+          f'{sum(1 for row in crows if row["qual_spectrum_shape"] == "no_knee")}/{len(crows)}')
 print('all checks passed')
