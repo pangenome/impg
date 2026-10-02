@@ -1,6 +1,6 @@
 # Diploid local coverage-vector comparison — owner-review design
 
-Status: **ROW-COORDINATE OBJECTIVE REFUTED; GRAPH-SPACE CONDENSATION MEASURED AT chrMT/chrI (FIRST CHECKPOINT, TIE CLAIM CORRECTED); CLASS-LEVEL QUAL EMISSION DERIVED AND MEASURED ON chrMT/chrI — 502-LOCUS PROOF, SELECTION SWAP AND VIABILITY CHANGES STILL OWNER-GATED** (2026-10-01). The sections below preserve the pre-registered row-coordinate proposal, the reason for testing it, and the first measured graph-space numbers. They are NOT a production implementation recipe. No selection path, output score, reference column, or PR has been changed.
+Status: **ROW-COORDINATE OBJECTIVE REFUTED; GRAPH-SPACE CONDENSATION MEASURED AT chrMT/chrI (FIRST CHECKPOINT, TIE CLAIM CORRECTED); SHARE-FORM QUAL MEASURED FALSIFIED AND SUPERSEDED BY THE DELTA FORM, MEASURED ON chrMT/chrI — 502-LOCUS PROOF, SELECTION SWAP AND VIABILITY CHANGES STILL OWNER-GATED** (2026-10-01). The sections below preserve the pre-registered row-coordinate proposal, the reason for testing it, and the first measured graph-space numbers. They are NOT a production implementation recipe. No selection path, output score, reference column, or PR has been changed.
 
 ## First graph-space checkpoint: condensation build measured on chrMT and chrI
 
@@ -13,6 +13,21 @@ This checkpoint does NOT license promotion: the 502-locus exhaustive graph-space
 ## Correction to the first checkpoint's tie claim (2026-10-01, QUAL stage)
 
 The measured paragraph above states "**Every rank1 is a tie** (9 tied pairs chrMT, 20 chrI): no locus has a uniquely-best truth pair." That is a MISREADING of the receipts' tied-pairs counter: `*_truth_tied_pairs` counts every class inside the 1e-12 window of the truth class INCLUDING the truth class itself, so a count of 1 means UNIQUE. The committed receipts read `tied_pairs = 1` at ALL THREE rank-1 loci (chrMT locus2, locus5; chrI locus6): the best pair IS the truth pair and no other pair is within 1e-12 — **the truth class is the UNIQUE maximum in both arms at those loci**. The "9 tied pairs chrMT, 20 chrI" totals are the sums of that counter (which includes the singleton counts), not counts of genuine ties. Genuine score ties with truth exist only BELOW the maximum: chrMT locus7 (2-way, combined rank 3), chrI locus2 (3-way, combined rank 67), chrI locus14 (2-way, combined rank 1385). The rank1 counts themselves (chrMT 2/8, chrI 1/17) were correct; the "no tie-break policy exists, so exact calls remain impossible" blocker applies to the below-max ties and to any future tie, not to the measured rank-1 loci.
+
+## QUAL emission, delta form: the similarity DELTA (owner ruling, 2026-10-01; supersedes the share form above)
+
+**The share form is MEASURED FALSIFIED.** The forced normalization `share = s_win / Σ s_c` over every distinct class tracked the called set's fraction of the domain's TOTAL similarity mass, not the similarity delta: in these exhaustive domains thousands of eligible near-twin classes each carry substantial similarity, so every measured share lay between 4e-5 and 1e-2 and every finite QUAL between 0.0002 and 0.37 — no discrimination between a confident unique maximum and a genuine tie (the k=2 tie loci scored 0.0006/0.0003, indistinguishable from the separated unique maxima). The section above and its receipts (`cosine-graph-qual-{chrMT,chrI}.jsonl`) remain untouched on disk as the measured falsified record; the receipt checker still reconciles them.
+
+**Derivation of the delta form.** Keep every piece of stage-2 machinery — material-class coalescing (bit-identical node+edge usage signatures merge; class weight = the class's OWN similarity value), called set = distinct classes at the bit-identical maximum, null emission for unbounded/massless loci, the tie-evidence stream — and replace ONLY the quality formula. The called set's confidence over its best alternative is the FORCED TWO-WAY NORMALIZATION `k*s_win` vs `a`: class mass under exclusive hypotheses (either the truth is in the called set or the best alternative wins; classes below `a` are strictly dominated and enter nowhere — any wider normalization would reintroduce the falsified domain-mass dependence). Within a bit-tied called set the truth is UNIFORM — measured in the tie anatomy: every differing node/edge carries zero observed read mass, so this read sample cannot distinguish the tied classes. The emitted call is a single material draw, so the confidence in it is
+
+```
+p = (k*s_win / (k*s_win + a)) * (1/k) = s_win / (k*s_win + a)
+QUAL = -10*log10(1 - p)
+```
+
+with `k` = distinct material classes bit-tied at the maximum `s_win`, and `a` = the best similarity among ALL classes outside the called set (`a = 0` if none). NO free parameters: the Phred convention and the forced two-way normalization are the only derived forms, both documented here.
+
+**Reduction checks.** (i) `k = 1` unique maximum with a clear gap (`a << s_win`) gives `p → 1`, QUAL high; `a = 0` is the unbounded null emission. (ii) An exact k-way tie holding all the domain's similarity (`a = 0`) gives `p = s_win/(k*s_win) = 1/k` and `QUAL = -10*log10(1 - 1/k)` bit-identically (unit-proven for k = 2, 3, 5, 9 in `qual_all_mass_k_way_class_tie_lands_at_derived_bound`, adapted from the share-form test). (iii) A near-twin at `a ≈ s_win` gives `p ≈ 1/2`, QUAL ≈ 3.01 — low and honest. (iv) Coalesced member-level ties never lower QUAL: the formula's only inputs are `(s_win, k, a)`, `k` counts DISTINCT classes only and no member sum exists, so a called class holding 12 route members and one holding 1 produce the same p. Unbounded (`p = 1`, exactly `k = 1` with `a = 0`) and massless (`s_win = 0`) loci emit null plus an explicit flag, never a clamp.
 
 ## QUAL emission: derived product semantics on the graph-space ranking path (owner ruling, measured on chrMT/chrI)
 

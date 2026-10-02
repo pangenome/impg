@@ -9,16 +9,24 @@ every streamed competitor's arm flags, scores and truth references; the
 path-continuity audit (the chain-junction channel's measured emptiness); and
 the arm-delta summary (the edge layer's contribution as separate numbers).
 
-QUAL phase (material-class product semantics, owner ruling 2026-10-01): the
-new receipts must reproduce every stage-1 measurement bit-identically, and
-per locus the checker re-derives the class share (called class value over the
-total similarity of every distinct material class), the Phred QUAL
--10*log10(1 - share), the called-set size/signatures/physical-pair
-multiplicity, truth-in-called-set, the k-way-tie derived bound
-Q <= -10*log10(1 - 1/k) (equality iff the tie holds all the domain's mass),
-and reconciles the tie-evidence stream against the stage-1 tied-pairs
-counter, including bit-exactness and node/edge usage distances versus the
-truth class.
+QUAL phase I (the committed share-form receipts, MEASURED FALSIFIED as a
+discrimination signal and kept untouched on disk as the record): the checker
+still reconciles them — stage-1 reproduction, the share re-derivation, the
+called-set machinery, the k-way bound and the tie-evidence stream — so the
+falsified form's artifacts remain auditable.
+
+QUAL phase II (the DELTA FORM, the current product semantics): p = s_win /
+(k*s_win + a) with k = distinct material classes bit-tied at the maximum
+s_win and a = the best similarity among ALL classes outside the called set
+(a = 0 if none); QUAL = -10*log10(1 - p). The new receipts must reproduce
+every stage-1 measurement and every stage-2 machinery field of the committed
+share-form receipts exactly (integers/booleans/masks; documented cross-run
+ULP tolerance on the HashMap-ordered float sums), the checker re-derives p
+(exact IEEE arithmetic), the Phred QUAL, the unbounded/massless null
+emission, the k-way derived bound Q <= -10*log10(1 - 1/k) (equality iff
+a = 0), measured monotonicity in a and k across loci, and reconciles the
+tie-evidence stream against both the stage-1 tied-pairs counter and the
+committed share-form stream.
 """
 import json
 import math
@@ -124,7 +132,13 @@ for component, expected in [('chrMT', 8), ('chrI', 17)]:
           f'{len(changed)} truth rank(s) changed by the edge layer: {changed}; '
           f'{empty_usage_competitors} competitor pair(s) involve an empty-usage row')
 
-    # --- QUAL receipts phase (material-class product semantics) ---
+    # --- QUAL receipts phase I: the committed share-form record (FALSIFIED) ---
+    # The share form was measured falsified: it tracked the called class's
+    # fraction of the domain's TOTAL similarity (Q 0.0002-0.37 everywhere,
+    # no separation between a confident unique max and a genuine tie). Its
+    # receipts stay on disk untouched as the measured record and remain
+    # reconciled here; the delta form (phase II below) replaces ONLY the
+    # quality formula.
     qprefix = D / f'run-cosine-graph-qual-pilot-{component}'
     assert Path(f'{qprefix}.done').exists()
     assert Path(f'{qprefix}.exit').read_text().strip() == '0'
@@ -249,7 +263,8 @@ for component, expected in [('chrMT', 8), ('chrI', 17)]:
                     assert entry['combined_ulp_delta'] == 0
             assert truth_entries == 1
     qsurvivors = [row for row in qrows if row['truth_pair_expressible']]
-    print(f'{component} QUAL table (material classes, combined arm), truth-expressible loci:')
+    print(f'{component} share-form QUAL table (FALSIFIED record; material classes, '
+          f'combined arm), truth-expressible loci:')
     for row in qsurvivors:
         qual = 'inf' if row['qual_unbounded'] else ('%.2f' % row['qual'] if row['qual'] is not None else 'null')
         print(f"  locus {row['locus']}: called classes {row['qual_called_class_count']}, "
@@ -266,9 +281,216 @@ for component, expected in [('chrMT', 8), ('chrI', 17)]:
         summary = (f'min {finite_quals[0]:.2f}, median {median:.2f}, max {finite_quals[-1]:.2f}')
     else:
         summary = 'none finite'
-    print(f'{component} QUAL summary: truth-in-called-set {in_set}/{expected}, '
+    print(f'{component} share-form QUAL summary (FALSIFIED record): truth-in-called-set '
+          f'{in_set}/{expected}, '
           f'loci with >=2 called classes {tied_max}/{expected}, '
           f'unbounded QUAL {unbounded}/{expected}; finite QUAL distribution: {summary}')
     print(f'{component} tie evidence: {ties_total} streamed entries within the 1e-12 window '
           f'of truth, {bitexact_total} bit-exact')
+
+    # --- QUAL receipts phase II: the DELTA FORM (current product semantics) ---
+    # p = s_win / (k*s_win + a): k = distinct material classes bit-tied at
+    # the maximum s_win; a = best similarity among ALL classes outside the
+    # called set (a = 0 if none); QUAL = -10*log10(1 - p). Every piece of
+    # stage-2 machinery (class coalescing, called set, null emission, ties
+    # stream) must reproduce the committed share-form receipts EXACTLY;
+    # only the quality formula differs.
+    dprefix = D / f'run-cosine-graph-qual-delta-pilot-{component}'
+    assert Path(f'{dprefix}.done').exists()
+    assert Path(f'{dprefix}.exit').read_text().strip() == '0'
+    drows = [json.loads(line) for line in (D / f'cosine-graph-qual-delta-{component}.jsonl').open()]
+    assert len(drows) == len(rows)
+    dtie_stream = {}
+    with (D / f'cosine-graph-qual-delta-{component}.jsonl.ties.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            dtie_stream.setdefault(entry['locus'], []).append(entry)
+    for prior, oldq, drow in zip(rows, qrows, drows):
+        assert prior['locus'] == oldq['locus'] == drow['locus']
+        # Stage-1 fields reproduce the committed exhaustive receipts.
+        for field in STAGE1_EXACT:
+            assert prior[field] == drow[field], (component, field, drow['locus'])
+        for field in STAGE1_FLOAT_ULP:
+            old, new = prior[field], drow[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, drow['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, drow['locus'])
+        assert sorted(map(list, prior['identity_kinds'])) == sorted(map(list, drow['identity_kinds']))
+        # Stage-2 machinery reproduces the share-form receipts exactly
+        # (integers, booleans, masks; floats within the documented cross-run
+        # ULP tolerance on the HashMap-ordered sums).
+        for field in ('qual_called_class_count', 'qual_called_physical_pairs',
+                      'qual_truth_in_called_set', 'combined_ties_with_truth_streamed'):
+            assert oldq[field] == drow[field], (component, field, drow['locus'])
+        old, new = oldq['qual_similarity_total'], drow['qual_similarity_total']
+        if old is None or new is None:
+            assert old is None and new is None, (component, 'qual_similarity_total', drow['locus'])
+        else:
+            assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, drow['locus'])
+        assert len(oldq['qual_called_classes']) == len(drow['qual_called_classes'])
+        for old_cls, new_cls in zip(oldq['qual_called_classes'], drow['qual_called_classes']):
+            for field in ('row_indices', 'row_member_counts', 'physical_pair_members',
+                          'row_node_counts', 'row_edge_counts', 'row_usage_hashes',
+                          'node_distance_to_first_called_class',
+                          'edge_distance_to_first_called_class',
+                          'node_differing_observed_mass_to_first_called',
+                          'edge_differing_observed_mass_to_first_called',
+                          'is_truth_class'):
+                assert old_cls[field] == new_cls[field], (component, field, drow['locus'])
+            assert abs(old_cls['combined_cosine'] - new_cls['combined_cosine']) <= \
+                1e-14 * max(1.0, abs(old_cls['combined_cosine'])), (component, drow['locus'])
+        old_best, new_best = oldq['qual_best_similarity'], drow['qual_best_similarity']
+        assert abs(new_best - old_best) <= 1e-14 * max(1.0, abs(old_best)), (component, drow['locus'])
+        # Delta-form derivation, fail-closed. The falsified share field is
+        # not emitted at all.
+        assert 'qual_share' not in drow
+        eligible = drow['eligible_pairs_combined']
+        k = drow['qual_called_class_count']
+        classes = drow['qual_called_classes']
+        best = drow['qual_best_similarity']
+        alt = drow['qual_alternative_similarity']
+        delta = drow['qual_delta_similarity']
+        p = drow['qual_p']
+        if eligible == 0:
+            assert k == 0 and classes == []
+            assert best is None and alt is None and delta is None
+            assert p is None and drow['qual'] is None and drow['qual_unbounded'] is False
+            assert drow['combined_ties_with_truth_streamed'] \
+                == len(dtie_stream.get(drow['locus'], [])) == 0
+            assert (drow['combined_truth_tied_pairs'] or 0) == 0
+            continue
+        assert k >= 1 and len(classes) == k
+        assert best == drow['combined_best_cosine']
+        assert (alt is None) == (delta is None)
+        if alt is not None:
+            assert alt < best  # every class outside the called set is strictly below the max
+            assert delta == best - alt
+        denominator = k * best + (alt if alt is not None else 0.0)
+        if denominator <= 0.0:
+            # Massless: no similarity mass anywhere (s_win = 0).
+            assert best == 0.0
+            assert p is None and drow['qual'] is None and drow['qual_unbounded'] is False
+        else:
+            assert p == best / denominator  # exact IEEE re-derivation
+            assert p <= 1.0 / k + 1e-12
+            if p >= 1.0:
+                assert drow['qual_unbounded'] is True and drow['qual'] is None
+                # Unbounded arises only at k = 1 with a = 0.
+                assert k == 1 and (alt is None or alt == 0.0)
+            else:
+                expected_qual = -10.0 * math.log10(1.0 - p)
+                assert drow['qual'] is not None
+                assert abs(drow['qual'] - expected_qual) <= 1e-9 * max(1.0, abs(expected_qual))
+                assert drow['qual_unbounded'] is False
+        if drow['truth_pair_expressible']:
+            expected_in = any(cls['is_truth_class'] for cls in classes)
+            assert expected_in == (drow['combined_truth_cosine'] == best)
+            assert drow['qual_truth_in_called_set'] == expected_in
+        else:
+            assert drow['qual_truth_in_called_set'] is None
+        # Derived bound: p <= 1/k, hence QUAL <= -10*log10(1 - 1/k), with
+        # equality iff a = 0 (the tie holds all the domain's similarity).
+        if k >= 2 and drow['qual'] is not None:
+            bound = -10.0 * math.log10(1.0 - 1.0 / k)
+            assert drow['qual'] <= bound + 1e-9, (component, drow['locus'])
+        # Tie-evidence stream: the same stage-1 window, reconciled against
+        # the new receipt AND the committed share-form stream.
+        entries_here = dtie_stream.get(drow['locus'], [])
+        assert drow['combined_ties_with_truth_streamed'] == len(entries_here)
+        expected_count = drow['combined_truth_tied_pairs']
+        assert len(entries_here) == (expected_count or 0)
+        old_entries = tie_stream.get(drow['locus'], [])
+        assert len(old_entries) == len(entries_here)
+        truth_rows = sorted(drow['truth_graph_rows'])
+        truth_entries = 0
+        for old_entry, entry in zip(old_entries, entries_here):
+            assert sorted(entry['row_indices']) == sorted(old_entry['row_indices'])
+            for field in ('combined_bit_exact', 'combined_ulp_delta', 'is_truth_class',
+                          'shared_rows_with_truth', 'node_distance_vs_truth_class',
+                          'edge_distance_vs_truth_class', 'node_differing_observed_mass_vs_truth',
+                          'edge_differing_observed_mass_vs_truth', 'row_member_counts'):
+                assert entry[field] == old_entry[field], (component, field, drow['locus'])
+            for field in ('combined_cosine', 'truth_combined_cosine', 'nodes_cosine'):
+                assert abs(entry[field] - old_entry[field]) <= 1e-14 * max(1.0, abs(old_entry[field]))
+            assert entry['combined_bit_exact'] == (entry['combined_ulp_delta'] == 0)
+            if entry['combined_bit_exact'] and not entry['is_truth_class']:
+                # A bit-exact tie between DISTINCT classes is only expected
+                # with zero observed mass on the differing segments.
+                assert entry['node_differing_observed_mass_vs_truth'] == 0.0
+                assert entry['edge_differing_observed_mass_vs_truth'] == 0.0
+            if entry['is_truth_class']:
+                truth_entries += 1
+                assert sorted(entry['row_indices']) == truth_rows
+                assert entry['node_distance_vs_truth_class'] == [0, 0]
+                assert entry['edge_distance_vs_truth_class'] == [0, 0]
+                assert entry['combined_ulp_delta'] == 0
+        assert truth_entries == (1 if expected_count else 0)
+    dsurvivors = [row for row in drows if row['truth_pair_expressible']]
+    print(f'{component} DELTA-FORM QUAL table (k, s_win, a, delta, p, QUAL; '
+          f'truth-expressible loci, combined arm):')
+    for row in dsurvivors:
+        alt = row['qual_alternative_similarity']
+        a_str = 'none(0)' if alt is None else f'{alt:.6f}'
+        delta = row['qual_delta_similarity']
+        d_str = 'n/a' if delta is None else f'{delta:.6f}'
+        qual = 'inf' if row['qual_unbounded'] else (
+            '%.2f' % row['qual'] if row['qual'] is not None else 'null')
+        print(f"  locus {row['locus']}: k {row['qual_called_class_count']}, "
+              f"s_win {row['qual_best_similarity']:.6f}, a {a_str}, delta {d_str}, "
+              f"p {row['qual_p']:.6f}, QUAL {qual}, "
+              f"truth-in-called-set {'YES' if row['qual_truth_in_called_set'] else 'no'}")
+
+    def qual_summary(qual_list):
+        finite = sorted(q for q in qual_list if q is not None)
+        if not finite:
+            return 'none finite'
+        mid = len(finite) // 2
+        median = finite[mid] if len(finite) % 2 else 0.5 * (finite[mid - 1] + finite[mid])
+        return f'min {finite[0]:.4f}, median {median:.4f}, max {finite[-1]:.4f}'
+
+    share_quals = [row['qual'] for row in qrows]
+    delta_quals = [row['qual'] for row in drows]
+    share_unbounded = sum(1 for row in qrows if row['qual_unbounded'])
+    delta_unbounded = sum(1 for row in drows if row['qual_unbounded'])
+    print(f'{component} QUAL distributions side by side (all {len(drows)} loci): '
+          f'FALSIFIED share form {sum(q is not None for q in share_quals)} finite '
+          f'[{qual_summary(share_quals)}], {share_unbounded} unbounded VS delta form '
+          f'{sum(q is not None for q in delta_quals)} finite [{qual_summary(delta_quals)}], '
+          f'{delta_unbounded} unbounded')
+    in_set = sum(1 for row in dsurvivors if row['qual_truth_in_called_set'])
+    print(f'{component} delta-form summary: truth-in-called-set {in_set}/{expected}, '
+          f'loci with >=2 called classes '
+          f'{sum(1 for row in drows if row["qual_called_class_count"] >= 2)}/{len(drows)}, '
+          f'unbounded {delta_unbounded}/{len(drows)}')
+    # Measured monotonicity in a (unit-proven in source): across all k = 1
+    # loci, p = s_win/(s_win + a) falls as the a/s_win ratio rises.
+    single = []
+    for row in drows:
+        if row['qual_p'] is None or row['qual_called_class_count'] != 1:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity']
+        ratio = 0.0 if alt is None else alt / best
+        single.append((ratio, row['qual_p']))
+    single.sort(key=lambda item: item[0])
+    for (r0, p0), (r1, p1) in zip(single, single[1:]):
+        assert p1 <= p0 * (1.0 + 1e-9) + 1e-15, (component, r0, r1, p0, p1)
+    # Measured monotonicity in k (unit-proven in source): at each measured
+    # k >= 2 called set, the counterfactual k = 1 confidence with the SAME
+    # (s_win, a) is strictly higher — a wider bit-tied called set lowers the
+    # confidence in the single emitted material draw.
+    wide_loci = []
+    for row in drows:
+        k = row['qual_called_class_count']
+        if row['qual_p'] is None or k < 2:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity'] or 0.0
+        counterfactual = best / (best + alt)
+        assert counterfactual > row['qual_p'], (component, row['locus'])
+        wide_loci.append((row['locus'], k, row['qual_p'], counterfactual))
+    for locus, k, p_value, counterfactual in wide_loci:
+        print(f'{component} measured k-monotonicity at locus {locus}: k={k} p={p_value:.6f} < '
+              f'counterfactual k=1 p={counterfactual:.6f} (same s_win, a)')
 print('all checks passed')

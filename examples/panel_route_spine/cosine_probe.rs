@@ -740,21 +740,31 @@ fn differing_observed_mass(
     total
 }
 
-/// The called material class's share of the domain's total similarity:
-/// the class's OWN similarity value over the summed similarity of every
-/// distinct material class, each summed once (deterministic pair-walk
-/// order). Member multiplicity never enters — nine route identities over
-/// one material class carry ONE class value, not nine. None fails closed
-/// when there is no similarity mass at all.
-fn qual_share(best: f64, total: f64) -> Option<f64> {
-    (total > 0.0).then(|| best / total)
+/// The DELTA-FORM confidence in the emitted single-material draw. The
+/// called set's confidence over its best alternative is the forced two-way
+/// normalization k*s_win vs a (class mass, exclusive hypotheses); within a
+/// bit-tied called set the truth is uniform (measured tie anatomy: the
+/// differing nodes/edges carry zero observed read mass), so
+/// p = (k*s_win/(k*s_win + a)) * (1/k) = s_win/(k*s_win + a), with k the
+/// DISTINCT material classes bit-tied at the maximum s_win and a the best
+/// similarity among ALL classes outside the called set (a = 0 if none).
+/// None fails closed when there is no similarity mass at all (s_win = 0
+/// and a = 0) or no called class.
+fn qual_p(s_win: f64, called_classes: usize, alternative: Option<f64>) -> Option<f64> {
+    if called_classes == 0 {
+        return None;
+    }
+    let alternative = alternative.unwrap_or(0.0);
+    let denominator = called_classes as f64 * s_win + alternative;
+    (denominator > 0.0).then(|| s_win / denominator)
 }
 
-/// Phred-scaled QUAL from the class share. None = unbounded (share 1: the
-/// called classes hold all the domain's similarity mass); emitted as
-/// null, never clamped — no free parameters, no cap.
-fn qual_from_share(share: f64) -> Option<f64> {
-    (share < 1.0).then(|| -10.0 * (1.0 - share).log10())
+/// Phred-scaled QUAL from the delta-form confidence. None = unbounded
+/// (p = 1: k = 1 with no alternative similarity — the called class is the
+/// domain's only similarity); emitted as null, never clamped — no free
+/// parameters, no cap.
+fn qual_from_p(p: f64) -> Option<f64> {
+    (p < 1.0).then(|| -10.0 * (1.0 - p).log10())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1026,13 +1036,15 @@ pub(super) fn dump_graph_exhaustive(
         };
         let truth_nodes_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, false));
         let truth_combined_score = pair_truth.and_then(|(a, b)| space.cosine(a, b, depth, true));
-        // Product QUAL state (material-class semantics). The exhaustive
-        // walk below sums every distinct class's combined-arm similarity
-        // exactly once and collects the classes at the bit-identical
-        // maximum. Exact-tie convention: identical f64 score values — every
-        // score is finite, non-negative, NaN-free, and -0.0 cannot arise
-        // (non-negative dots over positive norms), so IEEE-754 equality IS
-        // bit identity here; NO epsilon constant enters the product call.
+        // Product QUAL state (material-class semantics, DELTA FORM). The
+        // exhaustive walk below collects the classes at the bit-identical
+        // maximum and tracks the best similarity among ALL classes outside
+        // the called set (every such class scores strictly below the max,
+        // so it is the largest below-maximum value). Exact-tie convention:
+        // identical f64 score values — every score is finite, non-negative,
+        // NaN-free, and -0.0 cannot arise (non-negative dots over positive
+        // norms), so IEEE-754 equality IS bit identity here; NO epsilon
+        // constant enters the product call.
         let truth_merged_nodes = pair_truth.map(|(a, b)| {
             merged_multiset(&space.rows[a].nodes, &space.rows[b].nodes)
         });
@@ -1042,6 +1054,12 @@ pub(super) fn dump_graph_exhaustive(
         let mut combined_total = 0.0f64;
         let mut called_score = f64::NEG_INFINITY;
         let mut called: Vec<[usize; 2]> = Vec::new();
+        // The best similarity among ALL distinct classes OUTSIDE the called
+        // set (None while no class outside the eventual called set has
+        // produced a similarity value). Diagnostic continuity: the total is
+        // still emitted (`qual_similarity_total`) but the delta-form QUAL
+        // does NOT use it — it was the falsified share form's denominator.
+        let mut alternative_score: Option<f64> = None;
         let mut ties_streamed = 0u64;
         // Exhaustive assessment: every unordered graph-row pair, both arms.
         // The overlaps are computed once per pair and shared by both arms'
@@ -1079,16 +1097,28 @@ pub(super) fn dump_graph_exhaustive(
                                     .sqrt()
                         });
                 // Product QUAL accumulation: one value per distinct material
-                // class, summed in the deterministic enumeration order; the
-                // called set is the classes at the bit-identical maximum.
+                // class; the called set is the classes at the bit-identical
+                // maximum, and the best below-maximum value is the
+                // alternative a (a displaced maximum becomes it).
                 if let Some(score) = combined_score {
                     combined_total += score;
                     if score > called_score {
+                        if called_score.is_finite() {
+                            alternative_score = Some(
+                                alternative_score.map_or(called_score, |value| {
+                                    value.max(called_score)
+                                }),
+                            );
+                        }
                         called_score = score;
                         called.clear();
                         called.push([first, second]);
                     } else if score == called_score {
                         called.push([first, second]);
+                    } else {
+                        alternative_score = Some(
+                            alternative_score.map_or(score, |value| value.max(score)),
+                        );
                     }
                 }
                 // Tie-evidence stream: every class inside the stage-1 1e-12
@@ -1226,16 +1256,21 @@ pub(super) fn dump_graph_exhaustive(
             truth_nodes_score.map(|_| counts[0].0 + 1),
             truth_combined_score.map(|_| counts[1].0 + 1),
         ];
-        // Product QUAL (material-class semantics): the called set is the
-        // distinct material classes at the bit-identical maximum; the
-        // share is the called class's own value over the total similarity
-        // of every distinct class; QUAL = -10*log10(1 - share). Unbounded
-        // (share 1) and empty-domain loci emit null, never a clamp.
-        let share = (!called.is_empty())
-            .then(|| qual_share(called_score, combined_total))
+        // Product QUAL (material-class semantics, DELTA FORM): the called
+        // set is the distinct material classes at the bit-identical maximum;
+        // p = s_win / (k*s_win + a) with k the called-class count and a the
+        // best similarity outside the called set; QUAL = -10*log10(1 - p).
+        // Unbounded (p = 1: k = 1, a = 0) and massless loci emit null,
+        // never a clamp. Member multiplicity enters NOWHERE — k counts
+        // DISTINCT classes only, so coalesced member-level ties cannot
+        // lower QUAL.
+        let confidence = (!called.is_empty())
+            .then(|| qual_p(called_score, called.len(), alternative_score))
             .flatten();
-        let qual = share.and_then(qual_from_share);
-        let qual_unbounded = share.is_some_and(|value| value >= 1.0);
+        let qual = confidence.and_then(qual_from_p);
+        let qual_unbounded = confidence.is_some_and(|value| value >= 1.0);
+        let qual_delta = (!called.is_empty())
+            .then(|| alternative_score.map(|best_alternative| called_score - best_alternative));
         let truth_in_called_set = pair_truth.map(|(ta, tb)| {
             called.iter().any(|&[first, second]| {
                 (first == ta && second == tb) || (first == tb && second == ta)
@@ -1348,19 +1383,25 @@ pub(super) fn dump_graph_exhaustive(
                 _ => None,
             },
             // Product QUAL block (nodes+edges arm; the stage-1 machinery).
-            // `qual_similarity_total` sums each distinct material class's
-            // similarity exactly once; classes failing the zero-norm guard
-            // carry no similarity value and contribute nothing. The called
-            // set is the bit-identical maximum (class signatures, not
-            // member route identities). Unbounded QUAL (share 1) is null
-            // plus `qual_unbounded` — never clamped.
+            // The called set is the bit-identical maximum (class signatures,
+            // not member route identities); k = `qual_called_class_count`,
+            // s_win = `qual_best_similarity`, a = `qual_alternative_similarity`
+            // (null when every class outside the called set carries no
+            // similarity value, i.e. a = 0), p = s_win/(k*s_win + a),
+            // QUAL = -10*log10(1 - p). Unbounded (p = 1) is null plus
+            // `qual_unbounded` — never clamped. `qual_similarity_total`
+            // remains a diagnostic emission only: the total was the
+            // FALSIFIED share form's denominator and no longer enters the
+            // product formula.
             "qual_similarity_total": (!called.is_empty()).then_some(combined_total),
             "qual_best_similarity": (!called.is_empty()).then_some(called_score),
+            "qual_alternative_similarity": (!called.is_empty()).then_some(alternative_score).flatten(),
+            "qual_delta_similarity": qual_delta,
             "qual_called_class_count": called.len(),
             "qual_called_classes": qual_called_classes,
             "qual_called_physical_pairs": qual_called_physical_pairs,
             "qual_truth_in_called_set": truth_in_called_set,
-            "qual_share": share,
+            "qual_p": confidence,
             "qual_unbounded": qual_unbounded,
             "qual": qual,
             "combined_ties_with_truth_streamed": ties_streamed,
@@ -1507,59 +1548,83 @@ mod graph_tests {
     }
 
     /// A clean k-way material-class tie holding ALL the domain's similarity
-    /// lands EXACTLY at the derived bound Q = -10*log10(1 - 1/k), and extra
-    /// zero-similarity classes do not dilute the share.
+    /// lands EXACTLY at the derived bound Q = -10*log10(1 - 1/k): with no
+    /// alternative mass, p = s_win/(k*s_win) = 1/k bit-identically (the
+    /// chosen s values are powers of two, so k*s_win is exact); an
+    /// alternative carrying no similarity is the same value; any
+    /// competitor mass strictly lowers p and QUAL below the bound.
     #[test]
     fn qual_all_mass_k_way_class_tie_lands_at_derived_bound() {
-        for (k, s) in [(2u64, 0.5f64), (3, 0.25), (5, 0.03125), (9, 0.0078125)] {
-            let total = std::iter::repeat(s).take(k as usize).sum::<f64>();
-            let share = super::qual_share(s, total).unwrap();
-            assert_eq!(share, 1.0 / k as f64);
-            let qual = super::qual_from_share(share).unwrap();
+        for (k, s) in [(2usize, 0.5f64), (3, 0.25), (5, 0.03125), (9, 0.0078125)] {
+            let p = super::qual_p(s, k, None).unwrap();
+            assert_eq!(p, 1.0 / k as f64);
+            let qual = super::qual_from_p(p).unwrap();
             assert_eq!(qual, -10.0 * (1.0 - 1.0 / k as f64).log10());
-            // Zero-similarity classes contribute nothing to the total.
-            let with_zeros = total + 0.0 + 0.0;
-            assert_eq!(super::qual_share(s, with_zeros).unwrap(), share);
-            // Any competitor mass strictly LOWERS the share, so measured Q
-            // sits strictly BELOW the bound (the theorem direction).
-            let diluted = super::qual_share(s, total + s / 4.0).unwrap();
+            // a = 0 as an explicit zero-valued alternative is identical to
+            // no alternative at all (reduction iv's other half: classes
+            // outside the called set enter only through their similarity).
+            assert_eq!(super::qual_p(s, k, Some(0.0)).unwrap(), p);
+            // Any competitor mass strictly LOWERS p, so measured Q sits
+            // strictly BELOW the bound (the theorem direction).
+            let diluted = super::qual_p(s, k, Some(s / 4.0)).unwrap();
             assert!(diluted < 1.0 / k as f64);
-            assert!(super::qual_from_share(diluted).unwrap() < qual);
+            assert!(super::qual_from_p(diluted).unwrap() < qual);
         }
     }
 
-    /// QUAL rises monotonically with the share; a separated unique top
-    /// scores far above a near-tie; the exact k=2 all-mass bound is the
-    /// ceiling a 2-way tie can never exceed.
+    /// QUAL is strictly monotone in the alternative a and in the called-set
+    /// size k (p = s_win/(k*s_win + a) decreases in both); a near-twin
+    /// alternative (a = s_win, k = 1) is the honest Q ~ 3.01 and a unique
+    /// separated max (a << s_win) scores far above it — the reductions the
+    /// falsified share form could not make.
     #[test]
-    fn qual_monotonic_in_share_and_separated_beats_near_tie() {
-        let near_tie = super::qual_from_share(0.5).unwrap();
-        let separated = super::qual_from_share(0.99).unwrap();
-        assert!(near_tie < separated);
+    fn qual_monotonic_in_alternative_and_called_set_size() {
+        let s = 0.4f64;
+        // Monotone in a at k = 1, falling a raises QUAL.
+        let near_tie = super::qual_from_p(super::qual_p(s, 1, Some(s)).unwrap()).unwrap();
         assert!((near_tie - 3.010299956639812).abs() < 1e-9); // -10*log10(1/2)
-        // share 0.99: exactly 1% of the domain mass sits outside the called
-        // class, so Q is a hair above Q20 (1 - 0.99 is not exactly 0.01 in
-        // binary; the expected value is derived, not hardcoded).
-        assert!((separated - (-10.0 * (1.0 - 0.99f64).log10())).abs() < 1e-12);
-        assert!(separated > 19.9);
-        for (low, high) in [(0.1f64, 0.2), (0.2, 0.5), (0.5, 0.9), (0.9, 0.999)] {
-            assert!(super::qual_from_share(low).unwrap() < super::qual_from_share(high).unwrap());
+        let mut previous = near_tie;
+        for a in [0.3, 0.2, 0.1, 0.01, 0.001, 0.00001] {
+            let q = super::qual_from_p(super::qual_p(s, 1, Some(a)).unwrap()).unwrap();
+            assert!(q > previous);
+            previous = q;
         }
-        // A 2-way tie with any competitor mass lands strictly below the
-        // all-mass bound -10*log10(1 - 1/2).
-        let bound = -10.0 * (1.0 - 0.5f64).log10();
-        let diluted = super::qual_from_share(super::qual_share(0.5, 1.0 + 0.5).unwrap()).unwrap();
+        // Reduction (i): a unique max with a clear gap (a = s/100) gives
+        // p = 100/101, Q ~ 20 — high, versus the near-twin's ~3.01 (iii).
+        let separated = super::qual_from_p(super::qual_p(s, 1, Some(s / 100.0)).unwrap()).unwrap();
+        assert!((separated - (-10.0 * (1.0 - 100.0 / 101.0_f64).log10())).abs() < 1e-6);
+        assert!(separated > 19.9);
+        assert!(near_tie < 3.1);
+        // Monotone in k at fixed a: a wider bit-tied called set lowers the
+        // confidence in the emitted single-material draw (uniform truth
+        // within the tied set).
+        for k in 1..8usize {
+            let wider = super::qual_p(s, k + 1, Some(0.05)).unwrap();
+            assert!(wider < super::qual_p(s, k, Some(0.05)).unwrap());
+        }
+        // A k-way tie with any competitor mass lands strictly below the
+        // all-mass bound -10*log10(1 - 1/k).
+        let bound = -10.0 * (1.0 - 1.0 / 2.0_f64).log10();
+        let diluted = super::qual_from_p(super::qual_p(s, 2, Some(s)).unwrap()).unwrap();
         assert!(diluted < bound);
+        // Reduction (iv) is STRUCTURAL: member coalescing never lowers QUAL
+        // because the formula's only inputs are (s_win, k, a) — k counts
+        // DISTINCT classes and no member sum exists — so a called class
+        // holding 12 route members and one holding 1 produce the same p.
+        // Nothing to compute: the signature has no multiplicity parameter.
     }
 
-    /// Unbounded (share 1) and no-mass (total 0) loci fail closed to None —
-    /// no clamped or invented value is ever emitted.
+    /// Unbounded (p = 1: k = 1 with no alternative similarity) and massless
+    /// (s_win = 0, a = 0) loci fail closed to None — no clamped or invented
+    /// value is ever emitted.
     #[test]
     fn qual_unbounded_and_empty_domain_fail_closed() {
-        assert_eq!(super::qual_share(1.0, 1.0), Some(1.0));
-        assert_eq!(super::qual_from_share(1.0), None);
-        assert_eq!(super::qual_share(0.0, 0.0), None);
-        assert_eq!(super::qual_share(0.5, 0.0), None);
+        assert_eq!(super::qual_p(1.0, 1, None), Some(1.0));
+        assert_eq!(super::qual_p(1.0, 1, Some(0.0)), Some(1.0));
+        assert_eq!(super::qual_from_p(1.0), None);
+        assert_eq!(super::qual_p(0.0, 3, None), None);
+        assert_eq!(super::qual_p(0.0, 1, Some(0.0)), None);
+        assert_eq!(super::qual_p(0.5, 0, Some(0.25)), None);
     }
 
     /// The class-multiplicity and signature-distance helpers: a double-copy
