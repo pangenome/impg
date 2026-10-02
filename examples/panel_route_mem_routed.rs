@@ -2437,7 +2437,7 @@ impl SiteObserved {
 /// log-factorial at fractional observed shares (the equal-share routed
 /// supports are fractional), which the stable standard library does not
 /// expose (`float_gamma` is unstable).
-fn ln_gamma_observation(observed: f64) -> f64 {
+pub(crate) fn ln_gamma_observation(observed: f64) -> f64 {
     const LANCZOS_G: f64 = 7.0;
     const LANCZOS: [f64; 9] = [
         0.999_999_999_999_809_93,

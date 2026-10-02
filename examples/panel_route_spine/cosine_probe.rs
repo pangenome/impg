@@ -562,6 +562,13 @@ fn multiset_overlap(left: &[(u64, u32)], right: &[(u64, u32)]) -> f64 {
 /// are <x, e_i> over the observed mass; the norms are ||e_i||^2 per layer.
 /// Node keys are widened to u64 (and edges packed) so the O(rows^2) pair
 /// walk stays scalar.
+/// Per-key read-covering incidence sums, index-aligned with `nodes`/
+/// `edges`: the summed number of read-start positions whose read-length
+/// window contains the key's k-mer window, over the row's spelled
+/// instances (the likelihood rate's exposure shape; see
+/// `window_incidence`). Taken from the coalesced class's FIRST member:
+/// members spell the SAME usage multiset, and only path-boundary
+/// instances can differ in incidence.
 struct GraphRow {
     nodes: Vec<(u64, u32)>,
     edges: Vec<(PackedEdge, u32)>,
@@ -570,6 +577,8 @@ struct GraphRow {
     node_norm: f64,
     edge_norm: f64,
     members: Vec<usize>,
+    node_exposure: Vec<f64>,
+    edge_exposure: Vec<f64>,
 }
 
 struct GraphSpace {
@@ -993,26 +1002,66 @@ fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64]
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn dump_graph_exhaustive(
-    path: &str,
-    panel: &SyngIndex,
-    ranges: &[Vec<genome::SpanningTraversal>],
-    path_of_source: &[usize],
-    truth_pieces: &[[Vec<(usize, u64, u64, bool, u32)>; 2]],
-    instances: &crate::InstanceStructure,
-    k: u64,
-    depth: f64,
-    locus_offset: usize,
-) -> io::Result<()> {
-    let mut report = BufWriter::new(std::fs::File::create(path)?);
-    let mut competitors =
-        BufWriter::new(std::fs::File::create(format!("{path}.competitors.jsonl"))?);
-    // Classes within the stage-1 1e-12 window of the truth class (including
-    // the truth class itself): the tie-evidence stream for the exact-tie
-    // vs near-identical-signature question. Diagnostic only.
-    let mut ties = BufWriter::new(std::fs::File::create(format!("{path}.ties.jsonl"))?);
-    for (locus, candidates) in ranges.iter().enumerate() {
+/**
+ * The READ-COVERING INCIDENCE of a window [window_lo, window_hi) on a
+ * path of `path_len` bp: the number of read-start positions s whose
+ * READ_LENGTH window [s, s+READ_LENGTH) contains it — s <= window_lo and
+ * s + READ_LENGTH >= window_hi, s in [0, path_len - READ_LENGTH]. This is
+ * the established containment arithmetic of the structured-poisson
+ * machinery's exposure conversion (`window_incidence` in the rescore:
+ * a k-mer feature expects share mass proportional to the number of read
+ * placements that can contain it), here per graph key: a node key's
+ * window is its k-mer window [bp, bp+k); an edge key's window spans both
+ * adjacent k-mer windows [bp_left, bp_right+k). Zero-incidence keys are
+ * reported per locus (they can never be covered by a read).
+ */
+fn window_incidence(path_len: u64, window_lo: u64, window_hi: u64) -> f64 {
+    if path_len < READ_LENGTH as u64 {
+        return 0.0;
+    }
+    let lo = window_hi.saturating_sub(READ_LENGTH as u64);
+    let hi = window_lo.min(path_len - READ_LENGTH as u64);
+    if hi >= lo {
+        (hi - lo + 1) as f64
+    } else {
+        0.0
+    }
+}
+
+/// The per-locus graph-space extraction shared by the exhaustive cosine
+/// walk and the per-record likelihood walk: the coalesced graph rows
+/// (with per-key read-covering incidence sums), the fixed observation
+/// universe, the observed routed-share masses, and the contributing
+/// records' covered key sets. All f64 accumulations keep the established
+/// deterministic orders (the observed maps iterate records in sorted
+/// order and BTreeSets in key order; only the observed-norm sums keep
+/// the stage-1 HashMap iteration order and its documented cross-run ULP
+/// tolerance).
+struct GraphLocus {
+    records: Vec<u32>,
+    record_nodes: HashMap<u32, std::collections::BTreeSet<GraphNode>>,
+    record_edges: HashMap<u32, std::collections::BTreeSet<PackedEdge>>,
+    row_materials: Vec<Material>,
+    universe_nodes: std::collections::BTreeSet<GraphNode>,
+    universe_edges: std::collections::BTreeSet<PackedEdge>,
+    observed_nodes: HashMap<GraphNode, f64>,
+    observed_edges: HashMap<PackedEdge, f64>,
+    observed_node_mass: f64,
+    observed_edge_mass: f64,
+    space: GraphSpace,
+}
+
+impl GraphLocus {
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        candidates: &[genome::SpanningTraversal],
+        path_of_source: &[usize],
+        instances: &crate::InstanceStructure,
+        locus: usize,
+        panel: &SyngIndex,
+        k: u64,
+        depth: f64,
+    ) -> io::Result<Self> {
         // Per path: the candidate rows' merged material intervals and the
         // contributing records' merged placement spans (all features, both
         // frames, unioned per path — the record votes its share at a shared
@@ -1067,10 +1116,16 @@ pub(super) fn dump_graph_exhaustive(
         }
         // One bounding-range path walk per path; per-interval window
         // containment extracts nodes and the adjacencies between
-        // consecutive contained steps.
+        // consecutive contained steps. The step bp positions ride along
+        // so the per-key read-covering incidences accumulate per spelled
+        // instance (the likelihood rate's exposure shape).
         let mut row_nodes: Vec<std::collections::BTreeMap<GraphNode, u32>> =
             vec![std::collections::BTreeMap::new(); candidates.len()];
         let mut row_edges: Vec<std::collections::BTreeMap<PackedEdge, u32>> =
+            vec![std::collections::BTreeMap::new(); candidates.len()];
+        let mut row_node_exposure: Vec<std::collections::BTreeMap<GraphNode, f64>> =
+            vec![std::collections::BTreeMap::new(); candidates.len()];
+        let mut row_edge_exposure: Vec<std::collections::BTreeMap<PackedEdge, f64>> =
             vec![std::collections::BTreeMap::new(); candidates.len()];
         let mut record_nodes: HashMap<u32, std::collections::BTreeSet<GraphNode>> =
             HashMap::new();
@@ -1094,6 +1149,7 @@ pub(super) fn dump_graph_exhaustive(
             if hi_max <= lo_min {
                 continue;
             }
+            let path_len = panel.name_map.path_to_length[*path];
             let mut steps: Vec<(u64, i32)> = panel
                 .walk_path_range(*path, lo_min, hi_max)?
                 .into_iter()
@@ -1101,26 +1157,41 @@ pub(super) fn dump_graph_exhaustive(
                 .collect();
             steps.sort_unstable_by_key(|&(bp, _)| bp);
             let mut add_interval =
-                |lo: u64, hi: u64, nodes: &mut dyn FnMut(GraphNode), edges: &mut dyn FnMut(GraphEdge)| {
+                |lo: u64, hi: u64, nodes: &mut dyn FnMut(GraphNode, u64), edges: &mut dyn FnMut(GraphEdge, u64, u64)| {
                     let window = contained_steps(&steps, k, lo, hi);
-                    let mut previous: Option<GraphNode> = None;
-                    for &(_, node) in &steps[window] {
+                    let mut previous: Option<(GraphNode, u64)> = None;
+                    for &(bp, node) in &steps[window] {
                         let key = node.unsigned_abs();
-                        if let Some(left) = previous.take() {
-                            edges((left, key));
+                        if let Some((left, left_bp)) = previous.take() {
+                            edges((left, key), left_bp, bp);
                         }
-                        previous = Some(key);
-                        nodes(key);
+                        previous = Some((key, bp));
+                        nodes(key, bp);
                     }
                 };
             for &(row_index, lo, hi) in &work.rows {
                 let nodes = &mut row_nodes[row_index];
                 let edges = &mut row_edges[row_index];
+                let node_exposure = &mut row_node_exposure[row_index];
+                let edge_exposure = &mut row_edge_exposure[row_index];
                 add_interval(
                     lo,
                     hi,
-                    &mut |key| *nodes.entry(key).or_default() += 1,
-                    &mut |(left, right)| *edges.entry(pack_edge(left, right)).or_default() += 1,
+                    &mut |key, bp| {
+                        *nodes.entry(key).or_default() += 1;
+                        *node_exposure.entry(key).or_default() +=
+                            window_incidence(path_len, bp, bp.saturating_add(k));
+                    },
+                    &mut |(left, right), left_bp, right_bp| {
+                        let key = pack_edge(left, right);
+                        *edges.entry(key).or_default() += 1;
+                        *edge_exposure.entry(key).or_default() +=
+                            window_incidence(
+                                path_len,
+                                left_bp,
+                                right_bp.saturating_add(k),
+                            );
+                    },
                 );
             }
             for &(record, lo, hi) in &work.records {
@@ -1130,10 +1201,10 @@ pub(super) fn dump_graph_exhaustive(
                 add_interval(
                     lo,
                     hi,
-                    &mut |key| {
+                    &mut |key, _bp| {
                         nodes.insert(key);
                     },
-                    &mut |(left, right)| {
+                    &mut |(left, right), _left_bp, _right_bp| {
                         edges.insert(pack_edge(left, right));
                     },
                 );
@@ -1197,7 +1268,6 @@ pub(super) fn dump_graph_exhaustive(
                 .or_default()
                 .push(index);
         }
-        let graph_rows = groups.len();
         let rows: Vec<GraphRow> = groups
             .into_iter()
             .map(|(usage, members)| {
@@ -1229,6 +1299,22 @@ pub(super) fn dump_graph_exhaustive(
                         .iter()
                         .map(|&(_, mult)| mult as f64 * mult as f64)
                         .sum::<f64>();
+                let source_node_exposure = &row_node_exposure[members[0]];
+                let source_edge_exposure = &row_edge_exposure[members[0]];
+                let node_exposure = usage
+                    .nodes
+                    .iter()
+                    .map(|&(key, _)| {
+                        source_node_exposure.get(&key).copied().unwrap_or(0.0)
+                    })
+                    .collect();
+                let edge_exposure = usage
+                    .edges
+                    .iter()
+                    .map(|&(key, _)| {
+                        source_edge_exposure.get(&key).copied().unwrap_or(0.0)
+                    })
+                    .collect();
                 GraphRow {
                     nodes: usage
                         .nodes
@@ -1241,6 +1327,8 @@ pub(super) fn dump_graph_exhaustive(
                     node_norm,
                     edge_norm,
                     members,
+                    node_exposure,
+                    edge_exposure,
                 }
             })
             .collect();
@@ -1249,6 +1337,62 @@ pub(super) fn dump_graph_exhaustive(
             observed_node_norm,
             observed_edge_norm,
         };
+        Ok(Self {
+            records,
+            record_nodes,
+            record_edges,
+            row_materials,
+            universe_nodes,
+            universe_edges,
+            observed_nodes,
+            observed_edges,
+            observed_node_mass,
+            observed_edge_mass,
+            space,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dump_graph_exhaustive(
+    path: &str,
+    panel: &SyngIndex,
+    ranges: &[Vec<genome::SpanningTraversal>],
+    path_of_source: &[usize],
+    truth_pieces: &[[Vec<(usize, u64, u64, bool, u32)>; 2]],
+    instances: &crate::InstanceStructure,
+    k: u64,
+    depth: f64,
+    locus_offset: usize,
+) -> io::Result<()> {
+    let mut report = BufWriter::new(std::fs::File::create(path)?);
+    let mut competitors =
+        BufWriter::new(std::fs::File::create(format!("{path}.competitors.jsonl"))?);
+    // Classes within the stage-1 1e-12 window of the truth class (including
+    // the truth class itself): the tie-evidence stream for the exact-tie
+    // vs near-identical-signature question. Diagnostic only.
+    let mut ties = BufWriter::new(std::fs::File::create(format!("{path}.ties.jsonl"))?);
+    for (locus, candidates) in ranges.iter().enumerate() {
+        // Per path: the candidate rows' merged material intervals and the
+        // contributing records' merged placement spans (all features, both
+        // frames, unioned per path — the record votes its share at a shared
+        // segment once, however many subwalks or conserved paths cover it).
+        let locus_data =
+            GraphLocus::build(candidates, path_of_source, instances, locus, panel, k, depth)?;
+        let GraphLocus {
+            records,
+            record_nodes: _,
+            record_edges: _,
+            row_materials,
+            universe_nodes,
+            universe_edges,
+            observed_nodes,
+            observed_edges,
+            observed_node_mass,
+            observed_edge_mass,
+            space,
+        } = locus_data;
+        let graph_rows = space.rows.len();
         let mut id_to_row = vec![0usize; candidates.len()];
         for (index, row) in space.rows.iter().enumerate() {
             for &id in &row.members {
@@ -1725,8 +1869,8 @@ pub(super) fn dump_graph_exhaustive(
             "edge_universe_count": universe_edges.len(),
             "observed_node_mass": observed_node_mass,
             "observed_edge_mass": observed_edge_mass,
-            "observed_node_norm": observed_node_norm,
-            "observed_edge_norm": observed_edge_norm,
+            "observed_node_norm": space.observed_node_norm,
+            "observed_edge_norm": space.observed_edge_norm,
             "eligible_pairs_nodes": eligible[0],
             "eligible_pairs_combined": eligible[1],
             "competitor_entries": competitor_entries,
@@ -1813,6 +1957,272 @@ pub(super) fn dump_graph_exhaustive(
     ties.flush()
 }
 
+// ---------------------------------------------------------------------------
+// PER-RECORD LIKELIHOOD COMPARISON (owner go-ahead 2026-10-02). The
+// condensed node+edge coordinates STAY (shared material stored once; the
+// graph remains the coordinate system); what changes is the COMPARISON:
+// from the mass-cosine to per-record likelihoods — the COSIGT-style
+// comparison at read granularity. Model (fully derived; the derivation is
+// documented in docs/syng-gmem-bwt/cosine-coverage-objective.md):
+//
+//   Every universe key g (graph node or adjacency) carries an observed
+//   count C_g: the sum of the routed shares m_r of the records whose
+//   placement spans cover it (the SAME observed side the cosines use;
+//   the per-record granularity lives in this sum — each record's share
+//   mass restricted to the placements consistent with a candidate is
+//   exactly its addends m_r at the candidate's keys). A diplotype class
+//   c (an unordered pair of coalesced graph rows) predicts a rate per
+//   key: lambda_c(g) = M * E_c(g) / Q_c on its own keys, where E_c(g) is
+//   the class's summed READ-COVERING INCIDENCE over its spelled
+//   instances of g (the structured-poisson exposure conversion: expected
+//   share mass proportional to the number of read placements that can
+//   contain the key), Q_c = sum_g E_c(g), and M is the locus's realized
+//   total share mass — the empirical-Bayes calibration of the per-copy
+//   depth expectation to the realized routed-share scale (the depth
+//   constant does not transfer to share units; the realized budget is
+//   the only per-locus, candidate-independent, constant-free anchor).
+//   Keys the candidate does not spell are explained by the max-entropy
+//   null: the uniform background rate beta = M/|U| over the fixed
+//   observation universe (the omission-charge structure of the B1/B2
+//   structured-poisson arcs). The class's negative log-likelihood is the
+//   per-key Poisson deviance structure
+//
+//     NLL_c = sum_{g in keys(c)} [lambda_c(g) - C_g ln lambda_c(g) + lnG(C_g+1)]
+//           + sum_{g outside}    [beta        - C_g ln beta        + lnG(C_g+1)]
+//
+//   which expands to the incremental per-pair form
+//
+//     NLL_c = CONST + M_c*ln(Q_c*beta/M) - A_c - K_c*beta,
+//     A_c = sum_{g in keys(c)} C_g*ln E_c(g),   CONST = M + Gamma_U + |U|beta - M ln beta
+//
+//   with M_c the observed mass on the class's keys, K_c its distinct key
+//   count, Gamma_U the (candidate-independent, cancelling) sum of
+//   lnGamma(C_g+1) over the universe. The lnGamma count-costs cancel
+//   exactly because every universe key is charged once, explained or
+//   not; they are kept in the emitted log-likelihood for honesty.
+//   FAIL-CLOSED: a massless locus (M = 0) emits null for every class; a
+//   class that cannot explain observed mass on its keys (zero total
+//   incidence Q_c = 0, or observed mass on a zero-incidence key: no
+//   read placement can cover it, so the candidate's rate there is zero)
+//   emits null — it is ineligible, exactly the zero-norm guard of the
+//   cosine arm. Assessment-side only; no thresholds, no tuning constants.
+// ---------------------------------------------------------------------------
+
+/// One arm's per-class accumulation over the merged usage of a candidate
+/// class (two graph rows): `a` = sum over the class's distinct keys of
+/// C_g*ln(E_g) with E_g the class's summed read-covering incidence,
+/// `covered_mass` = M_c (observed share mass on the class's keys),
+/// `keys` = K_c (distinct key count), and the fail-closed flag for
+/// observed mass sitting on a zero-incidence key.
+#[derive(Clone, Copy)]
+struct ArmAccumulator {
+    a: f64,
+    covered_mass: f64,
+    keys: u64,
+    explainable: bool,
+}
+
+impl ArmAccumulator {
+    fn combined(nodes: Self, edges: Self) -> Self {
+        ArmAccumulator {
+            a: nodes.a + edges.a,
+            covered_mass: nodes.covered_mass + edges.covered_mass,
+            keys: nodes.keys + edges.keys,
+            explainable: nodes.explainable && edges.explainable,
+        }
+    }
+}
+
+fn likelihood_accumulate_key(
+    out: &mut ArmAccumulator,
+    key: u64,
+    exposure: f64,
+    observed: &dyn Fn(u64) -> f64,
+) {
+    let count = observed(key);
+    out.keys += 1;
+    if count > 0.0 {
+        if exposure > 0.0 {
+            out.a += count * exposure.ln();
+            out.covered_mass += count;
+        } else {
+            // Observed mass on a key no read placement can cover: the
+            // candidate's rate there is zero and the count is positive —
+            // the class cannot explain it. Fail closed.
+            out.explainable = false;
+        }
+    }
+}
+
+/// The per-pair merge over two sorted (key, mult) usage lists with their
+/// aligned incidence sums: one pass computes the arm's accumulation for
+/// the merged class (the same O(keys) shape as the cosine pair walk).
+fn likelihood_arm_merge(
+    left: (&[(u64, u32)], &[f64]),
+    right: (&[(u64, u32)], &[f64]),
+    observed: &dyn Fn(u64) -> f64,
+) -> ArmAccumulator {
+    let ((left_keys, left_exp), (right_keys, right_exp)) = (left, right);
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut out =
+        ArmAccumulator { a: 0.0, covered_mass: 0.0, keys: 0, explainable: true };
+    while i < left_keys.len() && j < right_keys.len() {
+        let (key, exposure) = if left_keys[i].0 < right_keys[j].0 {
+            let value = (left_keys[i].0, left_exp[i]);
+            i += 1;
+            value
+        } else if left_keys[i].0 > right_keys[j].0 {
+            let value = (right_keys[j].0, right_exp[j]);
+            j += 1;
+            value
+        } else {
+            let value = (left_keys[i].0, left_exp[i] + right_exp[j]);
+            i += 1;
+            j += 1;
+            value
+        };
+        likelihood_accumulate_key(&mut out, key, exposure, observed);
+    }
+    while i < left_keys.len() {
+        likelihood_accumulate_key(&mut out, left_keys[i].0, left_exp[i], observed);
+        i += 1;
+    }
+    while j < right_keys.len() {
+        likelihood_accumulate_key(&mut out, right_keys[j].0, right_exp[j], observed);
+        j += 1;
+    }
+    out
+}
+
+/// One arm's per-class negative log-likelihood from the closed form above.
+/// None fails closed: a massless arm (no observed share mass anywhere:
+// every rate would be zero and every count zero — no likelihood signal),
+// or a class that cannot explain observed mass on its own keys.
+fn likelihood_arm_nll(
+    arm_mass: f64,
+    universe_keys: u64,
+    gamma_total: f64,
+    acc: &ArmAccumulator,
+    class_exposure: f64,
+) -> Option<f64> {
+    if arm_mass <= 0.0 {
+        return None;
+    }
+    if !acc.explainable {
+        return None;
+    }
+    if acc.covered_mass > 0.0 && class_exposure <= 0.0 {
+        return None;
+    }
+    let beta = arm_mass / universe_keys as f64;
+    let constant =
+        arm_mass + gamma_total + universe_keys as f64 * beta - arm_mass * beta.ln();
+    let mass_term = if acc.covered_mass > 0.0 {
+        acc.covered_mass * (class_exposure * beta / arm_mass).ln()
+    } else {
+        0.0
+    };
+    Some(constant + mass_term - acc.a - acc.keys as f64 * beta)
+}
+
+/// A named candidate class's merged rate profile: the Poisson rate
+/// lambda(g) = M*E(g)/Q at every key the class spells (the class's summed
+/// incidence E over its two rows' instances, budget-calibrated), plus the
+/// class's distinct key count and total incidence.
+struct ClassRates {
+    node_rates: HashMap<GraphNode, f64>,
+    edge_rates: HashMap<PackedEdge, f64>,
+    key_count: u64,
+    total_exposure: f64,
+}
+
+impl ClassRates {
+    /// The merged rates of a class (pair of graph rows) under the arm's
+    /// realized mass budget. Only called for eligible classes (Q > 0 and
+    /// explainable); the caller verifies eligibility first.
+    fn build(first: &GraphRow, second: &GraphRow, arm_mass: f64) -> Self {
+        let mut node_rates: HashMap<GraphNode, f64> = HashMap::new();
+        let mut edge_rates: HashMap<PackedEdge, f64> = HashMap::new();
+        let mut key_count = 0u64;
+        for row in [first, second] {
+            for (&(key, _), &exposure) in row.nodes.iter().zip(&row.node_exposure) {
+                if !node_rates.contains_key(&(key as GraphNode)) {
+                    key_count += 1;
+                }
+                *node_rates.entry(key as GraphNode).or_default() += exposure;
+            }
+            for (&(key, _), &exposure) in row.edges.iter().zip(&row.edge_exposure) {
+                if !edge_rates.contains_key(&key) {
+                    key_count += 1;
+                }
+                *edge_rates.entry(key).or_default() += exposure;
+            }
+        }
+        let total_exposure =
+            node_rates.values().sum::<f64>() + edge_rates.values().sum::<f64>();
+        if total_exposure > 0.0 {
+            for rate in node_rates.values_mut() {
+                *rate *= arm_mass / total_exposure;
+            }
+            for rate in edge_rates.values_mut() {
+                *rate *= arm_mass / total_exposure;
+            }
+        }
+        ClassRates { node_rates, edge_rates, key_count, total_exposure }
+    }
+}
+
+/// The PER-RECORD decomposition of one candidate class's NLL (the exact
+/// identity: summing this over the locus's records reconstitutes the
+/// class's total NLL — the rate budgets M and (|U|-K_c)*beta are thinned
+/// over the R contributing records, each record's share-mass count terms
+/// enter through its own covered keys, and the per-key log-factorial
+/// count-costs split by the record's share of the key's count):
+
+///     nll_{r,c} = M/R + (|U|-K_c)*beta/R
+///                 - sum_{g in K_r ∩ keys(c)} m_r*ln lambda_c(g)
+///                 - sum_{g in K_r \ keys(c)} m_r*ln beta
+///                 + sum_{g in K_r} (m_r/C_g)*lnG(C_g+1)
+///
+/// The second and third lines are the record's VOTE: its routed share
+/// mass restricted to the placements consistent with the candidate's
+/// node+edge usage, evaluated at the candidate's rate where consistent
+/// and at the background where not — records landing on differing
+/// material vote differently under different candidates, and their
+/// evidence multiplies through the per-key Poisson structure.
+#[allow(clippy::too_many_arguments)]
+fn per_record_nll(
+    share: f64,
+    covered_nodes: &[GraphNode],
+    covered_edges: &[PackedEdge],
+    rates: &ClassRates,
+    observed_nodes: &HashMap<GraphNode, f64>,
+    observed_edges: &HashMap<PackedEdge, f64>,
+    arm_mass: f64,
+    universe_keys: u64,
+    record_count: usize,
+) -> f64 {
+    let beta = arm_mass / universe_keys as f64;
+    let budget = arm_mass / record_count as f64
+        + (universe_keys - rates.key_count) as f64 * beta / record_count as f64;
+    let mut evidence = 0.0f64;
+    for &node in covered_nodes {
+        let count = observed_nodes.get(&node).copied().unwrap_or(0.0);
+        evidence += match rates.node_rates.get(&node) {
+            Some(&rate) => -share * rate.ln(),
+            None => -share * beta.ln(),
+        } + share / count * crate::ln_gamma_observation(count);
+    }
+    for &edge in covered_edges {
+        let count = observed_edges.get(&edge).copied().unwrap_or(0.0);
+        evidence += match rates.edge_rates.get(&edge) {
+            Some(&rate) => -share * rate.ln(),
+            None => -share * beta.ln(),
+        } + share / count * crate::ln_gamma_observation(count);
+    }
+    budget + evidence
+}
+
 /// Total bp of a row's merged per-path material (the path-continuity audit
 /// above: a strictly adjacent same-source stitch merges to its full bp
 /// count; a gapped or overlapping row does not).
@@ -1820,12 +2230,1069 @@ fn row_material_merged_bp(material: &Material) -> u64 {
     material.iter().map(|&(_, lo, hi)| hi - lo).sum()
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dump_graph_likelihood(
+    path: &str,
+    panel: &SyngIndex,
+    ranges: &[Vec<genome::SpanningTraversal>],
+    path_of_source: &[usize],
+    truth_pieces: &[[Vec<(usize, u64, u64, bool, u32)>; 2]],
+    instances: &crate::InstanceStructure,
+    k: u64,
+    depth: f64,
+    locus_offset: usize,
+) -> io::Result<()> {
+    let mut report = BufWriter::new(std::fs::File::create(path)?);
+    let mut competitors =
+        BufWriter::new(std::fs::File::create(format!("{path}.competitors.jsonl"))?);
+    // Bit-exact likelihood ties with the truth class (including the truth
+    // class itself): the tie-evidence stream for the likelihood era. The
+    // stage-1 1e-12 window does not transfer to log-likelihood scale; the
+    // product convention is exact IEEE equality, and the stream reports
+    // the ULP-level anatomy.
+    let mut ties = BufWriter::new(std::fs::File::create(format!("{path}.ties.jsonl"))?);
+    // The per-record evidence sidecar: for the named classes (the called
+    // winner, the truth class, the best divergent rival), every
+    // contributing record's share, its covered-key split between
+    // consistent and inconsistent placements, and its per-record
+    // log-likelihood term.
+    let mut records_file =
+        BufWriter::new(std::fs::File::create(format!("{path}.records.jsonl"))?);
+    // The re-derivation ingredients: per-row usage and incidence lists,
+    // per-key observed counts, the records' universe-restricted covered
+    // key sets, and the path lengths.
+    let mut ingredients =
+        BufWriter::new(std::fs::File::create(format!("{path}.ingredients.jsonl"))?);
+    for (locus, candidates) in ranges.iter().enumerate() {
+        let locus_data =
+            GraphLocus::build(candidates, path_of_source, instances, locus, panel, k, depth)?;
+        let GraphLocus {
+            records,
+            record_nodes,
+            record_edges,
+            row_materials,
+            universe_nodes,
+            universe_edges,
+            observed_nodes,
+            observed_edges,
+            observed_node_mass,
+            observed_edge_mass,
+            space,
+        } = locus_data;
+        let graph_rows = space.rows.len();
+        // The records' UNIVERSE-RESTRICTED covered key sets, in sorted key
+        // order: keys outside the observation universe carry no mass in
+        // the model (the fixed convention of the row-space and graph-space
+        // arms).
+        let record_covered_nodes: HashMap<u32, Vec<GraphNode>> = records
+            .iter()
+            .filter_map(|&record| {
+                record_nodes.get(&record).map(|nodes| {
+                    (
+                        record,
+                        nodes
+                            .iter()
+                            .filter(|node| universe_nodes.contains(node))
+                            .copied()
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect();
+        let record_covered_edges: HashMap<u32, Vec<PackedEdge>> = records
+            .iter()
+            .filter_map(|&record| {
+                record_edges.get(&record).map(|edges| {
+                    (
+                        record,
+                        edges
+                            .iter()
+                            .filter(|edge| universe_edges.contains(edge))
+                            .copied()
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect();
+        // Per-row total incidence (Q_i per arm; the class's Q is the sum
+        // over its two rows — the merged usage's incidences add).
+        let row_node_q: Vec<f64> = space
+            .rows
+            .iter()
+            .map(|row| row.node_exposure.iter().sum())
+            .collect();
+        let row_edge_q: Vec<f64> = space
+            .rows
+            .iter()
+            .map(|row| row.edge_exposure.iter().sum())
+            .collect();
+        // Arm constants. The gamma count-costs are summed in sorted key
+        // order so the emitted absolute log-likelihoods are run-stable.
+        let mass_nodes = observed_node_mass;
+        let mass_edges = observed_edge_mass;
+        let mass_combined = mass_nodes + mass_edges;
+        let universe_nodes_count = universe_nodes.len() as u64;
+        let universe_edges_count = universe_edges.len() as u64;
+        let universe_combined = universe_nodes_count + universe_edges_count;
+        let gamma_nodes: f64 = universe_nodes
+            .iter()
+            .map(|&key| {
+                crate::ln_gamma_observation(
+                    observed_nodes.get(&key).copied().unwrap_or(0.0),
+                )
+            })
+            .sum();
+        let gamma_edges: f64 = universe_edges
+            .iter()
+            .map(|&key| {
+                crate::ln_gamma_observation(
+                    observed_edges.get(&key).copied().unwrap_or(0.0),
+                )
+            })
+            .sum();
+        let gamma_combined = gamma_nodes + gamma_edges;
+        // The zero-incidence audit: keys no read placement can cover.
+        let zero_incidence_row_keys = space
+            .rows
+            .iter()
+            .map(|row| {
+                row.node_exposure.iter().filter(|&&e| e == 0.0).count()
+                    + row.edge_exposure.iter().filter(|&&e| e == 0.0).count()
+            })
+            .sum::<usize>();
+        let observed_node_fn =
+            |key: u64| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0);
+        let observed_edge_fn = |key: u64| observed_edges.get(&key).copied().unwrap_or(0.0);
+        let mut id_to_row = vec![0usize; candidates.len()];
+        for (index, row) in space.rows.iter().enumerate() {
+            for &id in &row.members {
+                id_to_row[id] = index;
+            }
+        }
+        let truth = [0, 1].map(|copy| truth_index(candidates, &truth_pieces[locus][copy]));
+        let pair_truth = match (truth[0], truth[1]) {
+            (Some(a), Some(b)) => Some((id_to_row[a], id_to_row[b])),
+            _ => None,
+        };
+        // THE EXHAUSTIVE WALK: every unordered graph-row pair, both arms,
+        // one O(keys) merge per arm per pair (the same incremental shape
+        // as the cosine pair walk).
+        let mut class_pairs: Vec<[usize; 2]> = Vec::new();
+        let mut class_log_likelihoods: Vec<Option<f64>> = Vec::new();
+        let mut class_log_likelihoods_nodes: Vec<Option<f64>> = Vec::new();
+        let mut called_score = f64::NEG_INFINITY;
+        let mut called: Vec<[usize; 2]> = Vec::new();
+        for second in 0..graph_rows {
+            for first in 0..=second {
+                let (a, b) = (&space.rows[first], &space.rows[second]);
+                let nodes_acc = likelihood_arm_merge(
+                    (&a.nodes, &a.node_exposure),
+                    (&b.nodes, &b.node_exposure),
+                    &observed_node_fn,
+                );
+                let edges_acc = likelihood_arm_merge(
+                    (&a.edges, &a.edge_exposure),
+                    (&b.edges, &b.edge_exposure),
+                    &observed_edge_fn,
+                );
+                let combined_acc = ArmAccumulator::combined(nodes_acc, edges_acc);
+                let q_nodes = row_node_q[first] + row_node_q[second];
+                let q_edges = row_edge_q[first] + row_edge_q[second];
+                let nll_nodes = likelihood_arm_nll(
+                    mass_nodes,
+                    universe_nodes_count,
+                    gamma_nodes,
+                    &nodes_acc,
+                    q_nodes,
+                );
+                let nll_combined = likelihood_arm_nll(
+                    mass_combined,
+                    universe_combined,
+                    gamma_combined,
+                    &combined_acc,
+                    q_nodes + q_edges,
+                );
+                let log_likelihood = nll_combined.map(|nll| -nll);
+                let log_likelihood_nodes = nll_nodes.map(|nll| -nll);
+                class_pairs.push([first, second]);
+                class_log_likelihoods.push(log_likelihood);
+                class_log_likelihoods_nodes.push(log_likelihood_nodes);
+                if let Some(score) = log_likelihood {
+                    if score > called_score {
+                        called_score = score;
+                        called.clear();
+                        called.push([first, second]);
+                    } else if score == called_score {
+                        called.push([first, second]);
+                    }
+                }
+            }
+        }
+        // Truth assessment over the entire domain (exact IEEE comparison;
+        // no epsilon enters the likelihood era's ranking or tie call).
+        let truth_index_class = pair_truth.and_then(|(ta, tb)| {
+            class_pairs
+                .iter()
+                .position(|&[first, second]| {
+                    (first == ta && second == tb) || (first == tb && second == ta)
+                })
+        });
+        let truth_log_likelihood =
+            truth_index_class.and_then(|index| class_log_likelihoods[index]);
+        let mut higher = 0u64;
+        let mut tied_classes = 0u64;
+        let mut competitor_entries = 0u64;
+        let mut ties_streamed = 0u64;
+        if let (Some(truth_value), Some(truth_index)) = (truth_log_likelihood, truth_index_class) {
+            let truth_nodes = pair_truth
+                .map(|(ta, tb)| merged_multiset(&space.rows[ta].nodes, &space.rows[tb].nodes));
+            let truth_edges = pair_truth
+                .map(|(ta, tb)| merged_multiset(&space.rows[ta].edges, &space.rows[tb].edges));
+            for (index, (&[first, second], &score)) in
+                class_pairs.iter().zip(&class_log_likelihoods).enumerate()
+            {
+                let Some(score) = score else { continue };
+                if score > truth_value {
+                    higher += 1;
+                    let ids =
+                        [space.rows[first].members[0], space.rows[second].members[0]];
+                    serde_json::to_writer(&mut competitors, &serde_json::json!({
+                        "locus": locus + locus_offset,
+                        "row_indices": ids,
+                        "identities": [candidates[ids[0]].identity,
+                                       candidates[ids[1]].identity],
+                        "node_counts": [space.rows[first].nodes.len(),
+                                         space.rows[second].nodes.len()],
+                        "edge_counts": [space.rows[first].edges.len(),
+                                         space.rows[second].edges.len()],
+                        "log_likelihood": score,
+                        "truth_log_likelihood": truth_value,
+                        "likelihood_ratio": (score - truth_value).exp(),
+                    }))?;
+                    writeln!(competitors)?;
+                    competitor_entries += 1;
+                } else if score == truth_value {
+                    if index != truth_index {
+                        tied_classes += 1;
+                    }
+                    let (ta, tb) = pair_truth.unwrap();
+                    let merged_nodes =
+                        merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes);
+                    let merged_edges =
+                        merged_multiset(&space.rows[first].edges, &space.rows[second].edges);
+                    let node_distance =
+                        multiset_distance(&merged_nodes, truth_nodes.as_ref().unwrap());
+                    let edge_distance =
+                        multiset_distance(&merged_edges, truth_edges.as_ref().unwrap());
+                    let node_differing_mass = differing_observed_mass(
+                        &merged_nodes,
+                        truth_nodes.as_ref().unwrap(),
+                        &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                    );
+                    let edge_differing_mass = differing_observed_mass(
+                        &merged_edges,
+                        truth_edges.as_ref().unwrap(),
+                        &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                    );
+                    serde_json::to_writer(&mut ties, &serde_json::json!({
+                        "locus": locus + locus_offset,
+                        "row_indices": [first, second],
+                        "identities": [candidates[space.rows[first].members[0]].identity,
+                                       candidates[space.rows[second].members[0]].identity],
+                        "log_likelihood": score,
+                        "truth_log_likelihood": truth_value,
+                        "ulp_delta":
+                            (score.to_bits() as i64 - truth_value.to_bits() as i64).abs(),
+                        "bit_exact": score.to_bits() == truth_value.to_bits(),
+                        "shared_rows_with_truth": usize::from(first == ta)
+                            + usize::from(first == tb)
+                            + usize::from(second == ta)
+                            + usize::from(second == tb),
+                        "node_distance_vs_truth_class": [node_distance.0, node_distance.1],
+                        "edge_distance_vs_truth_class": [edge_distance.0, edge_distance.1],
+                        "node_differing_observed_mass_vs_truth": node_differing_mass,
+                        "edge_differing_observed_mass_vs_truth": edge_differing_mass,
+                        "row_member_counts": [space.rows[first].members.len(),
+                                               space.rows[second].members.len()],
+                        "is_truth_class": (first == ta && second == tb)
+                            || (first == tb && second == ta),
+                    }))?;
+                    writeln!(ties)?;
+                    ties_streamed += 1;
+                }
+            }
+        }
+        let eligible_classes = class_log_likelihoods.iter().filter(|score| score.is_some()).count();
+        let winner = called.first().copied();
+        let first_called_nodes = winner
+            .map(|[first, second]| merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes));
+        let first_called_edges = winner
+            .map(|[first, second]| merged_multiset(&space.rows[first].edges, &space.rows[second].edges));
+        // THE CLUSTER MACHINERY (unchanged semantics; the similarity
+        // behind it becomes a likelihood): the winner's material-distance
+        // spectrum with RELATIVE likelihoods exp(logL - logL_win) as the
+        // aligned scores, the derived knee cut, the exclusion union, k =
+        // divergent single-linkage clusters among the bit-tied called
+        // classes, a = the best likelihood outside the called clusters.
+        let mut spectrum: Vec<(f64, f64, f64, usize, usize, usize)> = Vec::new();
+        if let (Some([winner_first, winner_second]), Some(winner_nodes), Some(winner_edges)) =
+            (winner, first_called_nodes.as_ref(), first_called_edges.as_ref())
+        {
+            for (index, (&[first, second], &score)) in
+                class_pairs.iter().zip(&class_log_likelihoods).enumerate()
+            {
+                if first == winner_first && second == winner_second {
+                    continue;
+                }
+                let Some(score) = score else { continue };
+                let nodes = merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes);
+                let edges = merged_multiset(&space.rows[first].edges, &space.rows[second].edges);
+                let distance = differing_observed_mass(
+                    &nodes,
+                    winner_nodes,
+                    &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                ) + differing_observed_mass(
+                    &edges,
+                    winner_edges,
+                    &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                );
+                let signature_distance =
+                    signature_cosine_distance(&nodes, &edges, winner_nodes, winner_edges);
+                spectrum.push((
+                    distance,
+                    (score - called_score).exp(),
+                    signature_distance,
+                    first,
+                    second,
+                    index,
+                ));
+            }
+        }
+        spectrum.sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+        let mut tied_bands: Vec<(usize, Vec<f64>)> = Vec::new();
+        for &[first, second] in called.iter().skip(1) {
+            let index = spectrum
+                .iter()
+                .position(|&(_, _, _, a, b, _)| a == first && b == second)
+                .expect("called class missing from the winner's spectrum");
+            let nodes = merged_multiset(&space.rows[first].nodes, &space.rows[second].nodes);
+            let edges = merged_multiset(&space.rows[first].edges, &space.rows[second].edges);
+            let band: Vec<f64> = spectrum
+                .iter()
+                .map(|&(_, _, _, other_first, other_second, _)| {
+                    let other_nodes = merged_multiset(
+                        &space.rows[other_first].nodes,
+                        &space.rows[other_second].nodes,
+                    );
+                    let other_edges = merged_multiset(
+                        &space.rows[other_first].edges,
+                        &space.rows[other_second].edges,
+                    );
+                    differing_observed_mass(
+                        &nodes,
+                        &other_nodes,
+                        &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                    ) + differing_observed_mass(
+                        &edges,
+                        &other_edges,
+                        &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                    )
+                })
+                .collect();
+            tied_bands.push((index, band));
+        }
+        let tied_refs: Vec<(usize, &[f64])> = tied_bands
+            .iter()
+            .map(|(index, band)| (*index, band.as_slice()))
+            .collect();
+        let cluster = (!called.is_empty()).then(|| {
+            let pairs: Vec<(f64, f64)> = spectrum
+                .iter()
+                .map(|&(distance, score, _, _, _, _)| (distance, score))
+                .collect();
+            cluster_form_qual(1.0, &pairs, &tied_refs)
+        });
+        let cluster_knee = cluster.as_ref().and_then(|state| state.knee);
+        let cluster_shape = cluster.as_ref().map(|state| state.shape);
+        let cluster_size = cluster.as_ref().map(|state| state.cluster_size);
+        let cluster_k = cluster.as_ref().map(|state| state.k);
+        let cluster_alternative = cluster.as_ref().and_then(|state| state.alternative);
+        let cluster_excluded = cluster
+            .as_ref()
+            .map(|state| state.excluded.iter().filter(|excluded| **excluded).count());
+        let confidence = cluster.as_ref().and_then(|state| state.p);
+        let qual = confidence.and_then(qual_from_p);
+        let qual_unbounded = confidence.is_some_and(|value| value >= 1.0);
+        // The full-domain posterior (flat prior over the eligible classes:
+        // the derived choice — no information distinguishes candidates a
+        // priori; documented in the design doc): log-sum-exp over the
+        // class log-likelihoods, with the top cluster's summed posterior
+        // emitted as the natural measurement beside the product's forced
+        // two-way form.
+        let posterior_logsumexp: Option<f64> = (!called.is_empty()).then(|| {
+            let total: f64 = class_log_likelihoods
+                .iter()
+                .filter_map(|&score| score)
+                .map(|score| (score - called_score).exp())
+                .sum();
+            called_score + total.ln()
+        });
+        let top_cluster_posterior =
+            match (cluster.as_ref(), posterior_logsumexp) {
+                (Some(state), Some(logsumexp)) => {
+                    let mut mass = 1.0f64;
+                    for &(distance, score, _, _, _, _) in &spectrum {
+                        if distance <= state.cut {
+                            mass += score;
+                        }
+                    }
+                    Some(mass / (logsumexp - called_score).exp())
+                }
+                _ => None,
+            };
+        // The best genuinely divergent rivals, NAMED: every class holding a
+        // outside the called clusters, with identities, distance and both
+        // the relative and absolute likelihood.
+        let mut qual_alternative_classes: Vec<serde_json::Value> = Vec::new();
+        if let (Some(state), Some(alternative)) = (&cluster, cluster_alternative) {
+            for (index, entry) in spectrum.iter().enumerate() {
+                let &(distance, score, signature_distance, first, second, class_index) = entry;
+                if !state.excluded[index] && score == alternative {
+                    qual_alternative_classes.push(serde_json::json!({
+                        "spectrum_index": index,
+                        "distance": distance,
+                        "signature_distance": signature_distance,
+                        "relative_likelihood": score,
+                        "log_likelihood": class_log_likelihoods[class_index],
+                        "row_indices": [first, second],
+                        "identities": [candidates[space.rows[first].members[0]].identity,
+                                       candidates[space.rows[second].members[0]].identity],
+                    }));
+                }
+            }
+        }
+        let nearest_rival_distance = spectrum
+            .iter()
+            .find(|&&(distance, ..)| distance > 0.0)
+            .map(|&(distance, ..)| distance);
+        let spectrum_zero_distance = (!called.is_empty())
+            .then(|| spectrum.iter().filter(|&&(distance, ..)| distance == 0.0).count());
+        let qual_tied_class_bands: Vec<serde_json::Value> = called
+            .iter()
+            .skip(1)
+            .zip(&tied_bands)
+            .map(|(&[first, second], (index, band))| {
+                serde_json::json!({
+                    "row_indices": [first, second],
+                    "spectrum_index": index,
+                    "distance_to_winner": spectrum[*index].0,
+                    "band_distances": band,
+                })
+            })
+            .collect();
+        let truth_in_called_set = pair_truth.map(|(ta, tb)| {
+            called.iter().any(|&[first, second]| {
+                (first == ta && second == tb) || (first == tb && second == ta)
+            })
+        });
+        let mut qual_called_physical_pairs = 0u64;
+        let qual_called_classes: Vec<serde_json::Value> = called
+            .iter()
+            .enumerate()
+            .map(|(position, &[first, second])| {
+                let (row_a, row_b) = (&space.rows[first], &space.rows[second]);
+                let physical =
+                    class_physical_pairs(first == second, row_a.members.len(), row_b.members.len());
+                qual_called_physical_pairs += physical;
+                let node_distance = if position == 0 {
+                    [0u64, 0u64]
+                } else {
+                    let merged = merged_multiset(&row_a.nodes, &row_b.nodes);
+                    let distance = multiset_distance(&merged, first_called_nodes.as_ref().unwrap());
+                    [distance.0, distance.1]
+                };
+                let edge_distance = if position == 0 {
+                    [0u64, 0u64]
+                } else {
+                    let merged = merged_multiset(&row_a.edges, &row_b.edges);
+                    let distance = multiset_distance(&merged, first_called_edges.as_ref().unwrap());
+                    [distance.0, distance.1]
+                };
+                let node_differing_mass = if position == 0 {
+                    0.0
+                } else {
+                    differing_observed_mass(
+                        &merged_multiset(&row_a.nodes, &row_b.nodes),
+                        first_called_nodes.as_ref().unwrap(),
+                        &|key| observed_nodes.get(&(key as u32)).copied().unwrap_or(0.0),
+                    )
+                };
+                let edge_differing_mass = if position == 0 {
+                    0.0
+                } else {
+                    differing_observed_mass(
+                        &merged_multiset(&row_a.edges, &row_b.edges),
+                        first_called_edges.as_ref().unwrap(),
+                        &|key| observed_edges.get(&key).copied().unwrap_or(0.0),
+                    )
+                };
+                serde_json::json!({
+                    "row_indices": [first, second],
+                    "log_likelihood": (!called.is_empty()).then_some(called_score),
+                    "row_member_counts": [row_a.members.len(), row_b.members.len()],
+                    "physical_pair_members": physical,
+                    "row_node_counts": [row_a.nodes.len(), row_b.nodes.len()],
+                    "row_edge_counts": [row_a.edges.len(), row_b.edges.len()],
+                    "row_usage_hashes": [usage_hash(row_a), usage_hash(row_b)],
+                    "row_total_exposures": [row_node_q[first] + row_edge_q[first],
+                                            row_node_q[second] + row_edge_q[second]],
+                    "node_distance_to_first_called_class": node_distance,
+                    "edge_distance_to_first_called_class": edge_distance,
+                    "node_differing_observed_mass_to_first_called": node_differing_mass,
+                    "edge_differing_observed_mass_to_first_called": edge_differing_mass,
+                    "is_truth_class": pair_truth.is_some_and(|(ta, tb)| {
+                        (first == ta && second == tb) || (first == tb && second == ta)
+                    }),
+                })
+            })
+            .collect();
+        // THE PER-RECORD EVIDENCE SIDECAR: the named classes' per-record
+        // vote (share, covered-key split, per-record log-likelihood
+        // term). Named: the winner, the truth class, the best divergent
+        // rival (each distinct class once).
+        let mut named_classes: Vec<(usize, usize)> = Vec::new();
+        if let Some([first, second]) = winner {
+            named_classes.push((first, second));
+        }
+        if let (Some(truth_index), Some(_)) = (truth_index_class, truth_log_likelihood) {
+            let [first, second] = class_pairs[truth_index];
+            if !named_classes.contains(&(first, second)) {
+                named_classes.push((first, second));
+            }
+        }
+        if let (Some(state), Some(alternative)) = (&cluster, cluster_alternative) {
+            for (entry, excluded) in spectrum.iter().zip(&state.excluded) {
+                if !excluded && entry.1 == alternative {
+                    let (first, second) = (entry.3, entry.4);
+                    if !named_classes.contains(&(first, second)) {
+                        named_classes.push((first, second));
+                    }
+                }
+            }
+        }
+        let mut classes_evidence: Vec<serde_json::Value> = Vec::new();
+        for &(first, second) in &named_classes {
+            let class_index = class_pairs
+                .iter()
+                .position(|&[a, b]| a == first && b == second)
+                .expect("named class missing from the enumeration");
+            let Some(score) = class_log_likelihoods[class_index] else { continue };
+            let rates = ClassRates::build(&space.rows[first], &space.rows[second], mass_combined);
+            let per_record: Vec<serde_json::Value> = records
+                .iter()
+                .map(|&record| {
+                    let share = instances.record_shares[record as usize];
+                    let covered_nodes = record_covered_nodes
+                        .get(&record)
+                        .map(|set| set.as_slice())
+                        .unwrap_or(&[]);
+                    let covered_edges = record_covered_edges
+                        .get(&record)
+                        .map(|set| set.as_slice())
+                        .unwrap_or(&[]);
+                    let consistent_nodes = covered_nodes
+                        .iter()
+                        .filter(|node| rates.node_rates.contains_key(*node))
+                        .count();
+                    let consistent_edges = covered_edges
+                        .iter()
+                        .filter(|edge| rates.edge_rates.contains_key(*edge))
+                        .count();
+                    let term = per_record_nll(
+                        share,
+                        covered_nodes,
+                        covered_edges,
+                        &rates,
+                        &observed_nodes,
+                        &observed_edges,
+                        mass_combined,
+                        universe_combined,
+                        records.len(),
+                    );
+                    serde_json::json!({
+                        "record": record,
+                        "share": share,
+                        "covered_node_keys": covered_nodes.len(),
+                        "covered_edge_keys": covered_edges.len(),
+                        "consistent_node_keys": consistent_nodes,
+                        "consistent_edge_keys": consistent_edges,
+                        "per_record_nll": term,
+                    })
+                })
+                .collect();
+            classes_evidence.push(serde_json::json!({
+                "row_indices": [first, second],
+                "identities": [candidates[space.rows[first].members[0]].identity,
+                               candidates[space.rows[second].members[0]].identity],
+                "log_likelihood": score,
+                "per_record": per_record,
+            }));
+        }
+        serde_json::to_writer(&mut records_file, &serde_json::json!({
+            "locus": locus + locus_offset,
+            "classes": classes_evidence,
+        }))?;
+        writeln!(records_file)?;
+        // The re-derivation ingredients.
+        serde_json::to_writer(&mut ingredients, &serde_json::json!({
+            "locus": locus + locus_offset,
+            "read_length": READ_LENGTH,
+            "k": k,
+            "path_lengths": panel.name_map.path_to_length,
+            "records": records.iter().map(|&record| {
+                serde_json::json!({
+                    "record": record,
+                    "share": instances.record_shares[record as usize],
+                    "nodes": record_covered_nodes.get(&record)
+                        .cloned().unwrap_or_default(),
+                    "edges": record_covered_edges.get(&record)
+                        .cloned().unwrap_or_default(),
+                })
+            }).collect::<Vec<_>>(),
+            "rows": space.rows.iter().map(|row| {
+                serde_json::json!({
+                    "members": row.members,
+                    "nodes": row.nodes.iter().zip(&row.node_exposure)
+                        .map(|(&(key, mult), &exposure)| (key, mult, exposure))
+                        .collect::<Vec<_>>(),
+                    "edges": row.edges.iter().zip(&row.edge_exposure)
+                        .map(|(&(key, mult), &exposure)| (key, mult, exposure))
+                        .collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+            "universe_nodes": universe_nodes.iter()
+                .map(|&key| (key as u64,
+                             observed_nodes.get(&key).copied().unwrap_or(0.0)))
+                .collect::<Vec<_>>(),
+            "universe_edges": universe_edges.iter()
+                .map(|&key| (key,
+                             observed_edges.get(&key).copied().unwrap_or(0.0)))
+                .collect::<Vec<_>>(),
+        }))?;
+        writeln!(ingredients)?;
+        let mut identity_kinds: HashMap<&str, u64> = HashMap::new();
+        for row in candidates.iter() {
+            *identity_kinds
+                .entry(row.identity.split(':').next().unwrap_or("?"))
+                .or_default() += 1;
+        }
+        let multi_segment_rows = candidates
+            .iter()
+            .filter(|row| row.segments.len() > 1)
+            .count();
+        let disjoint_material_rows = candidates
+            .iter()
+            .zip(&row_materials)
+            .filter(|(row, material)| {
+                row.segments.iter().map(|s| s.end.saturating_sub(s.start)).sum::<u64>()
+                    > row_material_merged_bp(material)
+            })
+            .count();
+        let truth_rank = truth_log_likelihood.map(|_| higher + 1);
+        let truth_rank_nodes = truth_index_class
+            .and_then(|index| class_log_likelihoods_nodes[index])
+            .map(|truth_value| {
+                1 + class_log_likelihoods_nodes
+                    .iter()
+                    .filter(|&&score| score.is_some_and(|score| score > truth_value))
+                    .count()
+            });
+        serde_json::to_writer(&mut report, &serde_json::json!({
+            "locus": locus + locus_offset,
+            "model": "per-record-poisson-graph-v1",
+            "physical_rows": candidates.len(),
+            "identity_kinds": identity_kinds.iter().map(|(kind, count)| (kind, count))
+                .collect::<Vec<_>>(),
+            "multi_segment_rows": multi_segment_rows,
+            "disjoint_material_rows": disjoint_material_rows,
+            "record_count": records.len(),
+            "graph_rows": graph_rows,
+            "node_universe_count": universe_nodes.len(),
+            "edge_universe_count": universe_edges.len(),
+            "observed_node_mass": observed_node_mass,
+            "observed_edge_mass": observed_edge_mass,
+            "observed_node_norm": space.observed_node_norm,
+            "observed_edge_norm": space.observed_edge_norm,
+            "zero_incidence_row_keys": zero_incidence_row_keys,
+            "eligible_classes": eligible_classes,
+            "class_count": class_pairs.len(),
+            "class_row_pairs": class_pairs,
+            "class_log_likelihoods": class_log_likelihoods,
+            "class_log_likelihoods_nodes": class_log_likelihoods_nodes,
+            "likelihood_background_rate_nodes": (mass_nodes > 0.0)
+                .then(|| mass_nodes / universe_nodes_count as f64),
+            "likelihood_background_rate_combined": (mass_combined > 0.0)
+                .then(|| mass_combined / universe_combined as f64),
+            "likelihood_gamma_total_nodes": gamma_nodes,
+            "likelihood_gamma_total_edges": gamma_edges,
+            "truth_piece_presence": truth_pieces[locus].iter().map(|v| !v.is_empty())
+                .collect::<Vec<_>>(),
+            "truth_pair_expressible": pair_truth.is_some(),
+            "truth_rows": truth,
+            "truth_graph_rows": pair_truth.map(|(a, b)| [a, b]),
+            "truth_log_likelihood": truth_log_likelihood,
+            "truth_rank": truth_rank,
+            "truth_tied_classes": truth_log_likelihood.map(|_| tied_classes),
+            "higher_likelihood_competitors": truth_log_likelihood.map(|_| higher),
+            "truth_log_likelihood_nodes": truth_index_class
+                .and_then(|index| class_log_likelihoods_nodes[index]),
+            "truth_rank_nodes": truth_rank_nodes,
+            "competitor_entries": competitor_entries,
+            "best_log_likelihood": (!called.is_empty()).then_some(called_score),
+            "best_row_indices": winner.map(|[first, second]|
+                [space.rows[first].members[0], space.rows[second].members[0]]),
+            // Product QUAL block (combined nodes+edges arm), CLUSTER FORM
+            // with likelihoods: the called set is the bit-identical maximum
+            // log-likelihood; the material distance, knee cut, exclusion
+            // union, k and a are the already-built cluster machinery with
+            // RELATIVE likelihoods as the scores; p = L_win/(k*L_win + L_a)
+            // (the forced two-way normalization — the flat-prior posterior
+            // of the top cluster against the best divergent rival, the
+            // uniform-within-tied-set semantics unchanged);
+            // QUAL = -10*log10(1 - p); unbounded (p = 1) and massless loci
+            // emit null, never a clamp. The full-domain flat-prior
+            // posterior of the top cluster is emitted beside it as the
+            // natural measurement.
+            "qual_best_similarity": (!called.is_empty()).then_some(1.0f64),
+            "qual_spectrum_shape": cluster_shape,
+            "qual_knee_distance": cluster_knee,
+            "qual_cluster_size": cluster_size,
+            "qual_cluster_k": cluster_k,
+            "qual_spectrum_classes": (!called.is_empty()).then_some(spectrum.len()),
+            "qual_spectrum_zero_distance_classes": spectrum_zero_distance,
+            "qual_nearest_rival_distance": nearest_rival_distance,
+            "qual_excluded_class_count": cluster_excluded,
+            "qual_distance_spectrum": spectrum.iter().map(|&(distance, ..)| distance)
+                .collect::<Vec<_>>(),
+            "qual_distance_spectrum_scores": spectrum.iter().map(|&(_, score, ..)| score)
+                .collect::<Vec<_>>(),
+            "qual_signature_distance_spectrum": spectrum
+                .iter()
+                .map(|&(_, _, signature, ..)| signature)
+                .collect::<Vec<_>>(),
+            "qual_tied_class_bands": qual_tied_class_bands,
+            "qual_alternative_similarity": cluster_alternative,
+            "qual_alternative_classes": qual_alternative_classes,
+            "qual_called_class_count": called.len(),
+            "qual_called_classes": qual_called_classes,
+            "qual_called_physical_pairs": qual_called_physical_pairs,
+            "qual_truth_in_called_set": truth_in_called_set,
+            "qual_posterior_logsumexp": posterior_logsumexp,
+            "qual_posterior_top_cluster": top_cluster_posterior,
+            "qual_p": confidence,
+            "qual_unbounded": qual_unbounded,
+            "qual": qual,
+            "ties_with_truth_streamed": ties_streamed,
+        }))?;
+        writeln!(report)?;
+    }
+    report.flush()?;
+    competitors.flush()?;
+    ties.flush()?;
+    records_file.flush()?;
+    ingredients.flush()
+}
+
 #[cfg(test)]
 mod graph_tests {
     use super::{
-        contained_steps, multiset_overlap, pack_edge, row_material_merged_bp, GraphRow,
-        GraphSpace, GraphUsage,
+        contained_steps, likelihood_arm_merge, likelihood_arm_nll, multiset_overlap, pack_edge,
+        per_record_nll, row_material_merged_bp, window_incidence, ArmAccumulator, ClassRates,
+        GraphRow, GraphSpace, GraphUsage,
     };
+    use crate::HashMap;
+
+    /// The dense per-key Poisson NLL of a class: every universe key is a
+    /// count observation with a rate — the class's budget-calibrated rate
+    /// lambda(g) = M*E(g)/Q on its own keys, the uniform background
+    /// beta = M/|U| elsewhere. The independent re-derivation the factored
+    /// merge must match.
+    fn dense_class_nll(
+        class_keys: &[(u64, f64)], // (key, summed incidence E) over the class's distinct keys
+        universe: &[(u64, f64)],   // (key, observed count C) over the whole universe
+        arm_mass: f64,
+    ) -> f64 {
+        let universe_keys = universe.len() as f64;
+        let beta = arm_mass / universe_keys;
+        let total_exposure: f64 = class_keys.iter().map(|&(_, e)| e).sum();
+        let mut nll = 0.0;
+        for &(key, count) in universe {
+            let rate = match class_keys.iter().find(|&&(k, _)| k == key) {
+                Some(&(_, exposure)) => arm_mass * exposure / total_exposure,
+                None => beta,
+            };
+            nll += rate - count * rate.ln() + crate::ln_gamma_observation(count);
+        }
+        nll
+    }
+
+    /// A test GraphRow with explicit incidences (sorted by key).
+    fn exposure_row(nodes: Vec<(u32, u32)>, exposures: Vec<f64>) -> GraphRow {
+        assert_eq!(nodes.len(), exposures.len());
+        GraphRow {
+            node_dot: 0.0,
+            edge_dot: 0.0,
+            node_norm: 0.0,
+            edge_norm: 0.0,
+            nodes: nodes.into_iter().map(|(key, mult)| (key as u64, mult)).collect(),
+            edges: Vec::new(),
+            members: vec![],
+            node_exposure: exposures,
+            edge_exposure: Vec::new(),
+        }
+    }
+
+    /// The factored per-pair merge and closed-form NLL must equal the
+    /// direct dense per-key Poisson recomputation, on a hand-checkable
+    /// class with a shared key and a double-copy pair.
+    #[test]
+    fn likelihood_factored_nll_matches_dense_poisson() {
+        // Universe nodes {1,2,3}: C1 = 2, C2 = 1, C3 = 0.
+        let universe = [(1u64, 2.0f64), (2, 1.0), (3, 0.0)];
+        let arm_mass = universe.iter().map(|&(_, c)| c).sum::<f64>();
+        let observed = |key: u64| {
+            universe.iter().find(|&&(k, _)| k == key).map_or(0.0, |&(_, c)| c)
+        };
+        let row_x = exposure_row(vec![(1, 1), (2, 1)], vec![1.0, 1.0]);
+        let row_y = exposure_row(vec![(2, 1), (3, 1)], vec![1.0, 2.0]);
+        let gamma_total: f64 = universe
+            .iter()
+            .map(|&(_, count)| crate::ln_gamma_observation(count))
+            .sum();
+        for (first, second, dense_keys) in [
+            // (X, Y): union {1,2,3} with summed incidences {1: 1, 2: 2, 3: 2}.
+            (&row_x, &row_y, vec![(1u64, 1.0f64), (2, 2.0), (3, 2.0)]),
+            // (X, X): double copy — {1: 2, 2: 2}.
+            (&row_x, &row_x, vec![(1u64, 2.0f64), (2, 2.0)]),
+            // (Y, Y): {2: 2, 3: 4}.
+            (&row_y, &row_y, vec![(2u64, 2.0f64), (3, 4.0)]),
+        ] {
+            let acc = likelihood_arm_merge(
+                (&first.nodes, &first.node_exposure),
+                (&second.nodes, &second.node_exposure),
+                &observed,
+            );
+            let class_exposure: f64 =
+                first.node_exposure.iter().sum::<f64>() + second.node_exposure.iter().sum::<f64>();
+            let nll = likelihood_arm_nll(
+                arm_mass,
+                universe.len() as u64,
+                gamma_total,
+                &acc,
+                class_exposure,
+            )
+            .unwrap();
+            let dense = dense_class_nll(&dense_keys, &universe, arm_mass);
+            assert!((nll - dense).abs() < 1e-12, "factored {nll} vs dense {dense}");
+        }
+    }
+
+    /// BLIND SPOT 2 at unit level: a class using material where no records
+    /// land (a zero-count key) is penalized — its NLL is strictly worse
+    /// than the same class without the unused material, in the dense
+    /// recomputation AND the factored form.
+    #[test]
+    fn likelihood_zero_count_penalizes_unused_material() {
+        let universe = [(1u64, 2.0f64), (2, 1.0), (3, 0.0)];
+        let arm_mass: f64 = 3.0;
+        let observed = |key: u64| {
+            universe.iter().find(|&&(k, _)| k == key).map_or(0.0, |&(_, c)| c)
+        };
+        let spelling_used = exposure_row(vec![(1, 1), (2, 1)], vec![1.0, 1.0]);
+        let spelling_extra = exposure_row(vec![(1, 1), (2, 1), (3, 1)], vec![1.0, 1.0, 1.0]);
+        let nll = |first: &GraphRow, second: &GraphRow| {
+            let acc = likelihood_arm_merge(
+                (&first.nodes, &first.node_exposure),
+                (&second.nodes, &second.node_exposure),
+                &observed,
+            );
+            let class_exposure: f64 =
+                first.node_exposure.iter().sum::<f64>() + second.node_exposure.iter().sum::<f64>();
+            likelihood_arm_nll(arm_mass, 3, 0.0, &acc, class_exposure).unwrap()
+        };
+        let used = nll(&spelling_used, &spelling_used);
+        let extra = nll(&spelling_extra, &spelling_extra);
+        assert!(
+            extra > used,
+            "zero-count material must be penalized: used {used} vs extra {extra}"
+        );
+        // The dense recomputation agrees on the direction.
+        let dense_used =
+            dense_class_nll(&[(1u64, 2.0), (2, 2.0)], &universe, arm_mass);
+        let dense_extra =
+            dense_class_nll(&[(1u64, 2.0), (2, 2.0), (3, 2.0)], &universe, arm_mass);
+        assert!(dense_extra > dense_used);
+    }
+
+    /// BLIND SPOT 1 at unit level: two classes sharing the bulk material,
+    /// differing on material where records land — the class spelling the
+    /// observed material must win by the records' multiplicative evidence
+    /// (the rival pays the background omission on the differing mass and
+    /// the zero-count charge on its own unobserved material).
+    #[test]
+    fn likelihood_records_on_differing_material_separate_rivals() {
+        // Bulk key 1 (mass 2) is shared; key 2 carries records (mass 1);
+        // key 3 is unobserved. Truth spells {1,2}; the rival spells {1,3}.
+        let universe = [(1u64, 2.0f64), (2, 1.0), (3, 0.0)];
+        let arm_mass: f64 = 3.0;
+        let observed = |key: u64| {
+            universe.iter().find(|&&(k, _)| k == key).map_or(0.0, |&(_, c)| c)
+        };
+        let truth_row = exposure_row(vec![(1, 1), (2, 1)], vec![1.0, 1.0]);
+        let rival_row = exposure_row(vec![(1, 1), (3, 1)], vec![1.0, 1.0]);
+        let nll = |first: &GraphRow, second: &GraphRow| {
+            let acc = likelihood_arm_merge(
+                (&first.nodes, &first.node_exposure),
+                (&second.nodes, &second.node_exposure),
+                &observed,
+            );
+            let class_exposure: f64 =
+                first.node_exposure.iter().sum::<f64>() + second.node_exposure.iter().sum::<f64>();
+            likelihood_arm_nll(arm_mass, 3, 0.0, &acc, class_exposure).unwrap()
+        };
+        let truth = nll(&truth_row, &truth_row);
+        let rival = nll(&rival_row, &rival_row);
+        assert!(
+            truth < rival,
+            "the class spelling the records' material must win: truth {truth} vs rival {rival}"
+        );
+        // The same direction in the dense recomputation, with the omission
+        // and zero-count charges visible per key.
+        let dense_truth =
+            dense_class_nll(&[(1u64, 2.0), (2, 2.0)], &universe, arm_mass);
+        let dense_rival =
+            dense_class_nll(&[(1u64, 2.0), (3, 2.0)], &universe, arm_mass);
+        assert!(dense_truth < dense_rival);
+    }
+
+    /// The EXACT per-record decomposition identity: summing the per-record
+    /// NLL terms over the locus's records reconstitutes the class's total
+    /// NLL — the rate budgets thin over the R records, each record's
+    /// share-mass count terms enter through its own covered keys
+    /// (consistent at the class's rate, inconsistent at the background),
+    /// and the log-factorial count-costs split by the record's share of
+    /// each key's count.
+    #[test]
+    fn likelihood_per_record_decomposition_sums_to_class_nll() {
+        // Universe {1,2,3}; records: r0 (share 1.0, covers {1,2}),
+        // r1 (share 0.5, covers {1}), r2 (share 0.5, covers {2}),
+        // r3 (share 0.5, covers {2,3} — key 3 is INCONSISTENT with the
+        // class under test). C1 = 1.5, C2 = 2.0, C3 = 0.5.
+        let records: Vec<(f64, Vec<u32>)> = vec![
+            (1.0, vec![1, 2]),
+            (0.5, vec![1]),
+            (0.5, vec![2]),
+            (0.5, vec![2, 3]),
+        ];
+        let mut counts: std::collections::BTreeMap<u32, f64> = std::collections::BTreeMap::new();
+        for &(share, ref keys) in &records {
+            for &key in keys {
+                *counts.entry(key).or_default() += share;
+            }
+        }
+        let universe: Vec<(u64, f64)> =
+            counts.iter().map(|(&key, &count)| (key as u64, count)).collect();
+        let arm_mass: f64 = counts.values().sum();
+        let universe_keys = counts.len() as u64;
+        let observed = |key: u64| {
+            counts.get(&(key as u32)).copied().unwrap_or(0.0)
+        };
+        let observed_map: HashMap<u32, f64> =
+            counts.iter().map(|(&key, &count)| (key, count)).collect();
+        let class_row = exposure_row(vec![(1, 1), (2, 1)], vec![1.0, 1.0]);
+        // Class (row, row): merged incidences {1: 2, 2: 2}.
+        let acc = likelihood_arm_merge(
+            (&class_row.nodes, &class_row.node_exposure),
+            (&class_row.nodes, &class_row.node_exposure),
+            &observed,
+        );
+        let class_exposure: f64 = 4.0;
+        let gamma_total: f64 = counts
+            .values()
+            .map(|&count| crate::ln_gamma_observation(count))
+            .sum();
+        let total = likelihood_arm_nll(
+            arm_mass,
+            universe_keys,
+            gamma_total,
+            &acc,
+            class_exposure,
+        )
+        .unwrap();
+        let rates = ClassRates::build(&class_row, &class_row, arm_mass);
+        let mut decomposed = 0.0f64;
+        for &(share, ref keys) in &records {
+            decomposed += per_record_nll(
+                share,
+                &keys.iter().map(|&key| key as u32).collect::<Vec<u32>>(),
+                &[],
+                &rates,
+                &observed_map,
+                &HashMap::new(),
+                arm_mass,
+                universe_keys,
+                records.len(),
+            );
+        }
+        assert!(
+            (decomposed - total).abs() < 1e-9,
+            "per-record sum {decomposed} vs class NLL {total}"
+        );
+    }
+
+    /// The read-covering incidence: the number of read-start positions
+    /// whose read-length window contains the key's window, clipped to the
+    /// path — interior k-mers L-k+1, boundary k-mers clipped, edges
+    /// L-(gap+k)+1, and zero when no read fits the path.
+    #[test]
+    fn window_incidence_counts_read_starts() {
+        // READ_LENGTH = 150, k = 63: an interior node window [100, 163)
+        // on a long path: starts in [13, 100] — 88 positions.
+        assert_eq!(window_incidence(1000, 100, 163), 88.0);
+        // Near the path start: window [10, 73): starts in [0, 10] — 11.
+        assert_eq!(window_incidence(1000, 10, 73), 11.0);
+        // Near the path end: path_len 200: starts clipped to [13, 50] — 38.
+        assert_eq!(window_incidence(200, 100, 163), 38.0);
+        // An edge spanning [100, 163 + 8): starts in [21, 100] — 80.
+        assert_eq!(window_incidence(1000, 100, 171), 80.0);
+        // No read fits the path.
+        assert_eq!(window_incidence(100, 10, 73), 0.0);
+        // A window wider than the read can contain: zero (an edge whose
+        // windows no single read spans).
+        assert_eq!(window_incidence(1000, 100, 300), 0.0);
+    }
+
+    /// The likelihood-valued cluster QUAL keeps the owner's algebra: with
+    /// the winner's relative likelihood 1, p = 1/(k + L_a) — the flat-prior
+    /// posterior of the top cluster against the best divergent rival under
+    /// the forced two-way normalization.
+    #[test]
+    fn likelihood_valued_cluster_qual_algebra() {
+        // A far divergent tail: a = 1e-6, k = 1: p = 1/(1+1e-6), QUAL ~ 60.
+        let p = super::qual_p(1.0, 1, Some(1e-6)).unwrap();
+        assert!((p - 1.0 / (1.0 + 1e-6)).abs() < 1e-15);
+        assert!(super::qual_from_p(p).unwrap() > 59.0);
+        // A near-tied divergent rival: a = 0.99: p = 1/1.99, QUAL ~ 2.78.
+        let p = super::qual_p(1.0, 1, Some(0.99)).unwrap();
+        assert!((p - 1.0 / 1.99).abs() < 1e-15);
+        // Two divergent clusters bit-tied at the max, no rival: p = 1/2 —
+        // the honest k=2 bound.
+        let p = super::qual_p(1.0, 2, Some(0.0)).unwrap();
+        assert_eq!(p, 0.5);
+        // Unbounded: k = 1, no alternative.
+        assert_eq!(super::qual_p(1.0, 1, None), Some(1.0));
+        assert_eq!(super::qual_from_p(1.0), None);
+    }
 
     fn dense_dot(a: &[f64], b: &[f64]) -> f64 {
         a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -1843,7 +3310,10 @@ mod graph_tests {
         let observed_nodes = [(1u32, 2.0f64), (2, 3.0)];
         let observed_edges = [(pack_edge(1, 2), 1.0f64)];
         let depth = 15.0;
-        let row = |nodes: Vec<(u32, u32)>, edges: Vec<((u32, u32), u32)>| GraphRow {
+        let row = |nodes: Vec<(u32, u32)>, edges: Vec<((u32, u32), u32)>| {
+            let node_exposure = vec![1.0; nodes.len()];
+            let edge_exposure = vec![1.0; edges.len()];
+            GraphRow {
             node_dot: nodes.iter().map(|&(key, mult)| {
                 observed_nodes.iter().find(|&&(n, _)| n == key)
                     .map_or(0.0, |&(_, m)| m) * depth * mult as f64
@@ -1859,6 +3329,9 @@ mod graph_tests {
             nodes: nodes.into_iter().map(|(key, mult)| (key as u64, mult)).collect(),
             edges: edges.into_iter().map(|((a, b), mult)| (pack_edge(a, b), mult)).collect(),
             members: vec![],
+            node_exposure,
+            edge_exposure,
+            }
         };
         let space = GraphSpace {
             rows: vec![
@@ -2061,7 +3534,10 @@ mod graph_tests {
             2.5 // key 1 differs by one visit carrying 2.5 mass
         );
         assert_eq!(super::differing_observed_mass(&usage, &usage, &observed), 0.0);
-        let row = |nodes: Vec<(u32, u32)>, edges: Vec<((u32, u32), u32)>| GraphRow {
+        let row = |nodes: Vec<(u32, u32)>, edges: Vec<((u32, u32), u32)>| {
+            let node_exposure = vec![1.0; nodes.len()];
+            let edge_exposure = vec![1.0; edges.len()];
+            GraphRow {
             node_dot: 0.0,
             edge_dot: 0.0,
             node_norm: 0.0,
@@ -2072,6 +3548,9 @@ mod graph_tests {
                 .map(|((a, b), mult)| (super::pack_edge(a, b), mult))
                 .collect(),
             members: vec![],
+            node_exposure,
+            edge_exposure,
+            }
         };
         let left = row(vec![(1, 1)], vec![((1, 2), 1)]);
         let twin = row(vec![(1, 1)], vec![((1, 2), 1)]);

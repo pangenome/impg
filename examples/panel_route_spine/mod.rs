@@ -4481,6 +4481,25 @@ pub(super) fn run_local_first_spine(
         )?;
         rss_probe(rss, "cosine_graph_exhaustive_pilot")?;
     }
+    // Per-record likelihood comparison gate (owner go-ahead 2026-10-02):
+    // the SAME pure-route domain and condensed node+edge coordinates, the
+    // comparison changed from the mass-cosine to per-record Poisson
+    // likelihoods (read granularity, the graph's coordinates). The
+    // exhaustive ranking, the cluster-form QUAL with likelihoods, the
+    // per-record evidence sidecar and the re-derivation ingredients are
+    // assessment-side only.
+    if let Ok(path) = std::env::var("IMPG_COSINE_LIKELIHOOD_OUTPUT") {
+        ensure(
+            std::env::var_os("IMPG_COSINE_DOMAIN_PILOT").is_some(),
+            "likelihood receipt requires the pure-material domain gate",
+        )?;
+        cosine_probe::dump_graph_likelihood(
+            &path, panel, &ranges, path_of_source, &truth_pieces,
+            window_instances.ok_or_else(|| invalid("likelihood pilot needs record placements"))?,
+            k, model.depth, locus_offset,
+        )?;
+        rss_probe(rss, "cosine_graph_likelihood_pilot")?;
+    }
     let reference_partitions: Vec<u32> = (0..locus_count)
         .map(|locus| component_locus_to_partition[locus_offset + locus])
         .collect();
