@@ -1648,6 +1648,14 @@ fn main() -> io::Result<()> {
         .sum();
     let stride = ((total_occ + options.sample_count - 1) / options.sample_count).max(1);
     let mut context = BufWriter::new(File::create(&options.context_out)?);
+    // The rows sidecar: one line per DISTINCT candidate row referenced
+    // by the context sample (the row's walk in absolute panel
+    // coordinates + its sequence) -- the committed partition GFAs spell
+    // the same walks (the checker re-derives them from the GFA P/L/S
+    // lines and validates the receipt against them independently).
+    let rows_sidecar_path = format!("{}.rows.jsonl", options.context_out.display());
+    let mut rows_sidecar = BufWriter::new(File::create(&rows_sidecar_path)?);
+    let mut rows_emitted: BTreeSet<(usize, u64, u64)> = BTreeSet::new();
     let mut context_lines = 0u64;
     let mut context_rows = 0u64;
     let mut context_lookups = 0u64;
@@ -1821,6 +1829,22 @@ fn main() -> io::Result<()> {
                     }));
                 }
                 context_rows += 1;
+                if rows_emitted.insert((row.path, row.start, row.end)) {
+                    serde_json::to_writer(
+                        &mut rows_sidecar,
+                        &json!({
+                            "path": panel.name_map.path_to_name[row.path],
+                            "start": row.start,
+                            "end": row.end,
+                            "members": row.members,
+                            "walk": row.walk.iter()
+                                .map(|&(bp, node)| json!([bp, node]))
+                                .collect::<Vec<_>>(),
+                            "seq": String::from_utf8(row.seq.clone()).unwrap(),
+                        }),
+                    )?;
+                    writeln!(rows_sidecar)?;
+                }
                 row_values.push(json!({
                     "path": panel.name_map.path_to_name[row.path],
                     "start": row.start,
@@ -1847,6 +1871,7 @@ fn main() -> io::Result<()> {
         }
     }
     context.flush()?;
+    rows_sidecar.flush()?;
     eprintln!(
         "[anchor] context sample: stride {stride}, {context_lines} sampled occurrences, \
          {context_rows} traversing rows, {context_lookups} per-base lookups",
