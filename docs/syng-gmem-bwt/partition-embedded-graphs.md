@@ -115,3 +115,73 @@ locality — no content-homing, no window territories.
 
 No selection change, no inference rewiring, no thresholds; the scoreboard
 machinery is untouched; assessment-side only.
+
+## 5. The anchor-projection layer (slice A of the local-realignment model)
+
+Date: 2026-11-06 (slice A session). The owner's architecture ruling: the
+local-realignment evidence model EXTENDS the syng GBWT MEM-to-read
+projection — the MEMs are the anchor layer and place each read exactly on
+interned nodes; the realignment projects only THE BASES THE MEMs SKIP
+through the graph along the anchored placement. No new aligner, no
+parallel machinery; the scoring is a later slice.
+
+The layer (`examples/partition_anchor_projection.rs`, runner
+`genome/instrumented/run-anchor-projection.sh`, checker
+`genome/instrumented/check-anchor-projection.py`):
+
+- **Per record** (of the committed multi-matching census — the
+  read-matched stage's verified occurrence set): the canonical anchor
+  chain (signed node, canonical position; span = last + k), the read
+  variants (mirror flag, flank bases, instance count — reads of one
+  record differ in flanks AND mirror state, so the PHYSICAL strand is
+  per (occurrence x variant): `(orientation == 0) != mirrored`), and the
+  occurrences census-verbatim plus the SEQUENCE-VERIFIED origin shift
+  (measured 0 at every occurrence on both components — the committed
+  census starts are exact placements).
+- **Per occurrence**: the re-derived merged read-matched intervals and
+  covered-node lists (the census's own recipe) reproduce the committed
+  census EXACTLY at every occurrence (234,472 chrMT + 1,415,203 chrI);
+  the read hull equals the placed segment at every (occurrence, variant)
+  strand-aware (2.0M chrMT + 8.6M chrI checks).
+- **The binding lesson** (the likely death site of the timed-out
+  attempt): the census occurrence starts live in the routing's
+  CANONICAL-SCHEME territory step convention — the syng's stored path
+  walk (`walk_path_range`) carries only ONE frame's syncmer selection,
+  so anchor lookups must reproduce the territory step extraction (the
+  forward frame from the stored walk, the rc frame from the raw
+  extraction on the fetched range's reverse complement, per position the
+  frame that spells the k-mer's canonical form forward).
+- **The per-path graph context** (the lookups the scoring slice
+  consumes): per candidate row (the member rows of the axis partitions
+  of every window the occurrence touches, sharing at least one anchor
+  node with the required sign), the anchor correspondence (the
+  unique-monotone rule over the row's committed walk; repeated nodes
+  unresolved are named ambiguous) and per skipped base (hull-relative,
+  shared by all variants of one mirror state): the row-side coordinate,
+  the covering walk-index range (the partition GFAs' own step
+  sequences; empty = an inter-window gap pocket), and the row's base or
+  the out-of-extent flag. Emitted for an evenly-spaced stated sample of
+  1,000 occurrences per component (the full-fidelity per-path context
+  over every occurrence x every candidate row measures in the tens of
+  GB and is NOT emitted; the scoring slice computes contexts in-process
+  with this same machinery).
+
+Receipts (in the data directory, beside the earlier stage artifacts):
+`anchor-projection-{chrMT,chrI}.jsonl` (the full placement layer),
+`anchor-projection-context-{chrMT,chrI}.jsonl` (+ `.rows.jsonl` — the
+sampled candidate rows' walks and sequences, validated by the checker
+against the committed GFAs' P/L/S lines), run markers
+`run-anchorproj-{chrMT,chrI}.*` (exit 0, walls 153s/583s, RSS peaks
+2.3/3.5 GB), and the checker log `check-anchor-projection.log` — ALL
+PHASES PASS (41,435,430 checks, zero failures).
+
+Measured shape: chrMT 4,891 records / 34,088 read instances / 234,472
+occurrences / 33,036 read variants / 2,727,452 skipped bp (~80 bp per
+instance); chrI 13,905 / 231,210 / 1,415,203 / 183,844 / 18,844,823
+(~81.5 bp per instance); interior hull gaps ZERO on both components
+(the committed zero-gap measurement reproduced); multi-placement
+records 4,803 chrMT / 13,264 chrI. Context samples: 998 chrMT
+occurrences with 51,373 traversing rows and 10.0M per-base lookups;
+1,000 chrI occurrences with 98,305 traversing rows and 22.1M lookups.
+Assessment-side only; no thresholds; no scoring built; the scoreboard
+machinery is untouched.
