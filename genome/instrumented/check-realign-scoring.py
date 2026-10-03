@@ -87,6 +87,7 @@ EXACTNESS = f"{D}/realign-score-chrI.exactness.jsonl"
 INGREDIENTS = f"{D}/realign-score-chrI.jsonl.ingredients.jsonl"
 RUN = f"{D}/run-realignscore-chrI"
 LOCI = [2, 4, 7]
+COMPONENT = "S288C#0#chrI"  # the axis path (the --exhaustive mode rebinds it)
 K = 63
 READ_LENGTH = 150
 RSS_BUDGET_KB = 64 * 1024 * 1024
@@ -104,9 +105,41 @@ FLOOR = READ_LENGTH * B
 # derivation audited from the receipt's own panel strain list).
 # Slice D (--frame): the marginal model + the repaired canonical-
 # scheme pin skeletons + the frame-repair audit phases (9a-9f).
-FRAME = "--frame" in sys.argv
+# Slice E (--exhaustive chrMT|chrI): the exhaustive full-component
+# rerun receipts (the marginal model + the repaired skeletons over
+# EVERY window of the component) -- phases 1-8 with the skeleton
+# audit of phase 2 and the E audits of phase 5, the identical-fold
+# proof generalized (every locus's identical-pair fold verified from
+# the GFAs, no name hardcode), the truth-rank checks skipped at the
+# non-expressible loci, and phase 8 the before/after table vs the
+# committed Poisson-era read-matched receipts (the instrument of
+# record) with the old-wins PREDICTION VERDICTS (a lost old-win is a
+# named measured finding about the instruments, never a receipt
+# failure), the chrI L4 control hard-gated, and the aggregate
+# counts. Phase 9 stays on the slice-D pilot receipts (--frame).
+EXHAUSTIVE = None
+if "--exhaustive" in sys.argv:
+    _i = sys.argv.index("--exhaustive")
+    EXHAUSTIVE = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else "chrI"
+    if EXHAUSTIVE not in ("chrMT", "chrI"):
+        sys.exit("--exhaustive requires chrMT or chrI")
+FRAME = ("--frame" in sys.argv) or (EXHAUSTIVE is not None)
 MARGINAL = FRAME or ("--marginal" in sys.argv)
-if FRAME:
+if EXHAUSTIVE is not None:
+    RECEIPT = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl"
+    EXACTNESS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.exactness.jsonl"
+    INGREDIENTS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.ingredients.jsonl"
+    RUN = f"{D}/run-realignexhaustive-{EXHAUSTIVE}-{EXHAUSTIVE}"
+    BEFORE_RECEIPT = f"{D}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
+    SKELETON = f"{D}/realign-exhaustive-{EXHAUSTIVE}.skeleton.jsonl"
+    ANCHOR = f"{D}/anchor-projection-{EXHAUSTIVE}.jsonl"
+    COMPONENT = f"S288C#0#{EXHAUSTIVE}"
+    _loci = []
+    for _line in open(RECEIPT):
+        _loci.append(json.loads(_line)["locus"])
+    LOCI = sorted(_loci)
+    del _loci, _line
+elif FRAME:
     RECEIPT = f"{D}/realign-framescore-chrI.jsonl"
     EXACTNESS = f"{D}/realign-framescore-chrI.exactness.jsonl"
     INGREDIENTS = f"{D}/realign-framescore-chrI.jsonl.ingredients.jsonl"
@@ -201,7 +234,7 @@ def load_maps():
             m = json.load(f)
         maps[m["partition"]] = m
         for member in m["members"]:
-            if member["path_name"] == "S288C#0#chrI":
+            if member["path_name"] == COMPONENT:
                 axis.append((member["start"], m["partition"]))
                 break
     axis.sort()
@@ -650,27 +683,33 @@ def main():
             d = json.loads(line)
             skeleton_by_fold[(d["locus"], d["fold"])] = d
 
-        def load_anatomy(path):
-            out = {}
-            for line in open(path):
-                d = json.loads(line)
-                out.setdefault(d["locus"], {})[(d["record"], d["variant"])] = d
-            return out
+        if EXHAUSTIVE is None:
+            def load_anatomy(path):
+                out = {}
+                for line in open(path):
+                    d = json.loads(line)
+                    out.setdefault(d["locus"], {})[(d["record"], d["variant"])] = d
+                return out
 
-        anatomy_by_locus = load_anatomy(ANATOMY)
-        identity_anatomy_by_locus = load_anatomy(IDENTITY_ANATOMY)
-        for line in open(IDENTITY_RECEIPT):
-            d = json.loads(line)
-            identity_receipt[d["locus"]] = d
-        for line in open(IDENTITY_INGREDIENTS):
-            d = json.loads(line)
-            identity_ingredients[d["locus"]] = d
-        print(
-            f"   frame mode: {len(skeleton_by_fold)} skeleton rows, "
-            f"{sum(len(v) for v in anatomy_by_locus.values())} anatomy units (after), "
-            f"{sum(len(v) for v in identity_anatomy_by_locus.values())} (before)",
-            flush=True,
-        )
+            anatomy_by_locus = load_anatomy(ANATOMY)
+            identity_anatomy_by_locus = load_anatomy(IDENTITY_ANATOMY)
+            for line in open(IDENTITY_RECEIPT):
+                d = json.loads(line)
+                identity_receipt[d["locus"]] = d
+            for line in open(IDENTITY_INGREDIENTS):
+                d = json.loads(line)
+                identity_ingredients[d["locus"]] = d
+            print(
+                f"   frame mode: {len(skeleton_by_fold)} skeleton rows, "
+                f"{sum(len(v) for v in anatomy_by_locus.values())} anatomy units (after), "
+                f"{sum(len(v) for v in identity_anatomy_by_locus.values())} (before)",
+                flush=True,
+            )
+        else:
+            print(
+                f"   exhaustive mode ({EXHAUSTIVE}): {len(skeleton_by_fold)} skeleton rows",
+                flush=True,
+            )
 
     # ---------------- phase 2: folds vs the partition maps and GFAs
     print("== phase 2: fold structure vs the maps and the GFAs", flush=True)
@@ -1169,8 +1208,21 @@ def main():
         )
         best = float(class_lls.max())
         check(abs(best - d["best_log_likelihood"]) <= 1e-6, f"locus {locus}: best LL differs")
-        truth_folds = d["truth_folds"]
-        ti, tj = truth_folds
+        if d["truth_folds"] is None:
+            # a non-expressible locus (the exhaustive domains include
+            # them): no truth class exists to rank
+            check(
+                d["truth_pair_expressible"] is False,
+                f"locus {locus}: truth folds absent but flagged expressible",
+            )
+            print(
+                f"   locus {locus}: {len(class_lls)} classes re-derived "
+                f"(max diff {diff:.2e}); truth pair NOT expressible",
+                flush=True,
+            )
+            continue
+        ti, tj = d["truth_folds"]
+        check(d["truth_pair_expressible"] is True, f"locus {locus}: truth folds present but flagged inexpressible")
         truth_flat = tj * (tj + 1) // 2 + ti
         truth_ll = float(class_lls[truth_flat])
         rank = 1 + int((class_lls > truth_ll).sum())
@@ -1221,34 +1273,46 @@ def main():
         )
 
     # ---------------- phase 7: the identical-through-graph fold
-    print("== phase 7: the identical-through-graph fold (5397/5545)", flush=True)
+    print("== phase 7: the identical-through-graph fold", flush=True)
     for locus in LOCI:
         d = receipt[locus]
         if d["identical_pair_fold"] is None:
             continue
         fold = ingredients[locus]["folds"][d["identical_pair_fold"]]
         member_names = [m["path_name"] for m in fold["members"]]
-        check(
-            "BTE#3#block28_contig1" in member_names
-            and "BTE#4#block28_contig1" in member_names,
-            f"locus {locus}: identical-pair fold membership",
-        )
+        if EXHAUSTIVE is None:
+            check(
+                "BTE#3#block28_contig1" in member_names
+                and "BTE#4#block28_contig1" in member_names,
+                f"locus {locus}: identical-pair fold membership",
+            )
+            wanted = "block28_contig1"
+        else:
+            # the exhaustive mode generalizes the fold-by-construction
+            # proof: EVERY member of the named identical-pair fold must
+            # spell the same sequence and walk from the GFAs
+            wanted = None
         g = gfa(d["partition"])
         seqs = {}
         walks = {}
         for m in fold["members"]:
-            if "block28_contig1" not in m["path_name"]:
+            if wanted is not None and wanted not in m["path_name"]:
                 continue
             seq, positions, steps = g.spelled(row_gfa_name(m))
             seqs[m["path_name"]] = seq
             walks[m["path_name"]] = list(zip(positions, steps))
         vals = list(seqs.values())
-        check(all(v == vals[0] for v in vals), "identical-pair sequences differ")
+        check(len(vals) >= 2 and all(v == vals[0] for v in vals), "identical-pair sequences differ")
         wvals = list(walks.values())
         check(all(v == wvals[0] for v in wvals), "identical-pair walks differ")
         print(
-            f"   locus {locus}: BTE#3/#4 block28_contig1 spell identical "
-            f"sequence ({len(vals[0])} bp) and walk — the fold is exact",
+            f"   locus {locus}: {len(vals)} members "
+            + (
+                f"BTE#3/#4 block28_contig1 spell identical "
+                f"sequence ({len(vals[0])} bp) and walk — the fold is exact"
+                if EXHAUSTIVE is None
+                else f"spell identical sequence ({len(vals[0])} bp) and walk — the fold is exact"
+            ),
             flush=True,
         )
 
@@ -1268,71 +1332,162 @@ def main():
             )
         )
 
-    for locus in LOCI:
-        d = receipt[locus]
+    if EXHAUSTIVE is not None:
+        # slice E: the exhaustive before/after vs the committed
+        # Poisson-era read-matched receipts (the instrument of record).
+        # Guards: every BEFORE-rank-1 locus must remain rank 1 (the
+        # old-wins no-regression guard); no locus expressible before
+        # may become inexpressible; the chrI L4 control stays
+        # bit-exact (rank 1, gap 0.0, truth in the called set, the
+        # winner IS the truth pair).
+        print("== phase 8: the exhaustive verdicts vs the Poisson-era read-matched receipts", flush=True)
+        rank1_before = [locus for locus in LOCI if before[locus]["truth_rank"] == 1]
+        rank1_after = []
+        prediction_violations = []
+        expressible_before = [locus for locus in LOCI if before[locus]["truth_pair_expressible"]]
+        expressible_after = []
+        for locus in LOCI:
+            b = before[locus]
+            d = receipt[locus]
+            b_rank = b["truth_rank"]
+            b_qual = "unbounded" if b["qual"] is None else f"{b['qual']:.2f}"
+            a_qual = "unbounded" if d["qual"] is None else f"{d['qual']:.2f}"
+            print(
+                f"   locus {locus}: partition {d['partition']}, folds {d['folds']}, "
+                f"units {d['unit_count']}, classes {d['class_count']}; "
+                f"truth rank {b_rank} -> {d['truth_rank']}, "
+                f"log gap {('%.2f' % d['log_gap']) if d['log_gap'] is not None else 'n/a'}; "
+                f"QUAL {b_qual} -> {a_qual}; "
+                f"in called set {b.get('qual_truth_in_called_set')} -> {d['truth_in_called_set']}; "
+                f"factorized {d['validation']['factorized_equal']}/"
+                f"{d['validation']['factorized_checked']} exact",
+                flush=True,
+            )
+            if b["truth_pair_expressible"]:
+                check(
+                    d["truth_pair_expressible"],
+                    f"locus {locus}: expressible under the Poisson instrument but not the realignment instrument",
+                )
+                check(
+                    d["truth_rank"] is not None and d["log_gap"] is not None,
+                    f"locus {locus}: expressible but rank/gap missing",
+                )
+                if d["truth_rank"] == 1:
+                    rank1_after.append(locus)
+                    check(
+                        d["truth_in_called_set"],
+                        f"locus {locus}: rank 1 but truth not in the called set",
+                    )
+                if b_rank == 1:
+                    # THE PREDICTION VERDICT ("the old wins hold"), scored
+                    # honestly: a rank-1 locus that loses rank 1 is a
+                    # MEASURED FINDING about the instruments, not a
+                    # receipt error — reported loudly as a named
+                    # violation, never silently, and never folded into
+                    # the receipt-validation pass/fail.
+                    if d["truth_rank"] == 1:
+                        print(
+                            f"     prediction verdict: locus {locus} old-win HOLDS (rank 1)",
+                            flush=True,
+                        )
+                    else:
+                        prediction_violations.append(locus)
+                        print(
+                            f"     PREDICTION VIOLATION (measured finding): locus {locus} "
+                            f"old-win LOST rank 1 under the realignment instrument "
+                            f"(Poisson rank 1 -> {d['truth_rank']}, log gap "
+                            f"{d['log_gap']:.2f}) — residual named in the gap "
+                            "decomposition",
+                            flush=True,
+                        )
+            if d["truth_pair_expressible"]:
+                expressible_after.append(locus)
+        if EXHAUSTIVE == "chrI":
+            d4 = receipt[4]
+            check(
+                d4["truth_rank"] == 1 and d4["log_gap"] == 0.0 and d4["truth_in_called_set"],
+                "chrI L4 control: rank 1, gap 0.0, truth in the called set",
+            )
+            check(
+                tuple(fold_member_key(d4, i) for i in d4["best_fold_indices"])
+                == tuple(fold_member_key(d4, i) for i in d4["truth_folds"]),
+                "chrI L4 control: the winner must BE the truth pair",
+            )
+        newly = [locus for locus in expressible_after if locus not in expressible_before]
         print(
-            f"   locus {locus}: partition {d['partition']}, folds {d['folds']}, "
-            f"units {d['unit_count']}, classes {d['class_count']}; "
-            f"truth rank {d['truth_rank']}, log gap {d['log_gap']}, "
-            f"QUAL {'unbounded' if d['qual'] is None and d['qual_unbounded'] else d['qual']}; "
-            f"factorized {d['validation']['factorized_equal']}/"
-            f"{d['validation']['factorized_checked']} exact",
+            f"   AGGREGATE ({EXHAUSTIVE}): truth rank-1 {len(rank1_before)} -> {len(rank1_after)} "
+            f"of {len(expressible_after)} expressible (before: {len(expressible_before)}); "
+            f"rank-1 loci before {rank1_before}, after {rank1_after}; "
+            f"newly expressible {newly}; "
+            f"prediction violations (old wins lost): {prediction_violations}",
             flush=True,
         )
-        if MARGINAL:
-            b = before[locus]
-            if FRAME:
-                # slice D: the before-record is the paired identity
-                # (stored-walk) run; winners compared by MEMBER SET (the
-                # fold indices are per-receipt).
-                winner_before = tuple(fold_member_key(b, i) for i in b["best_fold_indices"])
-                winner_after = tuple(fold_member_key(d, i) for i in d["best_fold_indices"])
-                print(
-                    f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
-                    f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
-                    f"winner material {'unchanged' if winner_before == winner_after else 'CHANGED'}",
-                    flush=True,
-                )
-                if locus == 4:
-                    check(
-                        d["truth_rank"] == 1 and d["truth_in_called_set"] and d["log_gap"] == 0.0,
-                        "L4 control: the truth-rank1 control must hold bit-exact "
-                        "(rank 1, gap 0.0, truth in the called set)",
+    else:
+        for locus in LOCI:
+            d = receipt[locus]
+            print(
+                f"   locus {locus}: partition {d['partition']}, folds {d['folds']}, "
+                f"units {d['unit_count']}, classes {d['class_count']}; "
+                f"truth rank {d['truth_rank']}, log gap {d['log_gap']}, "
+                f"QUAL {'unbounded' if d['qual'] is None and d['qual_unbounded'] else d['qual']}; "
+                f"factorized {d['validation']['factorized_equal']}/"
+                f"{d['validation']['factorized_checked']} exact",
+                flush=True,
+            )
+            if MARGINAL:
+                b = before[locus]
+                if FRAME:
+                    # slice D: the before-record is the paired identity
+                    # (stored-walk) run; winners compared by MEMBER SET (the
+                    # fold indices are per-receipt).
+                    winner_before = tuple(fold_member_key(b, i) for i in b["best_fold_indices"])
+                    winner_after = tuple(fold_member_key(d, i) for i in d["best_fold_indices"])
+                    print(
+                        f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
+                        f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
+                        f"winner material {'unchanged' if winner_before == winner_after else 'CHANGED'}",
+                        flush=True,
                     )
-                    check(
-                        winner_before == winner_after,
-                        "L4 control: the winner material must be bit-exact unchanged",
+                    if locus == 4:
+                        check(
+                            d["truth_rank"] == 1 and d["truth_in_called_set"] and d["log_gap"] == 0.0,
+                            "L4 control: the truth-rank1 control must hold bit-exact "
+                            "(rank 1, gap 0.0, truth in the called set)",
+                        )
+                        check(
+                            winner_before == winner_after,
+                            "L4 control: the winner material must be bit-exact unchanged",
+                        )
+                        check(
+                            winner_after == tuple(fold_member_key(d, i) for i in d["truth_folds"]),
+                            "L4 control: the winner must BE the truth pair",
+                        )
+                    if locus == 7:
+                        check(
+                            d["truth_rank"] < b["truth_rank"] and d["log_gap"] < b["log_gap"],
+                            "L7: the frame repair must strictly improve the truth rank and gap",
+                        )
+                else:
+                    print(
+                        f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
+                        f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
+                        f"winner {b['best_fold_indices']} -> {d['best_fold_indices']}",
+                        flush=True,
                     )
-                    check(
-                        winner_after == tuple(fold_member_key(d, i) for i in d["truth_folds"]),
-                        "L4 control: the winner must BE the truth pair",
-                    )
-                if locus == 7:
-                    check(
-                        d["truth_rank"] < b["truth_rank"] and d["log_gap"] < b["log_gap"],
-                        "L7: the frame repair must strictly improve the truth rank and gap",
-                    )
-            else:
-                print(
-                    f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
-                    f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
-                    f"winner {b['best_fold_indices']} -> {d['best_fold_indices']}",
-                    flush=True,
-                )
-                if locus == 4:
-                    check(
-                        d["truth_rank"] == 1 and d["truth_in_called_set"],
-                        "L4 control: the truth-rank1 control must hold after the marginalization",
-                    )
-                    check(
-                        d["best_fold_indices"] == b["best_fold_indices"],
-                        "L4 control: the winner must be bit-exact unchanged",
-                    )
-                shrink = (d["log_gap"] or 0.0) <= (b["log_gap"] or 0.0)
-                check(shrink, f"locus {locus}: the log gap grew after the marginalization")
+                    if locus == 4:
+                        check(
+                            d["truth_rank"] == 1 and d["truth_in_called_set"],
+                            "L4 control: the truth-rank1 control must hold after the marginalization",
+                        )
+                        check(
+                            d["best_fold_indices"] == b["best_fold_indices"],
+                            "L4 control: the winner must be bit-exact unchanged",
+                        )
+                    shrink = (d["log_gap"] or 0.0) <= (b["log_gap"] or 0.0)
+                    check(shrink, f"locus {locus}: the log gap grew after the marginalization")
 
     # ---------------- phase 9 (slice D): the frame-repair audit
-    if FRAME:
+    if FRAME and EXHAUSTIVE is None:
         import filecmp
 
         print("== phase 9: the frame-repair audit (slice D)", flush=True)

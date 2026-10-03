@@ -402,3 +402,188 @@ under the marginal model with the repaired skeletons (all 35 loci) plus
 the before/after table — the instrument is now frame-unblinded and the
 rerun is the delivery. The L2 seam story (row extents) and the QUAL
 p-form's dynamic range stay named as before.
+
+## Slice E — the exhaustive chrMT/chrI rerun under the marginal model with repaired skeletons (2026-11-06)
+
+The delivery slice: every window of both components — all 14 chrMT + 21
+chrI = **35 loci** — scored exhaustively under the frame-unblinded
+instrument (`anchor-realign-v2-marginal-frame`: the marginal realignment
+likelihood, the canonical-scheme pin skeletons, the existing cluster
+QUAL machinery verbatim). No Rust source changed this slice; the
+instrument is the committed slice-D binary semantics, re-run over the
+full domains. Receipts `realign-exhaustive-{chrMT,chrI}.jsonl` (+ exactness,
+ingredients, records, skeleton sidecars) and run markers
+`run-realignexhaustive-{chrMT,chrI}-*` (exit 0; **walls 130 s + 472 s =
+602 s serial**; **RSS peaks 2,168,796 kB + 5,949,056 kB = 2.07 + 5.66
+GiB, both < 11× under the 64 GiB guard**). The in-process
+factorized-vs-direct gate re-verified EVERY placement over both full
+domains: **1,929,497/1,929,497 (chrMT) + 21,490,054/21,490,054 (chrI) =
+23,419,551/23,419,551 EXACT**.
+
+### The full per-locus table (before = the committed Poisson-era read-matched receipts, the instrument of record)
+
+chrMT (expressible = L2..L10; rank/gap n/a = truth pair not expressible
+under either instrument — L0, L1, L11, L12, L13 on both sides):
+
+| locus | rank before → after | log gap after | QUAL before → after | in called set | winner (after) |
+|---:|---|---:|---|---|---|
+| 0 | n/a | n/a | 9.50 → unbounded | n/a | DG1768+S288C [0,9041) pair |
+| 1 | n/a | n/a | 21.79 → 23.21 | n/a | BAL_1a [6913,12888) + DG1768/S288C/W303 fold |
+| 2 | 3 → **48** | 3,213.3 | 60.76 → unbounded | no | CBK+CBM [10519,17115) + SK1 [8858,15598) |
+| 3 | 1 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (DG1768/S288C + SK1) |
+| 4 | 15 → **1** | 0.0 | 14.11 → unbounded | **yes** | **the truth pair** (AAA/DG1768/S288C/SGDref + CBK/CBM/SK1 fold) |
+| 5 | 1 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (AAA/S288C/SGDref + SK1) |
+| 6 | 173 → **117** | 8,290.8 | unbounded → unbounded | no | DBVPG6044 [25902,36857) + S288C [33428,39044) |
+| 7 | 4 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (S288C + SK1) |
+| 8 | 2 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (DBVPG6044+SK1 fold + S288C) |
+| 9 | 3 → 3 | 2,072.1 | 156.54 → unbounded | no | AAA+SGDref [0,10902) + SK1 [58861,69265) |
+| 10 | 3 → **119** | 8,030.3 | unbounded → unbounded | no | DBVPG6044+SK1 fold + W303 [58915,65826) |
+| 11–13 | n/a | n/a | 140.41/unbounded/127.81 → unbounded | n/a | foreign/scaffold rows (non-expressible) |
+
+chrI (expressible = L2..L19 after — **L2 newly expressible**; L0, L1,
+L20 non-expressible on both sides):
+
+| locus | rank before → after | log gap after | QUAL before → after | in called set | winner (after) |
+|---:|---|---:|---|---|---|
+| 2 | n/a → **4** | 274.0 | 153.53 → unbounded | no | BTE#3/#4 block28 identical fold + S288C/W303 fold |
+| 3 | 13 → **2** | 12.9 | unbounded → unbounded | no | AAA+SGDref fold + SK1 fold |
+| 4 | 1 → **1** | 0.0 | 109.51 → unbounded | **yes** | **the truth pair** (S288C + SK1) — bit-exact control |
+| 5 | 1 → **1** | 0.0 | 57.10 → unbounded | **yes** | **the truth pair** (6-member S288C fold + SK1) |
+| 6 | 1 → **4** | 2,712.2 | unbounded → unbounded | no | CBM#1#chrI_2 [0,11799) + SK1 |
+| 7 | 1,086 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (AAA/S288C/SGDref + SK1) |
+| 8 | 1,123 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (7-member S288C fold + SK1) |
+| 9 | 259 → 4 | 882.2 | 151.76 → unbounded | no | S288C 6-member fold + CFF#1#chrI_1 [82727,95172) |
+| 10 | 47 → **1** | 0.0 | 15.50 → unbounded | **yes** | **the truth pair** (S288C + SK1) |
+| 11 | 43 → **1** | 0.0 | 18.87 → unbounded | **yes** | **the truth pair** (6-member S288C fold + SK1) |
+| 12 | 1 → **2** | 313.2 | 76.37 → unbounded | no | CFF#2#chrI_1 [105350,116305) + SK1 |
+| 13 | 3,487 → 1,082 | 35,914.9 | unbounded → unbounded | no | AGK [122220,132514) + CBM#2#chrI_3 [20643,31291) |
+| 14 | 61 → 12 | 1,984.8 | unbounded → unbounded | no | BTE#3/#4 block23 identical fold + SK1 |
+| 15 | 8,975 → 396 | 26,374.3 | unbounded → unbounded | no | ATV#3/#4 block146 identical fold + SK1 |
+| 16 | 18 → **6,613** | 62,913.7 | unbounded → unbounded | no | AIG#0#chrIV [1162863,1168638) + ASB#2#chrIV — cross-chromosome |
+| 17 | 3 → **2** | 488.5 | unbounded → unbounded | no | BEM#3/#4 block92 identical fold + SK1 |
+| 18 | 1,307 → 621 | 35,958.8 | unbounded → unbounded | no | AIS#1#chrI [167305,177537) + BTE#3/#4 block1 identical fold |
+| 19 | 108 → 182 | 19,779.7 | unbounded → unbounded | no | S288C 4-member fold + BFH#1#chrI [149862,160593) |
+
+### The aggregate
+
+Truth rank-1 under the realignment instrument vs the Poisson-era
+read-matched receipts: **chrMT 5 of 9 expressible (L3, L4, L5, L7, L8)
+vs 2 of 9 (L3, L5)** — the "2/8" convention used the older mask in
+which chrMT L4 was bracketed; the receipts measure L4 expressible at
+Poisson rank 15 and it CLOSES to rank 1 here. **chrI 6 of 18 expressible
+(L4, L5, L7, L8, L10, L11) vs 4 of 17 (L4, L5, L6, L12)** — chrI L2 the
+frame-gap-era bracket locus is NEWLY EXPRESSIBLE (rank 4). No locus
+expressible under the Poisson instrument is inexpressible under the
+realignment instrument (checker-enforced).
+
+### The prediction table, scored honestly
+
+- **The tail loci:** chrI L7 CLOSES to rank 1 (gap 0.0; expected from
+  the slice-D pilot); **L8 CLOSES to rank 1** (1,123 → 1); **L10 and
+  L11 CLOSE to rank 1** (47/43 → 1); L3 and L17 reach rank 2; L9 rank
+  4; L14 61 → 12. **L13 (1,082), L15 (396) and L18 (621) do NOT close** —
+  their gaps are unplaced-mass dominated (+19,298 / +12,095 / +17,316
+  truth-unplaced read mass: scaffold/conserved rows the winners place
+  and the truth rows cannot) with truth-favoring both-placed evidence
+  (−8,063.6 / −3,567.4 / −6,529.6). **L16 WORSENS 18 → 6,613** and is
+  the one locus where the both-placed evidence itself is winner-favoring
+  (+17,119): the winner is CROSS-CHROMOSOME chrIV repeat-family material
+  (AIG + ASB rows), 53,746 truth-unplaced mass — genuinely-matched
+  repeat material, not an evidence-model artifact. chrMT L2 WORSENS
+  3 → 48 and L10 WORSENS 3 → 119 (the winners' rows are 3×/2.7× the
+  truth row extents); L6 improves 173 → 117 but stays deep.
+- **The old wins:** chrMT L3 and L5 HOLD (bit-exact truth-pair
+  winners); chrI L4 and L5 HOLD (L4 the enforced bit-exact control).
+  **chrI L6 and L12 are LOST — the honest regressions of this rerun**
+  (L6 rank 1 → 4, gap 2,712.2; L12 rank 1 → 2, gap 313.2). Both are the
+  row-geometry/seam class: the winner replaces one truth homolog with a
+  LONGER row that places more of the window's reads (L6: the
+  CBM#1#chrI_2 scaffold row, len 11,799 vs the truth fold's 10,039,
+  unplaced-mass asymmetry +812, both-placed evidence −2,758.9
+  TRUTH-favoring; L12: the CFF#2#chrI_1 row len 10,955 vs 10,000,
+  asymmetry +295, both-placed −1,465.2 truth-favoring). The Poisson
+  instrument's rank-1 there was mass-share luck of the seed-matched
+  universe; under read-level likelihood the longer row wins on placed
+  mass while losing the per-base evidence — the lever is row extent /
+  the partition boundary geometry, exactly the L2 class named since
+  slice B.
+- **The identical-through-graph pairs stay tied — correctly, by
+  construction** (checker phase 7 re-proves from the GFAs: chrI L2's
+  BTE#3/#4 block28_contig1 fold members spell identical sequence and
+  walk; the L14/L15/L17/L18 winners carry their own identical
+  scaffold folds as single hypotheses).
+- **The frame-gap-era non-expressible loci now score:** chrI L2 — the
+  named bracket locus — is expressible and scores at rank 4. Every
+  locus the partition-graph expressibility census called jointly
+  spellable is expressible here; the remaining non-expressible sets are
+  unchanged (chrMT L0/L1/L11/L12/L13, chrI L0/L1/L20).
+- **The QUAL story:** under likelihood-ratio separations the cluster
+  p-form's relative likelihoods underflow (e^{ll−best} → 0) so p = 1 and
+  QUAL saturates UNBOUNDED at 34 of the 35 loci (the honest behavior of
+  the unmodified machinery, named since slice B); the single finite
+  value is chrMT L1's 23.21 (a 4-fold, 10-class domain). The Poisson
+  era's finite QUALs (0.37–156.5) all saturate; the QUAL signal must
+  come from a form with more dynamic range if it is to rank confidence
+  at realignment separations — the machinery itself stays untouched per
+  the ruling.
+
+### The residuals, named per locus with numbers
+
+Three classes cover every non-rank-1 expressible locus:
+1. **Row-geometry/seam (the L2 class):** the rival row is longer or
+   shifted and places reads the truth rows cannot; the truth WINS the
+   jointly-placed per-base evidence. chrI L2 (+225 unplaced mass,
+   −207.3 both-placed), L6 (+812, −2,758.9), L12 (+295, −1,465.2),
+   L17 (+856, −3,726.0), L9 (+554, −1,585.4), L3 (+2, −1.7), chrMT
+   L9 (+457, −172.4). Levers: row extents and window-seam geometry.
+2. **Truth-row fragmentation:** the alignment-induced partition
+   boundary cuts the truth homolog's material into short/multi-member
+   folds and reads over the cut cannot place. chrMT L2 (the truth
+   S288C co-fold spans only 2,231 bp beside the winner's 6,596 bp row),
+   chrMT L10 (truth S288C co-fold 2,527 bp vs the winner's 6,911 bp
+   W303 row), chrI L19 (truth SK1 row cut to 6,634 bp; the winner's
+   second fold is a foreign-window row BFH#1#chrI [149862,160593)),
+   chrI L13/L18 partially.
+3. **Genuinely-matched foreign/scaffold pocket mass (the multi-census
+   finding, now in likelihood units):** chrI L13 (+19,298 unplaced
+   mass), L15 (+12,095), L18 (+17,316), L16 (+12,511 and the only
+   winner-favoring both-placed evidence, +17,119 — cross-chromosome
+   chrIV repeat material), chrMT L6 (+1,857), L10 (+1,312). The pocket
+   rows spell the pocket reads exactly; no evidence-model repair can
+   close these — the lever is the candidate universe/row structure.
+   chrI L14's winner (the BTE block23 identical fold) also collects
+   +886 unplaced mass over a 12,580 bp row vs the truth fold's 10,027.
+
+### The independent checker, all modes
+
+`check-realign-scoring.py` gains the `--exhaustive chrMT|chrI` mode
+(phases 1–8 over every locus: markers/exit/wall/64 GiB guard; every
+fold's canonical skeleton re-verified against the partition GFAs with
+every frame decision checked — chrMT 1,099 rows / chrI 3,545 rows,
+added 89,318 + 536,927 and dropped 160,465 + 584,971 steps, 228,645 +
+830,785 byte-level sequence-verified against the S segments; the
+locality counts re-derived exactly; the sampled exactness re-derivation
+— 3,360 + 5,178 placements, every vote and backbone base; the E
+derivation audit and the ≥E bounding property over the whole matrices;
+ALL class log-likelihoods recomputed from the matrices — 1,169,912 +
+4,341,818 checks total, max deviations ≤ 1.2e-7; the QUAL states
+reproduced; the generalized identical-fold proof from the GFAs; the
+before/after verdicts with the old-wins PREDICTION VERDICTS — a lost
+old-win is reported as a NAMED MEASURED FINDING, never a receipt
+failure — and the chrI L4 control hard-gated and passing).
+**ALL PHASES PASS in every mode:** the new `--exhaustive chrMT` (1,169,912
+checks) and `--exhaustive chrI` (4,341,818 checks; the two prediction
+violations at L6/L12 named in the log), and the three prior modes
+unchanged on their committed receipts — default 6,760, `--marginal`
+6,592, `--frame` 579,972 checks, all 0 failures. Checker walls: 118 s
+(chrMT) + 366 s (chrI) = 484 s; the three prior modes ≈ 2 min each
+(poll-bounded). Checker RSS peaks ≈ 3 GB (chrMT) / 5 GB (chrI),
+observed well under the guard.
+
+### What remains (the levers, unchanged in kind)
+
+The candidate-universe/row-structure levers (row extents at window
+seams; the alignment-induced partition boundary that fragments truth
+rows; the scaffold/repeat pocket material and the cross-chromosome
+windows), and the QUAL p-form's dynamic range. No selection swap, no
+threshold, no scoreboard change; truth assessment-side only.
