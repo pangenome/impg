@@ -232,6 +232,17 @@ struct Options {
     /// path full-read verification). Pure emission; no scoring change.
     #[arg(long)]
     anatomy_out: Option<PathBuf>,
+    /// The pin-skeleton sidecar (slice D: per fold, the canonical-
+    /// scheme steps with per-step frame tags beside the stored path
+    /// walk's steps and the position diff — the frame-repair audit).
+    #[arg(long)]
+    skeleton_out: Option<PathBuf>,
+    /// The frame-audit-only mode (slice D's diagnosis): emit the
+    /// per-row skeleton diff (stored walk vs canonical scheme) for
+    /// every axis-partition row of the given loci and exit — no
+    /// reads, no census, no scoring. The output path is --out.
+    #[arg(long, default_value_t = false)]
+    frame_audit_only: bool,
     /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard).
     #[arg(long, default_value_t = 64.0)]
     rss_budget_gib: f64,
@@ -662,8 +673,245 @@ fn read_derive_cache(
 }
 
 // ---------------------------------------------------------------------------
-// Candidate rows (slice A's RowStore, verbatim semantics).
+// The canonical-scheme pin skeleton (slice D's frame repair).
+//
+// Slice A's binding lesson, applied to the slice-B pin machinery: the
+// syng's stored path walk (`walk_path_range`, what the partition GFAs'
+// P lines spell) carries only ONE frame's syncmer selection, so anchor
+// k-mers that are rc-frame-qualified on a path are ABSENT from that
+// walk — a fold pin skeleton built from it is frame-blind and cannot
+// pin records whose anchors qualify in the rc frame (the slice-C
+// anatomy's named cause: 2,059 in-window full-match units at chrI L7
+// with no valid truth placement). The repair reproduces the routing's
+// own canonical-scheme territory step extraction (ported from
+// build_territory_index_rows): per position, the frame that spells the
+// k-mer's canonical form min(K, rc(K)) forward decides; the chosen
+// frame's step node is kept (node identity is frame-independent — the
+// same interned syncmer id, the sign carries the frame's orientation)
+// and a position whose canonical frame did not qualify carries NO
+// step. The census records are derived under this same scheme, so
+// every anchor of every record is present at every true occurrence of
+// either orientation.
 // ---------------------------------------------------------------------------
+
+/// The per-position canonical-scheme selection over the two frames'
+/// step maps (positions absolute bp, step nodes signed). Frame tag:
+/// 0 = the stored forward frame's selection, 1 = the rc frame's
+/// qualification.
+fn canonical_scheme_steps(
+    forward_map: &BTreeMap<u64, i32>,
+    reverse_map: &BTreeMap<u64, i32>,
+    seq: &[u8],
+    seq_lo: u64,
+    k: u64,
+) -> Vec<(u64, i32, u8)> {
+    let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
+    positions.extend(reverse_map.keys().copied());
+    let mut steps = Vec::with_capacity(positions.len());
+    for bp in positions {
+        let rel = (bp - seq_lo) as usize;
+        let canonical_forward = seq
+            .get(rel..rel + k as usize)
+            .map(|window| {
+                impg::genome_inference::mem_records::window_is_canonical_forward(window)
+            })
+            .unwrap_or(false);
+        let chosen = if canonical_forward {
+            forward_map.get(&bp)
+        } else {
+            reverse_map.get(&bp)
+        };
+        if let Some(&node) = chosen {
+            let frame = if canonical_forward { 0u8 } else { 1u8 };
+            steps.push((bp, node, frame));
+        }
+    }
+    steps
+}
+
+/// The canonical-scheme steps overlapping one row range [start, end)
+/// — the pin skeleton's step source. Every emitted step is verified BY
+/// SEQUENCE against the AGC-fetched panel sequence (slice A's
+/// exactness discipline): the window at the claimed position must
+/// equal the claimed node's interned syncmer sequence, orientation-
+/// aware per the sign (`syncmer_seq(negative)` is the reverse
+/// complement), and the frame decision must agree with the window's
+/// canonical form. Returns the steps plus the census of the stored
+/// walk's diff (the diagnosis): `added` = positions the stored walk
+/// lacks (the rc-frame-only anchors — the blinded class),
+/// `replaced` = positions where the canonical scheme keeps a different
+/// node than the stored walk, `dropped` = stored positions the
+/// canonical scheme excludes (their canonical frame did not qualify —
+/// no census record can anchor there).
+#[allow(clippy::too_many_arguments)]
+fn canonical_steps_overlapping(
+    panel: &SyngIndex,
+    fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    path_name: &str,
+    start: u64,
+    end: u64,
+    k: u64,
+    stored: &[(u64, i32)],
+) -> io::Result<(Vec<(u64, i32, u8)>, u64, u64, u64)> {
+    // The rc-symmetric augmentation (the raw single-frame extraction on
+    // the fetched range's reverse complement, mapped back to the
+    // path's own coordinates with the frame's orientation on the
+    // sign). Fetch with one syncmer length of context on each side so
+    // every overlapping step's full k-mer is inside the fetched
+    // sequence for the canonical-form check.
+    let seq_lo = start.saturating_sub(k);
+    let seq_hi = end + k;
+    let seq = fetch(path_name, seq_lo, seq_hi)?;
+    let rc_seq = revcomp(&seq);
+    let reverse: Vec<(u64, i32)> =
+        impg::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
+            .into_iter()
+            .map(|(signed, q)| (seq_lo + seq.len() as u64 - k - q, -signed))
+            .collect();
+    // Both frames' selections restricted to the stored walk's own
+    // domain: steps whose windows overlap [start, end).
+    let keep = |bp: u64| bp + k > start && bp < end;
+    let forward_map: BTreeMap<u64, i32> = stored
+        .iter()
+        .copied()
+        .filter(|&(bp, _)| keep(bp))
+        .collect();
+    let reverse_map: BTreeMap<u64, i32> =
+        reverse.into_iter().filter(|&(bp, _)| keep(bp)).collect();
+    let steps = canonical_scheme_steps(&forward_map, &reverse_map, &seq, seq_lo, k);
+    let mut verified = 0u64;
+    let mut added = 0u64;
+    let mut replaced = 0u64;
+    for &(bp, node, frame) in &steps {
+        let rel = (bp - seq_lo) as usize;
+        let window = &seq[rel..rel + k as usize];
+        let mut interned = panel.syncmer_seq(node);
+        // The syng's kmerHashSeq may return lowercase bases; the GFA
+        // writer's own convention uppercases them (write_segment's
+        // make_ascii_uppercase) — match it.
+        interned.make_ascii_uppercase();
+        ensure(
+            window == interned.as_slice(),
+            &format!(
+                "canonical-scheme step fails sequence verification against the fetched \
+                 sequence: {path_name} bp {bp} node {node}"
+            ),
+        )?;
+        let canonical_forward =
+            impg::genome_inference::mem_records::window_is_canonical_forward(window);
+        ensure(
+            canonical_forward == (frame == 0),
+            "canonical-scheme frame decision disagrees with the window's canonical form",
+        )?;
+        verified += 1;
+        match forward_map.get(&bp) {
+            Some(&stored_node) if stored_node == node => {}
+            Some(_) => replaced += 1,
+            None => added += 1,
+        }
+    }
+    // Completeness of the forward part: every stored step at a
+    // canonical-forward position must survive with the stored node.
+    for (&bp, &node) in forward_map.iter() {
+        let rel = (bp - seq_lo) as usize;
+        let canonical_forward = seq
+            .get(rel..rel + k as usize)
+            .map(|window| {
+                impg::genome_inference::mem_records::window_is_canonical_forward(window)
+            })
+            .unwrap_or(false);
+        if canonical_forward {
+            ensure(
+                steps.iter().any(|&(s_bp, s_node, _)| s_bp == bp && s_node == node),
+                "canonical-scheme skeleton dropped a canonical-forward stored step",
+            )?;
+        }
+    }
+    let chosen_positions: BTreeSet<u64> = steps.iter().map(|&(bp, _, _)| bp).collect();
+    let dropped = forward_map
+        .keys()
+        .filter(|&&bp| !chosen_positions.contains(&bp))
+        .count() as u64;
+    Ok((steps, verified + added, added + replaced, dropped))
+}
+
+// ---------------------------------------------------------------------------
+// Candidate rows (slice A's RowStore, verbatim semantics; slice D: the
+// pin skeleton's step source is the canonical scheme by default).
+// ---------------------------------------------------------------------------
+
+/// The per-row skeleton diff over the CONTAINED steps (windows fully
+/// inside the row extent — the pin-skeleton domain): the canonical-
+/// scheme steps with frame tags beside the stored walk's steps, plus
+/// the position census (added = the rc-frame-only anchors the stored
+/// walk lacks; replaced = positions where the canonical scheme keeps
+/// a different node; dropped = stored positions the canonical scheme
+/// excludes).
+struct SkeletonDiff {
+    canonical: Vec<(u64, i32)>,
+    frames: Vec<(u64, u8)>,
+    stored: Vec<(u64, i32)>,
+    added: u64,
+    replaced: u64,
+    dropped: u64,
+    kept_forward: u64,
+    kept_reverse: u64,
+}
+
+fn contained_skeleton_diff(row: &RowFold, k: u64) -> SkeletonDiff {
+    let contained_of = |walk: &[(u64, i32)]| {
+        walk.iter()
+            .filter(|&&(bp, _)| bp >= row.start && bp + k <= row.end)
+            .map(|&(bp, node)| (bp - row.start, node))
+            .collect::<Vec<(u64, i32)>>()
+    };
+    let stored = contained_of(&row.stored_walk);
+    let canonical = contained_of(&row.walk);
+    let frames = row
+        .walk
+        .iter()
+        .zip(row.frames.iter())
+        .filter(|(&(bp, _), _)| bp >= row.start && bp + k <= row.end)
+        .map(|(&(bp, _), &frame)| (bp - row.start, frame))
+        .collect::<Vec<(u64, u8)>>();
+    let stored_positions: BTreeSet<u64> = stored.iter().map(|&(bp, _)| bp).collect();
+    let canonical_positions: BTreeSet<u64> = canonical.iter().map(|&(bp, _)| bp).collect();
+    let stored_nodes: BTreeMap<u64, i32> = stored.iter().copied().collect();
+    let mut added = 0u64;
+    let mut replaced = 0u64;
+    let mut dropped = 0u64;
+    let mut kept_forward = 0u64;
+    let mut kept_reverse = 0u64;
+    for &(bp, node) in &canonical {
+        match stored_nodes.get(&bp) {
+            None => added += 1,
+            Some(&stored_node) if stored_node == node => {}
+            Some(_) => replaced += 1,
+        }
+    }
+    for &bp in &stored_positions {
+        if !canonical_positions.contains(&bp) {
+            dropped += 1;
+        }
+    }
+    for &(_, frame) in &frames {
+        if frame == 0 {
+            kept_forward += 1;
+        } else {
+            kept_reverse += 1;
+        }
+    }
+    SkeletonDiff {
+        canonical,
+        frames,
+        stored,
+        added,
+        replaced,
+        dropped,
+        kept_forward,
+        kept_reverse,
+    }
+}
 
 struct RowFold {
     #[allow(dead_code)]
@@ -671,10 +919,18 @@ struct RowFold {
     start: u64,
     end: u64,
     seq: Vec<u8>,
-    /// All walk steps overlapping the row range (absolute bp, signed
-    /// node), sorted by bp — the committed partition GFAs' own P-line
-    /// walks.
+    /// The pin skeleton's steps overlapping the row range (absolute
+    /// bp, signed node), sorted by bp — the CANONICAL-SCHEME selection
+    /// by default (slice D's frame repair), or the stored path walk
+    /// under the identity gate (the slice-B/C before-record).
     walk: Vec<(u64, i32)>,
+    /// The frame tag per walk step (0 = the stored forward frame's
+    /// selection, 1 = the rc frame's qualification) — the audit view;
+    /// empty under the identity gate.
+    frames: Vec<u8>,
+    /// The stored path walk (the committed partition GFAs' own P-line
+    /// steps) — the audit's comparison baseline.
+    stored_walk: Vec<(u64, i32)>,
     /// (partition, member index) pairs of every partition holding this
     /// row.
     members: Vec<(u32, usize)>,
@@ -686,6 +942,12 @@ struct RowStore<'a> {
     panel: &'a SyngIndex,
     path_of_name: &'a HashMap<String, usize>,
     fetch: &'a dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    k: u64,
+    /// The identity gate: keep the stored path walk as the pin
+    /// skeleton (env IMPG_REALIGN_STORED_WALK_SKELETON; assessment-side
+    /// diagnostic for the before/after pairing — the repair is the
+    /// default).
+    stored_frame: bool,
     folds: Vec<RowFold>,
     dedup: HashMap<(usize, u64, u64), usize>,
     by_partition: HashMap<u32, Vec<usize>>,
@@ -697,11 +959,15 @@ impl<'a> RowStore<'a> {
         panel: &'a SyngIndex,
         path_of_name: &'a HashMap<String, usize>,
         fetch: &'a dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+        k: u64,
+        stored_frame: bool,
     ) -> Self {
         RowStore {
             panel,
             path_of_name,
             fetch,
+            k,
+            stored_frame,
             folds: Vec::new(),
             dedup: HashMap::new(),
             by_partition: HashMap::new(),
@@ -726,13 +992,30 @@ impl<'a> RowStore<'a> {
                 Some(&index) => index,
                 None => {
                     let seq = (self.fetch)(&member.path_name, member.start, end)?;
-                    let mut walk: Vec<(u64, i32)> = self
+                    let mut stored_walk: Vec<(u64, i32)> = self
                         .panel
                         .walk_path_range(path_idx, member.start, end)?
                         .into_iter()
                         .map(|(node, bp)| (bp, node))
                         .collect();
-                    walk.sort_unstable_by_key(|&(bp, _)| bp);
+                    stored_walk.sort_unstable_by_key(|&(bp, _)| bp);
+                    let (walk, frames) = if self.stored_frame {
+                        (stored_walk.clone(), Vec::new())
+                    } else {
+                        let (steps, _verified, _changed, _dropped) = canonical_steps_overlapping(
+                            self.panel,
+                            self.fetch,
+                            &member.path_name,
+                            member.start,
+                            end,
+                            self.k,
+                            &stored_walk,
+                        )?;
+                        (
+                            steps.iter().map(|&(bp, node, _)| (bp, node)).collect(),
+                            steps.iter().map(|&(_, _, frame)| frame).collect(),
+                        )
+                    };
                     let index = self.folds.len();
                     self.folds.push(RowFold {
                         path: path_idx,
@@ -740,6 +1023,8 @@ impl<'a> RowStore<'a> {
                         end,
                         seq,
                         walk,
+                        frames,
+                        stored_walk,
                         members: Vec::new(),
                     });
                     self.dedup.insert(dedup_key, index);
@@ -1540,21 +1825,24 @@ fn main() -> io::Result<()> {
         sources.fetch(source, lo, hi)
     };
 
-    // The census receipt (slice A's input, verbatim).
+    // The census receipt (slice A's input, verbatim; not needed in the
+    // frame-audit-only mode — the skeleton audit touches no reads).
     let mut census_records: Vec<CensusRecordLine> = Vec::new();
-    {
-        let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
-            .map_err(io::Error::other)?;
-        for line in BufReader::new(reader).lines() {
-            census_records.push(serde_json::from_str(&line?)?);
+    if !options.frame_audit_only {
+        {
+            let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
+                .map_err(io::Error::other)?;
+            for line in BufReader::new(reader).lines() {
+                census_records.push(serde_json::from_str(&line?)?);
+            }
         }
+        ensure(
+            census_records
+                .windows(2)
+                .all(|w| w[0].record + 1 == w[1].record),
+            "census record ids are not dense",
+        )?;
     }
-    ensure(
-        census_records
-            .windows(2)
-            .all(|w| w[0].record + 1 == w[1].record),
-        "census record ids are not dense",
-    )?;
 
     // The partition graph maps; the AXIS partitions (holding a member
     // row on the component path) ranked by axis-row start map to the
@@ -1579,13 +1867,17 @@ fn main() -> io::Result<()> {
         maps.insert(map.partition, map);
     }
     axis_partitions.sort_by_key(|&(partition, start)| (start, partition));
-    let n_windows = census_records
-        .iter()
-        .flat_map(|line| line.occurrences.iter())
-        .flat_map(|occ| occ.partitions.iter().copied())
-        .max()
-        .map(|w| w as usize + 1)
-        .unwrap_or(0);
+    let n_windows = if options.frame_audit_only {
+        axis_partitions.len()
+    } else {
+        census_records
+            .iter()
+            .flat_map(|line| line.occurrences.iter())
+            .flat_map(|occ| occ.partitions.iter().copied())
+            .max()
+            .map(|w| w as usize + 1)
+            .unwrap_or(0)
+    };
     ensure(
         axis_partitions.len() == n_windows,
         "axis partition count does not match the census window span",
@@ -1594,6 +1886,82 @@ fn main() -> io::Result<()> {
         axis_partitions.iter().map(|&(partition, _)| partition).collect();
     for &locus in &loci {
         ensure((locus as usize) < n_windows, "locus outside the window span")?;
+    }
+
+    // ------------------------------------- slice D gate 1: the frame audit
+    // (the frame-blindness diagnosis, pure emission: per axis-partition
+    // row of the given loci, the canonical-scheme pin skeleton beside
+    // the stored path walk, with the per-position diff — the class
+    // census of the frame-blinded anchors. Every canonical step is
+    // sequence-verified in-process against the fetched panel sequence.)
+    if options.frame_audit_only {
+        let audit_started = Instant::now();
+        let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, false);
+        for &locus in &loci {
+            let partition = window_partition[locus as usize];
+            let map = maps
+                .get(&partition)
+                .ok_or_else(|| invalid("axis partition map missing"))?;
+            store.ensure_partition(&map.members, partition)?;
+        }
+        let mut audit = BufWriter::new(File::create(&options.out)?);
+        let mut rows_total = 0u64;
+        let mut rows_affected = 0u64;
+        let mut steps_forward = 0u64;
+        let mut steps_reverse = 0u64;
+        let mut added_total = 0u64;
+        let mut replaced_total = 0u64;
+        let mut dropped_total = 0u64;
+        for row in &store.folds {
+            let diff = contained_skeleton_diff(row, k);
+            rows_total += 1;
+            steps_forward += diff.kept_forward;
+            steps_reverse += diff.kept_reverse;
+            added_total += diff.added;
+            replaced_total += diff.replaced;
+            dropped_total += diff.dropped;
+            if diff.added > 0 || diff.replaced > 0 || diff.dropped > 0 {
+                rows_affected += 1;
+            }
+            serde_json::to_writer(
+                &mut audit,
+                &json!({
+                    "partitions": row.members.iter().map(|&(p, _)| p).collect::<Vec<_>>(),
+                    "path_name": panel.name_map.path_to_name[row.path],
+                    "start": row.start,
+                    "end": row.end,
+                    "length": row.end - row.start,
+                    "steps": diff.canonical.iter().zip(diff.frames.iter())
+                        .map(|(&(bp, node), &(_, frame))| json!([bp, node, frame]))
+                        .collect::<Vec<_>>(),
+                    "stored": diff.stored.iter()
+                        .map(|&(bp, node)| json!([bp, node]))
+                        .collect::<Vec<_>>(),
+                    "added": diff.added,
+                    "replaced": diff.replaced,
+                    "dropped": diff.dropped,
+                    "kept_forward": diff.kept_forward,
+                    "kept_reverse": diff.kept_reverse,
+                }),
+            )?;
+            writeln!(audit)?;
+        }
+        audit.flush()?;
+        let partitions: BTreeSet<u32> = loci
+            .iter()
+            .map(|&l| window_partition[l as usize])
+            .collect();
+        eprintln!(
+            "[score] frame audit: {} partitions, {} rows, {} affected \
+             (added {added_total}, replaced {replaced_total}, dropped {dropped_total}; \
+             kept forward {steps_forward}, reverse {steps_reverse}) [{:.1}s]",
+            partitions.len(),
+            rows_total,
+            rows_affected,
+            audit_started.elapsed().as_secs_f64(),
+        );
+        rss.probe("frame_audit")?;
+        return Ok(());
     }
     eprintln!(
         "[score] inputs: {} census records, k {k}, {} windows, loci {loci:?}",
@@ -2050,7 +2418,17 @@ fn main() -> io::Result<()> {
     let records_path = format!("{}.records.jsonl", options.out.display());
     let mut records_file = BufWriter::new(File::create(&records_path)?);
 
-    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq);
+    // The identity gate (slice D): under IMPG_REALIGN_STORED_WALK_SKELETON
+    // the pin skeleton stays the stored path walk (the slice-B/C
+    // before-record; assessment-side diagnostic for the before/after
+    // pairing). The repair — the canonical-scheme skeleton — is the
+    // default.
+    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    let mut skeleton = match &options.skeleton_out {
+        Some(path) => Some(BufWriter::new(File::create(path)?)),
+        None => None,
+    };
+    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
     let contig = options
         .component
         .splitn(3, '#')
@@ -2163,6 +2541,67 @@ fn main() -> io::Result<()> {
             folds[index].members.push(member.clone());
         }
         let n_folds = folds.len();
+        // The pin-skeleton sidecar (slice D's frame-repair audit): per
+        // fold, the canonical-scheme contained steps with frame tags
+        // beside the stored walk's, with the position diff — and the
+        // per-locus totals for the receipt. Under the identity gate
+        // (stored_frame) the canonical rows were not extracted for
+        // scoring, so the sidecar is not emitted there.
+        let mut skeleton_rows = 0u64;
+        let mut skeleton_affected = 0u64;
+        let mut skeleton_added = 0u64;
+        let mut skeleton_replaced = 0u64;
+        let mut skeleton_dropped = 0u64;
+        let mut skeleton_forward = 0u64;
+        let mut skeleton_reverse = 0u64;
+        if let Some(writer) = &mut skeleton {
+            for (fold_index, fold) in folds.iter().enumerate() {
+                let first = &fold.members[0];
+                let path_idx = path_of_name[&first.path_name];
+                let clipped_end =
+                    first.end.min(panel.name_map.path_to_length[path_idx]);
+                let row_index = *store
+                    .dedup
+                    .get(&(path_idx, first.start, clipped_end))
+                    .ok_or_else(|| invalid("fold row missing from the store"))?;
+                let row = &store.folds[row_index];
+                let diff = contained_skeleton_diff(row, k);
+                skeleton_rows += 1;
+                skeleton_added += diff.added;
+                skeleton_replaced += diff.replaced;
+                skeleton_dropped += diff.dropped;
+                skeleton_forward += diff.kept_forward;
+                skeleton_reverse += diff.kept_reverse;
+                if diff.added > 0 || diff.replaced > 0 || diff.dropped > 0 {
+                    skeleton_affected += 1;
+                }
+                serde_json::to_writer(
+                    &mut *writer,
+                    &json!({
+                        "locus": locus,
+                        "partition": partition,
+                        "fold": fold_index,
+                        "members": fold.members.iter().map(|m| json!({
+                            "path_name": m.path_name, "start": m.start, "end": m.end,
+                        })).collect::<Vec<_>>(),
+                        "length": fold.len,
+                        "steps": diff.canonical.iter().zip(diff.frames.iter())
+                            .map(|(&(bp, node), &(_, frame))| json!([bp, node, frame]))
+                            .collect::<Vec<_>>(),
+                        "stored": diff.stored.iter()
+                            .map(|&(bp, node)| json!([bp, node]))
+                            .collect::<Vec<_>>(),
+                        "added": diff.added,
+                        "replaced": diff.replaced,
+                        "dropped": diff.dropped,
+                        "kept_forward": diff.kept_forward,
+                        "kept_reverse": diff.kept_reverse,
+                    }),
+                )?;
+                writeln!(writer)?;
+            }
+            writer.flush()?;
+        }
         eprintln!(
             "[score] locus {locus}: partition {partition}, {} members -> {n_folds} folds [{:.1}s]",
             map.members.len(),
@@ -3344,7 +3783,26 @@ fn main() -> io::Result<()> {
         serde_json::to_writer(&mut report, &json!({
             "locus": locus,
             "partition": partition,
-            "model": "anchor-realign-v2-marginal",
+            "model": if stored_frame {
+                "anchor-realign-v2-marginal"
+            } else {
+                "anchor-realign-v2-marginal-frame"
+            },
+            "skeleton": {
+                "scheme": if stored_frame { "stored_walk" } else { "canonical_scheme" },
+                "rows": skeleton_rows,
+                "rows_affected": skeleton_affected,
+                "added": skeleton_added,
+                "replaced": skeleton_replaced,
+                "dropped": skeleton_dropped,
+                "kept_forward": skeleton_forward,
+                "kept_reverse": skeleton_reverse,
+                "note": "the canonical-scheme pin skeleton (slice D's frame \
+                         repair: per position the frame that spells the \
+                         k-mer's canonical form forward decides; every step \
+                         sequence-verified against the fetched panel sequence); \
+                         added = rc-frame-only anchors the stored walk lacks",
+            },
             "scoring": {
                 "phred": phred,
                 "epsilon": epsilon,
@@ -3829,4 +4287,63 @@ mod tests {
         let p = state.p.expect("finite p");
         assert!((p - 1.0 / (1.0 + 1e-40)).abs() < 1e-12);
     }
+    #[test]
+    fn canonical_scheme_selects_per_window_form() {
+        // The canonical-scheme selection (slice D's frame repair): per
+        // position the frame that spells the k-mer's canonical form
+        // forward decides; a position whose canonical frame did not
+        // qualify carries NO step; the chosen frame's node is kept.
+        let k = 4u64;
+        // A 16 bp sequence: window at 0 is canonical-forward (ACGT),
+        // the windows at 6 and 12 are rc-canonical (T leads and the
+        // complement of the trailing base loses the comparison).
+        let seq = b"ACGTGTTAACGTTTGAC".to_vec();
+        let seq_lo = 100u64;
+        assert!(impg::genome_inference::mem_records::window_is_canonical_forward(
+            &seq[0..4]
+        ));
+        assert!(!impg::genome_inference::mem_records::window_is_canonical_forward(
+            &seq[6..10]
+        ));
+        let mut forward = BTreeMap::new();
+        forward.insert(seq_lo + 0, 11);
+        forward.insert(seq_lo + 6, 13); // forward-qualified, rc-canonical
+        let mut reverse = BTreeMap::new();
+        reverse.insert(seq_lo + 6, -13); // the rc frame's node at the same position
+        reverse.insert(seq_lo + 12, -17); // rc-only position, rc-canonical window
+        assert!(!impg::genome_inference::mem_records::window_is_canonical_forward(
+            &seq[12..16]
+        ));
+        let steps = canonical_scheme_steps(&forward, &reverse, &seq, seq_lo, k);
+        // The canonical-forward position keeps the forward node; the
+        // rc-canonical positions take the reverse frame's node (or
+        // drop when only the forward frame qualified); the forward-only
+        // rc-canonical position is REPLACED by the reverse node here.
+        assert_eq!(
+            steps,
+            vec![(seq_lo + 0, 11, 0u8), (seq_lo + 6, -13, 1u8), (seq_lo + 12, -17, 1u8)]
+        );
+    }
+
+    #[test]
+    fn canonical_scheme_drops_forward_only_rc_canonical_positions() {
+        // A position where ONLY the forward frame qualified and the
+        // window is rc-canonical carries NO step: no census record
+        // (derived under the same scheme) can anchor there.
+        let k = 4u64;
+        let seq = b"ACGTGTTAACGTTTGAC".to_vec();
+        let seq_lo = 0u64;
+        let mut forward = BTreeMap::new();
+        forward.insert(6, 13);
+        let reverse: BTreeMap<u64, i32> = BTreeMap::new();
+        let steps = canonical_scheme_steps(&forward, &reverse, &seq, seq_lo, k);
+        assert!(steps.is_empty());
+        // With the rc frame qualifying there too, the position keeps
+        // the rc frame's node.
+        let mut reverse = BTreeMap::new();
+        reverse.insert(6, -13);
+        let steps = canonical_scheme_steps(&forward, &reverse, &seq, seq_lo, k);
+        assert_eq!(steps, vec![(6, -13, 1u8)]);
+    }
+
 }
