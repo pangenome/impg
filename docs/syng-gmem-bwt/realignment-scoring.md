@@ -587,3 +587,127 @@ seams; the alignment-induced partition boundary that fragments truth
 rows; the scaffold/repeat pocket material and the cross-chromosome
 windows), and the QUAL p-form's dynamic range. No selection swap, no
 threshold, no scoreboard change; truth assessment-side only.
+
+## Phase 0 of the runtime plan — the dominance measurement (2026-11-06)
+
+The instrument's first wall-attribution slice (measure-before-lever;
+timers and counters only, emitted to stderr — no receipt field
+changes, no restructuring, no behavior change). `partition_realign_score`
+gains phase-local timers at its natural phase boundaries — inputs
+(panel+routes+census+partition maps), the FASTQ quality scan, the E
+derivation, the derive-cache load, the pilot-record BINDING phase (with
+sub-timers for its three cost drivers: the per-record canonical-scheme
+step extraction, the per-candidate key-shape re-derivation, and the
+per-(occurrence × shift) `verify_key_at` AGC fetch probes, plus measured
+counts — records, occurrences, candidate keys, verify probes, fetch
+calls, fetch bytes), the per-record read variants, the RowStore
+partition build (context assembly: per-row fetch + stored-walk
+extraction + canonical-scheme skeleton extraction, sequence-verified),
+and per locus: the touching/locality classification, the scoring
+matrix, the class enumeration, QUAL, the exactness sample, and the
+receipts/IO writes, with a `locus_N_receipts` RSS probe per locus for
+the memory-peak attribution. A global AGC-fetch counter attributes
+fetch volume per phase.
+
+### The timered exhaustive reruns (serial, exit 0, 64 GiB guard clean)
+
+chrMT all 14 loci: wall 150 s, poller RSS peak 2,195,864 kB; chrI all
+21 loci: wall 597 s, poller RSS peak 5,957,684 kB (the clean rerun;
+the committed slice-E run measured 5,949,056 kB — the same peak).
+Factorized-vs-direct 1,929,497 + 21,490,054 = 23,419,551/23,419,551
+EXACT in both. **THE ANSWER-PRESERVATION GATE passes on both
+components:** the timered receipts equal the committed slice-E
+receipts on every semantic field (only the walls/rss_kb timing fields
+differ; the walls field set unchanged), and all four sidecars
+(exactness/ingredients/records/skeleton) are BYTE-IDENTICAL — the
+instrumentation provably does not perturb the instrument.
+
+### THE DOMINANCE TABLE (the measured phase walls; chrMT 147.6 s and
+chrI 588.9 s in-process totals)
+
+| phase | chrMT wall | chrMT share | chrI wall | chrI share | the measured cost driver |
+|---|---:|---:|---:|---:|---|
+| inputs (panel+routes+census+maps) | 5.4 s | 3.7% | 6.6 s | 1.1% | the 10M-vertex/24M-edge GBWT + 4,891/13,905 census records |
+| quality scan | 2.7 s | 1.8% | 2.6 s | 0.4% | 2,439,103 reads streamed |
+| E derivation | 0.002 s | ~0% | 0.002 s | ~0% | 235 haplotype sets |
+| derive cache load | 1.4 s | 0.9% | 1.4 s | 0.2% | 2,439,103 reads / 666,327 keys |
+| **binding (anchor/pin placement + verify)** | **134.5 s** | **91.1%** | **551.1 s** | **93.6%** | 4,891/13,905 records; 234,472/1,415,203 occurrences; 4,954/14,629 candidate keys; **703,605/4,247,781 verify probes; 708,496/4,261,686 AGC fetches (51.4/308.5 MB)** |
+| read variants | 0.0 s | ~0% | 0.4 s | 0.1% | per-record variant census |
+| rows (context assembly) | 1.5 s | 1.0% | 6.3 s | 1.1% | 1,252/4,472 rows; 2,504/8,944 fetches (16.5/78.2 MB) |
+| loci: fold enum + units/locality + skeleton sidecar | 0.6 s | 0.4% | 2.0 s | 0.3% | Σ 1,099/3,545 folds; Σ 47,997/266,095 units |
+| loci: scoring matrix | 0.2 s | 0.1% | 1.9 s | 0.3% | 1,929,497/21,490,054 placements (rayon-parallel) |
+| loci: class LLs | 0.1 s | 0.1% | 3.0 s | 0.5% | Σ 59,225/378,306 classes × units mix_logsumexp (≈ 4.9 × 10^9 terms at chrI) |
+| loci: QUAL + exactness | 0.3 s | 0.2% | 1.4 s | 0.2% | spectra + 3,360/5,178 sample pairs |
+| loci: receipts/IO | 0.9 s | 0.6% | 12.1 s | 2.1% | the ingredients ll_matrix (Σ 47,997/266,095 units × folds; chrI L16 34.5 M entries) |
+
+Within the binding phase the verify probes are **99.1% (chrMT) /
+99.5% (chrI)** of the phase wall (133.3 s / 547.9 s); the step
+extraction is 0.8/2.3 s and the key-shape derivations 0.0/0.1 s.
+
+### THE INTERPRETATION — the lever mapping, measured
+
+**The dominant phase is the binding phase's per-(occurrence × shift ×
+candidate) sequence-fetch verification — 90% (chrMT) / 93% (chrI) of
+the whole instrument wall.** The natural unit cost is per-CALL, not
+per-byte: the average fetched verify range is ~72 bp (308.5 MB over
+4,261,686 fetches at chrI) and the measured cost is ~129 µs/probe —
+the random-access overhead of `sources.fetch` (per-call seek/decompress
+into the route sources), not the compared bytes. The mapping to the
+plan's levers:
+
+- **(a) Candidate-independent recomputation (the hoist-to-once class) —
+  THE lever this measurement names.** The verify loop fetches the SAME
+  per-occurrence range once per (candidate key × shift): measured
+  4,247,781 probes against 1,415,203 occurrences = a **3.01× pure
+  re-fetch redundancy** (the candidate multiplicity is small here —
+  14,629 candidate keys over 13,905 records — so the 3-shift loop is
+  the redundancy). Hoisting the fetch to once per (occurrence,
+  candidate) — or once per occurrence with the ±1 shift handled by
+  fetching one base of margin — bounds the dominant phase at ~1/3 of
+  its current wall (≈183 s at chrI) with NO model change. A per-range
+  fetch cache (the binding phase's ranges and the rows phase's ranges
+  overlap the already-fetched row sequences) would collapse the
+  per-call overhead further. Second-order members of the same class,
+  measured: the rows phase fetches each row's range twice (seq fetch +
+  the canonical-skeleton fetch of [start−k, end+k)) — 8,944 fetches
+  for 4,472 rows — at 6.3 s total; the per-(fold, unit)
+  `decode_record_tokens` re-derivation inside scoring is inside the
+  1.6 s scoring wall.
+- **(b) Per-class re-derivation (the Phase-2 vote-vector lever):**
+  the class enumeration re-walks all units per class — Σ classes ×
+  units ≈ 4.9 × 10^9 mix_logsumexp terms at chrI — for 3.0 s of
+  wall (0.5%; rayon-parallel; the CPU-seconds are larger but the wall
+  is the measure). Real CPU, but not where the wall lives.
+- **(c) Irreducible work:** the semantic per-occurrence verification
+  (one fetch + per-anchor compare per occurrence — 1,415,203
+  occurrences at chrI, each fetched range ~72 bp) and the scoring of
+  21,490,054 placements. Even fully hoisted, the binding phase
+  bounds at ~1/3 of its current wall; the remaining cost is the fetch
+  mechanism itself.
+
+**The memory-peak attribution (the 5.66 GiB):** NOT the binding phase
+(RSS 3.21 GB at chrI) and not scoring (4.27 GB at L16) — the peak is
+held in the per-locus **receipts/IO phase at the large-matrix loci**:
+the ingredients sidecar materializes the full ll_matrix as a serde
+JSON value tree before writing (chrI L16: 448 folds × 77,117 units =
+34.5 M entries ≈ +1.15 GB live over the 4.27 GB baseline), and the
+external poller catches 5.95 GB there (probe after the write: 4.80 GB
+retained). A streaming serializer (to_writerf over the matrix without
+the value-tree materialization) would remove the spike without
+touching the receipts' content.
+
+### The checker in the timered mode
+
+`check-realign-scoring.py --exhaustive chrMT|chrI --timered-base
+<base> --run-tag <tag>` re-runs every slice-E phase over the timered
+receipts and adds **phase 8t, the answer-preservation gate**: per
+locus, every semantic field must equal the committed slice-E receipt
+(only walls/rss_kb excluded, the walls field set checked unchanged
+against schema drift) and the four sidecars must be byte-identical.
+**ALL PHASES PASS:** chrMT 1,170,642 checks, chrI 4,342,914 checks, 0
+failures (the +730/+896 checks over slice E are phase 8t's own). The
+default paths and all prior modes are untouched.
+
+No thresholds, no tuning constants, no selection swap, no scoreboard
+change; assessment-side only; serial runs; the 64 GiB guard clean
+everywhere.

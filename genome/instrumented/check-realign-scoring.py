@@ -125,13 +125,37 @@ if "--exhaustive" in sys.argv:
         sys.exit("--exhaustive requires chrMT or chrI")
 FRAME = ("--frame" in sys.argv) or (EXHAUSTIVE is not None)
 MARGINAL = FRAME or ("--marginal" in sys.argv)
+# Slice F (phase 0 of the runtime plan — the dominance measurement):
+# with --exhaustive, the optional --timered-base BASE --run-tag TAG pair
+# points every phase at the TIMERED rerun's receipts (the instrumented
+# binary: timers and counters only, stderr-emitted) and adds phase 8t,
+# THE ANSWER-PRESERVATION GATE — the timered receipts must equal the
+# committed slice-E receipts on every semantic field (the identity-gate
+# pattern from slice D: only the walls/rss_kb timing fields may differ)
+# with byte-identical sidecars. The default paths are untouched.
+TIMERED_BASE = None
+if "--timered-base" in sys.argv:
+    if EXHAUSTIVE is None:
+        sys.exit("--timered-base requires --exhaustive")
+    _i = sys.argv.index("--timered-base")
+    TIMERED_BASE = sys.argv[_i + 1]
+    _i = sys.argv.index("--run-tag")
+    TIMERED_RUN = f"{D}/run-{sys.argv[_i + 1]}"
 if EXHAUSTIVE is not None:
-    RECEIPT = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl"
-    EXACTNESS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.exactness.jsonl"
-    INGREDIENTS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.ingredients.jsonl"
-    RUN = f"{D}/run-realignexhaustive-{EXHAUSTIVE}-{EXHAUSTIVE}"
-    BEFORE_RECEIPT = f"{D}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
-    SKELETON = f"{D}/realign-exhaustive-{EXHAUSTIVE}.skeleton.jsonl"
+    if TIMERED_BASE is not None:
+        RECEIPT = f"{D}/{TIMERED_BASE}.jsonl"
+        EXACTNESS = f"{D}/{TIMERED_BASE}.exactness.jsonl"
+        INGREDIENTS = f"{D}/{TIMERED_BASE}.jsonl.ingredients.jsonl"
+        RUN = TIMERED_RUN
+        BEFORE_RECEIPT = f"{D}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
+        SKELETON = f"{D}/{TIMERED_BASE}.skeleton.jsonl"
+    else:
+        RECEIPT = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl"
+        EXACTNESS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.exactness.jsonl"
+        INGREDIENTS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.ingredients.jsonl"
+        RUN = f"{D}/run-realignexhaustive-{EXHAUSTIVE}-{EXHAUSTIVE}"
+        BEFORE_RECEIPT = f"{D}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
+        SKELETON = f"{D}/realign-exhaustive-{EXHAUSTIVE}.skeleton.jsonl"
     ANCHOR = f"{D}/anchor-projection-{EXHAUSTIVE}.jsonl"
     COMPONENT = f"S288C#0#{EXHAUSTIVE}"
     _loci = []
@@ -1422,6 +1446,71 @@ def main():
             f"prediction violations (old wins lost): {prediction_violations}",
             flush=True,
         )
+
+        # ------------- phase 8t (slice F): THE ANSWER-PRESERVATION GATE
+        # The timered rerun (the instrumented binary: timers and
+        # counters only, emitted to stderr) must reproduce the committed
+        # slice-E receipts on EVERY semantic field — the identity-gate
+        # pattern from slice D: only the walls/rss_kb timing fields may
+        # differ, the walls field SET must be unchanged (no receipt
+        # schema drift), and the four sidecars must be byte-identical.
+        if TIMERED_BASE is not None:
+            import filecmp
+
+            print(
+                "== phase 8t: the answer-preservation gate (the timered rerun vs the committed slice-E receipts)",
+                flush=True,
+            )
+            committed_slice_e = {}
+            with open(f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl") as f:
+                for line in f:
+                    d = json.loads(line)
+                    committed_slice_e[d["locus"]] = d
+            skip = {"walls", "rss_kb"}
+            for locus in LOCI:
+                o, n = committed_slice_e[locus], receipt[locus]
+                check(
+                    (set(o) - skip) == (set(n) - skip),
+                    f"answer-preservation gate: locus {locus} field set differs",
+                )
+                check(
+                    set(o["walls"]) == set(n["walls"]),
+                    f"answer-preservation gate: locus {locus} walls field set differs",
+                )
+                for key in sorted(set(o) - skip):
+                    check(
+                        o[key] == n[key],
+                        f"answer-preservation gate: locus {locus} field {key} differs",
+                    )
+            for committed_sidecar, timered_sidecar in [
+                (
+                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.exactness.jsonl",
+                    EXACTNESS,
+                ),
+                (
+                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.ingredients.jsonl",
+                    INGREDIENTS,
+                ),
+                (
+                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.records.jsonl",
+                    f"{D}/{TIMERED_BASE}.jsonl.records.jsonl",
+                ),
+                (
+                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.skeleton.jsonl",
+                    SKELETON,
+                ),
+            ]:
+                check(
+                    filecmp.cmp(committed_sidecar, timered_sidecar, shallow=False),
+                    f"answer-preservation gate: {timered_sidecar} not byte-identical "
+                    f"to the committed sidecar",
+                )
+            print(
+                f"      the timered run reproduces the committed slice-E receipts "
+                f"(every semantic field at {len(LOCI)} loci; only walls/rss_kb "
+                f"differ) with byte-identical sidecars",
+                flush=True,
+            )
     else:
         for locus in LOCI:
             d = receipt[locus]

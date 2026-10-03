@@ -177,6 +177,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 const READ_LENGTH: usize = 150;
@@ -1786,6 +1787,12 @@ fn main() -> io::Result<()> {
     }
 
     // ------------------------------------------------------------- inputs
+    // (Phase instrumentation for the dominance measurement: timers and
+    // counters only, all emitted to stderr; no receipt field changes,
+    // no behavior change.)
+    let inputs_started = Instant::now();
+    let fetch_calls = AtomicU64::new(0);
+    let fetch_bytes = AtomicU64::new(0);
     let identity = PanelIdentity::read(&options.panel)?;
     let panel = SyngIndex::load(&options.panel, SyncmerParams::default())?;
     let k = panel.syncmer_length_bp() as u64;
@@ -1822,7 +1829,10 @@ fn main() -> io::Result<()> {
         if lo >= hi {
             return Ok(Vec::new());
         }
-        sources.fetch(source, lo, hi)
+        fetch_calls.fetch_add(1, Ordering::Relaxed);
+        let seq = sources.fetch(source, lo, hi)?;
+        fetch_bytes.fetch_add(seq.len() as u64, Ordering::Relaxed);
+        Ok(seq)
     };
 
     // The census receipt (slice A's input, verbatim; not needed in the
@@ -1887,6 +1897,14 @@ fn main() -> io::Result<()> {
     for &locus in &loci {
         ensure((locus as usize) < n_windows, "locus outside the window span")?;
     }
+    let inputs_seconds = inputs_started.elapsed().as_secs_f64();
+    eprintln!(
+        "[score] phase inputs: panel+routes+census+partition maps \
+         ({} census records, {} windows) [{inputs_seconds:.1}s]",
+        census_records.len(),
+        n_windows,
+    );
+    rss.probe("inputs")?;
 
     // ------------------------------------- slice D gate 1: the frame audit
     // (the frame-blindness diagnosis, pure emission: per axis-partition
@@ -1992,12 +2010,12 @@ fn main() -> io::Result<()> {
         epsilon,
         phred,
     };
+    let quality_seconds = quality_started.elapsed().as_secs_f64();
     eprintln!(
         "[score] scoring rate: uniform Phred {phred} over {total_reads} reads \
-         (epsilon {epsilon}, A {}, B {}) [{:.1}s]",
+         (epsilon {epsilon}, A {}, B {}) [{quality_seconds:.1}s]",
         scoring.a,
         scoring.b,
-        quality_started.elapsed().as_secs_f64(),
     );
     rss.probe("quality")?;
 
@@ -2010,6 +2028,7 @@ fn main() -> io::Result<()> {
     // diploid generation model (the balanced diploid sample's
     // documented construction: two haploid homologs).
     let mut strain_totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let elsewhere_started = Instant::now();
     for (name, &len) in panel
         .name_map
         .path_to_name
@@ -2043,6 +2062,13 @@ fn main() -> io::Result<()> {
          diploid {genome_diploid_bp:.1} bp)",
         strain_totals.len(),
     );
+    eprintln!(
+        "[score] phase elsewhere: E derivation over {} haplotype sets \
+         [{:.3}s]",
+        strain_totals.len(),
+        elsewhere_started.elapsed().as_secs_f64(),
+    );
+    let elsewhere_seconds = elsewhere_started.elapsed().as_secs_f64();
 
     // ------------------------------------- the read-record re-derivation
     let derive_started = Instant::now();
@@ -2061,11 +2087,11 @@ fn main() -> io::Result<()> {
         )?;
         (tokens, lists, seqs, mults, records)
     };
+    let derive_seconds = derive_started.elapsed().as_secs_f64();
     eprintln!(
-        "[score] derive cache loaded: {} reads, {} keys ({:.1}s)",
+        "[score] derive cache loaded: {} reads, {} keys ({derive_seconds:.1}s)",
         reads.len(),
         key_tokens.len(),
-        derive_started.elapsed().as_secs_f64(),
     );
     struct ReadRecord {
         key: u32,
@@ -2136,6 +2162,30 @@ fn main() -> io::Result<()> {
     // ------------------------- the pilot record set and the binding
     // The locus's evidence set: records with at least one occurrence
     // TOUCHING a scored window (the routing's own territory-touch rule).
+    // (Phase instrumentation: the binding sub-timers split the phase
+    // into its natural cost drivers — the per-record canonical-scheme
+    // step extraction, the per-candidate key-shape re-derivation, and
+    // the per-occurrence AGC fetch verification.)
+    let binding_started = Instant::now();
+    let binding_fetch_calls = fetch_calls.load(Ordering::Relaxed);
+    let binding_fetch_bytes = fetch_bytes.load(Ordering::Relaxed);
+    struct BindTimers {
+        shape_seconds: f64,
+        verify_seconds: f64,
+        shape_calls: u64,
+        verify_calls: u64,
+    }
+    let mut bind_timers = BindTimers {
+        shape_seconds: 0.0,
+        verify_seconds: 0.0,
+        shape_calls: 0,
+        verify_calls: 0,
+    };
+    let mut bind_steps_seconds = 0.0f64;
+    let mut bind_steps_calls = 0u64;
+    let mut bind_candidates = 0u64;
+    let mut bind_occurrences = 0u64;
+    let mut bind_shaped_keys: BTreeSet<u32> = BTreeSet::new();
     let mut pilot_records: BTreeSet<usize> = BTreeSet::new();
     for (record, line) in census_records.iter().enumerate() {
         for occ in &line.occurrences {
@@ -2280,11 +2330,15 @@ fn main() -> io::Result<()> {
             .occurrences
             .first()
             .ok_or_else(|| invalid("census record has no occurrences"))?;
+        bind_occurrences += line.occurrences.len() as u64;
+        let steps_started = Instant::now();
         let steps = canonical_steps_near(occ.path, occ.start)?
             .into_iter()
             .filter(|&(bp, _)| bp == occ.start)
             .map(|(_, node)| node)
             .collect::<Vec<i32>>();
+        bind_steps_seconds += steps_started.elapsed().as_secs_f64();
+        bind_steps_calls += 1;
         ensure(!steps.is_empty(), "census occurrence start has no panel step")?;
         let mut candidates: BTreeSet<u32> = BTreeSet::new();
         for &step in &steps {
@@ -2300,14 +2354,19 @@ fn main() -> io::Result<()> {
                 }
             }
         }
+        bind_candidates += candidates.len() as u64;
         let shifts = [0i64, 1, -1];
-        let verify_all = |key: u32| -> io::Result<Option<Vec<i64>>> {
+        let verify_all = |key: u32, t: &mut BindTimers| -> io::Result<Option<Vec<i64>>> {
+            let shape_started = Instant::now();
             let shape = key_shape(key, &key_tokens, &key_reads, &read_records, k)?;
+            t.shape_seconds += shape_started.elapsed().as_secs_f64();
+            t.shape_calls += 1;
             let mut per_occurrence = Vec::with_capacity(line.occurrences.len());
             for occ in &line.occurrences {
                 let mut found: Vec<i64> = Vec::new();
                 for &shift in &shifts {
-                    if verify_key_at(
+                    let verify_started = Instant::now();
+                    let verified = verify_key_at(
                         &shape,
                         &panel.name_map.path_to_name[occ.path],
                         occ,
@@ -2315,7 +2374,10 @@ fn main() -> io::Result<()> {
                         &fetch_seq,
                         k,
                         shift,
-                    )? {
+                    )?;
+                    t.verify_seconds += verify_started.elapsed().as_secs_f64();
+                    t.verify_calls += 1;
+                    if verified {
                         found.push(shift);
                     }
                 }
@@ -2329,7 +2391,8 @@ fn main() -> io::Result<()> {
         };
         let mut surviving: Vec<(u32, Vec<i64>)> = Vec::new();
         for key in candidates {
-            if let Some(per_occurrence) = verify_all(key)? {
+            bind_shaped_keys.insert(key);
+            if let Some(per_occurrence) = verify_all(key, &mut bind_timers)? {
                 surviving.push((key, per_occurrence));
             }
         }
@@ -2345,6 +2408,26 @@ fn main() -> io::Result<()> {
         pilot_records.len(),
         started.elapsed().as_secs_f64(),
     );
+    eprintln!(
+        "[score] phase binding: {} records / {} occurrences / {} candidate keys \
+         ({} distinct shaped) / {} shape derivations / {} verify probes; \
+         steps {:.1}s ({} extractions), shapes {:.1}s, verify {:.1}s, \
+         fetches {} ({:.1} MB), phase {:.1}s",
+        pilot_records.len(),
+        bind_occurrences,
+        bind_candidates,
+        bind_shaped_keys.len(),
+        bind_timers.shape_calls,
+        bind_timers.verify_calls,
+        bind_steps_seconds,
+        bind_steps_calls,
+        bind_timers.shape_seconds,
+        bind_timers.verify_seconds,
+        fetch_calls.load(Ordering::Relaxed) - binding_fetch_calls,
+        (fetch_bytes.load(Ordering::Relaxed) - binding_fetch_bytes) as f64 / (1024.0 * 1024.0),
+        binding_started.elapsed().as_secs_f64(),
+    );
+    let binding_seconds = binding_started.elapsed().as_secs_f64();
     rss.probe("binding")?;
 
     // ----------------------- per-record read variants (slice A, verbatim)
@@ -2355,6 +2438,7 @@ fn main() -> io::Result<()> {
         count: u64,
     }
     let mut record_variants: HashMap<usize, Vec<ReadVariant>> = HashMap::new();
+    let variants_started = Instant::now();
     for &record in &pilot_records {
         let line = &census_records[record];
         let key = census_key[record].unwrap();
@@ -2404,6 +2488,13 @@ fn main() -> io::Result<()> {
         )?;
         record_variants.insert(record, variants);
     }
+    eprintln!(
+        "[score] phase variants: {} records, per-record read variants \
+         [{:.1}s]",
+        record_variants.len(),
+        variants_started.elapsed().as_secs_f64(),
+    );
+    let variants_seconds = variants_started.elapsed().as_secs_f64();
     rss.probe("variants")?;
 
     // ------------------------------------------------------------------ receipts
@@ -2437,16 +2528,35 @@ fn main() -> io::Result<()> {
         .to_string();
     // The axis partitions of every window the pilot records touch
     // (the locality classification needs their rows).
+    // (Phase instrumentation: this is the CONTEXT ASSEMBLY phase —
+    // per-row sequence fetch, stored-walk extraction, and the
+    // canonical-scheme skeleton extraction with in-process sequence
+    // verification.)
+    let rows_started = Instant::now();
+    let rows_fetch_calls = fetch_calls.load(Ordering::Relaxed);
+    let rows_fetch_bytes = fetch_bytes.load(Ordering::Relaxed);
     for &partition in &window_partition {
         let map = maps
             .get(&partition)
             .ok_or_else(|| invalid("axis partition map missing"))?;
         store.ensure_partition(&map.members, partition)?;
     }
+    eprintln!(
+        "[score] phase rows: {} distinct rows over {} partitions, context \
+         assembly (canonical-scheme skeletons; fetches {} / {:.1} MB) \
+         [{:.1}s]",
+        store.folds.len(),
+        window_partition.len(),
+        fetch_calls.load(Ordering::Relaxed) - rows_fetch_calls,
+        (fetch_bytes.load(Ordering::Relaxed) - rows_fetch_bytes) as f64 / (1024.0 * 1024.0),
+        rows_started.elapsed().as_secs_f64(),
+    );
+    let rows_seconds = rows_started.elapsed().as_secs_f64();
     rss.probe("rows")?;
 
     let mut total_factorized_checked = 0u64;
     let mut total_factorized_equal = 0u64;
+    let mut loci_seconds_total = 0.0f64;
 
     for &locus in &loci {
         let locus_started = Instant::now();
@@ -2609,6 +2719,7 @@ fn main() -> io::Result<()> {
         );
 
         // ---------------------------------- the locus's records and units
+        let units_started = Instant::now();
         let mut locus_records: Vec<usize> = Vec::new();
         for &record in &pilot_records {
             if census_records[record]
@@ -2737,8 +2848,10 @@ fn main() -> io::Result<()> {
         }
         let n_units = units.len();
         eprintln!(
-            "[score] locus {locus}: {} records, {n_units} units",
+            "[score] locus {locus}: {} records, {n_units} units \
+             (touching/locality classification) [{:.1}s]",
             locus_records.len(),
+            units_started.elapsed().as_secs_f64(),
         );
 
         // ------------------------------- the scoring matrix (parallel folds)
@@ -3624,6 +3737,10 @@ fn main() -> io::Result<()> {
         };
 
         // ------------------------------------------------- the named classes
+        // (Phase instrumentation: the receipts/IO phase — the named
+        // classes, the ingredients (with the full ll_matrix), and the
+        // main receipt write.)
+        let receipts_started = Instant::now();
         let mut named: Vec<(usize, usize)> = Vec::new();
         named.push(winner_pair);
         if let Some(flat) = truth_flat {
@@ -3698,6 +3815,7 @@ fn main() -> io::Result<()> {
             "ll_matrix": matrix,
         }))?;
         writeln!(ingredients)?;
+        rss.probe(&format!("locus_{locus}_receipts"))?;
 
         // ---------------------------------------------------- the main receipt
         let called_classes_json: Vec<serde_json::Value> = called
@@ -3779,6 +3897,7 @@ fn main() -> io::Result<()> {
             (in_axis, overhang, extension)
         };
         let locus_seconds = locus_started.elapsed().as_secs_f64();
+        loci_seconds_total += locus_seconds;
         let rss_kb = rss.probe(&format!("locus_{locus}"))?;
         serde_json::to_writer(&mut report, &json!({
             "locus": locus,
@@ -3904,6 +4023,11 @@ fn main() -> io::Result<()> {
         }))?;
         writeln!(report)?;
         eprintln!(
+            "[score] locus {locus}: receipts/IO (named classes + ingredients + \
+             the main receipt) [{:.1}s]",
+            receipts_started.elapsed().as_secs_f64(),
+        );
+        eprintln!(
             "[score] locus {locus} done: {n_folds} folds, {n_units} units, {pair_count} classes, \
              truth_rank {:?}, log_gap {log_gap:?}, qual {qual:?} [{locus_seconds:.1}s]",
             truth_rank,
@@ -3925,6 +4049,16 @@ fn main() -> io::Result<()> {
         "[score] complete: loci {loci:?}, factorized placements {total_factorized_equal}/\
          {total_factorized_checked} exact, total {:.1}s",
         started.elapsed().as_secs_f64(),
+    );
+    eprintln!(
+        "[score] phase summary: inputs {inputs_seconds:.1}s, quality (FASTQ scan) \
+         {quality_seconds:.1}s, elsewhere {elsewhere_seconds:.3}s, derive cache \
+         {derive_seconds:.1}s, binding {binding_seconds:.1}s, variants \
+         {variants_seconds:.1}s, rows/context assembly {rows_seconds:.1}s, \
+         loci (folds+units+scoring+classes+qual+exactness+receipts) \
+         {loci_seconds_total:.1}s; AGC fetches {} total ({:.1} MB)",
+        fetch_calls.load(Ordering::Relaxed),
+        fetch_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
     );
     Ok(())
 }
