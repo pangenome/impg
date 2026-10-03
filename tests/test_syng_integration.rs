@@ -4331,6 +4331,176 @@ fn test_syng_identical_sequences_build_and_query() {
 }
 
 #[test]
+fn test_syng_filtered_wrapper_retains_dense_self_and_forward_homologs() {
+    use impg::impg_index::ImpgIndex;
+    let _guard = lock_syng();
+    let sequence = numeric_to_ascii(&make_sequence_numeric(10_000, 7));
+    let sequences = vec![
+        ("self#0#chr1".to_string(), sequence.clone()),
+        ("copy#0#chr1".to_string(), sequence.clone()),
+        (
+            "reverse#0#chr1".to_string(),
+            impg::graph::reverse_complement(&sequence),
+        ),
+    ];
+    let mut names = impg::seqidx::SequenceIndex::new();
+    for (name, seq) in &sequences {
+        names.get_or_insert_id(name, Some(seq.len()));
+    }
+    let query_id = names.get_id("self#0#chr1").unwrap();
+    let index = impg::syng::SyngIndex::build(
+        impg::syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        },
+        sequences.into_iter(),
+    );
+    // Keep the RC fixture for reproduction, but do not claim reverse discovery
+    // is validated: raw syng emits too few reverse anchors here, before chaining.
+    // See docs/syng-gmem-bwt/partition-diagnosis.md. Dense reverse normalization
+    // and provenance are independently covered in syng_transitive unit tests.
+    let wrapper = impg::SyngImpgWrapper::new(index, names, 0).with_chain_filter(5, 0.5);
+    let hits = wrapper
+        .query(query_id, 0, 10_000, false, None, None, false)
+        .unwrap();
+    for name in ["self#0#chr1", "copy#0#chr1"] {
+        let id = wrapper.seq_index().get_id(name).unwrap();
+        assert!(
+            hits.iter()
+                .any(|(iv, _, _)| iv.metadata == id && iv.first <= 100 && iv.last >= 9900),
+            "filtered wrapper lost near-full exact occurrence {name}: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn test_partition_syng_retains_seed_when_all_hits_filtered() {
+    let _guard = lock_syng();
+    let bin = impg_binary().expect("impg binary is required for the partition progress regression");
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("seed.fa");
+    let prefix = dir.path().join("idx");
+    let sequence = numeric_to_ascii(&make_sequence_numeric(10_000, 7));
+    std::fs::write(
+        &fasta,
+        format!(">seed#0#chr1\n{}\n", String::from_utf8(sequence).unwrap()),
+    )
+    .unwrap();
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta.to_str().unwrap(),
+            "-o",
+            prefix.to_str().unwrap(),
+            "--syncmer-length",
+            "63",
+            "--smer-length",
+            "8",
+            "--syncmer-seed",
+            "7",
+            "--position-sample-rate",
+            "1",
+            "-t",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    {
+        use impg::impg_index::ImpgIndex;
+        let index = impg::syng::SyngIndex::load(
+            prefix.to_str().unwrap(),
+            impg::syng::SyncmerParams {
+                k: 8,
+                w: 55,
+                seed: 7,
+            },
+        )
+        .unwrap();
+        assert!(!index
+            .query_region_with_anchors_ext("seed#0#chr1", 0, 10_000, 0, 0)
+            .unwrap()
+            .is_empty());
+        let mut names = impg::seqidx::SequenceIndex::new();
+        let id = names.get_or_insert_id("seed#0#chr1", Some(10_000));
+        let wrapper = impg::SyngImpgWrapper::new(index, names, 0).with_chain_filter(5, 1.0);
+        assert!(
+            wrapper
+                .query(id, 0, 10_000, false, None, None, false)
+                .unwrap()
+                .is_empty(),
+            "the progress control must actually have no eligible hits"
+        );
+    }
+    // Fraction 1 rejects the seeded path's partial boundary support; .5
+    // retains it. Both runs must emit only the legitimate seed singleton.
+    for fraction in ["1", "0.5"] {
+        let out_dir = dir.path().join(fraction);
+        let stderr_path = dir.path().join(format!("{fraction}.stderr"));
+        let mut child = Command::new(&bin)
+            .args([
+                "partition",
+                "-a",
+                prefix.to_str().unwrap(),
+                "-w",
+                "10000",
+                "-d",
+                "1000",
+                "-o",
+                "bed",
+                "--output-folder",
+                out_dir.to_str().unwrap(),
+                "--min-missing-size",
+                "0",
+                "--min-boundary-distance",
+                "0",
+                "--syng-min-chain-anchors",
+                "5",
+                "--syng-min-chain-fraction",
+                fraction,
+                "-t",
+                "1",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("partition did not make progress for fraction={fraction}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(
+            status.success(),
+            "{}",
+            std::fs::read_to_string(stderr_path).unwrap()
+        );
+        let bed = std::fs::read_to_string(out_dir.join("partitions.bed")).unwrap();
+        let mut rows: Vec<Vec<&str>> = bed.lines().map(|line| line.split('\t').collect()).collect();
+        rows.sort();
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the legitimate seed singleton may be emitted: {bed}"
+        );
+        assert_eq!(&rows[0][..3], &["seed#0#chr1", "0", "10000"]);
+    }
+}
+
+#[test]
 fn test_partition_syng_end_to_end_bed() {
     // End-to-end: build syng index from FASTA, then run `impg partition -a`
     // and verify non-empty BED output. This is the path I added but never
@@ -4435,6 +4605,17 @@ fn test_partition_syng_end_to_end_bed() {
         .iter()
         .any(|e| std::fs::metadata(e.path()).unwrap().len() > 0);
     assert!(any_non_empty, "All partition BED files are empty");
+    let bed = std::fs::read_to_string(out_folder.join("partitions.bed")).unwrap();
+    let mut members: BTreeMap<&str, std::collections::BTreeSet<&str>> = BTreeMap::new();
+    for line in bed.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        members.entry(fields[3]).or_default().insert(fields[0]);
+    }
+    assert!(
+        members.values().any(|names| names.contains("sampleA#1#chr1")
+            && names.contains("sampleB#1#chr1")),
+        "normal partitioning must still group discovered homologs, not just emit seeds: {bed}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -5299,4 +5480,126 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The FASTA/AGC streaming paths and parallel dictionary prepass must use the
+/// same original-window alphabet, including all-N and too-short named paths.
+#[test]
+fn test_syng_ambiguity_fasta_agc_serial_parallel() {
+    let _guard = lock_syng();
+    let bin = impg_binary().expect("build impg before running CLI tests");
+    let dir = tempfile::tempdir().unwrap();
+    let mut flanks = vec![4; 100];
+    flanks.extend(make_sequence_numeric(2000, 42));
+    flanks.extend(vec![4; 10_000]);
+    flanks.extend(make_sequence_numeric(2000, 99));
+    let sequences = vec![
+        ("flanks", flanks),
+        ("unknown", vec![4; 20_000]),
+        ("short", vec![0, 1, 2, 3]),
+        ("polyA", vec![0; 2000]),
+        ("repeat", vec![0, 1, 2, 3].repeat(500)),
+    ];
+    let fasta = dir.path().join("mixed.fa");
+    let mut fasta_data = Vec::new();
+    for (name, sequence) in &sequences {
+        fasta_data.extend(format!(">{name}#0#chr1\n").as_bytes());
+        fasta_data.extend(numeric_to_ascii(sequence));
+        fasta_data.push(b'\n');
+    }
+    std::fs::write(&fasta, fasta_data).unwrap();
+    let agc = dir.path().join("mixed.agc");
+    let config = StreamingQueueConfig {
+        queue_capacity: 10 * 1024 * 1024,
+        num_threads: 1,
+        verbosity: 0,
+        ..Default::default()
+    };
+    let mut compressor =
+        StreamingQueueCompressor::with_splitters(agc.to_str().unwrap(), config, AHashSet::new())
+            .unwrap();
+    for (name, sequence) in &sequences {
+        compressor
+            .push((*name).into(), format!("{name}#0#chr1"), sequence.clone())
+            .unwrap();
+    }
+    compressor.finalize().unwrap();
+    let mut baseline = None;
+    for use_agc in [false, true] {
+        for parallel in [false, true] {
+            let prefix = dir.path().join(format!("mixed-{use_agc}-{parallel}.syng"));
+            let prefix = prefix.to_str().unwrap();
+            let input = if use_agc { &agc } else { &fasta };
+            let mut command = Command::new(&bin);
+            command.args([
+                "syng",
+                if use_agc { "--agc" } else { "-f" },
+                input.to_str().unwrap(),
+                "-o",
+                prefix,
+                "--position-sample-rate",
+                "7",
+            ]);
+            if parallel {
+                command.arg("--parallel-dictionary");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let index =
+                impg::syng::SyngIndex::load(prefix, impg::syng::SyncmerParams::default()).unwrap();
+            assert_eq!(index.name_map.path_to_name.len(), sequences.len());
+            let mut walks = BTreeMap::new();
+            for (name, sequence) in &sequences {
+                let path_name = format!("{name}#0#chr1");
+                let path = index.name_map.name_to_path[&path_name] as usize;
+                assert_eq!(index.name_map.path_to_length[path], sequence.len() as u64);
+                let walk = index
+                    .walk_path_range(path, 0, sequence.len() as u64)
+                    .unwrap();
+                let known_count = index.name_map.path_starts[path]
+                    .as_ref()
+                    .unwrap()
+                    .num_syncmers;
+                assert_eq!(walk.len(), known_count as usize);
+                if *name == "unknown" || *name == "short" {
+                    assert!(walk.is_empty());
+                    assert!(index
+                        .query_region(&path_name, 0, sequence.len() as u64, 0)
+                        .unwrap()
+                        .is_empty());
+                } else {
+                    assert!(!walk.is_empty());
+                }
+                let spelled: Vec<_> = walk
+                    .iter()
+                    .map(|&(node, pos)| {
+                        let spelling = index.syncmer_seq(node).to_ascii_uppercase();
+                        let window = &sequence[pos as usize..pos as usize + 63];
+                        assert!(window.iter().all(|&b| b < 4));
+                        assert_eq!(spelling, numeric_to_ascii(window));
+                        (spelling, pos)
+                    })
+                    .collect();
+                if *name == "flanks" {
+                    assert!(walk[0].1 >= 100);
+                    assert!(walk.windows(2).any(|w| w[1].1 - w[0].1 >= 10_000));
+                }
+                walks.insert(path_name, spelled);
+            }
+            assert!(index
+                .query_region("polyA#0#chr1", 0, 2000, 0)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.genome != "unknown#0#chr1"));
+            if let Some(expected) = &baseline {
+                assert_eq!(&walks, expected);
+            } else {
+                baseline = Some(walks);
+            }
+        }
+    }
 }

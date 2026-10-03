@@ -66,8 +66,9 @@ where
 
 /// Chain exact syncmer anchors with SweepGA's scaffold-aware plane sweep.
 ///
-/// Syncmer anchors are represented as 1:1 exact PAF-style records and
-/// passed to `sweepga::paf_filter::PafFilter`. The syng query code must
+/// Overlapping/touching collinear syncmer anchors are normalized into 1:1
+/// exact PAF-style blocks and passed to `sweepga::paf_filter::PafFilter`, then
+/// retained block memberships are expanded back to anchors. The syng query code must
 /// not maintain a parallel plane-sweep/scaffold implementation: SweepGA's
 /// scaffold filter is where off-diagonal short-hit suppression belongs.
 pub fn chain_anchors(
@@ -104,12 +105,62 @@ pub fn chain_anchors_with_limits(
     chain_anchors_with_sweepga_scaffold_mass(hits, syncmer_len, max_query_hop, syncmer_len)
 }
 
+/// A gap-free union of exact seeds on one diagonal of one path/strand.
+/// Membership is retained separately from bp support: overlapping seeds do
+/// not contribute their lengths repeatedly, but all anchors survive expansion.
+struct ExactSeedBlock {
+    query_start: u64,
+    query_end: u64,
+    target_start: u64,
+    target_end: u64,
+    diagonal: i128,
+    anchors: Vec<Anchor>,
+}
+
+fn exact_seed_blocks(
+    mut anchors: Vec<Anchor>,
+    strand: char,
+    syncmer_len: u64,
+) -> Vec<ExactSeedBlock> {
+    let diagonal = |a: &Anchor| match strand {
+        '-' => a.target_pos as i128 + a.query_pos as i128,
+        _ => a.target_pos as i128 - a.query_pos as i128,
+    };
+    anchors.sort_by_key(|a| (diagonal(a), a.query_pos, a.target_pos, a.node_id));
+    let mut blocks: Vec<ExactSeedBlock> = Vec::new();
+    for anchor in anchors {
+        let d = diagonal(&anchor);
+        let query_end = anchor.query_pos.saturating_add(syncmer_len);
+        let target_end = anchor.target_pos.saturating_add(syncmer_len);
+        if let Some(block) = blocks.last_mut() {
+            if block.diagonal == d && anchor.query_pos <= block.query_end {
+                block.query_end = block.query_end.max(query_end);
+                block.target_start = block.target_start.min(anchor.target_pos);
+                block.target_end = block.target_end.max(target_end);
+                block.anchors.push(anchor);
+                continue;
+            }
+        }
+        blocks.push(ExactSeedBlock {
+            query_start: anchor.query_pos,
+            query_end,
+            target_start: anchor.target_pos,
+            target_end,
+            diagonal: d,
+            anchors: vec![anchor],
+        });
+    }
+    blocks.sort_by_key(|b| (b.query_start, b.target_start, b.query_end, b.target_end));
+    blocks
+}
+
 /// SweepGA-backed anchor chaining with an explicit scaffold mass.
 ///
-/// `min_scaffold_length` is in bp of exact syncmer seed support, matching
-/// SweepGA's scaffold-mass semantics. Callers that already know the desired
-/// anchor-count threshold should pass `threshold * syncmer_len` here so
-/// short off-diagonal seed runs are removed before interval refinement.
+/// `min_scaffold_length` is passed unchanged to SweepGA's scaffold-mass
+/// filter. Callers convert their anchor threshold to bp with
+/// `threshold * syncmer_len`. Exact block lengths count overlapping support
+/// only once; upstream scaffold spans can include gaps and are not exact
+/// covered-base mass. Normalization does not alter that scaffold policy.
 pub fn chain_anchors_with_sweepga_scaffold_mass(
     hits: Vec<HomologousIntervalWithAnchors>,
     syncmer_len: u64,
@@ -172,33 +223,29 @@ pub fn chain_anchors_with_sweepga_scaffold_mass(
 
     let mut out: Vec<HomologousIntervalWithAnchors> = per_target
         .into_par_iter()
-        .flat_map(|((genome, strand), mut anchors)| {
-        anchors.sort_by(|a, b| {
-            a.query_pos
-                .cmp(&b.query_pos)
-                .then(a.target_pos.cmp(&b.target_pos))
-        });
-        anchors.dedup_by(|a, b| {
-            a.query_pos == b.query_pos && a.target_pos == b.target_pos && a.node_id == b.node_id
-        });
-        if anchors.is_empty() {
+        .flat_map(|((genome, strand), anchors)| {
+        // SweepGA's best-buddy distance is designed for alignment blocks,
+        // not irregular overlapping k-mers. Normalize only observed exact
+        // collinear support; leave all gaps and chaining decisions to SweepGA.
+        let mut blocks = exact_seed_blocks(anchors, strand, syncmer_len);
+        if blocks.is_empty() {
             return Vec::new();
         }
-        let records: Vec<RecordMeta> = anchors
+        let records: Vec<RecordMeta> = blocks
             .iter()
             .enumerate()
-            .map(|(rank, anchor)| RecordMeta {
+            .map(|(rank, block)| RecordMeta {
                 rank,
                 query_name: "__syng_query#0#query".to_string(),
                 target_name: genome.clone(),
-                query_start: anchor.query_pos,
-                query_end: anchor.query_pos.saturating_add(syncmer_len),
-                target_start: anchor.target_pos,
-                target_end: anchor.target_pos.saturating_add(syncmer_len),
-                block_length: syncmer_len,
+                query_start: block.query_start,
+                query_end: block.query_end,
+                target_start: block.target_start,
+                target_end: block.target_end,
+                block_length: block.query_end - block.query_start,
                 identity: 1.0,
-                matches: syncmer_len,
-                alignment_length: syncmer_len,
+                matches: block.query_end - block.query_start,
+                alignment_length: block.query_end - block.query_start,
                 strand,
                 chain_id: None,
                 chain_status: sweepga::mapping::ChainStatus::Unassigned,
@@ -219,11 +266,11 @@ pub fn chain_anchors_with_sweepga_scaffold_mass(
         };
         let mut grouped: HashMap<String, Vec<Anchor>> = HashMap::new();
         for (rank, meta) in passing {
-            let Some(anchor) = anchors.get(rank).copied() else {
+            let Some(block) = blocks.get_mut(rank) else {
                 continue;
             };
             let chain_id = meta.chain_id.unwrap_or_else(|| format!("rank_{rank}"));
-            grouped.entry(chain_id).or_default().push(anchor);
+            grouped.entry(chain_id).or_default().append(&mut block.anchors);
         }
         let mut bucket_out = Vec::with_capacity(grouped.len());
         for (_chain_id, mut chain_anchors) in grouped {
@@ -1632,6 +1679,154 @@ mod tests {
         let out = chain_anchors(hits, 500, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].anchors.len(), 4);
+    }
+
+    fn irregular_exact_anchors(strand: char, offset: u64) -> Vec<Anchor> {
+        let steps = [1, 47, 3, 24, 55, 2, 13, 63, 7, 31];
+        let mut q = 0;
+        (0..400)
+            .map(|i| {
+                q += steps[i % steps.len()];
+                Anchor {
+                    query_pos: q,
+                    target_pos: if strand == '-' {
+                        offset + 20_000 - q
+                    } else {
+                        offset + q
+                    },
+                    node_id: i as u32,
+                }
+            })
+            .collect()
+    }
+
+    fn exact_hit(
+        genome: &str,
+        strand: char,
+        anchors: Vec<Anchor>,
+    ) -> HomologousIntervalWithAnchors {
+        HomologousIntervalWithAnchors {
+            genome: genome.into(),
+            start: anchors.iter().map(|a| a.target_pos).min().unwrap(),
+            end: anchors
+                .iter()
+                .map(|a| a.target_pos + TEST_SYNCMER_LEN)
+                .max()
+                .unwrap(),
+            strand,
+            anchors,
+        }
+    }
+
+    fn anchor_memberships(anchors: &[Anchor]) -> Vec<(u64, u64, u32)> {
+        let mut members: Vec<_> = anchors
+            .iter()
+            .map(|a| (a.query_pos, a.target_pos, a.node_id))
+            .collect();
+        members.sort_unstable();
+        members
+    }
+
+    #[test]
+    fn sweepga_irregular_dense_exact_forward_preserves_extent_and_memberships() {
+        check_irregular_dense_exact('+');
+    }
+
+    #[test]
+    fn sweepga_irregular_dense_exact_reverse_preserves_extent_and_memberships() {
+        check_irregular_dense_exact('-');
+    }
+
+    fn check_irregular_dense_exact(strand: char) {
+        let mut anchors = irregular_exact_anchors(strand, 0);
+        // Preserve repeated provenance too, without counting it as extra bp.
+        anchors.push(anchors[10]);
+        let hit = exact_hit("g#0#chr1", strand, anchors.clone());
+        let expected_bounds = (hit.start, hit.end);
+        let out = chain_anchors_with_sweepga_scaffold_mass(vec![hit], 63, 1000, 5 * 63);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].start, out[0].end), expected_bounds);
+        assert_eq!(
+            anchor_memberships(&out[0].anchors),
+            anchor_memberships(&anchors)
+        );
+        let extent = out[0].anchors.last().unwrap().query_pos + 63 - out[0].anchors[0].query_pos;
+        assert!(
+            extent >= 5_000,
+            "exact self must pass the 10kb query's .5 fraction filter"
+        );
+    }
+
+    #[test]
+    fn exact_seed_blocks_keep_gaps_diagonals_and_reverse_bounds() {
+        for strand in ['+', '-'] {
+            let target = |q| if strand == '+' { 1000 + q } else { 1000 - q };
+            let anchors: Vec<_> = [0, 10, 73, 137]
+                .into_iter()
+                .map(|q| mk_anchor(q, target(q)))
+                .collect();
+            let blocks = exact_seed_blocks(anchors, strand, 63);
+            // Overlap and touching merge; the unobserved bp at 136 does not.
+            assert_eq!(blocks.len(), 2);
+            assert_eq!((blocks[0].query_start, blocks[0].query_end), (0, 136));
+            assert_eq!(blocks[0].target_end - blocks[0].target_start, 136);
+            assert_eq!(blocks[0].anchors.len(), 3);
+            assert_eq!((blocks[1].query_start, blocks[1].query_end), (137, 200));
+        }
+        let blocks = exact_seed_blocks(vec![mk_anchor(0, 1000), mk_anchor(1, 1002)], '+', 63);
+        assert_eq!(
+            blocks.len(),
+            2,
+            "overlap alone cannot merge different diagonals"
+        );
+        let blocks = exact_seed_blocks(vec![mk_anchor(0, 0), mk_anchor(1, 0)], '+', 63);
+        assert_eq!(
+            blocks.len(),
+            2,
+            "negative diagonals must not saturate to zero"
+        );
+    }
+
+    #[test]
+    fn sweepga_exact_blocks_preserve_paths_strands_and_parallel_copies() {
+        let mut hits = Vec::new();
+        for genome in ["a#0#chr1", "b#0#chr1"] {
+            for strand in ['+', '-'] {
+                let mut anchors = irregular_exact_anchors(strand, 0);
+                anchors.extend(irregular_exact_anchors(strand, 30_000));
+                hits.push(exact_hit(genome, strand, anchors));
+            }
+        }
+        let out = chain_anchors_with_sweepga_scaffold_mass(hits, 63, 1000, 5 * 63);
+        assert_eq!(out.len(), 8);
+        for genome in ["a#0#chr1", "b#0#chr1"] {
+            for strand in ['+', '-'] {
+                for offset in [0, 30_000] {
+                    let expected = anchor_memberships(&irregular_exact_anchors(strand, offset));
+                    assert!(out.iter().any(|h| h.genome == genome
+                        && h.strand == strand
+                        && anchor_memberships(&h.anchors) == expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sweepga_exact_blocks_use_union_mass_not_anchor_count_or_gap_span() {
+        let dense = exact_hit("g", '+', (0..100).map(|q| mk_anchor(q, q)).collect());
+        // 100 overlapping seeds cover only 162bp, not 6300bp.
+        assert!(chain_anchors_with_sweepga_scaffold_mass(vec![dense], 63, 1000, 163).is_empty());
+        let blocks = exact_seed_blocks(vec![mk_anchor(0, 0), mk_anchor(500, 500)], '+', 63);
+        // Normalization leaves the gap out of the exact block lengths.
+        // SweepGA remains responsible for subsequent scaffold span semantics.
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|b| b.query_end - b.query_start)
+                .sum::<u64>(),
+            126
+        );
     }
 
     #[test]
