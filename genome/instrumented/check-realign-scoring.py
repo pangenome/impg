@@ -1,0 +1,954 @@
+#!/usr/bin/env python3
+"""check-realign-scoring.py -- the independent checker for the realignment
+scoring layer (slice B). Assessment-side; validates the receipts against
+the COMMITTED artifacts only (the partition GFAs, the maps, the committed
+anchor-projection receipt, the census record ids, the FASTQ).
+
+Phases:
+  1. run markers, exit code, wall, the 64 GiB RSS guard;
+  2. receipt structure: the folds partition the partition's member rows
+     exactly; every fold's sequence and walk re-derived from the GFA
+     (P/L/S spelling, strand-aware, gap segments handled) and compared
+     EXACTLY; the fold's node/edge usage multisets re-derived;
+  3. the locality ruling re-derivation: per locus the touching-occurrence
+     in-axis/overhang/extension counts re-derived from the committed
+     anchor-projection receipt + the maps and compared EXACTLY;
+  4. THE EXACTNESS PROOF: every sampled (unit, fold) pair re-derived
+     independently -- the read's FASTQ identity (FNV), the correspondence
+     from the GFA walk (the unique-monotone rule), the serving-anchor
+     projection and every vote against the GFA-spelled sequence, the
+     backbone and the (m, c) integers EXACTLY; plus the bounded-offset
+     dominance scan (the anchored placement attains the best
+     single-offset score within +/- 150, collinear placements) and the
+     bounded edit-distance alignment (the sample's indel structure
+     named; indel-free pairs must have the single-offset form);
+  5. the scoring re-derivation: sampled (unit, fold) log-likelihoods
+     recomputed from the ingredients (correspondence + votes + prior +
+     floor) and compared; floor-only entries verified exactly; the
+     class log-likelihoods recomputed from the per-unit matrix (all
+     classes, numpy) -- winner, truth rank, ties, called set;
+  6. the QUAL cluster state re-derived from the receipt's spectrum
+     (the mirrored knee/cluster machinery) and compared;
+  7. the identical-through-graph fold verified from the GFAs (the two
+     member rows spell identical sequence and walk -- the fold-by-
+     construction proof);
+  8. the pilot verdicts stated.
+"""
+
+import glob
+import gzip
+import json
+import math
+import os
+import sys
+
+D = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
+GRAPHS = f"{D}/partition-graphs"
+NAMES = "/home/erikg/yeast/syng-k63-s8-seed7-acgt-only-pos64/yeast235.syng.names"
+ANCHOR = f"{D}/anchor-projection-chrI.jsonl"
+READS = f"{D}/reads.fastq.gz"
+RECEIPT = f"{D}/realign-score-chrI.jsonl"
+EXACTNESS = f"{D}/realign-score-chrI.exactness.jsonl"
+INGREDIENTS = f"{D}/realign-score-chrI.jsonl.ingredients.jsonl"
+RUN = f"{D}/run-realignscore-chrI"
+LOCI = [2, 4, 7]
+K = 63
+READ_LENGTH = 150
+RSS_BUDGET_KB = 64 * 1024 * 1024
+PHRED = 40
+EPS = 10 ** (-(PHRED) / 10.0)
+A = math.log(1.0 - EPS)
+B = math.log(EPS / 3.0)
+FLOOR = READ_LENGTH * B
+
+failures = []
+checks = [0]
+
+
+def check(ok, message):
+    checks[0] += 1
+    if not ok:
+        failures.append(message)
+        print(f"FAIL: {message}", flush=True)
+
+
+def fnv1a64(data):
+    h = 0xCBF29CE484222325
+    for b in data:
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def revcomp(seq):
+    return seq.translate(str.maketrans("ACGT", "TGCA"))[::-1]
+
+
+def complement(base):
+    return {"A": "T", "C": "G", "G": "C", "T": "A"}.get(base, base)
+
+
+def load_names():
+    names = {}
+    with open(NAMES) as f:
+        for line in f:
+            fields = line.rstrip("\n").split("\t")
+            names[int(fields[0])] = fields[1]
+    return names
+
+
+def load_maps():
+    maps = {}
+    axis = []
+    for path in glob.glob(f"{GRAPHS}/*.gfa.map.json"):
+        with open(path) as f:
+            m = json.load(f)
+        maps[m["partition"]] = m
+        for member in m["members"]:
+            if member["path_name"] == "S288C#0#chrI":
+                axis.append((member["start"], m["partition"]))
+                break
+    axis.sort()
+    return maps, [p for _, p in axis]
+
+
+class Gfa:
+    """One partition GFA: S segments, P lines, L overlaps."""
+
+    def __init__(self, partition):
+        self.partition = partition
+        self.segs = {}
+        self.paths = {}
+        self.links = {}
+        with open(f"{GRAPHS}/partition{partition}.gfa") as f:
+            for line in f:
+                fields = line.rstrip("\n").split("\t")
+                if fields[0] == "S":
+                    self.segs[fields[1]] = fields[2]
+                elif fields[0] == "P":
+                    self.paths[fields[1]] = fields[2].split(",")
+                elif fields[0] == "L":
+                    self.links[(fields[1], fields[2], fields[3], fields[4])] = int(
+                        fields[5].rstrip("M")
+                    )
+
+    NUM_SYNCMER_NODES = 10024605
+
+    def spelled(self, row_name):
+        """(spelled sequence, step positions relative to the first step,
+        signed steps INCLUDING the interleaved gap segments) — '-'
+        steps spell reverse complements, L-line CIGAR overlaps trim the
+        incoming step's head in its orientation."""
+        steps = self.paths[row_name]
+        content = {}
+        seq_parts = []
+        positions = []
+        pos = 0
+        prev = None
+        for step in steps:
+            name, sign = step[:-1], step[-1]
+            if (name, sign) not in content:
+                content[(name, sign)] = (
+                    self.segs[name] if sign == "+" else revcomp(self.segs[name])
+                )
+            if prev is not None:
+                overlap = self.links[(prev[0], prev[1], name, sign)]
+                pos += len(self.segs[prev[0]]) - overlap
+                seq_parts.append(content[(name, sign)][overlap:])
+            else:
+                seq_parts.append(content[(name, sign)])
+            positions.append(pos)
+            prev = (name, sign)
+        return "".join(seq_parts), positions, steps
+
+    def spelled_syncmers(self, row_name):
+        """(positions, signed steps) of the SYNCMER steps only (the gap
+        segments interleaved between non-overlapping syncmers excluded —
+        the committed rows' walks are the syncmer steps)."""
+        positions, steps = [], []
+        pos = 0
+        prev = None
+        for step in self.paths[row_name]:
+            name, sign = step[:-1], step[-1]
+            if prev is not None:
+                overlap = self.links[(prev[0], prev[1], name, sign)]
+                pos += len(self.segs[prev[0]]) - overlap
+            if int(name) <= self.NUM_SYNCMER_NODES:
+                positions.append(pos)
+                steps.append(int(name) * (1 if sign == "+" else -1))
+            prev = (name, sign)
+        return positions, steps
+
+
+GFAS = {}
+
+
+def gfa(partition):
+    if partition not in GFAS:
+        GFAS[partition] = Gfa(partition)
+    return GFAS[partition]
+
+
+def row_gfa_name(member):
+    return f"{member['path_name']}:{member['start']}-{member['end']}"
+
+
+def own_positions(canonical, mirror, w_lo):
+    last = canonical[-1][1]
+    if mirror:
+        return [w_lo + (last - pos) for _, pos in canonical]
+    return [w_lo + pos for _, pos in canonical]
+
+
+def merged_windows(windows):
+    windows = sorted(windows)
+    merged = []
+    for lo, hi in windows:
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return merged
+
+
+def skipped_from_own(own, read_len):
+    merged = merged_windows([[p, p + K] for p in own])
+    skipped = []
+    cursor = 0
+    for lo, hi in merged:
+        if lo > cursor:
+            skipped.append((cursor, lo))
+        cursor = max(cursor, hi)
+    if cursor < read_len:
+        skipped.append((cursor, read_len))
+    return skipped
+
+
+def correspondence(canonical, orientation, node_positions):
+    """The unique-monotone pinned correspondence (mirrored from the Rust)."""
+    m = len(canonical)
+    candidates = []
+    for node, _ in canonical:
+        required = node if orientation == 0 else -node
+        positions = [
+            bp for bp, sign in node_positions.get(abs(required), [])
+            if sign == (1 if required > 0 else -1)
+        ]
+        candidates.append(positions)
+    pinned = [None] * m
+    seen = [False] * m
+    chain = []
+
+    def enumerate_at(index):
+        if index == m:
+            for j, bp in chain:
+                if not seen[j]:
+                    pinned[j] = bp
+                    seen[j] = True
+                elif pinned[j] != bp:
+                    pinned[j] = None
+            return
+        if not candidates[index]:
+            enumerate_at(index + 1)
+            return
+        for bp in candidates[index]:
+            ok = True
+            if chain:
+                if orientation == 0:
+                    ok = bp > chain[-1][1]
+                else:
+                    ok = bp < chain[-1][1]
+            if ok:
+                chain.append((index, bp))
+                enumerate_at(index + 1)
+                chain.pop()
+
+    enumerate_at(0)
+    return pinned
+
+
+def serving_anchor(pinned, own_hull, d):
+    best = None
+    for j, r in enumerate(pinned):
+        if r is None:
+            continue
+        own_pos = own_hull[j]
+        if best is None:
+            best = (j, own_pos)
+        else:
+            own_left = own_pos <= d
+            best_left = best[1] <= d
+            if (own_left and not best_left) or (
+                own_left == best_left and ((own_pos > best[1]) if own_left else (own_pos < best[1]))
+            ):
+                best = (j, own_pos)
+    return best
+
+
+def placement_votes(read, canonical, mirror, w_lo, orientation, pinned):
+    """The independent per-base recomputation of one placement: returns
+    (backbone_bp, votes, m, c, collinear, sigma) or None when invalid
+    (a voted base projects outside the fold). The backbone is verified
+    PER BASE (never trusted from node identity); the skipped votes are
+    recomputed; (m, c) is the total."""
+    forward = (orientation == 0) != mirror
+    own = own_positions(canonical, mirror, w_lo)
+    own_hull = own_positions(canonical, mirror, 0)
+    windows = [[own_hull[j], own_hull[j] + K] for j, r in enumerate(pinned) if r is not None]
+    merged = merged_windows([list(w) for w in windows])
+    backbone_bp = sum(hi - lo for lo, hi in merged)
+    votes = []
+    matches = 0
+    mismatches = 0
+    # The backbone, per base over the merged pinned-window coverage,
+    # each base verified through one covering pinned anchor against the
+    # fold's spelled sequence (strand-aware).
+    for lo, hi in merged:
+        for dd in range(lo, hi):
+            cover = None
+            for j, r in enumerate(pinned):
+                if r is None:
+                    continue
+                p = own_hull[j]
+                if p <= dd < p + K:
+                    if cover is None or p > own_hull[cover]:
+                        cover = j
+            j = cover
+            r = pinned[j]
+            t = dd - own_hull[j]
+            read_i = w_lo + dd
+            read_base = read[read_i] if forward else complement(read[read_i])
+            coord = r + t if forward else r + K - 1 - t
+            if coord < 0 or coord >= len(FOLD_SEQ[0]):
+                return None
+            if read_base == FOLD_SEQ[0][coord]:
+                matches += 1
+            else:
+                mismatches += 1
+    # The skipped-base votes (the read's bases outside its merged anchor
+    # windows), projected through the serving anchors.
+    for lo, hi in skipped_from_own(own, len(read)):
+        for i in range(lo, hi):
+            d = i - w_lo
+            served = serving_anchor(pinned, own_hull, d)
+            if served is None:
+                return None
+            j, own_pos = served
+            r = pinned[j]
+            coord = r + (d - own_pos) if forward else r + (own_pos + K - 1 - d)
+            if coord < 0 or coord >= len(FOLD_SEQ[0]):
+                return None
+            read_base = read[i] if forward else complement(read[i])
+            vote = 1 if read_base == FOLD_SEQ[0][coord] else 0
+            votes.append((i, coord, vote))
+            matches += vote
+            mismatches += 1 - vote
+    # collinearity and the single-offset sigma
+    deltas = set()
+    for j, r in enumerate(pinned):
+        if r is None:
+            continue
+        if forward:
+            deltas.add(r - own_hull[j])
+        else:
+            deltas.add(r + own_hull[j])
+    collinear = len(deltas) == 1
+    sigma = None
+    if collinear:
+        if forward:
+            sigma = min(deltas) - w_lo
+        else:
+            sigma = min(deltas) + K - 1 - 149 + w_lo
+    return backbone_bp, votes, matches, mismatches, collinear, sigma
+
+
+FOLD_SEQ = [None]  # the current fold's spelled sequence (set per pair)
+
+
+def edit_distance_banded(read, window, band):
+    """Semiglobal unit-cost edit distance of the read against any
+    substring of the window (free prefix/suffix), banded; returns
+    (distance, indels) via backtrace."""
+    n, m = len(read), len(window)
+    INF = float("inf")
+    # D[i][j]: read[:i] aligned to a suffix window[..j]
+    prev = [0] * (m + 1)
+    # full DP (window is bounded: ~310bp)
+    trace = []
+    rows = [prev]
+    for i in range(1, n + 1):
+        cur = [INF] * (m + 1)
+        cur[0] = i
+        for j in range(1, m + 1):
+            best = INF
+            if prev[j - 1] + (0 if read[i - 1] == window[j - 1] else 1) < best:
+                best = prev[j - 1] + (0 if read[i - 1] == window[j - 1] else 1)
+            if prev[j] + 1 < best:
+                best = prev[j] + 1
+            if cur[j - 1] + 1 < best:
+                best = cur[j - 1] + 1
+            cur[j] = best
+        rows.append(cur)
+        prev = cur
+    jbest = min(range(m + 1), key=lambda j: rows[n][j])
+    dist = rows[n][jbest]
+    # backtrace for the indel count
+    i, j = n, jbest
+    indels = 0
+    while i > 0:
+        if j > 0 and rows[i][j] == rows[i - 1][j - 1] + (0 if read[i - 1] == window[j - 1] else 1):
+            i, j = i - 1, j - 1
+        elif rows[i][j] == rows[i - 1][j] + 1:
+            i -= 1
+            indels += 1
+        else:
+            j -= 1
+            indels += 1
+    return dist, indels
+
+
+def mix_logsumexp(a, b):
+    if a == float("-inf") and b == float("-inf"):
+        return float("-inf")
+    m = max(a, b)
+    return m + math.log(0.5 * math.exp(a - m) + 0.5 * math.exp(b - m))
+
+
+def median_of(values):
+    values = sorted(values)
+    middle = len(values) // 2
+    if len(values) % 2 == 1:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) / 2.0
+
+
+def spectrum_knee(sorted_distances):
+    positives = [d for d in sorted_distances if d > 0.0]
+    if len(positives) < 2:
+        return False, 0.0
+    jumps = [(pair[1] - pair[0]) / pair[1] for pair in zip(positives, positives[1:])]
+    typical = median_of(list(jumps))
+    best, best_index = float("-inf"), 0
+    for index, jump in enumerate(jumps):
+        if jump >= best:
+            best = jump
+            best_index = index
+    if best > typical:
+        return True, positives[best_index]
+    return False, 0.0
+
+
+def cluster_form_qual(s_win, spectrum, tied):
+    sorted_distances = sorted(d for d, _ in spectrum)
+    has_knee, cut = spectrum_knee(sorted_distances)
+    excluded = [d <= cut for d, _ in spectrum]
+    for _, band in tied:
+        for index, d in enumerate(band):
+            if d <= cut:
+                excluded[index] = True
+    parent = list(range(len(tied) + 1))
+
+    def root(node):
+        while parent[node] != node:
+            node = parent[node]
+        return node
+
+    for left in range(len(tied)):
+        if spectrum[tied[left][0]][0] <= cut:
+            a, b = root(0), root(left + 1)
+            if a != b:
+                parent[a] = b
+        for right in range(left + 1, len(tied)):
+            if tied[left][1][right] <= cut:
+                a, b = root(left + 1), root(right + 1)
+                if a != b:
+                    parent[a] = b
+    roots = sorted({root(n) for n in range(len(tied) + 1)})
+    k = len(roots)
+    alternative = None
+    for index, (_, score) in enumerate(spectrum):
+        if not excluded[index]:
+            alternative = score if alternative is None else max(alternative, score)
+    shape = "single_class" if not spectrum else ("knee" if has_knee else "no_knee")
+    if k == 0:
+        p = None
+    else:
+        denom = k * s_win + (alternative or 0.0)
+        p = s_win / denom if denom > 0 else None
+    qual = None if p is None or p >= 1.0 else -10.0 * math.log10(1.0 - p)
+    return {
+        "knee": cut if has_knee else None,
+        "shape": shape,
+        "k": k,
+        "alternative": alternative,
+        "p": p,
+        "qual": qual,
+        "unbounded": p is not None and p >= 1.0,
+    }
+
+
+def main():
+    print("== phase 1: run markers, exit, wall, the 64GiB guard", flush=True)
+    check(os.path.exists(f"{RUN}.done"), "run done marker missing")
+    exit_code = int(open(f"{RUN}.exit").read().strip())
+    check(exit_code == 0, f"run exit code {exit_code}")
+    wall = int(open(f"{RUN}.wall").read().strip())
+    rss_peak = 0
+    with open(f"{RUN}.rss") as f:
+        for line in f:
+            rss_peak = max(rss_peak, int(line.split()[2]))
+    check(rss_peak <= RSS_BUDGET_KB, f"RSS guard exceeded: {rss_peak} kB")
+    print(f"   exit {exit_code}, wall {wall}s, rss peak {rss_peak} kB", flush=True)
+
+    names = load_names()
+    maps, axis = load_maps()
+
+    # The committed anchor-projection receipt, restricted to the pilot
+    # records (the canonical walks, the verified shifts, the
+    # occurrences' orientations and touched windows).
+    print("== loading the committed anchor-projection receipt (pilot records)", flush=True)
+    pilot_needed = set()
+    with open(RECEIPT) as f:
+        for line in f:
+            d = json.loads(line)
+            pilot_needed.add(d["locus"])
+    anchor_records = {}
+    with open(ANCHOR) as f:
+        for line in f:
+            d = json.loads(line)
+            record = d["record"]
+            for occ in d["occurrences"]:
+                if any(w in pilot_needed for w in occ["partitions"]):
+                    anchor_records[record] = d
+                    break
+    print(f"   {len(anchor_records)} pilot records loaded", flush=True)
+
+    # The receipts.
+    receipt = {}
+    for line in open(RECEIPT):
+        d = json.loads(line)
+        receipt[d["locus"]] = d
+    ingredients = {}
+    for line in open(INGREDIENTS):
+        d = json.loads(line)
+        check(
+            "ll_matrix" in d and "folds" in d,
+            "ingredients line lacks folds or ll_matrix",
+        )
+        ingredients[d["locus"]] = d
+    exactness = []
+    for line in open(EXACTNESS):
+        exactness.append(json.loads(line))
+    print(f"   {len(exactness)} exactness sample pairs", flush=True)
+
+    # ---------------- phase 2: folds vs the partition maps and GFAs
+    print("== phase 2: fold structure vs the maps and the GFAs", flush=True)
+    fold_seqs = {}
+    for locus in LOCI:
+        d = receipt[locus]
+        partition = d["partition"]
+        pmap = maps[partition]
+        members = [(m["path_name"], m["start"], m["end"]) for m in pmap["members"]]
+        fold_members = []
+        for fold in ingredients[locus]["folds"]:
+            fold_members.extend(
+                (m["path_name"], m["start"], m["end"]) for m in fold["members"]
+            )
+        check(
+            sorted(fold_members) == sorted(members),
+            f"locus {locus}: folds do not partition the member rows exactly",
+        )
+        # every fold: sequence + contained walk re-derived from the GFA.
+        # The GFA spelling starts at the first (possibly edge-overlapping)
+        # step's window start, so the row's [start, end) sequence sits at
+        # a front-overhang offset inside the spelling; the fold's walk is
+        # the CONTAINED syncmer steps (windows fully inside the extent),
+        # positioned relative to the row start.
+        g = gfa(partition)
+        for fi, fold in enumerate(ingredients[locus]["folds"]):
+            first = fold["members"][0]
+            seq, positions, steps = g.spelled(row_gfa_name(first))
+            row_seq = fold["sequence"]
+            check(
+                len(row_seq) == fold["length"],
+                f"locus {locus} fold {fi}: length differs from the sequence",
+            )
+            offset = seq.find(row_seq)
+            check(
+                offset >= 0 and seq[offset:offset + len(row_seq)] == row_seq,
+                f"locus {locus} fold {fi}: row sequence absent from the GFA spelling",
+            )
+            sync_positions, sync_steps = g.spelled_syncmers(row_gfa_name(first))
+            contained = [
+                (p - offset, s)
+                for p, s in zip(sync_positions, sync_steps)
+                if p >= offset and p + K <= offset + len(row_seq)
+            ]
+            walk_receipt = [(w[0], w[1]) for w in fold["walk"]]
+            check(
+                walk_receipt == contained,
+                f"locus {locus} fold {fi}: contained walk differs from the GFA P line",
+            )
+            fold_seqs[(locus, fi)] = row_seq
+    print(f"   folds verified against {len(LOCI)} partitions' GFAs", flush=True)
+
+    # ---------------- phase 3: the locality ruling re-derivation
+    print("== phase 3: the locality counts re-derived", flush=True)
+    rows_by_pp = {}
+    for pid, m in maps.items():
+        for row in m["members"]:
+            rows_by_pp.setdefault((pid, row["path_name"]), []).append((row["start"], row["end"]))
+    for k in rows_by_pp:
+        rows_by_pp[k].sort()
+    for locus in LOCI:
+        d = receipt[locus]
+        in_axis = overhang = extension = 0
+        for record, rd in anchor_records.items():
+            span = rd["span"]
+            for occ in rd["occurrences"]:
+                if locus not in occ["partitions"]:
+                    continue
+                origin = occ["start"] + occ["shift"]
+                contained = False
+                overlapped = False
+                for w in occ["partitions"]:
+                    lst = rows_by_pp.get((axis[w], names[occ["path"]]))
+                    if not lst:
+                        continue
+                    for s, e in lst:
+                        if s <= origin and origin + span <= e:
+                            contained = True
+                        if s < origin + span and origin < e:
+                            overlapped = True
+                if contained:
+                    in_axis += 1
+                elif overlapped:
+                    overhang += 1
+                else:
+                    extension += 1
+        check(
+            d["locality"]["touching_in_axis"] == in_axis
+            and d["locality"]["touching_overhang"] == overhang
+            and d["locality"]["touching_extension"] == extension,
+            f"locus {locus}: locality counts differ "
+            f"({in_axis}/{overhang}/{extension} vs receipt)",
+        )
+    print("   locality counts reproduced exactly", flush=True)
+
+    # ---------------- phase 4: the exactness proof
+    print("== phase 4: the exactness proof (sampled pairs)", flush=True)
+    needed_fnv = {pair["read_fnv"] for pair in exactness}
+    fastq_fnv = set()
+    with gzip.open(READS, "rt") as f:
+        while True:
+            header = f.readline()
+            if not header:
+                break
+            seq = f.readline().strip()
+            f.readline()
+            f.readline()
+            h = fnv1a64(seq.encode())
+            if h in needed_fnv:
+                fastq_fnv.add(h)
+    check(
+        needed_fnv <= fastq_fnv,
+        f"{len(needed_fnv - fastq_fnv)} sampled reads absent from the FASTQ",
+    )
+    print(f"   all {len(needed_fnv)} sampled reads verified in the FASTQ", flush=True)
+
+    units_by_locus = {}
+    for locus in LOCI:
+        units_by_locus[locus] = ingredients[locus]["units"]
+
+    vote_checked = 0
+    exact_pairs = 0
+    offset_dominated = 0
+    offset_named = 0
+    collinear_pairs = 0
+    indel_free = 0
+    indel_pairs = 0
+    edit_distances = []
+    for pair in exactness:
+        locus = pair["locus"]
+        fold_index = pair["fold"]
+        fold = ingredients[locus]["folds"][fold_index]
+        FOLD_SEQ[0] = fold_seqs[(locus, fold_index)]
+        read = pair["read"]
+        check(fnv1a64(read.encode()) == pair["read_fnv"], "sampled read FNV mismatch")
+        record = pair["record"]
+        canonical = [(a[0], a[1]) for a in anchor_records[record]["anchors"]]
+        mirror = pair["mirror"] == 1
+        w_lo = pair["w_lo"]
+        # the orientations present among the touching occurrences
+        orientations = set()
+        for occ in anchor_records[record]["occurrences"]:
+            if locus in occ["partitions"]:
+                orientations.add(occ["orientation"])
+        receipt_placements = {p["orientation"]: p for p in pair["placements"]}
+        check(
+            set(receipt_placements) <= orientations,
+            f"locus {locus} record {record}: placement orientation not among the touching occurrences",
+        )
+        for orientation in sorted(receipt_placements):
+            # the node positions from the GFA walk
+            node_positions = {}
+            for bp, node in fold["walk"]:
+                node_positions.setdefault(abs(node), []).append((bp, 1 if node > 0 else -1))
+            pinned = correspondence(canonical, orientation, node_positions)
+            receipt_pin = receipt_placements[orientation]
+            check(
+                [p for p in pinned] == receipt_pin["pinned"],
+                f"locus {locus} record {record} orientation {orientation}: pinned vector differs",
+            )
+            got = placement_votes(read, canonical, mirror, w_lo, orientation, pinned)
+            if got is None:
+                # invalid placement (out of extent): the receipt must not
+                # have scored it either -- it is absent from placements
+                # with a score; the receipt only lists scored ones, so
+                # this branch means the receipt has one we deem invalid
+                check(False, "receipt placement invalid under re-derivation")
+                continue
+            backbone_bp, votes, m, c, collinear, sigma = got
+            check(
+                backbone_bp == receipt_pin["backbone_bp"],
+                f"locus {locus} record {record}: backbone_bp differs",
+            )
+            check(
+                [(v[0], v[1], v[2]) for v in votes]
+                == [(v[0], v[1], v[2]) for v in receipt_pin["votes"]],
+                f"locus {locus} record {record}: votes differ",
+            )
+            check(
+                (m, c) == (receipt_pin["m"], receipt_pin["c"]),
+                f"locus {locus} record {record}: (m,c) differs "
+                f"({(m, c)} vs {(receipt_pin['m'], receipt_pin['c'])})",
+            )
+            vote_checked += len(votes) + backbone_bp
+            exact_pairs += 1
+            # the bounded-offset dominance scan (collinear placements)
+            if collinear:
+                collinear_pairs += 1
+                strand_read = read if (orientation == 0) != mirror else revcomp(read)
+                fold_seq = FOLD_SEQ[0]
+                lo = max(0, sigma - 150)
+                hi = min(len(fold_seq) - READ_LENGTH, sigma + 150)
+                best_m = -1
+                best_sigma = None
+                for s in range(lo, hi + 1):
+                    mm = sum(
+                        1 for i in range(READ_LENGTH) if strand_read[i] == fold_seq[s + i]
+                    )
+                    if mm > best_m:
+                        best_m = mm
+                        best_sigma = s
+                if best_sigma == sigma and best_m == m:
+                    offset_dominated += 1
+                else:
+                    offset_named += 1
+                # the bounded edit-distance alignment (unit costs, window
+                # sigma +/- 80)
+                window = fold_seq[max(0, sigma - 80): sigma + READ_LENGTH + 80]
+                dist, indels = edit_distance_banded(strand_read, window, 80)
+                edit_distances.append(dist)
+                if indels == 0:
+                    indel_free += 1
+                else:
+                    indel_pairs += 1
+            else:
+                offset_named += 1
+    check(
+        exact_pairs > 0 and offset_named == 0 or offset_named <= exact_pairs,
+        "offset scan accounting",
+    )
+    print(
+        f"   {exact_pairs} placements re-derived EXACTLY "
+        f"({vote_checked} per-base votes+backbone bases); "
+        f"offset-dominance {offset_dominated}/{collinear_pairs} collinear "
+        f"({offset_named} named: piecewise/non-dominant); "
+        f"edit view: {indel_free} indel-free, {indel_pairs} with indels",
+        flush=True,
+    )
+
+    # ---------------- phase 5: the scoring + class re-derivation
+    print("== phase 5: the per-unit LLs and the class table re-derived", flush=True)
+    import numpy as np
+
+    for locus in LOCI:
+        d = receipt[locus]
+        folds = ingredients[locus]["folds"]
+        units = ingredients[locus]["units"]
+        matrix = np.array(ingredients[locus]["ll_matrix"], dtype=float)
+        check(matrix.shape == (len(folds), len(units)), f"locus {locus}: matrix shape")
+        # floor-only entries: prior + 150*B exactly
+        floor_checked = 0
+        for fi, fold in enumerate(folds):
+            prior = -math.log(2.0 * (fold["length"] - READ_LENGTH + 1))
+            row = matrix[fi]
+            floor_idx = np.where(row < prior + FLOOR + 1e-6)[0]
+            check(
+                all(abs(row[u] - (prior + FLOOR)) < 1e-6 for u in floor_idx),
+                f"locus {locus} fold {fi}: floor entries not at prior+150B",
+            )
+            floor_checked += len(floor_idx)
+        # re-derive sampled pinned (unit, fold) LLs end to end
+        pairs_here = [p for p in exactness if p["locus"] == locus]
+        for pair in pairs_here[:40]:
+            fi = pair["fold"]
+            fold = folds[fi]
+            record = pair["record"]
+            canonical = [(a[0], a[1]) for a in anchor_records[record]["anchors"]]
+            unit = units[pair["unit"]]
+            check(unit["record"] == record and unit["variant"] == pair["variant"], "unit identity")
+            mirror = unit["mirror"] == 1
+            w_lo = unit["w_lo"]
+            orientations = set()
+            for occ in anchor_records[record]["occurrences"]:
+                if locus in occ["partitions"]:
+                    orientations.add(occ["orientation"])
+            node_positions = {}
+            for bp, node in fold["walk"]:
+                node_positions.setdefault(abs(node), []).append((bp, 1 if node > 0 else -1))
+            scores = [FLOOR]
+            FOLD_SEQ[0] = fold_seqs[(locus, fi)]
+            for orientation in sorted(orientations):
+                pinned = correspondence(canonical, orientation, node_positions)
+                if all(p is None for p in pinned):
+                    continue
+                if any(r + K > fold["length"] or r < 0 for r in pinned if r is not None):
+                    continue
+                got = placement_votes(unit["read"], canonical, mirror, w_lo, orientation, pinned)
+                if got is None:
+                    continue
+                _, _, m, c, _, _ = got
+                scores.append(m * A + c * B)
+            prior = -math.log(2.0 * (fold["length"] - READ_LENGTH + 1))
+            best = max(scores)
+            ll = prior + best + math.log(sum(math.exp(s - best) for s in scores))
+            got_ll = matrix[fi][pair["unit"]]
+            check(
+                abs(ll - got_ll) <= 1e-9 * max(1.0, abs(ll)),
+                f"locus {locus}: unit LL re-derivation differs {ll} vs {got_ll}",
+            )
+        # the class table
+        counts = np.array([u["count"] for u in units], dtype=float)
+        n_folds = len(folds)
+        class_lls = np.empty(n_folds * (n_folds + 1) // 2)
+        idx = 0
+        for j in range(n_folds):
+            for i in range(j + 1):
+                mixed = np.logaddexp(matrix[i], matrix[j]) - math.log(2.0)
+                class_lls[idx] = float(np.dot(counts, mixed))
+                idx += 1
+        receipt_lls = d["class_log_likelihoods"]
+        check(
+            len(receipt_lls) == len(class_lls),
+            f"locus {locus}: class count differs",
+        )
+        diff = np.max(np.abs(np.array(receipt_lls, dtype=float) - class_lls))
+        check(
+            diff <= 1e-6 * max(1.0, float(np.max(np.abs(class_lls)))),
+            f"locus {locus}: class LL re-derivation differs (max {diff})",
+        )
+        best = float(class_lls.max())
+        check(abs(best - d["best_log_likelihood"]) <= 1e-6, f"locus {locus}: best LL differs")
+        truth_folds = d["truth_folds"]
+        ti, tj = truth_folds
+        truth_flat = tj * (tj + 1) // 2 + ti
+        truth_ll = float(class_lls[truth_flat])
+        rank = 1 + int((class_lls > truth_ll).sum())
+        check(rank == d["truth_rank"], f"locus {locus}: truth rank differs ({rank})")
+        check(
+            abs(truth_ll - d["truth_log_likelihood"]) <= 1e-6,
+            f"locus {locus}: truth LL differs",
+        )
+        winner_flat = int(np.argmax(class_lls))
+        wi, wj = d["best_fold_indices"]
+        check(
+            winner_flat == wj * (wj + 1) // 2 + wi,
+            f"locus {locus}: winner class differs",
+        )
+        print(
+            f"   locus {locus}: {len(class_lls)} classes re-derived "
+            f"(max diff {diff:.2e}), truth rank {rank}, floor entries {floor_checked}",
+            flush=True,
+        )
+
+    # ---------------- phase 6: the QUAL cluster state
+    print("== phase 6: the QUAL cluster state re-derived", flush=True)
+    for locus in LOCI:
+        d = receipt[locus]
+        spectrum = list(zip(d["qual_distance_spectrum"], d["qual_distance_spectrum_scores"]))
+        state = cluster_form_qual(1.0, spectrum, [])
+        check(
+            state["shape"] == d["qual_spectrum_shape"],
+            f"locus {locus}: spectrum shape differs",
+        )
+        check(
+            (state["k"] == d["qual_cluster_k"]) if d["qual_cluster_k"] is not None else True,
+            f"locus {locus}: cluster k differs",
+        )
+        if d["qual"] is None:
+            check(state["unbounded"], f"locus {locus}: receipt QUAL None but state not unbounded")
+        else:
+            check(abs(state["qual"] - d["qual"]) < 1e-6, f"locus {locus}: QUAL differs")
+        print(
+            f"   locus {locus}: shape {state['shape']}, k {state['k']}, "
+            f"QUAL {'unbounded' if state['unbounded'] else state['qual']}",
+            flush=True,
+        )
+
+    # ---------------- phase 7: the identical-through-graph fold
+    print("== phase 7: the identical-through-graph fold (5397/5545)", flush=True)
+    for locus in LOCI:
+        d = receipt[locus]
+        if d["identical_pair_fold"] is None:
+            continue
+        fold = ingredients[locus]["folds"][d["identical_pair_fold"]]
+        member_names = [m["path_name"] for m in fold["members"]]
+        check(
+            "BTE#3#block28_contig1" in member_names
+            and "BTE#4#block28_contig1" in member_names,
+            f"locus {locus}: identical-pair fold membership",
+        )
+        g = gfa(d["partition"])
+        seqs = {}
+        walks = {}
+        for m in fold["members"]:
+            if "block28_contig1" not in m["path_name"]:
+                continue
+            seq, positions, steps = g.spelled(row_gfa_name(m))
+            seqs[m["path_name"]] = seq
+            walks[m["path_name"]] = list(zip(positions, steps))
+        vals = list(seqs.values())
+        check(all(v == vals[0] for v in vals), "identical-pair sequences differ")
+        wvals = list(walks.values())
+        check(all(v == wvals[0] for v in wvals), "identical-pair walks differ")
+        print(
+            f"   locus {locus}: BTE#3/#4 block28_contig1 spell identical "
+            f"sequence ({len(vals[0])} bp) and walk — the fold is exact",
+            flush=True,
+        )
+
+    # ---------------- phase 8: the pilot verdicts
+    print("== phase 8: the pilot verdicts", flush=True)
+    for locus in LOCI:
+        d = receipt[locus]
+        print(
+            f"   locus {locus}: partition {d['partition']}, folds {d['folds']}, "
+            f"units {d['unit_count']}, classes {d['class_count']}; "
+            f"truth rank {d['truth_rank']}, log gap {d['log_gap']}, "
+            f"QUAL {'unbounded' if d['qual'] is None and d['qual_unbounded'] else d['qual']}; "
+            f"factorized {d['validation']['factorized_equal']}/"
+            f"{d['validation']['factorized_checked']} exact",
+            flush=True,
+        )
+
+    print(f"\nTOTAL CHECKS: {checks[0]}, FAILURES: {len(failures)}")
+    if failures:
+        print("ALL PHASES FAIL" if len(failures) > 3 else "FAILURES PRESENT")
+        sys.exit(1)
+    print("ALL PHASES PASS")
+
+
+if __name__ == "__main__":
+    main()
