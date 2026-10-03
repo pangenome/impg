@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """check-realign-scoring.py -- the independent checker for the realignment
-scoring layer (slice B). Assessment-side; validates the receipts against
-the COMMITTED artifacts only (the partition GFAs, the maps, the committed
-anchor-projection receipt, the census record ids, the FASTQ).
+scoring layer (slice B) AND its slice-C extension, the generated-here/
+generated-elsewhere marginalization. Assessment-side; validates the
+receipts against the COMMITTED artifacts only (the partition GFAs, the
+maps, the committed anchor-projection receipt, the census record ids,
+the FASTQ).
+
+With no arguments: the committed slice-B receipts (the original floor
+semantics: prior + 150*B for unplaceable reads). With --marginal: the
+slice-C receipts (LL = logsumexp(local, E); the floor is the derived
+elsewhere branch E; the E derivation audited from the receipt's own
+panel strain list; the bounding property asserted over the whole
+matrix; the before/after pilot verdicts vs the slice-B receipts,
+including the L4 control preservation).
 
 Phases:
   1. run markers, exit code, wall, the 64 GiB RSS guard;
@@ -60,6 +70,28 @@ EPS = 10 ** (-(PHRED) / 10.0)
 A = math.log(1.0 - EPS)
 B = math.log(EPS / 3.0)
 FLOOR = READ_LENGTH * B
+
+# Slice C: the generated-here/generated-elsewhere marginalization.
+# With no arguments the checker validates the committed slice-B
+# receipts exactly as before. With --marginal it validates the slice-C
+# receipts (the marginal model: LL = logsumexp(local, E), the floor
+# for unplaceable reads is the derived elsewhere branch E, the E
+# derivation audited from the receipt's own panel strain list).
+MARGINAL = "--marginal" in sys.argv
+if MARGINAL:
+    RECEIPT = f"{D}/realign-marginal-chrI.jsonl"
+    EXACTNESS = f"{D}/realign-marginal-chrI.exactness.jsonl"
+    INGREDIENTS = f"{D}/realign-marginal-chrI.jsonl.ingredients.jsonl"
+    RUN = f"{D}/run-realignmarginal-chrI"
+    BEFORE_RECEIPT = f"{D}/realign-score-chrI.jsonl"
+
+
+def logsumexp2(a, b):
+    m = max(a, b)
+    if m == -math.inf:
+        return m
+    return m + math.log(math.exp(a - m) + math.exp(b - m))
+
 
 failures = []
 checks = [0]
@@ -779,17 +811,59 @@ def main():
         units = ingredients[locus]["units"]
         matrix = np.array(ingredients[locus]["ll_matrix"], dtype=float)
         check(matrix.shape == (len(folds), len(units)), f"locus {locus}: matrix shape")
-        # floor-only entries: prior + 150*B exactly
-        floor_checked = 0
-        for fi, fold in enumerate(folds):
-            prior = -math.log(2.0 * (fold["length"] - READ_LENGTH + 1))
-            row = matrix[fi]
-            floor_idx = np.where(row < prior + FLOOR + 1e-6)[0]
+        if MARGINAL:
+            # THE E-DERIVATION AUDIT (from the receipt's own panel
+            # strain list: the mean per-haplotype total path length,
+            # doubled for the diploid, then E = 150*A - ln(2*(G-149))).
+            sc = d["scoring"]
+            strain_list = sc["panel_strain_list"]
             check(
-                all(abs(row[u] - (prior + FLOOR)) < 1e-6 for u in floor_idx),
-                f"locus {locus} fold {fi}: floor entries not at prior+150B",
+                len(strain_list) == sc["panel_strains"],
+                "locus %d: strain list count differs" % locus,
             )
-            floor_checked += len(floor_idx)
+            mean_hap = sum(s["bp"] for s in strain_list) / len(strain_list)
+            check(
+                abs(mean_hap - sc["panel_mean_haploid_bp"]) < 1e-6,
+                f"locus {locus}: mean haploid re-derivation differs",
+            )
+            g_dip = 2.0 * mean_hap
+            check(
+                abs(g_dip - sc["genome_diploid_bp"]) < 1e-6,
+                f"locus {locus}: diploid genome re-derivation differs",
+            )
+            e_expect = READ_LENGTH * A - math.log(2.0 * (g_dip - READ_LENGTH + 1.0))
+            check(
+                abs(e_expect - sc["elsewhere_log_prob"]) < 1e-9,
+                f"locus {locus}: E re-derivation differs "
+                f"({e_expect} vs {sc['elsewhere_log_prob']})",
+            )
+            E = sc["elsewhere_log_prob"]
+            # THE BOUNDING PROPERTY: every unit's likelihood under every
+            # fold is at least E (the elsewhere branch bounds every
+            # floor), and no-pin entries sit at exactly E.
+            check(
+                float(matrix.min()) >= E - 1e-6,
+                f"locus {locus}: matrix entry below E",
+            )
+            at_e = int((np.abs(matrix - E) < 1e-9).sum())
+            print(
+                f"   locus {locus}: E audit passed "
+                f"(strains {sc['panel_strains']}, mean haploid {mean_hap:.1f}, "
+                f"E {E:.6f}); {at_e} matrix entries at E",
+                flush=True,
+            )
+        else:
+            # floor-only entries: prior + 150*B exactly
+            floor_checked = 0
+            for fi, fold in enumerate(folds):
+                prior = -math.log(2.0 * (fold["length"] - READ_LENGTH + 1))
+                row = matrix[fi]
+                floor_idx = np.where(row < prior + FLOOR + 1e-6)[0]
+                check(
+                    all(abs(row[u] - (prior + FLOOR)) < 1e-6 for u in floor_idx),
+                    f"locus {locus} fold {fi}: floor entries not at prior+150B",
+                )
+                floor_checked += len(floor_idx)
         # re-derive sampled pinned (unit, fold) LLs end to end
         pairs_here = [p for p in exactness if p["locus"] == locus]
         for pair in pairs_here[:40]:
@@ -808,7 +882,7 @@ def main():
             node_positions = {}
             for bp, node in fold["walk"]:
                 node_positions.setdefault(abs(node), []).append((bp, 1 if node > 0 else -1))
-            scores = [FLOOR]
+            scores = [FLOOR] if not MARGINAL else []
             FOLD_SEQ[0] = fold_seqs[(locus, fi)]
             for orientation in sorted(orientations):
                 pinned = correspondence(canonical, orientation, node_positions)
@@ -822,12 +896,34 @@ def main():
                 _, _, m, c, _, _ = got
                 scores.append(m * A + c * B)
             prior = -math.log(2.0 * (fold["length"] - READ_LENGTH + 1))
-            best = max(scores)
-            ll = prior + best + math.log(sum(math.exp(s - best) for s in scores))
+            best = max(scores) if scores else -math.inf
+            local_ll = (
+                -math.inf
+                if not scores or fold["length"] < READ_LENGTH
+                else prior + best + math.log(sum(math.exp(s - best) for s in scores))
+            )
+            if MARGINAL:
+                ll = logsumexp2(local_ll, E)
+                check(
+                    abs(pair["ll_local"] - local_ll) <= 1e-9 * max(1.0, abs(local_ll))
+                    if local_ll != -math.inf
+                    else pair["ll_local"] is None or pair["ll_local"] == -math.inf,
+                    f"locus {locus}: sampled ll_local differs",
+                )
+                check(
+                    abs(pair["elsewhere"] - E) < 1e-9,
+                    f"locus {locus}: sampled elsewhere term differs from E",
+                )
+            else:
+                ll = local_ll
             got_ll = matrix[fi][pair["unit"]]
             check(
                 abs(ll - got_ll) <= 1e-9 * max(1.0, abs(ll)),
                 f"locus {locus}: unit LL re-derivation differs {ll} vs {got_ll}",
+            )
+            check(
+                abs(pair["ll"] - got_ll) <= 1e-9 * max(1.0, abs(got_ll)),
+                f"locus {locus}: sampled pair ll differs from the matrix",
             )
         # the class table
         counts = np.array([u["count"] for u in units], dtype=float)
@@ -869,7 +965,12 @@ def main():
         )
         print(
             f"   locus {locus}: {len(class_lls)} classes re-derived "
-            f"(max diff {diff:.2e}), truth rank {rank}, floor entries {floor_checked}",
+            f"(max diff {diff:.2e}), truth rank {rank}"
+            + (
+                ""
+                if MARGINAL
+                else f", floor entries {floor_checked}"
+            ),
             flush=True,
         )
 
@@ -931,6 +1032,11 @@ def main():
 
     # ---------------- phase 8: the pilot verdicts
     print("== phase 8: the pilot verdicts", flush=True)
+    before = {}
+    if MARGINAL:
+        for line in open(BEFORE_RECEIPT):
+            b = json.loads(line)
+            before[b["locus"]] = b
     for locus in LOCI:
         d = receipt[locus]
         print(
@@ -942,6 +1048,25 @@ def main():
             f"{d['validation']['factorized_checked']} exact",
             flush=True,
         )
+        if MARGINAL:
+            b = before[locus]
+            print(
+                f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
+                f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
+                f"winner {b['best_fold_indices']} -> {d['best_fold_indices']}",
+                flush=True,
+            )
+            if locus == 4:
+                check(
+                    d["truth_rank"] == 1 and d["truth_in_called_set"],
+                    "L4 control: the truth-rank1 control must hold after the marginalization",
+                )
+                check(
+                    d["best_fold_indices"] == b["best_fold_indices"],
+                    "L4 control: the winner must be bit-exact unchanged",
+                )
+            shrink = (d["log_gap"] or 0.0) <= (b["log_gap"] or 0.0)
+            check(shrink, f"locus {locus}: the log gap grew after the marginalization")
 
     print(f"\nTOTAL CHECKS: {checks[0]}, FAILURES: {len(failures)}")
     if failures:

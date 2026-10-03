@@ -201,3 +201,124 @@ are not); (2) the QUAL p-form's dynamic range under likelihood ratios;
 remainder, measured negligible at the pilot); (4) the row-extent seam
 effect (rows extending past a neighbor's end collect the
 straddler reads — a row-geometry lever, not an evidence lever).
+
+## Slice C: the generated-here/generated-elsewhere marginalization (2026-11-06)
+
+**The defect being fixed.** A locus's record set is defined by the
+routing's territory touch, so conserved pockets bring reads into the
+locale's evidence that a candidate spelling the pocket collects at full
+match score while a candidate that does not pays the all-mismatch floor
+(`150*B` ~ -1,546) — even though the read's own genome generated it
+somewhere the candidate models only as "outside this locale". The
+owner's rho-squared principle: conserved material cancels;
+locally-variable material discriminates.
+
+**The anatomy first (the form-deciding gate, measured at chrI L7).**
+For every unit in L7's record set, classified by whether the slice-B
+winner (the ATV/BAD scaffold pocket folds) and the truth pair place it,
+the placement anatomy on the winner and truth folds (the
+`--anatomy-out` emission on `partition_realign_score`): the
+anchored/skipped/abstained decomposition, the collinearity verdict
+(the pinned anchors at ONE offset), the slice-B piecewise (m, c) beside
+the one-continuous-path whole-read score, the per-skipped-base votes
+with their projected coordinates, and the read's FULL-READ match at
+its verified occurrences on the sample's own donor paths
+(S288C/SK1, origin-shift-corrected, strand-aware).
+
+* **THE VERDICT: CONTINUOUS.** The winner's pocket placements are
+  100% collinear — one continuous path through the pocket row's spell
+  — with m mean 148.7/150 (c = 0 on 75.5% of the 1,603 winner-only
+  placements, c = 1 on 17%). The flanks vote AGAINST the scaffold
+  rows' own context and MATCH it: the pocket copies extend identical
+  through the reads' full spans, and no read spans into unique flank
+  material within its 150 bp. No placement-continuity rule is
+  imposed; the marginalization carries the whole weight.
+* **THE ANATOMY'S HEADLINE FINDING: the pocket reads are NOT
+  foreign/remote-generated.** Every winner-only-placed unit (1,603
+  units, mass 1,677) has a FULL-READ 150/150 match on the sample's own
+  donor paths S288C#0#chrI / SK1#0#chrI: 1,051 units (66%) INSIDE
+  window 7's own truth rows, 426 (27%) in the neighboring ±2 kb seam,
+  only 126 far. Yet the truth folds place none of the in-window ones:
+  2,059 units (mass 2,140) at L7 have an in-window full-match donor
+  occurrence with NO valid truth placement.
+* **THE CAUSE, proven with a named example (record 113 / unit 84 /
+  node 92071): the pin skeleton's stored-walk frame blindness.** The
+  fold pin skeletons are built from `walk_path_range` — ONE frame's
+  syncmer selection — and reads whose anchor k-mers are
+  rc-frame-qualified on the truth path are ABSENT from that walk
+  (slice A's binding lesson, missed in the slice-B pin skeleton),
+  while the same k-mers appear canonical-forward on the
+  reverse-complement scaffold copies, which pin and collect the full
+  match. The truth's `150*B` floor for these reads is a
+  placement-machinery frame artifact, not an inability to spell them.
+  The slice-B "54,015 per-base logs" also decompose into
+  one-homolog floor asymmetries (±1,546-magnitude mixture terms), not
+  per-base evidence — on jointly-placed reads the truth's per-base
+  evidence is BETTER (m 146.8 / c 1.08 vs the winner's 142.9 / 2.93).
+  The frame repair (canonical-scheme pin skeletons, the territory
+  extraction slice A already validated) is the named next lever; the
+  marginalization bounds its cost at E in the meantime.
+
+**The marginalization (derived, no tuning constants).** Each read's
+likelihood under a candidate marginalizes the two generation branches:
+
+    LL(read | candidate) = logsumexp( local-spell branch , E(read) )
+
+The local-spell branch is rule 2's per-(record, row) likelihood (the
+uniform placement prior + the anchored placements). `E(read)` is the
+CANDIDATE-INDEPENDENT elsewhere branch: the read explained by the
+genome outside this locale at the derived background rate — the read
+matches its origin at the MEASURED per-base rate (the census measured
+zero unmatched placement bp over 1,063,522 verified occurrences:
+reads are exact segments of their origins, at the reads' own
+Phred-derived rate A), under the max-entropy uniform origin over the
+donor's diploid genome:
+
+    E(read) = len(read) * A - ln(2 * (G_diploid - len(read) + 1))
+
+The same max-entropy spirit as the old Poisson model's beta = M/|U|:
+the unit of match likelihood spread uniformly over the universe of
+placements. The genome size is measured truth-free from the panel —
+the instrument's own genome universe: the mean per-(strain,
+haplotype) total path length (14,199,901.5 bp over 235 haplotype
+path sets), doubled for the diploid generation model
+(G_diploid = 28,399,803 bp; E = -17.870035 on this sample).
+
+* **THE FLOOR for unexplained reads is E**, not the all-mismatch
+  150*B (which survives only as the per-placement lower bound inside
+  the local branch's logsumexp — a bit-exact no-op wherever an anchor
+  pins, since `e^{150*B}` underflows).
+* **A read whose local placements score no better than E does not
+  vote beyond E** (the mixture absorbs every local branch below E);
+  **the logsumexp is monotone in the local branch**, so a candidate
+  that spells a read at least as well as every rival under the local
+  branch keeps its per-unit ordering after the marginalization — the
+  L4-control preservation property (unit-proven).
+
+**The pilot, before (slice B) → after (slice C), all three loci
+checker-verified (check-realign-scoring.py --marginal, ALL PHASES
+PASS, 6,589 checks, 0 failures; the slice-B mode still passes its own
+receipts, 6,757 checks, 0 failures):**
+
+| locus | truth rank before → after | log gap before → after | winner before → after |
+|---:|---|---:|---|
+| 4 (control) | 1 → 1 | 0.0 → 0.0 | unchanged (bit-exact, checker-enforced) |
+| 2 | 4 → 2 | 151,917.18 → 60.74 | unchanged (BTE identical fold + S288C/W303 fold) |
+| 7 | 1,644 → 8 | 1,247,492.61 → 982.04 | (ATV+BAD scaffold pockets) → (S288C/AAA/SGDref fold + ATV pocket fold) |
+
+The pocket harvest shrinks 99.92% at L7; the winner stops being the
+pure scaffold-pocket pair; the both-placed evidence gap flips negative
+(-2,900.7: the truth's evidence is better on jointly-placed reads);
+the identical-through-graph fold stays one candidate by construction
+(checker-verified from the GFAs); QUAL stays unbounded (the cluster
+p-form's relative likelihoods underflow at the surviving separations).
+
+**What remains (next slices).** (1) THE FRAME REPAIR — the
+canonical-scheme pin skeletons (slice A's territory extraction) so
+that rc-frame-qualified anchors pin on the rows that spell them: at
+L7 alone this affects 2,059 in-window full-match units the truth
+currently cannot place; it is a slice-B machinery repair, needs its
+own exactness gates, and should land before or with the exhaustive
+rerun. (2) The exhaustive chrMT/chrI rerun under the marginal model
+(all 35 loci) with the before/after table. (3) The QUAL p-form's
+dynamic range (unchanged per the ruling; the saturation is named).
