@@ -1051,8 +1051,10 @@ struct Pin {
 struct Fold {
     seq: Vec<u8>,
     len: u64,
-    /// The representative row's walk, relative to its start (the same
-    /// walk the committed partition GFAs' P lines spell).
+    /// The representative row's CONTAINED walk steps (windows fully
+    /// inside the row extent), relative to its start — the pinnable
+    /// anchor skeleton; the committed partition GFAs' P lines spell
+    /// these steps among their edge-overlapping and gap steps.
     walk: Vec<(u64, i32)>,
     /// node abs id -> relative (bp, sign) occurrences.
     node_positions: HashMap<u32, Vec<(u64, i32)>>,
@@ -1864,19 +1866,30 @@ fn main() -> io::Result<()> {
                 })
                 .ok_or_else(|| invalid("member row missing from the store"))?;
             let row = &store.folds[row_index];
+            // The CONTAINED steps only (windows fully inside the row
+            // extent): an anchor whose window overlaps the row edge
+            // cannot be a pinned backbone anchor (the read must lie
+            // fully inside), and keeping it would place its window
+            // start at a NEGATIVE relative position — the u64
+            // subtraction would wrap and poison the monotone
+            // enumeration. Edge-overlapping anchors abstain (the named
+            // remainder class).
             let relative: Vec<(u64, i32)> = row
                 .walk
                 .iter()
+                .filter(|&&(bp, _)| bp >= row.start && bp + k <= row.end)
                 .map(|&(bp, node)| (bp - row.start, node))
                 .collect();
-            let key = (row.seq.clone(), relative);
+            let key = (row.seq.clone(), relative.clone());
             let index = *fold_map.entry(key).or_insert_with(|| {
                 let mut node_positions: HashMap<u32, Vec<(u64, i32)>> = HashMap::new();
                 for &(bp, node) in &row.walk {
-                    node_positions
-                        .entry(node.unsigned_abs())
-                        .or_default()
-                        .push((bp - row.start, node.signum()));
+                    if bp >= row.start && bp + k <= row.end {
+                        node_positions
+                            .entry(node.unsigned_abs())
+                            .or_default()
+                            .push((bp - row.start, node.signum()));
+                    }
                 }
                 let contained: Vec<(u64, i32)> = row
                     .walk
@@ -1914,11 +1927,7 @@ fn main() -> io::Result<()> {
                 folds.push(Fold {
                     seq: row.seq.clone(),
                     len: (row.end - row.start) as u64,
-                    walk: row
-                        .walk
-                        .iter()
-                        .map(|&(bp, node)| (bp - row.start, node))
-                        .collect(),
+                    walk: relative,
                     node_positions,
                     members: Vec::new(),
                     nodes,
