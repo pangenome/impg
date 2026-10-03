@@ -109,6 +109,61 @@
 //!    which re-derives the scores from the committed GFAs, runs the
 //!    bounded-offset dominance scan and the bounded edit-distance
 //!    alignment on the sample.
+//!
+//! 7. THE GENERATED-HERE/GENERATED-ELSEWHERE MARGINALIZATION (slice C,
+//!    the owner's rho-squared principle: conserved material cancels;
+//!    locally-variable material discriminates). A locus's record set
+//!    is defined by the routing's territory touch, so conserved
+//!    pockets bring foreign-row-generated and cross-window reads into
+//!    the locale's evidence; a candidate that spells such material
+//!    would otherwise collect it at full match score while a candidate
+//!    that does not pays the all-mismatch floor — even though the
+//!    read's own genome generated it somewhere the candidate models
+//!    only as "outside this locale". Each read's likelihood under a
+//!    candidate therefore MARGINALIZES the two generation branches:
+//!
+//!        LL(read | candidate) = logsumexp( local-spell branch ,
+//!                                          E(read) )
+//!
+//!    where the local-spell branch is the per-(record, row) likelihood
+//!    of rule 2 (the uniform placement prior + the anchored
+//!    placements' backbone + skipped-base votes) and E(read) is the
+//!    CANDIDATE-INDEPENDENT elsewhere branch — the read explained by
+//!    the genome outside this locale at the derived background rate
+//!    (rule: the read matches its origin at the MEASURED per-base rate
+//!    — the census's zero-unmatched-bp measurement over 1,063,522
+//!    verified occurrences — under the max-entropy uniform origin
+//!    over the donor's diploid genome, the same max-entropy spirit as
+//!    the old Poisson model's beta = M/|U|: the unit of match
+//!    likelihood spread uniformly over the universe of placements;
+//!    the genome size measured from the panel, the instrument's own
+//!    truth-free genome universe). THE FLOOR for unexplained reads is
+//!    E(read), not the all-mismatch 150*B (which survives only as the
+//!    per-placement lower bound inside the local branch's logsumexp,
+//!    a bit-exact no-op wherever an anchor pins). A read whose local
+//!    placements score no better than E has ~zero discriminating
+//!    power between candidates — it does not vote beyond E; the
+//!    logsumexp is MONOTONE in the local branch, so a candidate that
+//!    spells a read strictly better than every rival under the local
+//!    branch still wins that read after the marginalization (the
+//!    L4-control preservation property, unit-proven).
+//!
+//!    THE POCKET-READ ANATOMY (measured first, at chrI L7 — the
+//!    form-deciding gate): the winner's pocket placements are 100%
+//!    collinear (one continuous path through the pocket row's spell)
+//!    with m mean 148.7/150 — the CONTINUOUS world, so no separate
+//!    placement-continuity rule is imposed; the marginalization
+//!    carries the whole weight. The anatomy's second finding is
+//!    recorded in the receipts and the docs note: the pocket reads'
+//!    FULL-READ donor occurrences sit on the sample's own S288C/SK1
+//!    chrI paths — 66% INSIDE the window's own truth rows, 27% in the
+//!    neighboring seam — i.e. the reads are (mostly) locally
+//!    generated, and the truth's failure to place them is the pin
+//!    skeleton's stored-walk frame blindness (slice A's binding
+//!    lesson: rc-frame-qualified anchors are absent from the stored
+//!    path walk), NOT an inability of the truth's rows to spell them.
+//!    The marginalization bounds that artifact's cost at E; the frame
+//!    repair itself is named as the next lever.
 
 #![recursion_limit = "512"]
 
@@ -171,6 +226,12 @@ struct Options {
     /// pilot domain regardless).
     #[arg(long, default_value_t = 100)]
     exactness_sample: u64,
+    /// The pocket-read anatomy sidecar (slice C: per unit, classified
+    /// by whether the winner and truth pairs place it, the placement
+    /// anatomy on the winner and truth folds plus the read's donor-
+    /// path full-read verification). Pure emission; no scoring change.
+    #[arg(long)]
+    anatomy_out: Option<PathBuf>,
     /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard).
     #[arg(long, default_value_t = 64.0)]
     rss_budget_gib: f64,
@@ -1018,19 +1079,58 @@ impl Scoring {
         m as f64 * self.a + c as f64 * self.b
     }
 
-    /// The model's derived per-read MINIMUM likelihood: every base of
-    /// the read mismatching (READ_LENGTH * ln(eps/3)) — the rigorous
-    /// lower bound of the read's likelihood under ANY placement, hence
-    /// the floor substituted for a read the row cannot anchor (the
-    /// anchored evidence model has no placement there; the exactness
-    /// receipt measures the true unanchored floor on the sample). As
-    /// a logsumexp term it underflows to +0.0 exactly wherever an
-    /// anchored placement exists (150 * ln(eps/3) ~ -1546 against
-    /// placement scores ~ -1), so it is a bit-exact no-op there.
+    /// The model's derived per-placement MINIMUM likelihood: every
+    /// base of the read mismatching (READ_LENGTH * ln(eps/3)) — the
+    /// rigorous lower bound of the read's likelihood under ANY
+    /// placement. It remains the stated lower bound of the local
+    /// branch's per-placement terms; as a logsumexp term it
+    /// underflows to +0.0 exactly wherever an anchored placement
+    /// exists (150 * ln(eps/3) ~ -1546 against placement scores ~ -1).
     #[inline]
     fn floor(&self) -> f64 {
         READ_LENGTH as f64 * self.b
     }
+}
+
+/// The plain two-term logsumexp.
+#[inline]
+fn logsumexp2(a: f64, b: f64) -> f64 {
+    let max = a.max(b);
+    if max == f64::NEG_INFINITY {
+        return max;
+    }
+    max + ((a - max).exp() + (b - max).exp()).ln()
+}
+
+/// THE ELSEWHERE BRANCH E(read) (slice C, derived — no tuning
+/// constants): each read was generated at ONE origin, uniform
+/// (max-entropy) over the donor's diploid genome; a candidate models
+/// the locale only, so the read's likelihood under a candidate
+/// marginalizes generated-here (the candidate's local spell) against
+/// generated-elsewhere (the genome outside this locale).
+///
+/// The elsewhere branch: the read matches its origin at the MEASURED
+/// per-base rate (the census measured zero unmatched placement bp
+/// over 1,063,522 verified occurrences — reads are exact segments of
+/// their origins, at the reads' own Phred-derived rate A), and the
+/// origin is uniform over the genome's 2*(G-149) both-strand
+/// full-read placements — the same max-entropy spirit as the old
+/// Poisson model's beta = M/|U|: the unit of match likelihood spread
+/// uniformly over the universe of placements, the universe measured
+/// from the panel (the instrument's genome universe, truth-free: the
+/// mean per-strain total path length, doubled for the diploid).
+///
+///   E(read) = len(read) * A - ln(2 * (G_diploid - len(read) + 1))
+///
+/// With uniform L150 reads and uniform quality bytes this is ONE
+/// derived constant per run. THE FLOOR for a read a candidate cannot
+/// place is E — not the all-mismatch 150*B (which survives only as
+/// the per-placement lower bound inside the local branch, a bit-exact
+/// no-op wherever an anchor pins).
+#[inline]
+fn elsewhere_log_prob(read_len: usize, match_log_prob: f64, genome_diploid_bp: f64) -> f64 {
+    read_len as f64 * match_log_prob
+        - (2.0 * (genome_diploid_bp - read_len as f64 + 1.0)).ln()
 }
 
 /// One anchored placement of a record's pattern onto one candidate
@@ -1300,6 +1400,84 @@ fn unit_log_likelihood(
     prior + best + sum.ln()
 }
 
+/// The COLLINEARITY verdict of one placement's pins (the slice C
+/// anatomy): the pinned anchors must sit at ONE offset for the
+/// placement to be ONE CONTINUOUS path through the fold's spell (a
+/// substitution-only generation spells the read along a single
+/// offset; the piecewise serving of slice B can collect flanks at
+/// mutually incompatible offsets — the flank-indel class). For
+/// physically-forward placements the invariant is r_j - own_hull_j;
+/// for physically-reverse placements the reflection r_j + own_hull_j
+/// (the reverse geometry). A TRUE placement is always collinear: the
+/// read is a contiguous segment of the row's source genome, the true
+/// assignment is among the monotone assignments, so every pinned
+/// anchor sits at its true position.
+fn placement_offset(
+    pinned: &[Option<i64>],
+    own_hull: &[u64],
+    forward: bool,
+) -> (bool, Option<i64>) {
+    let mut offsets: Vec<i64> = Vec::new();
+    for (j, &r) in pinned.iter().enumerate() {
+        if let Some(r) = r {
+            let own = own_hull[j] as i64;
+            offsets.push(if forward { r - own } else { r + own });
+        }
+    }
+    match offsets.first() {
+        None => (false, None),
+        Some(&first) => (offsets.iter().all(|&o| o == first), Some(first)),
+    }
+}
+
+/// The ONE-CONTINUOUS-PATH score: every base of the read projected
+/// at the placement's single offset — the whole-read form of the
+/// backbone + serving-anchor votes, INCLUDING the bases slice B
+/// abstained inside unpinned anchor windows (at a collinear offset
+/// the whole read projects, pinned or not). Requires collinear pins.
+/// The third return is the out-of-extent base count (a measurement
+/// for the anatomy; the placement-validity rule itself is
+/// unchanged).
+#[allow(clippy::too_many_arguments)]
+fn single_offset_score(
+    unit: &Unit,
+    offset_const: i64,
+    forward: bool,
+    fold_seq: &[u8],
+    fold_len: u64,
+    reads: &[Vec<u8>],
+    k: u64,
+) -> (u32, u32, u32) {
+    let read = &reads[unit.read];
+    let mut matches = 0u32;
+    let mut mismatches = 0u32;
+    let mut out_of_extent = 0u32;
+    for i in 0..read.len() as i64 {
+        let d = i - unit.w_lo as i64;
+        let coord = if forward {
+            offset_const + d
+        } else {
+            offset_const + k as i64 - 1 - d
+        };
+        if coord < 0 || coord >= fold_len as i64 {
+            out_of_extent += 1;
+            continue;
+        }
+        let base = fold_seq[coord as usize];
+        let read_base = if forward {
+            read[i as usize]
+        } else {
+            complement(read[i as usize])
+        };
+        if read_base == base {
+            matches += 1;
+        } else {
+            mismatches += 1;
+        }
+    }
+    (matches, mismatches, out_of_extent)
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1454,6 +1632,49 @@ fn main() -> io::Result<()> {
         quality_started.elapsed().as_secs_f64(),
     );
     rss.probe("quality")?;
+
+    // ------------------------- the ELSEWHERE branch derivation (slice C)
+    // The donor's genome size, measured from the panel (the
+    // instrument's own genome universe — truth-free): the panel's
+    // paths are grouped per (strain, haplotype) — "S288C#0#chrI",
+    // "ATV#3#block43_contig1" — so the measured unit is the mean
+    // total path length per HAPLOTYPE path set, doubled for the
+    // diploid generation model (the balanced diploid sample's
+    // documented construction: two haploid homologs).
+    let mut strain_totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for (name, &len) in panel
+        .name_map
+        .path_to_name
+        .iter()
+        .zip(panel.name_map.path_to_length.iter())
+    {
+        let haplotype: String = name
+            .splitn(3, '#')
+        .take(2)
+            .collect::<Vec<_>>()
+            .join("#");
+        let entry = strain_totals.entry(haplotype).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += len;
+    }
+    ensure(!strain_totals.is_empty(), "the panel has no paths")?;
+    let panel_mean_haploid_bp: f64 = strain_totals
+        .values()
+        .map(|&(_, bp)| bp as f64)
+        .sum::<f64>()
+        / strain_totals.len() as f64;
+    let genome_diploid_bp = 2.0 * panel_mean_haploid_bp;
+    let elsewhere = elsewhere_log_prob(READ_LENGTH, scoring.a, genome_diploid_bp);
+    let strain_list: Vec<serde_json::Value> = strain_totals
+        .iter()
+        .map(|(strain, &(paths, bp))| json!({"strain": strain, "paths": paths, "bp": bp}))
+        .collect();
+    eprintln!(
+        "[score] elsewhere branch: E = {elsewhere:.6} \
+         (panel strains {}, mean haploid {panel_mean_haploid_bp:.1} bp, \
+         diploid {genome_diploid_bp:.1} bp)",
+        strain_totals.len(),
+    );
 
     // ------------------------------------- the read-record re-derivation
     let derive_started = Instant::now();
@@ -1820,6 +2041,10 @@ fn main() -> io::Result<()> {
     // ------------------------------------------------------------------ receipts
     let mut report = BufWriter::new(File::create(&options.out)?);
     let mut exactness = BufWriter::new(File::create(&options.exactness_out)?);
+    let mut anatomy = match &options.anatomy_out {
+        Some(path) => Some(BufWriter::new(File::create(path)?)),
+        None => None,
+    };
     let ingredients_path = format!("{}.ingredients.jsonl", options.out.display());
     let mut ingredients = BufWriter::new(File::create(&ingredients_path)?);
     let records_path = format!("{}.records.jsonl", options.out.display());
@@ -2154,15 +2379,19 @@ fn main() -> io::Result<()> {
                         });
                     }
                     if !any_pin {
-                        // No anchored placement: the model's derived
-                        // per-read minimum (the all-mismatch floor).
+                        // No anchored placement: the ELSEWHERE branch
+                        // (the generated-elsewhere marginalization's
+                        // floor; a read a candidate cannot place is
+                        // explained by the genome outside the locale at
+                        // the derived background rate, not by the
+                        // all-mismatch minimum).
                         no_pin_records += 1;
-                        ll.push(unit_log_likelihood(&[scoring.floor()], fold.len));
+                        ll.push(elsewhere);
                         pinned.push(false);
                         mismatches.push(0);
                         continue;
                     }
-                    let mut scores: Vec<f64> = vec![scoring.floor()];
+                    let mut scores: Vec<f64> = Vec::new();
                     let mut unit_mismatches = 0u32;
                     let mut pinned_here = false;
                     for pin in pins.iter().flatten() {
@@ -2185,7 +2414,21 @@ fn main() -> io::Result<()> {
                         scores.push(scoring.placement(m, c));
                     }
                     pinned.push(pinned_here);
-                    ll.push(unit_log_likelihood(&scores, fold.len));
+                    // THE MARGINALIZATION: LL(read | fold) =
+                    // logsumexp( the local-spell branch (the uniform
+                    // placement prior + the anchored placements),
+                    // E(read) — the candidate-independent
+                    // generated-elsewhere branch ). A local branch
+                    // that scores no better than E is absorbed by it
+                    // (the read does not vote beyond E); the
+                    // logsumexp2 is monotone in the local branch, so
+                    // per-unit orderings the local branch preserves
+                    // (a full-match truth placement vs a rival's
+                    // worse placement) survive the marginalization.
+                    ll.push(logsumexp2(
+                        unit_log_likelihood(&scores, fold.len),
+                        elsewhere,
+                    ));
                     mismatches.push(unit_mismatches);
                 }
                 FoldScore {
@@ -2540,6 +2783,7 @@ fn main() -> io::Result<()> {
             let fold = &folds[fold_index];
             let positions_of = |node: u32| fold.positions_of(node);
             let mut placements: Vec<serde_json::Value> = Vec::new();
+            let mut local_scores: Vec<f64> = Vec::new();
             for &orientation in &touching[&record].orientations {
                 let (pinned, _ambiguous) =
                     anchor_correspondence(&canonical, orientation, &positions_of);
@@ -2608,6 +2852,7 @@ fn main() -> io::Result<()> {
                     "score": scoring.placement(m, c),
                     "votes": votes,
                 }));
+                local_scores.push(scoring.placement(m, c));
             }
             let read = &reads[unit.read];
             serde_json::to_writer(
@@ -2624,6 +2869,8 @@ fn main() -> io::Result<()> {
                     "read": String::from_utf8(read.clone()).unwrap(),
                     "fold": fold_index,
                     "ll": matrix[fold_index][unit_index],
+                    "ll_local": unit_log_likelihood(&local_scores, fold.len),
+                    "elsewhere": elsewhere,
                     "placements": placements,
                 }),
             )?;
@@ -2637,6 +2884,305 @@ fn main() -> io::Result<()> {
             valid_pairs.len(),
             mismatch_pairs.len(),
         );
+
+        // -------------------------------------- the pocket-read anatomy
+        // (slice C gate 1: THE ANATOMY THAT DECIDES THE FORM of the
+        // generated-here/generated-elsewhere marginalization. For
+        // every unit, classified by whether the winner and truth
+        // pairs place it, the placement anatomy on the winner and
+        // truth folds: the anchored/skipped/abstained decomposition,
+        // the collinearity verdict, the slice-B piecewise (m, c)
+        // BESIDE the one-continuous-path whole-read score, and the
+        // flank votes with their projected coordinates — plus the
+        // read's full verified-occurrence census and, on the
+        // sample's own donor paths (S288C/SK1, the balanced 15x/15x
+        // construction), the FULL-READ match at each donor
+        // occurrence: the generated-elsewhere evidence. Pure
+        // emission; the scoring is unchanged.)
+        let anatomy_seconds = if let Some(writer) = &mut anatomy {
+            let anatomy_started = Instant::now();
+            let (winner_first, winner_second) = winner_pair;
+            let mut anatomy_folds: Vec<usize> = vec![winner_first, winner_second];
+            if let Some((a, b)) = truth_pair {
+                for fold in [a, b] {
+                    if !anatomy_folds.contains(&fold) {
+                        anatomy_folds.push(fold);
+                    }
+                }
+            }
+            let truth_places_unit = |u: usize| {
+                truth_pair
+                    .map(|(a, b)| pinned[a][u] || pinned[b][u])
+                    .unwrap_or(false)
+            };
+            let winner_places_unit = |u: usize| pinned[winner_first][u] || pinned[winner_second][u];
+            let is_donor_path = |name: &str| {
+                name.starts_with("S288C#0#") || name.starts_with("SK1#0#")
+            };
+            let mut anatomy_units = 0u64;
+            for (u, unit) in units.iter().enumerate() {
+                let record = unit.record;
+                let canonical =
+                    decode_record_tokens(&key_tokens[census_key[record].unwrap() as usize])?;
+                let line = &census_records[record];
+                let shifts = &record_shifts[&record];
+                let span = walk_span(&canonical, k);
+                let class = match (winner_places_unit(u), truth_places_unit(u)) {
+                    (true, false) => "winner_only",
+                    (true, true) => "both",
+                    (false, true) => "truth_only",
+                    (false, false) => "neither",
+                };
+                let pinning_folds: Vec<usize> = (0..n_folds)
+                    .filter(|&f| pinned[f][u])
+                    .collect();
+                // The donor-path full-read verification: at each
+                // verified occurrence of this record on a donor
+                // path, the whole read (all 150 bases, strand-aware,
+                // origin-shift-corrected) against the donor path's
+                // own sequence.
+                let mut donor_checks: Vec<serde_json::Value> = Vec::new();
+                for (position, occ) in line.occurrences.iter().enumerate() {
+                    let name = &panel.name_map.path_to_name[occ.path];
+                    if !is_donor_path(name) {
+                        continue;
+                    }
+                    let origin = (occ.start as i64 + shifts[position]).max(0) as u64;
+                    let path_len = panel.name_map.path_to_length[occ.path];
+                    let forward = physical_forward(occ.orientation, unit.mirror);
+                    let lo = origin.saturating_sub(300);
+                    let hi = (origin + span + 300).min(path_len);
+                    let seq = fetch_seq(name, lo, hi)?;
+                    let read = &reads[unit.read];
+                    let mut full_m = 0u32;
+                    let mut full_c = 0u32;
+                    let mut full_oob = 0u32;
+                    for i in 0..read.len() as i64 {
+                        let d = i - unit.w_lo as i64;
+                        let coord = if forward {
+                            origin as i64 + d
+                        } else {
+                            origin as i64 + span as i64 - 1 - d
+                        };
+                        if coord < 0
+                            || coord >= path_len as i64
+                            || (coord as u64) < lo
+                            || coord as u64 >= hi
+                        {
+                            full_oob += 1;
+                            continue;
+                        }
+                        let base = seq[(coord - lo as i64) as usize];
+                        let read_base = if forward {
+                            read[i as usize]
+                        } else {
+                            complement(read[i as usize])
+                        };
+                        if read_base == base {
+                            full_m += 1;
+                        } else {
+                            full_c += 1;
+                        }
+                    }
+                    donor_checks.push(json!({
+                        "path": name, "origin": origin,
+                        "orientation": occ.orientation,
+                        "m": full_m, "c": full_c, "oob": full_oob,
+                    }));
+                }
+                // The placement anatomy on the winner and truth
+                // folds (the pocket rows and the rows the truth
+                // spells).
+                let emit_votes = class == "winner_only" || u % 16 == 0;
+                let mut placements: Vec<serde_json::Value> = Vec::new();
+                for &fold_index in &anatomy_folds {
+                    let fold = &folds[fold_index];
+                    let positions_of = |node: u32| fold.positions_of(node);
+                    for &orientation in &touching[&record].orientations {
+                        let (pinned_vec, _ambiguous) =
+                            anchor_correspondence(&canonical, orientation, &positions_of);
+                        // The per-anchor candidate census (the diagnosis of
+                        // all-None correspondences: which anchors the
+                        // fold's walk carries, with which signs).
+                        let anchor_candidates: Vec<serde_json::Value> = canonical
+                            .iter()
+                            .map(|&(node, _)| {
+                                let required = required_sign(node, orientation);
+                                let positions = positions_of(required.unsigned_abs());
+                                let with_sign = positions
+                                    .iter()
+                                    .filter(|&&(_, sign)| sign == required.signum())
+                                    .count();
+                                json!([
+                                    required,
+                                    with_sign,
+                                    positions.len(),
+                                ])
+                            })
+                            .collect();
+                        if pinned_vec.iter().all(|p| p.is_none()) {
+                            placements.push(json!({
+                                "fold": fold_index,
+                                "orientation": orientation,
+                                "valid": false,
+                                "windows_inside": false,
+                                "pinned": pinned_vec,
+                                "anchor_candidates": anchor_candidates,
+                                "backbone_bp": 0,
+                                "abstained_bp": 0,
+                                "skipped_bp": 0,
+                                "collinear": false,
+                                "offset": null,
+                                "m": 0, "c": 0,
+                                "single": null,
+                                "votes": [],
+                            }));
+                            continue;
+                        }
+                        let windows_inside =
+                            pinned_vec.iter().flatten().all(|&r| r + k <= fold.len);
+                        let own_flat = own_positions_of(&canonical, false, 0);
+                        let backbone_windows: Vec<(u64, u64)> = pinned_vec
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(j, &r)| r.map(|r2| (own_flat[j], r2)))
+                            .map(|(p, _)| (p, p + k))
+                            .collect();
+                        let backbone_bp: u64 =
+                            merge_windows(backbone_windows).iter().map(|&(lo, hi)| hi - lo).sum();
+                        let hull_windows: Vec<(u64, u64)> =
+                            own_flat.iter().map(|&p| (p, p + k)).collect();
+                        let hull_covered: u64 = merge_windows(hull_windows)
+                            .iter()
+                            .map(|&(lo, hi)| hi - lo)
+                            .sum();
+                        let pinned_i: Vec<Option<i64>> =
+                            pinned_vec.iter().map(|p| p.map(|v| v as i64)).collect();
+                        let pin = Pin {
+                            orientation,
+                            pinned: pinned_i.clone(),
+                            backbone_bp,
+                        };
+                        let forward = physical_forward(orientation, unit.mirror);
+                        let own_hull = own_positions_of(&canonical, unit.mirror, 0);
+                        let (collinear, offset_const) =
+                            placement_offset(&pin.pinned, &own_hull, forward);
+                        let own_positions =
+                            own_positions_of(&canonical, unit.mirror, unit.w_lo);
+                        let skipped = skipped_positions(&own_positions, k, READ_LENGTH as u64);
+                        let skipped_bp: u64 =
+                            skipped.iter().map(|&(lo, hi)| hi - lo).sum();
+                        let piecewise = placement_score(
+                            unit, &canonical, &pin, &fold.seq, fold.len, &reads, k,
+                        );
+                        let (m, c, valid) = match piecewise {
+                            Some((m, c)) => (m, c, true),
+                            None => (0, 0, false),
+                        };
+                        let single = if collinear {
+                            Some(single_offset_score(
+                                unit,
+                                offset_const.unwrap(),
+                                forward,
+                                &fold.seq,
+                                fold.len,
+                                &reads,
+                                k,
+                            ))
+                        } else {
+                            None
+                        };
+                        let mut votes: Vec<serde_json::Value> = Vec::new();
+                        if emit_votes {
+                            if let Some((m, c)) = piecewise {
+                                let _ = (m, c);
+                                for &(lo, hi) in &skipped {
+                                    for i in lo..hi {
+                                        let d = i as i64 - unit.w_lo as i64;
+                                        let (index, own_pos) = match serving_anchor(
+                                            &pin.pinned, &own_hull, d,
+                                        ) {
+                                            Some(found) => found,
+                                            None => continue,
+                                        };
+                                        let r = match pin.pinned[index] {
+                                            Some(r) => r,
+                                            None => continue,
+                                        };
+                                        let coord = if forward {
+                                            r + (d - own_pos)
+                                        } else {
+                                            r + (own_pos + k as i64 - 1 - d)
+                                        };
+                                        if coord < 0 || coord >= fold.len as i64 {
+                                            votes.push(json!([i, -1, 0]));
+                                            continue;
+                                        }
+                                        let base = fold.seq[coord as usize];
+                                        let read_base = if forward {
+                                            reads[unit.read][i as usize]
+                                        } else {
+                                            complement(reads[unit.read][i as usize])
+                                        };
+                                        votes.push(json!([
+                                            i,
+                                            coord,
+                                            if read_base == base { 1 } else { 0 },
+                                        ]));
+                                    }
+                                }
+                            }
+                        }
+                        placements.push(json!({
+                            "fold": fold_index,
+                            "orientation": orientation,
+                            "valid": valid,
+                            "windows_inside": windows_inside,
+                            "pinned": pin.pinned,
+                            "anchor_candidates": anchor_candidates,
+                            "backbone_bp": backbone_bp,
+                            "abstained_bp": hull_covered - backbone_bp,
+                            "skipped_bp": skipped_bp,
+                            "collinear": collinear,
+                            "offset": offset_const,
+                            "m": m, "c": c,
+                            "single": single,
+                            "votes": votes,
+                        }));
+                    }
+                }
+                let read = &reads[unit.read];
+                serde_json::to_writer(
+                    &mut *writer,
+                    &json!({
+                        "type": "unit",
+                        "locus": locus,
+                        "unit": u,
+                        "record": record,
+                        "variant": unit.variant,
+                        "mirror": if unit.mirror { 1 } else { 0 },
+                        "w_lo": unit.w_lo,
+                        "count": unit.count,
+                        "read_fnv": fnv1a64(read),
+                        "read": String::from_utf8(read.clone()).unwrap(),
+                        "class": class,
+                        "pinning_folds": pinning_folds,
+                        "donor_checks": donor_checks,
+                        "placements": placements,
+                    }),
+                )?;
+                writeln!(writer)?;
+                anatomy_units += 1;
+            }
+            eprintln!(
+                "[score] locus {locus}: anatomy {anatomy_units} units \
+                 [{:.1}s]",
+                anatomy_started.elapsed().as_secs_f64(),
+            );
+            anatomy_started.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
 
         // ------------------------------------------------- the named classes
         let mut named: Vec<(usize, usize)> = Vec::new();
@@ -2798,7 +3344,7 @@ fn main() -> io::Result<()> {
         serde_json::to_writer(&mut report, &json!({
             "locus": locus,
             "partition": partition,
-            "model": "anchor-realign-v1",
+            "model": "anchor-realign-v2-marginal",
             "scoring": {
                 "phred": phred,
                 "epsilon": epsilon,
@@ -2806,6 +3352,11 @@ fn main() -> io::Result<()> {
                 "mismatch_log_prob": scoring.b,
                 "read_length": READ_LENGTH,
                 "uniform_qualities": true,
+                "elsewhere_log_prob": elsewhere,
+                "genome_diploid_bp": genome_diploid_bp,
+                "panel_mean_haploid_bp": panel_mean_haploid_bp,
+                "panel_strains": strain_totals.len(),
+                "panel_strain_list": strain_list,
             },
             "record_count": locus_records.len(),
             "unit_count": n_units,
@@ -2857,11 +3408,12 @@ fn main() -> io::Result<()> {
                 "winner_unplaced_units": winner_unplaced_units,
                 "winner_unplaced_mass": winner_unplaced_mass,
                 "both_placed_evidence_gap": both_place_gap,
-                "note": "unplaced reads score at the model's derived \
-                         all-mismatch minimum (150*ln(eps/3)), the rigorous \
-                         lower bound of their unanchored likelihood; the \
-                         truth rank is floor-magnitude-robust, the gap \
-                         magnitudes are floor-dominated where unplaced \
+                "note": "unplaced reads score at the derived ELSEWHERE \
+                         branch E (the generated-elsewhere marginalization; \
+                         the genome outside this locale at the measured \
+                         per-base rate under the max-entropy uniform origin), \
+                         not the all-mismatch 150*B; ranks are bounded by E, \
+                         gap magnitudes are E-dominated where unplaced \
                          counts differ",
             },
             "locality": {
@@ -2882,11 +3434,12 @@ fn main() -> io::Result<()> {
                 "exactness_strata": stratum_counts,
             },
             "walls": {
-                "folds_seconds": fold_started.elapsed().as_secs_f64() - scoring_seconds - class_seconds - qual_seconds - exactness_seconds,
+                "folds_seconds": fold_started.elapsed().as_secs_f64() - scoring_seconds - class_seconds - qual_seconds - exactness_seconds - anatomy_seconds,
                 "scoring_seconds": scoring_seconds,
                 "classes_seconds": class_seconds,
                 "qual_seconds": qual_seconds,
                 "exactness_seconds": exactness_seconds,
+                "anatomy_seconds": anatomy_seconds,
                 "locus_seconds": locus_seconds,
             },
             "rss_kb": rss_kb,
@@ -2903,6 +3456,9 @@ fn main() -> io::Result<()> {
     exactness.flush()?;
     ingredients.flush()?;
     records_file.flush()?;
+    if let Some(writer) = anatomy.as_mut() {
+        writer.flush()?;
+    }
     ensure(
         total_factorized_checked == total_factorized_equal,
         "the factorization gate failed somewhere",
@@ -3120,6 +3676,71 @@ mod tests {
     }
 
     #[test]
+    fn collinearity_holds_for_true_placements_both_strands() {
+        // Forward: r_j - own_hull_j invariant.
+        let pinned = vec![Some(4i64), Some(14)];
+        let own_forward = vec![0u64, 10];
+        let (collinear, offset) = placement_offset(&pinned, &own_forward, true);
+        assert!(collinear);
+        assert_eq!(offset, Some(4));
+        // Physically reverse: the reflection r_j + own_hull_j invariant
+        // (the mirrored read's own hull positions are reflected).
+        let own_mirror = vec![10u64, 0];
+        let (collinear, offset) = placement_offset(&pinned, &own_mirror, false);
+        assert!(collinear);
+        assert_eq!(offset, Some(14));
+        // An indel between read and row pins the anchors at mutually
+        // incompatible offsets: NOT one continuous path.
+        let pinned_indel = vec![Some(4i64), Some(20)];
+        let (collinear, _) = placement_offset(&pinned_indel, &own_forward, true);
+        assert!(!collinear);
+    }
+
+    #[test]
+    fn the_one_continuous_path_score_equals_the_placement_score_when_collinear() {
+        // The slice-B piecewise (m, c) and the whole-read single-offset
+        // score agree exactly on a collinear placement where every
+        // anchor pins: the piecewise serving projects the flanks at
+        // the same offset, and the previously-abstaining within-window
+        // bases agree because the read is a contiguous segment.
+        let seq = fold_seq();
+        let (read, _) = forward_read(&seq);
+        let reads = vec![read];
+        let unit = Unit {
+            record: 0,
+            variant: 0,
+            mirror: false,
+            read: 0,
+            w_lo: 2,
+            count: 1,
+        };
+        let pin = pin();
+        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K)
+            .expect("valid placement");
+        assert_eq!((m, c), (29, 1));
+        let (sm, sc, oob) = single_offset_score(&unit, 4, true, &seq, 60, &reads, K);
+        assert_eq!((sm, sc, oob), (29, 1, 0));
+        // The mirrored read at the same pin: the reflected offset
+        // const 14 gives the identical per-base evidence.
+        let (forward_read_bytes, _) = forward_read(&seq);
+        let mirrored = revcomp(&forward_read_bytes);
+        let reads = vec![forward_read_bytes, mirrored];
+        let unit = Unit {
+            record: 0,
+            variant: 0,
+            mirror: true,
+            read: 1,
+            w_lo: 10,
+            count: 1,
+        };
+        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K)
+            .expect("valid placement");
+        assert_eq!((m, c), (29, 1));
+        let (sm, sc, oob) = single_offset_score(&unit, 14, false, &seq, 60, &reads, K);
+        assert_eq!((sm, sc, oob), (29, 1, 0));
+    }
+
+    #[test]
     fn the_diploid_mixture_handles_the_floor() {
         assert_eq!(mix_logsumexp(f64::NEG_INFINITY, f64::NEG_INFINITY), f64::NEG_INFINITY);
         let a = -2.0f64;
@@ -3142,6 +3763,51 @@ mod tests {
         // to the typical): the derived no-knee case.
         let geometric = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
         assert!(!spectrum_knee(&geometric).has_knee);
+    }
+
+    #[test]
+    fn the_elsewhere_branch_is_derived_and_bounds_the_floor() {
+        // E(read) = len*A - ln(2*(G - len + 1)): the measured per-base
+        // match rate under the max-entropy uniform origin over the
+        // genome's both-strand full-read placements.
+        let a = (1.0 - 1e-4f64).ln();
+        let e = elsewhere_log_prob(150, a, 24_400_000.0);
+        let expect = 150.0 * a - (2.0f64 * (24_400_000.0 - 150.0 + 1.0)).ln();
+        assert!((e - expect).abs() < 1e-9);
+        // The floor for an unplaceable read is E — far above the
+        // all-mismatch minimum, and the mixture with a missing local
+        // branch (NEG_INFINITY) is exactly E.
+        assert_eq!(logsumexp2(f64::NEG_INFINITY, e), e);
+        // A local branch scoring below E is absorbed by it: the read
+        // does not vote beyond E (a full-mismatch or heavily-mismatched
+        // placement carries no credit).
+        let bad_local = -(2.0f64 * (10_000.0 - 149.0)).ln() + 140.0 * a + 10.0 * (1e-4f64 / 3.0).ln();
+        assert!(logsumexp2(bad_local, e) < e + 1e-6);
+        // A full-match local placement on a 10kb row survives and
+        // beats E by the prior ratio (the locale's concentration).
+        let good_local = -(2.0f64 * (10_000.0 - 149.0)).ln() + 150.0 * a;
+        assert!(good_local > e);
+        assert!(logsumexp2(good_local, e) > e);
+    }
+
+    #[test]
+    fn the_marginalization_is_monotone_and_preserves_ties() {
+        // The L4-control preservation property: logsumexp2 is monotone
+        // in the local branch, so a candidate whose local branch is
+        // at least every rival's on every unit keeps its per-unit
+        // ordering after the marginalization; identical local branches
+        // stay identical (the identical-fold non-votes stay non-votes).
+        let e = elsewhere_log_prob(150, (1.0 - 1e-4f64).ln(), 24_400_000.0);
+        let a_local = -9.9f64;
+        let b_local = -25.0f64;
+        assert!(logsumexp2(a_local, e) > logsumexp2(b_local, e));
+        assert_eq!(logsumexp2(a_local, e), logsumexp2(a_local, e));
+        // Deep below E the branches are indistinguishable: the read
+        // does not vote.
+        let x = logsumexp2(-1546.0f64, e);
+        let y = logsumexp2(-2000.0f64, e);
+        assert!((x - y).abs() < 1e-12);
+        assert!((x - e).abs() < 1e-12);
     }
 
     #[test]
