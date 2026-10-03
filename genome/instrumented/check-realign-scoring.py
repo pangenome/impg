@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """check-realign-scoring.py -- the independent checker for the realignment
-scoring layer (slice B) AND its slice-C extension, the generated-here/
-generated-elsewhere marginalization. Assessment-side; validates the
-receipts against the COMMITTED artifacts only (the partition GFAs, the
-maps, the committed anchor-projection receipt, the census record ids,
-the FASTQ).
+scoring layer (slice B), its slice-C extension (the generated-here/
+generated-elsewhere marginalization) AND its slice-D extension (the
+canonical-scheme pin-skeleton frame repair). Assessment-side; validates
+the receipts against the COMMITTED artifacts only (the partition GFAs,
+the maps, the committed anchor-projection receipt, the census record
+ids, the FASTQ).
 
 With no arguments: the committed slice-B receipts (the original floor
 semantics: prior + 150*B for unplaceable reads). With --marginal: the
@@ -12,14 +13,36 @@ slice-C receipts (LL = logsumexp(local, E); the floor is the derived
 elsewhere branch E; the E derivation audited from the receipt's own
 panel strain list; the bounding property asserted over the whole
 matrix; the before/after pilot verdicts vs the slice-B receipts,
-including the L4 control preservation).
+including the L4 control preservation). With --frame: the slice-D
+receipts (the marginal model + the repaired canonical-scheme pin
+skeletons) plus the frame-repair audit phases:
+  9a. the identity gate: the env-gated stored-walk run reproduces the
+      committed slice-C receipts (semantic fields) with byte-identical
+      sidecars;
+  9b. the skeleton audit: every fold's canonical walk verified
+      INDEPENDENTLY against the GFA -- each step's window by SEQUENCE
+      against the node's S segment (orientation-aware), the frame
+      decision against the window's canonical form, the forward part
+      complete against the P-line walk, the dropped positions
+      rc-canonical; the skeleton sidecar cross-checked;
+  9c. the no-regression sweep: folds mapped by member set, per
+      (unit, fold) pin gains/losses and ll changes -- ZERO pin losses;
+  9d. the blinded-unit census before/after (the paired anatomy
+      receipts: units with a full-match donor occurrence inside a
+      truth-fold member row and no truth placement);
+  9e. the named proof case (record 113/unit 84 at L7) at the anatomy
+      AND skeleton levels;
+  9f. the full-component frame-audit census (chrI/chrMT rows affected,
+      added/dropped).
 
 Phases:
   1. run markers, exit code, wall, the 64 GiB RSS guard;
   2. receipt structure: the folds partition the partition's member rows
-     exactly; every fold's sequence and walk re-derived from the GFA
-     (P/L/S spelling, strand-aware, gap segments handled) and compared
-     EXACTLY; the fold's node/edge usage multisets re-derived;
+     exactly; every fold's sequence re-derived from the GFA (P/L/S
+     spelling, strand-aware, gap segments handled) and compared EXACTLY;
+     the fold's walk verified against the GFA P line (slice B/C) or the
+     canonical-skeleton rules (slice D); the fold's node/edge usage
+     multisets re-derived;
   3. the locality ruling re-derivation: per locus the touching-occurrence
      in-axis/overhang/extension counts re-derived from the committed
      anchor-projection receipt + the maps and compared EXACTLY;
@@ -42,7 +65,9 @@ Phases:
   7. the identical-through-graph fold verified from the GFAs (the two
      member rows spell identical sequence and walk -- the fold-by-
      construction proof);
-  8. the pilot verdicts stated.
+  8. the pilot verdicts stated (with the before/after table and the L4
+     control enforced);
+  9. (slice D, --frame) the frame-repair audit phases above.
 """
 
 import glob
@@ -77,8 +102,26 @@ FLOOR = READ_LENGTH * B
 # receipts (the marginal model: LL = logsumexp(local, E), the floor
 # for unplaceable reads is the derived elsewhere branch E, the E
 # derivation audited from the receipt's own panel strain list).
-MARGINAL = "--marginal" in sys.argv
-if MARGINAL:
+# Slice D (--frame): the marginal model + the repaired canonical-
+# scheme pin skeletons + the frame-repair audit phases (9a-9f).
+FRAME = "--frame" in sys.argv
+MARGINAL = FRAME or ("--marginal" in sys.argv)
+if FRAME:
+    RECEIPT = f"{D}/realign-framescore-chrI.jsonl"
+    EXACTNESS = f"{D}/realign-framescore-chrI.exactness.jsonl"
+    INGREDIENTS = f"{D}/realign-framescore-chrI.jsonl.ingredients.jsonl"
+    RUN = f"{D}/run-framescore-chrI-chrI"
+    BEFORE_RECEIPT = f"{D}/realign-marginal-chrI.jsonl"
+    IDENTITY_RECEIPT = f"{D}/realign-frameidentity-chrI.jsonl"
+    IDENTITY_EXACTNESS = f"{D}/realign-frameidentity-chrI.exactness.jsonl"
+    IDENTITY_INGREDIENTS = f"{D}/realign-frameidentity-chrI.jsonl.ingredients.jsonl"
+    IDENTITY_RUN = f"{D}/run-frameidentity-chrI-chrI"
+    IDENTITY_ANATOMY = f"{D}/realign-frameidentity-chrI.anatomy.jsonl"
+    ANATOMY = f"{D}/realign-framescore-chrI.anatomy.jsonl"
+    SKELETON = f"{D}/realign-framescore-chrI.skeleton.jsonl"
+    AUDIT_CHRI = f"{D}/realign-frameaudit-chrI.jsonl"
+    AUDIT_CHRMT = f"{D}/realign-frameaudit-chrMT.jsonl"
+elif MARGINAL:
     RECEIPT = f"{D}/realign-marginal-chrI.jsonl"
     EXACTNESS = f"{D}/realign-marginal-chrI.exactness.jsonl"
     INGREDIENTS = f"{D}/realign-marginal-chrI.jsonl.ingredients.jsonl"
@@ -118,6 +161,27 @@ def revcomp(seq):
 
 def complement(base):
     return {"A": "T", "C": "G", "G": "C", "T": "A"}.get(base, base)
+
+
+def window_is_canonical_forward(window):
+    """min(K, rc(K)) == K decided from both ends (the Rust function's
+    exact loop, byte-wise): a palindrome-around-the-center window
+    falls to the middle base's comparison."""
+    lo, hi = 0, len(window) - 1
+    while True:
+        a, b = window[lo], window[hi]
+        comp_b = {ord("A"): ord("T"), ord("C"): ord("G"),
+                  ord("G"): ord("C"), ord("T"): ord("A")}.get(b)
+        if comp_b is None:
+            return False
+        if a not in (ord("A"), ord("C"), ord("G"), ord("T")):
+            return False
+        if a != comp_b:
+            return a < comp_b
+        if lo + 1 >= hi:
+            return True
+        lo += 1
+        hi -= 1
 
 
 def load_names():
@@ -573,6 +637,41 @@ def main():
         exactness.append(json.loads(line))
     print(f"   {len(exactness)} exactness sample pairs", flush=True)
 
+    # Slice D inputs (frame mode): the skeleton sidecar, the paired
+    # anatomy receipts, the identity (stored-walk) receipts.
+    skeleton_by_fold = {}
+    frame_totals = [0, 0, 0, 0, 0]
+    identity_receipt = {}
+    identity_ingredients = {}
+    anatomy_by_locus = {}
+    identity_anatomy_by_locus = {}
+    if FRAME:
+        for line in open(SKELETON):
+            d = json.loads(line)
+            skeleton_by_fold[(d["locus"], d["fold"])] = d
+
+        def load_anatomy(path):
+            out = {}
+            for line in open(path):
+                d = json.loads(line)
+                out.setdefault(d["locus"], {})[(d["record"], d["variant"])] = d
+            return out
+
+        anatomy_by_locus = load_anatomy(ANATOMY)
+        identity_anatomy_by_locus = load_anatomy(IDENTITY_ANATOMY)
+        for line in open(IDENTITY_RECEIPT):
+            d = json.loads(line)
+            identity_receipt[d["locus"]] = d
+        for line in open(IDENTITY_INGREDIENTS):
+            d = json.loads(line)
+            identity_ingredients[d["locus"]] = d
+        print(
+            f"   frame mode: {len(skeleton_by_fold)} skeleton rows, "
+            f"{sum(len(v) for v in anatomy_by_locus.values())} anatomy units (after), "
+            f"{sum(len(v) for v in identity_anatomy_by_locus.values())} (before)",
+            flush=True,
+        )
+
     # ---------------- phase 2: folds vs the partition maps and GFAs
     print("== phase 2: fold structure vs the maps and the GFAs", flush=True)
     fold_seqs = {}
@@ -617,12 +716,135 @@ def main():
                 if p >= offset and p + K <= offset + len(row_seq)
             ]
             walk_receipt = [(w[0], w[1]) for w in fold["walk"]]
-            check(
-                walk_receipt == contained,
-                f"locus {locus} fold {fi}: contained walk differs from the GFA P line",
-            )
+            if FRAME:
+                # THE CANONICAL-SKELETON AUDIT (slice D): every claimed
+                # step verified BY SEQUENCE against the node's own GFA S
+                # segment (orientation-aware per the sign), the frame
+                # decision verified against the window's canonical form
+                # (a step at a stored position with the stored node must
+                # be canonical-forward; a step the stored walk lacks
+                # must be rc-canonical), the forward part verified
+                # COMPLETE against the P-line walk, and the dropped
+                # stored positions verified rc-canonical.
+                stored_map = dict(contained)
+                check(
+                    len(set(rel for rel, _ in walk_receipt)) == len(walk_receipt),
+                    f"locus {locus} fold {fi}: duplicate step positions in the claimed skeleton",
+                )
+                claimed_map = dict(walk_receipt)
+                kept_forward = 0
+                kept_reverse = 0
+                added = 0
+                replaced = 0
+                added_seq_verified = 0
+                for rel, node in walk_receipt:
+                    window = row_seq[rel : rel + K]
+                    cf = window_is_canonical_forward(window.encode())
+                    seg = g.segs.get(str(abs(node)))
+                    if seg is not None:
+                        oriented = seg if node > 0 else revcomp(seg)
+                        check(
+                            window == oriented,
+                            f"locus {locus} fold {fi}: claimed step {rel}/{node} "
+                            "fails sequence verification against the GFA S segment",
+                        )
+                    else:
+                        # An rc-frame-only anchor has no S segment in
+                        # this partition's GFA (the GFA spells the
+                        # STORED walks' nodes only). The node identity
+                        # is verified by the in-process kmerHash check
+                        # (the source of truth) and independently by
+                        # phase 4's per-base exactness re-derivation
+                        # (a wrong node id would break every placement
+                        # that pins through it); here the window's
+                        # canonical form is verified against the
+                        # GFA-spelled row.
+                        check(
+                            not cf,
+                            f"locus {locus} fold {fi}: claimed step {rel}/{node} has no "
+                            "GFA S segment but a canonical-forward window",
+                        )
+                    if seg is not None:
+                        added_seq_verified += 1
+                    if cf:
+                        # The canonical scheme keeps the FORWARD frame's
+                        # selection at canonical-forward positions, so
+                        # the stored walk must carry exactly this step.
+                        kept_forward += 1
+                        check(
+                            stored_map.get(rel) == node,
+                            f"locus {locus} fold {fi}: canonical-forward step {rel} "
+                            "differs from the stored walk's selection",
+                        )
+                    else:
+                        # At rc-canonical positions the rc frame's node is
+                        # kept (it may coincide with the stored node when
+                        # both frames qualified there).
+                        kept_reverse += 1
+                    if rel not in stored_map:
+                        added += 1
+                    elif stored_map[rel] != node:
+                        replaced += 1
+                for rel, node in contained:
+                    if window_is_canonical_forward(row_seq[rel : rel + K].encode()):
+                        check(
+                            claimed_map.get(rel) == node,
+                            f"locus {locus} fold {fi}: canonical-forward stored "
+                            f"step {rel} missing from the claimed skeleton",
+                        )
+                dropped = [rel for rel, _ in contained if rel not in claimed_map]
+                for rel in dropped:
+                    check(
+                        not window_is_canonical_forward(row_seq[rel : rel + K].encode()),
+                        f"locus {locus} fold {fi}: dropped stored step {rel} "
+                        "is canonical-forward",
+                    )
+                skel = skeleton_by_fold[(locus, fi)]
+                check(
+                    [(s[0], s[1]) for s in skel["steps"]] == walk_receipt,
+                    f"locus {locus} fold {fi}: skeleton sidecar steps differ",
+                )
+                check(
+                    [(s[0], s[1]) for s in skel["stored"]] == contained,
+                    f"locus {locus} fold {fi}: skeleton sidecar stored steps differ",
+                )
+                for rel, node, frame in skel["steps"]:
+                    check(
+                        frame == (0 if window_is_canonical_forward(row_seq[rel : rel + K].encode()) else 1),
+                        f"locus {locus} fold {fi}: skeleton sidecar frame tag wrong at {rel}",
+                    )
+                check(
+                    (skel["added"], skel["replaced"], skel["dropped"], skel["kept_forward"], skel["kept_reverse"])
+                    == (added, replaced, len(dropped), kept_forward, kept_reverse),
+                    f"locus {locus} fold {fi}: skeleton sidecar diff census differs",
+                )
+                frame_totals[0] += kept_forward
+                frame_totals[1] += added
+                frame_totals[2] += len(dropped)
+                frame_totals[3] += added_seq_verified
+                frame_totals[4] += kept_reverse
+            else:
+                check(
+                    walk_receipt == contained,
+                    f"locus {locus} fold {fi}: contained walk differs from the GFA P line",
+                )
             fold_seqs[(locus, fi)] = row_seq
-    print(f"   folds verified against {len(LOCI)} partitions' GFAs", flush=True)
+    if FRAME:
+        print(
+            f"   folds verified against {len(LOCI)} partitions' GFAs; the "
+            f"canonical skeletons: kept-forward {frame_totals[0]}, "
+            f"kept-reverse {frame_totals[4]}, added (positions the stored "
+            f"walk lacks) {frame_totals[1]}, dropped {frame_totals[2]}; "
+            f"{frame_totals[3]} steps carry a GFA S segment and are "
+            "sequence-verified byte-level (the rc-frame-only remainder "
+            "verified by canonical form here, by the in-process kmerHash "
+            "check against the AGC-fetched sequence, and by phase 4's "
+            "per-base exactness); every frame decision verified, the "
+            "forward part complete, the dropped positions rc-canonical",
+            flush=True,
+        )
+    else:
+        print(f"   folds verified against {len(LOCI)} partitions' GFAs", flush=True)
 
     # ---------------- phase 3: the locality ruling re-derivation
     print("== phase 3: the locality counts re-derived", flush=True)
@@ -1037,6 +1259,15 @@ def main():
         for line in open(BEFORE_RECEIPT):
             b = json.loads(line)
             before[b["locus"]] = b
+
+    def fold_member_key(d, index):
+        return tuple(
+            sorted(
+                (m["path_name"], m["start"], m["end"])
+                for m in d["fold_identities"][index]["members"]
+            )
+        )
+
     for locus in LOCI:
         d = receipt[locus]
         print(
@@ -1050,23 +1281,313 @@ def main():
         )
         if MARGINAL:
             b = before[locus]
+            if FRAME:
+                # slice D: the before-record is the paired identity
+                # (stored-walk) run; winners compared by MEMBER SET (the
+                # fold indices are per-receipt).
+                winner_before = tuple(fold_member_key(b, i) for i in b["best_fold_indices"])
+                winner_after = tuple(fold_member_key(d, i) for i in d["best_fold_indices"])
+                print(
+                    f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
+                    f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
+                    f"winner material {'unchanged' if winner_before == winner_after else 'CHANGED'}",
+                    flush=True,
+                )
+                if locus == 4:
+                    check(
+                        d["truth_rank"] == 1 and d["truth_in_called_set"] and d["log_gap"] == 0.0,
+                        "L4 control: the truth-rank1 control must hold bit-exact "
+                        "(rank 1, gap 0.0, truth in the called set)",
+                    )
+                    check(
+                        winner_before == winner_after,
+                        "L4 control: the winner material must be bit-exact unchanged",
+                    )
+                    check(
+                        winner_after == tuple(fold_member_key(d, i) for i in d["truth_folds"]),
+                        "L4 control: the winner must BE the truth pair",
+                    )
+                if locus == 7:
+                    check(
+                        d["truth_rank"] < b["truth_rank"] and d["log_gap"] < b["log_gap"],
+                        "L7: the frame repair must strictly improve the truth rank and gap",
+                    )
+            else:
+                print(
+                    f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
+                    f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
+                    f"winner {b['best_fold_indices']} -> {d['best_fold_indices']}",
+                    flush=True,
+                )
+                if locus == 4:
+                    check(
+                        d["truth_rank"] == 1 and d["truth_in_called_set"],
+                        "L4 control: the truth-rank1 control must hold after the marginalization",
+                    )
+                    check(
+                        d["best_fold_indices"] == b["best_fold_indices"],
+                        "L4 control: the winner must be bit-exact unchanged",
+                    )
+                shrink = (d["log_gap"] or 0.0) <= (b["log_gap"] or 0.0)
+                check(shrink, f"locus {locus}: the log gap grew after the marginalization")
+
+    # ---------------- phase 9 (slice D): the frame-repair audit
+    if FRAME:
+        import filecmp
+
+        print("== phase 9: the frame-repair audit (slice D)", flush=True)
+
+        # 9a. THE IDENTITY GATE: the env-gated stored-walk run must
+        # reproduce the committed slice-C receipts on every semantic
+        # field, with byte-identical exactness/ingredients sidecars.
+        print("   9a. the identity gate (the stored-walk run vs the committed slice-C receipts)", flush=True)
+        check(os.path.exists(f"{IDENTITY_RUN}.done"), "identity run done marker missing")
+        exit_id = int(open(f"{IDENTITY_RUN}.exit").read().strip())
+        check(exit_id == 0, f"identity run exit code {exit_id}")
+        with open(f"{IDENTITY_RUN}.rss") as f:
+            rss_id = max(int(line.split()[2]) for line in f)
+        check(rss_id <= RSS_BUDGET_KB, f"identity RSS guard exceeded: {rss_id} kB")
+        committed = {}
+        for line in open(BEFORE_RECEIPT):
+            b = json.loads(line)
+            committed[b["locus"]] = b
+        skip_fields = {"walls", "rss_kb", "skeleton"}
+        for locus in LOCI:
+            o, n = committed[locus], identity_receipt[locus]
+            check(
+                (set(o) - skip_fields) == (set(n) - skip_fields),
+                f"identity gate: locus {locus} field set differs",
+            )
+            for key in set(o) - skip_fields:
+                check(
+                    o[key] == n[key],
+                    f"identity gate: locus {locus} field {key} differs",
+                )
+        for a, b in [
+            (f"{D}/realign-marginal-chrI.exactness.jsonl", IDENTITY_EXACTNESS),
+            (f"{D}/realign-marginal-chrI.jsonl.ingredients.jsonl", IDENTITY_INGREDIENTS),
+        ]:
+            check(filecmp.cmp(a, b, shallow=False), f"identity gate: {b} not byte-identical to the committed sidecar")
+        print(
+            "      the identity run reproduces the committed slice-C receipts "
+            "(every semantic field) with byte-identical sidecars",
+            flush=True,
+        )
+
+        # 9b. the skeleton diff census vs the receipt's skeleton block
+        print("   9b. the skeleton census vs the receipt's skeleton block", flush=True)
+        for locus in LOCI:
+            sk = receipt[locus]["skeleton"]
+            check(sk["scheme"] == "canonical_scheme", f"locus {locus}: receipt skeleton scheme")
+            rows = [k for k in skeleton_by_fold if k[0] == locus]
+            check(len(rows) == sk["rows"], f"locus {locus}: skeleton row count differs")
+            affected = sum(
+                1
+                for k in rows
+                if skeleton_by_fold[k]["added"]
+                or skeleton_by_fold[k]["replaced"]
+                or skeleton_by_fold[k]["dropped"]
+            )
+            added = sum(skeleton_by_fold[k]["added"] for k in rows)
+            replaced = sum(skeleton_by_fold[k]["replaced"] for k in rows)
+            dropped = sum(skeleton_by_fold[k]["dropped"] for k in rows)
+            kept_forward = sum(skeleton_by_fold[k]["kept_forward"] for k in rows)
+            kept_reverse = sum(skeleton_by_fold[k]["kept_reverse"] for k in rows)
+            check(affected == sk["rows_affected"], f"locus {locus}: affected row count differs")
+            check(
+                (added, replaced, dropped, kept_forward, kept_reverse)
+                == (sk["added"], sk["replaced"], sk["dropped"], sk["kept_forward"], sk["kept_reverse"]),
+                f"locus {locus}: skeleton diff census differs",
+            )
             print(
-                f"     before/after: truth rank {b['truth_rank']} -> {d['truth_rank']}, "
-                f"log gap {b['log_gap']:.2f} -> {d['log_gap']:.2f}, "
-                f"winner {b['best_fold_indices']} -> {d['best_fold_indices']}",
+                f"      locus {locus}: {len(rows)} rows, {affected} affected "
+                f"(added {added}, replaced {replaced}, dropped {dropped}; "
+                f"kept forward {kept_forward}, reverse {kept_reverse})",
                 flush=True,
             )
-            if locus == 4:
-                check(
-                    d["truth_rank"] == 1 and d["truth_in_called_set"],
-                    "L4 control: the truth-rank1 control must hold after the marginalization",
-                )
-                check(
-                    d["best_fold_indices"] == b["best_fold_indices"],
-                    "L4 control: the winner must be bit-exact unchanged",
-                )
-            shrink = (d["log_gap"] or 0.0) <= (b["log_gap"] or 0.0)
-            check(shrink, f"locus {locus}: the log gap grew after the marginalization")
+
+        # 9c. THE NO-REGRESSION SWEEP: folds mapped by member set (the
+        # fold indices are per-receipt), units by (record, variant);
+        # per (unit, fold) pin gains/losses and ll changes. ZERO pin
+        # losses is the gate (a previously-placed pair must keep its
+        # placement: the dropped stored positions never carried a
+        # true pin).
+        print("   9c. the no-regression sweep (identity vs repaired, per (unit, fold))", flush=True)
+
+        def member_keys(folds):
+            return [
+                tuple(sorted((m["path_name"], m["start"], m["end"]) for m in f["members"]))
+                for f in folds
+            ]
+
+        for locus in LOCI:
+            fi = identity_ingredients[locus]
+            fr = ingredients[locus]
+            mi = member_keys(fi["folds"])
+            mr = member_keys(fr["folds"])
+            check(sorted(mi) == sorted(mr), f"locus {locus}: fold member sets differ between runs")
+            map_i = {k: n for n, k in enumerate(mi)}
+            map_r = {k: n for n, k in enumerate(mr)}
+            units_i = [(u["record"], u["variant"]) for u in fi["units"]]
+            units_r = [(u["record"], u["variant"]) for u in fr["units"]]
+            check(units_i == units_r, f"locus {locus}: unit streams differ between runs")
+            ui = {k: n for n, k in enumerate(units_i)}
+            pinned_b = {
+                key: set(u["pinning_folds"]) for key, u in identity_anatomy_by_locus[locus].items()
+            }
+            pinned_a = {
+                key: set(u["pinning_folds"]) for key, u in anatomy_by_locus[locus].items()
+            }
+            both = eq = changed = gains = losses = 0
+            max_delta = 0.0
+            for key, n in ui.items():
+                pb = pinned_b.get(key, set())
+                pa = pinned_a.get(key, set())
+                for k in mi:
+                    fb = map_i[k] in pb
+                    fa = map_r[k] in pa
+                    if fb and fa:
+                        both += 1
+                        delta = fr["ll_matrix"][map_r[k]][n] - fi["ll_matrix"][map_i[k]][n]
+                        if delta == 0.0:
+                            eq += 1
+                        else:
+                            changed += 1
+                            max_delta = max(max_delta, abs(delta))
+                    elif fb and not fa:
+                        losses += 1
+                    elif fa and not fb:
+                        gains += 1
+            check(
+                losses == 0,
+                f"locus {locus}: the frame repair lost {losses} previously-placed (unit, fold) pins",
+            )
+            print(
+                f"      locus {locus}: pinned-both {both} (ll identical {eq}, changed "
+                f"{changed}, max |delta| {max_delta:.4f}); pin gains {gains}; "
+                f"pin losses {losses}",
+                flush=True,
+            )
+
+        # 9d. THE BLINDED-UNIT CENSUS before/after: units with a
+        # full-match donor occurrence inside a truth-fold member row
+        # and NO truth placement.
+        print("   9d. the blinded-unit census before/after", flush=True)
+
+        def blinded_census(ana, locus, d):
+            truth_folds = set(d["truth_folds"] or [])
+            trows = [
+                (m["path_name"], m["start"], m["end"])
+                for fi_ in truth_folds
+                for m in d["fold_identities"][fi_]["members"]
+            ]
+            out = {}
+            for key, u in ana[locus].items():
+                in_window = False
+                for dc in u["donor_checks"]:
+                    if dc["c"] == 0 and dc["oob"] == 0 and dc["m"] == READ_LENGTH:
+                        for pn, s, e in trows:
+                            if pn == dc["path"] and s <= dc["origin"] and dc["origin"] + READ_LENGTH <= e:
+                                in_window = True
+                                break
+                    if in_window:
+                        break
+                if not in_window:
+                    continue
+                if not (truth_folds & set(u["pinning_folds"])):
+                    out[key] = u["count"]
+            return out
+
+        for locus in LOCI:
+            d = receipt[locus]
+            cb = blinded_census(identity_anatomy_by_locus, locus, identity_receipt[locus])
+            ca = blinded_census(anatomy_by_locus, locus, d)
+            check(
+                len(ca) < len(cb),
+                f"locus {locus}: the frame repair must strictly shrink the blinded-unit census "
+                f"({len(cb)} -> {len(ca)})",
+            )
+            print(
+                f"      locus {locus}: blinded units {len(cb)} (mass {sum(cb.values())}) -> "
+                f"{len(ca)} (mass {sum(ca.values())})",
+                flush=True,
+            )
+
+        # 9e. THE NAMED PROOF CASE (record 113 / unit 84 at L7): the
+        # truth fold must place it after the repair, with the anchor
+        # present in the repaired skeleton at the occurrence position
+        # and absent from the stored walk.
+        print("   9e. the named proof case (record 113 / unit 84 at L7)", flush=True)
+        d7 = receipt[7]
+        truth_folds_7 = set(d7["truth_folds"] or [])
+        before_u = identity_anatomy_by_locus[7][(113, 0)]
+        after_u = anatomy_by_locus[7][(113, 0)]
+        check(
+            not (truth_folds_7 & set(before_u["pinning_folds"])),
+            "proof case: the before-record must NOT place record 113 on the truth folds",
+        )
+        check(
+            bool(truth_folds_7 & set(after_u["pinning_folds"])),
+            "proof case: the repaired skeleton must place record 113 on the truth folds",
+        )
+        valid_truth = [
+            p
+            for p in after_u["placements"]
+            if p["fold"] in truth_folds_7 and p["valid"] and p["m"] == READ_LENGTH and p["c"] == 0
+        ]
+        check(
+            bool(valid_truth),
+            "proof case: the truth-fold placement of record 113 must be a full-read match",
+        )
+        found_row = None
+        with open(AUDIT_CHRI) as f:
+            for line in f:
+                row = json.loads(line)
+                if row["path_name"] == "S288C#0#chrI" and 7 in row["partitions"]:
+                    found_row = row
+                    break
+        check(found_row is not None, "proof case: the truth row absent from the frame audit")
+        rel = 73906 - found_row["start"]
+        check(
+            any(s[0] == rel and s[1] == -92071 and s[2] == 1 for s in found_row["steps"]),
+            "proof case: the repaired skeleton must carry (-92071, rc frame) at 73,906",
+        )
+        check(
+            all(s[0] != rel for s in found_row["stored"]),
+            "proof case: the stored walk must lack the anchor at 73,906",
+        )
+        print(
+            "      record 113: winner_only -> both; a valid truth-fold full-read "
+            "placement (m 150, c 0); the repaired skeleton carries (-92071, rc "
+            "frame) at 73,906 where the stored walk has no step",
+            flush=True,
+        )
+
+        # 9f. THE FULL-COMPONENT FRAME-AUDIT CENSUS (the diagnosis
+        # receipts): every axis-partition row affected on both
+        # components.
+        print("   9f. the full-component frame-audit census", flush=True)
+        for name, path in [("chrI", AUDIT_CHRI), ("chrMT", AUDIT_CHRMT)]:
+            rows = affected = added = replaced = dropped = 0
+            with open(path) as f:
+                for line in f:
+                    r = json.loads(line)
+                    rows += 1
+                    added += r["added"]
+                    replaced += r["replaced"]
+                    dropped += r["dropped"]
+                    if r["added"] or r["replaced"] or r["dropped"]:
+                        affected += 1
+            check(added > 0, f"{name}: the audit must find rc-frame-only anchors")
+            check(
+                affected == rows,
+                f"{name}: every row must be affected ({affected} of {rows})",
+            )
+            print(
+                f"      {name}: {rows} rows, {affected} affected "
+                f"(added {added}, replaced {replaced}, dropped {dropped})",
+                flush=True,
+            )
 
     print(f"\nTOTAL CHECKS: {checks[0]}, FAILURES: {len(failures)}")
     if failures:

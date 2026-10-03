@@ -322,3 +322,83 @@ own exactness gates, and should land before or with the exhaustive
 rerun. (2) The exhaustive chrMT/chrI rerun under the marginal model
 (all 35 loci) with the before/after table. (3) The QUAL p-form's
 dynamic range (unchanged per the ruling; the saturation is named).
+
+## Slice D — the canonical-scheme pin skeleton (the frame repair)
+
+Slice C's anatomy proved the pocket reads are not foreign: 66% have a
+FULL-READ 150/150 match inside the window's own truth rows, and the
+truth's failure to place them is a PLACEMENT-MACHINERY FRAME ARTIFACT —
+the fold pin skeletons were built from the syng's stored path walk
+(`walk_path_range`), which carries only ONE frame's syncmer selection,
+so anchor k-mers that are rc-frame-qualified on a path are absent from
+the walk (slice A's binding lesson, missed in slice B's pin skeleton).
+Slice D repairs the skeletons.
+
+**The repair (the routing's own convention, ported from
+`build_territory_index_rows`):** a fold's pin skeleton is the
+CANONICAL-SCHEME selection over its row extent — per position, the
+frame that spells the k-mer's canonical form min(K, rc(K)) forward
+decides; the rc frame's qualifying k-mers come from the raw extraction
+on the fetched range's reverse complement (mapped back to path
+coordinates, the sign carrying the frame's orientation; node identity
+is frame-independent); a position whose canonical frame did not qualify
+carries NO step. The census records are derived under this same scheme,
+so every anchor of every record is present at every true occurrence of
+either orientation. Every emitted step is verified BY SEQUENCE at
+extraction time against the AGC-fetched panel sequence (`syncmer_seq`:
+the interned window at the claimed position, orientation-aware per the
+sign — this verification caught the kmerHashSeq lowercase convention on
+its first run), the frame decision is verified against the window's
+canonical form, and the forward part is verified complete against the
+stored walk. The before-record stays reproducible under
+`IMPG_REALIGN_STORED_WALK_SKELETON` (the identity gate).
+
+**The diagnosis (all axis-partition rows, both components):** EVERY row
+is affected — chrI 4,472 rows (added 678,789 rc-frame-only anchors,
+dropped 735,805 stored positions whose canonical frame did not
+qualify), chrMT 1,252 rows (added 97,371, dropped 174,719); the
+canonical selection is ~50/50 by frame on chrI. The named proof case
+(record 113/unit 84, node 92071): the truth row now carries (-92071, rc
+frame) at 73,906 where the stored walk has no step (its stored-frame
+neighbors 7446960/9705993 are what blinded it).
+
+**The gates (check-realign-scoring.py --frame, ALL PHASES PASS, 579,969
+checks, 0 failures):** the identity run reproduces the committed
+slice-C receipts on every semantic field with byte-identical sidecars;
+the factorized-vs-direct exactness gate re-ran in full (1,405,438/
+1,405,438 placements exact, up from 768,827 — the repaired skeletons
+place more); the no-regression sweep measured ZERO pin losses at all
+three loci (the dropped stored positions never carried a true pin), pin
+gains 39,114/297,196/300,301 (L2/L4/L7), pinned-both pairs with
+changed ll 3,096/16,967/36,330 (added alternative monotone assignments;
+max |delta| 0.0069/7.9709/0.0076, every changed placement per-base
+exact); the blinded-unit census (units with a full-match donor
+occurrence inside a truth-fold member row and no truth placement, the
+paired anatomy receipts): L7 2,003/mass 2,083 → 14/14, L4 2,115 → 33,
+L2 2,215 → 280 (the L7 remainders are edge-discard/ambiguity cases —
+anchors present and pinned but the read overhangs the row).
+
+**The pilot (chrI 2,4,7, before = the slice-C marginal receipts = the
+identity gate):**
+
+| locus | truth rank before → after | log gap before → after | winner before → after |
+|---:|---|---:|---|
+| 4 (control) | 1 → 1 | 0.0 → 0.0 | unchanged (bit-exact verdict; the winner IS the truth pair, checker-enforced) |
+| 2 | 2 → 4 | 60.74 → 273.96 | unchanged material (BTE identical fold + S288C/W303 fold) |
+| 7 | 8 → **1** | 982.04 → **0.0** | pocket pair → **the truth pair itself** (bit-exact winner) |
+
+At L7 the winner-only class collapses 1,198 units → 0 (the 1,051-unit
+winner-exclusive fuel fully re-absorbed: every unit the winner places,
+the truth also places) and the tail locus CLOSES. At L2 the repair is
+honest UNBIASED machinery — the rival BTE scaffold row gains its own
+rc-frame anchors and collects 105 → 225 units of seam-straddler mass
+(the row-geometry lever named since slice B: the BTE row extends 556 bp
+past SK1's row end), so the truth rank returns to 4 with a
+truth-favoring both-placed gap (-207.3). The L4 control holds bit-exact
+(rank 1, gap 0.0, the winner the truth pair, winner material unchanged).
+
+**What remains (the next slice):** THE EXHAUSTIVE chrMT/chrI RERUN
+under the marginal model with the repaired skeletons (all 35 loci) plus
+the before/after table — the instrument is now frame-unblinded and the
+rerun is the delivery. The L2 seam story (row extents) and the QUAL
+p-form's dynamic range stay named as before.
