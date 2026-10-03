@@ -22,6 +22,15 @@
 //!   one `bp<TAB>signed_node` line per covered syncmer step, for the
 //!   near-twin condensation measurement (shared vs parallel nodes).
 //!
+//! `walks <prefix> <requests.tsv>` — batch walk mode (one panel load for
+//!   many walks; added for the partition-graph stage 2026-11-06). Each
+//!   request line (tab-separated):
+//!     `path_id <start> <end> [tag]`
+//!   emits ONE JSON line per walk:
+//!     `{"path":P,"start":s,"end":e,"tag":t,"steps":[[bp,signed_node],...]}`
+//!   used to verify that partition-graph GFA path lines spell exactly
+//!   the panel's own walks in the global interning (id continuity).
+//!
 //! Assessment-side only: reads the panel, writes measurements; no
 //! threshold enters anything (padding is per-request, set by the caller).
 
@@ -31,10 +40,25 @@ use std::io::{BufWriter, Write};
 
 fn usage(program: &str) {
     eprintln!(
-        "usage:\n  {} homology <syng_prefix> <requests.tsv>\n  {} walk <syng_prefix> <path_id> <start> <end>",
-        program, program
+        "usage:\n  {} homology <syng_prefix> <requests.tsv>\n  {} walk <syng_prefix> <path_id> <start> <end>\n  {} walks <syng_prefix> <requests.tsv>",
+        program, program, program
     );
     std::process::exit(1);
+}
+
+fn parse_walk_request(fields: &[&str], number: usize) -> (usize, u64, u64, String) {
+    if fields.len() < 3 || fields.len() > 4 {
+        panic!(
+            "walk request {}: need 3 or 4 fields (path, start, end [tag]), got {}",
+            number,
+            fields.len()
+        );
+    }
+    let path_id: usize = fields[0].parse().expect("path id must be usize");
+    let start: u64 = fields[1].parse().expect("start must be u64");
+    let end: u64 = fields[2].parse().expect("end must be u64");
+    let tag = fields.get(3).copied().unwrap_or("").to_string();
+    (path_id, start, end, tag)
 }
 
 fn main() {
@@ -64,6 +88,38 @@ fn main() {
                 writeln!(out, "{}\t{}", bp, node).expect("write step");
             }
             out.flush().expect("flush steps");
+        }
+        "walks" => {
+            if args.len() != 4 {
+                usage(&args[0]);
+            }
+            let requests = std::fs::read_to_string(&args[3]).expect("read walk requests");
+            let stdout = std::io::stdout();
+            let mut out = BufWriter::new(stdout.lock());
+            for (number, line) in requests.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let fields: Vec<&str> = line.split('\t').collect();
+                let (path_id, start, end, tag) =
+                    parse_walk_request(&fields, number + 1);
+                let steps = idx
+                    .walk_path_range(path_id, start, end)
+                    .expect("walk_path_range failed");
+                let line = serde_json::json!({
+                    "path": path_id,
+                    "start": start,
+                    "end": end,
+                    "tag": tag,
+                    "steps": steps
+                        .iter()
+                        .map(|(node, bp)| serde_json::json!([bp, node]))
+                        .collect::<Vec<_>>(),
+                });
+                writeln!(out, "{}", line).expect("write walk");
+            }
+            out.flush().expect("flush walks");
         }
         "homology" => {
             if args.len() != 4 {
