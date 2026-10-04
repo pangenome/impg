@@ -1081,3 +1081,28 @@ final checker: 6,760 / 6,592 / 579,972 checks, 0 failures each. Assessment-side 
 truth classes come from the committed slice-1 census receipt; no
 selection swap, no scoreboard change, no 502, no PR push; the 64 GiB
 guard clean everywhere.
+
+## The whole-genome fleet — all 17 components under the realignment instrument (2026-11-06, in flight)
+
+The owner's go: the remaining 14 balanced-diploid components
+(chrII, chrIII, chrV, chrVI, chrVII, chrVIII, chrIX, chrX, chrXI,
+chrXII, chrXIII, chrXIV, chrXV, chrXVI) through the chrIV recipe
+end-to-end — survey, partition-graph build, expressibility census,
+anchor-projection receipts, the serial identity base + the 4-wide
+exhaustive run of record (the marginal model with repaired
+skeletons, the 64GiB guard, external RSS polling), the corrected
+checker in its component-sliced modes, the per-component tables.
+chrMT, chrI and chrIV stand closed. The machinery is the committed
+chrIV-stage instrument, component-parameterized with every
+generalization gated byte-identical on chrIV (commit 87c0ded); the
+census's chrIV-only windowed-frame assert became a reported count
+(the fleet's balanced receipts carry windowed-frame truth-pair-
+expressible loci at most chromosomes — the phase-8 old-wins
+machinery is live genome-wide, unlike chrIV's vacuous 0/167 guard).
+
+Per-component sections land below as each chain closes; the
+whole-genome table is emitted by
+`genome/instrumented/genome-truth-rank-tables.py` (re-runnable
+mid-fleet; pending components reported as pending). Assessment-side
+only; no thresholds; no scoreboard change; serial within component
+where the recipe requires it.
