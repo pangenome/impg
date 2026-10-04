@@ -1301,3 +1301,102 @@ EXPRESSIBLE (in-axis 42/81, tiled-elsewhere 6/17, partial-expressible
 0/1; 17 tiled-inexpressible + 3 absent the remainder); the old-win
 record: loci 5, 8, 12, 17, 29 and 33 LOST, 13 HOLD. Table at
 `realign-chrXII-tables.txt`.
+
+## THE WHOLE-GENOME FLEET — the aggregate of record (2026-11-06, 16 of 17 components closed; chrIX in flight)
+
+THE WHOLE-GENOME TRUTH-RANK TABLE (the per-locus tables beside each
+component's receipts; the aggregate script
+`genome-truth-rank-tables.py`, re-runnable, writes
+`genome-truth-rank-tables.txt`):
+
+| component | loci | expressible | truth rank-1 | census in-axis | neighbor | foreign | contig-end |
+|-----------|------|-------------|--------------|----------------|----------|----------|------------|
+| chrMT     | 14   | 9           | 5            | —              | —        | —        | —          |
+| chrI      | 21   | 18          | 6            | —              | —        | —        | —          |
+| chrII     | 81   | 76          | 46           | 70             | 6        | 5        | 0          |
+| chrIII    | 38   | 28          | 13           | 19             | 11       | 8        | 0          |
+| chrIV     | 167  | 143         | 70           | 96             | 61       | 8        | 2          |
+| chrV      | 61   | 57          | 24           | 41             | 16       | 4        | 0          |
+| chrVI     | 29   | 25          | 15           | 16             | 8        | 5        | 0          |
+| chrVII    | 117  | 102         | 45           | 85             | 18       | 13       | 1          |
+| chrVIII   | 60   | 50          | 25           | 44             | 6        | 5        | 5          |
+| chrIX     |      |             |              | IN FLIGHT (45 loci / 71-partition build / IN-AXIS 35, NEIGHBOR 5, FOREIGN 5 surveyed; the anchor projection's context-sample phase over the shared repeat partitions still running — the fleet's one slow outlier) | | | |
+| chrX      | 80   | 70          | 35           | 67             | 6        | 7        | 0          |
+| chrXI     | 66   | 66          | 30           | 55             | 8        | 3        | 0          |
+| chrXII    | 119  | 99          | 48           | 81             | 27       | 8        | 3          |
+| chrXIII   | 101  | 86          | 37           | 64             | 27       | 10       | 0          |
+| chrXIV    | 82   | 71          | 35           | 64             | 10       | 8        | 0          |
+| chrXV     | 119  | 103         | 57           | 62             | 49       | 4        | 4          |
+| chrXVI    | 107  | 90          | 40           | 89             | 6        | 11       | 1          |
+
+THE AGGREGATE (16 closed components): 1262 loci, 1093
+truth-pair-expressible, TRUTH RANK-1 AT 531 (48.6% of expressible).
+By class across the closed fleet: the in-axis partition class
+resolves at roughly half everywhere (the variants discriminate where
+the material is genuinely placed); the one-window coordinate-offset
+(NEIGHBOR) class resolves at 22/39 at its biggest instance (chrXV);
+the windowed frame's own old-win record across the 13 components
+with non-vacuous guards: 97 old wins HOLD, 29 LOST under the
+realignment instrument (the prediction-violation class the chrIII L5
+finding named — the repeat-domain residuals, each named per locus in
+the component tables).
+
+THE MEASURED WALLS (external run markers; RSS = the external poller
+peak, all under the 64GiB guard):
+
+* census walls (16): 61+144+1124+825+2368+929+937+3031+566+948+617
+  +2350+1016+1139+1903+1194 = 19152s
+* anchor-projection walls (16): 153+600+465+354+704+442+191+721+197
+  +363+175+836+359+472+660+494 = 7186s
+* serial identity-base walls (16): 130+41+183+105+236+92+67+331+96
+  +133+84+180+135+162+287+186 = 2448s
+* 4-wide exhaustive walls (16): 14+30+107+65+148+66+62+168+55+97+55
+  +113+96+88+167+97 = 1428s
+* summed total (16): 19152+7186+2448+1428 = 30214s (503.6 min of
+  single-component walls — the fleet ran them concurrently; the
+  summed wall is the work, not the elapsed)
+* THE 4-WIDE SCORING PASS ALONE: 1428s = 23.8 min vs the grounded
+  chrIV-based extrapolation of ~20 min (7.9 x chrIV's 148s = 1169s
+  ≈ 19.5 min) — THE ESTIMATE HELD within ~22%: the residual is the
+  per-component fixed cost (inputs/quality/binding/derive-cache
+  phases) recurring 16 times where the single-component
+  extrapolation amortized it once. The scoring phase itself remains
+  sublinear in bp (chrIV's 12.1Mb is 7.9x chrI's 1.53Mb for 4.9x
+  the 4-wide wall).
+* RSS peaks (16 closed): census 45.5GB (chrIV), anchor 9.1GB
+  (chrIV), serial 26.8GB (chrIV), 4-wide 28.6GB (chrIV) — the
+  repeat-locality matrices dominate exactly where chrIV said they
+  would; every component under the 64GiB guard with headroom.
+
+THE FLEET'S MEASURED FINDINGS (the machinery's own receipts):
+
+* THE TRUTH-SECOND AMBIGUITY SEAM (3 components): chrXIV (partition
+  16), chrXVI (117/257), chrVII (16/111) — single-window partitions
+  carrying several SK1-carrying folds; the no-fabrication convention
+  (no truth pair rather than a wrong pair) is the committed rule,
+  identity-gated byte-identical on chrMT/chrI.
+* THE OVER-STRICT ABSOLUTE LL TOLERANCE (found by chrII L22's
+  64M-entry E audit): the re-derivation's float64 summation error is
+  relative to the LL magnitude; the best-LL and truth-LL checks now
+  use the class check's relative convention; the chrIV regression
+  gate re-passed (a proven no-op there).
+* THE STALE SHARED-PARTITION READ (found by chrXVI's graph checker):
+  the concurrent light lanes re-export shared partition GFAs; the
+  chrXVI census read `partition292.gfa` mid-export and manufactured
+  13/13 spurious pocket runs; the receipt was regenerated (216/217
+  records byte-identical), the stale copy kept, the checker re-passed.
+* THE CONCURRENT-LOG DIS-ENTANGLEMENT: the dead fleet drivers and
+  the manual slice launches double-wrote 8 slice logs; every
+  affected slice was re-run single-writer under the fixed checker
+  (the receipts were never at risk — the checkers are read-only).
+
+CHRIX — THE PRECISE REMAINDER: its anchor projection has been in the
+context-sample phase over the shared repeat partitions (the fleet's
+one slow outlier, single-threaded since 19:30Z); the nohup'd driver
+completes the chain automatically when it lands (serial identity
+base -> 4-wide run of record -> anchor checker -> realign checker,
+single slice at 45 loci -> graph checker -> tables), and the closure
+then needs only: verify ALL PHASES PASS, the fleet-heavy-chrIX done
+marker, the component docs section + commit, and the aggregate
+re-run (the script is re-runnable; chrIX's row lands from its
+receipts).
