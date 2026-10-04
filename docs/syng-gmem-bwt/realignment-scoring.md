@@ -1242,3 +1242,17 @@ after the concurrent-log disentanglement; graph). TRUTH RANK-1 AT
 35 OF 70 EXPRESSIBLE (in-axis 34/67, tiled-elsewhere 1/3; 10
 tiled-inexpressible the remainder); the old-win record: loci 6, 25
 and 36 LOST, 20 HOLD. Table at `realign-chrX-tables.txt`.
+
+### chrII — closed end-to-end (2026-11-06)
+
+81 loci / 99-partition build; twins AAA/SGDref (identical through
+the graph) + YPS128/YPS606 (a near-identical copy pair, 46/46
+variant-pocket bp runs). Census IN-AXIS 70 / NEIGHBOR 6 / FOREIGN 5.
+Walls: census 1124s (31.4GB), anchor 465s (6.3GB), serial 183s
+(13.3GB), 4-wide 107s (14.5GB), the 8t gate passed. All checkers ALL
+PHASES PASS (anchor 151,003,022; realign 3 slices 19,153,633/0 —
+s0 under the fixed checker after the LL-tolerance repair its locus
+22 E audit forced; graph). TRUTH RANK-1 AT 46 OF 76 EXPRESSIBLE
+(in-axis 44/70, tiled-elsewhere 2/6; 5 tiled-inexpressible the
+remainder); the old-win record: loci 28, 41, 50, 52, 56 and 61
+LOST, 15 HOLD. Table at `realign-chrII-tables.txt`.
