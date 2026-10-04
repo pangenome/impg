@@ -1286,3 +1286,18 @@ old-win record: loci 14, 29, 62 and 74 LOST, 11 HOLD. The
 truth-second ambiguity seam's third component (partitions 16/111);
 its fixed-binary serial re-run is the committed identity base. Table
 at `realign-chrVII-tables.txt`.
+
+### chrXII — closed end-to-end (2026-11-06)
+
+119 loci / 138-partition build (the fleet's biggest component); twins
+AAA/SGDref (identical through the graph; 3 twin-only holder
+partitions). Census IN-AXIS 81 / NEIGHBOR 27 / FOREIGN 8 /
+CONTIG-END 3. Walls: census 2350s (37.8GB), anchor 836s (7.4GB),
+serial 180s (20.1GB), 4-wide 113s (22.9GB), the 8t gate passed. All
+checkers ALL PHASES PASS (anchor 230,237,832; realign 3 slices
+23,612,482/0 — all three single-writer re-runs after the
+concurrent-log disentanglement; graph). TRUTH RANK-1 AT 48 OF 99
+EXPRESSIBLE (in-axis 42/81, tiled-elsewhere 6/17, partial-expressible
+0/1; 17 tiled-inexpressible + 3 absent the remainder); the old-win
+record: loci 5, 8, 12, 17, 29 and 33 LOST, 13 HOLD. Table at
+`realign-chrXII-tables.txt`.
