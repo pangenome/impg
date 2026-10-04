@@ -23,15 +23,24 @@ instrument input, no thresholds (the class statements come from the
 committed slice-1 census receipt; the ~6.7x scale factors are measured
 bp/window ratios, stated as such).
 
-Usage: realign-chrIV-tables.py [--skip-tables]   (prints to stdout and
-writes realign-chrIV-tables.txt beside the receipts)
+Usage: realign-chrIV-tables.py [COMPONENT] [--skip-tables]   (prints to
+stdout and writes realign-<COMPONENT>-tables.txt beside the receipts;
+the default chrIV reproduces the committed chrIV tables)
 """
 import json
 import sys
 
+# THE FLEET GENERALIZATION: the component is the optional first
+# argument (default chrIV, the committed tables' component).
+COMP = (
+    sys.argv[1]
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("--")
+    else "chrIV"
+)
+
 D = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
 GRAPHS = f"{D}/partition-graphs"
-CHRIV_CENSUS = f"{GRAPHS}/partition-graph-chrIV-census.jsonl"
+CENSUS_PATH = f"{GRAPHS}/partition-graph-{COMP}-census.jsonl"
 
 out_lines = []
 
@@ -72,19 +81,19 @@ def main():
     skip_tables = "--skip-tables" in sys.argv
 
     # ------------------------------------------------ the receipts
-    iv = load_receipt("realign-exhaustive-chrIV", "chrIV")
-    iv_serial = load_receipt("realign-par-serial-chrIV", "chrIV")
+    iv = load_receipt(f"realign-exhaustive-{COMP}", COMP)
+    iv_serial = load_receipt(f"realign-par-serial-{COMP}", COMP)
     ic = load_receipt("realign-exhaustive-chrI", "chrI")
     members = member_rows_by_partition()
 
     census = {}
-    for line in open(CHRIV_CENSUS):
+    for line in open(CENSUS_PATH):
         r = json.loads(line)
         if r.get("question") == "a":
             census[r["locus"]] = r["verdict"]
 
     # ------------------------------------------ (1) the domain scaling
-    say("== (1) THE DOMAIN-SCALING TABLE (chrIV, all 167 loci; per-locus domain sizes)")
+    say(f"== (1) THE DOMAIN-SCALING TABLE ({COMP}, all {len(iv)} loci; per-locus domain sizes)")
     say("locus  partition  member_rows  folds  class_pairs  units  records  placements")
     tot_rows = tot_folds = tot_pairs = tot_units = tot_records = tot_place = 0
     per_locus = []
@@ -116,7 +125,7 @@ def main():
     n_iv = len(iv)
     n_ic = len(ic)
     say("")
-    say("THE CHRIV vs CHRI PROFILE (the scaling verdict, measured):")
+    say(f"THE {COMP.upper()} vs CHRI PROFILE (the scaling verdict, measured):")
     say(f"  windows:                {n_iv} vs {n_ic}  ({n_iv/n_ic:.2f}x)")
     say(f"  class pairs (post-fold): {tot_pairs} vs {ic_pairs}  ({tot_pairs/ic_pairs:.2f}x)")
     say(f"  units:                   {tot_units} vs {ic_units}  ({tot_units/ic_units:.2f}x)")
@@ -135,7 +144,7 @@ def main():
 
     # ------------------------------------------- (2) the truth-rank table
     say("")
-    say("== (2) THE TRUTH-RANK TABLE (all 167 loci; classes from the slice-1 census receipt)")
+    say(f"== (2) THE TRUTH-RANK TABLE (all {len(iv)} loci; classes from the component census receipt)")
     say("locus  class                expressible  rank   log_gap          winner  QUAL    tied")
     agg = {}
     rank1 = []
@@ -176,8 +185,8 @@ def main():
         return exit_code, wall, peak
 
     for tag, label in (
-        ("realignpar-serial-chrIV-chrIV", "chrIV serial (the identity base)"),
-        ("realignexhaustive-chrIV-chrIV", "chrIV 4-wide (the exhaustive run of record)"),
+        (f"realignpar-serial-{COMP}-{COMP}", f"{COMP} serial (the identity base)"),
+        (f"realignexhaustive-{COMP}-{COMP}", f"{COMP} 4-wide (the exhaustive run of record)"),
     ):
         try:
             exit_code, wall, peak = run_stats(tag)
@@ -206,10 +215,10 @@ def main():
     except FileNotFoundError:
         say("  chrI 4-wide reference: markers missing")
 
-    with open(f"{D}/realign-chrIV-tables.txt", "w") as f:
+    with open(f"{D}/realign-{COMP}-tables.txt", "w") as f:
         f.write("\n".join(out_lines) + "\n")
     say("")
-    say(f"(tables written to {D}/realign-chrIV-tables.txt)")
+    say(f"(tables written to {D}/realign-{COMP}-tables.txt)")
 
 
 if __name__ == "__main__":

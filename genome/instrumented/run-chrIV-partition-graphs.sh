@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# The chrIV partition-embedded graph build + the alignment/walk dumps
-# (chrIV end-to-end slice 1). Same recipe as the chrMT/chrI build:
+# The partition-embedded graph build + the alignment/walk dumps, one
+# component (chrIV end-to-end slice 1; generalized for the
+# whole-genome fleet — the default chrIV reproduces the committed
+# build). Usage: run-chrIV-partition-graphs.sh [COMPONENT]
+# Same recipe as the chrMT/chrI build:
 # partition_graph_export in RAW mode, frequency mask disabled, AGC gap
 # splicing, global-syng node-id continuity; serial; receipt markers,
 # external RSS poller and the 64GiB guard. Receipts beside the
 # chrMT/chrI set in the validation dir's partition-graphs/.
 #
 # Prerequisite: partition-expressibility-census-chrIV.py requests
-# (writes the build list + both request files).
+# [COMPONENT] (writes the build list + both request files).
 set -uo pipefail
+C="${1:-chrIV}"
 PREFIX=/home/erikg/yeast/syng-k63-s8-seed7-acgt-only-pos64/yeast235.syng
 AGC=/home/erikg/yeast/yeast235.agc
 ROOT=/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results
@@ -48,21 +52,21 @@ run_phase() {
   return "$status"
 }
 
-mapfile -t IDS < "$OUT/partition-graph-chrIV-build-list.txt"
+mapfile -t IDS < "$OUT/partition-graph-$C-build-list.txt"
 echo "build set: ${#IDS[@]} partitions"
 
-run_phase build-chrIV-partition-graphs "$OUT/build-chrIV-partition-graphs.stdout" \
+run_phase build-$C-partition-graphs "$OUT/build-$C-partition-graphs.stdout" \
   "$BIN" export "$PREFIX" "$AGC" "$ROOT" "$OUT" "${IDS[@]}" || exit 1
 
-run_phase dumps-chrIV-homology "$OUT/partition-graph-chrIV-homology.jsonl" \
+run_phase dumps-$C-homology "$OUT/partition-graph-$C-homology.jsonl" \
   "$DUMP" homology "$PREFIX" \
-  "$OUT/partition-graph-chrIV-homology-requests.tsv" \
+  "$OUT/partition-graph-$C-homology-requests.tsv" \
   || exit 1
 
-run_phase dumps-chrIV-walks "$OUT/partition-graph-chrIV-walks.jsonl" \
+run_phase dumps-$C-walks "$OUT/partition-graph-$C-walks.jsonl" \
   "$DUMP" walks "$PREFIX" \
-  "$OUT/partition-graph-chrIV-walk-requests.tsv" \
+  "$OUT/partition-graph-$C-walk-requests.tsv" \
   || exit 1
 
-date -u +%FT%TZ > "$OUT/dumps-chrIV.done"
-echo "chrIV graphs + dumps complete"
+date -u +%FT%TZ > "$OUT/dumps-$C.done"
+echo "$C graphs + dumps complete"

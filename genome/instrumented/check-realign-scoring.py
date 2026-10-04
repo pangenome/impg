@@ -106,24 +106,34 @@ FLOOR = READ_LENGTH * B
 # derivation audited from the receipt's own panel strain list).
 # Slice D (--frame): the marginal model + the repaired canonical-
 # scheme pin skeletons + the frame-repair audit phases (9a-9f).
-# Slice E (--exhaustive chrMT|chrI): the exhaustive full-component
-# rerun receipts (the marginal model + the repaired skeletons over
-# EVERY window of the component) -- phases 1-8 with the skeleton
-# audit of phase 2 and the E audits of phase 5, the identical-fold
-# proof generalized (every locus's identical-pair fold verified from
-# the GFAs, no name hardcode), the truth-rank checks skipped at the
+# Slice E (--exhaustive COMP): the exhaustive full-component rerun
+# receipts (the marginal model + the repaired skeletons over EVERY
+# window of the component) -- phases 1-8 with the skeleton audit of
+# phase 2 and the E audits of phase 5, the identical-fold proof
+# generalized (every locus's identical-pair fold verified from the
+# GFAs, no name hardcode), the truth-rank checks skipped at the
 # non-expressible loci, and phase 8 the before/after table vs the
-# committed Poisson-era read-matched receipts (the instrument of
-# record) with the old-wins PREDICTION VERDICTS (a lost old-win is a
-# named measured finding about the instruments, never a receipt
-# failure), the chrI L4 control hard-gated, and the aggregate
-# counts. Phase 9 stays on the slice-D pilot receipts (--frame).
+# component's Poisson-era read-matched receipts (the instrument of
+# record; the fleet components' BEFORE receipts are the multicensus
+# runs' own read-matched likelihood outputs in the diagnostic scratch)
+# with the old-wins PREDICTION VERDICTS (a lost old-win is a named
+# measured finding about the instruments, never a receipt failure),
+# the chrI L4 control hard-gated, and the aggregate counts. Phase 9
+# stays on the slice-D pilot receipts (--frame).
+# THE FLEET: the whole-genome stage runs every balanced-diploid
+# component through this mode (chrII..chrXVI beside the closed
+# chrMT/chrI/chrIV).
 EXHAUSTIVE = None
 if "--exhaustive" in sys.argv:
     _i = sys.argv.index("--exhaustive")
     EXHAUSTIVE = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else "chrI"
-    if EXHAUSTIVE not in ("chrMT", "chrI", "chrIV"):
-        sys.exit("--exhaustive requires chrMT, chrI or chrIV")
+    _FLEET = (
+        "chrMT", "chrI", "chrII", "chrIII", "chrIV", "chrV", "chrVI",
+        "chrVII", "chrVIII", "chrIX", "chrX", "chrXI", "chrXII", "chrXIII",
+        "chrXIV", "chrXV", "chrXVI",
+    )
+    if EXHAUSTIVE not in _FLEET:
+        sys.exit(f"--exhaustive requires one of the 17 components: {_FLEET}")
 FRAME = ("--frame" in sys.argv) or (EXHAUSTIVE is not None)
 MARGINAL = FRAME or ("--marginal" in sys.argv)
 # Slice F (phase 0 of the runtime plan — the dominance measurement):
@@ -143,12 +153,15 @@ if "--timered-base" in sys.argv:
     _i = sys.argv.index("--run-tag")
     TIMERED_RUN = f"{D}/run-{sys.argv[_i + 1]}"
 if EXHAUSTIVE is not None:
-    # chrIV's Poisson-era BEFORE receipt lives in the diagnostic
-    # scratch (the census run's own likelihood output; the
-    # validation-root sidecars are the preserved balanced records).
+    # the BEFORE receipt root: chrI/chrMT keep the committed
+    # Poisson-era receipts at the validation root; chrIV and every
+    # fleet component's Poisson-era BEFORE receipt lives in the
+    # diagnostic scratch (the census run's own likelihood output;
+    # the validation-root sidecars are the preserved balanced
+    # records).
     _before_root = (
         f"{D}/cosine-diagnostic-scratch/{EXHAUSTIVE}"
-        if EXHAUSTIVE == "chrIV"
+        if EXHAUSTIVE not in ("chrI", "chrMT")
         else D
     )
     if TIMERED_BASE is not None:
@@ -1340,112 +1353,132 @@ def main():
 
     # ---------------- phase 7: the identical-through-graph fold
     print("== phase 7: the identical-through-graph fold", flush=True)
-    if EXHAUSTIVE == "chrIV":
-        # (the chrIV near-twin pair — AAA#0#chrIV/SGDref#0#chrIV, the
-        # survey's 100%-exact-rows flag — folds to ONE candidate at
-        # every locus where either holds a member row, BY CONSTRUCTION;
-        # the proof: every fold carrying one path's row carries the
-        # other's IDENTICAL row too (same interval), no fold carries
-        # exactly one of the pair, and every member of every such fold
-        # spells the same sequence and walk from the GFAs — the
+    _census_path = f"{D}/partition-graphs/partition-graph-{EXHAUSTIVE}-census.jsonl"
+    if EXHAUSTIVE not in ("chrI", "chrMT") and os.path.exists(_census_path):
+        # (THE FLEET GENERALIZATION of the chrIV twin branch: the EXACT
+        # flagged near-twin pairs — the identical-through-graph class,
+        # the survey's 100%-exact-rows flags; at chrIV exactly
+        # AAA#0#chrIV/SGDref#0#chrIV — fold to ONE candidate at every
+        # locus where either holds a member row, BY CONSTRUCTION; the
+        # proof: every fold carrying one path's row carries the other's
+        # IDENTICAL row too (same interval), no fold carries exactly
+        # one of the pair, and every member of every such fold spells
+        # the same sequence and walk from the GFAs — the
         # indistinguishability the class table then inherits: classes
-        # pair FOLDS, so no class can distinguish AAA from SGDref.)
-        pair = ("AAA#0#chrIV", "SGDref#0#chrIV")
-        twin_fold_loci = 0
-        for locus in LOCI:
-            d = receipt[locus]
-            folds = ingredients[locus]["folds"]
-            hit_folds = [
-                (i, f)
-                for i, f in enumerate(folds)
-                if any(m["path_name"] in pair for m in f["members"])
-            ]
-            if not hit_folds:
-                check(
-                    all(
-                        m["path_name"] not in pair
-                        for f in folds
-                        for m in f["members"]
-                    ),
-                    f"locus {locus}: a twin path row sits in a fold",
-                )
-                continue
-            twin_fold_loci += 1
-            g = gfa(d["partition"])
-            for i, f in hit_folds:
-                names_here = [m["path_name"] for m in f["members"]]
-                check(
-                    pair[0] in names_here and pair[1] in names_here,
-                    f"locus {locus}: fold {i} carries only one twin path "
-                    f"(the identical rows must fold together)",
-                )
-                a_intervals = sorted(
-                    (m["start"], m["end"])
-                    for m in f["members"]
-                    if m["path_name"] == pair[0]
-                )
-                b_intervals = sorted(
-                    (m["start"], m["end"])
-                    for m in f["members"]
-                    if m["path_name"] == pair[1]
-                )
-                check(
-                    a_intervals == b_intervals,
-                    f"locus {locus}: fold {i} twin row intervals differ "
-                    f"({a_intervals} vs {b_intervals})",
-                )
-                # (the fold's identity criterion is (row sequence,
-                # contained STORED walk) — NOT the full P-line spelling
-                # and NOT the fold's claimed walk, which in this mode is
-                # the REPAIRED canonical skeleton (phase 2's frame audit
-                # verifies the skeleton against the stored walk and the
-                # stored walk against the GFA P line for the
-                # representative; a member's P line may also extend past
-                # the row extent with its own edge-overlapping steps, and
-                # cross-chromosome repeat-family members legitimately
-                # spell longer tails — measured: partition 110's 74bp
-                # repeat fold carries AMP_1a#0#chrIII_chrX / ANL / AVN
-                # rows whose P lines spell 135bp). The grouping audit:
-                # every member spells the fold's sequence, and every
-                # member's contained stored walk — the GFA P line's
-                # syncmer steps positioned relative to the row's own
-                # crop — is IDENTICAL across the fold, the fold key
-                # itself.)
-                row_seq = f["sequence"]
-                ref_contained = None
-                for m in f["members"]:
-                    name = row_gfa_name(m)
-                    seq, _positions, _steps = g.spelled(name)
-                    offset = seq.find(row_seq)
+        # pair FOLDS, so no class can distinguish the pair. The
+        # interval-close near-identical copies (the CLL class) are NOT
+        # indistinguishable and get no proof. The pairs come from the
+        # census receipt of record — the partition-graphs checker
+        # independently re-derives the flag rule from the raw BEDs.)
+        _survey = {}
+        _spectrum = {}
+        for _line in open(_census_path):
+            _r = json.loads(_line)
+            if _r.get("question") == "s":
+                _survey = _r
+                for _entry in _r.get("interval_close_spectrum_ge_floor", ()):
+                    _spectrum[tuple(_entry["pair"])] = _entry
+        _exact_pairs = [
+            tuple(_pair)
+            for _pair in _survey.get("twin_pairs", ())
+            if _spectrum.get(tuple(_pair), {}).get("exact_fraction", 0.0) >= 1.0
+        ]
+        for pair in _exact_pairs:
+            twin_fold_loci = 0
+            for locus in LOCI:
+                d = receipt[locus]
+                folds = ingredients[locus]["folds"]
+                hit_folds = [
+                    (i, f)
+                    for i, f in enumerate(folds)
+                    if any(m["path_name"] in pair for m in f["members"])
+                ]
+                if not hit_folds:
                     check(
-                        offset >= 0,
-                        f"locus {locus}: fold {i} member {name} does not "
-                        "spell the fold's sequence",
+                        all(
+                            m["path_name"] not in pair
+                            for f in folds
+                            for m in f["members"]
+                        ),
+                        f"locus {locus}: a twin path row sits in a fold",
                     )
-                    if offset < 0:
-                        continue
-                    sync_positions, sync_steps = g.spelled_syncmers(name)
-                    contained = [
-                        (p - offset, s)
-                        for p, s in zip(sync_positions, sync_steps)
-                        if p >= offset and p + K <= offset + len(row_seq)
-                    ]
-                    if ref_contained is None:
-                        ref_contained = contained
-                    else:
+                    continue
+                twin_fold_loci += 1
+                g = gfa(d["partition"])
+                for i, f in hit_folds:
+                    names_here = [m["path_name"] for m in f["members"]]
+                    check(
+                        pair[0] in names_here and pair[1] in names_here,
+                        f"locus {locus}: fold {i} carries only one twin path "
+                        f"(the identical rows must fold together)",
+                    )
+                    a_intervals = sorted(
+                        (m["start"], m["end"])
+                        for m in f["members"]
+                        if m["path_name"] == pair[0]
+                    )
+                    b_intervals = sorted(
+                        (m["start"], m["end"])
+                        for m in f["members"]
+                        if m["path_name"] == pair[1]
+                    )
+                    check(
+                        a_intervals == b_intervals,
+                        f"locus {locus}: fold {i} twin row intervals differ "
+                        f"({a_intervals} vs {b_intervals})",
+                    )
+                    # (the fold's identity criterion is (row sequence,
+                    # contained STORED walk) — NOT the full P-line spelling
+                    # and NOT the fold's claimed walk, which in this mode is
+                    # the REPAIRED canonical skeleton (phase 2's frame audit
+                    # verifies the skeleton against the stored walk and the
+                    # stored walk against the GFA P line for the
+                    # representative; a member's P line may also extend past
+                    # the row extent with its own edge-overlapping steps, and
+                    # cross-chromosome repeat-family members legitimately
+                    # spell longer tails — measured: partition 110's 74bp
+                    # repeat fold carries AMP_1a#0#chrIII_chrX / ANL / AVN
+                    # rows whose P lines spell 135bp). The grouping audit:
+                    # every member spells the fold's sequence, and every
+                    # member's contained stored walk — the GFA P line's
+                    # syncmer steps positioned relative to the row's own
+                    # crop — is IDENTICAL across the fold, the fold key
+                    # itself.)
+                    row_seq = f["sequence"]
+                    ref_contained = None
+                    for m in f["members"]:
+                        name = row_gfa_name(m)
+                        seq, _positions, _steps = g.spelled(name)
+                        offset = seq.find(row_seq)
                         check(
-                            contained == ref_contained,
-                            f"locus {locus}: fold {i} member {name} "
-                            "contained stored walk differs from the "
-                            "fold's",
+                            offset >= 0,
+                            f"locus {locus}: fold {i} member {name} does not "
+                            "spell the fold's sequence",
                         )
-        print(
-            f"   AAA/SGDref fold to ONE candidate at {twin_fold_loci} of "
-            f"{len(LOCI)} loci — the fold criterion (row sequence + contained "
-            f"stored walk) re-derived from the GFAs for every member of "
-            f"every twin fold; no fold distinguishes the pair",
-            flush=True,
-        )
+                        if offset < 0:
+                            continue
+                        sync_positions, sync_steps = g.spelled_syncmers(name)
+                        contained = [
+                            (p - offset, s)
+                            for p, s in zip(sync_positions, sync_steps)
+                            if p >= offset and p + K <= offset + len(row_seq)
+                        ]
+                        if ref_contained is None:
+                            ref_contained = contained
+                        else:
+                            check(
+                                contained == ref_contained,
+                                f"locus {locus}: fold {i} member {name} "
+                                "contained stored walk differs from the "
+                                "fold's",
+                            )
+            print(
+                f"   {'/'.join(pair)} fold to ONE candidate at {twin_fold_loci} of "
+                f"{len(LOCI)} loci — the fold criterion (row sequence + contained "
+                f"stored walk) re-derived from the GFAs for every member of "
+                f"every twin fold; no fold distinguishes the pair",
+                flush=True,
+            )
     for locus in LOCI:
         d = receipt[locus]
         if d["identical_pair_fold"] is None:
@@ -1643,8 +1676,10 @@ def main():
             flush=True,
         )
 
-        if EXHAUSTIVE == "chrIV":
-            # ------------- phase 8c: the slice-1 expressibility classes
+        if EXHAUSTIVE not in ("chrI", "chrMT") and os.path.exists(
+            f"{D}/partition-graphs/partition-graph-{EXHAUSTIVE}-census.jsonl"
+        ):
+            # ------------- phase 8c: the expressibility classes
             # (the prediction table of record: the census receipt's
             # per-locus ortholog/positional statements interpret the
             # truth-rank table; the instrument's expressibility is
@@ -1667,7 +1702,7 @@ def main():
             )
             census = {}
             for line in open(
-                f"{D}/partition-graphs/partition-graph-chrIV-census.jsonl"
+                f"{D}/partition-graphs/partition-graph-{EXHAUSTIVE}-census.jsonl"
             ):
                 r = json.loads(line)
                 if r.get("question") == "a":
@@ -1680,7 +1715,7 @@ def main():
                 rows = [
                     (r["start"], r["end"])
                     for r in m["members"]
-                    if r["path_name"] == "SK1#0#chrIV"
+                    if r["path_name"] == f"SK1#0#{EXHAUSTIVE}"
                 ]
                 if rows:
                     sk1_rows[pid] = rows
@@ -1718,7 +1753,7 @@ def main():
                         for m in ms
                     )
                     carries_sk1 = lambda ms: any(
-                        m["path_name"] == "SK1#0#chrIV" for m in ms
+                        m["path_name"] == f"SK1#0#{EXHAUSTIVE}" for m in ms
                     )
                     check(
                         carries_axis(fa) or carries_axis(fb),
@@ -1786,14 +1821,14 @@ def main():
                 "== phase 8t: the answer-preservation gate (the timered rerun vs the committed receipts)",
                 flush=True,
             )
-            # (chrIV: the committed identity base is the SERIAL run's
-            # receipts — the 4-wide exhaustive run is the record, the
-            # serial run the gate's reference, the phase-3 ladder
-            # convention; chrMT/chrI keep the committed slice-E
-            # receipts as the base.)
+            # (chrIV and every fleet component: the committed identity
+            # base is the SERIAL run's receipts — the 4-wide exhaustive
+            # run is the record, the serial run the gate's reference,
+            # the phase-3 ladder convention; chrMT/chrI keep the
+            # committed slice-E receipts as the base.)
             committed_prefix = (
-                "realign-par-serial-chrIV"
-                if EXHAUSTIVE == "chrIV"
+                f"realign-par-serial-{EXHAUSTIVE}"
+                if EXHAUSTIVE not in ("chrI", "chrMT")
                 else f"realign-exhaustive-{EXHAUSTIVE}"
             )
             committed_slice_e = {}

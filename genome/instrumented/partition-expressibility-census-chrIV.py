@@ -88,6 +88,22 @@ import json
 import os
 import sys
 
+# THE FLEET GENERALIZATION (the whole-genome stage): the census takes
+# the component name as an optional second argument (requests|census
+# COMPONENT); the default chrIV keeps the committed chrIV receipts
+# byte-identical (the regression gate of the generalization).
+COMP = (
+    sys.argv[2]
+    if len(sys.argv) > 2 and sys.argv[1] in ("requests", "census")
+    and not sys.argv[2].startswith("-")
+    else "chrIV"
+)
+if not os.path.exists(
+    f"/home/erikg/yeast/genome-balanced-diploid-validation-20260930/"
+    f"genotype-distance-balanced-{COMP}.json"
+):
+    sys.exit(f"no balanced receipt for component {COMP}")
+
 DATA = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
 GRAPHS = f"{DATA}/partition-graphs"
 BEDS = "/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results"
@@ -95,19 +111,19 @@ AXIS_FILE = (
     "/home/erikg/yeast/genome-mem-bwt-bootstrap-20260911T055203Z/reference-axis-v1.json"
 )
 NAMES = "/home/erikg/yeast/syng-k63-s8-seed7-acgt-only/yeast235.syng.names"
-BALANCED = f"{DATA}/genotype-distance-balanced-chrIV.json"
+BALANCED = f"{DATA}/genotype-distance-balanced-{COMP}.json"
 PADDING = 120  # the syng probe's own existing choice
 INTERVAL_CLOSE = 50  # the stated coordinate-agreement window (bp)
 SPECTRUM_FLOOR = 0.3  # the reported spectrum floor (a reporting bound, not a flag rule)
-TRUTH0_NAME = "S288C#0#chrIV"
-TRUTH1_NAME = "SK1#0#chrIV"
+TRUTH0_NAME = f"S288C#0#{COMP}"
+TRUTH1_NAME = f"SK1#0#{COMP}"
 
-BUILD_LIST = f"{GRAPHS}/partition-graph-chrIV-build-list.txt"
-HOMOLOGY_REQUESTS = f"{GRAPHS}/partition-graph-chrIV-homology-requests.tsv"
-WALK_REQUESTS = f"{GRAPHS}/partition-graph-chrIV-walk-requests.tsv"
-HOMOLOGY_RECEIPT = f"{GRAPHS}/partition-graph-chrIV-homology.jsonl"
-WALK_RECEIPT = f"{GRAPHS}/partition-graph-chrIV-walks.jsonl"
-CENSUS_RECEIPT = f"{GRAPHS}/partition-graph-chrIV-census.jsonl"
+BUILD_LIST = f"{GRAPHS}/partition-graph-{COMP}-build-list.txt"
+HOMOLOGY_REQUESTS = f"{GRAPHS}/partition-graph-{COMP}-homology-requests.tsv"
+WALK_REQUESTS = f"{GRAPHS}/partition-graph-{COMP}-walk-requests.tsv"
+HOMOLOGY_RECEIPT = f"{GRAPHS}/partition-graph-{COMP}-homology.jsonl"
+WALK_RECEIPT = f"{GRAPHS}/partition-graph-{COMP}-walks.jsonl"
+CENSUS_RECEIPT = f"{GRAPHS}/partition-graph-{COMP}-census.jsonl"
 
 
 def load_names():
@@ -184,10 +200,10 @@ def interval_close_stats(rows_by_path, name_a, name_b):
 
 def derive_near_twins(by_path, names):
     """THE FLAG RULE (stated above): full interval-close coverage of the
-    shorter path's tiled bp, over the chrIV-family panel paths. Returns
+    shorter path's tiled bp, over the {COMP}-family panel paths. Returns
     (flagged pairs as name tuples, the >= SPECTRUM_FLOOR spectrum, the
-    chrIV-family path list)."""
-    family = sorted(name for name in by_path if name.rsplit("#", 1)[1] == "chrIV")
+    {COMP}-family path list)."""
+    family = sorted(name for name in by_path if name.rsplit("#", 1)[1] == COMP)
     spectrum = []
     for i, name_a in enumerate(family):
         for name_b in family[i + 1:]:
@@ -366,7 +382,7 @@ def run_census():
     census.append(
         {
             "question": "s",
-            "component": "chrIV",
+            "component": COMP,
             "partitions_genome_wide": len(by_partition),
             "chriv_family_paths": len(family),
             "chriv_family_rows": sum(len(by_path.get(n, ())) for n in family),
@@ -384,7 +400,7 @@ def run_census():
             "twin_pairs": [list(pair) for pair in flagged],
             "twin_holder_partitions": twin_holder_partitions,
             "near_twin_flag_rule": (
-                "a pair of chrIV-family paths is flagged iff every member row of one "
+                f"a pair of {COMP}-family paths is flagged iff every member row of one "
                 "path has an interval-close counterpart (both ends within "
                 f"{INTERVAL_CLOSE} bp) in the same partition of the other path "
                 "(full interval-close coverage of the shorter path's tiled bp)"
@@ -399,10 +415,20 @@ def run_census():
     #     truth_pair_in_candidate_domain is 0/167 — the whole chromosome
     #     is the 805 class at chrIV scale)
     # ------------------------------------------------------------------
-    assert all(
-        not record["truth_pair_in_candidate_domain"]
-        for record in balanced["rows"]
-    ), "the balanced chrIV receipt must carry truth_pair_in_candidate_domain=false everywhere"
+    # (the chrIV expectation — the whole chromosome the 805 class —
+    # was a chrIV MEASUREMENT, 0/167; the fleet components' balanced
+    # receipts carry windowed-frame truth-pair-expressible loci at
+    # many chromosomes (chrII 53/81, chrXVI 89/107, ...), so the count
+    # is REPORTED, never asserted: the census measures the partition
+    # structure, the windowed frame's own expressibility stays the
+    # balanced receipt's per-locus record below)
+    windowed_expressible = sum(
+        1 for record in balanced["rows"] if record["truth_pair_in_candidate_domain"]
+    )
+    print(
+        f"   (the balanced receipt's windowed-frame truth-pair-expressible "
+        f"loci: {windowed_expressible}/{len(balanced['rows'])})"
+    )
     axis_partitions = {partition for _, _, partition in axis}
     disease = 0
     disease_foreign = 0
@@ -414,7 +440,7 @@ def run_census():
         window_hits = hits.get((truth0, locus, truth1), [])
         record = {
             "question": "a",
-            "component": "chrIV",
+            "component": COMP,
             "locus": locus,
             "window": [start, end],
             "axis_partition": partition,
@@ -536,7 +562,7 @@ def run_census():
     census.append(
         {
             "question": "a-summary",
-            "component": "chrIV",
+            "component": COMP,
             "total_loci": len(axis),
             "in_axis_partition": in_axis,
             "split_elsewhere": disease,
@@ -554,7 +580,7 @@ def run_census():
         left, right = ids[left_name], ids[right_name]
         record = {
             "question": "c",
-            "component": "chrIV",
+            "component": COMP,
             "routes": [left_name, right_name],
             "route_ids": [left, right],
             "partitions": {},
@@ -649,7 +675,7 @@ def run_census():
         s288c_rows = placement(by_path, TRUTH0_NAME, start, end)
         record = {
             "question": "d",
-            "component": "chrIV",
+            "component": COMP,
             "locus": locus,
             "window": [start, end],
             "axis_partition": partition,
@@ -727,16 +753,16 @@ def run_census():
     # headline tables
     # ------------------------------------------------------------------
     survey = next(r for r in census if r["question"] == "s")
-    print("\n== (s) the chrIV survey")
+    print(f"\n== (s) the {COMP} survey")
     print(
         f"  {survey['partitions_genome_wide']} partitions genome-wide; "
-        f"chrIV-family: {survey['chriv_family_paths']} paths / "
+        f"{COMP}-family: {survey['chriv_family_paths']} paths / "
         f"{survey['chriv_family_rows']} rows / {survey['chriv_family_partitions']} partitions"
     )
     print(
-        f"  the balanced validation's chrIV component: {survey['loci']} loci over "
-        f"{survey['axis_partitions']} axis partitions; S288C#0#chrIV "
-        f"{survey['s288c_rows']} rows / {survey['s288c_len_bp']} bp; SK1#0#chrIV "
+        f"  the balanced validation's {COMP} component: {survey['loci']} loci over "
+        f"{survey['axis_partitions']} axis partitions; S288C#0#{COMP} "
+        f"{survey['s288c_rows']} rows / {survey['s288c_len_bp']} bp; SK1#0#{COMP} "
         f"{survey['sk1_rows']} rows / {survey['sk1_len_bp']} bp "
         f"({survey['sk1_rows_in_axis_partitions']} rows in axis partitions; "
         f"{len(survey['sk1_holder_partitions'])} SK1 holder partitions: "
@@ -755,7 +781,7 @@ def run_census():
         )
 
     summary = next(r for r in census if r["question"] == "a-summary")
-    print("\n== (a) the 805-class test at chrIV scale (all 167 loci)")
+    print(f"\n== (a) the 805-class test at {COMP} scale (all {len(axis)} loci)")
     print(
         f"  IN-AXIS-PARTITION {summary['in_axis_partition']} | "
         f"SPLIT-ELSEWHERE {summary['split_elsewhere']} "

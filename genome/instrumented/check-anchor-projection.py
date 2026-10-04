@@ -519,7 +519,9 @@ def main():
         print(f"CHECK FAILED: {len(failures)} failures over {checks[0]} checks")
         sys.exit(1)
     print(f"ALL PHASES PASS ({checks[0]} checks)")
-    with open(f"{D}/check-anchor-projection.log", "w") as f:
+    # (the fleet: one summary log per invocation — concurrent
+    # component chains must not clobber each other's summaries)
+    with open(f"{D}/check-anchor-projection-{'-'.join(components)}.log", "w") as f:
         f.write(f"{checks[0]} checks, {len(failures)} failures\n")
 
 

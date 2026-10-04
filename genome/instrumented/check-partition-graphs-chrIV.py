@@ -47,6 +47,16 @@ import json
 import os
 import sys
 
+# THE FLEET GENERALIZATION: the component is the optional first
+# argument (default chrIV; the chrIV receipts and markers are the
+# committed record and must keep passing unchanged).
+COMP = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "chrIV"
+if not os.path.exists(
+    f"/home/erikg/yeast/genome-balanced-diploid-validation-20260930/"
+    f"genotype-distance-balanced-{COMP}.json"
+):
+    sys.exit(f"no balanced receipt for component {COMP}")
+
 DATA = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
 GRAPHS = f"{DATA}/partition-graphs"
 BEDS = "/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results"
@@ -54,13 +64,13 @@ AXIS_FILE = (
     "/home/erikg/yeast/genome-mem-bwt-bootstrap-20260911T055203Z/reference-axis-v1.json"
 )
 NAMES = "/home/erikg/yeast/syng-k63-s8-seed7-acgt-only/yeast235.syng.names"
-BALANCED = f"{DATA}/genotype-distance-balanced-chrIV.json"
+BALANCED = f"{DATA}/genotype-distance-balanced-{COMP}.json"
 PADDING = 120
 INTERVAL_CLOSE = 50
 SPECTRUM_FLOOR = 0.3
 GUARD_KB = 64 * 1024 * 1024
-TRUTH0_NAME = "S288C#0#chrIV"
-TRUTH1_NAME = "SK1#0#chrIV"
+TRUTH0_NAME = f"S288C#0#{COMP}"
+TRUTH1_NAME = f"SK1#0#{COMP}"
 
 failures = []
 
@@ -153,7 +163,7 @@ def close_bp(rows_by_path, name_a, name_b):
 def derive_twins(by_path):
     """Independent re-derivation of the near-twin flag rule and the
     reported spectrum (the checker's own implementation)."""
-    family = sorted(name for name in by_path if name.rsplit("#", 1)[1] == "chrIV")
+    family = sorted(name for name in by_path if name.rsplit("#", 1)[1] == COMP)
     spectrum = []
     for i, name_a in enumerate(family):
         for name_b in family[i + 1:]:
@@ -199,9 +209,9 @@ def verdict_of(rows, partition, start, end):
 def phase1_markers(build):
     print("== phase 1: run markers")
     for name in (
-        "build-chrIV-partition-graphs",
-        "dumps-chrIV-homology",
-        "dumps-chrIV-walks",
+        f"build-{COMP}-partition-graphs",
+        f"dumps-{COMP}-homology",
+        f"dumps-{COMP}-walks",
     ):
         check(os.path.exists(f"{GRAPHS}/{name}.done"), f"marker {name}.done exists")
         code = open(f"{GRAPHS}/{name}.exit").read().strip()
@@ -209,12 +219,12 @@ def phase1_markers(build):
         check(os.path.exists(f"{GRAPHS}/{name}.log"), f"log {name}.log exists")
         wall = open(f"{GRAPHS}/{name}.wall").read().strip()
         print(f"   {name}: wall {wall}s")
-    check(os.path.exists(f"{GRAPHS}/dumps-chrIV.done"), "marker dumps-chrIV.done exists")
+    check(os.path.exists(f"{GRAPHS}/dumps-{COMP}.done"), f"marker dumps-{COMP}.done exists")
     peaks = {}
     for name in (
-        "build-chrIV-partition-graphs",
-        "dumps-chrIV-homology",
-        "dumps-chrIV-walks",
+        f"build-{COMP}-partition-graphs",
+        f"dumps-{COMP}-homology",
+        f"dumps-{COMP}-walks",
     ):
         peak = 0
         path = f"{GRAPHS}/{name}.rss"
@@ -294,9 +304,19 @@ def phase3_requests(names, axis, by_path, build):
     ids = {name: path for path, (name, _) in names.items()}
     flagged, spectrum, _ = derive_twins(by_path)
     twin_names = sorted({name for pair in flagged for name in pair})
+    # (the fleet generalization: the flagged pairs are the RECEIPT's
+    # own statement, re-derived here independently — the chrIV
+    # hardcode of the committed checker became the receipt comparison;
+    # chrIV re-derives exactly [AAA#0/SGDref#0, CLL#0/CLL#1])
+    survey = {}
+    for line in open(f"{GRAPHS}/partition-graph-{COMP}-census.jsonl"):
+        r = json.loads(line)
+        if r.get("question") == "s":
+            survey = r
     check(
-        [len(flagged), [list(p) for p in flagged]] == [2, [["AAA#0#chrIV", "SGDref#0#chrIV"], ["CLL#0#chrIV", "CLL#1#chrIV"]]],
-        f"near-twin flag re-derived: {['/'.join(p) for p in flagged]}",
+        sorted(tuple(p) for p in survey.get("twin_pairs", ())) == sorted(flagged),
+        f"near-twin flag re-derived == the census receipt's twin_pairs "
+        f"({['/'.join(p) for p in flagged]})",
     )
     derived_build = derive_build(axis, by_path, twin_names)
     check(
@@ -326,10 +346,10 @@ def phase3_requests(names, axis, by_path, build):
                     walk_lines.append(f"{ids[name]}\t{start}\t{end}\tpartition{partition}")
     committed_build = [
         int(line)
-        for line in open(f"{GRAPHS}/partition-graph-chrIV-build-list.txt").read().split()
+        for line in open(f"{GRAPHS}/partition-graph-{COMP}-build-list.txt").read().split()
     ]
-    committed_homology = open(f"{GRAPHS}/partition-graph-chrIV-homology-requests.tsv").read()
-    committed_walks = open(f"{GRAPHS}/partition-graph-chrIV-walk-requests.tsv").read()
+    committed_homology = open(f"{GRAPHS}/partition-graph-{COMP}-homology-requests.tsv").read()
+    committed_walks = open(f"{GRAPHS}/partition-graph-{COMP}-walk-requests.tsv").read()
     check(
         committed_build == derived_build,
         f"committed build list == re-derived ({len(committed_build)} partitions)",
@@ -349,7 +369,7 @@ def phase4_receipts(homology_lines, walk_lines):
     print("== phase 4: receipt validation")
     markers = {}
     hits = collections.defaultdict(list)
-    with open(f"{GRAPHS}/partition-graph-chrIV-homology.jsonl") as handle:
+    with open(f"{GRAPHS}/partition-graph-{COMP}-homology.jsonl") as handle:
         for line in handle:
             record = json.loads(line)
             if record.get("request_done"):
@@ -373,7 +393,7 @@ def phase4_receipts(homology_lines, walk_lines):
             target_problems.append((query, window, target))
     check(not target_problems, f"every emitted hit targets a requested path ({target_problems[:3]})")
     walks = {}
-    with open(f"{GRAPHS}/partition-graph-chrIV-walks.jsonl") as handle:
+    with open(f"{GRAPHS}/partition-graph-{COMP}-walks.jsonl") as handle:
         for line in handle:
             record = json.loads(line)
             walks[(record["path"], record["start"], record["end"], record["tag"])] = record["steps"]
@@ -433,7 +453,7 @@ def phase6_verdicts(names, axis, by_path, build, hits, flagged, spectrum):
     balanced = json.load(open(BALANCED))
     balanced_rows = {record["locus"]: record for record in balanced["rows"]}
     census = {}
-    with open(f"{GRAPHS}/partition-graph-chrIV-census.jsonl") as handle:
+    with open(f"{GRAPHS}/partition-graph-{COMP}-census.jsonl") as handle:
         for line in handle:
             record = json.loads(line)
             key = record.get("question")
@@ -451,7 +471,7 @@ def phase6_verdicts(names, axis, by_path, build, hits, flagged, spectrum):
     # survey record
     problems = []
     survey = census[("s",)]
-    family = sorted(name for name in by_path if name.rsplit("#", 1)[1] == "chrIV")
+    family = sorted(name for name in by_path if name.rsplit("#", 1)[1] == COMP)
     check(
         survey["partitions_genome_wide"] == 19421,
         f"survey: {survey['partitions_genome_wide']} partitions genome-wide",
@@ -459,7 +479,7 @@ def phase6_verdicts(names, axis, by_path, build, hits, flagged, spectrum):
     check(
         survey["chriv_family_paths"] == len(family)
         and survey["chriv_family_rows"] == sum(len(by_path.get(n, ())) for n in family),
-        "survey: chrIV-family path/row counts re-derived",
+        f"survey: {COMP}-family path/row counts re-derived",
     )
     axis_partitions = {p for _, _, p in axis}
     sk1_rows = by_path.get(TRUTH1_NAME, ())
@@ -596,7 +616,7 @@ def phase6_verdicts(names, axis, by_path, build, hits, flagged, spectrum):
         # does not share anywhere in the built common partitions —
         # re-derive the pocket counts from the walks receipt
         walks = {}
-        with open(f"{GRAPHS}/partition-graph-chrIV-walks.jsonl") as handle:
+        with open(f"{GRAPHS}/partition-graph-{COMP}-walks.jsonl") as handle:
             for line in handle:
                 w = json.loads(line)
                 walks[(w["path"], w["start"], w["end"], w["tag"])] = w["steps"]
