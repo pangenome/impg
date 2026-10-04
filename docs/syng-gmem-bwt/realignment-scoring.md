@@ -1226,7 +1226,6 @@ pre-fix serial crashed at L9 (partition 16, the shared repeat
 locality, carries two interval-distinct SK1 rows); the fixed binary
 fabricates no truth pair there (inexpressible, the no-fabrication
 convention), and the serial re-run is the committed identity base.
-Table at `realign-chrXIV-tables.txt` (the fleet component tables;
-the chrIV chromosome tables of record are the committed
-`realign-chrIV-tables.txt` from the chrIV stage — this fleet
-component IS that chromosome, closed at the same receipts).
+Table at `realign-chrXIV-tables.txt` (chromosome XIV — a different
+component from the chrIV pilot chromosome, whose committed tables
+stand at `realign-chrIV-tables.txt`).
