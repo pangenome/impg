@@ -1177,3 +1177,15 @@ RANK-1 AT 30 OF 66 EXPRESSIBLE — ALL 66 LOCI TRUTH-PAIR-EXPRESSIBLE
 (the fleet's first fully-expressible component); the old-win record:
 loci 15 and 19 LOST, 2 and 9 HOLD. Table at
 `realign-chrXI-tables.txt`.
+
+### chrXIII — closed end-to-end (2026-11-06)
+
+101 loci / 113-partition build; twins AAA/SGDref. Census IN-AXIS 64 /
+NEIGHBOR 27 / FOREIGN 10. Walls: census 1016s (32.2GB), anchor 359s
+(6.2GB), serial 135s (13.1GB), 4-wide 96s (13.7GB), the 8t gate
+passed. All checkers ALL PHASES PASS (anchor 146,110,496; realign 3
+slices 20,271,792/0; graph). TRUTH RANK-1 AT 37 OF 86 EXPRESSIBLE
+(in-axis 28/64, tiled-elsewhere 9/22; the remainder: 14
+tiled-elsewhere inexpressible + 1 partial); the old-win record: loci
+4 and 8 LOST, 6, 16 and 17 HOLD. Table at
+`realign-chrXIII-tables.txt`.
