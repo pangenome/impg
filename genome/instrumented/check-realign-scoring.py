@@ -87,6 +87,7 @@ EXACTNESS = f"{D}/realign-score-chrI.exactness.jsonl"
 INGREDIENTS = f"{D}/realign-score-chrI.jsonl.ingredients.jsonl"
 RUN = f"{D}/run-realignscore-chrI"
 LOCI = [2, 4, 7]
+LOCI_SET = set(LOCI)  # rebound by --exhaustive (and --loci-slice) below
 COMPONENT = "S288C#0#chrI"  # the axis path (the --exhaustive mode rebinds it)
 K = 63
 READ_LENGTH = 150
@@ -171,6 +172,7 @@ if EXHAUSTIVE is not None:
         _loci.append(json.loads(_line)["locus"])
     LOCI = sorted(_loci)
     del _loci, _line
+    LOCI_SET = set(LOCI)
     # (chrIV scale: the exhaustive checker over all 167 loci can be
     # SLICED — every check runs unchanged per sliced locus; the slices
     # are a wall measure, not a sample. "--loci-slice 0-49,100" keeps
@@ -187,6 +189,7 @@ if EXHAUSTIVE is not None:
         _sliced = [l for l in LOCI if l in _keep]
         print(f"(loci slice: {len(_sliced)} of {len(LOCI)} loci)", flush=True)
         LOCI = _sliced
+        LOCI_SET = set(_sliced)
         del _keep, _part, _sliced
 elif FRAME:
     RECEIPT = f"{D}/realign-framescore-chrI.jsonl"
@@ -989,7 +992,7 @@ def main():
 
     # ---------------- phase 4: the exactness proof
     print("== phase 4: the exactness proof (sampled pairs)", flush=True)
-    needed_fnv = {pair["read_fnv"] for pair in exactness}
+    needed_fnv = {pair["read_fnv"] for pair in exactness if pair["locus"] in receipt}
     fastq_fnv = set()
     with gzip.open(READS, "rt") as f:
         while True:
@@ -1022,6 +1025,10 @@ def main():
     edit_distances = []
     for pair in exactness:
         locus = pair["locus"]
+        if locus not in LOCI_SET:
+            # (a --loci-slice invocation: pairs outside the slice are
+            # covered by the slice that owns them)
+            continue
         fold_index = pair["fold"]
         fold = ingredients[locus]["folds"][fold_index]
         FOLD_SEQ[0] = fold_seqs[(locus, fold_index)]
@@ -1387,26 +1394,56 @@ def main():
                     f"locus {locus}: fold {i} twin row intervals differ "
                     f"({a_intervals} vs {b_intervals})",
                 )
-                seqs = {}
-                walks = {}
+                # (the fold's identity criterion is (row sequence,
+                # contained STORED walk) — NOT the full P-line spelling
+                # and NOT the fold's claimed walk, which in this mode is
+                # the REPAIRED canonical skeleton (phase 2's frame audit
+                # verifies the skeleton against the stored walk and the
+                # stored walk against the GFA P line for the
+                # representative; a member's P line may also extend past
+                # the row extent with its own edge-overlapping steps, and
+                # cross-chromosome repeat-family members legitimately
+                # spell longer tails — measured: partition 110's 74bp
+                # repeat fold carries AMP_1a#0#chrIII_chrX / ANL / AVN
+                # rows whose P lines spell 135bp). The grouping audit:
+                # every member spells the fold's sequence, and every
+                # member's contained stored walk — the GFA P line's
+                # syncmer steps positioned relative to the row's own
+                # crop — is IDENTICAL across the fold, the fold key
+                # itself.)
+                row_seq = f["sequence"]
+                ref_contained = None
                 for m in f["members"]:
-                    seq, positions, steps = g.spelled(row_gfa_name(m))
-                    seqs[m["path_name"] + str(m["start"])] = seq
-                    walks[m["path_name"] + str(m["start"])] = list(zip(positions, steps))
-                vals = list(seqs.values())
-                check(
-                    all(v == vals[0] for v in vals),
-                    f"locus {locus}: fold {i} members' sequences differ",
-                )
-                wvals = list(walks.values())
-                check(
-                    all(v == wvals[0] for v in wvals),
-                    f"locus {locus}: fold {i} members' walks differ",
-                )
+                    name = row_gfa_name(m)
+                    seq, _positions, _steps = g.spelled(name)
+                    offset = seq.find(row_seq)
+                    check(
+                        offset >= 0,
+                        f"locus {locus}: fold {i} member {name} does not "
+                        "spell the fold's sequence",
+                    )
+                    if offset < 0:
+                        continue
+                    sync_positions, sync_steps = g.spelled_syncmers(name)
+                    contained = [
+                        (p - offset, s)
+                        for p, s in zip(sync_positions, sync_steps)
+                        if p >= offset and p + K <= offset + len(row_seq)
+                    ]
+                    if ref_contained is None:
+                        ref_contained = contained
+                    else:
+                        check(
+                            contained == ref_contained,
+                            f"locus {locus}: fold {i} member {name} "
+                            "contained stored walk differs from the "
+                            "fold's",
+                        )
         print(
             f"   AAA/SGDref fold to ONE candidate at {twin_fold_loci} of "
-            f"{len(LOCI)} loci — identical sequence+walk verified from "
-            f"the GFAs at every fold; no fold distinguishes the pair",
+            f"{len(LOCI)} loci — the fold criterion (row sequence + contained "
+            f"stored walk) re-derived from the GFAs for every member of "
+            f"every twin fold; no fold distinguishes the pair",
             flush=True,
         )
     for locus in LOCI:
@@ -1428,28 +1465,76 @@ def main():
             # spell the same sequence and walk from the GFAs
             wanted = None
         g = gfa(d["partition"])
-        seqs = {}
-        walks = {}
-        for m in fold["members"]:
-            if wanted is not None and wanted not in m["path_name"]:
-                continue
-            seq, positions, steps = g.spelled(row_gfa_name(m))
-            seqs[m["path_name"]] = seq
-            walks[m["path_name"]] = list(zip(positions, steps))
-        vals = list(seqs.values())
-        check(len(vals) >= 2 and all(v == vals[0] for v in vals), "identical-pair sequences differ")
-        wvals = list(walks.values())
-        check(all(v == wvals[0] for v in wvals), "identical-pair walks differ")
-        print(
-            f"   locus {locus}: {len(vals)} members "
-            + (
-                f"BTE#3/#4 block28_contig1 spell identical "
-                f"sequence ({len(vals[0])} bp) and walk — the fold is exact"
-                if EXHAUSTIVE is None
-                else f"spell identical sequence ({len(vals[0])} bp) and walk — the fold is exact"
-            ),
-            flush=True,
-        )
+        if EXHAUSTIVE is None:
+            seqs = {}
+            walks = {}
+            for m in fold["members"]:
+                if wanted not in m["path_name"]:
+                    continue
+                seq, positions, steps = g.spelled(row_gfa_name(m))
+                seqs[m["path_name"]] = seq
+                walks[m["path_name"]] = list(zip(positions, steps))
+            vals = list(seqs.values())
+            check(len(vals) >= 2 and all(v == vals[0] for v in vals), "identical-pair sequences differ")
+            wvals = list(walks.values())
+            check(all(v == wvals[0] for v in wvals), "identical-pair walks differ")
+            print(
+                f"   locus {locus}: {len(vals)} members "
+                + (
+                    f"BTE#3/#4 block28_contig1 spell identical "
+                    f"sequence ({len(vals[0])} bp) and walk — the fold is exact"
+                    if EXHAUSTIVE is None
+                    else f"spell identical sequence ({len(vals[0])} bp) and walk — the fold is exact"
+                ),
+                flush=True,
+            )
+        else:
+            # (the exhaustive mode's fold-by-construction proof: the
+            # same fold-criterion grouping audit as the twin branch —
+            # the fold key is (row sequence, contained stored walk);
+            # FULL P-line spellings legitimately differ at
+            # edge-overlapping steps for cross-chromosome
+            # repeat-family members — measured: partition 111's 54bp
+            # repeat fold at L91/L105 carries 135 members incl.
+            # fused-path rows (ABH#0#chrV_chrXIV, AFH#0#chrVII_chrXVI)
+            # whose P lines extend past the row extent)
+            row_seq = fold["sequence"]
+            check(
+                len(fold["members"]) >= 2,
+                f"locus {locus}: identical-pair fold has fewer than 2 members",
+            )
+            ref_contained = None
+            for m in fold["members"]:
+                name = row_gfa_name(m)
+                seq, _positions, _steps = g.spelled(name)
+                offset = seq.find(row_seq)
+                check(
+                    offset >= 0,
+                    f"locus {locus}: identical-pair fold member {name} "
+                    "does not spell the fold's sequence",
+                )
+                if offset < 0:
+                    continue
+                sync_positions, sync_steps = g.spelled_syncmers(name)
+                contained = [
+                    (p - offset, s)
+                    for p, s in zip(sync_positions, sync_steps)
+                    if p >= offset and p + K <= offset + len(row_seq)
+                ]
+                if ref_contained is None:
+                    ref_contained = contained
+                else:
+                    check(
+                        contained == ref_contained,
+                        f"locus {locus}: identical-pair fold member {name} "
+                        "contained stored walk differs from the fold's",
+                    )
+            print(
+                f"   locus {locus}: {len(fold['members'])} members share the "
+                f"fold criterion (sequence {len(row_seq)} bp + contained "
+                "stored walk) — the fold is exact",
+                flush=True,
+            )
 
     # ---------------- phase 8: the pilot verdicts
     print("== phase 8: the pilot verdicts", flush=True)
@@ -1617,22 +1702,31 @@ def main():
                     f"rule (receipt {d['truth_pair_expressible']} vs expected {expect})",
                 )
                 if d["truth_pair_expressible"]:
+                    # (the instrument emits truth_folds sorted by fold
+                    # INDEX — (a.min(b), a.max(b)) — so the axis-row
+                    # fold and the SK1 fold can arrive in either order;
+                    # the class pair is unordered and the membership
+                    # proof is order-independent)
                     first, second = d["truth_folds"]
                     fa = d["fold_identities"][first]["members"]
                     fb = d["fold_identities"][second]["members"]
                     s0, e0, _ = axis_rows[locus]
-                    check(
-                        any(
-                            m["path_name"] == COMPONENT
-                            and m["start"] == s0
-                            and m["end"] == e0
-                            for m in fa
-                        ),
-                        f"locus {locus}: truth-first fold does not carry the window's axis row",
+                    carries_axis = lambda ms: any(
+                        m["path_name"] == COMPONENT
+                        and m["start"] == s0
+                        and m["end"] == e0
+                        for m in ms
+                    )
+                    carries_sk1 = lambda ms: any(
+                        m["path_name"] == "SK1#0#chrIV" for m in ms
                     )
                     check(
-                        any(m["path_name"] == "SK1#0#chrIV" for m in fb),
-                        f"locus {locus}: truth-second fold carries no SK1 row",
+                        carries_axis(fa) or carries_axis(fb),
+                        f"locus {locus}: neither truth fold carries the window's axis row",
+                    )
+                    check(
+                        carries_sk1(fa) or carries_sk1(fb),
+                        f"locus {locus}: neither truth fold carries an SK1 row",
                     )
                     if d["truth_rank"] == 1:
                         cls_rank1[c["verdict"]] += 1

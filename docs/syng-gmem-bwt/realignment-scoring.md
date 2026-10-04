@@ -938,3 +938,146 @@ Runner: `genome/instrumented/run-realign-parallel.sh`. Assessment-side
 only; no thresholds, no tuning constants, no selection swap, no
 scoreboard change, no 502, no PR push; the 64 GiB guard clean
 everywhere.
+
+## chrIV end-to-end, slice 2 — THE EXHAUSTIVE SCORING RUN (2026-11-06)
+
+The measurement that replaces the whole-genome extrapolation with
+arithmetic: all 167 chrIV loci under the marginal realignment model
+with repaired skeletons, the anchor-projection receipts at 1.5 Mb
+chromosome scale, and the domain/truth/wall tables against the chrI
+profile.
+
+**The input chain (the balanced-diploid validation's chrIV
+component):** the multi-census run (`run-cosine-multicensus.sh chrIV`,
+the committed pilots' recipe re-runnable per component) produced
+92,883 census records (6.68x chrI) / 12,753,283 verified occurrences
+(9.01x) / window span 0..166; the same run's Poisson-era read-matched
+receipt measured the windowed frame at 0/167 truth-pair-expressible
+(the slice-1 census's frame-gap prediction). The anchor-projection
+receipts (`anchor-projection-chrIV.*`, 2.6 GB + context + rows
+sidecars, exit 0, wall 704 s, poller peak 9.13 GB): 12,753,283/12,753,283
+occurrences interval-count and node-list matched against the census,
+shift 0 at every occurrence, 232 M hull checks; the sampled checker
+`check-anchor-projection.py chrIV` ALL PHASES PASS (297,745,711
+checks).
+
+**THE REPEAT-DOMAIN REPAIR (the exact-DP anchor correspondence).**
+The committed monotone-assignment enumeration is exponential in
+anchors-per-repeat-node; the first chrIV serial attempt measured
+locus 39 alone at 760.7 s in scoring (partition 175's repeat rows
+carry a syncmer node at 34 positions; 5,788 units x 179 folds), every
+other completed locus <= 0.6 s. The multiplicity map over the 158
+axis partitions names the hazard set (L71 a scaffold row with a node
+at 1,356 positions — benign there only because few units pin on it;
+L147 338; L78 103; L81 101; L166 96). The repair replaces the
+enumeration with an exact forward/backward feasibility DP: every
+complete monotone chain contains every candidate-bearing anchor, so a
+position is pinned iff it is the anchor's unique DISTINCT feasible
+candidate; >= 2 feasible = ambiguous None; none = the zero-leaf
+all-None outcome. Equivalence gates: unit test 18/18 (3,000
+randomized synthetic walks vs a verbatim copy of the committed
+enumeration — it caught the duplicate-position counting divergence on
+the way) and the chrMT/chrI serial byte-identity gates (all four
+sidecars byte-identical to the committed phase-1 rebuilt receipts, 0
+semantic diffs). With the DP, locus 39 scores in 0.0 s with
+IDENTICAL numbers (593,870/593,870 factorized placements).
+
+**THE WINDOW GENERALIZATION.** chrIV is the first component where
+windows are not 1:1 with axis partitions (167 windows over 158
+partitions; six partitions host 2-4 windows). Windows derive from
+the AXIS ROWS; the truth folds are window-aware (truth-first = the
+fold carrying the window's own axis row; truth-second = the committed
+path-name rule at single-window partitions, None at multi-window ones
+where an SK1 row cannot be attributed to a window by placement —
+chrIV partition 110's two SK1 rows are other windows' orthologs).
+Byte-identity-gated on chrMT/chrI (all sidecars byte-identical).
+
+**THE EXHAUSTIVE RUN OF RECORD (4-wide, the phase-3 clean rung; exit
+0; 64 GiB guard clean):** external wall 148 s (serial identity base
+236 s), poller RSS peak 28.58 GB (serial 26.79 GB); in-process phases
+(serial): inputs 12.0 s, quality 2.2 s, derive 1.1 s, binding 39.9 s,
+variants 0.9 s, rows/context 16.0 s, loci 138.0 s; at 4-wide the
+per-locus summed walls inflate (loci 260.4 s summed — the phase-3
+contention finding at chromosome scale) while the external wall
+falls. THE IDENTITY GATE: the 4-wide receipts equal the serial
+receipts on every semantic field, all FOUR sidecars byte-identical —
+no race at chrIV scale. Receipts `realign-exhaustive-chrIV.*` +
+`realign-par-serial-chrIV.*` + run markers at the validation dir.
+
+**THE DOMAIN-SCALING TABLE (chrIV vs chrI, measured):** windows 167
+vs 21 (7.95x); class pairs post-fold 4,279,081 vs 378,306 (11.31x);
+units 2,502,395 vs 266,095 (9.40x); records 128,215 vs 16,020
+(8.00x); factorized placements 202,871,144 vs 21,490,054 (9.44x);
+per-locus means 25,623 class pairs vs 18,015 (1.42x) and 14,984 units
+vs 12,671 (1.18x) — SUPERLINEAR in the class domain, dominated by the
+repeat-locality partitions: the largest loci are L92/L106 (partition
+24: 1,072 folds, 575,128 class pairs, 72,105 units, 18.4 M
+placements), L51 (partition 187: 956 folds, 457,446 pairs), L166
+(partition 289: 700 folds, 245,350 pairs — the chromosome-end
+subtelomeric locality), L66/L93/L107 (partition 16: the chrI-L16
+twin, 448 folds, 100,576 pairs), L121, L120/L134.
+
+**THE TRUTH-RANK TABLE (all 167 loci; classes from the slice-1
+expressibility census):** 143/167 truth-pair-expressible under the
+committed path-domain convention; truth rank-1 at 70 loci. By class:
+IN-AXIS-PARTITION 96 expressible, 48 rank-1; TILED-ELSEWHERE 46
+expressible (the one-window coordinate-offset class — the window's
+partition carries the NEIGHBOR window's aligned SK1 row; the paired
+class is named per locus in the checker's phase 8c, never silently
+passed as the ortholog), 21 of them rank-1; TILED-ELSEWHERE 23
+inexpressible (13 multi-window partitions, 8 no-SK1-row, L120/L134
+the ambiguous multi-window pair); ABSENT (the contig-end length
+polymorphism) — L163 EXPRESSIBLE and truth rank 1 (its axis
+partition 286 carries SK1's [1454080,1464091) row, the terminal
+material the slice-1 census's window query found), L166 inexpressible
+(its 289 partition carries no SK1#0#chrIV row at all; the winner
+harvests the cross-chromosome subtelomeric repeat family — AAA/SGDref
+chrXV + SK1 chrV folds — and is the only bounded-QUAL locus, 92.89).
+The identical pair AAA#0#chrIV/SGDref#0#chrIV folds to ONE candidate
+at every locus where either holds a row (checker phase 7: co-membership,
+identical intervals, identical sequence+walk from the GFAs).
+
+**THE WALL/MEMORY VERDICT vs THE EXTRAPOLATION:** the phase-3
+projection guessed chrIV-class binding ~65 s serial -> ~37 s at
+4-wide and a whole-instrument wall in the low minutes with an RSS
+guess of 10-20 GB. Measured: binding 39.9 s serial -> 22.5 s at
+4-wide (better than projected — the lane-cache floor scales with the
+touched lane set, 3,399 lane loads / 1.7 GB at the anchor layer and
+12,928,943 scoring fetches served from cache), the serial
+whole-instrument wall 236 s and 148 s at 4-wide — the honest
+arithmetic for the whole genome: chrIV is 7.95x chrI in windows but
+the wall is 3.6-4.9x chrI's (30-41 s), sublinear because the
+component constants (inputs, quality scan, derive cache) amortize;
+the whole genome (16 components, ~53x chrI) projects to ~15-20
+minutes at 4-wide per full-genome pass with the DP in place. The RSS
+peak 28.6 GB exceeds the 10-20 GB guess — the repeat-locality loci's
+matrices (L92's 72,105 units x 1,072 folds) are the cost; still well
+under the 64 GiB guard.
+
+**The gates:** the checker in all modes — `--exhaustive chrIV
+--timered-base realign-exhaustive-chrIV --run-tag
+realignexhaustive-chrIV-chrIV` over three --loci-slice invocations
+(every check per sliced locus; the slicing is a wall measure, not a
+sample), the anchor checker, the three prior modes unchanged on their
+committed receipts, unit tests 18/18 + 8/8; tables receipt-side via
+`realign-chrIV-tables.py`. The checker repairs the slice completion
+itself exposed, all checker-side, the receipts unaffected at every
+step (each failing check was one the receipts never claimed to
+satisfy): phase 8c assumed the instrument orders truth_folds
+(axis-row fold first — the instrument emits the pair sorted by fold
+index, so the SK1 fold can carry the lower index; 10 loci affected,
+fixed to the order-independent membership proof), and phase 7's
+twin and generic identical-pair branches compared members' FULL
+P-line spellings (and, in one repair round, the contained walk
+against the fold's CLAIMED walk — the claimed walk is the REPAIRED
+skeleton in this mode) — the fold key is (row sequence, contained
+STORED walk), and full spellings legitimately extend past the row
+extent differently (partition 110's 74bp repeat fold: 102 members,
+AMP_1a#0#chrIII_chrX/ANL/AVN members spell 135bp P lines;
+partition 111's 54bp fold at L91/L105: 137 members incl. fused-path
+rows) — fixed to the fold key itself, cross-member equality of
+the contained stored walk. The three prior modes re-run under the
+final checker: 6,760 / 6,592 / 579,972 checks, 0 failures each. Assessment-side only; no thresholds; the
+truth classes come from the committed slice-1 census receipt; no
+selection swap, no scoreboard change, no 502, no PR push; the 64 GiB
+guard clean everywhere.

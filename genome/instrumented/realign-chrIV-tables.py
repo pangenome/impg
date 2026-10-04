@@ -201,7 +201,7 @@ def main():
 
     # the chrI 4-wide reference
     try:
-        exit_code, wall, peak = run_stats("realignpar-4-chrI")
+        exit_code, wall, peak = run_stats("realignpar-4-chrI-chrI")
         say(f"  chrI 4-wide reference: exit {exit_code}, wall {wall}s, peak {peak/1048576:.2f} GB")
     except FileNotFoundError:
         say("  chrI 4-wide reference: markers missing")
