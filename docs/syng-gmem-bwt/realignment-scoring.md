@@ -1123,3 +1123,26 @@ loci newly expressible; the largest locus L28 (partition 376: 30,496
 units, 8,778 classes) ranks the truth 525th — the repeat-domain
 residual class. Census wall 937s (peak 23.1GB). The per-locus table:
 `realign-chrVI-tables.txt` beside the receipts.
+
+### chrIII — closed end-to-end (2026-11-06)
+
+38 loci / 48-partition build; twins AAA/SGDref only. Census IN-AXIS 19
+/ NEIGHBOR 11 / FOREIGN 8 / CONTIG-END 0. Walls: census 825s (24.8GB),
+anchor 354s (4.5GB), serial 105s (11.7GB), 4-wide 65s (13.6GB), the
+8t byte-identity gate passed. All three checkers ALL PHASES PASS
+(anchor 111,671,505 checks; realign 8,932,744/0; graph). TRUTH RANK-1
+AT 13 OF 28 EXPRESSIBLE (in-axis 10/19, tiled-elsewhere-neighbor 3/9);
+the windowed frame's old wins: 7 windowed-expressible before (see the
+phase-8 aggregate in the checker log); table at
+`realign-chrIII-tables.txt`.
+
+### chrVIII — closed end-to-end (2026-11-06)
+
+60 loci / 74-partition build; twins AAA/SGDref only. Census IN-AXIS 44
+/ NEIGHBOR 6 / FOREIGN 5 / CONTIG-END 5 (SK1's chrVIII ends short —
+the chrIV L163/L166 contig-end class). Walls: census 566s (26.6GB),
+anchor 197s (4.3GB), serial 96s (8.0GB), 4-wide 55s (8.4GB), the 8t
+gate passed. All three checkers ALL PHASES PASS (anchor 81,539,693;
+realign 11,431,917/0; graph). TRUTH RANK-1 AT 25 OF 50 EXPRESSIBLE
+(in-axis 23/44, tiled-elsewhere-neighbor 2/6); table at
+`realign-chrVIII-tables.txt`.
