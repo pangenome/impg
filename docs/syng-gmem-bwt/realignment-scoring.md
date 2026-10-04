@@ -1153,3 +1153,27 @@ is THE FLEET'S FIRST PREDICTION VIOLATION — an old win LOST under the
 realignment instrument (the chrI L6/L12 regression class, a named
 measured finding about the instruments, never a receipt failure).
 chrVIII: all 6 old wins HOLD, 12 rank-1 total.
+
+### chrV — closed end-to-end (2026-11-06)
+
+61 loci / 71-partition build; twins AAA/SGDref + BMB/BMC_2a. Census
+IN-AXIS 41 / NEIGHBOR 16 / FOREIGN 4. Walls: census 929s (28.2GB),
+anchor 442s (5.2GB), serial 92s (12.2GB), 4-wide 66s (12.0GB), the 8t
+gate passed. All checkers ALL PHASES PASS (anchor 125,047,477; realign
+3 slices 0/0; graph). TRUTH RANK-1 AT 24 OF 57 EXPRESSIBLE; the
+old-win record: locus 54 LOST (the regression class), locus 58 HOLDS.
+Table at `realign-chrV-tables.txt`.
+
+### chrXI — closed end-to-end (2026-11-06)
+
+66 loci / 74-partition build; the NEW structural class: the truth path
+S288C#0#chrXI itself is an interval-close near-twin of AAA#0/SGDref
+(the near-identical-assembly triple; the exact-fraction screen keeps
+the fold-to-one proof to AAA/SGDref). Census IN-AXIS 55 / NEIGHBOR 8 /
+FOREIGN 3. Walls: census 617s (27.8GB), anchor 175s (4.3GB), serial 84s
+(6.8GB), 4-wide 55s (7.0GB), the 8t gate passed. All checkers ALL
+PHASES PASS (anchor 75,336,268; realign 3 slices 0/0; graph). TRUTH
+RANK-1 AT 30 OF 66 EXPRESSIBLE — ALL 66 LOCI TRUTH-PAIR-EXPRESSIBLE
+(the fleet's first fully-expressible component); the old-win record:
+loci 15 and 19 LOST, 2 and 9 HOLD. Table at
+`realign-chrXI-tables.txt`.
