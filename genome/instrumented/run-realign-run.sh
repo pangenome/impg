@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# The anchor-projection layer, one component (assessment-side).
-# Usage: run-anchor-projection.sh chrMT [TAG] [OUTPREFIX]
-# With no OUTPREFIX the committed receipt names are used
-# (anchor-projection-<C>.jsonl / anchor-projection-context-<C>.jsonl);
-# pass a different prefix for identity-gate re-runs so the committed
-# receipts are never clobbered (the context sidecar lands at
-# <OUTPREFIX>-context.jsonl, its rows sidecar beside it).
+# THE REALIGNMENT SCORING RUN, one component, an arbitrary receipt
+# prefix and seam width (the chrIV end-to-end runner + the identity
+# gate runner for the window-generalization refactor). The seam
+# switch and width follow the phase-3 corrected mechanism
+# (IMPG_REALIGN_PARALLEL_SEAMS + IMPG_REALIGN_SEAM_WIDTH; "serial"
+# runs the committed serial path). THE RACE DETECTOR IS THE IDENTITY
+# GATE: receipts and all four sidecars must be byte-identical to the
+# serial receipts on every semantic field.
+# Usage: run-realign-run.sh WIDTH|serial COMP "0,1,..." OUTPREFIX [TAG]
 # Supplies the house runner's markers, external RSS poller and 64GiB guard.
 set -uo pipefail
-C="$1"; TAG="${2:-anchorproj}"; OUT="${3:-}"
-if [ -z "$OUT" ]; then
-  OUTMAIN="anchor-projection-$C"; OUTCTX="anchor-projection-context-$C"
-else
-  OUTMAIN="$OUT"; OUTCTX="$OUT-context"
-fi
+W="$1"; C="$2"; LOCI="$3"; OUT="$4"; TAG="${5:-realignrun-${W}-$C}"
 source /home/erikg/impg-genome-inference/build-env.sh
 D=/home/erikg/yeast/genome-balanced-diploid-validation-20260930
 cd "$D" || exit 1
-P="$D/run-$TAG-$C"
+P="$D/run-$TAG"
 rm -f "$P.done" "$P.exit"
 start=$(date +%s)
+SEAMENV=()
+if [ "$W" != "serial" ]; then
+  SEAMENV=(IMPG_REALIGN_PARALLEL_SEAMS=1 IMPG_REALIGN_SEAM_WIDTH="$W")
+fi
 IMPG_CORES="${IMPG_CORES:-0-255}" taskset -c "${IMPG_CORES:-0-255}" nice -n 10 \
-  stdbuf -oL -eL /home/erikg/impg-genome-inference/target/release/examples/partition_anchor_projection \
+  env "${SEAMENV[@]}" \
+  stdbuf -oL -eL /home/erikg/impg-genome-inference/target/release/examples/partition_realign_score \
   --panel /home/erikg/yeast/syng-k63-s8-seed7-acgt-only-pos64/yeast235.syng \
   --routes /home/erikg/yeast/genome-panel-routes-rebuild-v1/routes \
   --partition-graphs "$D/partition-graphs" \
@@ -29,8 +31,10 @@ IMPG_CORES="${IMPG_CORES:-0-255}" taskset -c "${IMPG_CORES:-0-255}" nice -n 10 \
   --census "$D/cosine-diagnostic-scratch/$C/cosine-multi-census.jsonl" \
   --reads "$D/reads.fastq.gz" \
   --derive-cache "$D/realign-derive-cache-chrMT.bin" \
-  --out "$D/$OUTMAIN.jsonl" \
-  --context-out "$D/$OUTCTX.jsonl" \
+  --loci "$LOCI" \
+  --out "$D/$OUT.jsonl" \
+  --exactness-out "$D/$OUT.exactness.jsonl" \
+  --skeleton-out "$D/$OUT.skeleton.jsonl" \
   > "$P.log" 2> "$P.err" &
 pid=$!
 ( while kill -0 "$pid" 2>/dev/null; do

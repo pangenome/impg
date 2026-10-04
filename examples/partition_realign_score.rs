@@ -2082,11 +2082,17 @@ fn main() -> io::Result<()> {
         )?;
     }
 
-    // The partition graph maps; the AXIS partitions (holding a member
-    // row on the component path) ranked by axis-row start map to the
-    // component's window ids in order (slice A's derivation).
+    // The partition graph maps; the AXIS ROWS (the component path's
+    // own member rows) ranked by start map to the component's window
+    // ids in order (slice A's derivation, generalized: one window per
+    // axis ROW, not per partition — a repeat-locality partition can
+    // carry SEVERAL of the component's windows, first measured at
+    // chrIV where 167 windows tile over 158 axis partitions; the
+    // window->partition map may repeat a partition and every window
+    // keeps its OWN axis row, which the truth-fold derivation below
+    // matches exactly).
     let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
-    let mut axis_partitions: Vec<(u32, u64)> = Vec::new();
+    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
     for entry in std::fs::read_dir(&options.partition_graphs)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -2095,18 +2101,18 @@ fn main() -> io::Result<()> {
         }
         let text = std::fs::read_to_string(&path)?;
         let map: PartitionMap = serde_json::from_str(&text)?;
-        if let Some(axis) = map
+        for axis in map
             .members
             .iter()
-            .find(|m| m.path_name == options.component)
+            .filter(|m| m.path_name == options.component)
         {
-            axis_partitions.push((map.partition, axis.start));
+            axis_rows.push((map.partition, axis.start, axis.end));
         }
         maps.insert(map.partition, map);
     }
-    axis_partitions.sort_by_key(|&(partition, start)| (start, partition));
+    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
     let n_windows = if options.frame_audit_only {
-        axis_partitions.len()
+        axis_rows.len()
     } else {
         census_records
             .iter()
@@ -2117,11 +2123,25 @@ fn main() -> io::Result<()> {
             .unwrap_or(0)
     };
     ensure(
-        axis_partitions.len() == n_windows,
-        "axis partition count does not match the census window span",
+        axis_rows.len() == n_windows,
+        "axis row count does not match the census window span",
     )?;
     let window_partition: Vec<u32> =
-        axis_partitions.iter().map(|&(partition, _)| partition).collect();
+        axis_rows.iter().map(|&(partition, _, _)| partition).collect();
+    // The window's OWN axis row (the truth-first fold is matched on
+    // it, window-aware).
+    let window_axis: Vec<(u64, u64)> =
+        axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
+    // The partition membership per window: a partition hosting more
+    // than one of the component's windows cannot attribute an SK1
+    // member row to a window by placement alone (measured at chrIV's
+    // partition 110, whose two SK1 rows are OTHER windows' orthologs)
+    // — the truth-second fold is derived only at single-window
+    // partitions, where the committed path-name rule is exact.
+    let mut windows_of_partition: HashMap<u32, usize> = HashMap::new();
+    for &partition in &window_partition {
+        *windows_of_partition.entry(partition).or_insert(0) += 1;
+    }
     for &locus in &loci {
         ensure((locus as usize) < n_windows, "locus outside the window span")?;
     }
@@ -2800,10 +2820,11 @@ fn main() -> io::Result<()> {
         store.ensure_partition(&map.members, partition)?;
     }
     eprintln!(
-        "[score] phase rows: {} distinct rows over {} partitions, context \
+        "[score] phase rows: {} distinct rows over {} partitions ({} windows), context \
          assembly (canonical-scheme skeletons; fetches {} / {:.1} MB, \
          lane loads {} / {:.1} MB) [{:.1}s]",
         store.folds.len(),
+        windows_of_partition.len(),
         window_partition.len(),
         fetch_calls.load(Ordering::Relaxed) - rows_fetch_calls,
         (fetch_bytes.load(Ordering::Relaxed) - rows_fetch_bytes) as f64 / (1024.0 * 1024.0),
@@ -2855,6 +2876,7 @@ fn main() -> io::Result<()> {
         let mut anatomy_buf: Vec<u8> = Vec::new();
         let window = locus as usize;
         let partition = window_partition[window];
+        let (axis_start, axis_end) = window_axis[window];
         let map = &maps[&partition];
 
         // ------------------------------------------------------- the folds
@@ -3337,18 +3359,50 @@ fn main() -> io::Result<()> {
         let winner_pair = called[0];
 
         // -------------------------------------------------- the truth folds
-        let fold_of_path = |name: &str| -> io::Result<Option<usize>> {
+        // (Window-aware, the chrIV generalization: the truth FIRST
+        // fold is the fold carrying THIS WINDOW'S OWN axis row —
+        // path + interval — because a repeat-locality partition can
+        // host several of the component's windows, each in its own
+        // fold, and the path-name rule would be ambiguous there. The
+        // truth SECOND fold keeps the committed path-name rule, but
+        // only at partitions hosting a SINGLE window: at a
+        // multi-window partition an SK1 member row cannot be
+        // attributed to this window by placement alone (measured:
+        // chrIV partition 110 carries two SK1 rows that are OTHER
+        // windows' orthologs), so no truth pair is fabricated — the
+        // locus is scored with the truth pair inexpressible.)
+        let truth_first = {
             let hits: Vec<usize> = folds
                 .iter()
                 .enumerate()
-                .filter(|(_, fold)| fold.members.iter().any(|m| m.path_name == name))
+                .filter(|(_, fold)| {
+                    fold.members.iter().any(|m| {
+                        m.path_name == options.component
+                            && m.start == axis_start
+                            && m.end == axis_end
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            ensure(hits.len() <= 1, "multiple folds carry the window's axis row")?;
+            hits.first().copied()
+        };
+        let truth_second = if windows_of_partition[&partition] > 1 {
+            None
+        } else {
+            let hits: Vec<usize> = folds
+                .iter()
+                .enumerate()
+                .filter(|(_, fold)| {
+                    fold.members
+                        .iter()
+                        .any(|m| m.path_name == format!("SK1#0#{contig}"))
+                })
                 .map(|(index, _)| index)
                 .collect();
             ensure(hits.len() <= 1, "multiple folds carry the truth path")?;
-            Ok(hits.first().copied())
+            hits.first().copied()
         };
-        let truth_first = fold_of_path(&options.component)?;
-        let truth_second = fold_of_path(&format!("SK1#0#{contig}"))?;
         let truth_pair = match (truth_first, truth_second) {
             (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
             _ => None,

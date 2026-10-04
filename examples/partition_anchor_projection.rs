@@ -822,6 +822,70 @@ fn main() -> io::Result<()> {
         .iter()
         .map(|lane| (lane.name.as_str(), lane.id))
         .collect();
+    // (Phase 1 fetch-path rebuild, ported to the projection layer: a
+    // per-lane in-memory sequence cache over the route sources — the
+    // same lever measured at the scoring instrument (binding fell
+    // 55x at chrI; the per-call random-access AGC crop was ~90% of
+    // the wall). DERIVED CHOICE, unchanged: load each TOUCHED lane
+    // once, whole, through the same validated Sources::fetch path
+    // (one sequential decompression per lane), then serve every crop
+    // as a memory slice of the cached buffer. Byte-identity: the
+    // lane buffer IS the 0..len crop Sources::fetch returns, so every
+    // fetch_seq call returns the same bytes as the per-call AGC
+    // fetch it replaces — the identity gate against the committed
+    // chrMT/chrI receipts proves it end-to-end.)
+    struct LaneCache {
+        sources: routes::Sources,
+        lane_lengths: Vec<u64>,
+        seqs: Vec<std::sync::Mutex<Option<std::sync::Arc<Vec<u8>>>>>,
+        loads: std::sync::atomic::AtomicU64,
+        bytes: std::sync::atomic::AtomicU64,
+        nanos: std::sync::atomic::AtomicU64,
+    }
+    impl LaneCache {
+        fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+            let started = Instant::now();
+            let mut slot = self.seqs[source].lock().unwrap();
+            if let Some(seq) = slot.as_ref() {
+                return Ok(std::sync::Arc::clone(seq));
+            }
+            let len = self.lane_lengths[source];
+            let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
+            self.loads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.bytes
+                .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+            self.nanos.fetch_add(
+                started.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            *slot = Some(std::sync::Arc::clone(&seq));
+            Ok(seq)
+        }
+        fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
+            // The Sources::fetch contract, mirrored exactly.
+            ensure(
+                source < self.lane_lengths.len()
+                    && start < end
+                    && end <= self.lane_lengths[source],
+                "invalid source crop",
+            )?;
+            let lane = self.lane(source)?;
+            Ok(lane[start as usize..end as usize].to_vec())
+        }
+    }
+    let lane_cache = LaneCache {
+        lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
+        sources,
+        seqs: (0..graph.lanes.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect(),
+        loads: std::sync::atomic::AtomicU64::new(0),
+        bytes: std::sync::atomic::AtomicU64::new(0),
+        nanos: std::sync::atomic::AtomicU64::new(0),
+    };
+    let fetch_calls = std::sync::atomic::AtomicU64::new(0);
+    let fetch_bytes = std::sync::atomic::AtomicU64::new(0);
     let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
         let path_idx = *path_of_name
             .get(name)
@@ -834,7 +898,10 @@ fn main() -> io::Result<()> {
         if lo >= hi {
             return Ok(Vec::new());
         }
-        sources.fetch(source, lo, hi)
+        fetch_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = lane_cache.fetch(source, lo, hi)?;
+        fetch_bytes.fetch_add(seq.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(seq)
     };
 
     // The census receipt.
@@ -853,11 +920,15 @@ fn main() -> io::Result<()> {
         "census record ids are not dense",
     )?;
 
-    // The partition graph maps; the AXIS partitions (holding a member
-    // row on the component path) ranked by axis-row start map to the
-    // component's window ids in order.
+    // The partition graph maps; the AXIS ROWS (the component path's
+    // own member rows) ranked by start map to the component's window
+    // ids in order. One window per axis ROW, not per partition: a
+    // repeat-locality partition can carry SEVERAL of the component's
+    // windows (first measured at chrIV, where 167 windows tile over
+    // 158 axis partitions), so the window->partition map may repeat
+    // a partition and every window keeps its OWN axis row.
     let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
-    let mut axis_partitions: Vec<(u32, u64)> = Vec::new();
+    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
     for entry in std::fs::read_dir(&options.partition_graphs)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -866,16 +937,16 @@ fn main() -> io::Result<()> {
         }
         let text = std::fs::read_to_string(&path)?;
         let map: PartitionMap = serde_json::from_str(&text)?;
-        if let Some(axis) = map
+        for axis in map
             .members
             .iter()
-            .find(|m| m.path_name == options.component)
+            .filter(|m| m.path_name == options.component)
         {
-            axis_partitions.push((map.partition, axis.start));
+            axis_rows.push((map.partition, axis.start, axis.end));
         }
         maps.insert(map.partition, map);
     }
-    axis_partitions.sort_by_key(|&(partition, start)| (start, partition));
+    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
     let n_windows = census_records
         .iter()
         .flat_map(|line| line.occurrences.iter())
@@ -884,16 +955,20 @@ fn main() -> io::Result<()> {
         .map(|w| w as usize + 1)
         .unwrap_or(0);
     ensure(
-        axis_partitions.len() == n_windows,
-        "axis partition count does not match the census window span",
+        axis_rows.len() == n_windows,
+        "axis row count does not match the census window span",
     )?;
     let window_partition: Vec<u32> =
-        axis_partitions.iter().map(|&(partition, _)| partition).collect();
+        axis_rows.iter().map(|&(partition, _, _)| partition).collect();
+    let distinct_axis_partitions: std::collections::BTreeSet<u32> =
+        window_partition.iter().copied().collect();
     eprintln!(
-        "[anchor] inputs: {} census records, k {k}, {} windows, axis partitions {:?}",
+        "[anchor] inputs: {} census records, k {k}, {} windows over {} axis \
+         partitions ({} windows share a partition)",
         census_records.len(),
         n_windows,
-        window_partition,
+        distinct_axis_partitions.len(),
+        n_windows - distinct_axis_partitions.len(),
     );
 
     // ------------------------------------- the read-record re-derivation
@@ -1877,6 +1952,15 @@ fn main() -> io::Result<()> {
          {context_rows} traversing rows, {context_lookups} per-base lookups",
     );
     rss.probe("context_sample")?;
+    eprintln!(
+        "[anchor] fetch path: {} calls / {:.1} MB served from {} lane loads \
+         / {:.1} MB ({:.1}s in loads)",
+        fetch_calls.load(std::sync::atomic::Ordering::Relaxed),
+        fetch_bytes.load(std::sync::atomic::Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
+        lane_cache.loads.load(std::sync::atomic::Ordering::Relaxed),
+        lane_cache.bytes.load(std::sync::atomic::Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
+        lane_cache.nanos.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+    );
     eprintln!("[anchor] done in {:.1}s", started.elapsed().as_secs_f64(),);
     Ok(())
 }
