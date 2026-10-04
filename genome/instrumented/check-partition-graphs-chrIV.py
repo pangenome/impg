@@ -484,7 +484,7 @@ def phase6_verdicts(names, axis, by_path, build, hits, flagged, spectrum):
     axis_partitions = {p for _, _, p in axis}
     sk1_rows = by_path.get(TRUTH1_NAME, ())
     check(
-        survey["loci"] == len(axis) == 167
+        survey["loci"] == len(axis)
         and survey["axis_partitions"] == len(axis_partitions)
         and survey["s288c_rows"] == len(by_path.get(TRUTH0_NAME, ()))
         and survey["sk1_rows"] == len(sk1_rows)

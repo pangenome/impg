@@ -1106,3 +1106,20 @@ whole-genome table is emitted by
 mid-fleet; pending components reported as pending). Assessment-side
 only; no thresholds; no scoreboard change; serial within component
 where the recipe requires it.
+
+### chrVI — the first fleet component closed end-to-end (2026-11-06)
+
+The chrIV recipe, all gates: survey 47-partition build set / 29 loci;
+twins AAA#0/SGDref#chrVI (100% exact) + ALH_1b/ALH_1c (interval-close,
+the CLL class); census IN-AXIS 16 / NEIGHBOR 8 / FOREIGN 5 / CONTIG-END
+0; anchor 191s (peak 3.9GB); serial base 67s (8.4GB); 4-wide run of
+record 62s (9.6GB), byte-identity gate passed (phase 8t vs the serial
+receipts); anchor checker ALL PHASES PASS (59,482,753 checks); realign
+checker ALL PHASES PASS; graph checker ALL PHASES PASS. THE NUMBERS:
+25 of 29 loci truth-pair-expressible under the path-domain convention,
+TRUTH RANK-1 AT 15 (in-axis 11/16, tiled-elsewhere-neighbor 4/9); the
+windowed frame's 2 old wins BOTH HOLD (no prediction violations), 23
+loci newly expressible; the largest locus L28 (partition 376: 30,496
+units, 8,778 classes) ranks the truth 525th — the repeat-domain
+residual class. Census wall 937s (peak 23.1GB). The per-locus table:
+`realign-chrVI-tables.txt` beside the receipts.
