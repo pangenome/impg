@@ -1146,3 +1146,10 @@ gate passed. All three checkers ALL PHASES PASS (anchor 81,539,693;
 realign 11,431,917/0; graph). TRUTH RANK-1 AT 25 OF 50 EXPRESSIBLE
 (in-axis 23/44, tiled-elsewhere-neighbor 2/6); table at
 `realign-chrVIII-tables.txt`.
+
+The chrIII phase-8 record (the honest old-wins story): the windowed
+frame's 2 old wins became 4 rank-1 loci (locus 4 HOLDS), and locus 5
+is THE FLEET'S FIRST PREDICTION VIOLATION — an old win LOST under the
+realignment instrument (the chrI L6/L12 regression class, a named
+measured finding about the instruments, never a receipt failure).
+chrVIII: all 6 old wins HOLD, 12 rank-1 total.
