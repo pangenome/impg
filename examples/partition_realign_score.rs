@@ -828,7 +828,7 @@ fn canonical_scheme_steps(
 #[allow(clippy::too_many_arguments)]
 fn canonical_steps_overlapping(
     panel: &SyngIndex,
-    fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    fetch: &(dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>> + Sync),
     path_name: &str,
     start: u64,
     end: u64,
@@ -1023,7 +1023,7 @@ struct RowFold {
 struct RowStore<'a> {
     panel: &'a SyngIndex,
     path_of_name: &'a HashMap<String, usize>,
-    fetch: &'a dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    fetch: &'a (dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>> + Sync),
     k: u64,
     /// The identity gate: keep the stored path walk as the pin
     /// skeleton (env IMPG_REALIGN_STORED_WALK_SKELETON; assessment-side
@@ -1040,7 +1040,7 @@ impl<'a> RowStore<'a> {
     fn new(
         panel: &'a SyngIndex,
         path_of_name: &'a HashMap<String, usize>,
-        fetch: &'a dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+        fetch: &'a (dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>> + Sync),
         k: u64,
         stored_frame: bool,
     ) -> Self {
@@ -1853,6 +1853,17 @@ fn main() -> io::Result<()> {
     let started = Instant::now();
     let options = Options::parse();
     let rss = RssGuard::new(options.rss_budget_gib);
+    // (Phase 3 — the parallelism pilot: THE SEAM SWITCH. The committed
+    // default is the serial code path — byte-for-byte the phase-1
+    // behavior. With IMPG_REALIGN_PARALLEL_SEAMS set, the two
+    // measured-dominant seams (the per-record binding loop and the
+    // per-locus loop) map over the rayon pool; the pool width is
+    // RAYON_NUM_THREADS — the ladder's rung. The seam bodies are pure
+    // per-record / per-locus computations whose results are collected
+    // in iteration order, so the receipts are thread-interleaving-
+    // independent BY CONSTRUCTION; the byte-identity gate against the
+    // serial receipts is the race detector.)
+    let seam_parallel = std::env::var("IMPG_REALIGN_PARALLEL_SEAMS").is_ok();
     let loci: Vec<u32> = options
         .loci
         .split(',')
@@ -2424,22 +2435,42 @@ fn main() -> io::Result<()> {
     // the top level. The fetch is performed once per (occurrence,
     // candidate) below, covering all three origin shifts.
     let mut census_key: Vec<Option<u32>> = vec![None; census_records.len()];
-    let mut record_shifts: HashMap<usize, Vec<i64>> = HashMap::new();
-    for &record in &pilot_records {
+    let mut record_shifts: Vec<Vec<i64>> = vec![Vec::new(); census_records.len()];
+    // (Phase 3 — the parallelism pilot, SEAM 1: the per-record binding
+    // loop. The body below is a PURE function of the record: it reads
+    // only immutable shared state (the census lines, the key indexes,
+    // the derive cache, the panel, the reads) plus the thread-safe
+    // fetch path (the atomic fetch counters and the mutex-per-lane
+    // LaneCache, whose loads are serialized per lane by construction
+    // and idempotent), and writes only its own result slot. Results
+    // are collected in pilot_records order and merged serially, so
+    // the bound keys and shifts are thread-interleaving-independent
+    // by construction; the serial path is the committed phase-1 code
+    // path with identical semantics, and the byte-identity gate
+    // against the serial receipts is the race detector.)
+    struct BindOne {
+        key: Option<u32>,
+        shifts: Vec<i64>,
+        occurrences: u64,
+        candidates: u64,
+        shaped_keys: Vec<u32>,
+        timers: BindTimers,
+        steps_seconds: f64,
+    }
+    let bind_one = |record: usize| -> io::Result<BindOne> {
         let line = &census_records[record];
         let occ = line
             .occurrences
             .first()
             .ok_or_else(|| invalid("census record has no occurrences"))?;
-        bind_occurrences += line.occurrences.len() as u64;
+        let occurrences = line.occurrences.len() as u64;
         let steps_started = Instant::now();
         let steps = canonical_steps_near(occ.path, occ.start)?
             .into_iter()
             .filter(|&(bp, _)| bp == occ.start)
             .map(|(_, node)| node)
             .collect::<Vec<i32>>();
-        bind_steps_seconds += steps_started.elapsed().as_secs_f64();
-        bind_steps_calls += 1;
+        let steps_seconds = steps_started.elapsed().as_secs_f64();
         ensure(!steps.is_empty(), "census occurrence start has no panel step")?;
         let mut candidates: BTreeSet<u32> = BTreeSet::new();
         for &step in &steps {
@@ -2455,8 +2486,15 @@ fn main() -> io::Result<()> {
                 }
             }
         }
-        bind_candidates += candidates.len() as u64;
+        let candidates_count = candidates.len() as u64;
         let shifts = [0i64, 1, -1];
+        let mut timers = BindTimers {
+            shape_seconds: 0.0,
+            verify_seconds: 0.0,
+            shape_calls: 0,
+            verify_calls: 0,
+            range_fetches: 0,
+        };
         let verify_all = |key: u32, t: &mut BindTimers| -> io::Result<Option<Vec<i64>>> {
             let shape_started = Instant::now();
             let shape = key_shape(key, &key_tokens, &key_reads, &read_records, k)?;
@@ -2501,9 +2539,13 @@ fn main() -> io::Result<()> {
             Ok(Some(per_occurrence))
         };
         let mut surviving: Vec<(u32, Vec<i64>)> = Vec::new();
+        // Every CANDIDATE key is shaped before its verify (the serial
+        // phase-1 code inserted each candidate into bind_shaped_keys
+        // before the verify, surviving or not — the SET is the
+        // semantic, collected here and unioned serially in the merge).
+        let shaped_keys: Vec<u32> = candidates.iter().copied().collect();
         for key in candidates {
-            bind_shaped_keys.insert(key);
-            if let Some(per_occurrence) = verify_all(key, &mut bind_timers)? {
+            if let Some(per_occurrence) = verify_all(key, &mut timers)? {
                 surviving.push((key, per_occurrence));
             }
         }
@@ -2511,8 +2553,40 @@ fn main() -> io::Result<()> {
             surviving.len() == 1,
             "census record has no unique verifying key",
         )?;
-        census_key[record] = Some(surviving[0].0);
-        record_shifts.insert(record, surviving.swap_remove(0).1);
+        Ok(BindOne {
+            key: Some(surviving[0].0),
+            shifts: surviving.swap_remove(0).1,
+            occurrences,
+            candidates: candidates_count,
+            shaped_keys,
+            timers,
+            steps_seconds,
+        })
+    };
+    let bound: Vec<BindOne> = if seam_parallel {
+        pilot_records
+            .par_iter()
+            .map(|&record| bind_one(record))
+            .collect::<io::Result<Vec<_>>>()?
+    } else {
+        pilot_records
+            .iter()
+            .map(|&record| bind_one(record))
+            .collect::<io::Result<Vec<_>>>()?
+    };
+    for (&record, one) in pilot_records.iter().zip(bound) {
+        census_key[record] = one.key;
+        record_shifts[record] = one.shifts;
+        bind_occurrences += one.occurrences;
+        bind_candidates += one.candidates;
+        bind_steps_seconds += one.steps_seconds;
+        bind_steps_calls += 1;
+        bind_shaped_keys.extend(one.shaped_keys);
+        bind_timers.shape_seconds += one.timers.shape_seconds;
+        bind_timers.verify_seconds += one.timers.verify_seconds;
+        bind_timers.shape_calls += one.timers.shape_calls;
+        bind_timers.verify_calls += one.timers.verify_calls;
+        bind_timers.range_fetches += one.timers.range_fetches;
     }
     eprintln!(
         "[score] pilot records bound: {} ({:.1}s)",
@@ -2677,9 +2751,41 @@ fn main() -> io::Result<()> {
     let mut total_factorized_checked = 0u64;
     let mut total_factorized_equal = 0u64;
     let mut loci_seconds_total = 0.0f64;
+    let skeleton_enabled = skeleton.is_some();
+    let anatomy_enabled = anatomy.is_some();
 
-    for &locus in &loci {
+    // (Phase 3 — the parallelism pilot, SEAM 2: the per-locus loop.
+    // The body below is a PURE function of the locus: it reads only
+    // immutable shared state (the partition maps, the assembled row
+    // store, the census lines, the bound keys/shifts/variants, the
+    // reads, the derive cache, the panel) plus the thread-safe fetch
+    // path (atomic counters; the mutex-per-lane LaneCache) and the
+    // read-only RSS guard — and it writes only its own per-locus
+    // buffers. Every sidecar line is buffered per locus and written
+    // in LOCUS ORDER after the loop, so parallel execution cannot
+    // interleave lines and the receipts are thread-interleaving-
+    // independent by construction. The serial path is the committed
+    // phase-1 code path; the byte-identity gate against the serial
+    // receipts is the race detector.)
+    struct LocusOutput {
+        skeleton: Vec<u8>,
+        exactness: Vec<u8>,
+        records: Vec<u8>,
+        ingredients: Vec<u8>,
+        report: Vec<u8>,
+        anatomy: Vec<u8>,
+        factorized_checked: u64,
+        factorized_equal: u64,
+        locus_seconds: f64,
+    }
+    let compute_locus = |locus: u32| -> io::Result<LocusOutput> {
         let locus_started = Instant::now();
+        let mut skeleton_buf: Vec<u8> = Vec::new();
+        let mut exactness_buf: Vec<u8> = Vec::new();
+        let mut records_buf: Vec<u8> = Vec::new();
+        let mut ingredients_buf: Vec<u8> = Vec::new();
+        let mut report_buf: Vec<u8> = Vec::new();
+        let mut anatomy_buf: Vec<u8> = Vec::new();
         let window = locus as usize;
         let partition = window_partition[window];
         let map = &maps[&partition];
@@ -2784,7 +2890,7 @@ fn main() -> io::Result<()> {
         let mut skeleton_dropped = 0u64;
         let mut skeleton_forward = 0u64;
         let mut skeleton_reverse = 0u64;
-        if let Some(writer) = &mut skeleton {
+        if skeleton_enabled {
             for (fold_index, fold) in folds.iter().enumerate() {
                 let first = &fold.members[0];
                 let path_idx = path_of_name[&first.path_name];
@@ -2806,7 +2912,7 @@ fn main() -> io::Result<()> {
                     skeleton_affected += 1;
                 }
                 serde_json::to_writer(
-                    &mut *writer,
+                    &mut skeleton_buf,
                     &json!({
                         "locus": locus,
                         "partition": partition,
@@ -2828,9 +2934,8 @@ fn main() -> io::Result<()> {
                         "kept_reverse": diff.kept_reverse,
                     }),
                 )?;
-                writeln!(writer)?;
+                skeleton_buf.push(b'\n');
             }
-            writer.flush()?;
         }
         eprintln!(
             "[score] locus {locus}: partition {partition}, {} members -> {n_folds} folds [{:.1}s]",
@@ -2879,7 +2984,7 @@ fn main() -> io::Result<()> {
                 .canonical,
                 k,
             );
-            let shifts = &record_shifts[&record];
+            let shifts = &record_shifts[record];
             let mut data = TouchingData {
                 orientations: BTreeSet::new(),
                 covered_nodes: BTreeSet::new(),
@@ -3124,8 +3229,6 @@ fn main() -> io::Result<()> {
         let edge_discarded: u64 = scored.iter().map(|s| s.edge_discarded).sum();
         let no_pin: u64 = scored.iter().map(|s| s.no_pin_records).sum();
         let abstained_hull_bp: u64 = scored.iter().map(|s| s.abstained_hull_bp).sum();
-        total_factorized_checked += factorized_checked;
-        total_factorized_equal += factorized_equal;
         ensure(
             factorized_checked == factorized_equal,
             &format!(
@@ -3528,7 +3631,7 @@ fn main() -> io::Result<()> {
             }
             let read = &reads[unit.read];
             serde_json::to_writer(
-                &mut exactness,
+                &mut exactness_buf,
                 &json!({
                     "locus": locus,
                     "unit": unit_index,
@@ -3546,7 +3649,7 @@ fn main() -> io::Result<()> {
                     "placements": placements,
                 }),
             )?;
-            writeln!(exactness)?;
+            exactness_buf.push(b'\n');
         }
         let exactness_seconds = exactness_started.elapsed().as_secs_f64();
         eprintln!(
@@ -3571,7 +3674,7 @@ fn main() -> io::Result<()> {
         // construction), the FULL-READ match at each donor
         // occurrence: the generated-elsewhere evidence. Pure
         // emission; the scoring is unchanged.)
-        let anatomy_seconds = if let Some(writer) = &mut anatomy {
+        let anatomy_seconds = if anatomy_enabled {
             let anatomy_started = Instant::now();
             let (winner_first, winner_second) = winner_pair;
             let mut anatomy_folds: Vec<usize> = vec![winner_first, winner_second];
@@ -3597,7 +3700,7 @@ fn main() -> io::Result<()> {
                 let canonical =
                     decode_record_tokens(&key_tokens[census_key[record].unwrap() as usize])?;
                 let line = &census_records[record];
-                let shifts = &record_shifts[&record];
+                let shifts = &record_shifts[record];
                 let span = walk_span(&canonical, k);
                 let class = match (winner_places_unit(u), truth_places_unit(u)) {
                     (true, false) => "winner_only",
@@ -3825,7 +3928,7 @@ fn main() -> io::Result<()> {
                 }
                 let read = &reads[unit.read];
                 serde_json::to_writer(
-                    &mut *writer,
+                    &mut anatomy_buf,
                     &json!({
                         "type": "unit",
                         "locus": locus,
@@ -3843,7 +3946,7 @@ fn main() -> io::Result<()> {
                         "placements": placements,
                     }),
                 )?;
-                writeln!(writer)?;
+                anatomy_buf.push(b'\n');
                 anatomy_units += 1;
             }
             eprintln!(
@@ -3901,11 +4004,11 @@ fn main() -> io::Result<()> {
                 "per_unit": per_unit,
             }));
         }
-        serde_json::to_writer(&mut records_file, &json!({
+        serde_json::to_writer(&mut records_buf, &json!({
             "locus": locus,
             "classes": classes_evidence,
         }))?;
-        writeln!(records_file)?;
+        records_buf.push(b'\n');
 
         // ----------------------------------------------------- the ingredients
         // (Phase 1, lever 3 — the streaming serializer: the ll_matrix is
@@ -3946,20 +4049,20 @@ fn main() -> io::Result<()> {
                 })
             })
             .collect();
-        ingredients.write_all(b"{\"folds\":")?;
-        serde_json::to_writer(&mut ingredients, &folds_json)?;
+        ingredients_buf.write_all(b"{\"folds\":")?;
+        serde_json::to_writer(&mut ingredients_buf, &folds_json)?;
         // The per-unit per-fold log-likelihood matrix (folds x units,
         // row-major; entries at E = no valid anchored placement).
-        ingredients.write_all(b",\"ll_matrix\":")?;
-        serde_json::to_writer(&mut ingredients, &matrix)?;
-        ingredients.write_all(b",\"locus\":")?;
-        serde_json::to_writer(&mut ingredients, &locus)?;
-        ingredients.write_all(b",\"partition\":")?;
-        serde_json::to_writer(&mut ingredients, &partition)?;
-        ingredients.write_all(b",\"units\":")?;
-        serde_json::to_writer(&mut ingredients, &units_json)?;
-        ingredients.write_all(b"}")?;
-        writeln!(ingredients)?;
+        ingredients_buf.write_all(b",\"ll_matrix\":")?;
+        serde_json::to_writer(&mut ingredients_buf, &matrix)?;
+        ingredients_buf.write_all(b",\"locus\":")?;
+        serde_json::to_writer(&mut ingredients_buf, &locus)?;
+        ingredients_buf.write_all(b",\"partition\":")?;
+        serde_json::to_writer(&mut ingredients_buf, &partition)?;
+        ingredients_buf.write_all(b",\"units\":")?;
+        serde_json::to_writer(&mut ingredients_buf, &units_json)?;
+        ingredients_buf.write_all(b"}")?;
+        ingredients_buf.push(b'\n');
         rss.probe(&format!("locus_{locus}_receipts"))?;
 
         // ---------------------------------------------------- the main receipt
@@ -4042,9 +4145,8 @@ fn main() -> io::Result<()> {
             (in_axis, overhang, extension)
         };
         let locus_seconds = locus_started.elapsed().as_secs_f64();
-        loci_seconds_total += locus_seconds;
         let rss_kb = rss.probe(&format!("locus_{locus}"))?;
-        serde_json::to_writer(&mut report, &json!({
+        serde_json::to_writer(&mut report_buf, &json!({
             "locus": locus,
             "partition": partition,
             "model": if stored_frame {
@@ -4166,7 +4268,7 @@ fn main() -> io::Result<()> {
             },
             "rss_kb": rss_kb,
         }))?;
-        writeln!(report)?;
+        report_buf.push(b'\n');
         eprintln!(
             "[score] locus {locus}: receipts/IO (named classes + ingredients + \
              the main receipt) [{:.1}s]",
@@ -4177,6 +4279,45 @@ fn main() -> io::Result<()> {
              truth_rank {:?}, log_gap {log_gap:?}, qual {qual:?} [{locus_seconds:.1}s]",
             truth_rank,
         );
+        Ok(LocusOutput {
+            skeleton: skeleton_buf,
+            exactness: exactness_buf,
+            records: records_buf,
+            ingredients: ingredients_buf,
+            report: report_buf,
+            anatomy: anatomy_buf,
+            factorized_checked,
+            factorized_equal,
+            locus_seconds,
+        })
+    };
+    let outputs: Vec<LocusOutput> = if seam_parallel {
+        loci
+            .par_iter()
+            .map(|&locus| compute_locus(locus))
+            .collect::<io::Result<Vec<_>>>()?
+    } else {
+        loci
+            .iter()
+            .map(|&locus| compute_locus(locus))
+            .collect::<io::Result<Vec<_>>>()?
+    };
+    // The ordered emission: the per-locus buffers are written in LOCUS
+    // ORDER — the receipt line order of the committed serial runs.
+    for output in outputs {
+        if let Some(writer) = skeleton.as_mut() {
+            writer.write_all(&output.skeleton)?;
+        }
+        exactness.write_all(&output.exactness)?;
+        records_file.write_all(&output.records)?;
+        ingredients.write_all(&output.ingredients)?;
+        report.write_all(&output.report)?;
+        if let Some(writer) = anatomy.as_mut() {
+            writer.write_all(&output.anatomy)?;
+        }
+        total_factorized_checked += output.factorized_checked;
+        total_factorized_equal += output.factorized_equal;
+        loci_seconds_total += output.locus_seconds;
     }
 
     report.flush()?;
