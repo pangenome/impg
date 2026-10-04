@@ -826,3 +826,115 @@ What remains for the runtime plan: the parallelism pilot (the next
 stage, not started here) — with binding collapsed to 1.7 s/10.0 s, the
 loci loop and inputs are the next-largest walls, and the
 per-locality work is now dominated by in-memory computation.
+
+## Phase 3 of the runtime plan — the parallelism pilot, measured not assumed (2026-11-06)
+
+The serial-only rule comes from a MEASURED race in the OLD machinery's
+reference-rescore (7-wide and 2-wide both failed, solo passed; the
+race file parked, one line). This instrument is receipt-side and
+partition-local, but the discipline is measure-don't-assume: the race
+detector here is BYTE-IDENTITY — every rung of the width ladder must
+reproduce the committed phase-1 serial receipts on every semantic
+field with all four sidecars byte-identical.
+
+**The seams.** The two natural parallel seams in the phase-1 profile,
+both in `examples/partition_realign_score.rs` (assessment-side; no
+src/ file touched): **seam 1** the per-record binding loop (10.0 s of
+35.4 s at chrI); **seam 2** the per-locus loop (11.4 s at chrI). The
+shared-state proof is compiler-enforced, not asserted: each seam body
+is a pure per-record / per-locus function — every outer capture is an
+immutable shared reference (the panel, the census lines, the key
+indexes, the derive cache, the reads, the partition maps, the
+assembled row store, the bound keys/shifts/variants) or the
+thread-safe fetch path (the `AtomicU64` fetch counters; the
+`LaneCache`'s mutex-per-lane slots, whose loads hold the lane's mutex
+through `Sources::fetch`, so loads are serialized per lane and
+idempotent — no lane can load twice). The `&dyn Fn` row-store fetch
+is widened to `&(dyn Fn + Sync)` and the seam map's bound enforces
+`Sync` at compile time. Every seam result lands in its own pre-sized
+slot read out in item order, and every sidecar line is buffered per
+locus and written in LOCUS ORDER after the loop — the receipts are
+thread-interleaving-independent BY CONSTRUCTION.
+
+**The width semantics, measured twice.** The first attempt put the
+seams on the rayon pool with `RAYON_NUM_THREADS=2`: the chrMT loci
+phase went 1.8 s → 18.5 s. The control experiment isolated two
+stacked effects: (1) the committed "serial" runs were never
+single-threaded in the loci loop — the per-locus
+scoring/classes/spectrum par_iters ride rayon's DEFAULT pool (the
+whole box), and bounding the pool to the rung width silently
+serialized those phases too (serial code at width 2: loci 8.2 s);
+(2) nesting the seam par_iter in the same bounded pool adds
+contention on top (18.5 s). NO RACE — even that pathological run was
+byte-identical. The corrected mechanism (`seam_map`): the seams run
+on DEDICATED scoped std::threads at width N
+(`IMPG_REALIGN_PARALLEL_SEAMS=1 IMPG_REALIGN_SEAM_WIDTH=N`), and from
+a non-rayon thread every inner par_iter installs rayon's global pool —
+the committed inner behavior, unchanged. The committed default (no
+env) is the serial path, byte-for-byte.
+
+**The identity gate, every rung, both components: PASS.** All four
+sidecars byte-identical to the committed phase-1 rebuilt receipts
+(exactness/ingredients/records/skeleton), every semantic field equal
+(only walls/rss_kb differ), binding counters identical (chrI 13,905
+records / 1,415,203 occurrences / 14,629 candidates / 4,247,781
+verify probes over 1,415,927 range fetches / 840 lane loads). No race
+found at any width — the seam bodies touch no mutable shared state.
+
+**The wall ladder (external wall, house runner, 64 GiB guard clean
+everywhere; the poller RSS peak is the honest meter):**
+
+| phase (chrI) | serial (re-baseline) | 2-wide | 4-wide | 8-wide |
+|---|---:|---:|---:|---:|
+| inputs | 7.0 s | 7.1 s | 6.1 s | 6.9 s |
+| quality scan | 2.5 s | 2.6 s | 2.5 s | 2.6 s |
+| derive cache | 1.4 s | 1.3 s | 1.3 s | 1.5 s |
+| **binding (seam 1)** | **9.7 s** | **6.8 s** | **5.5 s** | **5.6 s** |
+| rows/context | 2.5 s | 2.4 s | 2.4 s | 2.3 s |
+| **the loci loop (seam 2)** | **13.1 s** | **14.7 s** | **16.1 s** | **24.2 s** |
+| external wall | **41 s** | **34 s** | **30 s** | **30 s** |
+| poller RSS peak | 5.71 GB | 5.52 GB | 6.26 GB | 6.66 GB |
+
+(chrMT: serial 18 s / 2w 14 s / 4w 14 s / 8w 14 s; binding 1.1 → 0.8
+s; loci 1.8 → 3.2 s at 8w; RSS peaks 2.31 / 2.33 / 1.73 / 1.79 GB —
+the peak's locus alignment shifts with the stride schedule, poller
+sampling noise included. The committed phase-1 reference walls under
+their day's load: chrI 37 s / chrMT 22 s, chrI peak 4.20 GB — the
+re-baseline serial peak reads higher because the emission buffering
+holds the largest ingredients line (~706 MB at L16) in memory before
+the ordered write; the same buffering is in every rung.)
+
+**The honest reading, measured:** the binding seam pays (9.7 s →
+5.5 s, plateauing at the serialized 840-lane load floor — the lane
+loads hold their per-lane mutexes through the decompression); the
+LOCI SEAM IS A WALL LOSS AT EVERY WIDTH (13.1 s → 14.7/16.1/24.2 s)
+because the inner phases already saturate the box's default pool and
+outer concurrency only adds live-loci memory pressure and scheduling
+churn. The whole-instrument gain is 41 s → 30 s at chrI (~1.35x),
+entirely from seam 1. The optimal measured rung is 4-wide; 8-wide
+adds nothing on the wall and costs RSS.
+
+**The scaling projection (EXTRAPOLATION, labeled as such).** A
+chrIV-class chromosome (~1.53 Mb, ~6.7x chrI's window count) under
+the measured per-phase rates projects: binding ~9.7 s x 6.7 ≈ 65 s
+serial, ~37 s at 4-wide (the lane-load floor scales with the touched
+lane set); the loci loop ~13.1 s x 6.7 ≈ 88 s serial (per-locus
+matrix sizes assumed similar; the L16-class large loci dominate).
+The whole genome (16 chromosomes, ~53x chrI) projects ~20 minutes
+serial per full-genome pass and ~17 minutes at 4-wide — the seam
+gain does not compound, because the loci seam is a measured loss and
+the remaining wall (inputs ~6.7 s + quality 2.6 s + derive 1.3 s
+constants + the serialized lane-load floor) is seam-invisible. The
+levers for chrIV-class walls remain algorithmic (the named
+records-sidecar value tree, the per-locus receipts/IO), not seam
+width.
+
+**The gates:** the checker `--timered-base` sweep over every rung's
+receipts (all phases + 8t), plus the three prior modes over their
+committed receipts; unit tests 17/17. Receipts `realign-par-{serial,2,4,8}-{chrMT,chrI}.*`
++ run markers (`run-realignpar-*`) + checker logs (`check-par-*.log`)
+at the validation dir; the committed receipts untouched on disk.
+Runner: `genome/instrumented/run-realign-parallel.sh`. Assessment-side
+only; no thresholds, no tuning constants, no selection swap, no
+scoreboard change, no 502, no PR push; the 64 GiB guard clean
+everywhere.
