@@ -426,6 +426,87 @@ fn physical_forward(orientation: u8, mirror: bool) -> bool {
     (orientation == 0) != mirror
 }
 
+/// The anchor window start under one placement (slice A, verbatim).
+fn anchor_window_start(canonical_pos: u64, start: u64, span: u64, k: u64, orientation: u8) -> u64 {
+    if orientation == 0 {
+        start + canonical_pos
+    } else {
+        start + span - k - canonical_pos
+    }
+}
+
+/// One candidate key's canonical anchor chain with the projection
+/// geometry the binding verifies against (slice A).
+struct KeyShape {
+    canonical: Vec<(i32, u64)>,
+    span: u64,
+    read: usize,
+    mirrored: bool,
+    own_positions: Vec<u64>,
+}
+
+/// The per-shift crop of a hoisted (union-fetched) occurrence range
+/// (phase 1, lever 1): exactly the bytes the pre-rebuild per-shift
+/// fetch returned. All three origin shifts share the high bound
+/// `start + span + 1` (clamped to the path length by `fetch_seq`
+/// before the call) and differ only in the low bound
+/// `max(0, start + shift - 1)`, so from the union buffer — fetched
+/// once per (occurrence, candidate) starting at panel coordinate
+/// `seq_lo` — the per-shift crop is the buffer's tail from the
+/// shift's low bound (empty when that low bound reaches past the
+/// clamped high end, the empty-crop case of the old fetch).
+fn verify_shift_crop<'a>(seq: &'a [u8], seq_lo: u64, occ_start: u64, shift: i64) -> &'a [u8] {
+    let lo = (occ_start as i64 + shift - 1).max(0) as u64;
+    let from = lo.saturating_sub(seq_lo) as usize;
+    seq.get(from..).unwrap_or(&[])
+}
+
+/// Sequence verification of one key at one occurrence (slice A,
+/// verbatim semantics; phase 1 hoisted the fetch): every anchor
+/// window must sit at its projected panel position and equal the
+/// representative read's own k-mer. `seq` is the once-per-
+/// (occurrence, candidate) union range fetch covering all three
+/// origin shifts, starting at panel coordinate `seq_lo`; each shift
+/// verifies against the exact slice its own per-shift fetch
+/// returned before the rebuild (unit-proven; the identity gate
+/// proves the receipts unchanged end-to-end).
+fn verify_key_at(
+    shape: &KeyShape,
+    occ: &CensusOccurrence,
+    reads: &[Vec<u8>],
+    seq: &[u8],
+    seq_lo: u64,
+    k: u64,
+    shift: i64,
+) -> bool {
+    let lo = (occ.start as i64 + shift - 1).max(0) as u64;
+    let seq = verify_shift_crop(seq, seq_lo, occ.start, shift);
+    let origin = occ.start as i64 + shift;
+    let read = &reads[shape.read];
+    let forward = physical_forward(occ.orientation, shape.mirrored);
+    for (j, &(node, canonical_pos)) in shape.canonical.iter().enumerate() {
+        let _ = node;
+        let window_lo =
+            anchor_window_start(canonical_pos, origin as u64, shape.span, k, occ.orientation);
+        let rel_lo = window_lo as i64 - lo as i64;
+        if rel_lo < 0 || rel_lo + k as i64 > seq.len() as i64 {
+            return false;
+        }
+        let window = &seq[rel_lo as usize..(rel_lo + k as i64) as usize];
+        let own_pos = shape.own_positions[j] as usize;
+        let kmer = &read[own_pos..own_pos + k as usize];
+        let ok = if forward {
+            window == kmer
+        } else {
+            revcomp(window) == kmer
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 /// Merge windows (lo, hi): overlapping and exactly-abutting windows
 /// merge; a positive gap splits. Returns the merged intervals.
 fn merge_windows(mut windows: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
@@ -1817,6 +1898,73 @@ fn main() -> io::Result<()> {
         .iter()
         .map(|lane| (lane.name.as_str(), lane.id))
         .collect();
+    // (Phase 1, lever 2 — the call-bound fix: a per-lane in-memory
+    // sequence cache over the route sources. Phase 0 measured the
+    // binding verify loop at ~90%/93% of the whole instrument wall,
+    // CALL-bound at ~129-190us per ~72bp crop — the per-call
+    // random-access seek/decompress of Sources::fetch into the AGC —
+    // and measured the touched subset: one 93.3MB AGC file (3.34GB
+    // uncompressed over 9,901 lanes), of which the exhaustive chrI
+    // run touches 840 occurrence lanes (384.5MB) and the partition-
+    // map member rows 1,286 lanes (514.7MB total). DERIVED CHOICE:
+    // load each touched LANE once, whole, through the same validated
+    // Sources::fetch path (one sequential decompression per lane —
+    // the per-locality batch-prefetch option taken at its natural
+    // locality, the contig; a window/block cache would still pay a
+    // decompression call per 64KB window), then serve every crop as
+    // a memory slice of the cached buffer. Byte-identity: the lane
+    // buffer IS the 0..len crop Sources::fetch returns (length- and
+    // alphabet-validated, uppercased); a crop of it is a crop of the
+    // answer, so every fetch_seq call returns the same bytes as the
+    // per-call AGC fetch it replaces — the identity gate proves it
+    // end-to-end. The cache holds only touched lanes (<= ~515MB at
+    // chrI), never the 3.34GB whole panel.)
+    struct LaneCache {
+        sources: routes::Sources,
+        lane_lengths: Vec<u64>,
+        seqs: Vec<std::sync::Mutex<Option<std::sync::Arc<Vec<u8>>>>>,
+        loads: AtomicU64,
+        bytes: AtomicU64,
+        nanos: AtomicU64,
+    }
+    impl LaneCache {
+        fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+            let started = Instant::now();
+            let mut slot = self.seqs[source].lock().unwrap();
+            if let Some(seq) = slot.as_ref() {
+                return Ok(std::sync::Arc::clone(seq));
+            }
+            let len = self.lane_lengths[source];
+            let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            self.bytes.fetch_add(len, Ordering::Relaxed);
+            self.nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            *slot = Some(std::sync::Arc::clone(&seq));
+            Ok(seq)
+        }
+        fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
+            // The Sources::fetch contract, mirrored exactly.
+            ensure(
+                source < self.lane_lengths.len()
+                    && start < end
+                    && end <= self.lane_lengths[source],
+                "invalid source crop",
+            )?;
+            let lane = self.lane(source)?;
+            Ok(lane[start as usize..end as usize].to_vec())
+        }
+    }
+    let lane_cache = LaneCache {
+        lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
+        sources,
+        seqs: (0..graph.lanes.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect(),
+        loads: AtomicU64::new(0),
+        bytes: AtomicU64::new(0),
+        nanos: AtomicU64::new(0),
+    };
     let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
         let path_idx = *path_of_name
             .get(name)
@@ -1830,7 +1978,7 @@ fn main() -> io::Result<()> {
             return Ok(Vec::new());
         }
         fetch_calls.fetch_add(1, Ordering::Relaxed);
-        let seq = sources.fetch(source, lo, hi)?;
+        let seq = lane_cache.fetch(source, lo, hi)?;
         fetch_bytes.fetch_add(seq.len() as u64, Ordering::Relaxed);
         Ok(seq)
     };
@@ -2169,17 +2317,21 @@ fn main() -> io::Result<()> {
     let binding_started = Instant::now();
     let binding_fetch_calls = fetch_calls.load(Ordering::Relaxed);
     let binding_fetch_bytes = fetch_bytes.load(Ordering::Relaxed);
+    let binding_lane_loads = lane_cache.loads.load(Ordering::Relaxed);
+    let binding_lane_bytes = lane_cache.bytes.load(Ordering::Relaxed);
     struct BindTimers {
         shape_seconds: f64,
         verify_seconds: f64,
         shape_calls: u64,
         verify_calls: u64,
+        range_fetches: u64,
     }
     let mut bind_timers = BindTimers {
         shape_seconds: 0.0,
         verify_seconds: 0.0,
         shape_calls: 0,
         verify_calls: 0,
+        range_fetches: 0,
     };
     let mut bind_steps_seconds = 0.0f64;
     let mut bind_steps_calls = 0u64;
@@ -2220,13 +2372,6 @@ fn main() -> io::Result<()> {
             .entry((last_node, anchor_count))
             .or_default()
             .push(key as u32);
-    }
-    struct KeyShape {
-        canonical: Vec<(i32, u64)>,
-        span: u64,
-        read: usize,
-        mirrored: bool,
-        own_positions: Vec<u64>,
     }
     fn key_shape(
         key: u32,
@@ -2274,54 +2419,10 @@ fn main() -> io::Result<()> {
             own_positions,
         })
     }
-    // Sequence verification of one key at one occurrence (slice A,
-    // verbatim): every anchor window must sit at its projected panel
-    // position and equal the representative read's own k-mer.
-    fn verify_key_at(
-        shape: &KeyShape,
-        occ_path_name: &str,
-        occ: &CensusOccurrence,
-        reads: &[Vec<u8>],
-        fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
-        k: u64,
-        shift: i64,
-    ) -> io::Result<bool> {
-        let lo = (occ.start as i64 + shift - 1).max(0) as u64;
-        let hi = occ.start + shape.span + 1;
-        let seq = fetch(occ_path_name, lo, hi)?;
-        let origin = occ.start as i64 + shift;
-        let read = &reads[shape.read];
-        let forward = physical_forward(occ.orientation, shape.mirrored);
-        for (j, &(node, canonical_pos)) in shape.canonical.iter().enumerate() {
-            let _ = node;
-            let window_lo =
-                anchor_window_start(canonical_pos, origin as u64, shape.span, k, occ.orientation);
-            let rel_lo = window_lo as i64 - lo as i64;
-            if rel_lo < 0 || rel_lo + k as i64 > seq.len() as i64 {
-                return Ok(false);
-            }
-            let window = &seq[rel_lo as usize..(rel_lo + k as i64) as usize];
-            let own_pos = shape.own_positions[j] as usize;
-            let kmer = &read[own_pos..own_pos + k as usize];
-            let ok = if forward {
-                window == kmer
-            } else {
-                revcomp(window) == kmer
-            };
-            if !ok {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-    // The anchor window start under one placement (slice A, verbatim).
-    fn anchor_window_start(canonical_pos: u64, start: u64, span: u64, k: u64, orientation: u8) -> u64 {
-        if orientation == 0 {
-            start + canonical_pos
-        } else {
-            start + span - k - canonical_pos
-        }
-    }
+    // Sequence verification of one key at one occurrence: the hoisted
+    // (phase 1, lever 1) union-range verify — see `verify_key_at` at
+    // the top level. The fetch is performed once per (occurrence,
+    // candidate) below, covering all three origin shifts.
     let mut census_key: Vec<Option<u32>> = vec![None; census_records.len()];
     let mut record_shifts: HashMap<usize, Vec<i64>> = HashMap::new();
     for &record in &pilot_records {
@@ -2364,23 +2465,33 @@ fn main() -> io::Result<()> {
             let mut per_occurrence = Vec::with_capacity(line.occurrences.len());
             for occ in &line.occurrences {
                 let mut found: Vec<i64> = Vec::new();
+                // (Phase 1, lever 1 — hoist the re-fetch: ONE range
+                // fetch per (occurrence, candidate). Phase 0 measured
+                // the three-shift loop as a 3.01x pure re-fetch
+                // redundancy — the three per-shift ranges differ only
+                // in the low bound, all inside
+                // [max(0, start-2), start + span + 1). The union fetch
+                // replaces the three per-shift fetches; each shift
+                // then verifies against the exact slice its own
+                // fetch returned before the rebuild.)
+                let verify_started = Instant::now();
+                let union_lo = (occ.start as i64 - 2).max(0) as u64;
+                let union_hi = occ.start + shape.span + 1;
+                let seq = fetch_seq(
+                    &panel.name_map.path_to_name[occ.path],
+                    union_lo,
+                    union_hi,
+                )?;
                 for &shift in &shifts {
-                    let verify_started = Instant::now();
-                    let verified = verify_key_at(
-                        &shape,
-                        &panel.name_map.path_to_name[occ.path],
-                        occ,
-                        &reads,
-                        &fetch_seq,
-                        k,
-                        shift,
-                    )?;
-                    t.verify_seconds += verify_started.elapsed().as_secs_f64();
+                    let verified =
+                        verify_key_at(&shape, occ, &reads, &seq, union_lo, k, shift);
                     t.verify_calls += 1;
                     if verified {
                         found.push(shift);
                     }
                 }
+                t.verify_seconds += verify_started.elapsed().as_secs_f64();
+                t.range_fetches += 1;
                 match found.len() {
                     0 => return Ok(None),
                     1 => per_occurrence.push(found[0]),
@@ -2410,21 +2521,25 @@ fn main() -> io::Result<()> {
     );
     eprintln!(
         "[score] phase binding: {} records / {} occurrences / {} candidate keys \
-         ({} distinct shaped) / {} shape derivations / {} verify probes; \
-         steps {:.1}s ({} extractions), shapes {:.1}s, verify {:.1}s, \
-         fetches {} ({:.1} MB), phase {:.1}s",
+         ({} distinct shaped) / {} shape derivations / {} verify probes over \
+         {} range fetches; steps {:.1}s ({} extractions), shapes {:.1}s, verify \
+         {:.1}s, fetches {} ({:.1} MB), lane loads {} ({:.1} MB), phase {:.1}s",
         pilot_records.len(),
         bind_occurrences,
         bind_candidates,
         bind_shaped_keys.len(),
         bind_timers.shape_calls,
         bind_timers.verify_calls,
+        bind_timers.range_fetches,
         bind_steps_seconds,
         bind_steps_calls,
         bind_timers.shape_seconds,
         bind_timers.verify_seconds,
         fetch_calls.load(Ordering::Relaxed) - binding_fetch_calls,
         (fetch_bytes.load(Ordering::Relaxed) - binding_fetch_bytes) as f64 / (1024.0 * 1024.0),
+        lane_cache.loads.load(Ordering::Relaxed) - binding_lane_loads,
+        (lane_cache.bytes.load(Ordering::Relaxed) - binding_lane_bytes) as f64
+            / (1024.0 * 1024.0),
         binding_started.elapsed().as_secs_f64(),
     );
     let binding_seconds = binding_started.elapsed().as_secs_f64();
@@ -2535,6 +2650,8 @@ fn main() -> io::Result<()> {
     let rows_started = Instant::now();
     let rows_fetch_calls = fetch_calls.load(Ordering::Relaxed);
     let rows_fetch_bytes = fetch_bytes.load(Ordering::Relaxed);
+    let rows_lane_loads = lane_cache.loads.load(Ordering::Relaxed);
+    let rows_lane_bytes = lane_cache.bytes.load(Ordering::Relaxed);
     for &partition in &window_partition {
         let map = maps
             .get(&partition)
@@ -2543,12 +2660,15 @@ fn main() -> io::Result<()> {
     }
     eprintln!(
         "[score] phase rows: {} distinct rows over {} partitions, context \
-         assembly (canonical-scheme skeletons; fetches {} / {:.1} MB) \
-         [{:.1}s]",
+         assembly (canonical-scheme skeletons; fetches {} / {:.1} MB, \
+         lane loads {} / {:.1} MB) [{:.1}s]",
         store.folds.len(),
         window_partition.len(),
         fetch_calls.load(Ordering::Relaxed) - rows_fetch_calls,
         (fetch_bytes.load(Ordering::Relaxed) - rows_fetch_bytes) as f64 / (1024.0 * 1024.0),
+        lane_cache.loads.load(Ordering::Relaxed) - rows_lane_loads,
+        (lane_cache.bytes.load(Ordering::Relaxed) - rows_lane_bytes) as f64
+            / (1024.0 * 1024.0),
         rows_started.elapsed().as_secs_f64(),
     );
     let rows_seconds = rows_started.elapsed().as_secs_f64();
@@ -3788,32 +3908,57 @@ fn main() -> io::Result<()> {
         writeln!(records_file)?;
 
         // ----------------------------------------------------- the ingredients
-        serde_json::to_writer(&mut ingredients, &json!({
-            "locus": locus,
-            "partition": partition,
-            "folds": folds.iter().map(|fold| json!({
-                "members": fold.members.iter().map(|m| json!({
-                    "path_name": m.path_name, "start": m.start, "end": m.end,
-                })).collect::<Vec<_>>(),
-                "length": fold.len,
-                "sequence": String::from_utf8(fold.seq.clone()).unwrap(),
-                "walk": fold.walk.iter().map(|&(bp, node)| json!([bp, node]))
-                    .collect::<Vec<_>>(),
-                "nodes": fold.nodes,
-                "edges": fold.edges,
-            })).collect::<Vec<_>>(),
-            "units": units.iter().map(|unit| json!({
-                "record": unit.record,
-                "variant": unit.variant,
-                "mirror": if unit.mirror { 1 } else { 0 },
-                "w_lo": unit.w_lo,
-                "count": unit.count,
-                "read": String::from_utf8(reads[unit.read].clone()).unwrap(),
-            })).collect::<Vec<_>>(),
-            // The per-unit per-fold log-likelihood matrix (folds x
-            // units, row-major; null = no valid anchored placement).
-            "ll_matrix": matrix,
-        }))?;
+        // (Phase 1, lever 3 — the streaming serializer: the ll_matrix is
+        // serialized DIRECTLY from the typed matrix, not materialized
+        // as a serde_json value tree first. Phase 0 measured the L16
+        // tree at +1.15GB live RSS over the scoring baseline (34.5M
+        // entries); the streamed bytes are identical — the json! macro
+        // emits object keys in serde_json's default (non-preserved)
+        // map order, i.e. alphabetical, and every field here
+        // serializes through the same writer in that same order. The
+        // identity gate proves the sidecar byte-identical.)
+        let folds_json: Vec<serde_json::Value> = folds
+            .iter()
+            .map(|fold| {
+                json!({
+                    "members": fold.members.iter().map(|m| json!({
+                        "path_name": m.path_name, "start": m.start, "end": m.end,
+                    })).collect::<Vec<_>>(),
+                    "length": fold.len,
+                    "sequence": String::from_utf8(fold.seq.clone()).unwrap(),
+                    "walk": fold.walk.iter().map(|&(bp, node)| json!([bp, node]))
+                        .collect::<Vec<_>>(),
+                    "nodes": fold.nodes,
+                    "edges": fold.edges,
+                })
+            })
+            .collect();
+        let units_json: Vec<serde_json::Value> = units
+            .iter()
+            .map(|unit| {
+                json!({
+                    "record": unit.record,
+                    "variant": unit.variant,
+                    "mirror": if unit.mirror { 1 } else { 0 },
+                    "w_lo": unit.w_lo,
+                    "count": unit.count,
+                    "read": String::from_utf8(reads[unit.read].clone()).unwrap(),
+                })
+            })
+            .collect();
+        ingredients.write_all(b"{\"folds\":")?;
+        serde_json::to_writer(&mut ingredients, &folds_json)?;
+        // The per-unit per-fold log-likelihood matrix (folds x units,
+        // row-major; entries at E = no valid anchored placement).
+        ingredients.write_all(b",\"ll_matrix\":")?;
+        serde_json::to_writer(&mut ingredients, &matrix)?;
+        ingredients.write_all(b",\"locus\":")?;
+        serde_json::to_writer(&mut ingredients, &locus)?;
+        ingredients.write_all(b",\"partition\":")?;
+        serde_json::to_writer(&mut ingredients, &partition)?;
+        ingredients.write_all(b",\"units\":")?;
+        serde_json::to_writer(&mut ingredients, &units_json)?;
+        ingredients.write_all(b"}")?;
         writeln!(ingredients)?;
         rss.probe(&format!("locus_{locus}_receipts"))?;
 
@@ -4049,6 +4194,12 @@ fn main() -> io::Result<()> {
         "[score] complete: loci {loci:?}, factorized placements {total_factorized_equal}/\
          {total_factorized_checked} exact, total {:.1}s",
         started.elapsed().as_secs_f64(),
+    );
+    eprintln!(
+        "[score] lane cache: {} lanes loaded ({:.1} MB, {:.1}s of load time)",
+        lane_cache.loads.load(Ordering::Relaxed),
+        lane_cache.bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
+        lane_cache.nanos.load(Ordering::Relaxed) as f64 / 1e9,
     );
     eprintln!(
         "[score] phase summary: inputs {inputs_seconds:.1}s, quality (FASTQ scan) \
@@ -4480,4 +4631,131 @@ mod tests {
         assert_eq!(steps, vec![(6, -13, 1u8)]);
     }
 
+    /// The pre-rebuild per-shift verification (phase 0's code, the
+    /// reference for the hoisted union-range verify): one fetch per
+    /// (occurrence x shift), with the fetch closure carrying the
+    /// fetch_seq/Sources clamping semantics (high bound clamped to the
+    /// path length; empty crop when the low bound reaches it).
+    fn old_verify_key_at(
+        shape: &KeyShape,
+        occ: &CensusOccurrence,
+        reads: &[Vec<u8>],
+        fetch: &dyn Fn(u64, u64) -> Vec<u8>,
+        k: u64,
+        shift: i64,
+    ) -> bool {
+        let lo = (occ.start as i64 + shift - 1).max(0) as u64;
+        let hi = occ.start + shape.span + 1;
+        let seq = fetch(lo, hi);
+        let origin = occ.start as i64 + shift;
+        let read = &reads[shape.read];
+        let forward = physical_forward(occ.orientation, shape.mirrored);
+        for (j, &(node, canonical_pos)) in shape.canonical.iter().enumerate() {
+            let _ = node;
+            let window_lo =
+                anchor_window_start(canonical_pos, origin as u64, shape.span, k, occ.orientation);
+            let rel_lo = window_lo as i64 - lo as i64;
+            if rel_lo < 0 || rel_lo + k as i64 > seq.len() as i64 {
+                return false;
+            }
+            let window = &seq[rel_lo as usize..(rel_lo + k as i64) as usize];
+            let own_pos = shape.own_positions[j] as usize;
+            let kmer = &read[own_pos..own_pos + k as usize];
+            let ok = if forward {
+                window == kmer
+            } else {
+                revcomp(window) == kmer
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn hoisted_verify_reproduces_the_per_shift_fetch_verification() {
+        // Phase 1, lever 1: the once-per-(occurrence, candidate) union
+        // range fetch must reproduce, for every origin shift, exactly
+        // the verification the three per-shift fetches performed —
+        // including the edge cases where the clamped crop is short or
+        // empty (occurrence start near 0; range overhanging the path
+        // end), both orientations, both mirror states, and verdicts of
+        // both true and false.
+        let k = 4u64;
+        let path: Vec<u8> = b"ACGTACGTACGTTTGACACGTGCATATCGGATTCGCA".to_vec();
+        let path_len = path.len() as u64;
+        let fetch = |lo: u64, hi: u64| -> Vec<u8> {
+            let hi = hi.min(path_len);
+            if lo >= hi {
+                Vec::new()
+            } else {
+                path[lo as usize..hi as usize].to_vec()
+            }
+        };
+        // anchors at canonical positions 0 and 8, own k-mers at read
+        // positions 2 and 10; span 8 - 0 + 4 = 12.
+        let make_shape = |mirrored: bool| KeyShape {
+            canonical: vec![(7, 0), (9, 8)],
+            span: 12,
+            read: 0,
+            mirrored,
+            own_positions: vec![2, 10],
+        };
+        let mut read = path[2..16].to_vec();
+        let reads_match = vec![read.clone()];
+        read[3] = match read[3] {
+            b'A' => b'T',
+            other => b'A' + (other == b'A') as u8,
+        };
+        let reads_mismatch = vec![read];
+        // Interior starts verify true (orientation 0, unmirrored);
+        // near-zero starts exercise the low-bound clamp, path-end
+        // starts exercise the high-bound clamp and the empty crop.
+        for start in [0u64, 1, 2, 3, 5, 20, 30, 33, 34, 36, 38, 39, 41] {
+            for orientation in [0u8, 1] {
+                for mirrored in [false, true] {
+                    let occ = CensusOccurrence {
+                        path: 0,
+                        start,
+                        orientation,
+                        partitions: vec![],
+                        intervals: vec![],
+                    };
+                    let shape = make_shape(mirrored);
+                    for reads in [&reads_match, &reads_mismatch] {
+                        // The union range fetch (the hoist): one fetch
+                        // covering all three shifts' ranges.
+                        let union_lo = (occ.start as i64 - 2).max(0) as u64;
+                        let union_hi = occ.start + shape.span + 1;
+                        let seq = fetch(union_lo, union_hi);
+                        for shift in [-1i64, 0, 1] {
+                            assert_eq!(
+                                verify_key_at(&shape, &occ, reads, &seq, union_lo, k, shift),
+                                old_verify_key_at(&shape, &occ, reads, &fetch, k, shift),
+                                "hoisted verify disagrees with the per-shift fetch \
+                                 (start {start}, orientation {orientation}, mirrored \
+                                 {mirrored}, shift {shift})",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // And a true verdict exists (the equivalence is not vacuous):
+        // the read spells path[2..16], its first anchor's own k-mer at
+        // read position 2, so the occurrence start is 4.
+        let occ = CensusOccurrence {
+            path: 0,
+            start: 4,
+            orientation: 0,
+            partitions: vec![],
+            intervals: vec![],
+        };
+        let shape = make_shape(false);
+        let union_lo = 0u64;
+        let seq = fetch(union_lo, occ.start + shape.span + 1);
+        assert!(verify_key_at(&shape, &occ, &reads_match, &seq, union_lo, k, 0));
+        assert!(!verify_key_at(&shape, &occ, &reads_mismatch, &seq, union_lo, k, 0));
+    }
 }
