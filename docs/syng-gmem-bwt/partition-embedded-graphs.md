@@ -185,3 +185,77 @@ occurrences with 51,373 traversing rows and 10.0M per-base lookups;
 1,000 chrI occurrences with 98,305 traversing rows and 22.1M lookups.
 Assessment-side only; no thresholds; no scoring built; the scoreboard
 machinery is untouched.
+
+## 6. The chrIV scale-up (slice 1: survey, partition graphs, expressibility)
+
+Date: 2026-11-06 (chrIV end-to-end session). The same construction
+path and census semantics, extended to the first 1.5 Mb chromosome —
+the balanced-diploid validation's chrIV component (167 loci, truth
+S288C+SK1, `truth_pair_in_candidate_domain` 0/167 in the windowed
+frame; 98 assessable / 69 bracketed loci in the committed balanced
+receipt, which also supplies each assessable locus's SK1 ORTHOLOG
+interval — the alignment-truth statement, reported beside the
+POSITIONAL coordinate statement the chrMT/chrI census used).
+
+- **Survey** (receipt-side, from the partition BEDs + the axis file +
+  the names file): 19,421 partitions genome-wide carry 29,458
+  chrIV-family member rows (181 paths, 162 strains, 12 multi-copy)
+  across 1,822 partitions. The 167 windows sit over 158 axis
+  partitions; S288C#0#chrIV = 167 rows / 1,566,853 bp; SK1#0#chrIV =
+  163 rows / 1,486,921 bp, 145 rows in axis partitions, 17 SK1 holder
+  partitions (117, 292, 544, 2073, 2086, 2088, 2312, 2322, 2323,
+  2331, 2899, 2908, 3483, 3484, 3567, 3715, 14624).
+- **The near-twin flag rule** (stated, structural, pre-scoring): a
+  pair of chrIV-family paths is flagged iff EVERY member row of one
+  path has an interval-close counterpart (both ends within 50 bp) in
+  the same partition of the other. This flags exactly two pairs —
+  `AAA#0#chrIV`/`SGDref#0#chrIV` (100% EXACT-identical rows, the
+  identical-through-graph class) and `CLL#0#chrIV`/`CLL#1#chrIV`
+  (100% interval-close, 0% exact, offsets within ±16 bp, the
+  near-identical same-strain copy class); the runner-up `ALI#0`/`ALI#1`
+  sits at 72.5% and the next pair at 48.8% (full spectrum in the
+  receipt). 10 twin-only holder partitions (224, 351, 872, 929, 2332,
+  12263, 13908, 13916, 17761, 19193).
+- **Build**: 185 partitions (axis ∪ SK1 holders ∪ twin holders),
+  the same export tool and mode; wall 20 s, RSS peak 5.46 GB, 64 GiB
+  guard clean. Partition 16 (shared with the chrI build) re-rendered
+  BYTE-IDENTICAL — a free determinism proof. Homology dump: 167 window
+  queries (padding 120), wall 19 s; walks: 996 truth/twin member rows,
+  wall 5 s.
+- **The 805-class test at chrIV scale (all 167 loci)**: IN-AXIS 96 /
+  SPLIT-ELSEWHERE 69 (NEIGHBOR-AXIS 61 — every holder is an axis
+  partition, a one-window coordinate-offset class — / FOREIGN-REPEAT
+  8, the partition-spine disease class: L0+L1 subtelomeric 292/544, L39
+  2073, L52 2086/3483/14624, L53 2088/3484/14624, L54 2088, L123 117,
+  L124 3715) / CONTIG-END-LENGTH-POLYMORPHISM 2 (L163, L166: SK1's
+  chrIV ends 80 kb before S288C's — though both windows still carry
+  window-query hits onto SK1, e.g. L163's 278-anchor hit tiled in axis
+  partitions 285-287). By the ORTHOLOG statement the split is even
+  milder: 96/98 assessable loci IN-AXIS, the 2 exceptions (L66, L93)
+  in the repeat-locality axis partitions 110/234.
+- **The near-twin condensation**: AAA/SGDref share 58,048/58,048
+  nodes (100.0%) across all 163 common partitions, ZERO variant
+  pockets — identical haplotypes through the graph; CLL#0/CLL#1 share
+  54,121 nodes (99.6% of both sides) across 157 common partitions
+  with 50/49 left/right variant-pocket bp runs.
+- **Joint spellability**: JOINT-IN-AXIS 96/167, NEIGHBOR-AXIS-SPLIT 61,
+  FOREIGN-SPLIT 8, CONTIG-END 2 — the partition universe holds BOTH
+  homologs' material along the whole aligned length of the chromosome;
+  the windowed frame's 0/167 is a frame artifact, not missing material.
+- **Id continuity**: all 996 truth/twin member walks spell EXACTLY by
+  their GFA P lines (checker phase 5).
+- **Receipts** (beside the chrMT/chrI set, same directory):
+  `partition-graph-chrIV-{build-list.txt,homology-requests.tsv,
+  walk-requests.tsv,homology.jsonl,walks.jsonl,census.jsonl,
+  census.tables.txt}`, build/dump markers + RSS pollers
+  (`build-chrIV-partition-graphs.*`, `dumps-chrIV-*`), and the
+  independent checker log `check-partition-graphs-chrIV.log` — ALL
+  PHASES PASS. Scripts: `genome/instrumented/
+  partition-expressibility-census-chrIV.py` (requests + census),
+  `run-chrIV-partition-graphs.sh`, `check-partition-graphs-chrIV.py`.
+
+Assessment-side only; no thresholds (the 50 bp interval-close window
+and the 0.3 spectrum floor are stated classification/reporting
+conventions, like the 120 bp homology padding); scoreboard machinery
+untouched; no 502; no PR push. THE EXHAUSTIVE chrIV SCORING RUN IS
+SLICE 2 — not started here.
