@@ -1730,7 +1730,26 @@ def main():
                 c = census[locus]
                 pid = axis[locus]
                 multi = windows_of_partition[pid] > 1
-                expect = (not multi) and (pid in sk1_rows)
+                # (the fleet generalization: expressibility needs the
+                # path-name rule to be UNAMBIGUOUS — exactly one fold
+                # carrying an SK1 member row at a single-window
+                # partition; a partition carrying SEVERAL SK1 folds
+                # (measured: chrXIV partition 16, chrXVI 117/257,
+                # chrVII 16/111) cannot attribute the ortholog, no
+                # truth pair is fabricated. Derived from the receipt's
+                # fold members — the fold structure phase 2
+                # independently re-verified against the partition
+                # maps/GFAs — beside the map-derived single-window
+                # count.)
+                sk1_folds = sum(
+                    1
+                    for f in d["fold_identities"]
+                    if any(
+                        m["path_name"] == f"SK1#0#{EXHAUSTIVE}"
+                        for m in f["members"]
+                    )
+                )
+                expect = (not multi) and (sk1_folds == 1)
                 check(
                     d["truth_pair_expressible"] == expect,
                     f"locus {locus}: expressibility differs from the map-derived "

@@ -3455,6 +3455,18 @@ fn main() -> io::Result<()> {
         let truth_second = if windows_of_partition[&partition] > 1 {
             None
         } else {
+            // (THE FLEET GENERALIZATION, measured at chrXIV/chrXVI/
+            // chrXVII-class repeat-locality partitions: a SINGLE-window
+            // partition can still carry SEVERAL folds with SK1 member
+            // rows (chrXIV partition 16 carries SK1 [99039,104912) and
+            // [558497,563620); chrXVI partitions 117/257 similar) — the
+            // path-name rule cannot attribute WHICH SK1 fold is this
+            // window's ortholog, so NO truth pair is fabricated, the
+            // same no-fabrication convention as the multi-window
+            // partitions. The committed single-fold case is unchanged;
+            // chrMT/chrI/chrIV never hit the ambiguous case (their
+            // single-window partitions carry at most one SK1 fold —
+            // the identity gates prove the change is a no-op there.)
             let hits: Vec<usize> = folds
                 .iter()
                 .enumerate()
@@ -3465,8 +3477,11 @@ fn main() -> io::Result<()> {
                 })
                 .map(|(index, _)| index)
                 .collect();
-            ensure(hits.len() <= 1, "multiple folds carry the truth path")?;
-            hits.first().copied()
+            if hits.len() == 1 {
+                hits.first().copied()
+            } else {
+                None
+            }
         };
         let truth_pair = match (truth_first, truth_second) {
             (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
