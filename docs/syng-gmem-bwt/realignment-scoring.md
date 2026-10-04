@@ -1189,3 +1189,25 @@ slices 20,271,792/0; graph). TRUTH RANK-1 AT 37 OF 86 EXPRESSIBLE
 tiled-elsewhere inexpressible + 1 partial); the old-win record: loci
 4 and 8 LOST, 6, 16 and 17 HOLD. Table at
 `realign-chrXIII-tables.txt`.
+
+### chrXVI — closed end-to-end (2026-11-06)
+
+107 loci / 118-partition build; twins AAA/SGDref. Census IN-AXIS 89 /
+NEIGHBOR 6 / FOREIGN 11 / CONTIG-END 1. Walls: census 1194s (32.1GB),
+anchor 494s (6.5GB), serial 186s (15.6GB), 4-wide 97s (17.2GB), the
+8t gate passed. All checkers ALL PHASES PASS (anchor 172,867,366;
+realign 3 slices 21,515,024/0; graph). TRUTH RANK-1 AT 40 OF 90
+EXPRESSIBLE (in-axis 40/89; the remainder: 15 tiled-elsewhere
+inexpressible + 1 tiled expressible + 1 partial + 1 absent); the
+old-win record: loci 63 and 66 LOST, 16 HOLD. The truth-second
+ambiguity seam (partitions 117/257) and the no-fabrication branch
+exercised by this component's serial rerun. THE CENSUS RECEIPT
+CORRUPTION FOUND AND FIXED: the graph checker's phase (c) caught a
+stale shared-partition read from the concurrent light lanes — the
+chrXVI census recorded partition 292 as 0/0/0 nodes (a partial read
+of `partition292.gfa` while another lane re-exported it), producing
+spurious 13/13 variant-pocket runs; the receipt was regenerated (all
+216 other records byte-identical, the (c) record's 292 entry
+234/234/234, pockets 0/0 — AAA/SGDref identical through the graph),
+the stale copy kept as `.stale292-read`, and the graph checker
+re-run to ALL PHASES PASS. Table at `realign-chrXVI-tables.txt`.
