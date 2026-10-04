@@ -1229,3 +1229,16 @@ convention), and the serial re-run is the committed identity base.
 Table at `realign-chrXIV-tables.txt` (chromosome XIV — a different
 component from the chrIV pilot chromosome, whose committed tables
 stand at `realign-chrIV-tables.txt`).
+
+### chrX — closed end-to-end (2026-11-06)
+
+80 loci / 90-partition build; twins AAA/SGDref (identical through
+the graph, 0 pockets). Census IN-AXIS 67 / NEIGHBOR 6 / FOREIGN 7.
+Walls: census 948s (29.2GB), anchor 363s (5.8GB), serial 133s
+(13.3GB), 4-wide 97s (14.9GB), the 8t gate passed. All checkers ALL
+PHASES PASS (anchor 149,952,987; realign 3 slices 17,629,323/0 —
+s0/s1 single-writer driver logs, s2 a clean single-writer re-run
+after the concurrent-log disentanglement; graph). TRUTH RANK-1 AT
+35 OF 70 EXPRESSIBLE (in-axis 34/67, tiled-elsewhere 1/3; 10
+tiled-inexpressible the remainder); the old-win record: loci 6, 25
+and 36 LOST, 20 HOLD. Table at `realign-chrX-tables.txt`.
