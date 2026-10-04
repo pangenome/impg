@@ -1271,3 +1271,18 @@ better than half, absent-expressible 1/2; 14 tiled-inexpressible +
 2 absent the remainder); the old-win guard vacuous (the windowed
 frame scored 0/119 truth-pair-expressible — no old wins, no
 violations). Table at `realign-chrXV-tables.txt`.
+
+### chrVII — closed end-to-end (2026-11-06)
+
+117 loci / 103-partition build; twins AAA/SGDref (identical through
+the graph). Census IN-AXIS 85 / NEIGHBOR 18 / FOREIGN 13 / CONTIG-END
+1. Walls: census 3031s (39.1GB — the fleet's longest census), anchor
+721s (7.6GB), serial 331s (20.3GB), 4-wide 168s (22.8GB), the 8t
+gate passed. All checkers ALL PHASES PASS (anchor 243,737,794;
+realign 3 slices 25,286,033/0; graph). TRUTH RANK-1 AT 45 OF 102
+EXPRESSIBLE (in-axis 42/85, tiled-elsewhere 3/17; 13
+tiled-inexpressible + 1 partial + 1 absent the remainder); the
+old-win record: loci 14, 29, 62 and 74 LOST, 11 HOLD. The
+truth-second ambiguity seam's third component (partitions 16/111);
+its fixed-binary serial re-run is the committed identity base. Table
+at `realign-chrVII-tables.txt`.
