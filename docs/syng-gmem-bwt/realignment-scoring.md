@@ -1211,3 +1211,22 @@ spurious 13/13 variant-pocket runs; the receipt was regenerated (all
 234/234/234, pockets 0/0 — AAA/SGDref identical through the graph),
 the stale copy kept as `.stale292-read`, and the graph checker
 re-run to ALL PHASES PASS. Table at `realign-chrXVI-tables.txt`.
+
+### chrXIV (fleet component) — closed end-to-end (2026-11-06)
+
+82 loci / 103-partition build; twins AAA/SGDref. Census IN-AXIS 64 /
+NEIGHBOR 10 / FOREIGN 8. Walls: census 1139s (33.6GB), anchor 472s
+(6.0GB), serial 162s (13.1GB), 4-wide 88s (14.7GB), the 8t gate
+passed. All checkers ALL PHASES PASS (anchor 153,364,780; realign 3
+slices 17,331,466/0; graph). TRUTH RANK-1 AT 35 OF 71 EXPRESSIBLE
+(in-axis 34/64, tiled-elsewhere 1/7; 11 tiled-inexpressible the
+remainder); the old-win record: loci 40 and 49 LOST, 7 HOLD. THE
+COMPONENT THAT HIT THE TRUTH-SECOND AMBIGUITY SEAM FIRST: its
+pre-fix serial crashed at L9 (partition 16, the shared repeat
+locality, carries two interval-distinct SK1 rows); the fixed binary
+fabricates no truth pair there (inexpressible, the no-fabrication
+convention), and the serial re-run is the committed identity base.
+Table at `realign-chrXIV-tables.txt` (the fleet component tables;
+the chrIV chromosome tables of record are the committed
+`realign-chrIV-tables.txt` from the chrIV stage — this fleet
+component IS that chromosome, closed at the same receipts).
