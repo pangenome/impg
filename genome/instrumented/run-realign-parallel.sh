@@ -23,7 +23,7 @@ rm -f "$P.done" "$P.exit"
 start=$(date +%s)
 SEAMENV=()
 if [ "$W" != "serial" ]; then
-  SEAMENV=(RAYON_NUM_THREADS="$W" IMPG_REALIGN_PARALLEL_SEAMS=1)
+  SEAMENV=(IMPG_REALIGN_PARALLEL_SEAMS=1 IMPG_REALIGN_SEAM_WIDTH="$W")
 fi
 IMPG_CORES="${IMPG_CORES:-0-255}" taskset -c "${IMPG_CORES:-0-255}" nice -n 10 \
   env "${SEAMENV[@]}" \

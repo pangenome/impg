@@ -1849,21 +1849,90 @@ fn single_offset_score(
 // main
 // ---------------------------------------------------------------------------
 
+// (Phase 3 — the parallelism pilot: THE SEAM MAP. The two measured-
+// dominant seams (the per-record binding loop and the per-locus loop)
+// run on DEDICATED std::threads at a configurable width, NOT on the
+// rayon pool. MEASURED REASON, both effects caught by the first 2-wide
+// pilot run and its control: (1) the committed serial runs were never
+// single-threaded in the loci loop — the per-locus scoring/classes/
+// spectrum par_iters ride rayon's default pool (the whole box), and
+// bounding RAYON_NUM_THREADS to the rung width silently serialized
+// THOSE phases too (chrMT loci 1.8s serial-default -> 8.2s at a
+// 2-wide pool); (2) nesting the seam par_iter in the SAME pool adds
+// contention on top (18.5s: two concurrent loci each enqueueing
+// thousands of inner jobs onto the same 2 workers). The seam map
+// instead spawns `width` plain scoped threads, stride-assigned over
+// the items; from a non-rayon thread every inner par_iter installs
+// rayon's GLOBAL pool — the committed inner behavior, unchanged. The
+// seam bodies are pure per-item functions over immutable shared state
+// (compiler-enforced: the map takes `&(dyn Fn + Sync)`); each result
+// lands in its own pre-sized slot and is read out in item order, so
+// the outputs are interleaving-independent by construction — the
+// byte-identity gate against the serial receipts is the race
+// detector.)
+fn seam_map<T: Sync, R: Send>(
+    items: &[T],
+    width: usize,
+    f: &(dyn Fn(&T) -> io::Result<R> + Sync),
+) -> io::Result<Vec<R>> {
+    ensure(width >= 1, "the seam width must be at least 1")?;
+    let n = items.len();
+    if n == 0 || width == 1 {
+        return items.iter().map(f).collect();
+    }
+    let out: std::sync::Mutex<Vec<Option<R>>> =
+        std::sync::Mutex::new((0..n).map(|_| None).collect());
+    let errors: std::sync::Mutex<Vec<(usize, io::Error)>> =
+        std::sync::Mutex::new(Vec::new());
+    let out_ref = &out;
+    let errors_ref = &errors;
+    std::thread::scope(|scope| {
+        for w in 0..width {
+            scope.spawn(move || {
+                let mut i = w;
+                while i < n {
+                    match f(&items[i]) {
+                        Ok(value) => out_ref.lock().unwrap()[i] = Some(value),
+                        Err(error) => errors_ref.lock().unwrap().push((i, error)),
+                    }
+                    i += width;
+                }
+            });
+        }
+    });
+    let errors = errors.into_inner().unwrap();
+    if let Some((_, error)) = errors.into_iter().min_by_key(|(i, _)| *i) {
+        return Err(error);
+    }
+    let out = out.into_inner().unwrap();
+    Ok(out
+        .into_iter()
+        .map(|slot| slot.expect("the seam map left an unset slot"))
+        .collect())
+}
+
 fn main() -> io::Result<()> {
     let started = Instant::now();
     let options = Options::parse();
     let rss = RssGuard::new(options.rss_budget_gib);
     // (Phase 3 — the parallelism pilot: THE SEAM SWITCH. The committed
     // default is the serial code path — byte-for-byte the phase-1
-    // behavior. With IMPG_REALIGN_PARALLEL_SEAMS set, the two
-    // measured-dominant seams (the per-record binding loop and the
-    // per-locus loop) map over the rayon pool; the pool width is
-    // RAYON_NUM_THREADS — the ladder's rung. The seam bodies are pure
-    // per-record / per-locus computations whose results are collected
-    // in iteration order, so the receipts are thread-interleaving-
+    // behavior. With IMPG_REALIGN_PARALLEL_SEAMS set (and the width in
+    // IMPG_REALIGN_SEAM_WIDTH, default 2), the two measured-dominant
+    // seams (the per-record binding loop and the per-locus loop) run
+    // on dedicated seam threads — see `seam_map` for the measured
+    // reasons the seams do NOT share the rayon pool with the per-locus
+    // scoring/classes par_iters. The seam bodies are pure per-record /
+    // per-locus computations whose results land in per-item slots read
+    // out in item order, so the receipts are thread-interleaving-
     // independent BY CONSTRUCTION; the byte-identity gate against the
     // serial receipts is the race detector.)
     let seam_parallel = std::env::var("IMPG_REALIGN_PARALLEL_SEAMS").is_ok();
+    let seam_width: usize = std::env::var("IMPG_REALIGN_SEAM_WIDTH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2);
+    ensure(seam_width >= 1, "the seam width must be at least 1")?;
     let loci: Vec<u32> = options
         .loci
         .split(',')
@@ -2563,13 +2632,11 @@ fn main() -> io::Result<()> {
             steps_seconds,
         })
     };
+    let pilot_list: Vec<usize> = pilot_records.iter().copied().collect();
     let bound: Vec<BindOne> = if seam_parallel {
-        pilot_records
-            .par_iter()
-            .map(|&record| bind_one(record))
-            .collect::<io::Result<Vec<_>>>()?
+        seam_map(&pilot_list, seam_width, &|&record| bind_one(record))?
     } else {
-        pilot_records
+        pilot_list
             .iter()
             .map(|&record| bind_one(record))
             .collect::<io::Result<Vec<_>>>()?
@@ -4292,10 +4359,7 @@ fn main() -> io::Result<()> {
         })
     };
     let outputs: Vec<LocusOutput> = if seam_parallel {
-        loci
-            .par_iter()
-            .map(|&locus| compute_locus(locus))
-            .collect::<io::Result<Vec<_>>>()?
+        seam_map(&loci, seam_width, &|&locus| compute_locus(locus))?
     } else {
         loci
             .iter()
