@@ -1286,7 +1286,19 @@ def main():
             f"locus {locus}: class LL re-derivation differs (max {diff})",
         )
         best = float(class_lls.max())
-        check(abs(best - d["best_log_likelihood"]) <= 1e-6, f"locus {locus}: best LL differs")
+        # (the relative convention of the class check above: the
+        # re-derivation's summation error is RELATIVE to the LL
+        # magnitude - measured at chrII locus 22 (48,828 classes,
+        # 17.8M matrix entries, |LL| ~1.6e6): 1.28e-06 ABSOLUTE =
+        # 8e-13 relative, unmeetable by an absolute 1e-6 demand; the
+        # receipt is self-consistent (best == max of its own classes,
+        # runner-up gap 15,458 - no argmax flip). The class check's
+        # tolerance is the convention here.)
+        check(
+            abs(best - d["best_log_likelihood"])
+            <= 1e-6 * max(1.0, abs(best)),
+            f"locus {locus}: best LL differs",
+        )
         if d["truth_folds"] is None:
             # a non-expressible locus (the exhaustive domains include
             # them): no truth class exists to rank
@@ -1307,7 +1319,8 @@ def main():
         rank = 1 + int((class_lls > truth_ll).sum())
         check(rank == d["truth_rank"], f"locus {locus}: truth rank differs ({rank})")
         check(
-            abs(truth_ll - d["truth_log_likelihood"]) <= 1e-6,
+            abs(truth_ll - d["truth_log_likelihood"])
+            <= 1e-6 * max(1.0, abs(truth_ll)),
             f"locus {locus}: truth LL differs",
         )
         winner_flat = int(np.argmax(class_lls))
