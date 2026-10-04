@@ -711,3 +711,118 @@ default paths and all prior modes are untouched.
 No thresholds, no tuning constants, no selection swap, no scoreboard
 change; assessment-side only; serial runs; the 64 GiB guard clean
 everywhere.
+
+## Phase 1 of the runtime plan — THE FETCH-PATH REBUILD (2026-11-06)
+
+The three levers the phase-0 dominance table named, all
+answer-preserving (the receipts must reproduce slice E field for
+field, the sidecars byte-identically — the identity-gate pattern from
+slice D, enforced by the checker's phase 8t). Phase 2's vote-vector
+lever stays unbuilt: the same measurement that named the levers
+disproved it (0.1%/0.5% of wall).
+
+### Lever 1 — the hoisted re-fetch
+
+The binding verify loop re-fetched the same per-occurrence range once
+per origin shift (the measured 3.01x redundancy: 4,247,781 probes over
+1,415,203 occurrence-ranges at chrI). The three shift ranges differ
+only in the low bound (`max(0, start + shift - 1)`, shifts −1/0/1) and
+share the high bound `start + span + 1`, so one union fetch
+`[max(0, start − 2), start + span + 1)` per (occurrence, candidate)
+covers all three. `verify_key_at` (now top-level) verifies each shift
+against the union buffer's tail from the shift's clamped low bound —
+byte-for-byte the crop the per-shift fetch returned, including the
+short/empty-crop edge cases (start near 0; range overhanging the path
+end). Unit-proven against a copy of the pre-rebuild per-shift-fetch
+code across interior/near-zero/path-end occurrence starts, both
+orientations, both mirror states, both verdicts.
+
+### Lever 2 — the per-lane in-memory AGC cache (the call-bound fix)
+
+Phase 0 measured the fetch CALL-bound: ~129–190 µs per ~72 bp crop
+(one random-access seek/decompress per `Sources::fetch` into the
+AGC). Measured first, as ordered: the AGC is one 93.3 MB file (9,901
+lanes, 3.34 GB uncompressed); the touched subset is 840 occurrence
+lanes / 384.5 MB at chrI (141 / 11.5 MB at chrMT), 1,286 lanes /
+514.7 MB with the partition-map member rows. **The derived choice:**
+each TOUCHED lane loads once, whole, through the same validated
+`Sources::fetch` path (one sequential decompression per lane — the
+per-locality batch-prefetch option taken at its natural locality, the
+contig; a window/block cache would still pay a decompression call per
+window), then every crop is a memory slice of the cached buffer.
+Byte-identity by construction: the lane buffer IS the 0..len crop
+`Sources::fetch` returns (length- and alphabet-validated,
+uppercased), so a crop of it is a crop of the answer. The cache holds
+only touched lanes (≤ ~515 MB at chrI), never the 3.34 GB panel.
+
+### Lever 3 — the streaming ingredients serializer
+
+The ll_matrix now serializes directly from the typed matrix, not
+through a serde_json value tree (phase 0 measured the chrI L16 tree
+at +1.15 GB live over the 4.27 GB scoring baseline). Object keys are
+written in the `json!` macro's map order (serde_json without
+`preserve_order`: alphabetical), each field through the same
+serializer — the sidecar stays byte-identical.
+
+### THE WALL TABLE (before = phase 0, after = the rebuilt runs)
+
+| phase | chrMT before | chrMT after | chrI before | chrI after |
+|---|---:|---:|---:|---:|
+| inputs | 5.4 s | 7.5 s | 6.6 s | 6.7 s |
+| quality scan | 2.7 s | 3.2 s | 2.6 s | 2.7 s |
+| derive cache | 1.4 s | 1.8 s | 1.4 s | 1.3 s |
+| **BINDING** | **134.5 s (91.1%)** | **1.7 s (79x)** | **551.1 s (93.6%)** | **10.0 s (55x)** |
+| read variants | 0.0 s | 0.0 s | 0.4 s | 0.3 s |
+| rows/context assembly | 1.5 s | 0.7 s | 6.3 s | 2.3 s |
+| the loci loop | 3.5 s | 3.2 s | 37.7 s | 11.4 s |
+| **in-process total** | **147.6 s** | **18.1 s** | **588.9 s** | **35.4 s (16.6x)** |
+| external wall | 150 s | **22 s** | 597 s | **37 s** |
+
+Inside the rebuilt binding phase: the verify probes are unchanged as
+a semantic count (703,605 / 4,247,781) but now run over 234,535 /
+1,415,927 union range fetches (the measured 3.01x hoist), served from
+141 / 840 lane loads (10.9 / 366.7 MB, 0.4 / 7.9 s of load time inside
+the phase); the phase's fetch calls fell 708,496→239,426 (chrMT) and
+4,261,686→1,429,832 (chrI). The factorized-vs-direct gate re-verified
+every placement: 1,929,497 + 21,490,054 = 23,419,551/23,419,551 EXACT.
+
+### THE MEMORY SPIKE (gate e)
+
+The external poller peak at chrI fell 5,957,684 kB → **4,203,688 kB**
+(the slice-E 5.66 GiB peak was held at the L16 receipts phase; the
+lane cache itself adds 366.7 MB). The in-process receipts probe at L16
+reads 4,422,448 kB after the write over the 3,846,188 kB scored
+baseline; the residual ~576 MB is the records-sidecar named-classes
+value tree — outside this lever's scope, named as the remaining
+receipts-phase allocation. chrMT peak 2,077,092 kB (was 2,195,864).
+The 64 GiB guard is clean everywhere.
+
+### The gates
+
+**(b) The identity gate:** the checker's `--timered-base` mode over
+the rebuilt receipts (`--exhaustive chrMT --timered-base
+realign-rebuilt-chrMT --run-tag realignrebuilt-chrMT-chrMT`, likewise
+chrI): **ALL PHASES PASS — chrMT 1,170,642 checks, chrI 4,342,914
+checks, 0 failures**, both including phase 8t (every semantic field
+equal to the committed slice-E receipts, only walls/rss_kb differing,
+walls field set unchanged; all four sidecars byte-identical). The
+rebuilt runs are a proven no-op on the answers. **(c) The prior
+modes** over their committed receipts: default 6,760, --marginal,
+--frame, all 0 failures (the phase-0 no-regression sweep repeated).
+**(d) Unit tests:** `partition_realign_score` 17/17 (16 prior + the
+hoisted-verify equivalence test), `panel_route_mem_routed` 80/80,
+`partition_anchor_projection` 8/8, `partition_graph_export` 1/1.
+
+Receipts: `realign-rebuilt-{chrMT,chrI}.{jsonl,exactness.jsonl,skeleton.jsonl}`
++ sidecars + run markers (`run-realignrebuilt-*`, external RSS poller
+files) + the checker logs (`check-rebuilt-*.log`) at the validation
+dir; the committed slice-E and timered receipts untouched on disk.
+Runner: `genome/instrumented/run-realign-rebuilt.sh`. Assessment-side
+only (no src/ file touched); no thresholds, no tuning constants, no
+selection swap, no scoreboard change, no 502, no PR push; serial; the
+64 GiB guard clean everywhere.
+
+What remains for the runtime plan: the parallelism pilot (the next
+stage, not started here) — with binding collapsed to 1.7 s/10.0 s, the
+loci loop and inputs are the next-largest walls, and the
+per-locality work is now dominated by in-memory computation.
