@@ -38,9 +38,12 @@ LOCI="$($PY -c "print(','.join(str(i) for i in range($NLOCI)))")"
 echo "=== $C: $NLOCI loci"
 
 # ---- the anchor-projection receipts (the committed receipt names ARE
-# the fleet's receipts of record)
-if [ ! -f "$D/run-anchorproj-$C-$C.done" ]; then
-  bash genome/instrumented/run-anchor-projection.sh "$C" "anchorproj-$C" \
+# the fleet's receipts of record; the committed marker convention is
+# the bare anchorproj tag; the two earliest chains ran under the
+# per-component tag anchorproj-<C> before the convention was adopted -
+# both accepted on resume)
+if [ ! -f "$D/run-anchorproj-$C.done" ] && [ ! -f "$D/run-anchorproj-$C-$C.done" ]; then
+  bash genome/instrumented/run-anchor-projection.sh "$C" "anchorproj" \
     > "$D/fleet-heavy-$C-anchor.log" 2>&1 || { echo "$C anchor FAILED"; exit 1; }
 fi
 echo "=== $C anchor done $(date -u +%FT%TZ)"

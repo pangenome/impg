@@ -225,6 +225,14 @@ def check_component(component, path_names):
     context_path = f"{D}/anchor-projection-context-{component}.jsonl"
     sidecar_path = f"{context_path}.rows.jsonl"
     tag = f"run-anchorproj-{component}"
+    # (the fleet's heavy chains ran some components under the
+    # per-component tag anchorproj-<C>; the committed convention is the
+    # bare anchorproj tag. Prefer the committed name, fall back to the
+    # per-component one: the exit code is read from whichever markers
+    # exist, the committed name first.)
+    import os
+    if not os.path.exists(f"{D}/{tag}.exit"):
+        tag = f"run-anchorproj-{component}-{component}"
 
     # ---------------------------------------------------------- phase 1
     with open(f"{D}/{tag}.exit") as f:
