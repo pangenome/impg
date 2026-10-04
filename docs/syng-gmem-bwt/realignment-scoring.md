@@ -1256,3 +1256,18 @@ s0 under the fixed checker after the LL-tolerance repair its locus
 (in-axis 44/70, tiled-elsewhere 2/6; 5 tiled-inexpressible the
 remainder); the old-win record: loci 28, 41, 50, 52, 56 and 61
 LOST, 15 HOLD. Table at `realign-chrII-tables.txt`.
+
+### chrXV — closed end-to-end (2026-11-06)
+
+119 loci / 138-partition build; twins AAA/SGDref (identical through
+the graph). Census IN-AXIS 62 / NEIGHBOR 49 / FOREIGN 4 / CONTIG-END
+4 — the fleet's biggest coordinate-offset (NEIGHBOR) class. Walls:
+census 1903s (37.2GB), anchor 660s (7.6GB), serial 287s (19.9GB),
+4-wide 167s (21.1GB), the 8t gate passed. All checkers ALL PHASES
+PASS (anchor 225,628,824; realign 3 slices 25,365,917/0; graph).
+TRUTH RANK-1 AT 57 OF 103 EXPRESSIBLE (in-axis 34/62,
+tiled-elsewhere 22/39 — the neighbor-material class resolving at
+better than half, absent-expressible 1/2; 14 tiled-inexpressible +
+2 absent the remainder); the old-win guard vacuous (the windowed
+frame scored 0/119 truth-pair-expressible — no old wins, no
+violations). Table at `realign-chrXV-tables.txt`.
