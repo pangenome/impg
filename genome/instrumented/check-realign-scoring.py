@@ -121,8 +121,8 @@ EXHAUSTIVE = None
 if "--exhaustive" in sys.argv:
     _i = sys.argv.index("--exhaustive")
     EXHAUSTIVE = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else "chrI"
-    if EXHAUSTIVE not in ("chrMT", "chrI"):
-        sys.exit("--exhaustive requires chrMT or chrI")
+    if EXHAUSTIVE not in ("chrMT", "chrI", "chrIV"):
+        sys.exit("--exhaustive requires chrMT, chrI or chrIV")
 FRAME = ("--frame" in sys.argv) or (EXHAUSTIVE is not None)
 MARGINAL = FRAME or ("--marginal" in sys.argv)
 # Slice F (phase 0 of the runtime plan — the dominance measurement):
@@ -142,19 +142,27 @@ if "--timered-base" in sys.argv:
     _i = sys.argv.index("--run-tag")
     TIMERED_RUN = f"{D}/run-{sys.argv[_i + 1]}"
 if EXHAUSTIVE is not None:
+    # chrIV's Poisson-era BEFORE receipt lives in the diagnostic
+    # scratch (the census run's own likelihood output; the
+    # validation-root sidecars are the preserved balanced records).
+    _before_root = (
+        f"{D}/cosine-diagnostic-scratch/{EXHAUSTIVE}"
+        if EXHAUSTIVE == "chrIV"
+        else D
+    )
     if TIMERED_BASE is not None:
         RECEIPT = f"{D}/{TIMERED_BASE}.jsonl"
         EXACTNESS = f"{D}/{TIMERED_BASE}.exactness.jsonl"
         INGREDIENTS = f"{D}/{TIMERED_BASE}.jsonl.ingredients.jsonl"
         RUN = TIMERED_RUN
-        BEFORE_RECEIPT = f"{D}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
+        BEFORE_RECEIPT = f"{_before_root}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
         SKELETON = f"{D}/{TIMERED_BASE}.skeleton.jsonl"
     else:
         RECEIPT = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl"
         EXACTNESS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.exactness.jsonl"
         INGREDIENTS = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.ingredients.jsonl"
         RUN = f"{D}/run-realignexhaustive-{EXHAUSTIVE}-{EXHAUSTIVE}"
-        BEFORE_RECEIPT = f"{D}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
+        BEFORE_RECEIPT = f"{_before_root}/cosine-graph-likelihood-readmatched-{EXHAUSTIVE}.jsonl"
         SKELETON = f"{D}/realign-exhaustive-{EXHAUSTIVE}.skeleton.jsonl"
     ANCHOR = f"{D}/anchor-projection-{EXHAUSTIVE}.jsonl"
     COMPONENT = f"S288C#0#{EXHAUSTIVE}"
@@ -163,6 +171,23 @@ if EXHAUSTIVE is not None:
         _loci.append(json.loads(_line)["locus"])
     LOCI = sorted(_loci)
     del _loci, _line
+    # (chrIV scale: the exhaustive checker over all 167 loci can be
+    # SLICED — every check runs unchanged per sliced locus; the slices
+    # are a wall measure, not a sample. "--loci-slice 0-49,100" keeps
+    # loci 0..49 and 100.)
+    if "--loci-slice" in sys.argv:
+        _i = sys.argv.index("--loci-slice")
+        _keep = set()
+        for _part in sys.argv[_i + 1].split(","):
+            if "-" in _part:
+                _a, _b = _part.split("-")
+                _keep.update(range(int(_a), int(_b) + 1))
+            else:
+                _keep.add(int(_part))
+        _sliced = [l for l in LOCI if l in _keep]
+        print(f"(loci slice: {len(_sliced)} of {len(LOCI)} loci)", flush=True)
+        LOCI = _sliced
+        del _keep, _part, _sliced
 elif FRAME:
     RECEIPT = f"{D}/realign-framescore-chrI.jsonl"
     EXACTNESS = f"{D}/realign-framescore-chrI.exactness.jsonl"
@@ -257,12 +282,16 @@ def load_maps():
         with open(path) as f:
             m = json.load(f)
         maps[m["partition"]] = m
+        # ONE WINDOW PER AXIS ROW (not per partition): a repeat-locality
+        # partition can host several of the component's windows (first
+        # measured at chrIV — 167 windows over 158 axis partitions), so
+        # every component member row contributes a window and the
+        # window->partition map may repeat a partition.
         for member in m["members"]:
             if member["path_name"] == COMPONENT:
-                axis.append((member["start"], m["partition"]))
-                break
+                axis.append((member["start"], member["end"], m["partition"]))
     axis.sort()
-    return maps, [p for _, p in axis]
+    return maps, [p for _, _, p in axis], [(s, e, p) for s, e, p in axis]
 
 
 class Gfa:
@@ -654,7 +683,7 @@ def main():
     print(f"   exit {exit_code}, wall {wall}s, rss peak {rss_peak} kB", flush=True)
 
     names = load_names()
-    maps, axis = load_maps()
+    maps, axis, axis_rows = load_maps()
 
     # The committed anchor-projection receipt, restricted to the pilot
     # records (the canonical walks, the verified shifts, the
@@ -917,32 +946,38 @@ def main():
             rows_by_pp.setdefault((pid, row["path_name"]), []).append((row["start"], row["end"]))
     for k in rows_by_pp:
         rows_by_pp[k].sort()
+    # (chrIV-scale inversion, semantically identical to the committed
+    # per-locus loop: the occurrence classification is a per-OCCURRENCE
+    # property — it reads only the occurrence's own touched windows'
+    # rows — so it is computed once per occurrence and the per-locus
+    # counts accumulate the touching occurrences by their class. The
+    # committed loop was O(loci x occurrences); chrIV is 167 x 12.75M.)
+    touching_classes = {}
+    for record, rd in anchor_records.items():
+        span = rd["span"]
+        for oi, occ in enumerate(rd["occurrences"]):
+            origin = occ["start"] + occ["shift"]
+            contained = False
+            overlapped = False
+            for w in occ["partitions"]:
+                lst = rows_by_pp.get((axis[w], names[occ["path"]]))
+                if not lst:
+                    continue
+                for s, e in lst:
+                    if s <= origin and origin + span <= e:
+                        contained = True
+                    if s < origin + span and origin < e:
+                        overlapped = True
+            cls = 0 if contained else (1 if overlapped else 2)
+            for locus in set(occ["partitions"]):
+                if locus in receipt:
+                    touching_classes.setdefault(locus, []).append(cls)
     for locus in LOCI:
         d = receipt[locus]
-        in_axis = overhang = extension = 0
-        for record, rd in anchor_records.items():
-            span = rd["span"]
-            for occ in rd["occurrences"]:
-                if locus not in occ["partitions"]:
-                    continue
-                origin = occ["start"] + occ["shift"]
-                contained = False
-                overlapped = False
-                for w in occ["partitions"]:
-                    lst = rows_by_pp.get((axis[w], names[occ["path"]]))
-                    if not lst:
-                        continue
-                    for s, e in lst:
-                        if s <= origin and origin + span <= e:
-                            contained = True
-                        if s < origin + span and origin < e:
-                            overlapped = True
-                if contained:
-                    in_axis += 1
-                elif overlapped:
-                    overhang += 1
-                else:
-                    extension += 1
+        counts = [0, 0, 0]
+        for cls in touching_classes.get(locus, []):
+            counts[cls] += 1
+        in_axis, overhang, extension = counts
         check(
             d["locality"]["touching_in_axis"] == in_axis
             and d["locality"]["touching_overhang"] == overhang
@@ -1298,6 +1333,82 @@ def main():
 
     # ---------------- phase 7: the identical-through-graph fold
     print("== phase 7: the identical-through-graph fold", flush=True)
+    if EXHAUSTIVE == "chrIV":
+        # (the chrIV near-twin pair — AAA#0#chrIV/SGDref#0#chrIV, the
+        # survey's 100%-exact-rows flag — folds to ONE candidate at
+        # every locus where either holds a member row, BY CONSTRUCTION;
+        # the proof: every fold carrying one path's row carries the
+        # other's IDENTICAL row too (same interval), no fold carries
+        # exactly one of the pair, and every member of every such fold
+        # spells the same sequence and walk from the GFAs — the
+        # indistinguishability the class table then inherits: classes
+        # pair FOLDS, so no class can distinguish AAA from SGDref.)
+        pair = ("AAA#0#chrIV", "SGDref#0#chrIV")
+        twin_fold_loci = 0
+        for locus in LOCI:
+            d = receipt[locus]
+            folds = ingredients[locus]["folds"]
+            hit_folds = [
+                (i, f)
+                for i, f in enumerate(folds)
+                if any(m["path_name"] in pair for m in f["members"])
+            ]
+            if not hit_folds:
+                check(
+                    all(
+                        m["path_name"] not in pair
+                        for f in folds
+                        for m in f["members"]
+                    ),
+                    f"locus {locus}: a twin path row sits in a fold",
+                )
+                continue
+            twin_fold_loci += 1
+            g = gfa(d["partition"])
+            for i, f in hit_folds:
+                names_here = [m["path_name"] for m in f["members"]]
+                check(
+                    pair[0] in names_here and pair[1] in names_here,
+                    f"locus {locus}: fold {i} carries only one twin path "
+                    f"(the identical rows must fold together)",
+                )
+                a_intervals = sorted(
+                    (m["start"], m["end"])
+                    for m in f["members"]
+                    if m["path_name"] == pair[0]
+                )
+                b_intervals = sorted(
+                    (m["start"], m["end"])
+                    for m in f["members"]
+                    if m["path_name"] == pair[1]
+                )
+                check(
+                    a_intervals == b_intervals,
+                    f"locus {locus}: fold {i} twin row intervals differ "
+                    f"({a_intervals} vs {b_intervals})",
+                )
+                seqs = {}
+                walks = {}
+                for m in f["members"]:
+                    seq, positions, steps = g.spelled(row_gfa_name(m))
+                    seqs[m["path_name"] + str(m["start"])] = seq
+                    walks[m["path_name"] + str(m["start"])] = list(zip(positions, steps))
+                vals = list(seqs.values())
+                check(
+                    all(v == vals[0] for v in vals),
+                    f"locus {locus}: fold {i} members' sequences differ",
+                )
+                wvals = list(walks.values())
+                check(
+                    all(v == wvals[0] for v in wvals),
+                    f"locus {locus}: fold {i} members' walks differ",
+                )
+        print(
+            f"   AAA/SGDref fold to ONE candidate at {twin_fold_loci} of "
+            f"{len(LOCI)} loci — identical sequence+walk verified from "
+            f"the GFAs at every fold; no fold distinguishes the pair",
+            flush=True,
+        )
     for locus in LOCI:
         d = receipt[locus]
         if d["identical_pair_fold"] is None:
@@ -1447,6 +1558,126 @@ def main():
             flush=True,
         )
 
+        if EXHAUSTIVE == "chrIV":
+            # ------------- phase 8c: the slice-1 expressibility classes
+            # (the prediction table of record: the census receipt's
+            # per-locus ortholog/positional statements interpret the
+            # truth-rank table; the instrument's expressibility is
+            # re-derived from the maps — the window's own axis row in
+            # the truth-first fold, an SK1 row of the window's
+            # partition in the truth-second fold at single-window
+            # partitions — and verified against the receipt. The class
+            # distinction that matters: IN-AXIS (the ortholog row IS
+            # in the window's partition — the truth pair is the real
+            # homolog pair) vs TILED-ELSEWHERE-with-neighbor-SK1-row
+            # (the path-domain convention finds the COORDINATE-OFFSET
+            # neighbor window's aligned SK1 row in the partition — the
+            # paired class is named per locus, never silently passed
+            # as the ortholog) vs the inexpressible groups (multi-
+            # window partitions, no-SK1-row partitions, the contig
+            # end).
+            print(
+                "== phase 8c: the slice-1 expressibility classes vs the receipts",
+                flush=True,
+            )
+            census = {}
+            for line in open(
+                f"{D}/partition-graphs/partition-graph-chrIV-census.jsonl"
+            ):
+                r = json.loads(line)
+                if r.get("question") == "a":
+                    census[r["locus"]] = r
+            windows_of_partition = {}
+            for pid in axis:
+                windows_of_partition[pid] = windows_of_partition.get(pid, 0) + 1
+            sk1_rows = {}
+            for pid, m in maps.items():
+                rows = [
+                    (r["start"], r["end"])
+                    for r in m["members"]
+                    if r["path_name"] == "SK1#0#chrIV"
+                ]
+                if rows:
+                    sk1_rows[pid] = rows
+            from collections import Counter
+
+            cls_counts = Counter()
+            cls_expressible = Counter()
+            cls_rank1 = Counter()
+            neighbor_material = []
+            for locus in LOCI:
+                d = receipt[locus]
+                c = census[locus]
+                pid = axis[locus]
+                multi = windows_of_partition[pid] > 1
+                expect = (not multi) and (pid in sk1_rows)
+                check(
+                    d["truth_pair_expressible"] == expect,
+                    f"locus {locus}: expressibility differs from the map-derived "
+                    f"rule (receipt {d['truth_pair_expressible']} vs expected {expect})",
+                )
+                if d["truth_pair_expressible"]:
+                    first, second = d["truth_folds"]
+                    fa = d["fold_identities"][first]["members"]
+                    fb = d["fold_identities"][second]["members"]
+                    s0, e0, _ = axis_rows[locus]
+                    check(
+                        any(
+                            m["path_name"] == COMPONENT
+                            and m["start"] == s0
+                            and m["end"] == e0
+                            for m in fa
+                        ),
+                        f"locus {locus}: truth-first fold does not carry the window's axis row",
+                    )
+                    check(
+                        any(m["path_name"] == "SK1#0#chrIV" for m in fb),
+                        f"locus {locus}: truth-second fold carries no SK1 row",
+                    )
+                    if d["truth_rank"] == 1:
+                        cls_rank1[c["verdict"]] += 1
+                    if (
+                        c["verdict"] != "IN-AXIS-PARTITION"
+                        and d["truth_pair_expressible"]
+                    ):
+                        neighbor_material.append(locus)
+                cls_counts[c["verdict"]] += 1
+                if d["truth_pair_expressible"]:
+                    cls_expressible[c["verdict"]] += 1
+            print(
+                f"   class census over the slice: "
+                f"{dict(sorted(cls_counts.items()))}; expressible "
+                f"{dict(sorted(cls_expressible.items()))}; truth rank-1 "
+                f"{dict(sorted(cls_rank1.items()))}",
+                flush=True,
+            )
+            print(
+                f"   path-domain-expressible with NEIGHBOR (coordinate-offset) "
+                f"SK1 material — the paired class is NOT the ortholog pair, "
+                f"named per locus: {neighbor_material}",
+                flush=True,
+            )
+            # the full-component group census (all 167 windows, from the
+            # maps + census — not just the slice)
+            groups = Counter()
+            for locus in sorted(census):
+                pid = axis[locus]
+                if census[locus]["verdict"] == "IN-AXIS-PARTITION":
+                    groups["in_axis"] += 1
+                elif windows_of_partition[pid] > 1:
+                    groups["multiwindow_partition"] += 1
+                elif pid in sk1_rows:
+                    groups["neighbor_sk1_row"] += 1
+                elif census[locus]["verdict"] == "ABSENT":
+                    groups["contig_end_absent"] += 1
+                else:
+                    groups["no_sk1_row"] += 1
+            print(
+                f"   the full-component groups (all {len(census)} windows): "
+                f"{dict(sorted(groups.items()))}",
+                flush=True,
+            )
+
         # ------------- phase 8t (slice F): THE ANSWER-PRESERVATION GATE
         # The timered rerun (the instrumented binary: timers and
         # counters only, emitted to stderr) must reproduce the committed
@@ -1458,11 +1689,21 @@ def main():
             import filecmp
 
             print(
-                "== phase 8t: the answer-preservation gate (the timered rerun vs the committed slice-E receipts)",
+                "== phase 8t: the answer-preservation gate (the timered rerun vs the committed receipts)",
                 flush=True,
             )
+            # (chrIV: the committed identity base is the SERIAL run's
+            # receipts — the 4-wide exhaustive run is the record, the
+            # serial run the gate's reference, the phase-3 ladder
+            # convention; chrMT/chrI keep the committed slice-E
+            # receipts as the base.)
+            committed_prefix = (
+                "realign-par-serial-chrIV"
+                if EXHAUSTIVE == "chrIV"
+                else f"realign-exhaustive-{EXHAUSTIVE}"
+            )
             committed_slice_e = {}
-            with open(f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl") as f:
+            with open(f"{D}/{committed_prefix}.jsonl") as f:
                 for line in f:
                     d = json.loads(line)
                     committed_slice_e[d["locus"]] = d
@@ -1484,19 +1725,19 @@ def main():
                     )
             for committed_sidecar, timered_sidecar in [
                 (
-                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.exactness.jsonl",
+                    f"{D}/{committed_prefix}.exactness.jsonl",
                     EXACTNESS,
                 ),
                 (
-                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.ingredients.jsonl",
+                    f"{D}/{committed_prefix}.jsonl.ingredients.jsonl",
                     INGREDIENTS,
                 ),
                 (
-                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl.records.jsonl",
+                    f"{D}/{committed_prefix}.jsonl.records.jsonl",
                     f"{D}/{TIMERED_BASE}.jsonl.records.jsonl",
                 ),
                 (
-                    f"{D}/realign-exhaustive-{EXHAUSTIVE}.skeleton.jsonl",
+                    f"{D}/{committed_prefix}.skeleton.jsonl",
                     SKELETON,
                 ),
             ]:
@@ -1506,7 +1747,7 @@ def main():
                     f"to the committed sidecar",
                 )
             print(
-                f"      the timered run reproduces the committed slice-E receipts "
+                f"      the run reproduces the committed {committed_prefix} receipts "
                 f"(every semantic field at {len(LOCI)} loci; only walls/rss_kb "
                 f"differ) with byte-identical sidecars",
                 flush=True,

@@ -580,65 +580,130 @@ fn anchor_correspondence(
         );
     }
     let mut pinned: Vec<Option<u64>> = vec![None; m];
-    let mut pinned_seen: Vec<bool> = vec![false; m];
-    let mut assignments = 0u64;
-    let mut chain: Vec<(usize, u64)> = Vec::with_capacity(m);
-    fn enumerate(
-        index: usize,
-        candidates: &[Vec<u64>],
-        increasing: bool,
-        chain: &mut Vec<(usize, u64)>,
-        pinned: &mut Vec<Option<u64>>,
-        pinned_seen: &mut Vec<bool>,
-        assignments: &mut u64,
-    ) {
-        if index == candidates.len() {
-            *assignments += 1;
-            for &(j, bp) in chain.iter() {
-                if !pinned_seen[j] {
-                    pinned[j] = Some(bp);
-                    pinned_seen[j] = true;
-                } else if pinned[j] != Some(bp) {
-                    pinned[j] = None;
+    // (The exact feasibility DP — the chrIV repeat-domain repair.
+    // The committed enumeration descended every monotone assignment;
+    // at chrIV's repeat-dense rows the leaf count is exponential in the
+    // anchors-per-repeat (measured: locus 39's axis partition carries
+    // rows with a syncmer node at 34 positions, and the serial run
+    // spent 760.7s in that ONE locus's scoring phase on exactly this
+    // path; sibling partitions carry scaffold rows with nodes at 1356
+    // positions). The DP computes the SAME pinned vector exactly:
+    // every complete monotone chain contains every anchor that has
+    // candidates (the recursion dies otherwise), so a position is
+    // pinned iff it is the anchor's UNIQUE feasible candidate —
+    // feasible forward (a monotone prefix of the earlier candidate-
+    // bearing anchors ends below it) and backward (a suffix of the
+    // later ones starts above it); two feasible candidates disagree
+    // across leaves (ambiguous, None); an anchor with candidates but
+    // NO feasible position means ZERO complete chains, and the
+    // enumeration's zero-leaf outcome leaves every pin None — which
+    // the DP reproduces because no (anchor, position) is then both
+    // forward- and backward-feasible. Anchors with no candidates
+    // never enter a chain and stay None, exactly as before. The
+    // equivalence is unit-proven against a copy of the committed
+    // enumeration over randomized synthetic walks, and the chrMT/chrI
+    // receipts are byte-identity-gated against the committed runs.)
+    let idx: Vec<usize> = (0..m).filter(|&j| !candidates[j].is_empty()).collect();
+    if !idx.is_empty() {
+        let increasing = orientation == 0;
+        let n = idx.len();
+        // forward[k][t]: some monotone prefix over the idx chain
+        // 0..=k ends at candidate t of idx[k] (candidates are sorted
+        // ascending — the fold walks are).
+        let mut forward: Vec<Vec<bool>> = Vec::with_capacity(n);
+        for k in 0..n {
+            forward.push(vec![false; candidates[idx[k]].len()]);
+        }
+        for t in 0..candidates[idx[0]].len() {
+            forward[0][t] = true;
+        }
+        for k in 1..n {
+            let prev = &candidates[idx[k - 1]];
+            // the prefix/suffix-OR of the previous anchor's forward
+            let mut below = vec![false; prev.len() + 1];
+            if increasing {
+                for t in 0..prev.len() {
+                    below[t + 1] = below[t] || forward[k - 1][t];
+                }
+            } else {
+                let mut above = vec![false; prev.len() + 1];
+                for t in (0..prev.len()).rev() {
+                    above[t] = above[t + 1] || forward[k - 1][t];
+                }
+                below = above;
+            }
+            let here = &candidates[idx[k]];
+            for (t, &bp) in here.iter().enumerate() {
+                if increasing {
+                    let cut = prev.partition_point(|&p| p < bp);
+                    forward[k][t] = below[cut];
+                } else {
+                    let start = prev.partition_point(|&p| p <= bp);
+                    forward[k][t] = below[start];
                 }
             }
-            return;
         }
-        if candidates[index].is_empty() {
-            enumerate(index + 1, candidates, increasing, chain, pinned, pinned_seen, assignments);
-            return;
+        // backward[k][t]: some monotone suffix over idx[k+1..] starts
+        // on the far side of candidate t of idx[k].
+        let mut backward: Vec<Vec<bool>> = Vec::with_capacity(n);
+        for k in 0..n {
+            backward.push(vec![false; candidates[idx[k]].len()]);
         }
-        for &bp in &candidates[index] {
-            let ok = match chain.last() {
-                Some(&(_, last)) => {
-                    if increasing {
-                        bp > last
-                    } else {
-                        bp < last
-                    }
+        for t in 0..candidates[idx[n - 1]].len() {
+            backward[n - 1][t] = true;
+        }
+        for k in (0..n.saturating_sub(1)).rev() {
+            let next = &candidates[idx[k + 1]];
+            let mut beyond = vec![false; next.len() + 1];
+            if increasing {
+                for t in (0..next.len()).rev() {
+                    beyond[t] = beyond[t + 1] || backward[k + 1][t];
                 }
-                None => true,
-            };
-            if ok {
-                chain.push((index, bp));
-                enumerate(index + 1, candidates, increasing, chain, pinned, pinned_seen, assignments);
-                chain.pop();
+            } else {
+                let mut under = vec![false; next.len() + 1];
+                for t in 0..next.len() {
+                    under[t + 1] = under[t] || backward[k + 1][t];
+                }
+                beyond = under;
+            }
+            let here = &candidates[idx[k]];
+            for (t, &bp) in here.iter().enumerate() {
+                if increasing {
+                    let start = next.partition_point(|&p| p <= bp);
+                    backward[k][t] = beyond[start];
+                } else {
+                    let cut = next.partition_point(|&p| p < bp);
+                    backward[k][t] = beyond[cut];
+                }
+            }
+        }
+        // THE PIN: the unique forward-AND-backward-feasible candidate
+        // position (DISTINCT bp — the enumeration's leaves agree on a
+        // position, and duplicate candidate entries at one bp are the
+        // same agreement) per anchor — the position every complete
+        // chain uses; zero or >=2 distinct feasible positions leave
+        // the pin None, and when no complete chain exists no candidate
+        // is both-way feasible so every anchor stays None — the
+        // zero-leaf outcome. (Candidates are sorted, so equal bps are
+        // adjacent.)
+        for k in 0..n {
+            let j = idx[k];
+            let mut feasible: Option<u64> = None;
+            let mut feasible_count = 0u32;
+            for (t, &bp) in candidates[j].iter().enumerate() {
+                if forward[k][t] && backward[k][t] && feasible != Some(bp) {
+                    feasible = Some(bp);
+                    feasible_count += 1;
+                }
+            }
+            if feasible_count == 1 {
+                pinned[j] = feasible;
             }
         }
     }
-    enumerate(
-        0,
-        &candidates,
-        orientation == 0,
-        &mut chain,
-        &mut pinned,
-        &mut pinned_seen,
-        &mut assignments,
-    );
     let ambiguous: Vec<usize> = (0..m)
         .filter(|&j| !candidates[j].is_empty() && pinned[j].is_none())
         .collect();
-    let _ = assignments;
     (pinned, ambiguous)
 }
 
@@ -5016,5 +5081,142 @@ mod tests {
         let seq = fetch(union_lo, occ.start + shape.span + 1);
         assert!(verify_key_at(&shape, &occ, &reads_match, &seq, union_lo, k, 0));
         assert!(!verify_key_at(&shape, &occ, &reads_mismatch, &seq, union_lo, k, 0));
+    }
+
+    /// THE COMMITTED ENUMERATION (the pre-DP anchor correspondence,
+    /// copied verbatim for the equivalence proof — it descends every
+    /// monotone assignment; exponential on repeat-dense rows, which
+    /// is exactly why the DP replaces it at chrIV scale).
+    fn enumerate_correspondence(
+        canonical: &[(i32, u64)],
+        orientation: u8,
+        row_positions: &dyn Fn(u32) -> Vec<(u64, i32)>,
+    ) -> (Vec<Option<u64>>, Vec<usize>) {
+        let m = canonical.len();
+        let mut candidates: Vec<Vec<u64>> = Vec::with_capacity(m);
+        for &(node, _) in canonical {
+            let required = required_sign(node, orientation);
+            let positions = row_positions(required.unsigned_abs());
+            candidates.push(
+                positions
+                    .iter()
+                    .filter(|&&(_, sign)| sign == required.signum())
+                    .map(|&(bp, _)| bp)
+                    .collect(),
+            );
+        }
+        let mut pinned: Vec<Option<u64>> = vec![None; m];
+        let mut pinned_seen: Vec<bool> = vec![false; m];
+        let mut assignments = 0u64;
+        let mut chain: Vec<(usize, u64)> = Vec::with_capacity(m);
+        fn enumerate(
+            index: usize,
+            candidates: &[Vec<u64>],
+            increasing: bool,
+            chain: &mut Vec<(usize, u64)>,
+            pinned: &mut Vec<Option<u64>>,
+            pinned_seen: &mut Vec<bool>,
+            assignments: &mut u64,
+        ) {
+            if index == candidates.len() {
+                *assignments += 1;
+                for &(j, bp) in chain.iter() {
+                    if !pinned_seen[j] {
+                        pinned[j] = Some(bp);
+                        pinned_seen[j] = true;
+                    } else if pinned[j] != Some(bp) {
+                        pinned[j] = None;
+                    }
+                }
+                return;
+            }
+            if candidates[index].is_empty() {
+                enumerate(index + 1, candidates, increasing, chain, pinned, pinned_seen, assignments);
+                return;
+            }
+            for &bp in &candidates[index] {
+                let ok = match chain.last() {
+                    Some(&(_, last)) => {
+                        if increasing {
+                            bp > last
+                        } else {
+                            bp < last
+                        }
+                    }
+                    None => true,
+                };
+                if ok {
+                    chain.push((index, bp));
+                    enumerate(index + 1, candidates, increasing, chain, pinned, pinned_seen, assignments);
+                    chain.pop();
+                }
+            }
+        }
+        enumerate(
+            0,
+            &candidates,
+            orientation == 0,
+            &mut chain,
+            &mut pinned,
+            &mut pinned_seen,
+            &mut assignments,
+        );
+        let ambiguous: Vec<usize> = (0..m)
+            .filter(|&j| !candidates[j].is_empty() && pinned[j].is_none())
+            .collect();
+        let _ = assignments;
+        (pinned, ambiguous)
+    }
+
+    #[test]
+    fn anchor_correspondence_dp_equals_the_committed_enumeration() {
+        // The exact-DP equivalence: over randomized synthetic walks
+        // (a fixed-seed LCG for determinism), covering unique pins,
+        // repeat-node ambiguity, absent anchors, zero-chain cases and
+        // both orientations, the DP's (pinned, ambiguous) must equal
+        // the committed enumeration's on EVERY case.
+        let mut seed: u64 = 0x243F6A8885A308D3;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..3000u32 {
+            let m = (rng() % 6) as usize + 1; // 1..=6 anchors
+            let mut canonical: Vec<(i32, u64)> = Vec::with_capacity(m);
+            let mut pos = 0u64;
+            for j in 0..m {
+                pos += rng() % 7;
+                let node = 1 + (rng() % 4) as i32; // nodes 1..=4 (collisions likely)
+                let sign = if rng() % 2 == 0 { 1 } else { -1 };
+                canonical.push((sign * node, pos));
+                let _ = j;
+            }
+            // the row's node positions: each node at 0..=8 positions
+            let mut row: std::collections::HashMap<u32, Vec<(u64, i32)>> =
+                std::collections::HashMap::new();
+            for node in 1u32..=4 {
+                let count = (rng() % 9) as usize; // 0..=8 positions
+                let mut positions: Vec<(u64, i32)> = Vec::with_capacity(count);
+                let mut p = 0u64;
+                for _ in 0..count {
+                    p += rng() % 11;
+                    let sign = if rng() % 2 == 0 { 1 } else { -1 };
+                    positions.push((p, sign));
+                }
+                row.insert(node, positions);
+            }
+            let positions_of = move |node: u32| row.get(&node).cloned().unwrap_or_default();
+            for orientation in [0u8, 1u8] {
+                let expected = enumerate_correspondence(&canonical, orientation, &positions_of);
+                let actual = anchor_correspondence(&canonical, orientation, &positions_of);
+                assert_eq!(
+                    expected, actual,
+                    "DP differs from the committed enumeration at case {case} \
+                     orientation {orientation}: canonical {canonical:?}"
+                );
+            }
+        }
     }
 }
