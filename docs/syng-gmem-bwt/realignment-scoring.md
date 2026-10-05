@@ -1400,3 +1400,112 @@ then needs only: verify ALL PHASES PASS, the fleet-heavy-chrIX done
 marker, the component docs section + commit, and the aggregate
 re-run (the script is re-runnable; chrIX's row lands from its
 receipts).
+
+## THE CALLED-VS-TRUTH SEQUENCE QV — the owner's correction of the log-gap "QV-like" pattern (16 closed components; chrIX in flight)
+
+The owner rejected the model-internal log-gap conversion as "the QV".
+The QV they mean is the likegt sequence-QV pattern: align the CALLED
+diplotype against the ACTUAL diplotype, per expressible locus. This
+section is the measured record of that stage — receipt-side machinery
+only (`realign-sequence-qv.py` + the `qv-biwfa` helper crate, the
+same lib_wfa2 revision the repository already pins; no product
+change; chrIX excluded, its exhaustive run still in flight).
+
+THE CONVENTION (exact, stated): the called class's material is the
+winner fold pair's spelled sequences (the two homolog candidates);
+the truth pair's material is the truth folds' (the folds carrying
+the S288C and SK1 rows). Both orders of the injective no-replacement
+assignment are scored by the assignment-wide per-base error (summed
+edits / summed alignment columns) and the lower taken (the owner's
+yardstick; likegt's mean-identity rule computed beside it — it
+disagrees at 6 of 1093 loci, all named in the tables file, and the
+disagreement is bounded: the two rules never differ by more than the
+pairing itself). The alignment is biWFA gap-affine End2End at
+likegt's penalties (match 0 / mismatch 4 / gap-open 6 / gap-extend
+2), the CIGAR walked byte-by-byte against both sequences. Per-base
+error = (mismatch columns + gap columns) / (total columns over the
+chosen assignment's two pairs): indels enter as individual gap
+columns, the End2End span leaves NO unaligned overhang (every base of
+every sequence sits in exactly one column), so the denominator is the
+union of the assignment's aligned material. QV = -10*log10(error)
+with the likegt floor-and-cap: an error at or below 1e-6 — a perfect
+call, zero edits — is reported as QV 60.
+
+THE MATERIAL DERIVATION, DUAL-GATED per locus without touching the
+ingredients sidecars (they are the record; the main per-locus jsonl
+receipts are streamed): a fold's spelled sequence is the member row's
+panel window, fetched directly from the panel text (`yeast235.txt`,
+the concatenated panel + the names TSV), gated BOTH ways — (a) every
+member's own panel window is the identical row sequence (the fold
+criterion, re-verified member-by-member), and (b) the panel window is
+contained in the member row's partition-GFA P-line spelling at a
+front-overhang offset (the committed checker phase-2 derivation,
+L-overlap trimmed, gap segments included). Every used fold at every
+locus passed both gates: 2,964 folds over the 16 components (the
+per-component counts in the run log beside the receipts).
+
+THE RECEIPTS: `realign-sequence-qv-<C>.jsonl` per component (1,093
+per-locus records over the 16 closed components) + the aggregate
+`realign-sequence-qv-tables.txt` at the validation dir; 4,362 biWFA
+alignments; the full per-locus fields include the 2x2 pair matrix,
+both orders' scores, the chosen assignment, the per-pair match /
+mismatch / indel counts and the called/truth fold identities.
+
+THE GENOME-WIDE QV DISTRIBUTION (1,093 expressible loci): median
+17.84, p10 8.40, p90 60.00, min 0.05 (chrXVI L7); QV>=40 at 48.67%,
+QV>=30 at 48.86%, QV>=20 at 49.31% — the distribution is bimodal by
+construction: 531 perfect calls (QV 60, zero edits) at exactly the
+truth-rank-1 loci, and the 562 non-rank-1 calls clustered at QV
+6.9-16.3 (p10-p90; median 9.91).
+
+THE REFRACTIVE TABLE (the owner's question: how much sequence
+accuracy do the not-at-truth calls actually lose?):
+
+| stratum | n | median QV | p10-p90 QV | min | median per-base error | perfect |
+|---------|---|-----------|------------|-----|----------------------|---------|
+| rank-1 calls | 531 | 60.00 | 60-60 | 60 | 0 | 531 |
+| non-rank-1 calls | 562 | 9.91 | 6.89-16.33 | 0.05 | 0.102 | 0 |
+
+Every rank-1 call is a PERFECT sequence call (the called class IS the
+truth class: the same fold pair, the same spelled sequences — 531/531
+at zero edits). The non-rank-1 calls are NOT "effectively the same":
+their median identity to the truth diplotype is 89.80% (median
+per-base error 10.2%), only 3/562 (0.53%) reach >=99.9% identity
+(chrIII L5 at 99.990%, chrXVI L2 at 99.990%, chrI L3 at 99.952%),
+8/562 (1.42%) reach >=99%, 137/562 (24.38%) reach >=95%. The errors
+are STRUCTURAL, not point-mutational: the gap-column share of the
+edit count is 98.0% at the median (p10 83.0%) — the called class
+spells different-length, different-copy material (repeat-domain /
+foreign / seam windows), not the truth sequence with substitutions.
+By census class the non-rank-1 calls resolve: in-axis-partition 419
+(median QV 9.80), tiled-elsewhere/neighbor (the seam class) 101
+(11.10), tiled-elsewhere/foreign-repeat (the repeat-domain foreign
+class) 24 (10.88), absent/contig-end 1 (7.96), partial-elsewhere 1
+(15.09), pilot (chrMT/chrI, no census receipt) 16 (9.29).
+
+THE WORST CALLS, NAMED (the full 25-row table in the tables file;
+every one is a different-material call, the mismatches and the gap
+columns shown): chrXVI L7 (QV 0.05, 98.96% per-base error — the
+windowed truth pair is a 49bp repeat-domain fold pair while the call
+is a homozygous 4,417bp shared-window fold); chrV L59 (QV 1.71 —
+APG/CIH foreign copies vs the AAA/S288C window + SK1); chrXIV L11
+(QV 2.44 — AAC/BHH vs AAA/S288C + SK1); chrVII L56 (QV 3.07); chrMT
+L10 (QV 3.36 — a zero-mismatch, all-indel call: the same bases in a
+different-length arrangement); chrIV L63 and chrIV L104 (QV 4.84 /
+5.07 — the repeat-locality residuals the chrIV tables named). The
+worst-call rows carry the census class at every locus (the seam /
+foreign-repeat / contig-end classes named above).
+
+THE HONEST STATEMENTS: (1) the 531 rank-1 calls' perfect QVs are a
+construction-level fact (called class == truth class means the same
+folds, hence identical spelled sequences), reported because the
+owner's yardstick asks exactly this — the sequence the call spells
+against the sequence the truth spells; (2) the QV is an
+assessment-side measure, no threshold, no tuning constant (the Phred
+form and the likegt floor-and-cap are the standard conventions,
+stated above); (3) the windowed truth pair convention inherits the
+instrument's own per-locus truth-pair definition — at chrXVI L7 the
+"actual diplotype" is a 49bp fold pair by the committed windowed
+convention, and the QV states it rather than repairing it; (4) chrIX
+remains excluded (its receipts are not closed); its row lands when
+its chain completes.
