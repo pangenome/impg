@@ -168,6 +168,13 @@ if TERRITORY:
     if EXHAUSTIVE is None or TIMERED_BASE is None:
         sys.exit("--territory requires --exhaustive COMP --timered-base BASE --run-tag TAG")
     COMMITTED_RECEIPT = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl"
+    # (Stage 3, the pggb substrate gate: --committed-receipt PATH points
+    # phase 8N's BEFORE record at an alternative committed receipt family
+    # — the pggb gate's before is the committed NORMALIZED-rule receipts
+    # of record (realign-exhaustive-territory-<C>), not the default
+    # convention. Additive; the default phase-8N behavior is untouched.)
+    if "--committed-receipt" in sys.argv:
+        COMMITTED_RECEIPT = sys.argv[sys.argv.index("--committed-receipt") + 1]
 if EXHAUSTIVE is not None:
     # the BEFORE receipt root: chrI/chrMT keep the committed
     # Poisson-era receipts at the validation root; chrIV and every
@@ -2168,7 +2175,7 @@ def main():
         # locus (CONVERT / HOLD / REGRESS / residual-moved).
         if TERRITORY:
             print(
-                "== phase 8N: the territory gate (the normalized receipts vs the committed convention)",
+                f"== phase 8N: the territory gate (the receipts vs the committed baseline {COMMITTED_RECEIPT})",
                 flush=True,
             )
             committed = {}

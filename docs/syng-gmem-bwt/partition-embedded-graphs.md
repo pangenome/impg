@@ -259,3 +259,142 @@ and the 0.3 spectrum floor are stated classification/reporting
 conventions, like the 120 bp homology padding); scoreboard machinery
 untouched; no 502; no PR push. THE EXHAUSTIVE chrIV SCORING RUN IS
 SLICE 2 — not started here.
+
+## The pggb substrate (stage 3 of the owner's approved four)
+
+**The owner's build-substrate ruling:** the syng's syncmer nodes are
+interned BY EXACT SUBSEQUENCE (the window's k-mer content), so their
+identity is frame-independent and they can be PROJECTED onto ANY graph
+built from the same panel subsequences. The local graphs should
+therefore be built with a PGGB-CLASS pipeline — real alignment
+induction (all-pairs alignment, seqwish transitive closure, block
+smoothing, gfaffix normalization) over the partition's member-row
+sequences — rather than the syng-native export path, and the syng ids
+projected onto the result: the messy repeat/subtelomeric localities
+get handled by HOMOLOGY rather than by partition membership.
+
+### The survey (what is actually on the box)
+
+`allwave` 0.1.0 and `seqwish` and `wfmash` v0.24.2 and `FastGA` are
+installed; `odgi`, `smoothxg` and the `pggb` perl driver are NOT. The
+runnable pggb-class path is the impg graph machinery's own built-in
+engine (`impg graph --gfa-engine pggb`, default FastGA/SweepGA
+backend): sweepga all-pairs alignment → seqwish induction →
+smoothxg-style block smoothing + per-block POA → gfaffix normalization
+— exactly the engine the early campaign's partition-graph renderings
+used (`partition-graphs-20260910T234952Z`, whose manifest and
+`validate_gfa` proved every path's sequence preserved byte-for-byte).
+
+### The build
+
+Per partition, the same locality extents as the export build: the
+member BED rows (the completed alignment-induced partition run,
+commit 295bca9) → `members.fa` (AGC extraction, source-forward) →
+`impg graph --gfa-engine pggb --aligner fastga -t 8`. The chrMT/chrI
+build set is 56 partitions (35 axis + the chrMT/chrI truth-side and
+twin holders; the six holder partitions lacking export graphs were
+first exported through the committed raw-mode writer so the proof's
+witness exists for every partition). Build: wall 734s, 132MB, every
+partition exit 0 (runner `genome/instrumented/run-pggb-partition-graphs.sh`).
+
+### The projection and its proof (id continuity)
+
+`examples/pggb_projection.rs` per partition: every member path's
+sequence is reconstructed from the pggb graph's own P line (segments
+concatenated, orientation honored) and demanded byte-identical to its
+AGC row; the row's syng walk is derived THROUGH the pggb
+reconstruction (the interior windows are cross-checked to be exactly
+the raw matched-syncmer extraction of the pggb graph's own sequence)
+plus the panel's own AGC flanks under the export writer's exact
+overlap convention (`walk_path_range` keeps a window iff
+`bp < end && bp + (params.k + params.w) > start`); and the spelled
+signed global syncmer ids must EQUAL the export GFA's P-line spelling
+(gap splices excluded). **Result: 6,956/6,956 member rows across all
+56 partitions spell EXACTLY equal — zero diffs — plus the
+BED-completeness check (every member row present as a pggb path, no
+extras).** The first attempt failed loudly at 211/211 rows (the naive
+fully-inside convention; the export spelling carries 1-2
+edge-overlapping windows per row) — the failure named the convention,
+the fix reproduces it exactly. The projection receipts: per-row walks
+(`partition<N>.pggb.projection.jsonl`), per-segment interned windows
+(`partition<N>.pggb.segments.jsonl`), the scorer-interface maps
+(`partition<N>.pggb.map.json`), and the structural comparison tables
+(`pggb-projection.tables.txt`) at
+`pggb-partition-graphs-chrMT-chrI/projection/`.
+
+### The structural comparison (where the substrates differ)
+
+- **Granularity:** the pggb graphs are variant-bubble-granular —
+  156,804 segments averaging 8bp over 1.27MB of distinct sequence,
+  203,469 links, 83,593 bubble endpoints — where the export graphs are
+  syncmer-granular (138,732 segments at 63bp, 175,275 links, 37,829
+  bubble endpoints). The pggb substrate carries 2.2x the bubble
+  structure: divergent bases become proper variant bubbles instead of
+  fragmenting shared runs.
+- **Alignment-induced sharing at the residual loci** (bp-weighted
+  truth-row/winner-row sharing in the locus's partition, vs the
+  export's shared-syncmer-node fraction): chrI L13 (repeat-domain,
+  truth rank 1074) export 0.522 → pggb **0.909**; chrI L18 (seam/
+  repeat, rank 621) 0.412 → **0.848**; chrI L2 (near-twin, rank 4)
+  0.946 → 0.997; chrI L16 (foreign-repeat, rank 5742) 0.475 → 0.570.
+  Real alignment places the diverged copies as majority-shared
+  homologous sequence with variant pockets; the export path holds the
+  same material as partially-overlapping parallel rows.
+- **Membership over-joins, measured:** 25 of 56 partitions form ONE
+  component under pggb links; the holder/subtelomeric partitions
+  fragment badly — partition541: 49 components over 86 member rows
+  (largest holds 32); partition3093: 37; partition14482: 33;
+  partition14346: 28 (largest holds 9 of 41); partition14577: 18
+  components, largest holds 2 of 19, zero bubbles. Summed, 312 of
+  6,956 member rows sit OUTSIDE their partition's largest component:
+  partition membership chained together material that real alignment
+  leaves as separate localities. 55.0% of distinct pggb segment bp is
+  visited by >= 2 paths (the alignment-induced shared material).
+- **The seam geometry is inherited, not healed:** per-partition builds
+  over the same extents cannot connect what partition boundaries split;
+  the truth/winner rows of a seam-class locus sit in DIFFERENT
+  partitions in either substrate.
+
+### The gate (chrMT/chrI exhaustive scoring through the projected substrate)
+
+The scorer's substrate interface is the partition map (the member
+rows); the pggb-projected maps carry member rows identical to the
+export maps (verified per partition), and the spell-equality proof
+ties every row's coordinates to the export graphs. The exhaustive
+re-runs (serial + 4-wide, the territory-normalized rule on, receipts
+`realign-{pggb-serial,exhaustive-pggb}-{chrMT,chrI}`) reproduce the
+committed normalized-rule receipts **semantically identical on every
+field — the only differing fields are the timing walls/rss — with all
+four sidecars md5-IDENTICAL** (runner `genome/instrumented/run-realign-pggb.sh`).
+The truth-rank gate table: chrMT 9/9 expressible rank-1 (HOLD 9,
+CONVERT [], REGRESS []), chrI 14/21 (HOLD 14, CONVERT [], REGRESS []),
+exactly the committed baseline — zero conversions, zero regressions.
+The checker over the pggb receipts (all modes, `--territory` with the
+committed territory receipts as the phase-8N baseline via the new
+additive `--committed-receipt` flag): **ALL PHASES PASS — chrMT
+1,182,235 checks / 0 failures** (chrI beside it).
+
+### The honest verdict
+
+The pggb substrate is PROVEN coordinate-continuous with the syng
+interning (6,956/6,956 spell-equal) and answer-neutral for the current
+row-sequence likelihood (the receipts are field-identical; the
+candidate domain is the member rows and the pggb build preserves
+them all). Its measured value is STRUCTURAL: the diverged
+repeat/subtelomeric material becomes majority-shared homologous
+sequence with proper variant bubbles (L13 0.52→0.91, L18 0.41→0.85),
+and the alignment verdict on membership is now measured in both
+directions — membership over-joins (312 rows in disconnected
+components; the holder partitions are the worst) and under-joins
+across seams (inherited by per-partition builds). For the 193
+seam/repeat-interior residual loci the substrate does NOT by itself
+convert any call — the likelihood is row-sequence-based and the
+substrate swap is coordinate-neutral — but it is the right build for
+any future graph-structured evidence (edge votes, node-coalesced
+observation mass, bubble-aware placement), and it names the honest
+next question: alignment-induced LOCALITIES (not partition extents)
+as the build domain, which is where the seam class would finally be
+healed.
+
+Assessment-side only; no thresholds; scoreboard machinery unmodified;
+no selection swap; no 502; no PR push; the panel's own alignments only.
