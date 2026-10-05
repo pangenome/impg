@@ -674,14 +674,10 @@ def spectrum_knee(sorted_distances):
     return False, 0.0
 
 
-def cluster_form_qual(s_win, spectrum, tied):
+def cluster_form_qual(s_win, spectrum, tied, compact=False):
     sorted_distances = sorted(d for d, _ in spectrum)
     has_knee, cut = spectrum_knee(sorted_distances)
     excluded = [d <= cut for d, _ in spectrum]
-    for _, band in tied:
-        for index, d in enumerate(band):
-            if d <= cut:
-                excluded[index] = True
     parent = list(range(len(tied) + 1))
 
     def root(node):
@@ -689,21 +685,52 @@ def cluster_form_qual(s_win, spectrum, tied):
             node = parent[node]
         return node
 
-    for left in range(len(tied)):
-        if spectrum[tied[left][0]][0] <= cut:
-            a, b = root(0), root(left + 1)
-            if a != b:
-                parent[a] = b
-        for right in range(left + 1, len(tied)):
-            # (the band-pair distance is band_left's row at the
-            # RIGHT BAND'S FOLD INDEX — the instrument's own indexing
-            # (`tied[left].1[index_right]`), not the band's ordinal in
-            # the tied list; chrXIII L1's three-band tie caught the
-            # ordinal misread as a k=4 false failure)
-            if tied[left][1][tied[right][0]] <= cut:
-                a, b = root(left + 1), root(right + 1)
+    if compact:
+        # (Stage 2, THE WALL FIX's mirror: the degenerate-locus tie
+        # certificate is the compact CUT-INDEX list — each list IS its
+        # band's exact <=cut predicate set, so the excluded-union is
+        # list membership and a union-find edge (left, right) exists
+        # iff tied class right's spectrum index appears in left's
+        # list. The edge set is IDENTICAL to the band form's (which
+        # tests band_left[index_right] <= cut), so k is identical;
+        # the iteration is list-driven, linear in the total predicate
+        # count instead of quadratic in the tied-class count — the
+        # degenerate loci tie ~35,510 classes and the quadratic
+        # pairwise loop is the checker-side wall.)
+        ordinal_of = {entry[0]: ordinal for ordinal, entry in enumerate(tied)}
+        for left, (index, members) in enumerate(tied):
+            for member in members:
+                excluded[member] = True
+            if spectrum[index][0] <= cut:
+                a, b = root(0), root(left + 1)
                 if a != b:
                     parent[a] = b
+            for member in members:
+                right = ordinal_of.get(member)
+                if right is not None:
+                    a, b = root(left + 1), root(right + 1)
+                    if a != b:
+                        parent[a] = b
+    else:
+        for _, band in tied:
+            for index, d in enumerate(band):
+                if d <= cut:
+                    excluded[index] = True
+        for left in range(len(tied)):
+            if spectrum[tied[left][0]][0] <= cut:
+                a, b = root(0), root(left + 1)
+                if a != b:
+                    parent[a] = b
+            for right in range(left + 1, len(tied)):
+                # (the band-pair distance is band_left's row at the
+                # RIGHT BAND'S FOLD INDEX — the instrument's own indexing
+                # (`tied[left].1[index_right]`), not the band's ordinal in
+                # the tied list; chrXIII L1's three-band tie caught the
+                # ordinal misread as a k=4 false failure)
+                if tied[left][1][tied[right][0]] <= cut:
+                    a, b = root(left + 1), root(right + 1)
+                    if a != b:
+                        parent[a] = b
     roots = sorted({root(n) for n in range(len(tied) + 1)})
     k = len(roots)
     alternative = None
@@ -1534,18 +1561,31 @@ def main():
         d = receipt[locus]
         spectrum = list(zip(d["qual_distance_spectrum"], d["qual_distance_spectrum_scores"]))
         # (Stage 2: under the territory convention the receipt carries
-        # the tied-winner bands — the cluster machinery's union-find
-        # input for the called set's tied classes; the committed
-        # receipts never carried a tied winner, so the default mode
-        # keeps the empty band list.)
+        # the tied-winner tie certificate — the cluster machinery's
+        # union-find input for the called set's tied classes; the
+        # committed receipts never carried a tied winner, so the
+        # default mode keeps the empty band list. The wall fix adds
+        # the compact CUT-INDEX form at fully degenerate loci (every
+        # class ties at the pure-E score — the receipt's own
+        # called_class_count == class_count equality); both forms are
+        # the exact <=cut predicate sets, so the same re-derivation
+        # applies.)
+        compact = False
         if TERRITORY:
-            tied = [
-                (int(entry[0]), [float(x) for x in entry[1]])
-                for entry in d.get("qual_tied_bands", [])
-            ]
+            if "qual_tied_cut_indices" in d:
+                tied = [
+                    (int(entry[0]), [int(member) for member in entry[1]])
+                    for entry in d["qual_tied_cut_indices"]
+                ]
+                compact = True
+            else:
+                tied = [
+                    (int(entry[0]), [float(x) for x in entry[1]])
+                    for entry in d.get("qual_tied_bands", [])
+                ]
         else:
             tied = []
-        state = cluster_form_qual(1.0, spectrum, tied)
+        state = cluster_form_qual(1.0, spectrum, tied, compact)
         check(
             state["shape"] == d["qual_spectrum_shape"],
             f"locus {locus}: spectrum shape differs",

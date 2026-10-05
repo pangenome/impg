@@ -1923,3 +1923,117 @@ ingredients sidecars untouched; the 64GiB guard clean (the territory
 runs' RSS peaks within the committed envelopes); the census/anchor/
 graph artifacts stand (the convention changes only the comparison
 domain).
+
+## STAGE 2, THE WALL FIX — the degenerate-locus tie certificate (2026-10-05, W6)
+
+THE WALL, measured before the fix: the territory fleet's four
+stragglers did NOT land cleanly — chrX, chrXII and chrXV's 4-wides
+DIED at the 64GiB RSS guard (peaks 78.0, 85.9, 81.6 GB at their
+partition-110 monster loci; receipts zero bytes; the run wrapper's
+done-marker fires on failure too, which masked the deaths), and
+chrVII's 4-wide landed but peaked at 118.4 GB — its checker's
+phase-1 guard check FAILED on exactly that (the stale done-markers
+made the idempotent drivers skip the dead runs; all four markers
+removed, the chrVII superseded artifacts preserved
+`.guardviolated`). The serials had completed (peaks 16-21 GB) but
+at the monsters ground for 4,472-4,931 qual-seconds each.
+
+THE MECHANISM, exact: at a partition-110 window (chrXII L86,
+chrXV L14, chrX L52, chrVII L56 — one degenerate domain manifesting
+as four components' windows) EVERY fold's territory image is empty
+or shorter than a read (six non-empty images totalling 222 bp
+against READ_LENGTH 150), so no candidate places anything: every
+fold scores the candidate-independent E branch at every unit, EVERY
+one of the 35,511 classes ties at the pure-E score
+(called_class_count == class_count == 35,511, the winner [0,0] by
+flat order alone), and the tie certificate then materializes
+|called|-1 bands x |spectrum| observed-mass distances — 35,510 x
+35,510 = 1.26e9 multiset merges (the qual-seconds wall) — and
+emits them as a ~6 GB `qual_tied_bands` JSON DOM (the RSS-guard
+breach). The p-arithmetic confirms the structure digit-for-digit:
+k = 14,645 with alternative ~0 reproduces the receipts' QUAL
+0.00029655808123999367 exactly. The same degenerate class exists
+harmlessly at test scale in CLOSED chrIV (loci 67/94/108:
+called == class_count == 2,701, k = 331, 57 MB lines) — the
+checkers already digest those.
+
+THE FIX (the chrIX discipline applied to the QUAL phase — the
+naive enumeration replaced by an exact decidable form, the answers
+unchanged by construction): the cluster machinery consumes from
+each band ONLY its <=cut predicate set (the excluded-union and the
+union-find edges; band values above the knee cut are never read),
+so at a fully degenerate locus (called_class_count ==
+class_count — an exact structural equality, not a size threshold)
+the certificate is computed through SOUND two-sided O(1)
+observed-mass bounds — D >= |Sm_n(t)-Sm_n(e)| + |Sm_e(t)-Sm_e(e)|
+and D <= Sm_n(t)+Sm_n(e)+Sm_e(t)+Sm_e(e), where Sm is the observed
+mass of the (merged, additive) multiset — with the exact
+`differing_observed_mass` as the fallback for the undecided middle
+band, and emitted as the compact `qual_tied_cut_indices` (per tied
+class: its spectrum index and its band's exact <=cut member list)
+instead of the band matrix. Non-degenerate loci take the committed
+band path unchanged — byte-identical receipts — and the
+default-convention receipt schema is untouched (the emission stays
+territory-only). The checker's phase-6 mirror re-derives k from
+the compact lists with the same list-driven union-find (linear in
+the total predicate count instead of quadratic in the tied-class
+count — at the monster 35,510 tied classes would make the
+quadratic python loop the checker-side wall); the band-form path
+is unchanged.
+
+THE EXACTNESS PROOF, three layers: (1) the bounds are
+exact-deciding, not approximating — the upper bound <= cut proves
+the predicate TRUE, the lower bound > cut proves it FALSE, and the
+fallback computes the very distance the band would have carried,
+so the emitted predicate set equals the naive band matrix's by
+construction; (2) the unit gate
+`the_degenerate_tie_certificate_matches_the_naive_band_oracle`
+runs 3,000 randomized loci against a VERBATIM copy of the naive
+band construction as the oracle (predicate sets asserted equal,
+then the full cluster state — k, excluded, alternative,
+cluster_size, cut, shape, p — equal under both certificate forms),
+plus `the_degenerate_certificate_handles_the_monster_shape_fast`
+(the pathological shape at 40-fold scale, oracle-proven, inside
+the 60 s liveness bound); 21/21 tests pass. (3) the receipt gates:
+the fixed binary at chrXII L86 reproduces the landed SERIAL
+receipt's monster line on every answer field (QUAL, k = 14,645,
+cluster_size, excluded = 35,510, knee, posteriors, winner, LL —
+20/20 identical, the serial's naive slow path as the oracle);
+chrXIII's full 101-locus territory rerun is semantically identical
+line-for-line (walls/rss excepted) with the exactness and skeleton
+sidecars md5-identical — including the chrXIII L1 three-band tie,
+the non-degenerate tie path; and the env-unset chrMT run is
+semantically identical to the committed default receipts (the
+no-op proof: the default schema never carried tie fields and the
+degenerate compute is convention-agnostic).
+
+THE COST TABLE, per monster locus (the before side: the landed
+serial receipts' own walls; the after side: the fixed binary):
+
+| locus (window over partition 110) | qual_seconds before | qual_seconds after | locus_seconds before | locus_seconds after |
+|---|---:|---:|---:|---:|
+| chrXII L86 | 4,802.09 | 13.99 | 4,807.01 | 15.96 |
+| chrXV L14 | 4,472.48 | (the rerun's receipt) | 4,477.48 | (the rerun's receipt) |
+| chrX L52 | 4,931.34 | (the rerun's receipt) | 4,935.43 | (the rerun's receipt) |
+| chrVII L56 | 4,925.93 | (the rerun's receipt) | 4,930.83 | (the rerun's receipt) |
+
+(the after cells for the three rerun components land with the
+fleet closure below; the chrXII gate measured the full fix: a 343x
+qual-phase pay, 4,802 s -> 14.0 s, at a process RSS of 7.8 GB
+where the pre-fix 4-wides breached the guard at 78-118 GB). The
+emission collapses 1.26e9 band values into 1,256,064 predicate
+members (a ~15 MB receipt line where the naive emission was ~6 GB)
+— the monster receipts are small enough that the checker's
+ordinary line parsing handles them.
+
+THE HONEST STATEMENT of what the compact certificate does not
+carry: the raw band values above the knee cut are not emitted at
+degenerate loci. Nothing consumes them — the cluster machinery
+reads only the <=cut predicates — but a future consumer that
+wanted the full distance matrix at a degenerate locus would need
+to recompute it (the naive path still exists in the code and the
+oracle test).
+
+The four straggler 4-wides re-run on the fixed binary (the stale
+markers removed, the drivers autonomous), the checker mirrors in
+place; the fleet closure and the final aggregate follow.

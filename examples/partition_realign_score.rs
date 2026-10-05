@@ -1447,7 +1447,36 @@ struct ClusterQual {
     p: Option<f64>,
 }
 
-fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64])]) -> ClusterQual {
+/// The tie certificate's exact input: per tied called class (beyond
+/// the winner), either the FULL band (its observed-mass distance to
+/// every spectrum entry — the emitted form at every non-degenerate
+/// locus) or, at a fully degenerate locus (every class ties at the
+/// pure-E score), the compact CUT-INDEX LIST — the band's exact
+/// <=cut predicate set. The two forms are EXCHANGEABLE BY
+/// CONSTRUCTION: cluster_form_qual consumes from each band only the
+/// predicate {i : band[i] <= cut} (the excluded-union and the
+/// union-find edges — band values above the cut are never read), and
+/// the cut-index list is exactly that predicate set, so k, excluded,
+/// alternative, cluster_size, shape and p are identical under both.
+enum TieCertificate<'a> {
+    Bands(&'a [(usize, Vec<f64>)]),
+    CutIndices(&'a [(usize, Vec<usize>)]),
+}
+
+impl TieCertificate<'_> {
+    fn len(&self) -> usize {
+        match self {
+            TieCertificate::Bands(entries) => entries.len(),
+            TieCertificate::CutIndices(entries) => entries.len(),
+        }
+    }
+}
+
+fn cluster_form_qual(
+    s_win: f64,
+    spectrum: &[(f64, f64)],
+    tied: &TieCertificate,
+) -> ClusterQual {
     let mut sorted: Vec<f64> = spectrum.iter().map(|&(distance, _)| distance).collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
     let knee_cut = spectrum_knee(&sorted);
@@ -1458,13 +1487,6 @@ fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64]
         if distance <= cut {
             excluded[index] = true;
             band += 1;
-        }
-    }
-    for (_, band_distances) in tied {
-        for (index, &distance) in band_distances.iter().enumerate() {
-            if distance <= cut {
-                excluded[index] = true;
-            }
         }
     }
     let mut parent: Vec<usize> = (0..=tied.len()).collect();
@@ -1481,18 +1503,67 @@ fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64]
         }
         current
     };
-    for (left, (index_left, _)) in tied.iter().enumerate() {
-        if spectrum[*index_left].0 <= cut {
-            let (a, b) = (root(&mut parent, 0), root(&mut parent, left + 1));
-            if a != b {
-                parent[a] = b;
+    match tied {
+        TieCertificate::Bands(entries) => {
+            for (_, band_distances) in entries.iter() {
+                for (index, &distance) in band_distances.iter().enumerate() {
+                    if distance <= cut {
+                        excluded[index] = true;
+                    }
+                }
+            }
+            for (left, (index_left, _)) in entries.iter().enumerate() {
+                if spectrum[*index_left].0 <= cut {
+                    let (a, b) = (root(&mut parent, 0), root(&mut parent, left + 1));
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+                for (right, (index_right, _)) in entries.iter().enumerate().skip(left + 1) {
+                    if entries[left].1[*index_right] <= cut {
+                        let (a, b) =
+                            (root(&mut parent, left + 1), root(&mut parent, right + 1));
+                        if a != b {
+                            parent[a] = b;
+                        }
+                    }
+                }
             }
         }
-        for (right, (index_right, _)) in tied.iter().enumerate().skip(left + 1) {
-            if tied[left].1[*index_right] <= cut {
-                let (a, b) = (root(&mut parent, left + 1), root(&mut parent, right + 1));
-                if a != b {
-                    parent[a] = b;
+        TieCertificate::CutIndices(entries) => {
+            // The compact form: each list IS the band's <=cut predicate
+            // set, so the excluded-union is list membership and a
+            // union-find edge (left, right) exists iff tied class
+            // right's spectrum index appears in left's list. The
+            // edge set is identical to the band form's (the band
+            // path tests band_left[index_right] <= cut), so the
+            // components — and k — are identical; the iteration is
+            // list-driven, linear in the total predicate count
+            // instead of quadratic in the tied-class count (the
+            // degenerate loci tie ~35,510 classes — the quadratic
+            // pairwise loop is the checker-side wall).
+            let mut ordinal_of: HashMap<usize, usize> = HashMap::with_capacity(entries.len());
+            for (ordinal, &(index, _)) in entries.iter().enumerate() {
+                ordinal_of.insert(index, ordinal);
+            }
+            for (left, &(index, ref list)) in entries.iter().enumerate() {
+                for &member in list {
+                    excluded[member] = true;
+                }
+                if spectrum[index].0 <= cut {
+                    let (a, b) = (root(&mut parent, 0), root(&mut parent, left + 1));
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+                for &member in list {
+                    if let Some(&right) = ordinal_of.get(&member) {
+                        let (a, b) =
+                            (root(&mut parent, left + 1), root(&mut parent, right + 1));
+                        if a != b {
+                            parent[a] = b;
+                        }
+                    }
                 }
             }
         }
@@ -1525,6 +1596,104 @@ fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64]
         alternative,
         p,
     }
+}
+
+/// The DEGENERATE-LOCUS cut-index lists (the wall fix's compute core,
+/// extracted for the unit-test oracle): per tied called class (beyond
+/// the winner, in called order), its spectrum index and the exact
+/// <=cut predicate set of its band. Each (tied class, spectrum entry)
+/// distance is decided by the SOUND two-sided O(1) observed-mass
+/// bounds — D >= |Sm_n(t) - Sm_n(e)| + |Sm_e(t) - Sm_e(e)| and
+/// D <= Sm_n(t) + Sm_n(e) + Sm_e(t) + Sm_e(e), where Sm is the
+/// observed mass of the (merged, additive) multiset — with the exact
+/// differing_observed_mass as the fallback for the undecided middle
+/// band, so the emitted predicate set is IDENTICAL to the naive band
+/// matrix's by construction (the oracle test below proves it). The
+/// upper-bound-first ordering makes the common all-zero-mass case
+/// (both multisets observed-empty, D = 0) decidable without any merge.
+fn degenerate_cut_lists<NF, EF>(
+    folds: &[Fold],
+    called: &[(usize, usize)],
+    spectrum: &[(f64, f64, f64, usize, usize, usize)],
+    observed_node: &NF,
+    observed_edge: &EF,
+    cut: f64,
+) -> Vec<(usize, Vec<usize>)>
+where
+    NF: Fn(u64) -> f64 + Sync,
+    EF: Fn(u64) -> f64 + Sync,
+{
+    let mut position_of: HashMap<(usize, usize), usize> = HashMap::with_capacity(spectrum.len());
+    for (position, &(_, _, _, first, second, _)) in spectrum.iter().enumerate() {
+        position_of.insert((first, second), position);
+    }
+    let node_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.nodes
+                .iter()
+                .map(|&(key, count)| observed_node(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    let edge_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.edges
+                .iter()
+                .map(|&(key, count)| observed_edge(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    let entries: Vec<(usize, usize, f64, f64)> = spectrum
+        .iter()
+        .map(|&(_, _, _, first, second, _)| {
+            (
+                first,
+                second,
+                node_mass[first] + node_mass[second],
+                edge_mass[first] + edge_mass[second],
+            )
+        })
+        .collect();
+    called[1..]
+        .par_iter()
+        .map(|&(first, second)| {
+            let index = *position_of
+                .get(&(first, second))
+                .expect("called class missing from the winner's spectrum");
+            let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+            let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+            let node_lookup = |key: u64| observed_node(key);
+            let edge_lookup = |key: u64| observed_edge(key);
+            let (tn, te) = (
+                node_mass[first] + node_mass[second],
+                edge_mass[first] + edge_mass[second],
+            );
+            let mut list: Vec<usize> = Vec::new();
+            for (position, &(other_first, other_second, gn, ge)) in entries.iter().enumerate() {
+                let lower = (tn - gn).abs() + (te - ge).abs();
+                if lower > cut {
+                    continue;
+                }
+                let upper = tn + gn + te + ge;
+                if upper <= cut {
+                    list.push(position);
+                    continue;
+                }
+                let other_nodes =
+                    merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
+                let other_edges =
+                    merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
+                let distance = differing_observed_mass(&nodes, &other_nodes, &node_lookup)
+                    + differing_observed_mass(&edges, &other_edges, &edge_lookup);
+                if distance <= cut {
+                    list.push(position);
+                }
+            }
+            (index, list)
+        })
+        .collect()
 }
 
 /// The canonical diploid pair mixture: P(read | generated from the pair)
@@ -3786,29 +3955,78 @@ fn main() -> io::Result<()> {
                 }
                 _ => Vec::new(),
             };
+        // (Stage 2, THE WALL FIX — the degenerate-locus tie
+        // certificate. At a fully degenerate locus every fold's every
+        // unit scores the candidate-independent E branch (every
+        // territory image is empty or shorter than a read, so no
+        // candidate places anything), every one of the pair_count
+        // classes ties at the pure-E score and called.len() ==
+        // pair_count — an exact structural equality, not a size
+        // threshold. The naive certificate materializes |called| - 1
+        // bands x |spectrum| observed-mass distances — measured at the
+        // repeat-domain monster loci (the partition-110 windows
+        // chrXII L86/chrXV L14/chrX L52/chrVII L56): 35,510 x 35,510 =
+        // 1.26e9 multiset merges, qual_seconds 4,802s in the serial
+        // run, and a ~6GB qual_tied_bands DOM that breached the
+        // 64GiB guard in every 4-wide that reached it. The cluster
+        // machinery consumes from each band ONLY its <=cut predicate
+        // set, so the degenerate path computes exactly that: each
+        // (tied class, spectrum entry) distance is decided by SOUND
+        // two-sided O(1) bounds — D = Dn + De >= |Sm_n(t) - Sm_n(e)| +
+        // |Sm_e(t) - Sm_e(e)| and D <= Sm_n(t) + Sm_n(e) + Sm_e(t) +
+        // Sm_e(e), where Sm is the observed mass (the bounds are
+        // exact-deciding: the upper bound <= cut proves the predicate
+        // TRUE, the lower bound > cut proves it FALSE) — with the
+        // exact differing_observed_mass as the fallback for the
+        // undecided middle band. The emitted certificate is the
+        // compact cut-index list; the answers (k, excluded,
+        // alternative, cluster_size, shape, p) are identical to the
+        // naive path BY CONSTRUCTION and unit-gated against a
+        // verbatim oracle below. Non-degenerate loci take the
+        // committed band path unchanged — byte-identical receipts.)
+        let degenerate = called.len() == pair_count;
         let mut tied_bands: Vec<(usize, Vec<f64>)> = Vec::new();
-        for &(first, second) in called.iter().skip(1) {
-            let index = spectrum
-                .iter()
-                .position(|&(_, _, _, a, b, _)| a == first && b == second)
-                .expect("called class missing from the winner's spectrum");
-            let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
-            let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
-            let band: Vec<f64> = spectrum
-                .par_iter()
-                .map(|&(_, _, _, other_first, other_second, _)| {
-                    let other_nodes =
-                        merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
-                    let other_edges =
-                        merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
-                    differing_observed_mass(&nodes, &other_nodes, &observed_node_fn)
-                        + differing_observed_mass(&edges, &other_edges, &observed_edge_fn)
-                })
-                .collect();
-            tied_bands.push((index, band));
+        let mut cut_index_lists: Vec<(usize, Vec<usize>)> = Vec::new();
+        if degenerate {
+            let mut sorted: Vec<f64> =
+                spectrum.iter().map(|&(distance, _, _, _, _, _)| distance).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+            let cut = spectrum_knee(&sorted).cut;
+            cut_index_lists = degenerate_cut_lists(
+                &folds,
+                &called,
+                &spectrum,
+                &observed_node_fn,
+                &observed_edge_fn,
+                cut,
+            );
+        } else {
+            for &(first, second) in called.iter().skip(1) {
+                let index = spectrum
+                    .iter()
+                    .position(|&(_, _, _, a, b, _)| a == first && b == second)
+                    .expect("called class missing from the winner's spectrum");
+                let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+                let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+                let band: Vec<f64> = spectrum
+                    .par_iter()
+                    .map(|&(_, _, _, other_first, other_second, _)| {
+                        let other_nodes =
+                            merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
+                        let other_edges =
+                            merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
+                        differing_observed_mass(&nodes, &other_nodes, &observed_node_fn)
+                            + differing_observed_mass(&edges, &other_edges, &observed_edge_fn)
+                    })
+                    .collect();
+                tied_bands.push((index, band));
+            }
         }
-        let tied_refs: Vec<(usize, &[f64])> =
-            tied_bands.iter().map(|(index, band)| (*index, band.as_slice())).collect();
+        let tie_certificate = if degenerate {
+            TieCertificate::CutIndices(&cut_index_lists)
+        } else {
+            TieCertificate::Bands(&tied_bands)
+        };
         let cluster = called_score
             .filter(|_| !spectrum.is_empty() || !called.is_empty())
             .map(|_| {
@@ -3816,7 +4034,7 @@ fn main() -> io::Result<()> {
                     .iter()
                     .map(|&(distance, score, _, _, _, _)| (distance, score))
                     .collect();
-                cluster_form_qual(1.0, &pairs, &tied_refs)
+                cluster_form_qual(1.0, &pairs, &tie_certificate)
             });
         let cluster_knee = cluster.as_ref().and_then(|state| state.knee);
         let cluster_shape = cluster.as_ref().map(|state| state.shape);
@@ -4722,18 +4940,32 @@ fn main() -> io::Result<()> {
                          candidate-independent E branch for both candidates \
                          equally (rule 8)",
             });
-            // The tied-winner bands (the cluster machinery's union-find
-            // input for tied called classes — the committed receipts
-            // never carried a tied winner, so the checker's phase 6
-            // could re-derive k with an empty band list; the normalized
-            // convention's converted loci DO tie (the identical-LL
-            // called set), so the bands are emitted for the checker's
-            // faithful re-derivation. Territory receipts only — the
-            // default receipt schema stays byte-identical.)
-            report_value["qual_tied_bands"] = json!(tied_bands
-                .iter()
-                .map(|(index, band)| json!([index, band]))
-                .collect::<Vec<_>>());
+            // The tied-winner tie certificate (the cluster machinery's
+            // union-find input for tied called classes — the committed
+            // receipts never carried a tied winner, so the checker's
+            // phase 6 could re-derive k with an empty band list; the
+            // normalized convention's converted loci DO tie (the
+            // identical-LL called set), so the certificate is emitted
+            // for the checker's faithful re-derivation. Territory
+            // receipts only — the default receipt schema stays
+            // byte-identical. At a FULLY DEGENERATE locus (every
+            // class ties at the pure-E score) the certificate is the
+            // compact CUT-INDEX list — the band's exact <=cut
+            // predicate set, the only part of the band the cluster
+            // machinery consumes (the wall fix; the naive band
+            // matrix there is 35,510 x 35,510 distances, a ~6GB
+            // emission that breached the 64GiB guard).)
+            if degenerate {
+                report_value["qual_tied_cut_indices"] = json!(cut_index_lists
+                    .iter()
+                    .map(|(index, list)| json!([index, list]))
+                    .collect::<Vec<_>>());
+            } else {
+                report_value["qual_tied_bands"] = json!(tied_bands
+                    .iter()
+                    .map(|(index, band)| json!([index, band]))
+                    .collect::<Vec<_>>());
+            }
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
         }
@@ -5227,7 +5459,7 @@ mod tests {
             (2.0, 0.1),
             (100.0, 1e-40),
         ];
-        let state = cluster_form_qual(1.0, &spectrum, &[]);
+        let state = cluster_form_qual(1.0, &spectrum, &TieCertificate::Bands(&[]));
         assert!(state.knee.is_some());
         // A single called class: k = 1, and p = 1/(1 + a) is capped by
         // the alternative's likelihood mass.
@@ -5235,6 +5467,310 @@ mod tests {
         assert_eq!(state.alternative, Some(1e-40));
         let p = state.p.expect("finite p");
         assert!((p - 1.0 / (1.0 + 1e-40)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_degenerate_tie_certificate_matches_the_naive_band_oracle() {
+        // THE WALL FIX'S EXACTNESS GATE (the chrIX oracle discipline):
+        // the degenerate-locus cut-index path against a VERBATIM copy
+        // of the pre-fix naive band matrix. Randomized folds and
+        // observed maps; the naive path materializes every band and
+        // derives its <=cut predicate set; the tiered path must emit
+        // the IDENTICAL predicate set and drive cluster_form_qual to
+        // the IDENTICAL state (k, excluded, alternative, cluster_size,
+        // cut, shape, p) — the bounds are exact-deciding, not
+        // approximating, and the fallback computes the very distance
+        // the band would have carried.
+        let mut seed = 0x5eed_1234u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for case in 0..3000 {
+            let n_folds = 2 + (next() % 9) as usize; // 2..=10 folds
+            let pair_count = n_folds * (n_folds + 1) / 2;
+            let folds: Vec<Fold> = (0..n_folds)
+                .map(|_| {
+                    let mut nodes: Vec<(u64, u32)> = (0..(next() % 7))
+                        .map(|_| (1 + (next() % 24) as u64, 1 + next() % 3))
+                        .collect();
+                    nodes.sort_unstable();
+                    nodes.dedup_by(|a, b| {
+                        if a.0 == b.0 {
+                            b.1 += a.1;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    let mut edges: Vec<(u64, u32)> = (0..(next() % 5))
+                        .map(|_| (1000 + (next() % 24) as u64, 1 + next() % 2))
+                        .collect();
+                    edges.sort_unstable();
+                    edges.dedup_by(|a, b| {
+                        if a.0 == b.0 {
+                            b.1 += a.1;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    Fold {
+                        seq: vec![],
+                        len: 0,
+                        walk: vec![],
+                        node_positions: HashMap::new(),
+                        members: vec![],
+                        nodes,
+                        edges,
+                    }
+                })
+                .collect();
+            let observed_node: HashMap<u64, f64> = (0..8)
+                .map(|_| (1 + (next() % 30) as u64, (next() % 97) as f64))
+                .collect();
+            let observed_edge: HashMap<u64, f64> = (0..6)
+                .map(|_| (1000 + (next() % 30) as u64, (next() % 89) as f64))
+                .collect();
+            let node_fn = |key: u64| observed_node.get(&key).copied().unwrap_or(0.0);
+            let edge_fn = |key: u64| observed_edge.get(&key).copied().unwrap_or(0.0);
+            // The degenerate locus: every class ties at the pure-E
+            // score, the winner is (0, 0) by flat order, and the
+            // spectrum is every other pair — the instrument's own
+            // construction, all scores 1.0.
+            let called: Vec<(usize, usize)> = (0..pair_count).map(unrank_pair).collect();
+            let (winner_first, winner_second) = called[0];
+            let winner_nodes =
+                merged_multiset(&folds[winner_first].nodes, &folds[winner_second].nodes);
+            let winner_edges =
+                merged_multiset(&folds[winner_first].edges, &folds[winner_second].edges);
+            let mut spectrum: Vec<(f64, f64, f64, usize, usize, usize)> = (0..pair_count)
+                .filter_map(|flat| {
+                    let (first, second) = unrank_pair(flat);
+                    if first == winner_first && second == winner_second {
+                        return None;
+                    }
+                    let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+                    let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+                    let distance =
+                        differing_observed_mass(&nodes, &winner_nodes, &node_fn)
+                            + differing_observed_mass(&edges, &winner_edges, &edge_fn);
+                    let signature = signature_cosine_distance(
+                        &nodes, &edges, &winner_nodes, &winner_edges,
+                    );
+                    Some((distance, 1.0, signature, first, second, flat))
+                })
+                .collect();
+            spectrum
+                .sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+            let mut sorted: Vec<f64> =
+                spectrum.iter().map(|&(distance, ..)| distance).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
+            let cut = spectrum_knee(&sorted).cut;
+            // The VERBATIM naive oracle (the pre-fix band
+            // construction, kept here as the test's oracle).
+            let mut oracle_bands: Vec<(usize, Vec<f64>)> = Vec::new();
+            for &(first, second) in called.iter().skip(1) {
+                let index = spectrum
+                    .iter()
+                    .position(|&(_, _, _, a, b, _)| a == first && b == second)
+                    .expect("called class missing from the winner's spectrum");
+                let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+                let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+                let band: Vec<f64> = spectrum
+                    .iter()
+                    .map(|&(_, _, _, other_first, other_second, _)| {
+                        let other_nodes =
+                            merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
+                        let other_edges =
+                            merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
+                        differing_observed_mass(&nodes, &other_nodes, &node_fn)
+                            + differing_observed_mass(&edges, &other_edges, &edge_fn)
+                    })
+                    .collect();
+                oracle_bands.push((index, band));
+            }
+            let oracle_cut_lists: Vec<(usize, Vec<usize>)> = oracle_bands
+                .iter()
+                .map(|(index, band)| {
+                    (
+                        *index,
+                        band.iter()
+                            .enumerate()
+                            .filter(|&(_, &distance)| distance <= cut)
+                            .map(|(position, _)| position)
+                            .collect(),
+                    )
+                })
+                .collect();
+            let tiered = degenerate_cut_lists(
+                &folds, &called, &spectrum, &node_fn, &edge_fn, cut,
+            );
+            assert_eq!(tiered, oracle_cut_lists, "case {case}: predicate sets differ");
+            let pairs: Vec<(f64, f64)> = spectrum
+                .iter()
+                .map(|&(distance, score, ..)| (distance, score))
+                .collect();
+            let state_bands =
+                cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
+            let state_lists =
+                cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+            assert_eq!(state_lists.k, state_bands.k, "case {case}: k differs");
+            assert_eq!(state_lists.excluded, state_bands.excluded, "case {case}: excluded differs");
+            assert_eq!(state_lists.alternative, state_bands.alternative, "case {case}: alternative differs");
+            assert_eq!(state_lists.cluster_size, state_bands.cluster_size, "case {case}: cluster_size differs");
+            assert_eq!(state_lists.cut, state_bands.cut, "case {case}: cut differs");
+            assert_eq!(state_lists.shape, state_bands.shape, "case {case}: shape differs");
+            assert_eq!(state_lists.p, state_bands.p, "case {case}: p differs");
+        }
+    }
+
+    #[test]
+    fn the_degenerate_certificate_handles_the_monster_shape_fast() {
+        // The monster-locus shape at test scale (the chrXII L86
+        // class): MANY folds, EVERY class tied at the pure-E score —
+        // the naive certificate is (pair_count - 1) squared distances
+        // (at the real locus 35,510 x 35,510 = 1.26e9, a 4,802s grind
+        // and a ~6GB emission that breached the 64GiB guard); the
+        // tiered path must reach the IDENTICAL cluster state well
+        // inside the liveness bound, with the oracle proving the
+        // equality at a size the oracle can afford (40 folds -> 820
+        // classes, 819 x 819 naive distances).
+        let started = Instant::now();
+        let mut seed = 0x1234_abcdu64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let n_folds = 40usize;
+        let pair_count = n_folds * (n_folds + 1) / 2;
+        let folds: Vec<Fold> = (0..n_folds)
+            .map(|fold| {
+                // Repeat-domain-shaped multisets: every fold carries a
+                // few HEAVY observed nodes at varying copy counts plus
+                // disjoint unobserved material.
+                let mut nodes: Vec<(u64, u32)> = vec![(1, 1 + next() % 9), (2, 1 + next() % 9)];
+                nodes.extend((0..(next() % 6)).map(|_| {
+                    (50 + (next() % 200) as u64, 1 + next() % 3)
+                }));
+                nodes.sort_unstable();
+                nodes.dedup_by(|a, b| {
+                    if a.0 == b.0 {
+                        b.1 += a.1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let mut edges: Vec<(u64, u32)> = vec![(1001, 1 + next() % 5)];
+                edges.extend((0..(next() % 4)).map(|_| {
+                    (1100 + (next() % 100) as u64, 1 + next() % 2)
+                }));
+                edges.sort_unstable();
+                edges.dedup_by(|a, b| {
+                    if a.0 == b.0 {
+                        b.1 += a.1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let _ = fold;
+                Fold {
+                    seq: vec![],
+                    len: 0,
+                    walk: vec![],
+                    node_positions: HashMap::new(),
+                    members: vec![],
+                    nodes,
+                    edges,
+                }
+            })
+            .collect();
+        let observed_node: HashMap<u64, f64> =
+            [(1u64, 37.0), (2u64, 11.0), (3u64, 53.0)].into_iter().collect();
+        let observed_edge: HashMap<u64, f64> =
+            [(1001u64, 29.0), (1002u64, 7.0)].into_iter().collect();
+        let node_fn = |key: u64| observed_node.get(&key).copied().unwrap_or(0.0);
+        let edge_fn = |key: u64| observed_edge.get(&key).copied().unwrap_or(0.0);
+        let called: Vec<(usize, usize)> = (0..pair_count).map(unrank_pair).collect();
+        let (winner_first, winner_second) = called[0];
+        let winner_nodes =
+            merged_multiset(&folds[winner_first].nodes, &folds[winner_second].nodes);
+        let winner_edges =
+            merged_multiset(&folds[winner_first].edges, &folds[winner_second].edges);
+        let mut spectrum: Vec<(f64, f64, f64, usize, usize, usize)> = (0..pair_count)
+            .filter_map(|flat| {
+                let (first, second) = unrank_pair(flat);
+                if first == winner_first && second == winner_second {
+                    return None;
+                }
+                let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+                let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+                let distance =
+                    differing_observed_mass(&nodes, &winner_nodes, &node_fn)
+                        + differing_observed_mass(&edges, &winner_edges, &edge_fn);
+                let signature =
+                    signature_cosine_distance(&nodes, &edges, &winner_nodes, &winner_edges);
+                Some((distance, 1.0, signature, first, second, flat))
+            })
+            .collect();
+        spectrum.sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+        let mut sorted: Vec<f64> = spectrum.iter().map(|&(distance, ..)| distance).collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
+        let cut = spectrum_knee(&sorted).cut;
+        let mut oracle_bands: Vec<(usize, Vec<f64>)> = Vec::new();
+        for &(first, second) in called.iter().skip(1) {
+            let index = spectrum
+                .iter()
+                .position(|&(_, _, _, a, b, _)| a == first && b == second)
+                .expect("called class missing from the winner's spectrum");
+            let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+            let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+            let band: Vec<f64> = spectrum
+                .iter()
+                .map(|&(_, _, _, other_first, other_second, _)| {
+                    let other_nodes =
+                        merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
+                    let other_edges =
+                        merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
+                    differing_observed_mass(&nodes, &other_nodes, &node_fn)
+                        + differing_observed_mass(&edges, &other_edges, &edge_fn)
+                })
+                .collect();
+            oracle_bands.push((index, band));
+        }
+        let oracle_cut_lists: Vec<(usize, Vec<usize>)> = oracle_bands
+            .iter()
+            .map(|(index, band)| {
+                (
+                    *index,
+                    band.iter()
+                        .enumerate()
+                        .filter(|&(_, &distance)| distance <= cut)
+                        .map(|(position, _)| position)
+                        .collect(),
+                )
+            })
+            .collect();
+        let tiered = degenerate_cut_lists(&folds, &called, &spectrum, &node_fn, &edge_fn, cut);
+        assert_eq!(tiered, oracle_cut_lists, "monster shape: predicate sets differ");
+        let pairs: Vec<(f64, f64)> = spectrum
+            .iter()
+            .map(|&(distance, score, ..)| (distance, score))
+            .collect();
+        let state_bands =
+            cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
+        let state_lists =
+            cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+        assert_eq!(state_lists.k, state_bands.k);
+        assert_eq!(state_lists.excluded, state_bands.excluded);
+        assert_eq!(state_lists.p, state_bands.p);
+        assert!(started.elapsed().as_secs() < 60, "the liveness bound");
     }
     #[test]
     fn canonical_scheme_selects_per_window_form() {
