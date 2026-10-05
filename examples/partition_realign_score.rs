@@ -164,6 +164,47 @@
 //!    path walk), NOT an inability of the truth's rows to spell them.
 //!    The marginalization bounds that artifact's cost at E; the frame
 //!    repair itself is named as the next lever.
+//!
+//! 8. THE EXTENT NORMALIZATION (stage 2 of the owner's approved
+//!    four; env IMPG_REALIGN_TERRITORY_NORMALIZED, beside the
+//!    committed convention). THE MEASURED DEFECT: the candidates of
+//!    one locus are rows of the same partition whose OWN extents
+//!    differ by thousands of bases (the census's window territory is
+//!    the PANGENOME territory — every path's full member row — so
+//!    every candidate sits wholly "in territory" while a longer row
+//!    can place reads a shorter one cannot: the likelihood rewards
+//!    whoever happens to SPAN more, not who explains the locus
+//!    better; the causal autopsy measured this unplaced-differential
+//!    term winner-favored at 582/584 non-rank-1 loci against
+//!    truth-favoring both-placed evidence). THE DERIVED RULE, no
+//!    tuning constants: candidates are compared on EQUAL extents —
+//!    the locus's TERRITORY, its own coordinate, the window's axis
+//!    row. Per fold, the territory IMAGE is the interval spanned by
+//!    the fold's walk steps shared with the axis row's walk (the
+//!    alignment-induced correspondence — the same node-identity
+//!    structure the pin machinery already trusts; interior diverged
+//!    pockets lie between shared anchors and are INCLUDED). The
+//!    local-spell branch is restricted to the image: a placement is
+//!    valid iff the read's pinned windows and voted bases project
+//!    inside it, and the uniform placement prior counts the image's
+//!    placements (2 * (image_len - 149), both strands). Mass outside
+//!    the image is handled by the derived symmetric rule: it enters
+//!    as the E-branch background for BOTH candidates equally — the
+//!    elsewhere branch is candidate-independent, so out-of-image mass
+//!    contributes ZERO differential and cannot vote for the spanner.
+//!    THE HONEST CHECK: the territory is the locus's own coordinate,
+//!    not the truth's and not any candidate's; a true
+//!    deletion/insertion haplotype keeps every bit of its IN-WINDOW
+//!    evidence (the image is the interval between the fold's outermost
+//!    shared anchors — all in-window material, diverged pockets
+//!    included), and its material beyond the window is E for every
+//!    candidate equally, so it loses no RELATIVE evidence and no rival
+//!    can harvest it. A fold sharing no anchor with the axis row has
+//!    an EMPTY image: it spells no territory material of this locus
+//!    and every unit falls to E under it. Under the default (env
+//!    unset) every fold's image is its full extent and the rule
+//!    degenerates EXACTLY to the committed comparison — the identity
+//!    gate.
 
 #![recursion_limit = "512"]
 
@@ -1655,17 +1696,21 @@ fn serving_anchor(pinned: &[Option<i64>], own_hull: &[u64], d: i64) -> Option<(u
 /// sign — asserted per base by the direct check) plus the skipped-base
 /// votes against the fold's spelled sequence. Returns None when the
 /// placement is invalid for this variant (a voted base projects
-/// outside the fold's extent — the uniform placement prior's support
-/// requires the read fully inside).
+/// outside the comparison domain — the fold's extent, or under the
+/// normalized convention the fold's TERRITORY IMAGE [img_lo, img_hi),
+/// the uniform placement prior's support requires the read fully
+/// inside it).
 #[allow(clippy::too_many_arguments)]
 fn placement_score(
     unit: &Unit,
     canonical: &[(i32, u64)],
     pin: &Pin,
     fold_seq: &[u8],
-    fold_len: u64,
+    _fold_len: u64,
     reads: &[Vec<u8>],
     k: u64,
+    img_lo: i64,
+    img_hi: i64,
 ) -> Option<(u32, u32)> {
     let read = &reads[unit.read];
     let forward = physical_forward(pin.orientation, unit.mirror);
@@ -1684,7 +1729,7 @@ fn placement_score(
             } else {
                 r + (own_pos + k as i64 - 1 - d)
             };
-            if coord < 0 || coord >= fold_len as i64 {
+            if coord < img_lo || coord >= img_hi {
                 return None;
             }
             let base = fold_seq[coord as usize];
@@ -2856,6 +2901,12 @@ fn main() -> io::Result<()> {
     // pairing). The repair — the canonical-scheme skeleton — is the
     // default.
     let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    // (Stage 2, the extent normalization: under
+    // IMPG_REALIGN_TERRITORY_NORMALIZED the per-locus comparison
+    // domain is the territory image per fold — rule 8 of the model
+    // doc above. The default keeps the committed convention
+    // bit-for-bit.)
+    let territory_normalized = std::env::var("IMPG_REALIGN_TERRITORY_NORMALIZED").is_ok();
     let mut skeleton = match &options.skeleton_out {
         Some(path) => Some(BufWriter::new(File::create(path)?)),
         None => None,
@@ -3031,6 +3082,61 @@ fn main() -> io::Result<()> {
             folds[index].members.push(member.clone());
         }
         let n_folds = folds.len();
+        // ------------------------------------------- the territory images
+        // (Stage 2, rule 8: the locus's normalized comparison domain.
+        // The territory is the LOCUS'S OWN COORDINATE — the window's
+        // axis row (the component's own member row at [axis_start,
+        // axis_end)); per fold the image is the interval spanned by
+        // the fold's walk steps shared with the axis row's walk —
+        // the alignment-induced correspondence. Under the default
+        // convention every fold's image is its FULL EXTENT and the
+        // rule degenerates exactly to the committed comparison.)
+        let territory_axis_fold: Option<usize>;
+        let territory: Vec<(u64, u64)> = if territory_normalized {
+            let hits: Vec<usize> = folds
+                .iter()
+                .enumerate()
+                .filter(|(_, fold)| {
+                    fold.members.iter().any(|m| {
+                        m.path_name == options.component
+                            && m.start == axis_start
+                            && m.end == axis_end
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            ensure(
+                hits.len() == 1,
+                "the window's axis row is not exactly one fold at this locus",
+            )?;
+            let axis_nodes: BTreeSet<u32> = folds[hits[0]]
+                .walk
+                .iter()
+                .map(|&(_, node)| node.unsigned_abs())
+                .collect();
+            territory_axis_fold = Some(hits[0]);
+            folds
+                .iter()
+                .map(|fold| {
+                    let shared: Vec<u64> = fold
+                        .walk
+                        .iter()
+                        .filter(|&&(_, node)| axis_nodes.contains(&node.unsigned_abs()))
+                        .map(|&(bp, _)| bp)
+                        .collect();
+                    match (shared.first(), shared.last()) {
+                        (Some(&lo), Some(&hi)) => (lo, hi + k),
+                        // The empty image: the fold spells no territory
+                        // material of this locus (no shared anchor) —
+                        // every unit falls to E under it.
+                        _ => (0, 0),
+                    }
+                })
+                .collect()
+        } else {
+            territory_axis_fold = None;
+            folds.iter().map(|fold| (0u64, fold.len)).collect()
+        };
         // The pin-skeleton sidecar (slice D's frame-repair audit): per
         // fold, the canonical-scheme contained steps with frame tags
         // beside the stored walk's, with the position diff — and the
@@ -3262,6 +3368,11 @@ fn main() -> io::Result<()> {
                     let record = unit.record;
                     let canonical = decode_record_tokens(&key_tokens[census_key[record].unwrap() as usize])
                         .expect("bound record");
+                    // (Stage 2: this fold's territory image — the
+                    // placement-validity domain and the prior's
+                    // support. Under the default convention it is the
+                    // fold's full extent.)
+                    let (img_lo, img_hi) = territory[fold_index];
                     // The pins per orientation present among the
                     // touching occurrences (fold-independent — the
                     // convention cannot bias fold comparisons).
@@ -3285,7 +3396,7 @@ fn main() -> io::Result<()> {
                         let backbone_bp: u64 =
                             merge_windows(windows).iter().map(|&(lo, hi)| hi - lo).sum();
                         let windows_inside = pinned.iter().flatten().all(|&r| {
-                            r + k <= fold.len
+                            r >= img_lo && r + k <= img_hi
                         });
                         // The abstained hull bp (the named remainder:
                         // read hull bases inside unpinned anchor
@@ -3328,6 +3439,7 @@ fn main() -> io::Result<()> {
                     for pin in pins.iter().flatten() {
                         let Some((m, c)) = placement_score(
                             unit, &canonical, pin, &fold.seq, fold.len, &reads, k,
+                            img_lo as i64, img_hi as i64,
                         ) else {
                             edge_discarded += 1;
                             continue;
@@ -3357,7 +3469,7 @@ fn main() -> io::Result<()> {
                     // (a full-match truth placement vs a rival's
                     // worse placement) survive the marginalization.
                     ll.push(logsumexp2(
-                        unit_log_likelihood(&scores, fold.len),
+                        unit_log_likelihood(&scores, img_hi - img_lo),
                         elsewhere,
                     ));
                     mismatches.push(unit_mismatches);
@@ -3757,6 +3869,7 @@ fn main() -> io::Result<()> {
             let canonical =
                 decode_record_tokens(&key_tokens[census_key[record].unwrap() as usize])?;
             let fold = &folds[fold_index];
+            let (img_lo, img_hi) = territory[fold_index];
             let positions_of = |node: u32| fold.positions_of(node);
             let mut placements: Vec<serde_json::Value> = Vec::new();
             let mut local_scores: Vec<f64> = Vec::new();
@@ -3767,7 +3880,7 @@ fn main() -> io::Result<()> {
                     continue;
                 }
                 let windows_inside =
-                    pinned.iter().flatten().all(|&r| r + k <= fold.len);
+                    pinned.iter().flatten().all(|&r| r >= img_lo && r + k <= img_hi);
                 if !windows_inside {
                     continue;
                 }
@@ -3789,6 +3902,7 @@ fn main() -> io::Result<()> {
                 };
                 let Some((m, c)) = placement_score(
                     unit, &canonical, &pin, &fold.seq, fold.len, &reads, k,
+                    img_lo as i64, img_hi as i64,
                 ) else {
                     continue;
                 };
@@ -3845,7 +3959,7 @@ fn main() -> io::Result<()> {
                     "read": String::from_utf8(read.clone()).unwrap(),
                     "fold": fold_index,
                     "ll": matrix[fold_index][unit_index],
-                    "ll_local": unit_log_likelihood(&local_scores, fold.len),
+                    "ll_local": unit_log_likelihood(&local_scores, img_hi - img_lo),
                     "elsewhere": elsewhere,
                     "placements": placements,
                 }),
@@ -3973,6 +4087,7 @@ fn main() -> io::Result<()> {
                 let mut placements: Vec<serde_json::Value> = Vec::new();
                 for &fold_index in &anatomy_folds {
                     let fold = &folds[fold_index];
+                    let (img_lo, img_hi) = territory[fold_index];
                     let positions_of = |node: u32| fold.positions_of(node);
                     for &orientation in &touching[&record].orientations {
                         let (pinned_vec, _ambiguous) =
@@ -4016,7 +4131,7 @@ fn main() -> io::Result<()> {
                             continue;
                         }
                         let windows_inside =
-                            pinned_vec.iter().flatten().all(|&r| r + k <= fold.len);
+                            pinned_vec.iter().flatten().all(|&r| r >= img_lo && r + k <= img_hi);
                         let own_flat = own_positions_of(&canonical, false, 0);
                         let backbone_windows: Vec<(u64, u64)> = pinned_vec
                             .iter()
@@ -4050,6 +4165,7 @@ fn main() -> io::Result<()> {
                             skipped.iter().map(|&(lo, hi)| hi - lo).sum();
                         let piecewise = placement_score(
                             unit, &canonical, &pin, &fold.seq, fold.len, &reads, k,
+                            img_lo as i64, img_hi as i64,
                         );
                         let (m, c, valid) = match piecewise {
                             Some((m, c)) => (m, c, true),
@@ -4282,13 +4398,23 @@ fn main() -> io::Result<()> {
             .collect();
         let fold_identities: Vec<serde_json::Value> = folds
             .iter()
-            .map(|fold| {
-                json!({
+            .enumerate()
+            .map(|(fold_index, fold)| {
+                let (img_lo, img_hi) = territory[fold_index];
+                let mut value = json!({
                     "members": fold.members.iter().map(|m| json!({
                         "path_name": m.path_name, "start": m.start, "end": m.end,
                     })).collect::<Vec<_>>(),
                     "length": fold.len,
-                })
+                });
+                if territory_normalized {
+                    value["image"] = if img_hi > img_lo {
+                        json!([img_lo, img_hi])
+                    } else {
+                        serde_json::Value::Null
+                    };
+                }
+                value
             })
             .collect();
         let class_fold_pairs: Vec<[usize; 2]> = (0..pair_count)
@@ -4352,6 +4478,8 @@ fn main() -> io::Result<()> {
             "partition": partition,
             "model": if stored_frame {
                 "anchor-realign-v2-marginal"
+            } else if territory_normalized {
+                "anchor-realign-v2-marginal-frame-territory"
             } else {
                 "anchor-realign-v2-marginal-frame"
             },
@@ -4469,6 +4597,44 @@ fn main() -> io::Result<()> {
             },
             "rss_kb": rss_kb,
         }))?;
+        // (Stage 2: the territory field is emitted ONLY under the
+        // normalized convention — the default receipt stays
+        // byte-identical to the committed convention, the identity
+        // gate. serde_json's default map is ordered, so the late
+        // insertion lands alphabetically like every other key.)
+        if territory_normalized {
+            let mut report_value: serde_json::Value =
+                serde_json::from_slice(&report_buf)?;
+            report_value["territory"] = json!({
+                "convention": "normalized",
+                "axis_fold": territory_axis_fold,
+                "images": territory.iter().map(|&(lo, hi)| {
+                    if hi > lo { json!([lo, hi]) } else { serde_json::Value::Null }
+                }).collect::<Vec<_>>(),
+                "note": "the locus's normalized comparison domain: the \
+                         window's axis row (the locus's own coordinate); per \
+                         fold the image is the interval spanned by the \
+                         fold's walk steps shared with the axis row's walk; \
+                         placements and the uniform prior are restricted to \
+                         the image; out-of-image mass enters at the \
+                         candidate-independent E branch for both candidates \
+                         equally (rule 8)",
+            });
+            // The tied-winner bands (the cluster machinery's union-find
+            // input for tied called classes — the committed receipts
+            // never carried a tied winner, so the checker's phase 6
+            // could re-derive k with an empty band list; the normalized
+            // convention's converted loci DO tie (the identical-LL
+            // called set), so the bands are emitted for the checker's
+            // faithful re-derivation. Territory receipts only — the
+            // default receipt schema stays byte-identical.)
+            report_value["qual_tied_bands"] = json!(tied_bands
+                .iter()
+                .map(|(index, band)| json!([index, band]))
+                .collect::<Vec<_>>());
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
         report_buf.push(b'\n');
         eprintln!(
             "[score] locus {locus}: receipts/IO (named classes + ingredients + \
@@ -4621,7 +4787,7 @@ mod tests {
             count: 1,
         };
         let pin = pin();
-        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K)
+        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 60)
             .expect("valid placement");
         // Backbone 16 matches + 14 skipped votes, one of them the
         // deliberate mismatch at fold rel 13.
@@ -4663,7 +4829,7 @@ mod tests {
         let own = own_positions_of(&canonical(), true, 10);
         assert_eq!(own, vec![20, 10]);
         let pin = pin();
-        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K)
+        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 60)
             .expect("valid placement");
         assert_eq!((m, c), (29, 1));
         let (dm, dc) = direct_score(&unit, &canonical(), &pin, &seq, 60, &reads, K).unwrap();
@@ -4692,13 +4858,70 @@ mod tests {
             pinned: vec![Some(4), Some(14)],
             backbone_bp: 16,
         };
-        let placed = placement_score(&unit, &canonical(), &pin, &seq, 24, &reads, K);
+        let placed = placement_score(&unit, &canonical(), &pin, &seq, 24, &reads, K, 0, 24);
         assert!(placed.is_none());
         // Backbone windows partly outside the extent are not
         // placements either (the windows_inside check at pin
         // construction discards them).
         let pin_outside = [Some(196i64), Some(206)];
         assert!(pin_outside.iter().flatten().any(|&r| r + K as i64 > 24));
+    }
+
+    #[test]
+    fn the_territory_image_restricts_placements_symmetrically() {
+        // Stage 2, rule 8: under the normalized convention the
+        // comparison domain is the fold's TERRITORY IMAGE — a
+        // placement whose read span exits the image is not a local
+        // placement of the locus, exactly as one exiting the fold's
+        // extent is not a placement under the committed convention.
+        // The SAME placement that is valid at the full extent
+        // [0, 60) must score IDENTICALLY inside a containing image
+        // (the degenerate default), and must be INVALID once the
+        // image ends before the read's voted bases: the rule
+        // restricts every candidate by its OWN image of the SAME
+        // territory — it cannot collect out-of-image mass.
+        let seq = fold_seq();
+        let (read, _) = forward_read(&seq);
+        let reads = vec![read];
+        let unit = Unit {
+            record: 0,
+            variant: 0,
+            mirror: false,
+            read: 0,
+            w_lo: 2,
+            count: 1,
+        };
+        let pin = pin();
+        // The containing image: identical score (the degenerate
+        // default convention, bit-for-bit).
+        let (m, c) =
+            placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 60)
+                .expect("valid placement");
+        assert_eq!((m, c), (29, 1));
+        let (m2, c2) =
+            placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 34)
+                .expect("the read span [2, 32) lies inside the image");
+        assert_eq!((m2, c2), (29, 1));
+        // The image ending at 31 clips the read's last voted base
+        // (fold rel 32): not a placement — the read is not generated
+        // wholly within this fold's image of the territory.
+        assert!(
+            placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 31).is_none()
+        );
+        // An empty image admits no placement at all (a fold sharing
+        // no anchor with the axis row spells no territory material).
+        assert!(
+            placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 0).is_none()
+        );
+        // The prior counts the IMAGE's placements under the
+        // normalized convention (the support length, not the fold's
+        // full extent) — and an image shorter than the read has no
+        // support at all.
+        let a = 0.0f64;
+        let full = unit_log_likelihood(&[a], 200);
+        let image = unit_log_likelihood(&[a], 150);
+        assert!(full < image); // the smaller support carries the larger prior
+        assert_eq!(unit_log_likelihood(&[a], 149), f64::NEG_INFINITY);
     }
 
     #[test]
@@ -4797,7 +5020,7 @@ mod tests {
             count: 1,
         };
         let pin = pin();
-        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K)
+        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 60)
             .expect("valid placement");
         assert_eq!((m, c), (29, 1));
         let (sm, sc, oob) = single_offset_score(&unit, 4, true, &seq, 60, &reads, K);
@@ -4815,7 +5038,7 @@ mod tests {
             w_lo: 10,
             count: 1,
         };
-        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K)
+        let (m, c) = placement_score(&unit, &canonical(), &pin, &seq, 60, &reads, K, 0, 60)
             .expect("valid placement");
         assert_eq!((m, c), (29, 1));
         let (sm, sc, oob) = single_offset_score(&unit, 14, false, &seq, 60, &reads, K);

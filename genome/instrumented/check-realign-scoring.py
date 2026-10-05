@@ -136,6 +136,18 @@ if "--exhaustive" in sys.argv:
         sys.exit(f"--exhaustive requires one of the 17 components: {_FLEET}")
 FRAME = ("--frame" in sys.argv) or (EXHAUSTIVE is not None)
 MARGINAL = FRAME or ("--marginal" in sys.argv)
+# (Stage 2, the extent normalization: --territory validates the
+# TERRITORY-NORMALIZED receipts — the env-gated convention
+# (IMPG_REALIGN_TERRITORY_NORMALIZED) written through the same
+# --timered-base prefix mechanism. The phases gain the territory
+# audits: the images re-derived from the walks and compared exactly,
+# the sampled per-unit re-derivations under the image bounds, the
+# placement-span checks of phase 4, and phase 8N — the
+# conversion/no-regression gate vs the COMMITTED default-convention
+# receipts. Phase 8t (answer preservation) does NOT run: the
+# convention changed by design; the env-unset identity gate is the
+# separate no-op proof.)
+TERRITORY = "--territory" in sys.argv
 # Slice F (phase 0 of the runtime plan — the dominance measurement):
 # with --exhaustive, the optional --timered-base BASE --run-tag TAG pair
 # points every phase at the TIMERED rerun's receipts (the instrumented
@@ -152,6 +164,10 @@ if "--timered-base" in sys.argv:
     TIMERED_BASE = sys.argv[_i + 1]
     _i = sys.argv.index("--run-tag")
     TIMERED_RUN = f"{D}/run-{sys.argv[_i + 1]}"
+if TERRITORY:
+    if EXHAUSTIVE is None or TIMERED_BASE is None:
+        sys.exit("--territory requires --exhaustive COMP --timered-base BASE --run-tag TAG")
+    COMMITTED_RECEIPT = f"{D}/realign-exhaustive-{EXHAUSTIVE}.jsonl"
 if EXHAUSTIVE is not None:
     # the BEFORE receipt root: chrI/chrMT keep the committed
     # Poisson-era receipts at the validation root; chrIV and every
@@ -1081,6 +1097,29 @@ def main():
                 check(False, "receipt placement invalid under re-derivation")
                 continue
             backbone_bp, votes, m, c, collinear, sigma = got
+            if TERRITORY:
+                # (Stage 2: the sampled placements must lie WHOLLY
+                # within the fold's territory image — the pinned
+                # windows and every voted coordinate; an empty-image
+                # fold admits no scored placement at all. The images
+                # themselves are re-derived and verified in phase 5.)
+                img = receipt[locus]["territory"]["images"][fold_index]
+                check(
+                    img is not None,
+                    f"locus {locus} fold {fold_index}: a scored placement on an empty-image fold",
+                )
+                check(
+                    all(img[0] <= v[1] < img[1] for v in votes),
+                    f"locus {locus} record {record}: sampled votes outside the territory image",
+                )
+                check(
+                    all(
+                        img[0] <= r and r + K <= img[1]
+                        for r in receipt_pin["pinned"]
+                        if r is not None
+                    ),
+                    f"locus {locus} record {record}: pinned windows outside the territory image",
+                )
             check(
                 backbone_bp == receipt_pin["backbone_bp"],
                 f"locus {locus} record {record}: backbone_bp differs",
@@ -1151,6 +1190,63 @@ def main():
         units = ingredients[locus]["units"]
         matrix = np.array(ingredients[locus]["ll_matrix"], dtype=float)
         check(matrix.shape == (len(folds), len(units)), f"locus {locus}: matrix shape")
+        territory_images = None
+        if TERRITORY:
+            # ---------------- the territory images re-derived (rule 8)
+            # The images are a PURE function of the folds' walks and
+            # the axis fold (the window's own row): the interval
+            # spanned by the steps shared with the axis row's walk.
+            # Re-derived here from the ingredients and compared to the
+            # receipt EXACTLY (both the territory field and the
+            # fold_identities tag); the axis fold's membership is
+            # verified against the window's own axis row from the
+            # maps (the locus's coordinate, not any candidate's).
+            t = d.get("territory")
+            check(
+                t is not None and t.get("convention") == "normalized",
+                f"locus {locus}: territory field missing or not the normalized convention",
+            )
+            check(
+                d["model"] == "anchor-realign-v2-marginal-frame-territory",
+                f"locus {locus}: model tag is not the territory convention",
+            )
+            axis_fold = t["axis_fold"]
+            axis_start, axis_end, _ = axis_rows[locus]
+            axis_members = d["fold_identities"][axis_fold]["members"]
+            check(
+                any(
+                    m["path_name"] == COMPONENT
+                    and m["start"] == axis_start
+                    and m["end"] == axis_end
+                    for m in axis_members
+                ),
+                f"locus {locus}: the axis fold does not carry the window's own axis row",
+            )
+            axis_nodes = {abs(n) for _bp, n in folds[axis_fold]["walk"]}
+            derived = []
+            for fold in folds:
+                shared = [bp for bp, node in fold["walk"] if abs(node) in axis_nodes]
+                derived.append((shared[0], shared[-1] + K) if shared else None)
+            territory_images = derived
+            check(
+                len(t["images"]) == len(folds),
+                f"locus {locus}: territory image count differs",
+            )
+            for fi, img in enumerate(t["images"]):
+                expect = [derived[fi][0], derived[fi][1]] if derived[fi] else None
+                check(img == expect, f"locus {locus}: fold {fi} territory image differs")
+                identity_img = d["fold_identities"][fi].get("image")
+                check(
+                    identity_img == expect,
+                    f"locus {locus}: fold {fi} fold_identities image differs",
+                )
+            n_empty = sum(1 for img in derived if img is None)
+            print(
+                f"   locus {locus}: territory images verified "
+                f"(axis fold {axis_fold}, {len(derived) - n_empty} images, "
+                f"{n_empty} empty)",
+                flush=True,
+            )
         if MARGINAL:
             # THE E-DERIVATION AUDIT (from the receipt's own panel
             # strain list: the mean per-haplotype total path length,
@@ -1224,22 +1320,41 @@ def main():
                 node_positions.setdefault(abs(node), []).append((bp, 1 if node > 0 else -1))
             scores = [FLOOR] if not MARGINAL else []
             FOLD_SEQ[0] = fold_seqs[(locus, fi)]
+            # (Stage 2: under the territory convention the placement
+            # domain is the fold's IMAGE — the windows-inside test and
+            # the prior's support both use it; an empty image admits
+            # no placement at all.)
+            if TERRITORY:
+                img = territory_images[fi]
+                support = 0 if img is None else img[1] - img[0]
+                img_lo = 0 if img is None else img[0]
+                img_hi = 0 if img is None else img[1]
+            else:
+                support = fold["length"]
+                img_lo, img_hi = 0, fold["length"]
             for orientation in sorted(orientations):
                 pinned = correspondence(canonical, orientation, node_positions)
                 if all(p is None for p in pinned):
                     continue
-                if any(r + K > fold["length"] or r < 0 for r in pinned if r is not None):
+                if any(
+                    r + K > img_hi or r < img_lo for r in pinned if r is not None
+                ):
                     continue
                 got = placement_votes(unit["read"], canonical, mirror, w_lo, orientation, pinned)
                 if got is None:
                     continue
+                if TERRITORY and any(v[1] < img_lo or v[1] >= img_hi for v in got[1]):
+                    # a voted base outside the image: not a placement
+                    # of the normalized convention (the instrument
+                    # discards it; so does the faithful re-derivation)
+                    continue
                 _, _, m, c, _, _ = got
                 scores.append(m * A + c * B)
-            prior = -math.log(2.0 * (fold["length"] - READ_LENGTH + 1))
+            prior = -math.log(2.0 * (support - READ_LENGTH + 1))
             best = max(scores) if scores else -math.inf
             local_ll = (
                 -math.inf
-                if not scores or fold["length"] < READ_LENGTH
+                if not scores or support < READ_LENGTH
                 else prior + best + math.log(sum(math.exp(s - best) for s in scores))
             )
             if MARGINAL:
@@ -1345,7 +1460,19 @@ def main():
     for locus in LOCI:
         d = receipt[locus]
         spectrum = list(zip(d["qual_distance_spectrum"], d["qual_distance_spectrum_scores"]))
-        state = cluster_form_qual(1.0, spectrum, [])
+        # (Stage 2: under the territory convention the receipt carries
+        # the tied-winner bands — the cluster machinery's union-find
+        # input for the called set's tied classes; the committed
+        # receipts never carried a tied winner, so the default mode
+        # keeps the empty band list.)
+        if TERRITORY:
+            tied = [
+                (int(entry[0]), [float(x) for x in entry[1]])
+                for entry in d.get("qual_tied_bands", [])
+            ]
+        else:
+            tied = []
+        state = cluster_form_qual(1.0, spectrum, tied)
         check(
             state["shape"] == d["qual_spectrum_shape"],
             f"locus {locus}: spectrum shape differs",
@@ -1846,7 +1973,11 @@ def main():
         # pattern from slice D: only the walls/rss_kb timing fields may
         # differ, the walls field SET must be unchanged (no receipt
         # schema drift), and the four sidecars must be byte-identical.
-        if TIMERED_BASE is not None:
+        # (Stage 2: the gate does NOT run for the territory receipts —
+        # the convention changed BY DESIGN; the env-unset identity
+        # gate is the separate no-op proof, and phase 8N below is the
+        # territory receipts' own gate.)
+        if TIMERED_BASE is not None and not TERRITORY:
             import filecmp
 
             print(
@@ -1911,6 +2042,88 @@ def main():
                 f"      the run reproduces the committed {committed_prefix} receipts "
                 f"(every semantic field at {len(LOCI)} loci; only walls/rss_kb "
                 f"differ) with byte-identical sidecars",
+                flush=True,
+            )
+        # ------------- phase 8N (stage 2): THE TERRITORY GATE — the
+        # normalized-convention receipts vs the COMMITTED default-
+        # convention receipts of the same component. THE GUARDS, hard:
+        # (1) NO REGRESSION — every locus at truth rank 1 under the
+        # committed convention must remain rank 1 (a regression is a
+        # DESIGN FAILURE, named loudly); (2) expressibility is
+        # preserved; (3) the winner at a held rank-1 locus is the
+        # truth pair. The conversion table is stated honestly per
+        # locus (CONVERT / HOLD / REGRESS / residual-moved).
+        if TERRITORY:
+            print(
+                "== phase 8N: the territory gate (the normalized receipts vs the committed convention)",
+                flush=True,
+            )
+            committed = {}
+            for line in open(COMMITTED_RECEIPT):
+                c = json.loads(line)
+                committed[c["locus"]] = c
+            conversions = []
+            regressions = []
+            moved = []
+            rank1_c = [
+                locus
+                for locus in LOCI
+                if committed[locus].get("truth_rank") == 1
+            ]
+            rank1_t = []
+            for locus in LOCI:
+                c, d = committed[locus], receipt[locus]
+                if not c["truth_pair_expressible"]:
+                    check(
+                        not d["truth_pair_expressible"],
+                        f"locus {locus}: inexpressible under the committed convention "
+                        "but expressible under the normalized convention",
+                    )
+                    continue
+                cr, tr = c["truth_rank"], d["truth_rank"]
+                if tr == 1:
+                    rank1_t.append(locus)
+                    check(
+                        d["truth_in_called_set"],
+                        f"locus {locus}: rank 1 but truth not in the called set",
+                    )
+                verdict = "HOLD" if cr == 1 and tr == 1 else None
+                if verdict is None:
+                    if cr == 1:
+                        verdict = "REGRESS"
+                        regressions.append(locus)
+                    elif tr == 1:
+                        verdict = "CONVERT"
+                        conversions.append(locus)
+                    elif cr != tr:
+                        verdict = "moved"
+                        moved.append(locus)
+                    else:
+                        verdict = "unchanged"
+                print(
+                    f"   locus {locus}: truth rank {cr} -> {tr}, "
+                    f"log gap {c['log_gap']:.2f} -> "
+                    f"{d['log_gap'] if d['log_gap'] is None else round(d['log_gap'], 2)}  "
+                    f"{verdict}",
+                    flush=True,
+                )
+            check(
+                not regressions,
+                f"TERRITORY GATE FAILED: rank-1 regressions under the normalized "
+                f"convention: {regressions}",
+            )
+            for locus in rank1_c:
+                d = receipt[locus]
+                check(
+                    tuple(fold_member_key(d, i) for i in d["best_fold_indices"])
+                    == tuple(fold_member_key(d, i) for i in d["truth_folds"]),
+                    f"locus {locus}: a held rank-1 locus whose winner is not the truth pair",
+                )
+            print(
+                f"   AGGREGATE ({EXHAUSTIVE}): truth rank-1 "
+                f"{len(rank1_c)} -> {len(rank1_t)} under the normalized convention; "
+                f"CONVERT {conversions}; REGRESS {regressions}; "
+                f"residual moved {moved}",
                 flush=True,
             )
     else:
