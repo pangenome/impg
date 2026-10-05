@@ -2012,19 +2012,23 @@ serial receipts' own walls; the after side: the fixed binary):
 
 | locus (window over partition 110) | qual_seconds before | qual_seconds after | locus_seconds before | locus_seconds after |
 |---|---:|---:|---:|---:|
-| chrXII L86 | 4,802.09 | 13.99 | 4,807.01 | 15.96 |
-| chrXV L14 | 4,472.48 | (the rerun's receipt) | 4,477.48 | (the rerun's receipt) |
-| chrX L52 | 4,931.34 | (the rerun's receipt) | 4,935.43 | (the rerun's receipt) |
-| chrVII L56 | 4,925.93 | (the rerun's receipt) | 4,930.83 | (the rerun's receipt) |
+| chrXII L86 | 4,802.09 | 18.3 | 4,807.01 | 25.3 |
+| chrXV L14 | 4,472.48 | 18.0 | 4,477.48 | 21.8 |
+| chrX L52 | 4,931.34 | 16.9 | 4,935.43 | 19.7 |
+| chrVII L56 | 4,925.93 | 22.9 | 4,930.83 | 32.7 |
 
-(the after cells for the three rerun components land with the
-fleet closure below; the chrXII gate measured the full fix: a 343x
-qual-phase pay, 4,802 s -> 14.0 s, at a process RSS of 7.8 GB
-where the pre-fix 4-wides breached the guard at 78-118 GB). The
-emission collapses 1.26e9 band values into 1,256,064 predicate
-members (a ~15 MB receipt line where the naive emission was ~6 GB)
-— the monster receipts are small enough that the checker's
-ordinary line parsing handles them.
+(the measured pay at the four monsters: 215-292x on the qual phase;
+the re-run 4-wides' whole-component walls 106-226 s where chrVII's
+pre-fix 4-wide took 2,759 s; process RSS peaks 15.9-24.7 GB where
+the pre-fix runs breached the 64GiB guard at 78.0-118.4 GB — every
+monster locus's answer fields reproduce the landed serial receipts'
+naive-path values, QUAL 0.00029655808123999367 and k = 14,645
+included, 19/19 fields at all four; the receipts collapse from
+10.4 GB to 0.19 GB per component). The emission collapses 1.26e9
+band values into 1,256,064 predicate members per monster (a ~15 MB
+receipt line where the naive emission was ~6 GB) — the monster
+receipts are small enough that the checker's ordinary line
+parsing handles them.
 
 THE HONEST STATEMENT of what the compact certificate does not
 carry: the raw band values above the knee cut are not emitted at
@@ -2037,3 +2041,126 @@ oracle test).
 The four straggler 4-wides re-run on the fixed binary (the stale
 markers removed, the drivers autonomous), the checker mirrors in
 place; the fleet closure and the final aggregate follow.
+
+## STAGE 2 CLOSED — THE 17/17 FLEET AGGREGATE UNDER THE NORMALIZED RULE (2026-10-05, W6)
+
+The four stragglers re-run on the fixed binary landed clean: whole-
+component 4-wide walls 106-226 s (chrVII's pre-fix 4-wide: 2,759 s),
+process RSS peaks 15.9-24.7 GB (the pre-fix runs breached the 64GiB
+guard at 78.0-118.4 GB), receipts 0.10-0.19 GB per component (the
+pre-fix chrVII receipt was 10.4 GB — the monster band emissions),
+and every monster locus reproduces the landed serial receipts'
+naive-path answers 19/19 fields (QUAL 0.00029655808123999367,
+k = 14,645, excluded 35,510, knee 4,763 — the serials' 4,472-4,931
+qual-second grind as the oracle).
+
+THE FINAL AGGREGATE (all 17 components; the committed default-
+convention aggregate of record untouched — the `--out-suffix`
+convention): 1,307 loci, 1,133 expressible, TRUTH RANK-1 AT
+876/1,133 = 77.3% (the committed convention's whole-genome verdict
+was 549/1,133 = 48.5%). CONVERT 327 / REGRESS 0 — the zero-
+regression guard holds fleet-wide (the mid-fleet 13-component
+snapshot was CONVERT 225 / REGRESS 0). The conversions by the
+causal autopsy's cause: extent 263 (the autopsy's measured extent
+class 307, 274 expected under full neutralization — HELD within
+4%), repeat-domain 59, rival-dominant 4, contig-end 1; the tie
+anatomy 325 unique wins + 2 truth-tied-not-first (the truth in the
+called set at the max LL with a likelihood-identical rival first
+in flat order).
+
+THE QV DISTRIBUTION (the lower mode's collapse quantified, 17/17):
+median 60.00 (was 17.77), p10 13.79 (was 8.40), p90 60.00; perfect
+calls (QV 60, zero edits) 874/1,133 = 77.2% (was 549/1,133 =
+48.5%); QV>=40 at 77.41% (was 48.67%); the non-rank-1 residue 257
+loci at median QV 14.18, median per-base error 3.8%. ARITHMETIC:
+rank-1 876 vs perfect 874 — the two rank-1-but-not-perfect loci
+are the degenerate ties (chrVII L56 class: the truth TIES at the
+pure-E maximum with every class, ranks 1 by the nothing-beats-it
+rule, but the CALLED class is the flat-order winner pair, not the
+truth pair — the degenerate locus's honest signature).
+
+THE CHECKER-HYGIENE REPAIR this closure caught: the run wrapper's
+per-run markers (.rss/.stages) are APPEND-mode, so the dead runs'
+78-118 GB peaks leaked into the clean re-runs' logs and the
+checker's phase-1 guard flagged the clean runs on stale history
+(the same marker disease that masked the deaths: the wrapper
+touches .done even on failure). The wrapper now clears .rss/
+.stages at launch (the history preserved in .fullhistory copies
+at the validation dir); the stragglers' logs filtered to the run
+of record; the checkers re-run on the clean markers.
+
+## STAGE 4 — THE RIVAL-DOMINANT AUTOPSY UNDER THE NORMALIZED RULE (2026-10-05, W6)
+
+Receipt-side, assessment-only: `genome/instrumented/rival-dominant-
+autopsy.py`, the per-locus receipts `realign-rival-autopsy-<C>.jsonl`
++ `realign-rival-autopsy-tables.txt` at the validation dir. THE
+COHORT, re-derived under the normalized rule (not inherited from the
+pre-normalization classing): every expressible locus whose truth is
+not rank-1 AND whose BOTH-PLACED EVIDENCE GAP is positive — the
+rival out-places the truth on the material BOTH pairs place. THE
+COUNT: 64 loci (the pre-normalization class was 66; 3 converted to
+rank-1, 13 left the cohort with the extent term neutralized — their
+shared evidence now favors the truth — and 14 NEW entrants joined:
+loci the default-convention classing called extent- or repeat-class
+whose exposed shared-evidence deficit is rival-favored under the
+normalized geometry; 50 of the 64 carry the pre-normalization
+S1-AND-NOT-S2 signature).
+
+WHY THE RIVAL OUT-PLACES THE TRUTH ON SHARED MATERIAL — the
+mechanism classes (primary, the stated precedence; every feature
+derived from the receipts, the cuts are the stated conventions):
+
+  - INTERIOR SUBSTITUTION: 57/64 (89.2%) — median both-placed gap
+    4,690.8 LL, median QV 13.23, median identity 95.25%; the win is
+    carried by INTERIOR GAP COLUMNS (gap_columns > mismatches): the
+    rival pair spells DIFFERENT-LENGTH INTERIOR MATERIAL — diverged
+    paralogous copies whose interior the reads genuinely match
+    better than the truth's. By census class: 31 in-axis, 22
+    tiled-elsewhere/neighbor (the seam), 2 foreign-repeat, 1
+    partial-elsewhere, 1 pilot. THE DOMINANT MECHANISM IS REAL
+    COPY-DIVERGENCE, not geometry: even with both pairs restricted
+    to equal comparison domains the diverged copies win the reads.
+  - TWIN INDISTINGUISHABLE: 4/64 (6.3%) — median both-placed gap
+    0.6 LL, median identity 99.99%, median QV 39.96: the called and
+    truth diplotypes spell effectively the same sequence and the
+    panel genuinely cannot distinguish them (the shared-evidence
+    rival class — chrIII L5 and chrXVI L2, plus two loci that
+    joined under the normalized rule).
+  - SUBSTITUTION BETTER MATCH: 3/64 (4.7%) — median gap 4,691.3,
+    median QV 17.88, identity 98.37%: the win is carried by base-
+    substitution columns — the rival copy's bases match better.
+  - ZYGOSITY/DOSAGE: 0/64 — no locus in the cohort has a
+    homozygous-vs-heterozygous winner/truth structure difference
+    (winner homozygous at 0 of 64); the dosage mechanism the owner
+    hypothesized is ABSENT in this cohort under the normalized rule.
+  - UNPLACED ASSIST: 58/64 also carry a winner-favored one-side-
+    placed residual (the winner still places some units the truth
+    pair cannot within its image) — but by the cohort definition
+    the SHARED evidence alone keeps the rival ahead: under FULL
+    neutralization of the unplaced term these loci still do not
+    convert.
+
+THE FIX MAPPING, honest: NO mass-re-attribution (geometry) lever
+applies to this cohort BY DEFINITION — the extent normalization
+stage already equalized the comparison domain and the jointly
+placed reads still prefer the rival. The named levers that remain
+are EVIDENCE-MODEL side, not geometry: (1) for the 57 interior-
+substitution loci, a placement-topology or copy-number prior that
+penalizes diverged-copy explanations would have to OVERRULE the
+reads' own likelihoods — a model change with product-wide
+consequences, not a repair; (2) for the 4 twins, nothing can
+distinguish what the panel does not contain — the indistinguishable
+copies are a PANEL property.
+
+THE HONEST NO-FIX VERDICT, stated plainly: at 64/1,133 expressible
+loci (5.7%) the truth is not the maximum-likelihood call under ANY
+comparison-domain repair — the evidence genuinely prefers the rival
+(or cannot distinguish it). What that means for the product: these
+loci are the IRREDUCIBLE RESIDUE of the panel's actual copy
+structure under the current evidence model; the truth assessment's
+expectation at deployment is bounded by them, and the remaining
+non-rank-1 total (257 loci, 22.7% of expressible) decomposes into
+this 64-locus irreducible core plus the 193 loci where a geometry
+lever still applies (the seam and repeat-domain interiors). No fix
+is recommended for this cohort; the honest statement is the
+deliverable.

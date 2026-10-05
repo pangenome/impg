@@ -15,7 +15,13 @@ source /home/erikg/impg-genome-inference/build-env.sh
 D=/home/erikg/yeast/genome-balanced-diploid-validation-20260930
 cd "$D" || exit 1
 P="$D/run-$TAG"
-rm -f "$P.done" "$P.exit"
+# THE PER-RUN MARKERS ARE PER-RUN: a re-run regenerates them, so the
+# stale previous run's rss/stages history must not leak into the new
+# run's record — the checker's phase-1 guard reads the whole .rss file
+# and the fleet's dead 4-wides (exit 1, .done touched anyway) left
+# 78-118GB peaks in the logs that flagged the CLEAN re-runs. Preserve
+# nothing here: copy aside before relaunching if the history matters.
+rm -f "$P.done" "$P.exit" "$P.rss" "$P.stages"
 start=$(date +%s)
 SEAMENV=()
 if [ "$W" != "serial" ]; then
