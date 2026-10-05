@@ -1509,3 +1509,126 @@ instrument's own per-locus truth-pair definition — at chrXVI L7 the
 convention, and the QV states it rather than repairing it; (4) chrIX
 remains excluded (its receipts are not closed); its row lands when
 its chain completes.
+
+## THE CAUSAL AUTOPSY OF THE 562 NON-RANK-1 CALLS — measurement only, no fixes (2026-11-06, 16 closed components; chrIX in flight)
+
+The owner's demand: WHY are the 562 non-rank-1 calls made with
+gap-dominated ~10% structural divergence? The hypothesis under test
+(stated as hypothesis, measured here): EXTENT ASYMMETRY —
+partition/window boundaries fragment the truth's in-domain rows while
+rival rows span longer across the seams, collecting orphaned read
+mass the fragmented truth cannot place (the unplaced-mass advantage),
+so the likelihood correctly prefers the longer explainer, and the QV
+comparison over mismatched extents produces end-gaps.
+
+MACHINERY (assessment-side, receipt-streamed; the ingredients sidecars
+never opened; `genome/instrumented/nonrank1-autopsy.py` + the biWFA
+helper's optional `--cigar` mode — the default protocol byte-identical
+to the committed QV stage's): per non-rank-1 expressible locus the
+autopsy re-aligns the QV stage's CHOSEN assignment's two pairs under
+the same biWFA machinery WITH the walked CIGAR, asserts every pair's
+counts equal the committed QV receipts pair-for-pair (all 562 passed;
+the assignment re-derived identically at every locus), and reads the
+main receipt's own `log_gap_decomposition` + the census receipts' tiling
+placements. Per-locus receipts: `realign-nonrank1-autopsy-<C>.jsonl`
+(extent comparison, end-vs-interior gap anatomy in bases, likelihood
+term decomposition, census class + the SK1 ortholog's tiling partitions
+— the cut points); the aggregate: `realign-nonrank1-autopsy-tables.txt`.
+
+THE MEASURED DECOMPOSITION TERMS (the receipt's own semantics):
+`both_placed_evidence_gap` = winner-minus-truth summed over units BOTH
+pairs place (negative = truth-favored); `residual_unplaced_gap` =
+log_gap minus that term = EXACTLY the winner-minus-truth over the
+units not both place (units neither places score at the same derived
+E and cancel); `e_scale_mass_asym` = mass asymmetry x E, the stated
+magnitude SCALE of the unplaced term (not its exact LL).
+
+(1) THE EXTENT MEASUREMENT: the called diplotype is LONGER than the
+truth at 513/562 loci (91.3%); median called-minus-truth length
++1,834bp; median called end-overhang 1,378bp vs truth end-overhang 0bp;
+68 loci carry overhangs on BOTH sides (the shifted-row shape). The
+end-gap share of all edits: median 75.1% (the gap columns remain 98%
+of edits per the QV stage; of those, end-gaps dominate at the median).
+
+(2) THE LIKELIHOOD TERM WINNERS: the unplaced-differential term is
+WINNER-favored at 560/562 loci (99.6%) — the unplaced-mass asymmetry
+(median 2,215 reads; E-scale median 39,582 LL) is essentially
+universal in the cohort; the both-placed evidence term is TRUTH-
+favored at 494/562 (87.9%, median magnitude 2,893 LL). The residual
+term exceeds the both-placed term at 551/562 loci; the median
+residual share of log_gap is 1.34 — the winner's advantage is MORE
+THAN ENTIRELY the unplaced-differential term, overcoming a
+truth-favoring shared-evidence deficit. THE LIKELIHOOD HALF OF THE
+HYPOTHESIS IS CONFIRMED AT COHORT SCALE: the winner collects orphaned
+read mass the truth cannot place, and the jointly placed reads
+already prefer the truth.
+
+(3) THE ANATOMY HALF: end-gap-dominated (end-gap columns > interior
+gap columns) at 314/562 loci (55.9%); interior-gap-dominated at 248
+(44.0%, median 5 interior gap runs — true material substitution);
+the full hypothesis shape (unplaced-mass advantage AND truth-favored
+shared evidence AND end-gap-dominated anatomy) at 299/562 (53.2%).
+The QV is the comparison over MISMATCHED EXTENTS exactly as
+hypothesized at the end-gap-dominated loci (median end-gap share
+98.2% in that class); at the interior-dominated loci the QV measures
+diverged-copy substitution instead (median end-gap share 0.2%).
+
+(4) THE CAUSAL DECOMPOSITION (primary cause per locus, stated
+precedence — contig-end class first, then the extent shape, then the
+interior shape, then the rival-dominant and shared-evidence shapes):
+
+| cause | n | frac | median QV | median identity | median end-gap share | median mass asym | median len_delta |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| extent-asymmetry (S1+S2+end-dominated) | 298 | 53.0% | 9.48 | 88.72% | 98.2% | 932 | +2,358bp |
+| repeat-domain substitution (S1+S2+interior) | 194 | 34.5% | 12.82 | 94.78% | 0.2% | 11,140 | +680bp |
+| rival-dominant (winner wins both-placed too) | 66 | 11.7% | 12.32 | 94.13% | 7.9% | 6,890 | +375bp |
+| shared-evidence rival (no unplaced advantage) | 2 | 0.4% | ~40 | 99.99% | 0% | 0 | 0 |
+| boundary (pure-mismatch shape) | 1 | 0.2% | 21.43 | 99.28% | 0% | 886 | 0 |
+| contig-end | 1 | 0.2% | 7.96 | 84.02% | 95.7% | 1,371 | +2,824bp |
+
+The cause x census-class cross-tab: extent-asymmetry is dominated by
+in-axis loci (243) but reaches every class; the seam class
+(tiled-elsewhere/neighbor, 101 loci) splits 33 extent / 37 interior /
+30 rival-dominant / 1 boundary. The row-geometry fact: the SK1 window
+ortholog tiles >1 partition at 258/287 of the census-covered
+extent-asymmetry loci (median 2 partitions) — the partition-boundary
+cut is the cohort's ambient geometry, the cut points named per locus
+in the receipts. The two shared-evidence rivals are the "effectively
+the same" calls (chrIII L5 QV 40.03, chrXVI L2 QV 39.89 at 99.99%
+identity — a near-identical rival winning on jointly placed reads
+alone); the boundary locus is chrXIV L79 (146 edits, all mismatches).
+
+(5) THE FIX MAPPING (NO FIXES IMPLEMENTED — the measured expected
+conversions under the stated criterion: a mass-re-attribution repair
+converts a locus iff with the unplaced-differential term neutralized
+the both-placed evidence decides for the truth, i.e.
+both_placed_evidence_gap < 0):
+
+| lever (stated precedence: the most specific structural disease first) | addressed | expected conversions | not convertible |
+|---|---:|---:|---:|
+| extent normalization of the comparison domain | 265 | 265 | 0 |
+| repeat-domain repair | 157 | 157 | 0 |
+| partition-spine seam repair | 101 | 71 | 30 |
+| contig-end handling | 1 | 1 | 0 |
+| no mass-re-attribution lever (rival wins shared evidence too) | 38 | 0 | 38 |
+
+Total convertible under full neutralization: 494/562 (87.9%). THE
+HONEST ORDERING: extent normalization (265) > repeat-domain repair
+(157) > seam repair (71) > contig-end handling (1); the 68
+not-convertible loci (the rival-dominant class minus its seam members,
+plus the two shared-evidence rivals) need a different mechanism — the
+rival also wins the jointly placed reads (median both-placed gap
++4,772 in that class) — named, not hidden. The seam lever's
+not-convertible 30 are the seam loci whose rival wins shared evidence
+too.
+
+The honest caveats: (a) the conversion counts are upper bounds under
+FULL neutralization of the unplaced term — partial repairs convert
+subsets, measured per repair when built; (b) `e_scale_mass_asym` is
+the E-scale magnitude of the unplaced term, not its exact LL (the
+one-side-placed units' exact LLs are not in the receipt); the
+conversion criterion uses only the receipt-exact both-placed and
+residual terms; (c) the classification conventions (the signature
+definitions and the precedence) are stated above, like the census's
+own 50bp rule — no thresholds enter any instrument; (d) chrIX remains
+excluded; its row lands when its chain completes.

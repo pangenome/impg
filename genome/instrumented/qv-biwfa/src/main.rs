@@ -16,6 +16,12 @@
 //!        silently approximated: a failed alignment is reported, the
 //!        caller names the locus and excludes it from the aggregate
 //!        honestly)
+//! With the optional "--cigar" argv flag (the non-rank-1 autopsy
+//! stage's extension; the DEFAULT response is byte-identical to the
+//! committed QV stage's protocol, which never passes the flag) the
+//! successful response appends the walked CIGAR op string as a fifth
+//! tab field, so the caller can derive the end-gap vs interior-gap
+//! anatomy from the very alignment the counts summarize.
 //!
 //! The CIGAR is walked against BOTH sequences byte-by-byte: match /
 //! mismatch columns are decided by comparing the actual bases (exact
@@ -30,6 +36,9 @@ use lib_wfa2::affine_wavefront::{
 };
 
 fn main() {
+    // The --cigar mode flag (see the protocol note above): assessment-
+    // side anatomy extension, default protocol untouched.
+    let with_cigar = std::env::args().any(|a| a == "--cigar");
     // The likegt penalties exactly (BIWFA_INTEGRATION.md /
     // sequence_qv.rs): mismatch 4, gap-opening 6, gap-extension 2,
     // match score 0, Medium memory, End2End span, Alignment scope
@@ -128,7 +137,12 @@ fn main() {
             out.flush().unwrap();
             continue;
         }
-        writeln!(out, "{matches}\t{mismatches}\t{ins}\t{dels}").unwrap();
+        if with_cigar {
+            let cigar_str: String = cigar.iter().map(|&c| c as char).collect();
+            writeln!(out, "{matches}\t{mismatches}\t{ins}\t{dels}\t{cigar_str}").unwrap();
+        } else {
+            writeln!(out, "{matches}\t{mismatches}\t{ins}\t{dels}").unwrap();
+        }
         out.flush().unwrap();
     }
 }
