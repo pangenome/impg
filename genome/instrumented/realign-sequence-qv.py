@@ -3,8 +3,8 @@
 log-gap "QV-like" pattern — the likegt sequence-QV pattern, NOT the
 model-internal log-gap conversion).
 
-Per expressible locus of the closed components (chrIX EXCLUDED: its
-exhaustive run is still in flight): align the CALLED diplotype against
+Per expressible locus of the closed components (all 17 — chrIX closed
+by the anchor-pathology repair): align the CALLED diplotype against
 the ACTUAL diplotype.
 
   (1) THE MATERIAL: the called class's material is the winner fold
@@ -51,7 +51,7 @@ the ACTUAL diplotype.
       identity = 1 - error.
 
 Receipt-side only: reads the committed receipts and partition GFAs,
-no instrument input, no thresholds, no product change; chrIX excluded.
+no instrument input, no thresholds, no product change.
 Usage:
   realign-sequence-qv.py --component C   (per-component pass; writes
         realign-sequence-qv-C.jsonl beside the receipts)
@@ -73,12 +73,13 @@ HELPER = f"{HERE}/qv-biwfa/target/release/qv-biwfa"
 QV_CAP = 60.0          # the likegt convention: perfect call = QV 60
 ERROR_FLOOR = 1e-6     # the likegt floor under the cap
 
-# The 16 closed components (chrIX EXCLUDED — its exhaustive run is
-# still in flight; the aggregate states this).
+# The 17 closed components (chrIX closed by the anchor-pathology
+# repair — the exponential-correspondence enumeration replaced by the
+# exact feasibility DP, the whole-genome fleet 17/17).
 COMPONENTS = [
     "chrMT", "chrI", "chrIV", "chrII", "chrIII", "chrV", "chrVI",
-    "chrVII", "chrVIII", "chrX", "chrXI", "chrXII", "chrXIII",
-    "chrXIV", "chrXV", "chrXVI",
+    "chrVII", "chrVIII", "chrIX", "chrX", "chrXI", "chrXII",
+    "chrXIII", "chrXIV", "chrXV", "chrXVI",
 ]
 
 
@@ -462,8 +463,8 @@ def run_tables():
                 )
                 records.append(r)
     say("== THE CALLED-VS-TRUTH SEQUENCE QV — THE AGGREGATE OF RECORD")
-    say(f"   components: {len(COMPONENTS)} closed (chrIX EXCLUDED — its exhaustive")
-    say("   run is still in flight); loci: every truth-pair-expressible locus")
+    say(f"   components: {len(COMPONENTS)} closed")
+    say("loci: every truth-pair-expressible locus")
     say(f"   records: {len(records)}")
     say("")
     say("THE CONVENTION (the honest statement):")

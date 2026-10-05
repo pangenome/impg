@@ -10,7 +10,7 @@ pairs under the same biWFA machinery with the helper's --cigar mode
 (default protocol byte-identical; the counts must equal the stored QV
 stage's pairs exactly — a built-in cross-check), and reads the census
 receipts for the row-geometry facts. The ingredients sidecars are
-never opened. chrIX EXCLUDED (its exhaustive run is still in flight).
+never opened. All 17 components closed (chrIX closed by the anchor-pathology repair).
 
 THE HYPOTHESIS UNDER TEST (stated as hypothesis — measured, not
 assumed): EXTENT ASYMMETRY — partition/window boundaries fragment the
@@ -581,8 +581,8 @@ def run_tables():
             for line in f:
                 records.append(json.loads(line))
     say("== THE CAUSAL AUTOPSY OF THE NON-RANK-1 CALLS — THE AGGREGATE OF RECORD")
-    say(f"   components: {len(COMPONENTS)} closed (chrIX EXCLUDED — its exhaustive")
-    say("   run is still in flight); cohort: every truth-pair-expressible locus")
+    say(f"   components: {len(COMPONENTS)} closed")
+    say("cohort: every truth-pair-expressible locus")
     say("   whose truth rank is not 1 (the QV stage's non-rank-1 set)")
     say(f"   records: {len(records)}")
     say("")

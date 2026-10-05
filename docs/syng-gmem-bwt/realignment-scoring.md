@@ -1082,7 +1082,7 @@ truth classes come from the committed slice-1 census receipt; no
 selection swap, no scoreboard change, no 502, no PR push; the 64 GiB
 guard clean everywhere.
 
-## The whole-genome fleet — all 17 components under the realignment instrument (2026-11-06, in flight)
+## The whole-genome fleet — all 17 components under the realignment instrument (closed 2026-10-05: 17 of 17)
 
 The owner's go: the remaining 14 balanced-diploid components
 (chrII, chrIII, chrV, chrVI, chrVII, chrVIII, chrIX, chrX, chrXI,
@@ -1302,7 +1302,102 @@ EXPRESSIBLE (in-axis 42/81, tiled-elsewhere 6/17, partial-expressible
 record: loci 5, 8, 12, 17, 29 and 33 LOST, 13 HOLD. Table at
 `realign-chrXII-tables.txt`.
 
-## THE WHOLE-GENOME FLEET — the aggregate of record (2026-11-06, 16 of 17 components closed; chrIX in flight)
+### chrIX — closed end-to-end AFTER THE ANCHOR-PATHOLOGY AUTOPSY (2026-10-05; the fleet's 17th and last component)
+
+chrIX was the fleet's one killed run: its anchor projection ground
+for 18.1 wall hours (65,215s; 1,085 CPU-minutes single-threaded;
+killed by the owner's order at exit 143) inside the context-sample
+phase, a ~100x outlier against chrIV's 704s anchor wall. THE
+AUTOPSY (the artifacts read before any fix was designed):
+
+* THE SIGNATURE: the placement layer completed in ~90s CPU
+  (3,415,719/3,415,719 occurrences interval-count AND node-list
+  matched, own-row checked 3,395,330, hull checks 49,541,258), 787
+  context-sample lines were written (402MB), and then ZERO output
+  for 18 hours — the grind sat inside the per-sample row loop,
+  before a single JSON byte of the grinding sample could be written.
+* THE MONSTER, IDENTIFIED FROM THE ARTIFACTS: stride 3,416 over
+  3,415,719 occurrences = 1,000 samples; the last fully-written
+  sample is flat 2,688,392 (record 22910, occ 473); the grind is
+  SAMPLE 788 at flat 2,691,808 — census record 22914, occurrence 37
+  (path 512, start 115849, orientation 1), window 11, axis partition
+  554. Record 22914 is a PURE TANDEM-REPEAT READ: 12 canonical
+  anchors, and every one of its 672 occurrences' census intervals
+  spell the same node abs id 7263719 twelve times.
+* THE FOLD-STRUCTURE MEASUREMENT (partition 554's committed GFA):
+  node 7263719 sits on the '+' strand at up to 70 positions in one
+  row (BCE_3a#0#chrIX +70, BGN_3a +58, ANL#3/#4 +53, CGH_1#3/#4
+  +45, ... ~95 rows carry it, zero '-' copies — the orientation-1
+  required sign is '+', which the 18h stall itself proves). With 12
+  IDENTICAL anchors each holding the same candidate set, the
+  monotone-assignment leaf count is C(M,12): C(70,12) ~ 7.2e12 leaves
+  for the top row alone — the summed leaf volume over the traversing
+  rows IS the 18-hour grind, on ONE sampled occurrence.
+* THE ROOT CAUSE: `partition_anchor_projection.rs` carried its own
+  copy of the ORIGINAL EXPONENTIAL `anchor_correspondence`
+  enumeration — the chrIV slice-2 repeat-domain repair replaced the
+  enumeration with the exact feasibility DP in
+  `partition_realign_score.rs` ONLY; the anchor projection's copy
+  was never repaired. chrIV's own anchor run (and chrV/chrX/chrXVI,
+  which share partition 292's axis windows) survived by luck of the
+  sample draw: the pathology needs the JOINT structure — a
+  repeat-composed READ (12 identical anchors) x a repeat-dense ROW
+  (the node at dozens of positions) — and chrIX's sample 788 was the
+  first draw in the fleet that hit it.
+
+THE FIX (derived, not tuned; commit f23d50e): the enumeration body
+replaced by the exact feasibility DP ported verbatim from the
+scoring instrument's proven repair — a position is pinned iff it is
+the anchor's unique forward-AND-backward-feasible candidate; cost
+O(anchors x candidates) = 12x70 = 840 operations where the
+enumeration paid ~7.2e12 leaves. NO other behavior touched. THE
+GATES: unit tests 10/10 (the 8 prior + the 3,000-case randomized
+equivalence test against a verbatim copy of the committed
+enumeration + the chrIX-shape regression: 12 identical anchors x
+70 positions returns all-ambiguous in microseconds); THE IDENTITY
+GATES on the fixed binary — chrIV's and chrI's anchor receipts
+(main + context + rows sidecars) reproduce the committed receipts
+BYTE-IDENTICALLY (md5-equal, exit 0, walls 729.5s/64s, fetch-path
+counters identical): the repair is a proven no-op on the
+non-pathological components. The killed run's markers are preserved
+(`run-anchorproj-chrIX-chrIX.*.killed18h` + the partial outputs'
+md5s at the validation dir).
+
+THE CHAIN THEN FLEW: anchor 82s (18.1 hours -> 82 seconds, the
+~800x measured pay on the pathological component; poller RSS peak
+4.12GB; 1,000/1,000 samples, 99,972 traversing rows, 21,447,946
+per-base lookups; the killed run died at sample 788), serial
+identity base 56s (7.30GB), 4-wide run of record 41s (8.65GB),
+anchor checker ALL PHASES PASS (67,205,810 checks), realign checker
+ALL PHASES PASS (9,881,217 checks / 0 failures, single slice at 45
+loci, incl. the 8t byte-identity gate vs the serial receipts),
+graph checker ALL PHASES PASS. Census walls: 429s (26.6GB), from
+the fleet's earlier multicensus run.
+
+chrIX's NUMBERS: 45 loci / 71-partition build (the survey: IN-AXIS
+35, NEIGHBOR 5, FOREIGN 5, CONTIG-END 0; FOUR flagged twin pairs —
+AAA/SGDref identical-through-graph, BMB/UWOPS052272,
+CLL#0/CLL#1, UWOPS034614/UWOPS052272; 15 twin-only holder
+partitions). 40 of 45 truth-pair-expressible; TRUTH RANK-1 AT 18
+(in-axis 17/35, tiled-elsewhere 1/5; the 5 inexpressible are the
+bracketed subtelomeric windows L0-L3 + L44). Old-wins: 11 held /
+3 lost (L19 rank 15, L37 rank 2, L41 rank 3). The domain-scaling
+verdict vs chrI: 45 vs 21 windows for 2.32x the class pairs — the
+largest locus L0 (partition 292, the shared subtelomeric repeat
+family, 814 member rows, 699 folds, 244,650 class pairs, 62,073
+units, 13.9M placements) and L1 (partition 544, 62,074 units); the
+anchor pathology's own locus L11 (partition 554) is a MID-SIZED
+class domain (182 folds, 16,653 class pairs) — the disease is
+orthogonal to class-domain size, it lives in the READ-ROW ambiguity
+structure. Table at `realign-chrIX-tables.txt`; the sequence-QV row
+(40 expressible, 18 rank-1, 22 non-rank-1, median QV 16.64, min
+7.36 — chrIX contributes no worst-25 call) and the autopsy row (22
+non-rank-1: 9 extent-asymmetry, 13 repeat-domain — chrIX is the
+fleet's most repeat-domain-dense component at 59% of its non-rank-1
+set, consistent with its subtelomeric L0/L1 and the shared repeat
+families) in the aggregate sections below.
+
+## THE WHOLE-GENOME FLEET — the aggregate of record (17 of 17 components closed; chrIX landed 2026-10-05 after the anchor-pathology repair)
 
 THE WHOLE-GENOME TRUTH-RANK TABLE (the per-locus tables beside each
 component's receipts; the aggregate script
@@ -1320,7 +1415,7 @@ component's receipts; the aggregate script
 | chrVI     | 29   | 25          | 15           | 16             | 8        | 5        | 0          |
 | chrVII    | 117  | 102         | 45           | 85             | 18       | 13       | 1          |
 | chrVIII   | 60   | 50          | 25           | 44             | 6        | 5        | 5          |
-| chrIX     |      |             |              | IN FLIGHT (45 loci / 71-partition build / IN-AXIS 35, NEIGHBOR 5, FOREIGN 5 surveyed; the anchor projection's context-sample phase over the shared repeat partitions still running — the fleet's one slow outlier) | | | |
+| chrIX     | 45   | 40          | 18           | 35             | 5        | 5        | 0          |
 | chrX      | 80   | 70          | 35           | 67             | 6        | 7        | 0          |
 | chrXI     | 66   | 66          | 30           | 55             | 8        | 3        | 0          |
 | chrXII    | 119  | 99          | 48           | 81             | 27       | 8        | 3          |
@@ -1329,14 +1424,14 @@ component's receipts; the aggregate script
 | chrXV     | 119  | 103         | 57           | 62             | 49       | 4        | 4          |
 | chrXVI    | 107  | 90          | 40           | 89             | 6        | 11       | 1          |
 
-THE AGGREGATE (16 closed components): 1262 loci, 1093
-truth-pair-expressible, TRUTH RANK-1 AT 531 (48.6% of expressible).
+THE AGGREGATE (17 closed components): 1307 loci, 1133
+truth-pair-expressible, TRUTH RANK-1 AT 549 (48.5% of expressible).
 By class across the closed fleet: the in-axis partition class
 resolves at roughly half everywhere (the variants discriminate where
 the material is genuinely placed); the one-window coordinate-offset
 (NEIGHBOR) class resolves at 22/39 at its biggest instance (chrXV);
-the windowed frame's own old-win record across the 13 components
-with non-vacuous guards: 97 old wins HOLD, 29 LOST under the
+the windowed frame's own old-win record across the 14 components
+with non-vacuous guards: 105 old wins HOLD, 32 LOST under the
 realignment instrument (the prediction-violation class the chrIII L5
 finding named — the repeat-domain residuals, each named per locus in
 the component tables).
@@ -1344,29 +1439,33 @@ the component tables).
 THE MEASURED WALLS (external run markers; RSS = the external poller
 peak, all under the 64GiB guard):
 
-* census walls (16): 61+144+1124+825+2368+929+937+3031+566+948+617
-  +2350+1016+1139+1903+1194 = 19152s
-* anchor-projection walls (16): 153+600+465+354+704+442+191+721+197
-  +363+175+836+359+472+660+494 = 7186s
-* serial identity-base walls (16): 130+41+183+105+236+92+67+331+96
-  +133+84+180+135+162+287+186 = 2448s
-* 4-wide exhaustive walls (16): 14+30+107+65+148+66+62+168+55+97+55
-  +113+96+88+167+97 = 1428s
-* summed total (16): 19152+7186+2448+1428 = 30214s (503.6 min of
+* census walls (17): 61+144+1124+825+2368+929+937+3031+566+429+948
+  +617+2350+1016+1139+1903+1194 = 19581s
+* anchor-projection walls (17): 153+600+465+354+704+442+191+721+197
+  +82+363+175+836+359+472+660+494 = 7268s (chrIX's 82s is the
+  post-repair wall; the killed pre-repair run was 65,215s — the
+  repair removed ~64,433s of that one component's anchor wall)
+* serial identity-base walls (17): 130+41+183+105+236+92+67+331+96
+  +56+133+84+180+135+162+287+186 = 2504s
+* 4-wide exhaustive walls (17): 14+30+107+65+148+66+62+168+55+41
+  +97+55+113+96+88+167+97 = 1469s
+* summed total (17): 19581+7268+2504+1469 = 30822s (513.7 min of
   single-component walls — the fleet ran them concurrently; the
   summed wall is the work, not the elapsed)
-* THE 4-WIDE SCORING PASS ALONE: 1428s = 23.8 min vs the grounded
+* THE 4-WIDE SCORING PASS ALONE: 1469s = 24.5 min vs the grounded
   chrIV-based extrapolation of ~20 min (7.9 x chrIV's 148s = 1169s
-  ≈ 19.5 min) — THE ESTIMATE HELD within ~22%: the residual is the
+  ≈ 19.5 min) — THE ESTIMATE HELD within ~26%: the residual is the
   per-component fixed cost (inputs/quality/binding/derive-cache
-  phases) recurring 16 times where the single-component
+  phases) recurring 17 times where the single-component
   extrapolation amortized it once. The scoring phase itself remains
   sublinear in bp (chrIV's 12.1Mb is 7.9x chrI's 1.53Mb for 4.9x
   the 4-wide wall).
-* RSS peaks (16 closed): census 45.5GB (chrIV), anchor 9.1GB
+* RSS peaks (17 closed): census 45.5GB (chrIV), anchor 9.1GB
   (chrIV), serial 26.8GB (chrIV), 4-wide 28.6GB (chrIV) — the
   repeat-locality matrices dominate exactly where chrIV said they
-  would; every component under the 64GiB guard with headroom.
+  would; every component under the 64GiB guard with headroom
+  (chrIX's peaks: census 26.6GB, anchor 4.1GB, serial 7.3GB, 4-wide
+  8.7GB).
 
 THE FLEET'S MEASURED FINDINGS (the machinery's own receipts):
 
@@ -1390,18 +1489,17 @@ THE FLEET'S MEASURED FINDINGS (the machinery's own receipts):
   affected slice was re-run single-writer under the fixed checker
   (the receipts were never at risk — the checkers are read-only).
 
-CHRIX — THE PRECISE REMAINDER: its anchor projection has been in the
-context-sample phase over the shared repeat partitions (the fleet's
-one slow outlier, single-threaded since 19:30Z); the nohup'd driver
-completes the chain automatically when it lands (serial identity
-base -> 4-wide run of record -> anchor checker -> realign checker,
-single slice at 45 loci -> graph checker -> tables), and the closure
-then needs only: verify ALL PHASES PASS, the fleet-heavy-chrIX done
-marker, the component docs section + commit, and the aggregate
-re-run (the script is re-runnable; chrIX's row lands from its
-receipts).
+CHRIX — CLOSED (the remainder paragraph superseded): the killed
+18.1h anchor run was autopsied to the exact (sample, row) pair, the
+exponential-enumeration copy in the anchor projection replaced by
+the exact feasibility DP (identity-gated byte-identical on
+chrIV/chrI), and the chain landed in minutes — anchor 82s, serial
+56s, 4-wide 41s, all checkers ALL PHASES PASS; the receipts, the
+killed run's preserved markers and the tables beside the fleet's
+set at the validation dir. THE WHOLE-GENOME FLEET IS CLOSED: 17 of
+17 components, 1307 loci, 549 truth rank-1 of 1133 expressible.
 
-## THE CALLED-VS-TRUTH SEQUENCE QV — the owner's correction of the log-gap "QV-like" pattern (16 closed components; chrIX in flight)
+## THE CALLED-VS-TRUTH SEQUENCE QV — the owner's correction of the log-gap "QV-like" pattern (17 closed components; chrIX landed 2026-10-05)
 
 The owner rejected the model-internal log-gap conversion as "the QV".
 The QV they mean is the likegt sequence-QV pattern: align the CALLED
@@ -1409,7 +1507,8 @@ diplotype against the ACTUAL diplotype, per expressible locus. This
 section is the measured record of that stage — receipt-side machinery
 only (`realign-sequence-qv.py` + the `qv-biwfa` helper crate, the
 same lib_wfa2 revision the repository already pins; no product
-change; chrIX excluded, its exhaustive run still in flight).
+change; chrIX closed 2026-10-05, its 40 expressible loci in the
+aggregate below).
 
 THE CONVENTION (exact, stated): the called class's material is the
 winner fold pair's spelled sequences (the two homolog candidates);
@@ -1418,7 +1517,7 @@ the S288C and SK1 rows). Both orders of the injective no-replacement
 assignment are scored by the assignment-wide per-base error (summed
 edits / summed alignment columns) and the lower taken (the owner's
 yardstick; likegt's mean-identity rule computed beside it — it
-disagrees at 6 of 1093 loci, all named in the tables file, and the
+disagrees at 6 of 1133 loci, all named in the tables file, and the
 disagreement is bounded: the two rules never differ by more than the
 pairing itself). The alignment is biWFA gap-affine End2End at
 likegt's penalties (match 0 / mismatch 4 / gap-open 6 / gap-extend
@@ -1441,45 +1540,45 @@ criterion, re-verified member-by-member), and (b) the panel window is
 contained in the member row's partition-GFA P-line spelling at a
 front-overhang offset (the committed checker phase-2 derivation,
 L-overlap trimmed, gap segments included). Every used fold at every
-locus passed both gates: 2,964 folds over the 16 components (the
+locus passed both gates: 3,072 folds over the 17 components (the
 per-component counts in the run log beside the receipts).
 
-THE RECEIPTS: `realign-sequence-qv-<C>.jsonl` per component (1,093
-per-locus records over the 16 closed components) + the aggregate
-`realign-sequence-qv-tables.txt` at the validation dir; 4,362 biWFA
+THE RECEIPTS: `realign-sequence-qv-<C>.jsonl` per component (1,133
+per-locus records over the 17 closed components) + the aggregate
+`realign-sequence-qv-tables.txt` at the validation dir; 4,522 biWFA
 alignments; the full per-locus fields include the 2x2 pair matrix,
 both orders' scores, the chosen assignment, the per-pair match /
 mismatch / indel counts and the called/truth fold identities.
 
-THE GENOME-WIDE QV DISTRIBUTION (1,093 expressible loci): median
-17.84, p10 8.40, p90 60.00, min 0.05 (chrXVI L7); QV>=40 at 48.67%,
-QV>=30 at 48.86%, QV>=20 at 49.31% — the distribution is bimodal by
-construction: 531 perfect calls (QV 60, zero edits) at exactly the
-truth-rank-1 loci, and the 562 non-rank-1 calls clustered at QV
-6.9-16.3 (p10-p90; median 9.91).
+THE GENOME-WIDE QV DISTRIBUTION (1,133 expressible loci): median
+17.77, p10 8.44, p90 60.00, min 0.05 (chrXVI L7); QV>=40 at 48.54%,
+QV>=30 at 48.72%, QV>=20 at 49.16% — the distribution is bimodal by
+construction: 549 perfect calls (QV 60, zero edits) at exactly the
+truth-rank-1 loci, and the 584 non-rank-1 calls clustered at QV
+6.9-16.3 (p10-p90; median 9.95).
 
 THE REFRACTIVE TABLE (the owner's question: how much sequence
 accuracy do the not-at-truth calls actually lose?):
 
 | stratum | n | median QV | p10-p90 QV | min | median per-base error | perfect |
 |---------|---|-----------|------------|-----|----------------------|---------|
-| rank-1 calls | 531 | 60.00 | 60-60 | 60 | 0 | 531 |
-| non-rank-1 calls | 562 | 9.91 | 6.89-16.33 | 0.05 | 0.102 | 0 |
+| rank-1 calls | 549 | 60.00 | 60-60 | 60 | 0 | 549 |
+| non-rank-1 calls | 584 | 9.95 | 6.95-16.33 | 0.05 | 0.101 | 0 |
 
 Every rank-1 call is a PERFECT sequence call (the called class IS the
-truth class: the same fold pair, the same spelled sequences — 531/531
+truth class: the same fold pair, the same spelled sequences — 549/549
 at zero edits). The non-rank-1 calls are NOT "effectively the same":
-their median identity to the truth diplotype is 89.80% (median
-per-base error 10.2%), only 3/562 (0.53%) reach >=99.9% identity
+their median identity to the truth diplotype is 89.89% (median
+per-base error 10.1%), only 3/584 (0.51%) reach >=99.9% identity
 (chrIII L5 at 99.990%, chrXVI L2 at 99.990%, chrI L3 at 99.952%),
-8/562 (1.42%) reach >=99%, 137/562 (24.38%) reach >=95%. The errors
+8/584 (1.37%) reach >=99%, 146/584 (25.00%) reach >=95%. The errors
 are STRUCTURAL, not point-mutational: the gap-column share of the
-edit count is 98.0% at the median (p10 83.0%) — the called class
+edit count is 98.0% at the median (p10 82.9%) — the called class
 spells different-length, different-copy material (repeat-domain /
 foreign / seam windows), not the truth sequence with substitutions.
-By census class the non-rank-1 calls resolve: in-axis-partition 419
-(median QV 9.80), tiled-elsewhere/neighbor (the seam class) 101
-(11.10), tiled-elsewhere/foreign-repeat (the repeat-domain foreign
+By census class the non-rank-1 calls resolve: in-axis-partition 437
+(median QV 9.81), tiled-elsewhere/neighbor (the seam class) 105
+(11.23), tiled-elsewhere/foreign-repeat (the repeat-domain foreign
 class) 24 (10.88), absent/contig-end 1 (7.96), partial-elsewhere 1
 (15.09), pilot (chrMT/chrI, no census receipt) 16 (9.29).
 
@@ -1496,7 +1595,7 @@ different-length arrangement); chrIV L63 and chrIV L104 (QV 4.84 /
 worst-call rows carry the census class at every locus (the seam /
 foreign-repeat / contig-end classes named above).
 
-THE HONEST STATEMENTS: (1) the 531 rank-1 calls' perfect QVs are a
+THE HONEST STATEMENTS: (1) the 549 rank-1 calls' perfect QVs are a
 construction-level fact (called class == truth class means the same
 folds, hence identical spelled sequences), reported because the
 owner's yardstick asks exactly this — the sequence the call spells
@@ -1507,13 +1606,18 @@ stated above); (3) the windowed truth pair convention inherits the
 instrument's own per-locus truth-pair definition — at chrXVI L7 the
 "actual diplotype" is a 49bp fold pair by the committed windowed
 convention, and the QV states it rather than repairing it; (4) chrIX
-remains excluded (its receipts are not closed); its row lands when
-its chain completes.
+IS CLOSED (2026-10-05): its 40 expressible loci are in the
+aggregate above (18 rank-1 perfect, 22 non-rank-1, median QV 16.64,
+min 7.36 — no chrIX locus in the worst-25 list).
 
-## THE CAUSAL AUTOPSY OF THE 562 NON-RANK-1 CALLS — measurement only, no fixes (2026-11-06, 16 closed components; chrIX in flight)
+## THE CAUSAL AUTOPSY OF THE NON-RANK-1 CALLS — measurement only, no fixes (584 records; 17 closed components; chrIX landed 2026-10-05)
 
-The owner's demand: WHY are the 562 non-rank-1 calls made with
-gap-dominated ~10% structural divergence? The hypothesis under test
+The owner's demand: WHY are the non-rank-1 calls made with
+gap-dominated ~10% structural divergence? (The original cohort was
+the 562 calls of the 16 components closed at measurement time;
+chrIX's 22 landed with its chain — 9 extent-asymmetry + 13
+repeat-domain — and every cohort number below is the 17/17
+re-derivation.) The hypothesis under test
 (stated as hypothesis, measured here): EXTENT ASYMMETRY —
 partition/window boundaries fragment the truth's in-domain rows while
 rival rows span longer across the seams, collecting orphaned read
@@ -1527,7 +1631,7 @@ helper's optional `--cigar` mode — the default protocol byte-identical
 to the committed QV stage's): per non-rank-1 expressible locus the
 autopsy re-aligns the QV stage's CHOSEN assignment's two pairs under
 the same biWFA machinery WITH the walked CIGAR, asserts every pair's
-counts equal the committed QV receipts pair-for-pair (all 562 passed;
+counts equal the committed QV receipts pair-for-pair (all 584 passed;
 the assignment re-derived identically at every locus), and reads the
 main receipt's own `log_gap_decomposition` + the census receipts' tiling
 placements. Per-locus receipts: `realign-nonrank1-autopsy-<C>.jsonl`
@@ -1544,19 +1648,19 @@ E and cancel); `e_scale_mass_asym` = mass asymmetry x E, the stated
 magnitude SCALE of the unplaced term (not its exact LL).
 
 (1) THE EXTENT MEASUREMENT: the called diplotype is LONGER than the
-truth at 513/562 loci (91.3%); median called-minus-truth length
-+1,834bp; median called end-overhang 1,378bp vs truth end-overhang 0bp;
+truth at 533/584 loci (91.3%); median called-minus-truth length
++1,817bp; median called end-overhang 1,296bp vs truth end-overhang 0bp;
 68 loci carry overhangs on BOTH sides (the shifted-row shape). The
-end-gap share of all edits: median 75.1% (the gap columns remain 98%
+end-gap share of all edits: median 73.4% (the gap columns remain 98%
 of edits per the QV stage; of those, end-gaps dominate at the median).
 
 (2) THE LIKELIHOOD TERM WINNERS: the unplaced-differential term is
-WINNER-favored at 560/562 loci (99.6%) — the unplaced-mass asymmetry
-(median 2,215 reads; E-scale median 39,582 LL) is essentially
+WINNER-favored at 582/584 loci (99.7%) — the unplaced-mass asymmetry
+(median 2,388 reads; E-scale median magnitude 42,674 LL) is essentially
 universal in the cohort; the both-placed evidence term is TRUTH-
-favored at 494/562 (87.9%, median magnitude 2,893 LL). The residual
-term exceeds the both-placed term at 551/562 loci; the median
-residual share of log_gap is 1.34 — the winner's advantage is MORE
+favored at 516/584 (88.4%, median magnitude 2,893 LL). The residual
+term exceeds the both-placed term at 573/584 loci; the median
+residual share of log_gap is 1.36 — the winner's advantage is MORE
 THAN ENTIRELY the unplaced-differential term, overcoming a
 truth-favoring shared-evidence deficit. THE LIKELIHOOD HALF OF THE
 HYPOTHESIS IS CONFIRMED AT COHORT SCALE: the winner collects orphaned
@@ -1564,10 +1668,10 @@ read mass the truth cannot place, and the jointly placed reads
 already prefer the truth.
 
 (3) THE ANATOMY HALF: end-gap-dominated (end-gap columns > interior
-gap columns) at 314/562 loci (55.9%); interior-gap-dominated at 248
-(44.0%, median 5 interior gap runs — true material substitution);
+gap columns) at 322/584 loci (55.1%); interior-gap-dominated at 261
+(44.7%, median 5 interior gap runs — true material substitution);
 the full hypothesis shape (unplaced-mass advantage AND truth-favored
-shared evidence AND end-gap-dominated anatomy) at 299/562 (53.2%).
+shared evidence AND end-gap-dominated anatomy) at 308/584 (52.7%).
 The QV is the comparison over MISMATCHED EXTENTS exactly as
 hypothesized at the end-gap-dominated loci (median end-gap share
 98.2% in that class); at the interior-dominated loci the QV measures
@@ -1579,24 +1683,28 @@ interior shape, then the rival-dominant and shared-evidence shapes):
 
 | cause | n | frac | median QV | median identity | median end-gap share | median mass asym | median len_delta |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| extent-asymmetry (S1+S2+end-dominated) | 298 | 53.0% | 9.48 | 88.72% | 98.2% | 932 | +2,358bp |
-| repeat-domain substitution (S1+S2+interior) | 194 | 34.5% | 12.82 | 94.78% | 0.2% | 11,140 | +680bp |
-| rival-dominant (winner wins both-placed too) | 66 | 11.7% | 12.32 | 94.13% | 7.9% | 6,890 | +375bp |
-| shared-evidence rival (no unplaced advantage) | 2 | 0.4% | ~40 | 99.99% | 0% | 0 | 0 |
+| extent-asymmetry (S1+S2+end-dominated) | 307 | 52.6% | 9.47 | 88.71% | 98.2% | 929 | +2,359bp |
+| repeat-domain substitution (S1+S2+interior) | 207 | 35.4% | 12.87 | 94.83% | 0.1% | 10,930 | +677bp |
+| rival-dominant (winner wins both-placed too) | 66 | 11.3% | 12.32 | 94.13% | 7.9% | 6,890 | +375bp |
+| shared-evidence rival (no unplaced advantage) | 2 | 0.3% | ~40 | 99.99% | 0% | 0 | 0 |
 | boundary (pure-mismatch shape) | 1 | 0.2% | 21.43 | 99.28% | 0% | 886 | 0 |
 | contig-end | 1 | 0.2% | 7.96 | 84.02% | 95.7% | 1,371 | +2,824bp |
 
 The cause x census-class cross-tab: extent-asymmetry is dominated by
-in-axis loci (243) but reaches every class; the seam class
-(tiled-elsewhere/neighbor, 101 loci) splits 33 extent / 37 interior /
+in-axis loci (252) but reaches every class; the seam class
+(tiled-elsewhere/neighbor, 105 loci) splits 33 extent / 41 interior /
 30 rival-dominant / 1 boundary. The row-geometry fact: the SK1 window
-ortholog tiles >1 partition at 258/287 of the census-covered
+ortholog tiles >1 partition at 267/296 of the census-covered
 extent-asymmetry loci (median 2 partitions) — the partition-boundary
 cut is the cohort's ambient geometry, the cut points named per locus
 in the receipts. The two shared-evidence rivals are the "effectively
 the same" calls (chrIII L5 QV 40.03, chrXVI L2 QV 39.89 at 99.99%
 identity — a near-identical rival winning on jointly placed reads
 alone); the boundary locus is chrXIV L79 (146 edits, all mismatches).
+chrIX's contribution: 9 extent-asymmetry + 13 repeat-domain — the
+fleet's most repeat-domain-dense component (59% of its non-rank-1
+set vs the fleet's 35.4%), consistent with its subtelomeric L0/L1
+windows and the shared repeat-family partitions.
 
 (5) THE FIX MAPPING (NO FIXES IMPLEMENTED — the measured expected
 conversions under the stated criterion: a mass-re-attribution repair
@@ -1606,15 +1714,15 @@ both_placed_evidence_gap < 0):
 
 | lever (stated precedence: the most specific structural disease first) | addressed | expected conversions | not convertible |
 |---|---:|---:|---:|
-| extent normalization of the comparison domain | 265 | 265 | 0 |
-| repeat-domain repair | 157 | 157 | 0 |
-| partition-spine seam repair | 101 | 71 | 30 |
+| extent normalization of the comparison domain | 274 | 274 | 0 |
+| repeat-domain repair | 166 | 166 | 0 |
+| partition-spine seam repair | 105 | 75 | 30 |
 | contig-end handling | 1 | 1 | 0 |
 | no mass-re-attribution lever (rival wins shared evidence too) | 38 | 0 | 38 |
 
-Total convertible under full neutralization: 494/562 (87.9%). THE
-HONEST ORDERING: extent normalization (265) > repeat-domain repair
-(157) > seam repair (71) > contig-end handling (1); the 68
+Total convertible under full neutralization: 516/584 (88.4%). THE
+HONEST ORDERING: extent normalization (274) > repeat-domain repair
+(166) > seam repair (75) > contig-end handling (1); the 68
 not-convertible loci (the rival-dominant class minus its seam members,
 plus the two shared-evidence rivals) need a different mechanism — the
 rival also wins the jointly placed reads (median both-placed gap
@@ -1630,5 +1738,39 @@ one-side-placed units' exact LLs are not in the receipt); the
 conversion criterion uses only the receipt-exact both-placed and
 residual terms; (c) the classification conventions (the signature
 definitions and the precedence) are stated above, like the census's
-own 50bp rule — no thresholds enter any instrument; (d) chrIX remains
-excluded; its row lands when its chain completes.
+own 50bp rule — no thresholds enter any instrument; (d) chrIX IS
+CLOSED (2026-10-05): its 22 non-rank-1 records are in every number
+above.
+
+THE CHRIX PATHOLOGY'S LESSON FOR THE REPEAT-DOMAIN LEVER (the
+owner's question: does the anchor blowup implicate the repeat-domain
+loci at inference time?): NO — the blowup was NOT in the product's
+inference path, and the defect class is now closed everywhere. The
+18.1h grind lived in the ASSESSMENT machinery — the anchor
+projection's own copy of the pre-repair exponential correspondence
+enumeration — while the inference-time scorer already carried the
+exact feasibility DP (the chrIV L39 repair, measured 760.7s -> 0.0s
+with identical answers). But the pathological structure IS the
+repeat-domain row geometry at its extreme: a repeat-composed READ
+(12 identical anchor nodes — a pure tandem-repeat read) against
+repeat-dense ROWS (a syncmer node at up to 70 positions in one row)
+is the same monotone-assignment ambiguity that makes the 207
+repeat-domain loci hard for the likelihood — repeat rows tie and
+steal read mass through exactly these multi-position anchor
+correspondences. The measured teachings: (i) the ambiguity degrades
+GRACEFULLY under the DP — C(70,12) ~ 7.2e12 monotone leaves collapse
+to O(anchors x candidates) with the answers unchanged (the DP-vs-
+enumeration equivalence unit-proven over randomized walks; chrIV
+and chrI anchor receipts byte-identical under the repair) — so NO
+repeat-domain locus can hang the inference path; the blowup risk was
+an artifact of the assessment instrument, not a property of the
+class; (ii) the pathology's own locus (chrIX L11, partition 554) is
+a MID-SIZED class domain (182 folds, 16,653 class pairs) whose call
+is a repeat-domain residual (truth rank 8, winner AMP_1a|
+S288C/W303, log_gap 847) — the hazard is orthogonal to class-domain
+size and lives entirely in the read-row ambiguity structure; (iii)
+chrIX's autopsy mix (13 of 22 non-rank-1 = repeat-domain, 59% vs
+the fleet's 35.4%) confirms the shared subtelomeric repeat
+partitions concentrate the class — and the same repair discipline
+applies to any future instrument that touches the correspondence
+layer: enumerate nothing over repeat rows; the closed form is exact.
