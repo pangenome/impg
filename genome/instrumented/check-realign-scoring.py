@@ -695,7 +695,12 @@ def cluster_form_qual(s_win, spectrum, tied):
             if a != b:
                 parent[a] = b
         for right in range(left + 1, len(tied)):
-            if tied[left][1][right] <= cut:
+            # (the band-pair distance is band_left's row at the
+            # RIGHT BAND'S FOLD INDEX — the instrument's own indexing
+            # (`tied[left].1[index_right]`), not the band's ordinal in
+            # the tied list; chrXIII L1's three-band tie caught the
+            # ordinal misread as a k=4 false failure)
+            if tied[left][1][tied[right][0]] <= cut:
                 a, b = root(left + 1), root(right + 1)
                 if a != b:
                     parent[a] = b
