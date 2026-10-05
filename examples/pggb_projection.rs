@@ -589,6 +589,25 @@ fn main() {
                 }
             })
             .collect();
+        // THE COMPLETENESS CHECK (the substrate must carry every member
+        // row of the locality: the scorer's candidate domain is the map's
+        // member rows, so a pggb build that dropped or renamed a row
+        // would silently shrink the domain — fail loudly instead).
+        let expected_names: HashSet<String> = members
+            .iter()
+            .map(|m| format!("{}:{}-{}", m.path_name, m.start, m.end))
+            .collect();
+        let observed_names: HashSet<String> = pggb.paths.keys().cloned().collect();
+        for missing in expected_names.difference(&observed_names) {
+            panic!(
+                "partition {partition}: members.bed row {missing} has no pggb path"
+            );
+        }
+        for extra in observed_names.difference(&expected_names) {
+            panic!(
+                "partition {partition}: pggb path {extra} is not a members.bed row"
+            );
+        }
         let map = serde_json_ish::Map {
             partition,
             construction_material:
