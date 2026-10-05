@@ -27,11 +27,15 @@ D = "/home/erikg/yeast/genome-balanced-diploid-validation-20230930"
 D = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
 GRAPHS = f"{D}/partition-graphs"
 # (Stage 2: --receipt-prefix P points the table at an alternative
-# receipt family - the territory-normalized receipts.)
+# receipt family - the territory-normalized receipts; --out-suffix S
+# keeps the committed aggregate of record untouched.)
 import sys as _sys
 RECEIPT_PREFIX = "realign-exhaustive"
+OUT_SUFFIX = ""
 if "--receipt-prefix" in _sys.argv:
     RECEIPT_PREFIX = _sys.argv[_sys.argv.index("--receipt-prefix") + 1]
+if "--out-suffix" in _sys.argv:
+    OUT_SUFFIX = _sys.argv[_sys.argv.index("--out-suffix") + 1]
 
 COMPONENTS = [
     "chrMT", "chrI", "chrII", "chrIII", "chrIV", "chrV", "chrVI",
@@ -213,9 +217,9 @@ def main():
         say(f"  closed components: {len(per_component)} of 17, {total_loci} loci, "
             f"truth rank-1 {total_rank1}/{total_expressible} expressible "
             f"({100.0 * total_rank1 / max(1, total_expressible):.1f}% of expressible)")
-    with open(f"{D}/genome-truth-rank-tables.txt", "w") as f:
+    with open(f"{D}/genome-truth-rank-tables{OUT_SUFFIX}.txt", "w") as f:
         f.write("\n".join(out_lines) + "\n")
-    say(f"(written to {D}/genome-truth-rank-tables.txt)")
+    say(f"(written to {D}/genome-truth-rank-tables{OUT_SUFFIX}.txt)")
 
 
 if __name__ == "__main__":

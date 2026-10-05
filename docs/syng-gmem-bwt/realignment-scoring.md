@@ -1774,3 +1774,152 @@ the fleet's 35.4%) confirms the shared subtelomeric repeat
 partitions concentrate the class — and the same repair discipline
 applies to any future instrument that touches the correspondence
 layer: enumerate nothing over repeat rows; the closed form is exact.
+
+## STAGE 2 — THE EXTENT NORMALIZATION (the territory-image rule): derived, gated, and extended to the fleet (2026-10-05)
+
+The autopsy's top lever, measured at 307 extent-class loci, implemented
+as the owner's approved stage 2. NO THRESHOLDS, NO TUNING CONSTANTS:
+the comparison domain is DERIVED from the panel's own committed walk
+structure. The scoreboard machinery is untouched; the convention is
+env-gated (`IMPG_REALIGN_TERRITORY_NORMALIZED`) beside the committed
+default, and the env-unset path is proven a byte-identity no-op (the
+identity gate: chrMT's committed receipts reproduced with all four
+sidecars md5-identical, semantic fields zero-diff).
+
+THE NAIVE WITNESS FALSIFIED FIRST (receipt-side, committed to the
+record as `territory-normalization-predict.py`): the census's window
+territory is the PANGENOME territory (every candidate row sits wholly
+in-territory — the CBK/CBM row IS window 2's territory row), so
+restricting to the window's territory converts NOTHING (measured
+~zero out-of-territory mass at chrMT). The real defect, measured at
+the failing loci: the candidates' OWN row extents differ by thousands
+of bp within the same in-territory locale (chrMT L2: the winner's
+first homolog fold 73 = the CBK/CBM row len 6,596 vs the truth axis
+fold 109 len 2,231 — the winner shares its SECOND homolog with the
+truth and swaps the first for a 3x-longer row; L6: DBVPG 10,955 vs SK1
+5,852; L10: W303 6,911 vs axis 2,587), and the longer row harvests
+the orphaned read mass the fragmented truth cannot place.
+
+THE DERIVED RULE — THE TERRITORY IMAGE (rule 8 of the model section):
+the normalized comparison domain is the LOCUS'S OWN COORDINATE, the
+window's axis row. Per fold, its territory image = the interval
+spanned by the fold's walk steps SHARED with the axis row's walk (the
+alignment-induced correspondence — the instrument's own committed
+node-identity structure, the same semantics the pin machinery trusts).
+Placements and the uniform placement prior are restricted to the
+image; out-of-image mass falls to the CANDIDATE-INDEPENDENT E branch
+for BOTH candidates equally (it cannot vote for the spanner). An
+empty image (no shared anchor) admits no placement: every unit falls
+to E under that fold.
+
+THE EDGE REFINEMENT (the first fleet pass's one regression, named and
+diagnosed — chrV L24): the interval between the outermost shared
+anchors EXCLUDES variant pockets at the territory's edge — a true edge
+variant (no shared anchor on its outer side) cannot be bounded by an
+anchor and fell to E, silencing the truth's own edge material. THE
+DERIVED WITNESS separates the two edge populations by exact set
+membership over the component's own committed axis walks: edge
+material CLAIMED by another window's axis row is that window's
+territory (excluded — chrMT L2's winner-row head: 131 of 158 steps
+shared with the NEIGHBOR window's axis walk, the orphaned-mass
+harvest); edge material claimed by NO window's walk is this locus's
+own edge variant, in-territory BY ELIMINATION (included, bounded by
+the row's own extent — chrV L24's SK1 ortholog head: 12/12 steps
+shared with no window's walk, a true variant). Per-window axis-node
+attribution (rep = the first window whose axis row carries the node;
+count = how many windows' axis rows carry it) is built once per
+component; a fold's image extends to its own row edge on each side
+whose pocket no other window claims; a fold with no shared anchor at
+all is own-material iff no other window claims any of its steps; the
+window's own axis fold's image is its full extent.
+
+THE HONEST CHECK: the territory is the locus's own coordinate, not
+the truth's and not any candidate's. A true insertion/deletion
+haplotype's material WITHIN the window keeps full local evidence (the
+image is the interval between the outermost shared anchors — interior
+diverged pockets are included, and edge variants are included by the
+refinement); its material beyond the window is E for every candidate
+equally, so it loses no RELATIVE evidence and no rival can harvest
+it. Measured at the gate: the rule CONVERTS the extent-class loci and
+holds every rank-1 locus.
+
+THE CHRMT/CHRI GATES (the refined rule, exhaustive reruns, the
+checker in `--territory` mode — phase 5 re-derives the images from
+the GFAs' P lines and compares them exactly; the sampled re-derivations
+run under the image bounds; the tied-winner bands are emitted and
+consumed; phase 8t is skipped BY DESIGN — the env-unset identity gate
+is the separate no-op proof; NEW phase 8N is the hard-gated
+conversion/no-regression table):
+- chrMT: ALL PHASES PASS 1,182,231/0 — CONVERT [L2 48->1, L6 117->1,
+  L9 3->1, L10 119->1] HOLD 5 REGRESS NONE — truth rank-1 5 -> 9 of 9
+  expressible. The QV re-run: 9/9 PERFECT (zero edits).
+- chrI: ALL PHASES PASS 4,364,560/0 — CONVERT [L3, L6, L9, L12, L14,
+  L15, L17, L19] (the L6/L12 prediction class; ranks up to 396 -> 1)
+  HOLD 6 REGRESS NONE — truth rank-1 6 -> 14 of 18 expressible; the
+  residuals L2 (the near-twin) + L13/L16/L18 (the repeat-domain class)
+  are the NEXT lever's territory, named.
+- chrV (the regression case the edge refinement repairs): L24 HOLDS
+  rank-1, CONVERT 15, REGRESS NONE — truth rank-1 24 -> 39 of 57
+  expressible; the QV re-run 39/57 perfect with the non-perfect
+  median QV lifted to ~15.
+
+THE FLEET (the 17-component extension, the drivers nohup'd with
+done-markers; MID-FLEET SNAPSHOT at this writing, the four big
+components' serial identity bases still grinding the
+extended-image repeat loci): 13 of 17 components closed end-to-end
+(chrMT chrI chrII chrIII chrIV chrV chrVI chrVIII chrIX chrXI chrXIII
+chrXIV chrXVI — each: the territory serial identity base, the 4-wide
+exhaustive run of record, the `--territory` checker slices ALL PHASES
+PASS, 75.9M checks 0 failures across the landed slices so far);
+PENDING: chrVII chrX chrXII chrXV. THE MID-FLEET CONVERSION TABLE
+(`territory-conversion-tables.txt`, the per-locus rows in
+`territory-conversion-loci.jsonl`): CONVERT 225 / REGRESS 0 / moved
+220 (non-rank-1 loci that improved rank without reaching 1) over the
+759 expressible loci of the closed set; truth rank-1 364 -> 589
+(77.6% of expressible; the committed convention's whole-genome
+verdict was 48.5%). THE ZERO-REGRESSION GUARD HOLDS at every landed
+component — no rank-1 locus lost rank-1 anywhere in the fleet. THE
+CONVERSIONS BY THE AUTOPSY'S CAUSE (joined to the autopsy receipts):
+extent 185 (the autopsy's extent class: 307 loci fleet-wide, 274
+expected conversions under full neutralization — the four pending
+components hold a large share of the class), repeat-domain 37 (the
+image rule also repairs loci the autopsy classed by their interior
+anatomy), rival-dominant 3; THE TIE ANATOMY: 224 unique wins (the
+winner IS the truth pair) + 1 truth-tied-not-first (the truth is in
+the called set at the max LL; the enumerated winner is a
+likelihood-identical rival whose extra material is out-of-image).
+
+THE QV RE-RUN UNDER THE NORMALIZED CONVENTION (the owner's stage-4
+prediction, measured at 13 components): 588/759 perfect calls
+(QV 60, zero edits; was 549/1,133 = 48.5% under the committed
+convention whole-genome), median QV 60.00 (was 17.77), p10 13.79
+(was 8.40), QV>=40 at 77.87% (was 48.67%) — THE LOWER QV MODE HAS
+COLLAPSED: the extent-mismatch end-gaps are gone, and what remains
+below QV 60 is the repeat-domain class's true interior divergence
+(the next lever's territory). Receipts: `realign-sequence-qv-territory-<C>.jsonl`
++ `realign-sequence-qv-territory-tables.txt`; the committed
+default-convention QV receipts of record are untouched (the
+`--out-suffix` convention).
+
+THE CHECKER-SIDE REPAIRS THIS STAGE (both mirrors of the instrument's
+own documented conventions, both caught by the fleet): (1) the edge
+refinement's `axis_attribution()` was inserted at module scope but
+reads the main()-local `axis_rows` — every `--territory` checker died
+at phase-5 entry; it now takes the window list from the caller. (2)
+chrXIII's territory checker died forming the uniform-prior term
+eagerly for a sampled fold whose NON-EMPTY image is shorter than a
+read — the instrument's `unit_log_likelihood` documents and guards
+the degenerate case (NEG_INFINITY when the support is shorter than a
+read); the checker's prior is now formed lazily under the same guard.
+The aggregates: `genome-truth-rank-tables-territory.txt` (the
+committed aggregate of record untouched) and
+`territory-conversion-tables.txt`.
+
+Standing rules held throughout: truth assessment-side only; no
+thresholds (the image and the attribution are exact set membership
+over committed structures); the scoreboard machinery unmodified; no
+selection swap; no PR push; the receipts streamed, never slurped; the
+ingredients sidecars untouched; the 64GiB guard clean (the territory
+runs' RSS peaks within the committed envelopes); the census/anchor/
+graph artifacts stand (the convention changes only the comparison
+domain).

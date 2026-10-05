@@ -1406,7 +1406,19 @@ def main():
                     continue
                 _, _, m, c, _, _ = got
                 scores.append(m * A + c * B)
-            prior = -math.log(2.0 * (support - READ_LENGTH + 1))
+            # (The instrument's own degenerate-case convention
+            # (unit_log_likelihood): an image shorter than a read
+            # admits NO placement — local_ll NEG_INFINITY — and the
+            # prior is never formed. Under the territory convention a
+            # non-empty image can be shorter than a read (chrXIII
+            # L22's sampled fold); compute the prior lazily so the
+            # faithful re-derivation mirrors the instrument instead of
+            # leaving the log domain.)
+            prior = (
+                -math.log(2.0 * (support - READ_LENGTH + 1))
+                if support >= READ_LENGTH
+                else -math.inf
+            )
             best = max(scores) if scores else -math.inf
             local_ll = (
                 -math.inf
