@@ -209,8 +209,11 @@ def qv_of(error):
 # ------------------------------------------------------- census classes
 def census_classes(component):
     """The per-locus expressibility class from the component's census
-    receipt (the fleet tables' class source; IN-AXIS / NEIGHBOR (the
-    tiled-elsewhere class) / FOREIGN / CONTIG-END)."""
+    receipt (the fleet tables' class source). The verdict is the class
+    (IN-AXIS-PARTITION / TILED-ELSEWHERE / PARTIAL-ELSEWHERE /
+    ABSENT) with the split/absent detail appended where the census
+    states one (the seam class NEIGHBOR-AXIS, the repeat-domain class
+    FOREIGN-REPEAT, the contig-end length polymorphism)."""
     path = f"{GRAPHS}/partition-graph-{component}-census.jsonl"
     classes = {}
     if not os.path.exists(path):
@@ -220,14 +223,24 @@ def census_classes(component):
             r = json.loads(line)
             if r.get("question") != "a":
                 continue
-            if r["verdict"] == "IN-AXIS-PARTITION":
-                cls = "in-axis"
-            elif r.get("absent_class") == "CONTIG-END-LENGTH-POLYMORPHISM":
-                cls = "contig-end"
-            elif r.get("split_class") == "NEIGHBOR-AXIS":
-                cls = "neighbor"
-            else:
-                cls = "foreign"
+            verdict = r["verdict"]
+            detail = None
+            if verdict == "TILED-ELSEWHERE" or verdict == "PARTIAL-ELSEWHERE":
+                split = r.get("split_class") or "NONE"
+                if split != "NONE":
+                    detail = {
+                        "NEIGHBOR-AXIS": "neighbor",
+                        "FOREIGN-REPEAT": "foreign-repeat",
+                    }.get(split, split.lower())
+            elif verdict == "ABSENT":
+                absent = r.get("absent_class") or "NONE"
+                if absent != "NONE":
+                    detail = {
+                        "CONTIG-END-LENGTH-POLYMORPHISM": "contig-end",
+                    }.get(absent, absent.lower())
+            cls = verdict.lower()
+            if detail:
+                cls = f"{cls}/{detail}"
             classes[r["locus"]] = cls
     return classes
 
@@ -430,14 +443,24 @@ def run_tables():
     out_lines = []
     say = lambda t="": (print(t, flush=True), out_lines.append(t))
     records = []
+    census_by_component = {}
     for component in COMPONENTS:
         path = f"{D}/realign-sequence-qv-{component}.jsonl"
         if not os.path.exists(path):
             say(f"WARNING: {component} per-locus QV receipt absent")
             continue
+        if component not in census_by_component:
+            census_by_component[component] = census_classes(component)
         with open(path) as f:
             for line in f:
-                records.append(json.loads(line))
+                r = json.loads(line)
+                # the class is re-derived from the census receipt here
+                # (the same source the per-component pass used), so the
+                # tables never trust a possibly-stale stored label
+                r["class"] = census_by_component[component].get(
+                    r["locus"], "pilot (no census receipt)"
+                )
+                records.append(r)
     say("== THE CALLED-VS-TRUTH SEQUENCE QV — THE AGGREGATE OF RECORD")
     say(f"   components: {len(COMPONENTS)} closed (chrIX EXCLUDED — its exhaustive")
     say("   run is still in flight); loci: every truth-pair-expressible locus")
