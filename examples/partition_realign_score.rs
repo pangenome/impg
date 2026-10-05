@@ -205,6 +205,31 @@
 //!    unset) every fold's image is its full extent and the rule
 //!    degenerates EXACTLY to the committed comparison — the identity
 //!    gate.
+//!
+//!    THE EDGE REFINEMENT (measured at the two boundary cases the
+//!    first fleet pass caught — chrV L24, the one regression, named
+//!    and diagnosed): the interval between the outermost shared
+//!    anchors EXCLUDES variant pockets at the territory's EDGE — a
+//!    true edge variant (no shared anchor on its outer side) cannot
+//!    be bounded by an anchor and fell to E, silencing the truth's
+//!    own edge material. THE DERIVED WITNESS that separates the two
+//!    edge populations (measured): the fold's edge-pocket steps are
+//!    checked against EVERY OTHER WINDOW's own axis-row node set
+//!    (the component's own walks, the panel's committed structure):
+//!    edge material CLAIMED by another window's axis row is that
+//!    window's territory (excluded — chrMT L2's winner row head:
+//!    131 of 158 steps shared with the NEIGHBOR window's axis walk,
+//!    the orphaned-mass harvest); edge material claimed by NO
+//!    window's walk is this locus's own edge variant, in-territory
+//!    BY ELIMINATION (included, bounded by the row's own extent —
+//!    chrV L24's SK1 ortholog head: 12 steps shared with no window's
+//!    walk, a true variant). The image therefore extends to the
+//!    fold's own row edge on each side whose pocket no other window
+//!    claims; a fold with no shared anchor at all is own-material
+//!    iff no other window claims any of its steps. The window's own
+//!    axis fold IS the territory by definition: its image is its
+//!    full extent. No tuning constants — the attribution is exact
+//!    set membership over the committed axis walks.
 
 #![recursion_limit = "512"]
 
@@ -2043,6 +2068,12 @@ fn main() -> io::Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(2);
     ensure(seam_width >= 1, "the seam width must be at least 1")?;
+    // (Stage 2, the extent normalization: under
+    // IMPG_REALIGN_TERRITORY_NORMALIZED the per-locus comparison
+    // domain is the territory image per fold — rule 8 of the model
+    // doc above. The default keeps the committed convention
+    // bit-for-bit.)
+    let territory_normalized = std::env::var("IMPG_REALIGN_TERRITORY_NORMALIZED").is_ok();
     let loci: Vec<u32> = options
         .loci
         .split(',')
@@ -2255,6 +2286,40 @@ fn main() -> io::Result<()> {
     for &locus in &loci {
         ensure((locus as usize) < n_windows, "locus outside the window span")?;
     }
+    // (Stage 2, rule 8's EDGE REFINEMENT: the per-window axis-node
+    // attribution, built ONCE per component from the panel's own
+    // stored walks over every window's axis row. A fold's image
+    // extends to its own row edge over edge material that NO OTHER
+    // window's axis row claims — the two measured boundary cases:
+    // chrMT L2's winner-row head is 131/158 steps shared with the
+    // NEIGHBOR window's walk (neighbor territory, excluded), chrV
+    // L24's SK1 ortholog head is 12/12 steps shared with no window's
+    // walk (a true edge variant, in-territory by elimination).
+    // rep = the first window whose axis row carries the node;
+    // count = how many windows' axis rows carry it. A node is
+    // attributable to ANOTHER window iff rep != this locus or the
+    // node is carried by more than one window.)
+    let axis_node_attribution: Option<(HashMap<u32, u32>, HashMap<u32, u32>)> =
+        if territory_normalized {
+            let path_idx = *path_of_name
+                .get(&options.component)
+                .ok_or_else(|| invalid("component path absent from the syng"))?;
+            let path_len = panel.name_map.path_to_length[path_idx];
+            let mut rep: HashMap<u32, u32> = HashMap::new();
+            let mut count: HashMap<u32, u32> = HashMap::new();
+            for (window, &(start, end)) in window_axis.iter().enumerate() {
+                let end = end.min(path_len);
+                ensure(start < end, "degenerate axis row")?;
+                for (node, _bp) in panel.walk_path_range(path_idx, start, end)? {
+                    let key = node.unsigned_abs();
+                    rep.entry(key).or_insert(window as u32);
+                    *count.entry(key).or_insert(0) += 1;
+                }
+            }
+            Some((rep, count))
+        } else {
+            None
+        };
     let inputs_seconds = inputs_started.elapsed().as_secs_f64();
     eprintln!(
         "[score] phase inputs: panel+routes+census+partition maps \
@@ -2901,12 +2966,6 @@ fn main() -> io::Result<()> {
     // pairing). The repair — the canonical-scheme skeleton — is the
     // default.
     let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
-    // (Stage 2, the extent normalization: under
-    // IMPG_REALIGN_TERRITORY_NORMALIZED the per-locus comparison
-    // domain is the territory image per fold — rule 8 of the model
-    // doc above. The default keeps the committed convention
-    // bit-for-bit.)
-    let territory_normalized = std::env::var("IMPG_REALIGN_TERRITORY_NORMALIZED").is_ok();
     let mut skeleton = match &options.skeleton_out {
         Some(path) => Some(BufWriter::new(File::create(path)?)),
         None => None,
@@ -3115,22 +3174,65 @@ fn main() -> io::Result<()> {
                 .map(|&(_, node)| node.unsigned_abs())
                 .collect();
             territory_axis_fold = Some(hits[0]);
+            // (The EDGE REFINEMENT's attribution witness: node ->
+            // (first window's axis row carrying it, how many windows'
+            // axis rows carry it) — a fold's edge pocket extends to
+            // its own row edge iff NO step in the pocket is claimed
+            // by ANOTHER window's axis row.)
+            let (rep, count) = axis_node_attribution
+                .as_ref()
+                .expect("attribution built under the normalized convention");
+            let attributable_elsewhere = |node: u32| -> bool {
+                match (rep.get(&node), count.get(&node)) {
+                    (Some(&first), Some(&windows)) => first != locus || windows > 1,
+                    _ => false,
+                }
+            };
             folds
                 .iter()
-                .map(|fold| {
+                .enumerate()
+                .map(|(fold_index, fold)| {
+                    // The window's own axis fold IS the territory by
+                    // definition: its image is its full extent.
+                    if fold_index == hits[0] {
+                        return (0u64, fold.len);
+                    }
                     let shared: Vec<u64> = fold
                         .walk
                         .iter()
                         .filter(|&&(_, node)| axis_nodes.contains(&node.unsigned_abs()))
                         .map(|&(bp, _)| bp)
                         .collect();
-                    match (shared.first(), shared.last()) {
+                    let (lo, hi) = match (shared.first(), shared.last()) {
                         (Some(&lo), Some(&hi)) => (lo, hi + k),
-                        // The empty image: the fold spells no territory
-                        // material of this locus (no shared anchor) —
-                        // every unit falls to E under it.
-                        _ => (0, 0),
-                    }
+                        // No shared anchor: the whole row is non-own
+                        // material — own BY ELIMINATION iff no other
+                        // window's axis row claims any of its steps
+                        // (the empty image otherwise).
+                        _ => {
+                            if fold
+                                .walk
+                                .iter()
+                                .all(|&(_, node)| !attributable_elsewhere(node.unsigned_abs()))
+                            {
+                                return (0u64, fold.len);
+                            }
+                            return (0u64, 0u64);
+                        }
+                    };
+                    // The head pocket (steps before the first shared
+                    // anchor): extend to the row edge iff no step is
+                    // another window's territory material.
+                    let head_claimed = fold.walk.iter().any(|&(bp, node)| {
+                        bp < lo && attributable_elsewhere(node.unsigned_abs())
+                    });
+                    let tail_claimed = fold.walk.iter().any(|&(bp, node)| {
+                        bp >= hi && attributable_elsewhere(node.unsigned_abs())
+                    });
+                    (
+                        if head_claimed { lo } else { 0 },
+                        if tail_claimed { hi } else { fold.len },
+                    )
                 })
                 .collect()
         } else {

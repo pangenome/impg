@@ -26,6 +26,13 @@ import sys
 D = "/home/erikg/yeast/genome-balanced-diploid-validation-20230930"
 D = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
 GRAPHS = f"{D}/partition-graphs"
+# (Stage 2: --receipt-prefix P points the table at an alternative
+# receipt family - the territory-normalized receipts.)
+import sys as _sys
+RECEIPT_PREFIX = "realign-exhaustive"
+if "--receipt-prefix" in _sys.argv:
+    RECEIPT_PREFIX = _sys.argv[_sys.argv.index("--receipt-prefix") + 1]
+
 COMPONENTS = [
     "chrMT", "chrI", "chrII", "chrIII", "chrIV", "chrV", "chrVI",
     "chrVII", "chrVIII", "chrIX", "chrX", "chrXI", "chrXII", "chrXIII",
@@ -108,7 +115,7 @@ def main():
     per_component = {}
     pending = []
     for c in COMPONENTS:
-        receipt = f"{D}/realign-exhaustive-{c}.jsonl"
+        receipt = f"{D}/{RECEIPT_PREFIX}-{c}.jsonl"
         if not os.path.exists(receipt):
             pending.append(c)
             say(f"{c:<10} PENDING (no exhaustive receipt)")

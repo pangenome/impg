@@ -243,6 +243,28 @@ elif MARGINAL:
     BEFORE_RECEIPT = f"{D}/realign-score-chrI.jsonl"
 
 
+def axis_attribution(axis_rows):
+    """(Stage 2, the edge refinement's witness) per node: the first
+    window's own axis row carrying it and how many windows' axis rows
+    carry it — re-derived from the partition GFAs' P lines (the same
+    stored walks the instrument attributes over from the panel).
+    axis_rows is the caller's (start, end, partition) window list —
+    the checker's own load_maps derivation, main()-local."""
+    if hasattr(axis_attribution, "_cache"):
+        return axis_attribution._cache
+    rep, count = {}, {}
+    for w, (start, end, partition) in enumerate(axis_rows):
+        g = gfa(partition)
+        _pos, steps = g.spelled_syncmers(f"{COMPONENT}:{start}-{end}")
+        for n in steps:
+            key = abs(n)
+            if key not in rep:
+                rep[key] = w
+            count[key] = count.get(key, 0) + 1
+    axis_attribution._cache = (rep, count)
+    return rep, count
+
+
 def logsumexp2(a, b):
     m = max(a, b)
     if m == -math.inf:
@@ -1223,10 +1245,44 @@ def main():
                 f"locus {locus}: the axis fold does not carry the window's own axis row",
             )
             axis_nodes = {abs(n) for _bp, n in folds[axis_fold]["walk"]}
+            rep, count = axis_attribution(axis_rows)
+
+            def attributable(node, _locus=locus):
+                first = rep.get(node)
+                if first is None:
+                    return False
+                return first != _locus or count[node] > 1
+
             derived = []
-            for fold in folds:
+            for fi, fold in enumerate(folds):
+                # the window's own axis fold IS the territory: full extent
+                if fi == axis_fold:
+                    derived.append((0, fold["length"]))
+                    continue
                 shared = [bp for bp, node in fold["walk"] if abs(node) in axis_nodes]
-                derived.append((shared[0], shared[-1] + K) if shared else None)
+                if not shared:
+                    # no shared anchor: own by elimination iff no other
+                    # window's axis row claims any of its steps
+                    if all(
+                        not attributable(abs(n)) for _bp, n in fold["walk"]
+                    ):
+                        derived.append((0, fold["length"]))
+                    else:
+                        derived.append(None)
+                    continue
+                lo, hi = shared[0], shared[-1] + K
+                head_claimed = any(
+                    bp < lo and attributable(abs(n)) for bp, n in fold["walk"]
+                )
+                tail_claimed = any(
+                    bp >= hi and attributable(abs(n)) for bp, n in fold["walk"]
+                )
+                derived.append(
+                    (
+                        lo if head_claimed else 0,
+                        hi if tail_claimed else fold["length"],
+                    )
+                )
             territory_images = derived
             check(
                 len(t["images"]) == len(folds),

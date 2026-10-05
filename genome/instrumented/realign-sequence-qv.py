@@ -76,6 +76,18 @@ ERROR_FLOOR = 1e-6     # the likegt floor under the cap
 # The 17 closed components (chrIX closed by the anchor-pathology
 # repair — the exponential-correspondence enumeration replaced by the
 # exact feasibility DP, the whole-genome fleet 17/17).
+# (Stage 2: --receipt-prefix P / --out-suffix S point the stage at an
+# alternative receipt family - the territory-normalized receipts
+# (realign-exhaustive-territory-<C>) re-scored under the same
+# convention, the per-locus and tables outputs suffixed to keep the
+# committed QV receipts of record untouched.)
+RECEIPT_PREFIX = "realign-exhaustive"
+OUT_SUFFIX = ""
+if "--receipt-prefix" in sys.argv:
+    RECEIPT_PREFIX = sys.argv[sys.argv.index("--receipt-prefix") + 1]
+if "--out-suffix" in sys.argv:
+    OUT_SUFFIX = sys.argv[sys.argv.index("--out-suffix") + 1]
+
 COMPONENTS = [
     "chrMT", "chrI", "chrIV", "chrII", "chrIII", "chrV", "chrVI",
     "chrVII", "chrVIII", "chrIX", "chrX", "chrXI", "chrXII",
@@ -376,11 +388,11 @@ def locus_qv(d, panel, aligner, gates):
 
 
 def run_component(component):
-    receipt_path = f"{D}/realign-exhaustive-{component}.jsonl"
+    receipt_path = f"{D}/{RECEIPT_PREFIX}-{component}.jsonl"
     if not os.path.exists(receipt_path):
         print(f"{component}: NO RECEIPT, skipped", flush=True)
         return False
-    out_path = f"{D}/realign-sequence-qv-{component}.jsonl"
+    out_path = f"{D}/realign-sequence-qv{OUT_SUFFIX}-{component}.jsonl"
     panel = Panel()
     aligner = BiWfa()
     gates = {"folds_verified": 0}
@@ -446,7 +458,7 @@ def run_tables():
     records = []
     census_by_component = {}
     for component in COMPONENTS:
-        path = f"{D}/realign-sequence-qv-{component}.jsonl"
+        path = f"{D}/realign-sequence-qv{OUT_SUFFIX}-{component}.jsonl"
         if not os.path.exists(path):
             say(f"WARNING: {component} per-locus QV receipt absent")
             continue
@@ -575,9 +587,9 @@ def run_tables():
     say("(the perfect-call convention: zero-edit loci carry QV 60 exactly;")
     say(" their per-pair CIGARs are full match columns, verified by the same")
     say(" biWFA walk — no fast path is taken)")
-    with open(f"{D}/realign-sequence-qv-tables.txt", "w") as f:
+    with open(f"{D}/realign-sequence-qv{OUT_SUFFIX}-tables.txt", "w") as f:
         f.write("\n".join(out_lines) + "\n")
-    print(f"wrote {D}/realign-sequence-qv-tables.txt", flush=True)
+    print(f"wrote {D}/realign-sequence-qv{OUT_SUFFIX}-tables.txt", flush=True)
 
 
 def main():
