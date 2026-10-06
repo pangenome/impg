@@ -731,6 +731,20 @@ def class_ll_table(matrix, counts):
     return class_lls
 
 
+def held_rank1_winner_assertion(d, fold_member_key):
+    """Phase 8N's winner-equality assertion for a before-rank-1
+    locus: the called winner's member key IS the truth pair's.
+    None - NOT APPLICABLE - when the truth pair is inexpressible under
+    the new domains (truth_folds None, the over-join separation
+    class, e.g. chrVII L56): there is no truth pair to compare, and
+    the locus is already named as a regression by the gate above."""
+    if d["truth_folds"] is None:
+        return None
+    return tuple(fold_member_key(d, i) for i in d["best_fold_indices"]) == tuple(
+        fold_member_key(d, i) for i in d["truth_folds"]
+    )
+
+
 def median_of(values):
     values = sorted(values)
     middle = len(values) // 2
@@ -2466,11 +2480,12 @@ def main():
             )
             for locus in rank1_c:
                 d = receipt[locus]
-                check(
-                    tuple(fold_member_key(d, i) for i in d["best_fold_indices"])
-                    == tuple(fold_member_key(d, i) for i in d["truth_folds"]),
-                    f"locus {locus}: a held rank-1 locus whose winner is not the truth pair",
-                )
+                winner_is_truth = held_rank1_winner_assertion(d, fold_member_key)
+                if winner_is_truth is not None:
+                    check(
+                        winner_is_truth,
+                        f"locus {locus}: a held rank-1 locus whose winner is not the truth pair",
+                    )
             print(
                 f"   AGGREGATE ({EXHAUSTIVE}): truth rank-1 "
                 f"{len(rank1_c)} -> {len(rank1_t)} under the normalized convention; "

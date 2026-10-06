@@ -83,6 +83,46 @@ class DegenerateZeroUnitLocusTest(unittest.TestCase):
         for got, want in zip(table, expected):
             self.assertAlmostEqual(got, want, places=9)
 
+    def test_held_rank1_assertion_not_applicable_at_inexpressible_truth(self):
+        # the same degenerate locus's second seam: a before-rank-1
+        # locus whose truth pair became INEXPRESSIBLE under the new
+        # domains (chrVII L56, the over-join separation class) - the
+        # 8N winner-equality assertion is NOT APPLICABLE (None), the
+        # regression is already named by the gate itself.
+        def fold_member_key(d, index):
+            return tuple(
+                sorted(
+                    (m["path_name"], m["start"], m["end"])
+                    for m in d["fold_identities"][index]["members"]
+                )
+            )
+
+        winner = [{"path_name": "SK1#0#chrVII", "start": 0, "end": 15}]
+        held = {
+            "truth_folds": None,
+            "best_fold_indices": [0],
+            "fold_identities": [{"members": winner}],
+        }
+        self.assertIsNone(
+            checker.held_rank1_winner_assertion(held, fold_member_key)
+        )
+        # no behavior change elsewhere: winner == truth passes,
+        # winner != truth fails
+        truth = [{"path_name": "SK1#0#chrVII", "start": 0, "end": 15}]
+        ok = {
+            "truth_folds": [0, 0],
+            "best_fold_indices": [0, 0],
+            "fold_identities": [{"members": winner}, {"members": truth}],
+        }
+        self.assertTrue(checker.held_rank1_winner_assertion(ok, fold_member_key))
+        rival = [{"path_name": "CENPK#0#chrVII", "start": 1, "end": 16}]
+        bad = {
+            "truth_folds": [1, 1],
+            "best_fold_indices": [0, 0],
+            "fold_identities": [{"members": winner}, {"members": rival}],
+        }
+        self.assertFalse(checker.held_rank1_winner_assertion(bad, fold_member_key))
+
 
 if __name__ == "__main__":
     unittest.main()
