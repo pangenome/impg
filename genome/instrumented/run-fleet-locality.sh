@@ -84,14 +84,17 @@ with open(f"{D}/realign-locality-serial-{C}.jsonl") as fs, \
         assert rs == re_, f"locus {rs['locus']} semantic diff"
         n += 1
 print(f"identity: {n} loci, 0 semantic diffs")
-for ext in ("", ".exactness.jsonl", ".skeleton.jsonl",
+# (the committed gate pattern: the FOUR SIDECARS are md5-identical;
+# the main receipt carries per-locus rss_kb/walls timing fields and
+# is proven by the semantic comparison above)
+for ext in (".exactness.jsonl", ".skeleton.jsonl",
             ".jsonl.ingredients.jsonl", ".jsonl.records.jsonl"):
-    a = hashlib.md5(open(f"{D}/realign-locality-serial-{C}.jsonl{ext}", "rb")
+    a = hashlib.md5(open(f"{D}/realign-locality-serial-{C}{ext}", "rb")
                     .read()).hexdigest()
-    b = hashlib.md5(open(f"{D}/realign-locality-exhaustive-{C}.jsonl{ext}", "rb")
+    b = hashlib.md5(open(f"{D}/realign-locality-exhaustive-{C}{ext}", "rb")
                     .read()).hexdigest()
     assert a == b, f"sidecar md5 differs: {ext}"
-    print(f"md5 {ext or '.jsonl'}: {a} identical")
+    print(f"md5 {ext}: {a} identical")
 EOF
   touch "$D/locality-identity-$C.done"
 fi

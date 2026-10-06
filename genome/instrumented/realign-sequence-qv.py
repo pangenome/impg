@@ -52,6 +52,19 @@ the ACTUAL diplotype.
 
 Receipt-side only: reads the committed receipts and partition GFAs,
 no instrument input, no thresholds, no product change.
+(Gate 3, the locality domain: --locality re-points the material gate
+(b) at the CONSTITUENT CONTAINMENT - a locality fold's interval is
+a derived hull, NOT a partition BED row, so the row's own export-GFA
+P line may not exist; the fold's material is witnessed through the
+path's OWN TILING ROWS that overlap the fold interval (the committed
+BED structure, the same constituent rows the checker's locality
+fold mirror merges): their union must COVER the fold interval, and
+every constituent row's export-GFA spelling must CONTAIN the row's
+own panel window (the committed containment gate, per constituent
+row). The panel fetch and the fold criterion (a) are unchanged; the
+checker's phase-2 constituent-merge walk audit remains the
+walk-level independent derivation. Additive; the committed default
+behavior is untouched.)
 Usage:
   realign-sequence-qv.py --component C   (per-component pass; writes
         realign-sequence-qv-C.jsonl beside the receipts)
@@ -87,6 +100,34 @@ if "--receipt-prefix" in sys.argv:
     RECEIPT_PREFIX = sys.argv[sys.argv.index("--receipt-prefix") + 1]
 if "--out-suffix" in sys.argv:
     OUT_SUFFIX = sys.argv[sys.argv.index("--out-suffix") + 1]
+LOCALITY = "--locality" in sys.argv
+BEDDIR = "/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results"
+
+
+def panel_tiling():
+    """path -> [(partition, start, end)] from the committed BEDs (the
+    panel's own row structure; the constituent rows of the locality
+    fold mirror)."""
+    if not hasattr(panel_tiling, "_t"):
+        _t = {}
+        for fn in os.listdir(BEDDIR):
+            if not fn.endswith(".bed"):
+                continue
+            try:
+                pid = int(fn.replace("partition", "").replace(".bed", ""))
+            except ValueError:
+                continue
+            with open(os.path.join(BEDDIR, fn)) as f:
+                for line in f:
+                    a = line.rstrip("\n").split("\t")
+                    if len(a) < 3:
+                        continue
+                    _t.setdefault(a[0], []).append(
+                        (pid, int(a[1]), int(a[2])))
+        for p in _t:
+            _t[p].sort()
+        panel_tiling._t = _t
+    return panel_tiling._t
 
 COMPONENTS = [
     "chrMT", "chrI", "chrIV", "chrII", "chrIII", "chrV", "chrVI",
@@ -177,6 +218,17 @@ def gfa(partition):
     return GFAS[partition]
 
 
+SPELLED = {}
+
+
+def spelled_row(pid, row_name):
+    """A constituent row's export-GFA spelling, cached."""
+    key = (pid, row_name)
+    if key not in SPELLED:
+        SPELLED[key] = gfa(pid).spelled(row_name)
+    return SPELLED[key]
+
+
 # ------------------------------------------------------ the biWFA helper
 class AlignFailure(Exception):
     pass
@@ -258,6 +310,41 @@ def census_classes(component):
     return classes
 
 
+def constituent_gate(panel, path_name, lo, hi, gates):
+    """THE LOCALITY MATERIAL GATE (b'): the fold interval is a derived
+    hull, not a BED row - its material is witnessed through the
+    path's own tiling rows overlapping [lo, hi): their union must
+    COVER the interval and every constituent row's export-GFA
+    spelling must CONTAIN the row's own panel window (the committed
+    containment gate per constituent row)."""
+    rows = [(ts, te, pid) for (pid, ts, te)
+            in panel_tiling().get(path_name, [])
+            if ts < hi and te > lo]
+    if not rows:
+        raise AlignFailure(
+            f"{path_name} fold [{lo},{hi}): no constituent tiling rows")
+    merged = []
+    for ts, te, _ in sorted(rows):
+        if merged and ts <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], te)
+        else:
+            merged.append([ts, te])
+    if merged[0][0] > lo or merged[-1][1] < hi or any(
+            merged[i + 1][0] > merged[i][1] for i in range(len(merged) - 1)):
+        raise AlignFailure(
+            f"{path_name} fold [{lo},{hi}): constituent rows do not "
+            f"cover the interval (merged {merged})")
+    for ts, te, pid in rows:
+        seq_row = panel.window(path_name, ts, te)
+        spelled = spelled_row(pid, f"{path_name}:{ts}-{te}")
+        offset = spelled.find(seq_row)
+        if offset < 0 or spelled[offset:offset + len(seq_row)] != seq_row:
+            raise AlignFailure(
+                f"{path_name} fold [{lo},{hi}): constituent row "
+                f"[{ts},{te}) panel window absent from its GFA spelling")
+        gates["constituent_rows_verified"] += 1
+
+
 def fold_strains(fold):
     return sorted({m["path_name"].split("#")[0] for m in fold["members"]})
 
@@ -278,7 +365,7 @@ def locus_qv(d, panel, aligner, gates):
             f"called={called} truth={truth}"
         )
     partition = d["partition"]
-    g = gfa(partition)
+    g = None if LOCALITY else gfa(partition)
     seqs = {}
     for fi in sorted(set(called + truth)):
         fold = d["fold_identities"][fi]
@@ -303,15 +390,24 @@ def locus_qv(d, panel, aligner, gates):
                 )
         # (b) the GFA containment: the panel window appears in the
         # member row's P-line spelling at a front-overhang offset.
-        spelled = g.spelled(f"{first['path_name']}:{first['start']}-{first['end']}")
-        offset = spelled.find(seq)
-        if offset < 0 or spelled[offset:offset + len(seq)] != seq:
-            raise AlignFailure(
-                f"locus {d['locus']} fold {fi}: panel window absent from "
-                "the GFA spelling of "
-                f"{first['path_name']}:{first['start']}-{first['end']}"
-            )
-        gates["folds_verified"] += 1
+        # (the locality mode: the CONSTITUENT CONTAINMENT - the fold
+        # interval is a derived hull witnessed through the path's own
+        # overlapping tiling rows.)
+        if LOCALITY:
+            constituent_gate(panel, first["path_name"],
+                             first["start"], first["end"], gates)
+            gates["folds_verified"] += 1
+        else:
+            spelled = g.spelled(
+                f"{first['path_name']}:{first['start']}-{first['end']}")
+            offset = spelled.find(seq)
+            if offset < 0 or spelled[offset:offset + len(seq)] != seq:
+                raise AlignFailure(
+                    f"locus {d['locus']} fold {fi}: panel window absent from "
+                    "the GFA spelling of "
+                    f"{first['path_name']}:{first['start']}-{first['end']}"
+                )
+            gates["folds_verified"] += 1
         seqs[fi] = seq
     # the 2x2 alignment matrix (deduplicated per locus)
     pair_cache = {}
@@ -395,7 +491,7 @@ def run_component(component):
     out_path = f"{D}/realign-sequence-qv{OUT_SUFFIX}-{component}.jsonl"
     panel = Panel()
     aligner = BiWfa()
-    gates = {"folds_verified": 0}
+    gates = {"folds_verified": 0, "constituent_rows_verified": 0}
     n_loci = n_expressible = 0
     classes = census_classes(component)
     with open(receipt_path) as fin, open(out_path, "w") as fout:
@@ -419,7 +515,10 @@ def run_component(component):
     print(
         f"{component}: {n_loci} loci, {n_expressible} truth-pair-expressible, "
         f"{gates['folds_verified']} folds dual-gated (panel fold criterion + "
-        f"GFA containment), {aligner.count} biWFA alignments; wrote {out_path}",
+        + (f"constituent containment, {gates['constituent_rows_verified']} "
+           "constituent rows GFA-verified)"
+           if LOCALITY else "GFA containment")
+        + f"), {aligner.count} biWFA alignments; wrote {out_path}",
         flush=True,
     )
     return True
