@@ -243,99 +243,95 @@ class LocalityBuilder:
             "truncated_paths": 0,
             "untestable_rows": 0,
         }
-        by_path = defaultdict(list)
-        for rn in universe:
+        # (Folds are PER ROW, one fold per universe row, each extended
+        # along its own tiling seam chain - NOT merged per path: the
+        # committed domain folds identical copies (same sequence, same
+        # relative walk) into ONE candidate, and a per-path hull of a
+        # path's several rows both breaks that coalescing (an identical
+        # twin row merged with a longer row of the same path becomes a
+        # separate rival carrying the longer material - the chrMT-L2
+        # regression class) and makes the truth's own first-homolog
+        # support a rival. The fold interval = the exact extent hull
+        # of the correspondence pairs (segment pairs carry their
+        # segment length, node pairs the window extent K+W), so
+        # identical rows yield identical intervals and coalesce.)
+        for rn in sorted(universe):
             path_name, se = rn.rsplit(":", 1)
-            by_path[path_name].append(rn)
-        for path_name in sorted(by_path):
+            rs, re = (int(x) for x in se.split("-"))
             if path_name == axis_path:
-                continue
-            rows = by_path[path_name]
-            row_bounds = []
-            for rn in rows:
-                _, se = rn.rsplit(":", 1)
-                ts, te = (int(x) for x in se.split("-"))
-                row_bounds.append((ts, te))
-            comp_lo = min(b[0] for b in row_bounds)
-            comp_hi = max(b[1] for b in row_bounds)
-            # (i) the within-partition pggb shared segments, pruned
-            # to the COLINEAR ALIGNMENT CORE (the maximal monotone
-            # chain; repeat-coincidence segments drop out)
+                continue  # the axis fold is the axis row verbatim
+            rpos = pg.positions(rn)
+            # (i) the row's own pggb shared segments (the colinear
+            # LIS core; repeat-coincidence segments drop out)
             raw = []
-            for rn in rows:
-                rpos = pg.positions(rn)
-                for seg, pp in rpos.items():
-                    if seg in axis_segset:
-                        raw.append((comp_start(rn) + pp, s + axis_pos[seg]))
-            pairs = lis_core(raw)
-            # (ii) the cross-partition seam chain - RESTRICTED to the
-            # component's own axis partitions (the window spine: the
-            # panel's alignment placed the window territories there,
-            # and the seam being repaired is the window boundary of
-            # the axis path's own tiling; material in holder/foreign
-            # partitions is another locality's placement, chased by
-            # no projection - the sparse-repeat-chain runaway this
-            # restriction kills was measured at chrI W16 where an
-            # ASB#2#chrIV fold reached 350kb through one-node rows)
+            for seg, pp in rpos.items():
+                if seg in axis_segset:
+                    raw.append((rs + pp, s + axis_pos[seg],
+                                pg.segs[seg]))
+            core = lis_core([(p, a) for p, a, _ in raw])
+            extent = {p: x for p, a, x in raw}
+            pairs = [(p, a, extent[p]) for p, a in core]
+            # (ii) the row's own cross-partition seam chain
             tiling = [(pid, ts, te) for (pid, ts, te)
                       in self.tiling.get(path_name, [])
-                      if pid != part and pid in axis_partitions]
+                      if pid != part and pid in axis_partitions
+                      and ts < re and te > rs]
             admitted = set()
-            untest = 0
             changed = True
             while changed and pairs:
                 changed = False
-                lo_p = min(p for p, a in pairs)
-                hi_p = max(p for p, a in pairs)
-                lo_a = min(a for p, a in pairs)
-                hi_a = max(a for p, a in pairs)
+                lo_p = min(p for p, a, x in pairs)
+                hi_p = max(p + x for p, a, x in pairs)
+                lo_a = min(a for p, a, x in pairs)
+                hi_a = max(a for p, a, x in pairs)
                 for (pid, ts, te) in tiling:
                     key = (pid, ts, te)
                     if key in admitted:
                         continue
                     if not (ts <= hi_p and te >= lo_p):
-                        continue  # not tiling-chain-adjacent to the hull
+                        continue
                     if pid not in self.pggb_built:
-                        continue  # untestable (counted below)
+                        continue
                     nodes = self.walks(pid).get(
                         row_name(path_name, ts, te))
                     if not nodes:
                         continue
-                    shared = [(bp, axis_node_bp[n])
-                              for n, bp in nodes.items() if n in axis_node_bp]
+                    shared = [(bp, axis_node_bp[n], K + W)
+                              for n, bp in nodes.items()
+                              if n in axis_node_bp]
                     if not shared:
                         continue
-                    extends = any(
-                        (ab < lo_a and pb < lo_p) or (ab > hi_a and pb > hi_p)
-                        for pb, ab in shared)
-                    if not extends:
+                    grows = any(
+                        (ab < lo_a and pb < lo_p)
+                        or (ab > hi_a and pb > hi_p)
+                        for pb, ab, _ in shared)
+                    if not grows:
                         continue
                     admitted.add(key)
                     pairs.extend(
-                        (pb, ab) for pb, ab in shared
+                        (pb, ab, K + W) for pb, ab, _ in shared
                         if (ab < lo_a and pb < lo_p)
                         or (ab > hi_a and pb > hi_p))
                     changed = True
             if pairs:
-                lo = min(p for p, a in pairs)
-                hi = max(p for p, a in pairs) + K + W
-                for (pid, ts, te) in tiling:
-                    if (pid not in self.pggb_built
-                            and ts <= hi and te >= lo
-                            and key_not_admitted(admitted, pid, ts, te)):
-                        untest += 1
-                structure["untestable_rows"] += untest
-                if lo < comp_lo or hi > comp_hi:
+                lo = min(p for p, a, x in pairs)
+                hi = max(p + x for p, a, x in pairs)
+                structure["untestable_rows"] += sum(
+                    1 for (pid, ts, te) in tiling
+                    if pid not in self.pggb_built
+                    and ts <= hi and te >= lo
+                    and (pid, ts, te) not in admitted)
+                if lo < rs or hi > re:
                     structure["extended_paths"] += 1
-                if lo > comp_lo or hi < comp_hi:
+                if lo > rs or hi < re:
                     structure["truncated_paths"] += 1
                 members.append({"path_name": path_name,
                                 "start": int(lo), "end": int(hi)})
             else:
-                # no correspondence: the committed fold
-                for ts, te in row_bounds:
-                    members.append({"path_name": path_name,
-                                    "start": ts, "end": te})
+                # no correspondence: the committed fold (the full row,
+                # the standing image rule decides)
+                members.append({"path_name": path_name,
+                                "start": rs, "end": re})
         structure["members"] = len(members)
         return members, structure
 

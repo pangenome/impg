@@ -230,6 +230,33 @@
 //!    axis fold IS the territory by definition: its image is its
 //!    full extent. No tuning constants — the attribution is exact
 //!    set membership over the committed axis walks.
+//!
+//! 9. THE ALIGNMENT-INDUCED LOCALITY DOMAIN (the owner's go; env
+//!    IMPG_REALIGN_LOCALITY_DOMAIN, beside the committed
+//!    conventions; implies rule 8). THE DOMAIN CHANGE: the maps'
+//!    member lists are the LOCALITY FOLDS (built receipt-side by
+//!    locality-domain-maps.py): the universe = the connected
+//!    component of the window's axis partition pggb graph that
+//!    contains the axis row (partition membership over-joins
+//!    disconnected material — those rows leave the locus's
+//!    universe); the fold material on each universe path = the
+//!    path-interval hull of the MAXIMAL MONOTONE AXIS-
+//!    CORRESPONDENCE — order-preserving (path position, axis
+//!    position) pairs pooled from the pggb shared segments (the
+//!    within-partition real alignment, colinear LIS core) and the
+//!    interned syng nodes shared with the axis row's walk, chained
+//!    along the path's own tiling across partition boundaries only
+//!    within the component's own axis partitions and admitted only
+//!    at the correspondence's monotone ends (the seam rejoin: the
+//!    partition boundary severed one continuous material and the
+//!    shared-node coverage names exactly the severed piece). The
+//!    records re-derive per locality: an occurrence votes iff its
+//!    interval overlaps a locality fold row on the occurrence's own
+//!    path (the census's own territory-touch convention on the new
+//!    extents). The territory images become exact under this fold
+//!    construction (the fold IS the correspondence core), so the
+//!    locality mode implies the territory rule; all other machinery
+//!    is unchanged.
 
 #![recursion_limit = "512"]
 
@@ -2243,6 +2270,23 @@ fn main() -> io::Result<()> {
     // doc above. The default keeps the committed convention
     // bit-for-bit.)
     let territory_normalized = std::env::var("IMPG_REALIGN_TERRITORY_NORMALIZED").is_ok();
+    // (The alignment-induced locality domain, the owner's go: under
+    // IMPG_REALIGN_LOCALITY_DOMAIN the maps' member lists ARE the
+    // locality folds (the connected component of the axis partition's
+    // pggb graph containing the axis row; the fold material = the
+    // path-interval hull of the maximal monotone axis-correspondence,
+    // built receipt-side by locality-domain-maps.py), and the locus's
+    // records re-derive per locality: an occurrence votes iff its
+    // interval overlaps a locality fold row on the occurrence's OWN
+    // path — the census's own territory-touch convention over the
+    // locality extents instead of the partition's extents. All the
+    // standing machinery (the territory-image comparison rule, the
+    // marginal realignment likelihood, the DP disciplines, the QUAL
+    // bounds) is unchanged; the locality domain's folds make the
+    // territory images exact (the fold IS the correspondence core),
+    // so the locality mode implies the territory rule.)
+    let locality_domain = std::env::var("IMPG_REALIGN_LOCALITY_DOMAIN").is_ok();
+    let territory_normalized = territory_normalized || locality_domain;
     let loci: Vec<u32> = options
         .loci
         .split(',')
@@ -2785,7 +2829,20 @@ fn main() -> io::Result<()> {
     let mut pilot_records: BTreeSet<usize> = BTreeSet::new();
     for (record, line) in census_records.iter().enumerate() {
         for occ in &line.occurrences {
-            if occ.partitions.iter().any(|w| loci.contains(w)) {
+            // (Locality mode: a record can vote at a pilot locus only
+            // by overlapping a locality fold row, and every fold row
+            // lies inside a window partition's own territory rows —
+            // so the census's own window touch remains a valid
+            // SUPERSET pre-filter over the full window set; the
+            // exhaustive gate runs bind every touching record exactly
+            // as the committed exhaustive runs do. The per-locus
+            // selection below applies the exact locality overlap.)
+            let touches = if locality_domain {
+                !occ.partitions.is_empty()
+            } else {
+                occ.partitions.iter().any(|w| loci.contains(w))
+            };
+            if touches {
                 pilot_records.insert(record);
                 break;
             }
@@ -3476,12 +3533,48 @@ fn main() -> io::Result<()> {
 
         // ---------------------------------- the locus's records and units
         let units_started = Instant::now();
+        // (Locality mode: the territory-touch convention on the NEW
+        // locality extents — an occurrence votes at the locus iff its
+        // interval overlaps a locality fold row on the occurrence's
+        // OWN path, the census's own coordinate-overlap rule over the
+        // locality's rows. The committed partition mode keeps the
+        // census's window ids verbatim.)
+        let locality_touch = |position: usize, occ: &CensusOccurrence,
+                               span: u64,
+                               shifts: &Vec<i64>| -> bool {
+            if !locality_domain {
+                return occ.partitions.contains(&locus);
+            }
+            let origin =
+                ((occ.start as i64 + shifts[position]).max(0)) as u64;
+            store
+                .rows_of_partition_path(locus, occ.path)
+                .iter()
+                .any(|&row_index| {
+                    let row = &store.folds[row_index];
+                    row.start < origin + span && origin < row.end
+                })
+        };
         let mut locus_records: Vec<usize> = Vec::new();
         for &record in &pilot_records {
-            if census_records[record]
+            let line = &census_records[record];
+            let span = walk_span(
+                &key_shape(
+                    census_key[record].unwrap(),
+                    &key_tokens,
+                    &key_reads,
+                    &read_records,
+                    k,
+                )?
+                .canonical,
+                k,
+            );
+            let shifts = &record_shifts[record];
+            if line
                 .occurrences
                 .iter()
-                .any(|occ| occ.partitions.contains(&locus))
+                .enumerate()
+                .any(|(position, occ)| locality_touch(position, occ, span, shifts))
             {
                 locus_records.push(record);
             }
@@ -3525,7 +3618,7 @@ fn main() -> io::Result<()> {
                 extension: 0,
             };
             for (position, occ) in line.occurrences.iter().enumerate() {
-                if !occ.partitions.contains(&locus) {
+                if !locality_touch(position, occ, span, shifts) {
                     continue;
                 }
                 data.orientations.insert(occ.orientation);
@@ -3543,24 +3636,39 @@ fn main() -> io::Result<()> {
                     }
                 }
                 // The locality classification (slice A's own-row rule):
-                // containment in a member row of any touched window's
-                // axis partition, on the occurrence's own path.
+                // containment in a member row of the locus's domain
+                // rows, on the occurrence's own path. (Locality mode:
+                // the domain rows are the locality folds; the committed
+                // partition mode keeps every touched window's axis
+                // partition rows.)
                 let origin = (occ.start as i64 + shifts[position]).max(0) as u64;
                 let mut contained = false;
                 let mut overlapped = false;
-                for &w in &occ.partitions {
-                    if (w as usize) >= n_windows {
-                        continue;
-                    }
-                    for &row_index in
-                        store.rows_of_partition_path(window_partition[w as usize], occ.path)
-                    {
+                if locality_domain {
+                    for &row_index in store.rows_of_partition_path(locus, occ.path) {
                         let row = &store.folds[row_index];
                         if row.start <= origin && origin + span <= row.end {
                             contained = true;
                         }
                         if row.start < origin + span && origin < row.end {
                             overlapped = true;
+                        }
+                    }
+                } else {
+                    for &w in &occ.partitions {
+                        if (w as usize) >= n_windows {
+                            continue;
+                        }
+                        for &row_index in
+                            store.rows_of_partition_path(window_partition[w as usize], occ.path)
+                        {
+                            let row = &store.folds[row_index];
+                            if row.start <= origin && origin + span <= row.end {
+                                contained = true;
+                            }
+                            if row.start < origin + span && origin < row.end {
+                                overlapped = true;
+                            }
                         }
                     }
                 }
@@ -4798,6 +4906,8 @@ fn main() -> io::Result<()> {
             "partition": partition,
             "model": if stored_frame {
                 "anchor-realign-v2-marginal"
+            } else if locality_domain {
+                "anchor-realign-v2-marginal-frame-territory-locality"
             } else if territory_normalized {
                 "anchor-realign-v2-marginal-frame-territory"
             } else {
