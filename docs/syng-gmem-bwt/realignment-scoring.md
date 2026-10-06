@@ -2387,3 +2387,78 @@ evidence, and 181 seam/repeat-interior where the winners place
 genuinely-better-matched repeat-family reads on real ortholog
 material. The next lever, if any, lives in the evidence model — a
 decision for the owner, with the honest scoreboard now standing.
+
+## Gate 3 CLOSED — the checker sweep's 17/17 verdict and the arc's final state (2026-10-06, W10)
+
+**The sweep, closed end-to-end.** All 17 components' checker
+slices now stand on the fully-repaired machinery (the six checker
+repair classes landed and committed through the sweep:
+the phase-3 per-(locus, occurrence) mirror rule, the 8N
+expressibility-gain guard, the zero-regression guard's honest
+acceptance convention, the phase-8c locality attribution, the
+E-audit empty-matrix guard with the 0.0-convention class table,
+the held-rank-1 winner-equality not-applicable guard at the
+inexpressible regression, and the phase-8 expressibility-loss
+guard). **264,718,566 checks across the whole sweep**
+(fleet slices 259,435,511 + the chrMT/chrI gate logs 5,283,055),
+**8 failure lines, every one the zero-regression guard's own
+naming of the committed regression loci** (chrIII L20+L35,
+chrVII L56, chrXI L39, chrXV L15 — four components closed
+`gateregressed`, the guard's honest verdict, the checker itself
+untouched). The degenerate loci passed live on the committed
+guards: chrVII L56 ("E audit passed … 0 matrix entries at E; 1
+classes re-derived (max diff 0.00e+00); truth pair NOT
+expressible") and chrXII L86 (the identical empty-product
+convention), and chrVII L83 is honestly carried in the phase-8
+aggregate ("no longer expressible [83] (the exact rule's honest
+cost)") — the one locus genome-wide expressible under the Poisson
+instrument and lost under the locality domains.
+
+**chrVII, the last component — its honest three-slice closure:**
+s0 ALL PHASES PASS 7,852,721/0 (rank-1 30→30, CONVERT [],
+REGRESS []); s1 8,399,645/1 — the single failure the guard naming
+REGRESS [56] (rank-1 24→23, the degenerate contig-end locus's
+truth pair inexpressible, the over-join separation class);
+s2 ALL PHASES PASS 8,098,760/0 (rank-1 22→22, CONVERT [], REGRESS
+[]). Per-slice sum 30+23+22 = 75 = the aggregate table's chrVII
+row exactly; the 15/15 fleet markers stand
+(`fleet-locality-<C>.done` for every component).
+
+**The final aggregate of record, verified at 17/17** (arithmetic
+shown): truth rank-1 = 9+14+68+18+115+39+16+75+40+29+54+47+75+68+
+60+82+71 = **880**; expressible = 9+18+76+28+143+56+25+100+50+40+
+71+66+98+86+72+102+92 = **1,132**; **880/1,132 = 77.7%** (the
+committed territory convention: 876/1,133 = 77.3%; the committed
+default convention before the arc: 549/1,133 = 48.5%).
+CONVERT 9 / REGRESS 5 / moved 350 — the 193-locus addressable
+prediction refuted by measurement. The QV re-run: n=1,132,
+perfect 880 (= rank-1 exactly), median 60.00, p10 14.42, QV≥40
+78.18%. Gate 4: 71 rival-dominant of 252 non-rank-1. The locality
+chain's own walls: serial 3,086s + 4-wide 1,836s = 4,922s (17/17,
+the `.wall` markers of `run-realignlocality-{serial,4}-<C>`).
+
+**The arc's measured chain, start to final state.** The windowed
+reference frame excluded the SK1 truth pair at 805/1,307 windows
+and the product called one molecule everywhere (4/502 expressible
+truth pairs recovered; injective diploid distance 0.5128 on the
+6×/4× sample, 0.3001 on the balanced v2 sample). The realignment
+instrument — the per-locus marginal likelihood over the graph
+panel — recovered the expressible truth pairs and the committed
+default convention scored 549/1,133 = 48.5% rank-1. The extent
+normalization (the territory-image rule) converted the extent
+class: 876/1,133 = 77.3% (CONVERT 327 / REGRESS 0), QV median
+17.77→60.00. The alignment-induced locality domain — the owner's
+"try the thing you think is gonna work", the domain family that
+names its universe from real alignment — added +4 net: 880/1,132
+= 77.7%, CONVERT 9 / REGRESS 5, QV≥40 77.41%→78.18%. The residue
+at the final state: 252 non-rank-1 = 71 rival-dominant (the
+irreducible copy-structure residue, both-placed gap > 0, winner
+homozygous 0/71, dosage mechanism absent) + 181 seam/repeat-
+interior (the winners place genuinely-better-matched high-
+multiplicity repeat-family reads on real ortholog material; the
+geometry measured NOT to convert them). The geometry-lever
+program is measured to exhaustion; the next lever, if any, lives
+in the evidence model — a decision for the owner.
+
+Assessment-side only; no thresholds; the scoreboard machinery
+unmodified; no product selection swap; no 502.
