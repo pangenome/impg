@@ -14,7 +14,15 @@ dominated, then rival-dominant S1+not-S2, then the shared-evidence
 rival, then the boundary shapes); aggregate the conversions by cause
 with the autopsy's 307-loci extent-class expectation beside them.
 
-Usage: territory-conversion-count.py [--out FILE]
+(Gate 3, the locality domain: --before-prefix P --after-prefix Q
+--tables-out F point the SAME machinery at an arbitrary receipt pair -
+the locality fleet's before is the committed normalized-rule receipts
+of record (realign-exhaustive-territory) and its after is the locality
+receipts (realign-locality-exhaustive). Additive; the default
+territory-vs-committed behavior is untouched.)
+
+Usage: territory-conversion-count.py [--out FILE] [--before-prefix P]
+       [--after-prefix Q] [--tables-out F]
 """
 import json
 import os
@@ -55,6 +63,20 @@ def main():
     out = None
     if "--out" in sys.argv:
         out = sys.argv[sys.argv.index("--out") + 1]
+    before_prefix = (
+        sys.argv[sys.argv.index("--before-prefix") + 1]
+        if "--before-prefix" in sys.argv else "realign-exhaustive"
+    )
+    after_prefix = (
+        sys.argv[sys.argv.index("--after-prefix") + 1]
+        if "--after-prefix" in sys.argv
+        else "realign-exhaustive-territory"
+    )
+    tables_out = (
+        sys.argv[sys.argv.index("--tables-out") + 1]
+        if "--tables-out" in sys.argv
+        else f"{D}/territory-conversion-tables.txt"
+    )
     lines = []
     rows = []
 
@@ -62,7 +84,8 @@ def main():
         print(text, flush=True)
         lines.append(text)
 
-    say("== THE EXTENT-NORMALIZATION CONVERSION TABLE (the territory convention vs the committed convention)")
+    say("== THE EXTENT-NORMALIZATION CONVERSION TABLE "
+        f"(the {after_prefix} convention vs the {before_prefix} convention)")
     say("component  loci  expr  rank1-before  rank1-after  CONVERT  REGRESS  moved")
     total = {
         "loci": 0, "expr": 0, "rank1_b": 0, "rank1_a": 0,
@@ -73,8 +96,8 @@ def main():
     regressions = []
     pending = []
     for c in COMPONENTS:
-        committed_path = f"{D}/realign-exhaustive-{c}.jsonl"
-        territory_path = f"{D}/realign-exhaustive-territory-{c}.jsonl"
+        committed_path = f"{D}/{before_prefix}-{c}.jsonl"
+        territory_path = f"{D}/{after_prefix}-{c}.jsonl"
         if not os.path.exists(territory_path):
             pending.append(c)
             say(f"{c:<10} PENDING (no territory receipt)")
@@ -193,9 +216,9 @@ def main():
             for r in rows:
                 f.write(json.dumps(r) + "\n")
         say(f"per-locus rows -> {out}")
-    with open(f"{D}/territory-conversion-tables.txt", "w") as f:
+    with open(tables_out, "w") as f:
         f.write("\n".join(lines) + "\n")
-    say(f"tables -> {D}/territory-conversion-tables.txt")
+    say(f"tables -> {tables_out}")
 
 
 if __name__ == "__main__":

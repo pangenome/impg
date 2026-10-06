@@ -194,11 +194,19 @@ if LOCALITY:
         if "--maps-dir" in sys.argv
         else f"{D}/locality-graphs-{EXHAUSTIVE}"
     )
-    PROJ_DIR = (
-        sys.argv[sys.argv.index("--projection-dir") + 1]
-        if "--projection-dir" in sys.argv
-        else f"{D}/pggb-partition-graphs-chrMT-chrI/projection"
-    )
+    # (Gate 3, the fleet: the projection sidecars live in BOTH the
+    # committed chrMT/chrI gate projection dir and the fleet
+    # projection dir - --projection-dir may be given MULTIPLE times,
+    # each partition resolving to the first dir that carries its
+    # sidecar; the committed gate receipts always win. Additive; the
+    # single-dir default behavior is untouched.)
+    PROJ_DIRS = [
+        sys.argv[i + 1]
+        for i, a in enumerate(sys.argv)
+        if a == "--projection-dir"
+    ] or [f"{D}/pggb-partition-graphs-chrMT-chrI/projection"]
+    if LOCALITY:
+        PROJ_DIRS.append(f"{D}/pggb-partition-graphs-fleet/projection")
     BEDDIR = "/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results"
 else:
     MAPS_DIR = GRAPHS
@@ -933,13 +941,22 @@ def main():
 
         def locality_proj_walks(pid):
             if pid not in LOCALITY_PROJ:
-                table = {}
-                with open(f"{PROJ_DIR}/partition{pid}.pggb.projection.jsonl") as f:
-                    for line in f:
-                        r = json.loads(line)
-                        table[r["p"]] = [
-                            (int(bp), int(node)) for node, bp in r["w"]
-                        ]
+                table = None
+                for pd in PROJ_DIRS:
+                    try:
+                        with open(
+                            f"{pd}/partition{pid}.pggb.projection.jsonl"
+                        ) as f:
+                            table = {}
+                            for line in f:
+                                r = json.loads(line)
+                                table[r["p"]] = [
+                                    (int(bp), int(node))
+                                    for node, bp in r["w"]
+                                ]
+                        break
+                    except FileNotFoundError:
+                        continue
                 LOCALITY_PROJ[pid] = table
             return LOCALITY_PROJ[pid]
 
@@ -949,12 +966,12 @@ def main():
                 if ts >= hi + KW or te <= lo - KW:
                     continue
                 rn = f"{path_name}:{ts}-{te}"
-                try:
-                    for bp, node in locality_proj_walks(pid).get(rn, []):
-                        if bp not in merged:
-                            merged[bp] = node
-                except FileNotFoundError:
+                walks = locality_proj_walks(pid)
+                if walks is None:
                     continue
+                for bp, node in walks.get(rn, []):
+                    if bp not in merged:
+                        merged[bp] = node
             return sorted(
                 (bp - lo, node)
                 for bp, node in merged.items()

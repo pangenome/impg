@@ -55,20 +55,57 @@ Emit per window: locality-graphs-<C>/window<w>.gfa.map.json (the
 scorer's own PartitionMap schema, partition id = the window id) +
 the structure receipt (the gate-1 measurement). Receipt-side only;
 assessment-side. Usage:
-  locality-domain-maps.py chrI [--measure-only]
-"""
+  locality-domain-maps.py COMP [--measure-only] [--maps-dir DIR]
+
+THE FLEET PATH RESOLUTION (gate 3): the pggb builds live in BOTH
+the committed chrMT/chrI gate dir (the 56 gate partitions) and the
+fleet dir (the 1358-partition union todo), and the projection
+sidecars in the gate dir's committed projection/ and the fleet
+projection/ - each partition resolves to the FIRST dir that carries
+its artifact (the gate receipts of record are never re-derived).
+The axis-row window list defaults to the committed export maps at
+partition-graphs/ (member-identity-proven identical to the
+pggb-projected maps the gate used; both sources enumerate the same
+axis rows at chrMT/chrI, verified)."""
 import json
 import os
 import sys
 from collections import defaultdict
 
 D = "/home/erikg/yeast/genome-balanced-diploid-validation-20260930"
-PGGB = f"{D}/pggb-partition-graphs-chrMT-chrI"
-PROJ = f"{PGGB}/projection"
-MAPS = f"{D}/pggb-projected-graphs-chrMT-chrI"
+PGGB_DIRS = [
+    f"{D}/pggb-partition-graphs-chrMT-chrI",
+    f"{D}/pggb-partition-graphs-fleet",
+    f"{D}/pggb-partition-graphs-fleet2",
+]
+PROJ_DIRS = [
+    f"{D}/pggb-partition-graphs-chrMT-chrI/projection",
+    f"{D}/pggb-partition-graphs-fleet/projection",
+]
+MAPS = f"{D}/partition-graphs"
 BEDDIR = "/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results"
 K, W = 63, 8  # the syng's own syncmer window parameters
 TRUTH_SECOND = "SK1#0#"
+
+
+def pggb_gfa_path(partition):
+    """The partition's pggb build: the committed gate dir first (the
+    56 receipts of record), then the fleet lanes."""
+    for d in PGGB_DIRS:
+        p = f"{d}/partition{partition}/graph.gfa"
+        if os.path.exists(p):
+            return p
+    raise SystemExit(f"partition {partition} has no pggb build")
+
+
+def proj_sidecar_path(partition):
+    """The partition's projection sidecar: the committed gate
+    projection first, then the fleet projection."""
+    for d in PROJ_DIRS:
+        p = f"{d}/partition{partition}.pggb.projection.jsonl"
+        if os.path.exists(p):
+            return p
+    raise SystemExit(f"partition {partition} has no projection sidecar")
 
 
 class UnionFind:
@@ -176,9 +213,12 @@ class LocalityBuilder:
         self.pggb_cache = {}
         self.walk_cache = {}
         self.pggb_built = set()
-        for d in os.listdir(PGGB):
-            if d.startswith("partition") and os.path.isdir(f"{PGGB}/{d}"):
-                self.pggb_built.add(int(d.replace("partition", "")))
+        for d in PGGB_DIRS:
+            for sd in os.listdir(d):
+                if (sd.startswith("partition")
+                        and os.path.isdir(f"{d}/{sd}")
+                        and os.path.exists(f"{d}/{sd}/graph.gfa")):
+                    self.pggb_built.add(int(sd.replace("partition", "")))
         # the panel tiling per path: path -> [(partition, start, end)]
         self.tiling = defaultdict(list)
         for fn in os.listdir(BEDDIR):
@@ -200,7 +240,7 @@ class LocalityBuilder:
     def pggb(self, partition):
         if partition not in self.pggb_cache:
             self.pggb_cache[partition] = PggbGfa(
-                f"{PGGB}/partition{partition}/graph.gfa")
+                pggb_gfa_path(partition))
         return self.pggb_cache[partition]
 
     def walks(self, partition):
@@ -208,7 +248,7 @@ class LocalityBuilder:
         sidecar (the spell-equality-proven syng coordinates)."""
         if partition not in self.walk_cache:
             table = {}
-            with open(f"{PROJ}/partition{partition}.pggb.projection.jsonl") as f:
+            with open(proj_sidecar_path(partition)) as f:
                 for line in f:
                     r = json.loads(line)
                     rn = r["p"]
@@ -347,16 +387,18 @@ def key_not_admitted(admitted, pid, ts, te):
 def main():
     comp = sys.argv[1] if len(sys.argv) > 1 else "chrI"
     measure_only = "--measure-only" in sys.argv
+    maps_dir = (sys.argv[sys.argv.index("--maps-dir") + 1]
+                if "--maps-dir" in sys.argv else MAPS)
     axis_path = f"S288C#0#{comp}"
     outdir = f"{D}/locality-graphs-{comp}"
     if not measure_only:
         os.makedirs(outdir, exist_ok=True)
 
     axis_rows = []
-    for fn in sorted(os.listdir(MAPS)):
+    for fn in sorted(os.listdir(maps_dir)):
         if not fn.endswith(".gfa.map.json"):
             continue
-        m = json.load(open(os.path.join(MAPS, fn)))
+        m = json.load(open(os.path.join(maps_dir, fn)))
         for mem in m["members"]:
             if mem["path_name"] == axis_path:
                 axis_rows.append((mem["start"], mem["end"], m["partition"]))
