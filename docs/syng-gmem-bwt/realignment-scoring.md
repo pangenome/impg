@@ -2261,3 +2261,119 @@ are a fleet prediction — the tiled-elsewhere loci's wrong-material
 truth pairs become the real ortholog pairs through the seam chain),
 and the QV re-run. The honest verdict with the rival-dominant
 residue recomputed under the new domains follows the fleet.
+
+## Gate 3 — the fleet under the locality domains: the measured verdict
+
+**The substrate, closed.** Both converging build lanes completed the
+full 1358-partition union todo independently (each partition built
+once per lane; the fleet dir is the lane of record), and the
+committed projection tool proved the fleet substrate end-to-end:
+271,377/271,377 member rows spell exactly equal to their export GFA
+P lines (0 diffs), with the BED-completeness check per partition —
+together with the 56 gate partitions' committed proof, every
+partition the fleet touches is proven coordinate-continuous with
+the global syng interning.
+
+**The fleet chain, per component** (marker-idempotent drivers:
+maps → serial → 4-wide → identity → checker slices): the locality
+maps re-derive through the gate+fleet path resolution (per-partition:
+the committed chrMT/chrI gate receipts of record win, the fleet
+lanes fill the rest; the axis-row window list defaults to the
+committed export maps, member-identity-proven identical — the
+parameterized builder re-derives the committed gate maps
+byte-identically at both components); every component's serial and
+4-wide receipts land with 0 semantic diffs and all four sidecars
+md5-identical (the identity-gate pattern of record); the checkers
+run `--territory --locality` with phase 8N's BEFORE pointed at the
+committed normalized-rule receipts of record.
+
+**The aggregate (the honest scoreboard).** Truth rank-1 **880 of
+1,132 expressible = 77.7%** (the committed territory convention:
+876/1,133 = 77.3%). Expressibility moved both ways, every move
+named: gained 5 (chrX L50, chrXIV L9, chrXVI L8/L85/L93 — the seam
+chain made truth pairs spellable where the partition rule could
+not), lost 6 (chrV L59, chrVII L56+L83, chrXII L101, chrXV L49,
+chrXVI L7 — the truth-second rows left the axis component or the
+exact-correspondence rule dropped their material).
+
+**The conversion count vs the 193 prediction: REFUTED by
+measurement.** CONVERT **9** / REGRESS **5** / moved 350. The
+193-locus seam/repeat-interior "addressable" class converts only 9
+loci — all 9 unique wins (the winner IS the truth pair), by cause
+extent 4 / repeat-domain 4 / rival-dominant 1. The seam-class
+conversions the design predicted did not materialize: the residuals'
+winners are connected in-component repeat-copy rows placing
+genuinely-better-matched reads (the chrI-L13 mechanism, now measured
+genome-wide), and rejoining the severed ortholog material does not
+make the truth pair win — the likelihood's advantage lives in the
+evidence model, not the geometry.
+
+**The five regressions, autopsied from the receipts' own fold
+identities — two honest mechanism classes.**
+
+- *The edge-pocket/hull-sensitivity class* (4 loci): chrIII L20
+  (1→2, gap 0.27 nats — the SK1 truth fold truncated 20 bp at its
+  left edge by the exact-correspondence rule while a 1-bp-shorter
+  near-twin rival hull scores better), chrXI L39 (1→2, gap 0.23 —
+  the truth-second fold truncated 171 bp; a near-twin CENPK fold
+  paired with the truth's own second fold), chrXV L15 (1→2, gap
+  0.21 — a 1-bp-shorter CENPK hull paired with the truth's own
+  DBVPG/SK1 fold), and chrIII L35 (1→2, gap 162.5 — the seam chain
+  admitted a rival strain's REAL ortholog: BAQ_1a's chrIII row,
+  351 bp longer than SK1's own ortholog row, and the longer genuine
+  ortholog outplaces the truth's shorter one).
+- *The over-join separation class* (1 locus): chrVII L56, a
+  degenerate 15 bp contig-end axis window whose truth-second rows
+  are not alignment-connected to the axis row's component — the
+  truth pair becomes inexpressible. The honest cost of the exact
+  rule at a window where the panel's truth material has no
+  realignment connection.
+
+The checker's phase-8N zero-regression guard fires loudly at
+exactly these loci — the guard is the design's own "any regression =
+design failure, named" contract, and the fleet's verdict is carried
+honestly (the checker's regression check is untouched; the drivers
+record `check-locality-<C>.gateregressed` for the affected
+components).
+
+**The QV re-run under the locality domains**
+(`realign-sequence-qv-locality-tables.txt`; the material gate's
+locality mode = the constituent containment: a fold's interval is a
+derived hull, witnessed through the path's own tiling rows
+overlapping it — their union must cover the interval and every
+constituent row's export-GFA spelling must contain its panel
+window; every fold dual-gated, 0 gate failures): n=1,132, **perfect
+calls 880** (= the rank-1 count exactly — every rank-1 locus is a
+zero-edit call), median 60.00, p10 14.42 (was 13.79), QV≥40 at
+78.18% (was 77.41%). The lower mode is unchanged in kind: the 252
+non-rank-1 loci remain the repeat-domain constituency.
+
+**Gate 4 — the rival-dominant residue recomputed under the new
+domains** (`realign-rival-autopsy-tables-locality.txt`): the cohort
+is **71 of 252** non-rank-1 expressible (the territory convention:
+64 of 257; 50 carry the pre-normalization signature), mechanisms
+interior-substitution 60 / twin-indistinguishable 7 /
+substitution-better-match 4 / zygosity-dosage 0 (the hypothesized
+dosage mechanism absent again; winner homozygous 0/71). The residue
+decomposition: 1,132 expressible = 880 rank-1 + 71 rival-dominant
+(the irreducible copy-structure residue — no geometry lever applies
+by definition) + **181 seam/repeat-interior** (252 − 71, down from
+193 — and the fleet measured that the locality lever converts only
+9 of them).
+
+**The honest verdict for the arc.** The alignment-induced locality
+domain is measurement-complete: it is the first domain family that
+names its own universe from real alignment (the over-join
+separation measured, the seam chains rejoined, the spell-equality
+proof fleet-wide), and its honest yield is small and two-sided —
++4 net rank-1 with 9 conversions and 5 named regressions. The
+geometry-lever program is now measured to exhaustion: the
+territory normalization converted the extent class (225→327 over
+the arc), and the locality domain — the strongest geometry
+candidate, built on real alignment — converts 9 more while paying
+5 regressions. What remains (252 loci) is not addressable by
+geometry: 71 rival-dominant by the receipts' own both-placed
+evidence, and 181 seam/repeat-interior where the winners place
+genuinely-better-matched repeat-family reads on real ortholog
+material. The next lever, if any, lives in the evidence model — a
+decision for the owner, with the honest scoreboard now standing.
