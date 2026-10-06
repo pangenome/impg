@@ -516,7 +516,7 @@ def run_component(component):
         f"{component}: {n_loci} loci, {n_expressible} truth-pair-expressible, "
         f"{gates['folds_verified']} folds dual-gated (panel fold criterion + "
         + (f"constituent containment, {gates['constituent_rows_verified']} "
-           "constituent rows GFA-verified)"
+           "constituent rows GFA-verified"
            if LOCALITY else "GFA containment")
         + f"), {aligner.count} biWFA alignments; wrote {out_path}",
         flush=True,

@@ -77,9 +77,9 @@ def median(values):
     return statistics.median(values) if values else None
 
 
-def load_qv(component):
+def load_qv(component, qv_suffix="territory"):
     qv = {}
-    path = D / f"realign-sequence-qv-territory-{component}.jsonl"
+    path = D / f"realign-sequence-qv-{qv_suffix}-{component}.jsonl"
     if not path.exists():
         return qv
     with open(path) as f:
@@ -189,17 +189,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--components", default=None)
     ap.add_argument("--out-suffix", default="")
+    # (Gate 4, the locality domain: --receipt-prefix P --qv-suffix S
+    # point the SAME machinery at the locality receipts - the
+    # rival-dominant residue recomputed under the new domains.
+    # Additive; the territory default behavior is untouched.)
+    ap.add_argument("--receipt-prefix", default="realign-exhaustive-territory")
+    ap.add_argument("--qv-suffix", default="territory")
     args = ap.parse_args()
     components = args.components.split(",") if args.components else ALL_COMPONENTS
 
     records = []
     per_component = {}
     for component in components:
-        receipt_path = D / f"realign-exhaustive-territory-{component}.jsonl"
+        receipt_path = D / f"{args.receipt_prefix}-{component}.jsonl"
         if not receipt_path.exists():
-            say(f"== {component}: territory receipt MISSING, skipped")
+            say(f"== {component}: {args.receipt_prefix} receipt MISSING, skipped")
             continue
-        qv = load_qv(component)
+        qv = load_qv(component, args.qv_suffix)
         prior = load_prior(component)
         kept = 0
         nonrank1 = 0
