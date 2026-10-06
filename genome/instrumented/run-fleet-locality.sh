@@ -153,7 +153,7 @@ for l in open(sys.argv[1]):
 sys.exit(0 if ok and saw else 1)
 PYEOF
     then
-      echo "$C slice $SL: phases pass except the 8N zero-regression guard at loci $regs (the honest gate verdict)"
+      echo "$C slice $SL: phases pass except the 8N zero-regression guard (the honest gate verdict: $(grep -oE 'rank-1 regressions under the normalized convention: \[[^]]*\]' "$D/check-locality-$C-${LOGS[$i]}.log" | head -1))"
       GATEREGRESSED=1
     else
       echo "$C locality checker slice $SL FAILED"; exit 1
