@@ -74,6 +74,7 @@ import glob
 import gzip
 import json
 import math
+import numpy as np
 import os
 import sys
 
@@ -697,6 +698,37 @@ def mix_logsumexp(a, b):
         return float("-inf")
     m = max(a, b)
     return m + math.log(0.5 * math.exp(a - m) + 0.5 * math.exp(b - m))
+
+
+def e_bounding_property_holds(matrix, e):
+    """Phase 5's E-audit bounding property: every unit's likelihood
+    under every fold is at least E (the elsewhere branch bounds every
+    floor), and no-pin entries sit at exactly E. VACUOUS on an empty
+    matrix - the locality domain's degenerate zero-unit locus
+    (chrVII L56, the 15bp contig-end window whose universe holds
+    only the axis fold): the scorer's convention there is the empty
+    product (one class, every class LL exactly 0.0, the winner the
+    single class), verified exactly by the phase-5 class
+    re-derivation below - there is no matrix entry to bound."""
+    return matrix.size == 0 or float(matrix.min()) >= e - 1e-6
+
+
+def class_ll_table(matrix, counts):
+    """Phase 5's class-table re-derivation: class LL = sum over the
+    locus's units of count * mix_logsumexp(fold a, fold b), over all
+    unordered fold pairs i <= j. At a zero-unit locus the sum is the
+    EMPTY PRODUCT: exactly 0.0 for every class, so every class ties
+    and the winner is the single class by flat order (the scorer's
+    called[0] convention; the checker's argmax agrees)."""
+    n_folds = len(matrix)
+    class_lls = np.empty(n_folds * (n_folds + 1) // 2)
+    idx = 0
+    for j in range(n_folds):
+        for i in range(j + 1):
+            mixed = np.logaddexp(matrix[i], matrix[j]) - math.log(2.0)
+            class_lls[idx] = float(np.dot(counts, mixed))
+            idx += 1
+    return class_lls
 
 
 def median_of(values):
@@ -1421,7 +1453,6 @@ def main():
 
     # ---------------- phase 5: the scoring + class re-derivation
     print("== phase 5: the per-unit LLs and the class table re-derived", flush=True)
-    import numpy as np
 
     for locus in LOCI:
         d = receipt[locus]
@@ -1555,17 +1586,8 @@ def main():
             # THE BOUNDING PROPERTY: every unit's likelihood under every
             # fold is at least E (the elsewhere branch bounds every
             # floor), and no-pin entries sit at exactly E.
-            # (The size guard: the locality domain's degenerate
-            # zero-unit locus - chrVII L56, the 15bp contig-end window
-            # whose universe holds only the axis fold - carries an
-            # EMPTY matrix; the scorer's convention there is the empty
-            # product: one class, every class LL exactly 0.0, the
-            # winner the single class. The bounding property is
-            # vacuous on an empty matrix; the phase-5 class
-            # re-derivation below verifies the 0.0 convention
-            # exactly.)
             check(
-                matrix.size == 0 or float(matrix.min()) >= E - 1e-6,
+                e_bounding_property_holds(matrix, E),
                 f"locus {locus}: matrix entry below E",
             )
             at_e = int((np.abs(matrix - E) < 1e-9).sum())
@@ -1681,14 +1703,7 @@ def main():
             )
         # the class table
         counts = np.array([u["count"] for u in units], dtype=float)
-        n_folds = len(folds)
-        class_lls = np.empty(n_folds * (n_folds + 1) // 2)
-        idx = 0
-        for j in range(n_folds):
-            for i in range(j + 1):
-                mixed = np.logaddexp(matrix[i], matrix[j]) - math.log(2.0)
-                class_lls[idx] = float(np.dot(counts, mixed))
-                idx += 1
+        class_lls = class_ll_table(matrix, counts)
         receipt_lls = d["class_log_likelihoods"]
         check(
             len(receipt_lls) == len(class_lls),
