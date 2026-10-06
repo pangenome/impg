@@ -2200,7 +2200,16 @@ def main():
                         for m in f["members"]
                     )
                 )
-                expect = (not multi) and (sk1_folds == 1)
+                # (the locality mode: the fold structure IS the
+                # attribution - the seam chain ties the SK1 fold to
+                # THIS window's fold set, so the territory mode's
+                # multi-window-partition proxy does not apply; the
+                # ambiguity guard (exactly one SK1 fold) stands)
+                expect = (
+                    (sk1_folds == 1)
+                    if LOCALITY
+                    else ((not multi) and (sk1_folds == 1))
+                )
                 check(
                     d["truth_pair_expressible"] == expect,
                     f"locus {locus}: expressibility differs from the map-derived "
