@@ -1194,13 +1194,24 @@ def main():
                 # the territory-touch convention on the locality
                 # extents: the occurrence votes at the locus iff its
                 # interval overlaps a locality fold row on its own
-                # path; the classification is against the same rows
+                # path; the classification is against the same rows.
+                # (The classification is PER (locus, occurrence) - the
+                # scorer's own rule: contained/overlapped reset per
+                # locus, an occurrence touching several windows is
+                # classified independently at each. The per-occurrence
+                # accumulation across loci was a false-failure-only
+                # mirror bug, first fired at chrXIII L22/L26 where a
+                # shared occurrence is contained at one window and
+                # overhang at another - chrMT/chrI never mixed classes
+                # across windows, so the gate passed under the bug.)
                 touched_loci = []
                 for locus in LOCI:
+                    contained = False
+                    overlapped = False
+                    hit = False
                     lst = rows_by_pp.get((locus, names[occ["path"]]))
                     if not lst:
                         continue
-                    hit = False
                     for s, e in lst:
                         if s < origin + span and origin < e:
                             hit = True
@@ -1208,7 +1219,8 @@ def main():
                         if s <= origin and origin + span <= e:
                             contained = True
                     if hit:
-                        touched_loci.append(locus)
+                        touched_loci.append(
+                            (locus, 0 if contained else (1 if overlapped else 2)))
             else:
                 for w in occ["partitions"]:
                     lst = rows_by_pp.get((axis[w], names[occ["path"]]))
@@ -1219,11 +1231,15 @@ def main():
                             contained = True
                         if s < origin + span and origin < e:
                             overlapped = True
-            cls = 0 if contained else (1 if overlapped else 2)
             if LOCALITY:
-                for locus in touched_loci:
+                # (the classification is per (locus, occurrence):
+                # touched_loci carries (locus, class) pairs so an
+                # occurrence touching several windows is classified
+                # independently at each, exactly the scorer's rule)
+                for locus, cls in touched_loci:
                     touching_classes.setdefault(locus, []).append(cls)
             else:
+                cls = 0 if contained else (1 if overlapped else 2)
                 for locus in set(occ["partitions"]):
                     if locus in receipt:
                         touching_classes.setdefault(locus, []).append(cls)
@@ -2360,6 +2376,7 @@ def main():
             conversions = []
             regressions = []
             moved = []
+            gained = []
             rank1_c = [
                 locus
                 for locus in LOCI
@@ -2369,6 +2386,13 @@ def main():
             for locus in LOCI:
                 c, d = committed[locus], receipt[locus]
                 if not c["truth_pair_expressible"]:
+                    if LOCALITY and d["truth_pair_expressible"]:
+                        # (the locality seam chain can make a truth pair
+                        # spellable where the committed convention could
+                        # not - the design's stated expressibility
+                        # change, honestly reported, never failed)
+                        gained.append(locus)
+                        continue
                     check(
                         not d["truth_pair_expressible"],
                         f"locus {locus}: inexpressible under the committed convention "
@@ -2418,7 +2442,9 @@ def main():
                 f"   AGGREGATE ({EXHAUSTIVE}): truth rank-1 "
                 f"{len(rank1_c)} -> {len(rank1_t)} under the normalized convention; "
                 f"CONVERT {conversions}; REGRESS {regressions}; "
-                f"residual moved {moved}",
+                f"residual moved {moved}"
+                + (f"; newly expressible {gained} (the seam chain)"
+                   if LOCALITY and gained else ""),
                 flush=True,
             )
     else:
