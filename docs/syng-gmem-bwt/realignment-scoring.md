@@ -2164,3 +2164,100 @@ this 64-locus irreducible core plus the 193 loci where a geometry
 lever still applies (the seam and repeat-domain interiors). No fix
 is recommended for this cohort; the honest statement is the
 deliverable.
+
+## THE ALIGNMENT-INDUCED LOCALITY DOMAIN — the owner's go, derived, and gated at chrMT/chrI (2026-10-06)
+
+**The design (no thresholds, no tuning constants).** The candidate
+domains come from ALIGNMENT-INDUCED LOCALITIES, not partition
+memberships:
+
+* **The locality** of a window is the alignment-connected structure
+  of its axis partition's pggb graph that contains the window's axis
+  row — the connected component (undirected, over the graph's own
+  segments and links, a path's own consecutive steps included) whose
+  segments the axis row's pggb path traverses. Partition membership
+  over-joins disconnected material; those rows leave the locus's
+  universe (measured at the gate components: 27 rows leave at chrMT,
+  45 at chrI; partition 14901 carries 24 components over 146 rows).
+* **The fold material** on each universe path is the path-interval
+  hull of the MAXIMAL MONOTONE AXIS-CORRESPONDENCE — the
+  order-preserving (path position, axis position) pairs pooled from
+  (i) the pggb shared segments (the within-partition real alignment;
+  the colinear LIS core, repeat-coincidence segments dropping out)
+  and (ii) the interned syng nodes shared with the axis row's walk,
+  chained along the path's own partition-BED tiling across partition
+  boundaries ONLY WITHIN the component's own axis partitions (the
+  window spine — the seam being repaired is the window boundary of
+  the axis path's own tiling) and admitted only at the
+  correspondence's monotone ends. Folds are PER ROW (one fold per
+  universe row, each extended along its own seam chain) with the
+  interval the exact extent hull of the pairs (segment pairs carry
+  their segment's own length, node pairs the window extent), so
+  identical rows yield identical intervals and coalesce under the
+  committed (sequence, relative-walk) fold key — the per-path hull
+  variant of this construction was MEASURED regressing chrMT
+  L2/L7/L9/L10 by breaking that coalescing, and repaired. The axis
+  path's fold is the window's axis row itself (the territory). A row
+  with no correspondence pair keeps its full row (the standing image
+  rule decides).
+* **The records re-derive per locality**: the territory-touch
+  convention on the new locality extents — an occurrence votes at
+  the locus iff its interval overlaps a locality fold row on the
+  occurrence's own path (the census's own coordinate-overlap rule
+  over the locality's rows instead of the partition's rows).
+* **The machinery stands** (the territory-image extent
+  normalization, the marginal realignment likelihood, the DP
+  disciplines, the QUAL bounds): the locality domain implies the
+  territory rule (the fold construction makes the images exact) and
+  every other mechanism is byte-identical. Env
+  `IMPG_REALIGN_LOCALITY_DOMAIN`; the maps are
+  `locality-domain-maps.py`'s window-keyed emissions (the scorer's
+  own `PartitionMap` schema, partition id = the window id).
+
+**The residual mechanism, measured first (chrI L13, the receipt's
+own `ll_matrix`).** The truth pair fails to place 19,761 of 23,943
+units (mass 27,881); the winner-only differential (4,779 units /
+10,423 mass over 37 records) is entirely high-multiplicity
+repeat-family reads (mult 700-1750, one to two anchors, hundreds of
+occurrences across the panel) whose window-13-touching occurrences
+sit on the DIVERGED COPY rows (CBM#2#chrI_3, AGK#0#chrI, ADM#2#chrI_1,
+CIC#1#chrI_2), not on severed truth material; the both-placed
+evidence favors the truth (-8,063). SK1's partition-13 row exactly
+covers the window's SK1 ortholog (the offset alignment S288C
+130058 ↔ SK1 132779; the abut point is the row boundary) — the
+truth is NOT severed at the chrI interior residuals, and the locality
+domain does not (and cannot honestly) remove the connected
+repeat-copy rows.
+
+**The gate table (phase 8N vs the committed normalized-rule receipts
+of record).** chrMT HOLD 9/9, CONVERT [], REGRESS []; chrI HOLD
+14/14 rank-1, CONVERT [], REGRESS []; the residuals unchanged in
+class (L2 rank 4, L13 1073, L16 4165 (improved from 5742, not
+converted), L18 621) — exactly the stated prediction. Expressibility
+unchanged at both components. The 4-wide runs reproduce the serial
+receipts with 0 semantic diffs and all four sidecars md5-identical.
+The checker's `--locality` mode re-derives each fold member's stored
+walk by the CONSTITUENT MERGE (the merged absolute-bp walks of the
+path's own tiling rows overlapping the fold interval, from the
+committed pggb projection sidecars) and runs the committed
+frame-skeleton audit over it; every member of a fold must re-derive
+the same relative stored walk (the coalescing proof).
+
+**The seam-coverage margins, honestly stated.** A fold whose
+correspondence core ends inside its row loses the edge material
+beyond the core (the truly diverged edge pockets with no exact
+segment or node sharing — the chrV-L24 head class): under the
+locality domain such material is not the territory's projection by
+the exact rule. The gate measures whether any rank-1 locus regresses
+for it (none did at chrMT/chrI); the fleet gate watches for it.
+
+**The fleet (gate 3, in flight).** The pggb builds for the 15
+remaining components' committed build sets (the 1358-partition union
+todo, two converging marker-idempotent serial lanes), then the
+per-component projection + locality maps + exhaustive runs + the
+checker, the new genome aggregate vs 876/1,133, the conversion
+count vs the 193 addressable prediction (the seam-class conversions
+are a fleet prediction — the tiled-elsewhere loci's wrong-material
+truth pairs become the real ortholog pairs through the seam chain),
+and the QV re-run. The honest verdict with the rival-dominant
+residue recomputed under the new domains follows the fleet.

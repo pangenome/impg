@@ -175,6 +175,33 @@ if TERRITORY:
     # convention. Additive; the default phase-8N behavior is untouched.)
     if "--committed-receipt" in sys.argv:
         COMMITTED_RECEIPT = sys.argv[sys.argv.index("--committed-receipt") + 1]
+# (The alignment-induced locality domain's checker mode: --locality
+# switches the map source to the locality fold maps, the phase-2 fold
+# mirror to the CONSTITUENT-MERGE walk derivation (each locality
+# fold's walk = the merged absolute-bp walks of the path's own tiling
+# rows overlapping the fold interval, from the committed pggb
+# projection sidecars — the spell-equality-proven syng coordinates),
+# the phase-3 touch rule to the territory-touch convention on the
+# locality extents, and the model tag to the locality convention.
+# Requires the exhaustive/territory machinery; the committed default
+# behavior is untouched.)
+LOCALITY = "--locality" in sys.argv
+if LOCALITY:
+    if EXHAUSTIVE is None or TIMERED_BASE is None:
+        sys.exit("--locality requires --exhaustive COMP --timered-base BASE --run-tag TAG")
+    MAPS_DIR = (
+        sys.argv[sys.argv.index("--maps-dir") + 1]
+        if "--maps-dir" in sys.argv
+        else f"{D}/locality-graphs-{EXHAUSTIVE}"
+    )
+    PROJ_DIR = (
+        sys.argv[sys.argv.index("--projection-dir") + 1]
+        if "--projection-dir" in sys.argv
+        else f"{D}/pggb-partition-graphs-chrMT-chrI/projection"
+    )
+    BEDDIR = "/home/erikg/yeast/partition-pos64-w10k-d1k-to-completion/results"
+else:
+    MAPS_DIR = GRAPHS
 if EXHAUSTIVE is not None:
     # the BEFORE receipt root: chrI/chrMT keep the committed
     # Poisson-era receipts at the validation root; chrIV and every
@@ -339,7 +366,7 @@ def load_names():
 def load_maps():
     maps = {}
     axis = []
-    for path in glob.glob(f"{GRAPHS}/*.gfa.map.json"):
+    for path in glob.glob(f"{MAPS_DIR}/*.gfa.map.json"):
         with open(path) as f:
             m = json.load(f)
         maps[m["partition"]] = m
@@ -350,7 +377,14 @@ def load_maps():
         # window->partition map may repeat a partition.
         for member in m["members"]:
             if member["path_name"] == COMPONENT:
-                axis.append((member["start"], member["end"], m["partition"]))
+                # (locality mode: the maps are window-keyed; the axis
+                # row's OWN partition lives in the construction
+                # receipt - the attribution and GFA mirrors need the
+                # real partition, not the window id)
+                axis.append((
+                    member["start"], member["end"],
+                    m.get("construction", {}).get(
+                        "axis_partition", m["partition"])))
     axis.sort()
     return maps, [p for _, _, p in axis], [(s, e, p) for s, e, p in axis]
 
@@ -860,6 +894,72 @@ def main():
     # ---------------- phase 2: folds vs the partition maps and GFAs
     print("== phase 2: fold structure vs the maps and the GFAs", flush=True)
     fold_seqs = {}
+    if LOCALITY:
+        # THE LOCALITY FOLD MIRROR - the helpers: each fold member row
+        # is a locality fold interval (path, lo, hi); the STORED walk
+        # is re-derived by the CONSTITUENT MERGE - the merged
+        # absolute-bp walks of the path's own tiling rows overlapping
+        # [lo-(K+W), hi+(K+W)) in the projection-covered partitions
+        # (the committed pggb projection sidecars, the spell-equality-
+        # proven syng coordinates), filtered to the panel walk
+        # convention and the contained rule, relative to lo. The
+        # fold loop below then runs the committed frame-skeleton
+        # audit over this stored walk, and every member of a fold
+        # must re-derive the SAME relative stored walk (the
+        # coalescing proof: the fold key is (sequence, relative
+        # stored walk)).
+        if not hasattr(load_maps, "_tiling"):
+            _t = {}
+            for fn in os.listdir(BEDDIR):
+                if not fn.endswith(".bed"):
+                    continue
+                try:
+                    _pid = int(fn.replace("partition", "").replace(".bed", ""))
+                except ValueError:
+                    continue
+                with open(os.path.join(BEDDIR, fn)) as _f:
+                    for _line in _f:
+                        _a = _line.rstrip("\n").split("\t")
+                        if len(_a) < 3:
+                            continue
+                        _t.setdefault(_a[0], []).append(
+                            (_pid, int(_a[1]), int(_a[2])))
+            for _p in _t:
+                _t[_p].sort()
+            load_maps._tiling = _t
+        LOCALITY_TILING = load_maps._tiling
+        LOCALITY_PROJ = {}
+        KW = K + 8
+
+        def locality_proj_walks(pid):
+            if pid not in LOCALITY_PROJ:
+                table = {}
+                with open(f"{PROJ_DIR}/partition{pid}.pggb.projection.jsonl") as f:
+                    for line in f:
+                        r = json.loads(line)
+                        table[r["p"]] = [
+                            (int(bp), int(node)) for node, bp in r["w"]
+                        ]
+                LOCALITY_PROJ[pid] = table
+            return LOCALITY_PROJ[pid]
+
+        def locality_stored_contained(path_name, lo, hi):
+            merged = {}
+            for (pid, ts, te) in LOCALITY_TILING.get(path_name, []):
+                if ts >= hi + KW or te <= lo - KW:
+                    continue
+                rn = f"{path_name}:{ts}-{te}"
+                try:
+                    for bp, node in locality_proj_walks(pid).get(rn, []):
+                        if bp not in merged:
+                            merged[bp] = node
+                except FileNotFoundError:
+                    continue
+            return sorted(
+                (bp - lo, node)
+                for bp, node in merged.items()
+                if bp < hi and bp + KW > lo and bp >= lo and bp + K <= hi
+            )
     for locus in LOCI:
         d = receipt[locus]
         partition = d["partition"]
@@ -880,26 +980,47 @@ def main():
         # a front-overhang offset inside the spelling; the fold's walk is
         # the CONTAINED syncmer steps (windows fully inside the extent),
         # positioned relative to the row start.
-        g = gfa(partition)
+        g = gfa(axis_rows[locus][2] if LOCALITY else partition)
         for fi, fold in enumerate(ingredients[locus]["folds"]):
             first = fold["members"][0]
-            seq, positions, steps = g.spelled(row_gfa_name(first))
             row_seq = fold["sequence"]
             check(
                 len(row_seq) == fold["length"],
                 f"locus {locus} fold {fi}: length differs from the sequence",
             )
-            offset = seq.find(row_seq)
-            check(
-                offset >= 0 and seq[offset:offset + len(row_seq)] == row_seq,
-                f"locus {locus} fold {fi}: row sequence absent from the GFA spelling",
-            )
-            sync_positions, sync_steps = g.spelled_syncmers(row_gfa_name(first))
-            contained = [
-                (p - offset, s)
-                for p, s in zip(sync_positions, sync_steps)
-                if p >= offset and p + K <= offset + len(row_seq)
-            ]
+            if LOCALITY:
+                # the stored walk from the constituent merge; every
+                # member must re-derive the same relative stored walk
+                # (the coalescing proof - the fold key)
+                contained = locality_stored_contained(
+                    first["path_name"], first["start"], first["end"])
+                ref_contained = contained
+                for m in fold["members"][1:]:
+                    check(
+                        locality_stored_contained(
+                            m["path_name"], m["start"], m["end"]) == ref_contained,
+                        f"locus {locus} fold {fi}: member "
+                        f"{m['path_name']}:{m['start']}-{m['end']} relative "
+                        "stored walk differs from the fold representative",
+                    )
+                    check(
+                        m["end"] - m["start"] == fold["length"],
+                        f"locus {locus} fold {fi}: member interval length differs",
+                    )
+                offset = 0
+            else:
+                seq, positions, steps = g.spelled(row_gfa_name(first))
+                offset = seq.find(row_seq)
+                check(
+                    offset >= 0 and seq[offset:offset + len(row_seq)] == row_seq,
+                    f"locus {locus} fold {fi}: row sequence absent from the GFA spelling",
+                )
+                sync_positions, sync_steps = g.spelled_syncmers(row_gfa_name(first))
+                contained = [
+                    (p - offset, s)
+                    for p, s in zip(sync_positions, sync_steps)
+                    if p >= offset and p + K <= offset + len(row_seq)
+                ]
             walk_receipt = [(w[0], w[1]) for w in fold["walk"]]
             if FRAME:
                 # THE CANONICAL-SKELETON AUDIT (slice D): every claimed
@@ -1052,19 +1173,43 @@ def main():
             origin = occ["start"] + occ["shift"]
             contained = False
             overlapped = False
-            for w in occ["partitions"]:
-                lst = rows_by_pp.get((axis[w], names[occ["path"]]))
-                if not lst:
-                    continue
-                for s, e in lst:
-                    if s <= origin and origin + span <= e:
-                        contained = True
-                    if s < origin + span and origin < e:
-                        overlapped = True
+            if LOCALITY:
+                # the territory-touch convention on the locality
+                # extents: the occurrence votes at the locus iff its
+                # interval overlaps a locality fold row on its own
+                # path; the classification is against the same rows
+                touched_loci = []
+                for locus in LOCI:
+                    lst = rows_by_pp.get((locus, names[occ["path"]]))
+                    if not lst:
+                        continue
+                    hit = False
+                    for s, e in lst:
+                        if s < origin + span and origin < e:
+                            hit = True
+                            overlapped = True
+                        if s <= origin and origin + span <= e:
+                            contained = True
+                    if hit:
+                        touched_loci.append(locus)
+            else:
+                for w in occ["partitions"]:
+                    lst = rows_by_pp.get((axis[w], names[occ["path"]]))
+                    if not lst:
+                        continue
+                    for s, e in lst:
+                        if s <= origin and origin + span <= e:
+                            contained = True
+                        if s < origin + span and origin < e:
+                            overlapped = True
             cls = 0 if contained else (1 if overlapped else 2)
-            for locus in set(occ["partitions"]):
-                if locus in receipt:
+            if LOCALITY:
+                for locus in touched_loci:
                     touching_classes.setdefault(locus, []).append(cls)
+            else:
+                for locus in set(occ["partitions"]):
+                    if locus in receipt:
+                        touching_classes.setdefault(locus, []).append(cls)
     for locus in LOCI:
         d = receipt[locus]
         counts = [0, 0, 0]
@@ -1268,8 +1413,13 @@ def main():
                 f"locus {locus}: territory field missing or not the normalized convention",
             )
             check(
-                d["model"] == "anchor-realign-v2-marginal-frame-territory",
-                f"locus {locus}: model tag is not the territory convention",
+                d["model"]
+                == (
+                    "anchor-realign-v2-marginal-frame-territory-locality"
+                    if LOCALITY
+                    else "anchor-realign-v2-marginal-frame-territory"
+                ),
+                f"locus {locus}: model tag is not the locality/territory convention",
             )
             axis_fold = t["axis_fold"]
             axis_start, axis_end, _ = axis_rows[locus]
@@ -1664,7 +1814,7 @@ def main():
                     )
                     continue
                 twin_fold_loci += 1
-                g = gfa(d["partition"])
+                g = gfa(axis_rows[locus][2] if LOCALITY else d["partition"])
                 for i, f in hit_folds:
                     names_here = [m["path_name"] for m in f["members"]]
                     check(
@@ -1708,6 +1858,10 @@ def main():
                     ref_contained = None
                     for m in f["members"]:
                         name = row_gfa_name(m)
+                        if LOCALITY and name not in g.paths:
+                            # a locality hull member: the coalescing
+                            # proof is phase 2's mirror
+                            continue
                         seq, _positions, _steps = g.spelled(name)
                         offset = seq.find(row_seq)
                         check(
@@ -1757,7 +1911,7 @@ def main():
             # proof: EVERY member of the named identical-pair fold must
             # spell the same sequence and walk from the GFAs
             wanted = None
-        g = gfa(d["partition"])
+        g = gfa(axis_rows[locus][2] if LOCALITY else d["partition"])
         if EXHAUSTIVE is None:
             seqs = {}
             walks = {}
@@ -1799,6 +1953,10 @@ def main():
             ref_contained = None
             for m in fold["members"]:
                 name = row_gfa_name(m)
+                if LOCALITY and name not in g.paths:
+                    # a locality hull member: the coalescing proof for
+                    # this fold is phase 2's constituent-merge mirror
+                    continue
                 seq, _positions, _steps = g.spelled(name)
                 offset = seq.find(row_seq)
                 check(
