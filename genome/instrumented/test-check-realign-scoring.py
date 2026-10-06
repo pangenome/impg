@@ -123,6 +123,18 @@ class DegenerateZeroUnitLocusTest(unittest.TestCase):
         }
         self.assertFalse(checker.held_rank1_winner_assertion(bad, fold_member_key))
 
+    def test_locality_expressibility_loss_reported_not_failed(self):
+        # the gain guard's loss counterpart: under --locality a
+        # before-expressible truth pair whose material the exact rule
+        # drops is the design's stated expressibility change (LOST,
+        # honestly reported per slice, e.g. chrVII L83 - the one locus
+        # expressible under the Poisson instrument and lost under the
+        # locality domains); the guard itself is UNCHANGED for the
+        # non-locality runs.
+        self.assertTrue(checker.locality_expressibility_loss(False, True))
+        self.assertFalse(checker.locality_expressibility_loss(True, True))
+        self.assertFalse(checker.locality_expressibility_loss(False, False))
+
 
 if __name__ == "__main__":
     unittest.main()

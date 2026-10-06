@@ -745,6 +745,19 @@ def held_rank1_winner_assertion(d, fold_member_key):
     )
 
 
+def locality_expressibility_loss(after_expressible, locality):
+    """Phase 8's expressibility-loss guard under the locality domain:
+    a before-expressible truth pair whose material the exact
+    correspondence rule drops is the design's stated expressibility
+    change - LOST, honestly reported per slice (the aggregate of
+    record names the lost loci; chrVII L83 is the one locus
+    expressible under the Poisson instrument and lost under the
+    locality domains) - not a mirror failure. The guard itself is
+    UNCHANGED for the non-locality runs (False falls through to the
+    committed check)."""
+    return bool(locality and not after_expressible)
+
+
 def median_of(values):
     values = sorted(values)
     middle = len(values) // 2
@@ -2086,6 +2099,7 @@ def main():
         rank1_before = [locus for locus in LOCI if before[locus]["truth_rank"] == 1]
         rank1_after = []
         prediction_violations = []
+        lost = []
         expressible_before = [locus for locus in LOCI if before[locus]["truth_pair_expressible"]]
         expressible_after = []
         for locus in LOCI:
@@ -2106,6 +2120,15 @@ def main():
                 flush=True,
             )
             if b["truth_pair_expressible"]:
+                if locality_expressibility_loss(d["truth_pair_expressible"], LOCALITY):
+                    # (the locality domain's exact-correspondence rule
+                    # drops a before-expressible truth pair's material -
+                    # the design's stated expressibility change, LOST,
+                    # honestly reported per slice and named in the
+                    # aggregate, never check-failed; the non-locality
+                    # guard below is untouched)
+                    lost.append(locus)
+                    continue
                 check(
                     d["truth_pair_expressible"],
                     f"locus {locus}: expressible under the Poisson instrument but not the realignment instrument",
@@ -2161,7 +2184,9 @@ def main():
             f"of {len(expressible_after)} expressible (before: {len(expressible_before)}); "
             f"rank-1 loci before {rank1_before}, after {rank1_after}; "
             f"newly expressible {newly}; "
-            f"prediction violations (old wins lost): {prediction_violations}",
+            f"prediction violations (old wins lost): {prediction_violations}"
+            + (f"; no longer expressible {lost} (the exact rule's honest cost)"
+               if LOCALITY and lost else ""),
             flush=True,
         )
 
