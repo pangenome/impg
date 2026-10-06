@@ -2355,11 +2355,21 @@ is **71 of 252** non-rank-1 expressible (the territory convention:
 interior-substitution 60 / twin-indistinguishable 7 /
 substitution-better-match 4 / zygosity-dosage 0 (the hypothesized
 dosage mechanism absent again; winner homozygous 0/71). The residue
-decomposition: 1,132 expressible = 880 rank-1 + 71 rival-dominant
-(the irreducible copy-structure residue — no geometry lever applies
-by definition) + **181 seam/repeat-interior** (252 − 71, down from
-193 — and the fleet measured that the locality lever converts only
-9 of them).
+decomposition, both axes shown:
+
+| the 252 non-rank-1 (1,132 expressible − 880 rank-1) | count |
+|---|---|
+| by census class: in-axis-partition (interior) | 159 |
+| tiled-elsewhere/neighbor (seam) | 74 |
+| tiled-elsewhere/foreign-repeat | 14 |
+| partial-elsewhere/foreign-repeat | 1 |
+| pilot (chrMT/chrI, no census receipt) | 4 |
+| by mechanism: rival-dominant (both-placed gap > 0) | 71 |
+| non-rival seam/repeat-interior (252 − 71) | 181 |
+
+The 181 are not addressable by geometry (measured: the locality
+lever converts 9); the 71 are the irreducible copy-structure
+residue.
 
 **The honest verdict for the arc.** The alignment-induced locality
 domain is measurement-complete: it is the first domain family that
