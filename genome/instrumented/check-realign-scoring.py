@@ -1555,8 +1555,17 @@ def main():
             # THE BOUNDING PROPERTY: every unit's likelihood under every
             # fold is at least E (the elsewhere branch bounds every
             # floor), and no-pin entries sit at exactly E.
+            # (The size guard: the locality domain's degenerate
+            # zero-unit locus - chrVII L56, the 15bp contig-end window
+            # whose universe holds only the axis fold - carries an
+            # EMPTY matrix; the scorer's convention there is the empty
+            # product: one class, every class LL exactly 0.0, the
+            # winner the single class. The bounding property is
+            # vacuous on an empty matrix; the phase-5 class
+            # re-derivation below verifies the 0.0 convention
+            # exactly.)
             check(
-                float(matrix.min()) >= E - 1e-6,
+                matrix.size == 0 or float(matrix.min()) >= E - 1e-6,
                 f"locus {locus}: matrix entry below E",
             )
             at_e = int((np.abs(matrix - E) < 1e-9).sum())
