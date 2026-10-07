@@ -230,7 +230,11 @@ receipt vs the committed assessment numbers of record: 880/1,132 =
 77.7%, QV median 60.00, p10 14.42). **chrII: CLOSED end-to-end through
 the CLI** — 81 loci / 76 expressible / 68 rank-1 (exactly the
 committed aggregate table's row), the gate FIELD-IDENTICAL vs the
-committed QV receipts on all 76 expressible loci. The long pole is the per-component
+committed QV receipts on all 76 expressible loci. **chrIII: CLOSED
+end-to-end through the CLI** — 38 loci / 28 expressible / 18 rank-1
+(exactly the committed aggregate table's row), the gate FIELD-IDENTICAL
+vs the committed QV receipts on all 28 expressible loci.
+The long pole is the per-component
 census regeneration (the validation dir was cleaned of the census
 scratch; ~6 h of walls across the 15 fleet components); the
 record-derivation cache is whole-sample (one cache serves every
