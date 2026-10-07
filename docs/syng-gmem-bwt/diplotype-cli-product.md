@@ -208,6 +208,18 @@ field-identical to the committed chrI QV receipts on all 18 expressible
 loci — including the four named non-rank-1 residuals (L2/L13/L16/L18)
 with their exact error/QV numbers.
 
+**The instrument's own checker, reused**: the committed checker
+(`check-realign-scoring.py --territory --locality`) runs over the
+regenerated chain the CLI is proven field-identical to — chrMT: **ALL
+PHASES PASS, 1,054,875 checks / 0 failures** (the exact committed
+gate-2 record; phase-8N aggregate: truth rank-1 9 -> 9 HOLD, CONVERT
+[], REGRESS []); chrI: **ALL PHASES PASS, 4,228,180 / 0** (the exact
+committed gate-2 record; phase-8N: rank-1 14 -> 14, CONVERT [],
+REGRESS [], residual moved [13, 16]). The checker's own cleaned
+prerequisites were regenerated through the committed runners first
+(the territory 4-wide BEFORE receipts, the locality 4-wide
+timered-base receipts, the anchor-projection receipts).
+
 **The full 17-component sample**: driven end-to-end through the CLI by
 `genome/instrumented/run-cli-product-fleet.sh` (marker-idempotent per
 component: the census regeneration through the committed runner, the
@@ -215,7 +227,10 @@ CLI product run + test mode, the per-component gate vs the surviving
 committed QV receipts on every field), with the sample aggregate at
 `genome/instrumented/cli-product-aggregate.py` (the before/after
 receipt vs the committed assessment numbers of record: 880/1,132 =
-77.7%, QV median 60.00, p10 14.42). The long pole is the per-component
+77.7%, QV median 60.00, p10 14.42). **chrII: CLOSED end-to-end through
+the CLI** — 81 loci / 76 expressible / 68 rank-1 (exactly the
+committed aggregate table's row), the gate FIELD-IDENTICAL vs the
+committed QV receipts on all 76 expressible loci. The long pole is the per-component
 census regeneration (the validation dir was cleaned of the census
 scratch; ~6 h of walls across the 15 fleet components); the
 record-derivation cache is whole-sample (one cache serves every
