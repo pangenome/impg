@@ -6,6 +6,7 @@ pub mod mem_records;
 pub mod joint;
 pub mod observations;
 pub mod panel_routes;
+pub mod realign_score;
 pub mod reconstruction;
 pub mod sample;
 pub mod sequence_evaluation;

@@ -1,8 +1,8 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
 mod panel_route_search_policy;
 use crate::genome_inference::{
-    self as genome, calling, catalog, genotype, joint, observations, panel_routes, sample,
-    threading,
+    self as genome, calling, catalog, genotype, joint, observations, panel_routes,
+    realign_score, sample, threading,
 };
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
@@ -69,6 +69,66 @@ pub struct RouteEvidence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// THE PRODUCT OBJECTIVE (the owner's product swap): per-locus diplotype calls
+    /// with the model-internal quality — the realignment likelihood +
+    /// territory-image extents + the alignment-induced locality domains as the
+    /// selection path. Default output: calls.jsonl, one truth-free record per
+    /// locus (the two called paths, the class identity, the QUAL, the E/gap
+    /// fields). The called-vs-truth sequence QV lives ONLY behind --truth-qv
+    /// (the test mode, the truth haplotypes as input; never in the default
+    /// output).
+    CallDiplotypes {
+        /// The panel syng prefix
+        #[arg(long)]
+        panel: String,
+        /// The route graph directory (graph.json + sources)
+        #[arg(long)]
+        routes: PathBuf,
+        /// The locality map directory (window<N>.gfa.map.json)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The component lane (e.g. S288C#0#chrI) — the axis path whose
+        /// member rows define the window-to-partition mapping
+        #[arg(long)]
+        component: String,
+        /// The multi-matching census receipt (the sample's read records and
+        /// placements against the panel; truth-free)
+        #[arg(long)]
+        census: PathBuf,
+        /// The sample FASTQ (read identity + the quality-byte assertion)
+        #[arg(long)]
+        reads: PathBuf,
+        /// The record-derivation cache (a pure function of the FASTQ and the panel)
+        #[arg(long)]
+        derive_cache: PathBuf,
+        /// The scored loci (window ids of the component, comma-separated,
+        /// distinct and sorted, e.g. 2,4,7)
+        #[arg(long)]
+        loci: String,
+        /// The selection convention (default: the alignment-induced locality
+        /// domain — the current best measured selection)
+        #[arg(long, value_enum, default_value_t = realign_score::Selection::Locality)]
+        selection: realign_score::Selection,
+        /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
+        #[arg(long, default_value_t = 64.0)]
+        rss_budget_gib: f64,
+        /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
+        /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
+        /// computes the called-vs-truth sequence QV per locus (the committed
+        /// convention) into calls.jsonl.truth-qv.jsonl; never mixed into the
+        /// default product output
+        #[arg(long, num_args = 2)]
+        truth_qv: Option<Vec<String>>,
+        /// The pinned biWFA alignment helper for the test mode (gap-affine
+        /// End2End 0/4/6/2, Medium memory, no heuristic — the same machinery
+        /// the validated QV receipts used)
+        #[arg(long)]
+        qv_biwfa: Option<PathBuf>,
+        /// New output directory (refused if it exists): calls.jsonl + the
+        /// instrument receipts beside it
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
     /// Automatic all-source lanes, all identity endpoint families, DNA hubs and indexed native start profiles
     BuildPanelRoutes {
         #[command(flatten)]
@@ -422,6 +482,74 @@ fn route_run(
 }
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::CallDiplotypes {
+            panel,
+            routes,
+            partition_graphs,
+            component,
+            census,
+            reads,
+            derive_cache,
+            loci,
+            selection,
+            rss_budget_gib,
+            truth_qv,
+            qv_biwfa,
+            out_dir,
+        } => genome::with_output_model(
+            &out_dir,
+            realign_score::MODEL,
+            || {
+                let options = realign_score::Options {
+                    panel,
+                    routes,
+                    partition_graphs,
+                    component,
+                    census,
+                    reads,
+                    derive_cache,
+                    loci,
+                    // The instrument receipts land beside the product
+                    // calls under the CLI's own output directory (the
+                    // translation-gate and checker artifacts).
+                    out: out_dir.join("instrument-receipt.jsonl"),
+                    exactness_out: out_dir.join("instrument-receipt.exactness.jsonl"),
+                    exactness_sample: 100,
+                    // The committed runner's artifact set verbatim: the
+                    // skeleton sidecar is part of the receipt-of-record
+                    // layout the checker consumes.
+                    skeleton_out: Some(out_dir.join("instrument-receipt.skeleton.jsonl")),
+                    anatomy_out: None,
+                    frame_audit_only: false,
+                    rss_budget_gib,
+                    selection,
+                    product_calls: Some(out_dir.join("calls.jsonl")),
+                    truth_qv: truth_qv.unwrap_or_default(),
+                    qv_biwfa: qv_biwfa.unwrap_or_else(|| {
+                        "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
+                    }),
+                };
+                let truth_qv_enabled = !options.truth_qv.is_empty();
+                realign_score::run(options)?;
+                let calls = out_dir.join("calls.jsonl");
+                let truth_qv_path = out_dir.join("calls.jsonl.truth-qv.jsonl");
+                Ok(serde_json::json!({
+                    "calls": genome::reconstruction::fingerprint(&calls)?,
+                    "calls_bytes": std::fs::metadata(&calls)?.len(),
+                    "instrument_receipt": genome::reconstruction::fingerprint(
+                        &out_dir.join("instrument-receipt.jsonl"),
+                    )?,
+                    "truth_qv_test_mode": if truth_qv_enabled {
+                        genome::reconstruction::fingerprint(&truth_qv_path)?
+                    } else {
+                        serde_json::Value::Null
+                    },
+                    "selection": format!("{selection:?}"),
+                    "scope": "per-locus-diplotype-calls-with-model-internal-qual",
+                    "truth_in_default_output": false,
+                }))
+            },
+        ),
         Command::BuildPanelRoutes {
             common,
             catalog,

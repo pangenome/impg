@@ -1,4 +1,5 @@
 // lib.rs
+#![recursion_limit = "512"]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 pub mod agc_index;
