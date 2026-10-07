@@ -1,8 +1,8 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
 mod panel_route_search_policy;
 use crate::genome_inference::{
-    self as genome, calling, catalog, genotype, joint, observations, panel_routes,
-    realign_score, sample, threading,
+    self as genome, calling, catalog, diplotype_chain, genotype, joint, observations,
+    panel_routes, realign_score, sample, threading,
 };
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
@@ -126,6 +126,52 @@ pub enum Command {
         qv_biwfa: Option<PathBuf>,
         /// New output directory (refused if it exists): calls.jsonl + the
         /// instrument receipts beside it
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// THE CHAIN/PHASING LAYER (the owner's product ruling: the diploid
+    /// product is TWO whole-chromosome molecules per component): the
+    /// thin orientation DP over the CLI's CLOSED per-locus calls
+    /// (calls.jsonl) — the junction-spanning reads' votes (the edge
+    /// layer, the census's crossing records) plus the called folds'
+    /// shared-segment continuation (the adjacency layer) orient each
+    /// boundary; the accumulated chain emits the two molecules (the
+    /// per-locus orientation, the spelled sequences, the per-boundary
+    /// link confidence). The chain NEVER writes the calls — the
+    /// per-locus product is bit-identical pre/post chain (the thin-
+    /// layer property, proven by the emitted calls fingerprint).
+    /// The switch evaluation against the truth haplotypes lives ONLY
+    /// behind --truth-qv-file (the test mode, the product run's own
+    /// truth-QV artifact as input; never in the default output).
+    ChainMolecules {
+        /// The CLI product's closed per-locus calls (calls.jsonl)
+        #[arg(long)]
+        calls: PathBuf,
+        /// The panel syng prefix
+        #[arg(long)]
+        panel: String,
+        /// The route graph directory (graph.json + sources)
+        #[arg(long)]
+        routes: PathBuf,
+        /// The locality map directory (window<N>.gfa.map.json)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The multi-matching census receipt (the same truth-free
+        /// input the product run consumed)
+        #[arg(long)]
+        census: PathBuf,
+        /// THE TEST MODE (the owner's ruling, assessment-side only):
+        /// the product run's calls.jsonl.truth-qv.jsonl — consumed
+        /// read-only into molecules.jsonl.truth-qv.jsonl (the switch
+        /// table and the per-locus accuracy, separate columns, never
+        /// conflated)
+        #[arg(long)]
+        truth_qv_file: Option<PathBuf>,
+        /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
+        #[arg(long, default_value_t = 64.0)]
+        rss_budget_gib: f64,
+        /// New output directory (refused if it exists): molecules.jsonl
+        /// + the test-mode artifact beside it
         #[arg(long)]
         out_dir: PathBuf,
     },
@@ -550,6 +596,43 @@ pub fn run(command: Command) -> io::Result<()> {
                 }))
             },
         ),
+        Command::ChainMolecules {
+            calls,
+            panel,
+            routes,
+            partition_graphs,
+            census,
+            truth_qv_file,
+            rss_budget_gib,
+            out_dir,
+        } => genome::with_output_model(&out_dir, diplotype_chain::MODEL, || {
+            let options = diplotype_chain::Options {
+                calls: calls.clone(),
+                panel,
+                routes,
+                partition_graphs,
+                census,
+                truth_qv: truth_qv_file.clone(),
+                rss_budget_gib,
+                out_dir: out_dir.clone(),
+            };
+            diplotype_chain::run(options)?;
+            let truth_out = out_dir.join("molecules.jsonl.truth-qv.jsonl");
+            Ok(serde_json::json!({
+                "molecules": genome::reconstruction::fingerprint(
+                    &out_dir.join("molecules.jsonl"),
+                )?,
+                "calls_consumed": genome::reconstruction::fingerprint(&calls)?,
+                "calls_bytes": std::fs::metadata(&calls)?.len(),
+                "truth_qv_test_mode": if truth_qv_file.is_some() {
+                    genome::reconstruction::fingerprint(&truth_out)?
+                } else {
+                    serde_json::Value::Null
+                },
+                "scope": "two-molecules-per-component-chain-over-closed-calls",
+                "truth_in_default_output": false,
+            }))
+        }),
         Command::BuildPanelRoutes {
             common,
             catalog,

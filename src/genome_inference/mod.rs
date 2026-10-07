@@ -1,6 +1,7 @@
 //! Experimental ownership diagnostics, quantitative haploid calls and source-path threads.
 pub mod calling;
 pub mod catalog;
+pub mod diplotype_chain;
 pub mod genotype;
 pub mod mem_records;
 pub mod joint;
