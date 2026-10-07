@@ -2,6 +2,7 @@
 pub mod calling;
 pub mod catalog;
 pub mod diplotype_chain;
+pub mod diplotype_dosage;
 pub mod genotype;
 pub mod mem_records;
 pub mod joint;

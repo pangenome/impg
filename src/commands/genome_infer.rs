@@ -1,8 +1,8 @@
 //! Experimental inference CLI; deliberately independent of the legacy infer stitcher.
 mod panel_route_search_policy;
 use crate::genome_inference::{
-    self as genome, calling, catalog, diplotype_chain, genotype, joint, observations,
-    panel_routes, realign_score, sample, threading,
+    self as genome, calling, catalog, diplotype_chain, diplotype_dosage, genotype, joint,
+    observations, panel_routes, realign_score, sample, threading,
 };
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
@@ -171,6 +171,56 @@ pub enum Command {
         #[arg(long, default_value_t = 64.0)]
         rss_budget_gib: f64,
         /// New output directory (refused if it exists): molecules.jsonl
+        /// + the test-mode artifact beside it
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// THE DOSAGE SURFACE (the copy-number layer of the two-molecule
+    /// emission): the per-panel-segment copy count implied by the
+    /// chain's two molecules — derived from molecules.jsonl and
+    /// nothing else product-side, with REPEAT-VISIT MULTIPLICITY
+    /// (a molecule traversing a segment twice carries its true
+    /// multiplicity), the territory/axis extents per segment, and
+    /// the DEPTH-CONSISTENCY QC (the observed per-segment census
+    /// mass vs the expected under the emitted dosage — the
+    /// likelihood's own per-covered-copy expectation, the ratio
+    /// stated per segment, never binned, no thresholds). The
+    /// truth-referenced dosage comparison lives ONLY behind
+    /// --truth-qv-file (the test mode, the product run's own
+    /// truth-QV artifact + the receipt's fold identities as input;
+    /// never in the default output).
+    EmitDosage {
+        /// The chain layer's two-molecule product (molecules.jsonl)
+        #[arg(long)]
+        molecules: PathBuf,
+        /// The panel syng prefix
+        #[arg(long)]
+        panel: String,
+        /// The locality map directory (window<N>.gfa.map.json; the
+        /// axis window extents)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The multi-matching census receipt (the same truth-free
+        /// input the product and chain runs consumed; the observed
+        /// mass)
+        #[arg(long)]
+        census: PathBuf,
+        /// THE TEST MODE (the owner's ruling, assessment-side only):
+        /// the product run's calls.jsonl.truth-qv.jsonl — the truth
+        /// pair per locus, consumed read-only into
+        /// dosage.jsonl.truth-qv.jsonl (the agreement table and the
+        /// per-locus accuracy, separate columns, never conflated)
+        #[arg(long, requires = "folds")]
+        truth_qv_file: Option<PathBuf>,
+        /// The product run's instrument receipt (the per-locus fold
+        /// identities — the truth folds' member rows; required by
+        /// the test mode)
+        #[arg(long, requires = "truth_qv_file")]
+        folds: Option<PathBuf>,
+        /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
+        #[arg(long, default_value_t = 64.0)]
+        rss_budget_gib: f64,
+        /// New output directory (refused if it exists): dosage.jsonl
         /// + the test-mode artifact beside it
         #[arg(long)]
         out_dir: PathBuf,
@@ -630,6 +680,42 @@ pub fn run(command: Command) -> io::Result<()> {
                     serde_json::Value::Null
                 },
                 "scope": "two-molecules-per-component-chain-over-closed-calls",
+                "truth_in_default_output": false,
+            }))
+        }),
+        Command::EmitDosage {
+            molecules,
+            panel,
+            partition_graphs,
+            census,
+            truth_qv_file,
+            folds,
+            rss_budget_gib,
+            out_dir,
+        } => genome::with_output_model(&out_dir, diplotype_dosage::MODEL, || {
+            let options = diplotype_dosage::Options {
+                molecules: molecules.clone(),
+                panel,
+                partition_graphs,
+                census,
+                truth_qv_file: truth_qv_file.clone(),
+                folds: folds.clone(),
+                rss_budget_gib,
+                out_dir: out_dir.clone(),
+            };
+            diplotype_dosage::run(options)?;
+            let truth_out = out_dir.join("dosage.jsonl.truth-qv.jsonl");
+            Ok(serde_json::json!({
+                "dosage": genome::reconstruction::fingerprint(
+                    &out_dir.join("dosage.jsonl"),
+                )?,
+                "molecules_consumed": genome::reconstruction::fingerprint(&molecules)?,
+                "truth_qv_test_mode": if truth_qv_file.is_some() {
+                    genome::reconstruction::fingerprint(&truth_out)?
+                } else {
+                    serde_json::Value::Null
+                },
+                "scope": "per-panel-segment-copy-counts-derived-from-the-two-molecules",
                 "truth_in_default_output": false,
             }))
         }),
