@@ -282,6 +282,18 @@ row), the gate FIELD-IDENTICAL vs the committed QV receipts on all
 expressible / 82 rank-1 (exactly the committed aggregate table's
 row), the gate FIELD-IDENTICAL vs the committed QV receipts on all
 102 expressible loci.
+**chrXII: CLOSED end-to-end through the CLI** — 119 loci / 98
+expressible / 75 rank-1 (exactly the committed aggregate table's
+row), the gate FIELD-IDENTICAL vs the committed QV receipts on all
+98 expressible loci.
+
+**THE FLEET IS 17/17**: every component closed end-to-end through
+the CLI, every per-component row exactly the committed assessment
+table's row, every gate FIELD-IDENTICAL vs the committed QV
+receipts on every expressible locus — the translation held with
+zero divergence. The sample before/after receipt lands at
+`cli-product-gate-AGGREGATE.txt`.
+
 The long pole is the per-component
 census regeneration (the validation dir was cleaned of the census
 scratch; ~6 h of walls across the 15 fleet components); the
