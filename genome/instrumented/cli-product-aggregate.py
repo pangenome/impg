@@ -48,12 +48,12 @@ for c in COMPONENTS:
         n += 1
         if t.get("truth_pair_expressible"):
             e += 1
+            if t.get("qv") is not None:
+                qv_errors.append((t.get("error", 0.0), t.get("qv")))
             if t.get("rank1"):
                 r1 += 1
                 if t.get("perfect"):
                     perfect += 1
-                if t.get("qv") is not None:
-                    qv_errors.append((t.get("error", 0.0), t.get("qv")))
     rows.append((c, n, e, r1, perfect))
     total_loci += n; total_expressible += e
     total_rank1 += r1; total_perfect += perfect
@@ -74,10 +74,13 @@ if qv_errors:
     qvs = sorted(x[1] for x in qv_errors)
     median = qvs[len(qvs) // 2] if len(qvs) % 2 == 1 else (
         qvs[len(qvs) // 2 - 1] + qvs[len(qvs) // 2]) / 2.0
-    p10 = qvs[max(0, int(0.10 * len(qvs)) - 1)]
+    # the committed tables' nearest-rank percentile convention
+    import math
+    p10 = qvs[min(len(qvs) - 1, math.ceil(0.10 * len(qvs)) - 1)]
     say(f"  QV: perfect {total_perfect} (= the rank-1 count by the committed "
         f"measurement), median {median:.2f}, p10 {p10:.2f}, "
-        f"QV>=40 at {100.0 * sum(1 for q in qvs if q >= 40) / len(qvs):.2f}%")
+        f"QV>=40 at {100.0 * sum(1 for q in qvs if q >= 40) / len(qvs):.2f}% "
+        f"(over all {len(qvs)} expressible loci)")
 say()
 say("== THE COMMITTED ASSESSMENT NUMBERS OF RECORD (the locality fleet: "
     "rank-1 880/1,132 expressible = 77.7%, QV perfect 880, median 60.00, "

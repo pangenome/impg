@@ -300,6 +300,83 @@ scratch; ~6 h of walls across the 15 fleet components); the
 record-derivation cache is whole-sample (one cache serves every
 component).
 
+## THE SAMPLE BEFORE/AFTER RECEIPT — the fleet 17/17 aggregate
+
+`cli-product-gate-AGGREGATE.txt` (written by
+`genome/instrumented/cli-product-aggregate.py`, receipt-side): the
+full diploid validation sample measured END-TO-END THROUGH THE CLI
+vs the committed assessment numbers of record.
+
+| component | loci | expressible | truth-rank-1 | perfect |
+|---|---|---|---|---|
+| chrMT | 14 | 9 | 9 | 9 |
+| chrI | 21 | 18 | 14 | 14 |
+| chrII | 81 | 76 | 68 | 68 |
+| chrIII | 38 | 28 | 18 | 18 |
+| chrIV | 167 | 143 | 115 | 115 |
+| chrV | 61 | 56 | 39 | 39 |
+| chrVI | 29 | 25 | 16 | 16 |
+| chrVII | 117 | 100 | 75 | 75 |
+| chrVIII | 60 | 50 | 40 | 40 |
+| chrIX | 45 | 40 | 29 | 29 |
+| chrX | 80 | 71 | 54 | 54 |
+| chrXI | 66 | 66 | 47 | 47 |
+| chrXII | 119 | 98 | 75 | 75 |
+| chrXIII | 101 | 86 | 68 | 68 |
+| chrXIV | 82 | 72 | 60 | 60 |
+| chrXV | 119 | 102 | 82 | 82 |
+| chrXVI | 107 | 92 | 71 | 71 |
+| **TOTAL** | **1,307** | **1,132** | **880** | **880** |
+
+**THE AGGREGATE: loci 1,307, expressible 1,132, truth rank-1 880,
+perfect 880 — 880/1,132 = 77.7%.** The QV distribution over all 1,132
+expressible loci: median 60.00, p10 14.42 (nearest-rank), QV>=40 at
+78.18%.
+
+**THE TRANSLATION VERDICT: 77.7% SURVIVES THE INSTRUMENT-TO-CLI
+TRANSLATION EXACTLY.** The committed assessment numbers of record
+(the locality fleet) were 880/1,132 expressible = 77.7%, QV perfect
+880, median 60.00, p10 14.42, QV>=40 78.18% — the CLI end-to-end
+sample reproduces every one of them, and every per-component row is
+the committed table's row exactly. THE
+DIVERGENCES FOUND AND DIAGNOSED, all summary-script-side, zero
+per-locus divergence anywhere: (1) the aggregate script's first QV
+line collected the QV only within the rank-1 branch, printing the
+rank-1-only distribution (p10 60.00, >=40 100%) instead of the full
+expressible cohort — fixed to collect every expressible locus's QV
+(the per-locus values were always field-identical, proven by every
+per-component gate); (2) the p10 index convention (int-index 112 vs
+the committed tables' nearest-rank 113) produced 14.41 vs the
+committed 14.42 — aligned to the committed nearest-rank convention.
+No instrument-side divergence exists: the CLI's per-locus outputs
+are field-identical to the committed receipts at every expressible
+locus of all 17 components (the per-component gates), and the two
+gate components' regenerated chains carry the full committed
+checker verification (chrMT 1,054,875/0, chrI 4,228,180/0).
+
+## THE TEST-MODE DEMONSTRATION — the truth-QV path, spot-checked
+
+The `--truth-qv` test mode (the ONLY assessment surface, requiring
+the truth haplotypes as explicit input, never in the default
+output) is demonstrated at chrMT (the dedicated
+`cli-product-chrMT-truthqv` run of record): `--truth-qv
+S288C#0#chrMT SK1#0#chrMT` — the first haplotype is the component
+lane (the axis-row truth-first convention), the material is each
+fold's own panel-window sequence, the assignment yardstick the
+owner's injective no-replacement rule with likegt's mean-identity
+rule computed beside it, biWFA gap-affine End2End at likegt's
+penalties. The run's `calls.jsonl.truth-qv.jsonl` reproduces the
+committed QV receipts FIELD-IDENTICALLY on all 9 expressible loci:
+9 rank-1, 9 perfect, QV 60.0 at each — and the same proof stands
+fleet-wide, every component's gate comparing its
+`calls.jsonl.truth-qv.jsonl` against the committed QV receipts
+field-by-field (truth_rank, rank1, assignment, likegt_assignment,
+assignment_disagreement, pairs, chosen_pairs, total_edits,
+total_columns, mismatches, gap_columns, error, identity, qv,
+perfect, called_folds/truth_folds strain sets) — FIELD-IDENTICAL at
+all 17 components, zero diffs. The default `calls.jsonl` carries
+NO truth keys anywhere.
+
 ## Production constraints
 
 Bounded memory (the 64 GiB RSS guard, the lane cache, the degenerate-locus
