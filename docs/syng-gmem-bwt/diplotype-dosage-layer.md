@@ -145,3 +145,40 @@ selection. The new surface measures the disease at the coverage level
 rank-1 loci (the test mode): at every rank-1 locus the emitted pair IS
 the truth pair, so the emitted dosage equals the truth dosage
 structurally — the fleet aggregate states the numbers.
+
+## The fleet aggregate (17/17, `dosage-aggregate.py`)
+
+Every component gated ALL CHECKS PASS (the thin-layer proof, the QC
+arithmetic, the agreement table). The fleet totals:
+
+- **Correct dosage 880 / 1,132 expressible = 77.74%** — and
+  **rank-1 dosage agreement 880 / 880 = 100%**: the dosage surface
+  is a faithful function of the call (correct exactly at the
+  rank-1 loci, inherited disagreement exactly at the 252 non-rank-1
+  expressible loci — the residue's own material, no dosage error
+  that selection did not already make).
+- **THE HONEST DECOMPOSITION**: per locus — 880 correct, 252
+  `dosage_inherited_from_non_rank1_call`, 175 bracketed (truth pair
+  not expressible), **0 dosage-specific emission defects**, **0
+  non-rank-1 calls whose dosage coincides with the truth's**; every
+  differing locus's mechanism is `territory_split` (252),
+  `multiplicity_mismatch` 0. Per segment over the union universes
+  (9,527 segments): 6,954 agree, 1,922 inherited from non-rank-1
+  calls, 651 bracketed-locus-involved, **0 dosage-specific at
+  rank-1**.
+- **The emission**: 8,136 segments, copy-bp 77,959,457 (the row-bp
+  identity gated at every component); the depth-consistency QC
+  states the ratio per segment with NO binning — the fleet's stated
+  distribution: median 0.686, p10 0.549, p90 1.511 (the census's
+  own multi-matching spread: much read mass lands on panel material
+  outside the emission — the unattributed material mass is stated
+  per component, never hidden).
+- **THE OLD DEFECT'S VERDICT**: the 1,041/1,307 single-class-of-2
+  era is GONE — the emission states 45 flat-class-of-2 loci of
+  1,307 (3.44%), and the 45 decompose honestly: 3 at rank-1 loci
+  where the TRUTH pair itself is coverage-flat (chrXII loci whose
+  two homologs the panel represents by one coverage; the emission
+  matches truth exactly there), 42 at bracketed loci (truth
+  unknowable). At every expressible locus where the truth is mixed
+  (1,129 of 1,132), the emission is mixed — the real heterozygosity
+  at rank-1 loci is carried in the per-segment copy counts, 880/880.
