@@ -200,10 +200,26 @@ then verified against the surviving per-locus QV receipts):
    `calls.jsonl`; the receipt differs only in the walls/rss timing
    fields).
 
-The same gate extends to chrI and then the full 17-component sample
-(the long pole: the per-component census regeneration and the
-per-component anchor derive caches — chrMT's is the only cache on
-disk).
+**chrI: CLOSED** — the regenerated chrI receipt anchored 18/18 called
+folds + truth ranks vs the committed chrI QV receipts; the CLI
+receipt parity TRUE (mod walls/rss); the product calls field-identical
+per locus (folds, best LL, E, alternative gap, QUAL); the test mode
+field-identical to the committed chrI QV receipts on all 18 expressible
+loci — including the four named non-rank-1 residuals (L2/L13/L16/L18)
+with their exact error/QV numbers.
+
+**The full 17-component sample**: driven end-to-end through the CLI by
+`genome/instrumented/run-cli-product-fleet.sh` (marker-idempotent per
+component: the census regeneration through the committed runner, the
+CLI product run + test mode, the per-component gate vs the surviving
+committed QV receipts on every field), with the sample aggregate at
+`genome/instrumented/cli-product-aggregate.py` (the before/after
+receipt vs the committed assessment numbers of record: 880/1,132 =
+77.7%, QV median 60.00, p10 14.42). The long pole is the per-component
+census regeneration (the validation dir was cleaned of the census
+scratch; ~6 h of walls across the 15 fleet components); the
+record-derivation cache is whole-sample (one cache serves every
+component).
 
 ## Production constraints
 
