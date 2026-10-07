@@ -418,10 +418,14 @@ pub struct Options {
 // ---------------------------------------------------------------------------
 
 /// One persistent biWFA helper child (stdin/stdout pipes; one
-/// request-response round trip per alignment).
+/// request-response round trip per alignment). The child is closed
+/// EXPLICITLY by `finish` (close our stdin end so the helper sees EOF
+/// and exits, then reap it); the field-drop order alone would leave a
+/// wait() deadlock (the helper blocks on stdin while we block on its
+/// exit) — so no Drop impl waits, and run() always calls finish().
 pub struct QvAligner {
     child: std::process::Child,
-    stdin: std::process::ChildStdin,
+    stdin: Option<std::process::ChildStdin>,
     stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
@@ -448,7 +452,7 @@ impl QvAligner {
         );
         Ok(QvAligner {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
         })
     }
@@ -460,11 +464,15 @@ impl QvAligner {
             !first.is_empty() && !second.is_empty(),
             "empty sequence in the truth-QV test mode",
         )?;
-        self.stdin.write_all(first)?;
-        self.stdin.write_all(b"\t")?;
-        self.stdin.write_all(second)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| invalid("the qv-biwfa helper is already closed"))?;
+        stdin.write_all(first)?;
+        stdin.write_all(b"\t")?;
+        stdin.write_all(second)?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()?;
         let mut line = String::new();
         self.stdout.read_line(&mut line)?;
         let line = line.trim_end();
@@ -483,12 +491,17 @@ impl QvAligner {
         }
         Ok(counts)
     }
-}
 
-impl Drop for QvAligner {
-    fn drop(&mut self) {
-        let _ = self.stdin.flush();
-        let _ = self.child.wait();
+    /// Close the request stream (the helper exits at EOF) and reap
+    /// the child.
+    pub fn finish(&mut self) -> io::Result<()> {
+        if let Some(mut stdin) = self.stdin.take() {
+            stdin.flush()?;
+        }
+        self.child
+            .wait()
+            .map(|_| ())
+            .map_err(|error| invalid(&format!("the qv-biwfa helper wait failed: {error}")))
     }
 }
 
@@ -4224,6 +4237,14 @@ pub fn run(options: Options) -> io::Result<()> {
         } else {
             None
         };
+        // The test-mode pair's LL rank (the committed receipts'
+        // truth_rank/rank1 fields, for the same convention): 1 + the
+        // count of classes strictly above the pair's class LL.
+        let truth_rank_test = truth_pair_test.map(|(a, b)| {
+            let flat = b * (b + 1) / 2 + a;
+            let value = class_lls[flat];
+            1 + class_lls.iter().filter(|&&ll| ll > value).count()
+        });
         let truth_flat = truth_pair.map(|(a, b)| b * (b + 1) / 2 + a);
         let truth_log_likelihood = truth_flat.map(|flat| class_lls[flat]);
         let truth_rank = truth_log_likelihood.map(|value| {
@@ -5576,6 +5597,8 @@ pub fn run(options: Options) -> io::Result<()> {
                             "partition": partition,
                             "component": options.component,
                             "truth_pair_expressible": true,
+                            "truth_rank": truth_rank_test,
+                            "rank1": truth_rank_test == Some(1),
                             "called_folds": [
                                 {"index": winner_first,
                                  "strains": fold_strains(&folds[winner_first])},
@@ -5700,6 +5723,12 @@ pub fn run(options: Options) -> io::Result<()> {
         fetch_calls.load(Ordering::Relaxed),
         fetch_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
     );
+    if let Some(aligner) = truth_qv_aligner.as_ref() {
+        aligner
+            .lock()
+            .map_err(|_| invalid("the truth-QV aligner lock poisoned"))?
+            .finish()?;
+    }
     Ok(())
 }
 
