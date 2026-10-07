@@ -242,6 +242,10 @@ row), the gate FIELD-IDENTICAL vs the committed QV receipts on all
 expressible / 39 rank-1 (exactly the committed aggregate table's
 row), the gate FIELD-IDENTICAL vs the committed QV receipts on all
 56 expressible loci.
+**chrVI: CLOSED end-to-end through the CLI** — 29 loci / 25
+expressible / 16 rank-1 (exactly the committed aggregate table's
+row), the gate FIELD-IDENTICAL vs the committed QV receipts on all
+25 expressible loci.
 The long pole is the per-component
 census regeneration (the validation dir was cleaned of the census
 scratch; ~6 h of walls across the 15 fleet components); the
