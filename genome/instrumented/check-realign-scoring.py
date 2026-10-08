@@ -1079,13 +1079,29 @@ def main():
         # positioned relative to the row start.
         g = gfa(axis_rows[locus][2] if LOCALITY else partition)
         alignfold_groups = {}
+        alignfold_skel = {}
         if ALIGNFOLD:
+            rep_rows = {}
             for group in (
                 receipt[locus]
                 .get("alignment_connected_folds", {})
                 .get("merge_groups", [])
             ):
                 alignfold_groups[group["fold"]] = group
+                rr = group["representative_row"]
+                rep_rows[group["fold"]] = (rr["path_name"], rr["start"], rr["end"])
+            skel_by_rep = {}
+            for key, row in skeleton_by_fold.items():
+                if key[0] == locus and row.get("members"):
+                    m = row["members"][0]
+                    skel_by_rep.setdefault(
+                        (m["path_name"], m["start"], m["end"]), row
+                    )
+            for fi, fold in enumerate(ingredients[locus]["folds"]):
+                if fi not in rep_rows:
+                    m = fold["members"][0]
+                    rep_rows[fi] = (m["path_name"], m["start"], m["end"])
+                alignfold_skel[fi] = skel_by_rep[rep_rows[fi]]
         for fi, fold in enumerate(ingredients[locus]["folds"]):
             first = fold["members"][0]
             row_seq = fold["sequence"]
@@ -1146,7 +1162,8 @@ def main():
                     check(
                         any(
                             tuple(tuple(s) for s in locality_stored_contained(
-                                m["path_name"], m["start"], m["end"])) == ref_contained
+                                m["path_name"], m["start"], m["end"]))
+                            == tuple(tuple(s) for s in ref_contained)
                             for m in fold["members"]
                         ),
                         f"locus {locus} fold {fi}: the representative's "
@@ -1264,7 +1281,9 @@ def main():
                         f"locus {locus} fold {fi}: dropped stored step {rel} "
                         "is canonical-forward",
                     )
-                skel = skeleton_by_fold[(locus, fi)]
+                skel = (
+                    alignfold_skel[fi] if ALIGNFOLD else skeleton_by_fold[(locus, fi)]
+                )
                 check(
                     [(s[0], s[1]) for s in skel["steps"]] == walk_receipt,
                     f"locus {locus} fold {fi}: skeleton sidecar steps differ",
@@ -1586,14 +1605,18 @@ def main():
                 t is not None and t.get("convention") == "normalized",
                 f"locus {locus}: territory field missing or not the normalized convention",
             )
+            _model = (
+                "anchor-realign-v2-marginal-frame-territory-locality"
+                if LOCALITY
+                else "anchor-realign-v2-marginal-frame-territory"
+            )
+            # (--alignfold: the relaxed receipts state their own model
+            # honestly with the -alignfold marker appended.)
             check(
                 d["model"]
-                == (
-                    "anchor-realign-v2-marginal-frame-territory-locality"
-                    if LOCALITY
-                    else "anchor-realign-v2-marginal-frame-territory"
-                ),
-                f"locus {locus}: model tag is not the locality/territory convention",
+                == (_model + "-alignfold" if ALIGNFOLD else _model),
+                f"locus {locus}: model tag is not the "
+                "locality/territory convention",
             )
             axis_fold = t["axis_fold"]
             axis_start, axis_end, _ = axis_rows[locus]
