@@ -190,6 +190,27 @@ LOCALITY = "--locality" in sys.argv
 if LOCALITY:
     if EXHAUSTIVE is None or TIMERED_BASE is None:
         sys.exit("--locality requires --exhaustive COMP --timered-base BASE --run-tag TAG")
+# (The alignment-connected fold relaxation's checker mode: --alignfold
+# audits the RELAXED receipts (env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS,
+# through the same --timered-base mechanism) — the fold rule relaxed by
+# alignment connection subject to the read-level indistinguishability
+# safety property. Phase 2 handles the merged folds (a merged fold's
+# member rows fall into as many exact-fold classes as the group names;
+# the representative's class must re-derive the claimed walk); phase 10
+# audits the merge anatomy (every group's stated pocket masses ZERO —
+# the safety property; the groups disjoint; the representative the
+# group's minimum), re-derives the truth-second correspondence (the
+# shared-node-mass argmax and its tie/zero refusals) from the
+# ingredients' fold node multisets, and enforces THE CLASS-LL
+# INVARIANT: merging bit-identical likelihood columns cannot change
+# any class LL value, so every locus's best_log_likelihood must equal
+# the COMMITTED locality receipts of record — the no-regression proof,
+# checker-enforced. Requires the locality machinery.)
+ALIGNFOLD = "--alignfold" in sys.argv
+if ALIGNFOLD:
+    if not LOCALITY:
+        sys.exit("--alignfold requires --locality (the relaxed receipts of record are the locality runs)")
+    ALIGNFOLD_COMMITTED = f"{D}/realign-locality-exhaustive-{EXHAUSTIVE}.jsonl"
     MAPS_DIR = (
         sys.argv[sys.argv.index("--maps-dir") + 1]
         if "--maps-dir" in sys.argv
@@ -1057,6 +1078,14 @@ def main():
         # the CONTAINED syncmer steps (windows fully inside the extent),
         # positioned relative to the row start.
         g = gfa(axis_rows[locus][2] if LOCALITY else partition)
+        alignfold_groups = {}
+        if ALIGNFOLD:
+            for group in (
+                receipt[locus]
+                .get("alignment_connected_folds", {})
+                .get("merge_groups", [])
+            ):
+                alignfold_groups[group["fold"]] = group
         for fi, fold in enumerate(ingredients[locus]["folds"]):
             first = fold["members"][0]
             row_seq = fold["sequence"]
@@ -1067,18 +1096,72 @@ def main():
             if LOCALITY:
                 # the stored walk from the constituent merge; every
                 # member must re-derive the same relative stored walk
-                # (the coalescing proof - the fold key)
+                # (the coalescing proof - the fold key). Under
+                # --alignfold a MERGED fold's members fall into as
+                # many exact-fold classes as the merge group names,
+                # and the representative's class must re-derive the
+                # claimed walk exactly (the fold's walk/sequence IS
+                # the representative's).
+                if ALIGNFOLD:
+                    classes = {}
+                    for m in fold["members"]:
+                        key = tuple(tuple(s) for s in locality_stored_contained(
+                            m["path_name"], m["start"], m["end"]))
+                        classes.setdefault(key, []).append(m)
+                    group = alignfold_groups.get(fi)
+                    if group is None:
+                        check(
+                            len(classes) == 1,
+                            f"locus {locus} fold {fi}: an ungrouped fold must "
+                            "carry exactly one exact-fold class",
+                        )
+                    else:
+                        check(
+                            len(classes) == len(group["members"]),
+                            f"locus {locus} fold {fi}: the merged fold carries "
+                            f"{len(classes)} exact-fold classes, the group names "
+                            f"{len(group['members'])}",
+                        )
+                        # The representative's member row (the receipt's
+                        # own identification): it must be present among
+                        # the fold's members.
+                        rr = group["representative_row"]
+                        rep_rows = [
+                            m for m in fold["members"]
+                            if (m["path_name"], m["start"], m["end"])
+                            == (rr["path_name"], rr["start"], rr["end"])
+                        ]
+                        check(
+                            len(rep_rows) == 1,
+                            f"locus {locus} fold {fi}: the group's "
+                            "representative row is not a member of the "
+                            "merged fold",
+                        )
+                        if rep_rows:
+                            first = rep_rows[0]
                 contained = locality_stored_contained(
                     first["path_name"], first["start"], first["end"])
                 ref_contained = contained
-                for m in fold["members"][1:]:
+                if ALIGNFOLD and alignfold_groups.get(fi) is not None:
                     check(
-                        locality_stored_contained(
-                            m["path_name"], m["start"], m["end"]) == ref_contained,
-                        f"locus {locus} fold {fi}: member "
-                        f"{m['path_name']}:{m['start']}-{m['end']} relative "
-                        "stored walk differs from the fold representative",
+                        any(
+                            tuple(tuple(s) for s in locality_stored_contained(
+                                m["path_name"], m["start"], m["end"])) == ref_contained
+                            for m in fold["members"]
+                        ),
+                        f"locus {locus} fold {fi}: the representative's "
+                        "stored walk must be one of the merged fold's "
+                        "member classes",
                     )
+                for m in fold["members"][1:]:
+                    if not ALIGNFOLD:
+                        check(
+                            locality_stored_contained(
+                                m["path_name"], m["start"], m["end"]) == ref_contained,
+                            f"locus {locus} fold {fi}: member "
+                            f"{m['path_name']}:{m['start']}-{m['end']} relative "
+                            "stored walk differs from the fold representative",
+                        )
                     check(
                         m["end"] - m["start"] == fold["length"],
                         f"locus {locus} fold {fi}: member interval length differs",
@@ -2841,6 +2924,111 @@ def main():
                 f"(added {added}, replaced {replaced}, dropped {dropped})",
                 flush=True,
             )
+
+    # ------------------ phase 10: the alignment-connected fold
+    # relaxation audit (--alignfold)
+    if ALIGNFOLD:
+        print("== phase 10: the alignment-connected fold relaxation audit", flush=True)
+        committed_ll = {}
+        with open(ALIGNFOLD_COMMITTED) as f:
+            for line in f:
+                d = json.loads(line)
+                committed_ll[d["locus"]] = d["best_log_likelihood"]
+        total_groups = 0
+        merged_pairs = 0
+        for locus in LOCI:
+            d = receipt[locus]
+            field = d.get("alignment_connected_folds")
+            check(
+                field is not None,
+                f"locus {locus}: the relaxed receipt lacks the "
+                "alignment_connected_folds field",
+            )
+            check(
+                d.get("model", "").endswith("-alignfold"),
+                f"locus {locus}: the model string lacks the -alignfold marker",
+            )
+            groups = field["merge_groups"]
+            seen_members = set()
+            for group in groups:
+                total_groups += 1
+                check(
+                    group["pocket_node_mass"] == 0.0
+                    and group["pocket_edge_mass"] == 0.0,
+                    f"locus {locus}: merge group {group['fold']} states a "
+                    "NONZERO pocket mass — the safety property refused this "
+                    "merge in the instrument",
+                )
+                members = group["members"]
+                check(
+                    group["representative"] == min(members),
+                    f"locus {locus}: merge group {group['fold']}'s "
+                    "representative is not the member minimum",
+                )
+                check(
+                    len(seen_members & set(members)) == 0,
+                    f"locus {locus}: merge groups overlap on the exact folds",
+                )
+                seen_members.update(members)
+                merged_pairs += len(members) * (len(members) - 1) // 2
+            # THE CLASS-LL INVARIANT: merging bit-identical likelihood
+            # columns cannot change any class LL value — the relaxed
+            # run's best log-likelihood must equal the committed
+            # locality receipt of record's, at EVERY locus.
+            check(
+                abs(d["best_log_likelihood"] - committed_ll[locus]) == 0.0,
+                f"locus {locus}: the relaxed best_log_likelihood "
+                f"{d['best_log_likelihood']} differs from the committed "
+                f"{committed_ll[locus]} — a merge changed a class LL",
+            )
+            # THE TRUTH-SECOND CORRESPONDENCE re-derivation: the
+            # shared-node-mass argmax (and its tie/zero refusals)
+            # recomputed from the ingredients' fold node multisets.
+            corr = field.get("truth_second_correspondence")
+            if corr is not None and corr.get("candidates"):
+                ing_folds = ingredients[locus]["folds"]
+                node_sets = [
+                    {n[0]: n[1] for n in fold["nodes"]} for fold in ing_folds
+                ]
+                axis = corr["axis_fold"]
+                restated = []
+                for cand in corr["candidates"]:
+                    shared = sum(
+                        min(c, node_sets[cand["fold"]].get(key, 0))
+                        for key, c in node_sets[axis].items()
+                    )
+                    check(
+                        shared == cand["shared_node_mass"],
+                        f"locus {locus}: the correspondence's stated shared "
+                        f"mass {cand['shared_node_mass']} for fold "
+                        f"{cand['fold']} differs from the re-derived {shared}",
+                    )
+                    restated.append((cand["fold"], shared))
+                best = max(s for _, s in restated)
+                argmax = [f for f, s in restated if s == best]
+                if d["truth_folds"] is not None:
+                    check(
+                        best > 0 and len(argmax) == 1
+                        and d["truth_folds"][1] == argmax[0],
+                        f"locus {locus}: the expressible truth pair's second "
+                        f"fold {d['truth_folds'][1] if d['truth_folds'] else None} "
+                        f"differs from the re-derived correspondence argmax {argmax}",
+                    )
+                else:
+                    check(
+                        best == 0 or len(argmax) > 1,
+                        f"locus {locus}: the inexpressible locus's "
+                        "correspondence must be a tie or a zero connection "
+                        f"(re-derived argmax {argmax} at best {best})",
+                    )
+        print(
+            f"   {total_groups} merge groups, {merged_pairs} merged pairs; "
+            "every group's pocket masses ZERO; every locus's "
+            "best_log_likelihood identical to the committed locality "
+            "receipt of record; the truth-second correspondence "
+            "re-derived at every stated locus",
+            flush=True,
+        )
 
     print(f"\nTOTAL CHECKS: {checks[0]}, FAILURES: {len(failures)}")
     if failures:

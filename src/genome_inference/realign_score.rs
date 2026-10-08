@@ -97,6 +97,51 @@
 //!    the material-distance spectrum, mirrored pure functions from
 //!    panel_route_spine/cosine_probe.rs) over the likelihood ratios.
 //!
+//! 5b. THE ALIGNMENT-CONNECTED FOLD RELAXATION (the segdup follow-up's
+//!    stage-1 rule; env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS,
+//!    beside the exact rule — env-unset is the exact code path
+//!    verbatim). The exact fold rule coalesces rows only on identical
+//!    spelled sequence AND identical contained walk — exact node+edge
+//!    multiset equality at identical offsets — which is too strict at
+//!    near-identical segdup copies: the truth's second haplotype
+//!    exists as graph paths but the variant pockets (the
+//!    node-multiset deltas between the near-identical copies) break
+//!    the exact multiset, so the copies never coalesce and the exact
+//!    correspondence refuses. Under the relaxation rows fold by their
+//!    CONNECTION in the locality's alignment structure — the pggb
+//!    bubble: the connected alignment component containing the axis
+//!    correspondence (folds are alignment-adjacent iff their contained
+//!    node multisets share a node) — SUBJECT TO the safety property
+//!    that preserves the fold's guarantee, A FOLD STILL MEANS NO
+//!    CANDIDATE CAN DISTINGUISH THE MEMBERS: the members must be
+//!    indistinguishable AT READ LEVEL — identical on the
+//!    observed-material projection, i.e. every evidence unit's
+//!    per-fold log-likelihood column is BIT-IDENTICAL across the
+//!    members (the operative exactly-verified predicate, computed
+//!    from the scoring matrix itself), whose data-level form is the
+//!    derived condition: every node and edge in the symmetric
+//!    difference of the members' contained multisets — the variant
+//!    pockets — carries ZERO observed census mass at this locus, OR
+//!    THE FOLD DOES NOT HAPPEN (the merge is refused and the exact
+//!    folds stand; an SNV pocket with even one observed read refuses
+//!    the merge — the property that prevents folding
+//!    genuinely-distinguishable material). The same alignment
+//!    connection carries the truth-second correspondence: the fold
+//!    carrying the second haplotype's rows with the MAXIMUM
+//!    shared-node mass with the axis fold (argmax, not a threshold;
+//!    ties and disconnected candidates refuse — no fabrication),
+//!    replacing the exact rule's single-window/exactly-one-fold
+//!    attribution refusal. The merged fold carries the representative's
+//!    sequence/walk/skeleton (any member is valid under the asserted
+//!    invariant) and the additive multiset merge; the report names
+//!    every merge group with its pocket masses and refusal counters,
+//!    and the truth-QV artifact carries the correspondence receipt
+//!    (checker inputs). Merging LL-identical columns preserves every
+//!    class LL value, so winner and truth likelihoods are unchanged;
+//!    fold indices, class counts, called strain lists and QUAL spectra
+//!    can change where merges land — every change attributable to a
+//!    named merge group.
+//!
 //! 6. THE EXACTNESS PROOF: for EVERY scored (unit, fold, placement) in
 //!    the pilot domain the factorized score is asserted equal to the
 //!    direct per-base comparison (the backbone verified base-by-base
@@ -1557,6 +1602,542 @@ fn differing_observed_mass(
     total
 }
 
+// ---------------------------------------------------------------------------
+// The alignment-connected fold relaxation (the segdup follow-up's
+// stage-1 rule, env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS).
+//
+// THE EXACT FOLD RULE coalesces rows only on identical spelled
+// sequence AND identical contained relative walk — exact node+edge
+// multiset equality at identical offsets. At near-identical segdup
+// copies that rule is too strict: the truth's second haplotype
+// exists as graph paths (its rows are present in the fold space)
+// but the variant pockets — the node-multiset deltas between the
+// near-identical copies — break the exact multiset, so the copies
+// never coalesce and the exact correspondence refuses.
+//
+// THE RELAXED RULE. Rows fold by their connection in the locality's
+// alignment structure — the pggb bubble: the connected alignment
+// component containing the axis correspondence (two folds are
+// alignment-adjacent iff their contained node multisets share a
+// node; the bubble is the transitive closure around the axis fold)
+// — rather than exact multiset equality alone, SUBJECT TO the
+// safety property that preserves the fold's guarantee:
+//
+// A FOLD STILL MEANS NO CANDIDATE CAN DISTINGUISH THE MEMBERS. The
+// members must be indistinguishable AT READ LEVEL — identical on
+// the observed-material projection: every evidence unit's
+// per-fold log-likelihood is bit-identical across the members
+// (the operative, exactly-verified check; it is the definition of
+// "no candidate distinguishes the members", computed from the
+// scoring matrix itself), whose data-level form is: every node and
+// edge in the symmetric difference of the members' contained
+// multisets — the variant pockets — carries ZERO observed census
+// mass at this locus. A pocket carrying read mass means some read's
+// occurrence covers differing material, its placements vote against
+// the members' different spellings, and its unit's likelihood
+// differs — the fold does NOT happen (the merge is refused and the
+// exact folds stand). This is the property that prevents folding
+// genuinely-distinguishable material: an SNV pocket with even one
+// observed read refuses the merge, whatever the node-sharing.
+// (The conditions are transitive: pairwise massless symmetric
+// differences union to a massless difference, and bit-identical
+// columns are an equivalence — so a merged group is safe at every
+// pair by construction.)
+//
+// The merged fold carries the representative's sequence, walk and
+// pin skeleton (any member is a valid representative under the
+// invariant — the asserted bit-identical columns ARE the proof),
+// every member's member rows, and the additive multiset merge of
+// the members' node/edge multisets (the pair machinery's own
+// convention). Merging cannot change any class log-likelihood
+// value (LL-identical columns map every class to a class of the
+// same value), so the winner's likelihood and the truth pair's
+// likelihood are preserved; class COUNTS, fold indices, called
+// strain lists and QUAL spectra can change where merges land —
+// the receipts name every merge group (the report's
+// alignment_connected_folds field) so any changed call is
+// attributable.
+// ---------------------------------------------------------------------------
+
+/// The per-locus merge anatomy, emitted in the report under the
+/// relaxed rule (checker input: every merge named, every pocket
+/// mass stated).
+struct MergeGroupReceipt {
+    /// The merged fold's index in the relaxed fold space.
+    index: usize,
+    /// The representative's index in the exact fold space (whose
+    /// sequence/walk/skeleton the merged fold carries).
+    representative: usize,
+    /// The representative's first member row (the checker's
+    /// representative-class identification input).
+    representative_row: MemberRow,
+    /// Every member's index in the exact fold space, ascending.
+    members: Vec<usize>,
+    /// The pairwise symmetric-difference node/edge observed mass
+    /// (the variant pockets' read mass — zero at every admitted
+    /// merge by the safety condition).
+    pocket_node_mass: f64,
+    pocket_edge_mass: f64,
+}
+
+/// The merge pass's honest counters (the receipt's refusal anatomy).
+struct MergeCounters {
+    /// Candidate pairs whose columns are bit-identical (the safety
+    /// condition's input set).
+    equal_column_pairs: u64,
+    /// Refusals by reason (mutually exclusive, in check order).
+    refused_outside_bubble: u64,
+    refused_unshared: u64,
+    refused_pocket_mass: u64,
+    /// Admitted merges.
+    merged_pairs: u64,
+}
+
+/// A minimal union-find over fold indices.
+struct FoldUnionFind {
+    parent: Vec<usize>,
+}
+
+impl FoldUnionFind {
+    fn new(n: usize) -> Self {
+        FoldUnionFind {
+            parent: (0..n).collect(),
+        }
+    }
+    fn find(&mut self, index: usize) -> usize {
+        let mut root = index;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut node = index;
+        while self.parent[node] != root {
+            let next = self.parent[node];
+            self.parent[node] = root;
+            node = next;
+        }
+        root
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.parent[rb] = ra;
+        }
+    }
+}
+
+/// FNV-1a over the column's f64 bit patterns (the equal-column
+/// bucket key; buckets are re-verified bit-exactly before use).
+fn column_bits_hash(column: &[f64]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &value in column {
+        for byte in value.to_bits().to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// Whether two sorted contained multisets share at least one node
+/// key (the alignment structure's adjacency: a shared interned node
+/// IS an alignment edge between the two rows).
+fn share_a_node(left: &[(u64, u32)], right: &[(u64, u32)]) -> bool {
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => return true,
+        }
+    }
+    false
+}
+
+/// The multiset-intersection mass of two sorted node multisets (the
+/// alignment correspondence measure: the shared material counted at
+/// copy multiplicity, no thresholds).
+fn shared_node_mass(left: &[(u64, u32)], right: &[(u64, u32)]) -> u64 {
+    let (mut i, mut j, mut total) = (0usize, 0usize, 0u64);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                total += left[i].1.min(right[j].1) as u64;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    total
+}
+
+/// THE MERGE PASS (pure; unit-tested). Consumes the exact-rule fold
+/// space with its scoring matrix and territory images, returns the
+/// relaxed fold space, the remapped axis fold, the merge anatomy and
+/// the counters. With no axis fold or no eligible pair the output
+/// is the input unchanged (the exact rule stands).
+#[allow(clippy::type_complexity)]
+fn alignment_connected_merge(
+    folds: Vec<Fold>,
+    matrix: Vec<Vec<f64>>,
+    pinned: Vec<Vec<bool>>,
+    mismatches: Vec<Vec<u32>>,
+    territory: Vec<(u64, u64)>,
+    axis_fold: Option<usize>,
+    territory_axis_fold: Option<usize>,
+    observed_node: &HashMap<u64, f64>,
+    observed_edge: &HashMap<u64, f64>,
+) -> (
+    Vec<Fold>,
+    Vec<Vec<f64>>,
+    Vec<Vec<bool>>,
+    Vec<Vec<u32>>,
+    Vec<(u64, u64)>,
+    Option<usize>,
+    Vec<MergeGroupReceipt>,
+    MergeCounters,
+) {
+    let n = folds.len();
+    let mut groups: Vec<MergeGroupReceipt> = Vec::new();
+    let counters = MergeCounters {
+        equal_column_pairs: 0,
+        refused_outside_bubble: 0,
+        refused_unshared: 0,
+        refused_pocket_mass: 0,
+        merged_pairs: 0,
+    };
+    let Some(axis) = axis_fold else {
+        return (
+            folds,
+            matrix,
+            pinned,
+            mismatches,
+            territory,
+            territory_axis_fold,
+            groups,
+            counters,
+        );
+    };
+    if n < 2 {
+        return (
+            folds,
+            matrix,
+            pinned,
+            mismatches,
+            territory,
+            territory_axis_fold,
+            groups,
+            counters,
+        );
+    }
+    // The alignment structure's connected components: one union per
+    // shared node (the pggb bubble around the axis correspondence is
+    // the axis fold's component).
+    let mut node_carriers: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (index, fold) in folds.iter().enumerate() {
+        for &(key, _) in &fold.nodes {
+            node_carriers.entry(key).or_default().push(index);
+        }
+    }
+    let mut components = FoldUnionFind::new(n);
+    for carriers in node_carriers.values() {
+        for &index in carriers.iter().skip(1) {
+            components.union(carriers[0], index);
+        }
+    }
+    let mut components = components;
+    let axis_root = components.find(axis);
+    // Component roots, hoisted (the parallel pair scan reads them).
+    let roots: Vec<usize> = (0..n).map(|i| components.find(i)).collect();
+    // The equal-column buckets (the safety condition's candidate
+    // set: only bit-identical columns can be indistinguishable).
+    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (index, column) in matrix.iter().enumerate() {
+        buckets.entry(column_bits_hash(column)).or_default().push(index);
+    }
+    let node_mass = |key: u64| observed_node.get(&key).copied().unwrap_or(0.0);
+    let edge_mass = |key: u64| observed_edge.get(&key).copied().unwrap_or(0.0);
+    // The eligible-pair scan, parallel over buckets (folds, matrix
+    // and roots are read-only here; the per-bucket counters sum to
+    // the receipt's).
+    struct BucketOutcome {
+        pairs: Vec<(usize, usize)>,
+        equal_column_pairs: u64,
+        refused_outside_bubble: u64,
+        refused_unshared: u64,
+        refused_pocket_mass: u64,
+    }
+    let outcomes: Vec<BucketOutcome> = buckets
+        .values()
+        .collect::<Vec<_>>()
+        .par_iter()
+        .map(|bucket| {
+            let mut out = BucketOutcome {
+                pairs: Vec::new(),
+                equal_column_pairs: 0,
+                refused_outside_bubble: 0,
+                refused_unshared: 0,
+                refused_pocket_mass: 0,
+            };
+            for a in 0..bucket.len() {
+                for b in (a + 1)..bucket.len() {
+                    let (i, j) = (bucket[a].min(bucket[b]), bucket[a].max(bucket[b]));
+                    // (Hash buckets can collide: verify the columns
+                    // bit-exactly — the safety condition's exact
+                    // predicate, never the hash.)
+                    if !matrix[i]
+                        .iter()
+                        .zip(&matrix[j])
+                        .all(|(x, y)| x.to_bits() == y.to_bits())
+                    {
+                        continue;
+                    }
+                    out.equal_column_pairs += 1;
+                    if roots[i] != axis_root || roots[j] != axis_root {
+                        out.refused_outside_bubble += 1;
+                        continue;
+                    }
+                    if !share_a_node(&folds[i].nodes, &folds[j].nodes) {
+                        out.refused_unshared += 1;
+                        continue;
+                    }
+                    // THE SAFETY PROPERTY (the derived condition): the
+                    // variant pockets — the symmetric-difference node
+                    // and edge material — must carry ZERO observed
+                    // read mass, or the fold does NOT happen.
+                    let pocket_nodes =
+                        differing_observed_mass(&folds[i].nodes, &folds[j].nodes, &node_mass);
+                    let pocket_edges =
+                        differing_observed_mass(&folds[i].edges, &folds[j].edges, &edge_mass);
+                    if pocket_nodes > 0.0 || pocket_edges > 0.0 {
+                        out.refused_pocket_mass += 1;
+                        continue;
+                    }
+                    out.pairs.push((i, j));
+                }
+            }
+            out
+        })
+        .collect();
+    let mut merges = FoldUnionFind::new(n);
+    let mut counters = counters;
+    for outcome in outcomes {
+        counters.equal_column_pairs += outcome.equal_column_pairs;
+        counters.refused_outside_bubble += outcome.refused_outside_bubble;
+        counters.refused_unshared += outcome.refused_unshared;
+        counters.refused_pocket_mass += outcome.refused_pocket_mass;
+        counters.merged_pairs += outcome.pairs.len() as u64;
+        for (i, j) in outcome.pairs {
+            merges.union(i, j);
+        }
+    }
+    // The merge groups: every fold's merge root, grouped and sorted
+    // (the representative is the group's smallest old index —
+    // deterministic).
+    let mut groups_by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for index in 0..n {
+        let root = merges.find(index);
+        groups_by_root.entry(root).or_default().push(index);
+    }
+    let mut sorted_groups: Vec<Vec<usize>> = groups_by_root
+        .into_values()
+        .filter(|members| members.len() > 1)
+        .map(|mut members| {
+            members.sort_unstable();
+            members
+        })
+        .collect();
+    sorted_groups.sort_unstable_by_key(|members| members[0]);
+    let group_of_min: HashMap<usize, usize> = sorted_groups
+        .iter()
+        .enumerate()
+        .map(|(group_index, members)| (members[0], group_index))
+        .collect();
+    let member_of: HashMap<usize, usize> = sorted_groups
+        .iter()
+        .enumerate()
+        .flat_map(|(group_index, members)| {
+            members
+                .iter()
+                .map(move |&member| (member, group_index))
+        })
+        .collect();
+    // Rebuild the fold space: representatives (and solo folds) in old
+    // index order; non-representative members fold into their group.
+    let mut folds: Vec<Option<Fold>> = folds.into_iter().map(Some).collect();
+    let mut new_folds: Vec<Fold> = Vec::with_capacity(n);
+    // The new index of each old fold (group members share the merged
+    // fold's index) and the representative of each new fold.
+    let mut remap: Vec<usize> = vec![0; n];
+    let mut new_representatives: Vec<usize> = Vec::with_capacity(n);
+    for old in 0..n {
+        if member_of.contains_key(&old) && !group_of_min.contains_key(&old) {
+            // A non-representative group member: it folds into its
+            // group's merged fold (remapped after the loop).
+            continue;
+        }
+        remap[old] = new_folds.len();
+        new_representatives.push(old);
+        if let Some(&group_index) = group_of_min.get(&old) {
+            let members = &sorted_groups[group_index];
+            let representative =
+                folds[old].take().expect("representative taken twice");
+            let mut all_members: Vec<MemberRow> = Vec::new();
+            let mut pocket_node_mass = 0.0f64;
+            let mut pocket_edge_mass = 0.0f64;
+            for &member in members.iter().skip(1) {
+                // (The admitted-pair transitivity proof, asserted: every
+                // member's column is bit-identical to the representative's.)
+                assert!(
+                    matrix[member]
+                        .iter()
+                        .zip(&matrix[old])
+                        .all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "merged group with distinguishable members"
+                );
+                let member_fold =
+                    folds[member].take().expect("group member taken twice");
+                all_members.extend(member_fold.members.iter().cloned());
+                pocket_node_mass += differing_observed_mass(
+                    &representative.nodes,
+                    &member_fold.nodes,
+                    &node_mass,
+                );
+                pocket_edge_mass += differing_observed_mass(
+                    &representative.edges,
+                    &member_fold.edges,
+                    &edge_mass,
+                );
+            }
+            all_members.extend(representative.members.iter().cloned());
+            groups.push(MergeGroupReceipt {
+                index: new_folds.len(),
+                representative: old,
+                representative_row: representative.members[0].clone(),
+                members: members.clone(),
+                pocket_node_mass,
+                pocket_edge_mass,
+            });
+            // (The fold's material stays ONE hypothesis's — the
+            // representative's multisets, the committed convention:
+            // under the exact rule a fold's members do not multiply
+            // its material either. The other members are PROVEN
+            // equivalent, not additional copies.)
+            new_folds.push(Fold {
+                seq: representative.seq,
+                len: representative.len,
+                walk: representative.walk,
+                node_positions: representative.node_positions,
+                members: all_members,
+                nodes: representative.nodes,
+                edges: representative.edges,
+            });
+        } else {
+            new_folds.push(folds[old].take().expect("solo fold taken twice"));
+        }
+    }
+    // Every group member's remap lands on the merged fold's index.
+    for members in &sorted_groups {
+        let merged_index = remap[members[0]];
+        for &member in members {
+            remap[member] = merged_index;
+        }
+    }
+    // The per-fold rows and territory images regroup onto each new
+    // fold's representative (the merged fold carries the
+    // representative's column — asserted bit-identical to every
+    // member's above).
+    let new_matrix: Vec<Vec<f64>> = new_representatives
+        .iter()
+        .map(|&old| matrix[old].clone())
+        .collect();
+    let new_pinned: Vec<Vec<bool>> = new_representatives
+        .iter()
+        .map(|&old| pinned[old].clone())
+        .collect();
+    let new_mismatches: Vec<Vec<u32>> = new_representatives
+        .iter()
+        .map(|&old| mismatches[old].clone())
+        .collect();
+    let new_territory: Vec<(u64, u64)> =
+        new_representatives.iter().map(|&old| territory[old]).collect();
+    let new_territory_axis_fold = territory_axis_fold.map(|index| remap[index]);
+    (
+        new_folds,
+        new_matrix,
+        new_pinned,
+        new_mismatches,
+        new_territory,
+        new_territory_axis_fold,
+        groups,
+        counters,
+    )
+}
+
+/// THE ALIGNMENT-CONNECTED TRUTH-SECOND CORRESPONDENCE (the
+/// relaxation's attribution clause). The committed exact rule derives
+/// the truth-second fold only at single-window partitions and only
+/// when the haplotype's rows form exactly one fold — at the segdup
+/// block the partitions are multi-window and the haplotype's tiling
+/// is fragmented into several folds, so the exact rule refuses and
+/// the locus is scored with the truth pair INEXPRESSIBLE even though
+/// the truth's second haplotype exists as graph paths. Under the
+/// relaxation the correspondence is read from the alignment structure
+/// itself: among the folds carrying the second haplotype's member
+/// rows, the fold connected to the axis correspondence by the
+/// MAXIMUM shared contained-node multiset mass (the alignment's own
+/// correspondence measure — the same connection the fold relation
+/// reads; an argmax, not a threshold). Refused (None) when the axis
+/// fold is absent, when no fold carries the haplotype, when the best
+/// candidate shares NO node with the axis fold (not connected to the
+/// bubble), or when the maximum is TIED (an ambiguous correspondence
+/// — the no-fabrication discipline preserved). The receipt value
+/// names every candidate and its shared mass (checker input).
+fn connected_truth_second(
+    folds: &[Fold],
+    truth_first: Option<usize>,
+    second_name: &str,
+) -> (Option<usize>, Option<serde_json::Value>) {
+    let Some(axis) = truth_first else {
+        return (None, None);
+    };
+    let mut candidates: Vec<(usize, u64)> = folds
+        .iter()
+        .enumerate()
+        .filter(|(_, fold)| {
+            fold.members.iter().any(|m| m.path_name == second_name)
+        })
+        .map(|(index, fold)| {
+            (index, shared_node_mass(&folds[axis].nodes, &fold.nodes))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let receipt = Some(json!({
+        "rule": "alignment-connected-argmax",
+        "axis_fold": axis,
+        "candidates": candidates.iter().map(|&(index, shared)| json!({
+            "fold": index,
+            "shared_node_mass": shared,
+        })).collect::<Vec<_>>(),
+    }));
+    if candidates.is_empty() {
+        return (None, receipt);
+    }
+    let best = candidates[0].1;
+    if best == 0 {
+        // Not connected to the axis correspondence at all: the
+        // haplotype's folds lie outside the bubble.
+        return (None, receipt);
+    }
+    let ties = candidates.iter().filter(|&&(_, shared)| shared == best).count();
+    if ties > 1 {
+        // An ambiguous correspondence: the no-fabrication rule.
+        return (None, receipt);
+    }
+    (Some(candidates[0].0), receipt)
+}
+
 fn signature_cosine_distance(
     nodes_a: &[(u64, u32)],
     edges_a: &[(u64, u32)],
@@ -2463,6 +3044,20 @@ pub fn run(options: Options) -> io::Result<()> {
         std::env::var("IMPG_REALIGN_TERRITORY_NORMALIZED").is_ok(),
         std::env::var("IMPG_REALIGN_LOCALITY_DOMAIN").is_ok(),
     );
+    // (The alignment-connected fold relaxation — the segdup
+    // follow-up's stage-1 rule, beside the exact fold rule: env
+    // IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS. Rows fold by their
+    // connection in the locality's alignment structure — the pggb
+    // bubble containing the axis correspondence — subject to the
+    // derived safety property (the members indistinguishable AT
+    // READ LEVEL: bit-identical per-unit likelihood columns, the
+    // variant pockets carrying zero observed read mass, or the fold
+    // does NOT happen), and the truth-second correspondence is read
+    // from the same alignment connection. The full derived rule is
+    // documented at the merge pass. Env-unset: the exact rule's code
+    // path verbatim — the committed receipts byte-identical.)
+    let alignment_connected =
+        std::env::var("IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS").is_ok();
     // The selection flag pins the convention exactly: Env defers to
     // the committed switches verbatim (the instrument default);
     // Default pins the committed base convention (env ignored);
@@ -3505,6 +4100,14 @@ pub fn run(options: Options) -> io::Result<()> {
     } else {
         "anchor-realign-v2-marginal-frame"
     };
+    // (The alignment-connected fold relaxation's marker — the
+    // receipt states its own model honestly; env-unset keeps the
+    // committed strings byte-identical.)
+    let model_name: std::borrow::Cow<str> = if alignment_connected {
+        std::borrow::Cow::Owned(format!("{model_name}-alignfold"))
+    } else {
+        std::borrow::Cow::Borrowed(model_name)
+    };
     let truth_qv_haplotypes = &options.truth_qv;
     struct LocusOutput {
         skeleton: Vec<u8>,
@@ -4142,6 +4745,105 @@ pub fn run(options: Options) -> io::Result<()> {
         );
         rss.probe(&format!("locus_{locus}_scored"))?;
 
+        // --------------------------- the observed census mass (moved up
+        // from below the truth folds: pure code motion — the merge pass
+        // reads it; the values are identical to the committed site's,
+        // and every later use is unchanged.)
+        let observed_nodes: HashMap<u64, f64> = {
+            let mut map: HashMap<u64, f64> = HashMap::new();
+            for &record in &locus_records {
+                let multiplicity = census_records[record].multiplicity as f64;
+                for &node in &touching[&record].covered_nodes {
+                    *map.entry(node).or_default() += multiplicity;
+                }
+            }
+            map
+        };
+        let observed_edges: HashMap<u64, f64> = {
+            let mut map: HashMap<u64, f64> = HashMap::new();
+            for &record in &locus_records {
+                let multiplicity = census_records[record].multiplicity as f64;
+                for &edge in &touching[&record].covered_edges {
+                    *map.entry(edge).or_default() += multiplicity;
+                }
+            }
+            map
+        };
+        let observed_node_mass: f64 = observed_nodes.values().sum();
+        let observed_edge_mass: f64 = observed_edges.values().sum();
+
+        // --------------- the alignment-connected fold relaxation pass
+        // (env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS; the derived rule
+        // documented at the merge function. Env-unset: the exact-rule
+        // structures pass through untouched — the committed receipts
+        // byte-identical. Env-set: the exact folds merge by alignment
+        // connection subject to the read-level indistinguishability
+        // safety property, and every fold-indexed structure regroups
+        // onto the relaxed space (the representative's rows — asserted
+        // bit-identical to every member's).)
+        let merge_axis_fold = territory_axis_fold.or_else(|| {
+            folds.iter().position(|fold| {
+                fold.members.iter().any(|m| {
+                    m.path_name == options.component
+                        && m.start == axis_start
+                        && m.end == axis_end
+                })
+            })
+        });
+        let (
+            folds,
+            matrix,
+            pinned,
+            mismatches,
+            territory,
+            territory_axis_fold,
+            merge_groups,
+            merge_counters,
+        ) = if alignment_connected {
+            alignment_connected_merge(
+                folds,
+                matrix,
+                pinned,
+                mismatches,
+                territory,
+                merge_axis_fold,
+                territory_axis_fold,
+                &observed_nodes,
+                &observed_edges,
+            )
+        } else {
+            (
+                folds,
+                matrix,
+                pinned,
+                mismatches,
+                territory,
+                territory_axis_fold,
+                Vec::new(),
+                MergeCounters {
+                    equal_column_pairs: 0,
+                    refused_outside_bubble: 0,
+                    refused_unshared: 0,
+                    refused_pocket_mass: 0,
+                    merged_pairs: 0,
+                },
+            )
+        };
+        let n_folds = folds.len();
+        if alignment_connected && !merge_groups.is_empty() {
+            eprintln!(
+                "[score] locus {locus}: alignment-connected folds: {} merge groups \
+                 ({} admitted pairs of {} equal-column candidates; refusals: \
+                 {} outside-bubble, {} unshared, {} pocket-mass)",
+                merge_groups.len(),
+                merge_counters.merged_pairs,
+                merge_counters.equal_column_pairs,
+                merge_counters.refused_outside_bubble,
+                merge_counters.refused_unshared,
+                merge_counters.refused_pocket_mass,
+            );
+        }
+
         // ------------------------------------------- the exhaustive classes
         let class_started = Instant::now();
         let pair_count = n_folds * (n_folds + 1) / 2;
@@ -4197,8 +4899,20 @@ pub fn run(options: Options) -> io::Result<()> {
             ensure(hits.len() <= 1, "multiple folds carry the window's axis row")?;
             hits.first().copied()
         };
-        let truth_second = if windows_of_partition[&partition] > 1 {
-            None
+        let (truth_second, truth_second_correspondence) = if alignment_connected {
+            // (The relaxation's attribution clause: the truth-second
+            // fold is the fold carrying the haplotype's rows with the
+            // MAXIMUM shared-node mass with the axis fold — the
+            // alignment connection itself, replacing the exact rule's
+            // single-window/exactly-one-fold refusal; ties and
+            // disconnected candidates still refuse — no fabrication.)
+            connected_truth_second(
+                &folds,
+                truth_first,
+                &format!("SK1#0#{contig}"),
+            )
+        } else if windows_of_partition[&partition] > 1 {
+            (None, None)
         } else {
             // (THE FLEET GENERALIZATION, measured at chrXIV/chrXVI/
             // chrXVII-class repeat-locality partitions: a SINGLE-window
@@ -4222,11 +4936,14 @@ pub fn run(options: Options) -> io::Result<()> {
                 })
                 .map(|(index, _)| index)
                 .collect();
-            if hits.len() == 1 {
-                hits.first().copied()
-            } else {
-                None
-            }
+            (
+                if hits.len() == 1 {
+                    hits.first().copied()
+                } else {
+                    None
+                },
+                None,
+            )
         };
         let truth_pair = match (truth_first, truth_second) {
             (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
@@ -4240,6 +4957,9 @@ pub fn run(options: Options) -> io::Result<()> {
         // (single-window partitions only; exactly one fold). The
         // committed instrument hard-coded the validation sample's
         // SK1 second haplotype; the test mode requires it as input.
+        // (The alignment-connected relaxation's test-mode
+        // correspondence receipt, emitted in the truth-QV artifact.)
+        let mut truth_second_correspondence_test: Option<serde_json::Value> = None;
         let truth_pair_test = if truth_qv_mode {
             ensure(
                 truth_qv_haplotypes[0] == options.component,
@@ -4247,8 +4967,14 @@ pub fn run(options: Options) -> io::Result<()> {
                  (the window's own axis row is the truth-first fold)",
             )?;
             let second_name = truth_qv_haplotypes[1].as_str();
-            let second = if windows_of_partition[&partition] > 1 {
-                None
+            let (second, correspondence) = if alignment_connected {
+                // (The relaxation's attribution clause, test mode: the
+                // same alignment-connected correspondence as the
+                // committed truth pair's — the four segdup windows'
+                // expressibility clause.)
+                connected_truth_second(&folds, truth_first, second_name)
+            } else if windows_of_partition[&partition] > 1 {
+                (None, None)
             } else {
                 let hits: Vec<usize> = folds
                     .iter()
@@ -4260,8 +4986,9 @@ pub fn run(options: Options) -> io::Result<()> {
                     })
                     .map(|(index, _)| index)
                     .collect();
-                (hits.len() == 1).then(|| hits[0])
+                ((hits.len() == 1).then(|| hits[0]), None)
             };
+            truth_second_correspondence_test = correspondence;
             match (truth_first, second) {
                 (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
                 _ => None,
@@ -4298,30 +5025,10 @@ pub fn run(options: Options) -> io::Result<()> {
         };
 
         // ------------------------------------------- observed mass (no shares)
-        let observed_nodes: HashMap<u64, f64> = {
-            let mut map: HashMap<u64, f64> = HashMap::new();
-            for &record in &locus_records {
-                let multiplicity = census_records[record].multiplicity as f64;
-                for &node in &touching[&record].covered_nodes {
-                    *map.entry(node).or_default() += multiplicity;
-                }
-            }
-            map
-        };
-        let observed_edges: HashMap<u64, f64> = {
-            let mut map: HashMap<u64, f64> = HashMap::new();
-            for &record in &locus_records {
-                let multiplicity = census_records[record].multiplicity as f64;
-                for &edge in &touching[&record].covered_edges {
-                    *map.entry(edge).or_default() += multiplicity;
-                }
-            }
-            map
-        };
+        // (Moved above the fold-relaxation pass — the merge reads it;
+        // the committed values are reused verbatim below.)
         let observed_node_fn = |key: u64| observed_nodes.get(&key).copied().unwrap_or(0.0);
         let observed_edge_fn = |key: u64| observed_edges.get(&key).copied().unwrap_or(0.0);
-        let observed_node_mass: f64 = observed_nodes.values().sum();
-        let observed_edge_mass: f64 = observed_edges.values().sum();
 
         // ------------------------------------------------- the QUAL cluster
         let qual_started = Instant::now();
@@ -5370,6 +6077,46 @@ pub fn run(options: Options) -> io::Result<()> {
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
         }
+        // (The alignment-connected fold relaxation's report field —
+        // emitted ONLY under the relaxed rule: the merge anatomy with
+        // every group's pocket masses (zero at every admitted merge —
+        // the safety property, checker-verifiable), the refusal
+        // counters, and the truth-second correspondence receipt. The
+        // default receipt schema stays byte-identical — the identity
+        // gate.)
+        if alignment_connected {
+            let mut report_value: serde_json::Value =
+                serde_json::from_slice(&report_buf)?;
+            report_value["alignment_connected_folds"] = json!({
+                "rule": "the pggb bubble (the connected alignment component 
+                          containing the axis correspondence) + read-level 
+                          indistinguishability: bit-identical per-unit 
+                          likelihood columns and zero observed read mass on 
+                          every variant pocket, or the fold does not happen",
+                "merge_groups": merge_groups.iter().map(|group| json!({
+                    "fold": group.index,
+                    "representative": group.representative,
+                    "representative_row": {
+                        "path_name": group.representative_row.path_name,
+                        "start": group.representative_row.start,
+                        "end": group.representative_row.end,
+                    },
+                    "members": group.members,
+                    "pocket_node_mass": group.pocket_node_mass,
+                    "pocket_edge_mass": group.pocket_edge_mass,
+                })).collect::<Vec<_>>(),
+                "counters": {
+                    "equal_column_pairs": merge_counters.equal_column_pairs,
+                    "refused_outside_bubble": merge_counters.refused_outside_bubble,
+                    "refused_unshared": merge_counters.refused_unshared,
+                    "refused_pocket_mass": merge_counters.refused_pocket_mass,
+                    "merged_pairs": merge_counters.merged_pairs,
+                },
+                "truth_second_correspondence": truth_second_correspondence,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
         report_buf.push(b'\n');
         eprintln!(
             "[score] locus {locus}: receipts/IO (named classes + ingredients + \
@@ -5535,6 +6282,8 @@ pub fn run(options: Options) -> io::Result<()> {
                         "partition": partition,
                         "component": options.component,
                         "truth_pair_expressible": false,
+                        "truth_second_correspondence":
+                            truth_second_correspondence_test,
                         "called_folds": [
                             {"index": winner_first,
                              "strains": fold_strains(&folds[winner_first])},
@@ -5629,6 +6378,8 @@ pub fn run(options: Options) -> io::Result<()> {
                             "partition": partition,
                             "component": options.component,
                             "truth_pair_expressible": true,
+                            "truth_second_correspondence":
+                                truth_second_correspondence_test,
                             "truth_rank": truth_rank_test,
                             "rank1": truth_rank_test == Some(1),
                             "called_folds": [
@@ -6806,4 +7557,225 @@ mod tests {
             }
         }
     }
+
+    // ---------------------------------------------------------------
+    // The alignment-connected fold relaxation (stage 1): the merge
+    // pass and the truth-second correspondence, unit-tested against
+    // toy fold spaces that name every rule clause.
+    // ---------------------------------------------------------------
+
+    /// A toy fold: nodes/edges sorted+deduped multisets, members by
+    /// name, an all-identical column by default.
+    fn alignfold_toy(
+        nodes: &[(u64, u32)],
+        edges: &[(u64, u32)],
+        members: &[&str],
+    ) -> Fold {
+        let mut sorted: Vec<(u64, u32)> = nodes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                b.1 += a.1;
+                true
+            } else {
+                false
+            }
+        });
+        let mut esorted: Vec<(u64, u32)> = edges.to_vec();
+        esorted.sort_unstable();
+        esorted.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                b.1 += a.1;
+                true
+            } else {
+                false
+            }
+        });
+        Fold {
+            seq: vec![b'A', b'C', b'G', b'T'],
+            len: 4,
+            walk: vec![(0, 1)],
+            node_positions: HashMap::new(),
+            members: members
+                .iter()
+                .map(|&name| MemberRow {
+                    path_name: name.to_string(),
+                    start: 0,
+                    end: 4,
+                })
+                .collect(),
+            nodes: sorted,
+            edges: esorted,
+        }
+    }
+
+    #[test]
+    fn the_alignment_connected_merge_folds_indistinguishable_copies() {
+        // The axis fold (0) and two near-identical copies (1, 2) share
+        // nodes (alignment-connected), carry bit-identical likelihood
+        // columns, and their variant pockets carry ZERO observed mass
+        // — they fold. Fold 3 differs from 1 only in a pocket node
+        // (5) that carries observed mass — its merge is REFUSED (the
+        // safety property: a pocket with even one observed read
+        // refuses the fold). Fold 4 has a distinguishable column —
+        // refused. Fold 5 shares NO node with the bubble — outside
+        // the axis's connected alignment component, refused.
+        let folds = vec![
+            // 0: the axis correspondence.
+            alignfold_toy(&[(1, 1), (2, 1)], &[(100, 1)], &["axis"]),
+            // 1: a near-identical copy — pocket node 3 (massless).
+            alignfold_toy(&[(1, 1), (2, 1), (3, 1)], &[(100, 1), (101, 1)], &["twinA"]),
+            // 2: another — pocket node 4 (massless).
+            alignfold_toy(&[(1, 1), (2, 1), (4, 1)], &[(100, 1), (102, 1)], &["twinB"]),
+            // 3: differs from 1 by pocket node 5 (OBSERVED mass 7.5).
+            alignfold_toy(&[(1, 1), (2, 1), (5, 1)], &[(100, 1), (103, 1)], &["massed"]),
+            // 4: shares nodes, unobserved pockets, but a DIFFERENT
+            // column (a read-level distinction).
+            alignfold_toy(&[(1, 1), (2, 1), (6, 1)], &[(100, 1), (104, 1)], &["othercolumn"]),
+            // 5: NO shared node with the bubble (its own alignment
+            // component) — outside the axis correspondence's bubble.
+            alignfold_toy(&[(30, 1), (31, 1)], &[(105, 1)], &["disconnected"]),
+        ];
+        let matrix = vec![
+            vec![1.5, -2.0],
+            vec![1.5, -2.0],
+            vec![1.5, -2.0],
+            vec![1.5, -2.0],
+            vec![1.5, 0.25], // fold 4: a different column
+            vec![1.5, -2.0],
+        ];
+        let pinned = vec![vec![true, false]; 6];
+        let mismatches = vec![vec![0u32, 0u32]; 6];
+        let territory = vec![(0u64, 4u64); 6];
+        let observed_node: HashMap<u64, f64> =
+            [(5u64, 7.5f64)].into_iter().collect();
+        let observed_edge: HashMap<u64, f64> = HashMap::new();
+        let (new_folds, new_matrix, _pinned, _mismatches, new_territory, new_axis, groups, counters) =
+            alignment_connected_merge(
+                folds, matrix, pinned, mismatches, territory, Some(0), Some(0),
+                &observed_node, &observed_edge,
+            );
+        // Exactly one merge group: {0, 1, 2} (the axis bubble's
+        // indistinguishable copies).
+        assert_eq!(groups.len(), 1, "one merge group");
+        assert_eq!(groups[0].members, vec![0, 1, 2]);
+        assert_eq!(groups[0].representative, 0);
+        assert_eq!(groups[0].pocket_node_mass, 0.0);
+        assert_eq!(groups[0].pocket_edge_mass, 0.0);
+        // 0, 1, 2 coalesce; 3, 4, 5 stand: 4 folds.
+        assert_eq!(new_folds.len(), 4);
+        // The merged fold carries every member's rows and the
+        // REPRESENTATIVE's multiset (one hypothesis's material —
+        // members are proven equivalents, not additional copies).
+        assert_eq!(new_folds[0].members.len(), 3);
+        assert_eq!(new_folds[0].nodes, vec![(1, 1), (2, 1)]);
+        assert_eq!(new_folds[0].edges, vec![(100, 1)]);
+        // The merged fold's column is the representative's.
+        assert_eq!(new_matrix[0], vec![1.5, -2.0]);
+        assert_eq!(new_territory[0], (0, 4));
+        assert_eq!(new_axis, Some(0));
+        // The refusal anatomy: fold 3 refused on pocket mass (with the
+        // axis too — its pocket 5 is observed); fold 4 on the column;
+        // fold 5 on the bubble (4 pairs). The equal-column bucket is
+        // {0,1,2,3,5}: 10 candidate pairs.
+        assert_eq!(counters.equal_column_pairs, 10);
+        assert_eq!(counters.refused_pocket_mass, 3); // (0,3),(1,3),(2,3)
+        assert_eq!(counters.refused_outside_bubble, 4); // (x,5) pairs
+        assert_eq!(counters.refused_unshared, 0);
+        assert_eq!(counters.merged_pairs, 3); // (0,1),(0,2),(1,2)
+        // Solo folds keep their own data.
+        assert_eq!(new_folds[1].members[0].path_name, "massed");
+    }
+
+    #[test]
+    fn the_alignment_connected_merge_refuses_bit_differences() {
+        // Two alignment-adjacent folds with massless pockets whose
+        // columns differ in the LAST BIT: not bit-identical — a
+        // candidate can distinguish them (the exactness discipline
+        // is bit-level) — the fold does NOT happen.
+        let folds = vec![
+            alignfold_toy(&[(1, 1)], &[], &["axis"]),
+            alignfold_toy(&[(1, 1), (2, 1)], &[], &["twin"]),
+        ];
+        let matrix = vec![
+            vec![1.0f64],
+            vec![1.0f64 + f64::EPSILON], // one ULP apart
+        ];
+        let (new_folds, _m, _p, _mm, _t, _a, groups, counters) =
+            alignment_connected_merge(
+                folds, matrix, vec![vec![true]; 2], vec![vec![0u32]; 2],
+                vec![(0, 4); 2], Some(0), Some(0),
+                &HashMap::new(), &HashMap::new(),
+            );
+        assert!(groups.is_empty(), "a ULP distinction refuses the fold");
+        assert_eq!(new_folds.len(), 2);
+        assert_eq!(counters.equal_column_pairs, 0);
+        assert_eq!(counters.merged_pairs, 0);
+    }
+
+    #[test]
+    fn the_alignment_connected_merge_without_axis_fold_is_a_noop() {
+        // No axis correspondence: no bubble, no merges — the exact
+        // fold space passes through unchanged.
+        let folds = vec![
+            alignfold_toy(&[(1, 1)], &[], &["a"]),
+            alignfold_toy(&[(1, 1)], &[], &["b"]),
+        ];
+        let matrix = vec![vec![1.0], vec![1.0]];
+        let (new_folds, _m, _p, _mm, _t, _a, groups, _c) = alignment_connected_merge(
+            folds, matrix, vec![vec![true]; 2], vec![vec![0u32]; 2],
+            vec![(0, 4); 2], None, None,
+            &HashMap::new(), &HashMap::new(),
+        );
+        assert!(groups.is_empty());
+        assert_eq!(new_folds.len(), 2);
+    }
+
+    #[test]
+    fn the_connected_truth_second_takes_the_max_shared_correspondence() {
+        // The segdup block's attribution: several folds carry the
+        // second haplotype's rows; the alignment connection (the
+        // maximum shared contained-node mass with the axis fold)
+        // selects the correspondence; ties and disconnected
+        // candidates refuse (no fabrication).
+        let axis = alignfold_toy(&[(1, 1), (2, 1), (3, 1), (4, 1)], &[], &["axis"]);
+        let near = alignfold_toy(&[(1, 1), (2, 1), (3, 1), (9, 1)], &[], &["HG002#2"]);
+        let mid = alignfold_toy(&[(1, 1), (2, 1)], &[], &["HG002#2"]);
+        let far = alignfold_toy(&[(1, 1)], &[], &["HG002#2"]);
+        let unconnected = alignfold_toy(&[(40, 1)], &[], &["HG002#2"]);
+        let folds = vec![axis, mid, near, far, unconnected];
+        let (chosen, receipt) =
+            connected_truth_second(&folds, Some(0), "HG002#2");
+        assert_eq!(chosen, Some(2), "the maximum shared-node mass wins");
+        let receipt = receipt.expect("the correspondence receipt");
+        let candidates = receipt["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 4, "every carrier named");
+        assert_eq!(candidates[0]["fold"], 2);
+        assert_eq!(candidates[0]["shared_node_mass"], 3);
+
+        // A TIE at the maximum: the ambiguous correspondence refuses.
+        let tied = alignfold_toy(&[(1, 1), (2, 1), (3, 1), (10, 1)], &[], &["HG002#2"]);
+        let folds = vec![
+            alignfold_toy(&[(1, 1), (2, 1), (3, 1), (4, 1)], &[], &["axis"]),
+            alignfold_toy(&[(1, 1), (2, 1), (3, 1), (9, 1)], &[], &["HG002#2"]),
+            tied,
+        ];
+        let (chosen, _receipt) = connected_truth_second(&folds, Some(0), "HG002#2");
+        assert_eq!(chosen, None, "a tie refuses the attribution");
+
+        // NO shared node with the axis fold: not connected to the
+        // bubble — refused even as the sole carrier.
+        let folds = vec![
+            alignfold_toy(&[(1, 1)], &[], &["axis"]),
+            alignfold_toy(&[(40, 1)], &[], &["HG002#2"]),
+        ];
+        let (chosen, _receipt) = connected_truth_second(&folds, Some(0), "HG002#2");
+        assert_eq!(chosen, None, "a disconnected carrier refuses");
+
+        // No axis fold: no correspondence at all.
+        let (chosen, receipt) = connected_truth_second(&folds, None, "HG002#2");
+        assert_eq!(chosen, None);
+        assert!(receipt.is_none());
+    }
+
 }
