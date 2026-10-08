@@ -1,0 +1,1546 @@
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:857:5
+    |
+854 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+857 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:879:16
+    |
+879 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:880:14
+    |
+880 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `generate_multi_level_candidates` is never used
+    --> src/resolution.rs:3397:4
+     |
+3397 | fn generate_multi_level_candidates(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7171:4
+     |
+7171 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10712:4
+      |
+10712 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib) generated 6 warnings
+warning: variable does not need to be mutable
+   --> examples/panel_route_evidence_topology.rs:719:17
+    |
+719 |             let mut profile_bins: Vec<[u64; 5]> = (0..nbins)
+    |                 ----^^^^^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `w`
+   --> examples/panel_route_evidence_topology.rs:717:17
+    |
+717 |             let w = 3usize; // window in bins on each side
+    |                 ^ help: if this is intentional, prefix it with an underscore: `_w`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `min_count`
+   --> examples/panel_route_evidence_topology.rs:718:17
+    |
+718 |             let min_count = 20u64;
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_min_count`
+
+warning: fields `group`, `start`, and `end` are never read
+   --> examples/panel_route_evidence_topology.rs:209:5
+    |
+208 | struct OccRow {
+    |        ------ fields in this struct
+209 |     group: u32,
+    |     ^^^^^
+...
+212 |     start: u64,
+    |     ^^^^^
+213 |     end: u64,
+    |     ^^^
+    |
+    = note: `OccRow` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `impg` (example "panel_route_evidence_topology" test) generated 4 warnings (run `cargo fix --example "panel_route_evidence_topology" -p impg --tests` to apply 3 suggestions)
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:1767:13
+     |
+1767 |         let mut mode;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `evaluated_state_classes` is assigned to, but never used
+    --> examples/panel_route_diploid_search/genome.rs:4896:13
+     |
+4896 |         let mut evaluated_state_classes = 0usize;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_evaluated_state_classes` instead
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `evaluated_state_classes` is never read
+    --> examples/panel_route_diploid_search/genome.rs:5052:17
+     |
+5052 |                 evaluated_state_classes += 1;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:5732:5
+     |
+5732 |     mut load_profiles: F,
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable `parent_map` is assigned to, but never used
+    --> examples/panel_route_diploid_search/genome.rs:7424:17
+     |
+7424 |             let mut parent_map = PersistentCountMap::default();
+     |                 ^^^^^^^^^^^^^^
+     |
+     = note: consider using `_parent_map` instead
+
+warning: value assigned to `parent_map` is never read
+    --> examples/panel_route_diploid_search/genome.rs:7436:17
+     |
+7436 |                 parent_map = PersistentCountMap::from_sorted(&parent_counts);
+     |                 ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: constant `JOINT_PROJECTION_WINDOW` is never used
+  --> examples/panel_route_diploid_search/mod.rs:33:7
+   |
+33 | const JOINT_PROJECTION_WINDOW: u64 = 16;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `line` is never used
+  --> examples/panel_route_diploid_search/mod.rs:41:4
+   |
+41 | fn line(f: &mut File, v: &impl Serialize) -> io::Result<()> {
+   |    ^^^^
+
+warning: methods `validate` and `meter_options` are never used
+   --> examples/panel_route_diploid_search/mod.rs:87:12
+    |
+ 86 | impl Options {
+    | ------------ methods in this implementation
+ 87 |     pub fn validate(&self) -> io::Result<()> {
+    |            ^^^^^^^^
+...
+112 |     fn meter_options(&self) -> haploid::Options {
+    |        ^^^^^^^^^^^^^
+
+warning: method `has_intents` is never used
+   --> examples/panel_route_diploid_search/mod.rs:153:8
+    |
+152 | impl Emission {
+    | ------------- method in this implementation
+153 |     fn has_intents(&self) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: variants `Emission` and `Native` are never constructed
+   --> examples/panel_route_diploid_search/mod.rs:166:5
+    |
+164 | enum Work {
+    |      ---- variants in this enum
+165 |     Geometry(PairedTask),
+166 |     Emission(Emission),
+    |     ^^^^^^^^
+167 |     Native(NativeHead),
+    |     ^^^^^^
+    |
+    = note: `Work` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `class` is never used
+   --> examples/panel_route_diploid_search/mod.rs:170:8
+    |
+169 | impl Work {
+    | --------- method in this implementation
+170 |     fn class(&self) -> usize {
+    |        ^^^^^
+
+warning: struct `Baseline` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:209:8
+    |
+209 | struct Baseline {
+    |        ^^^^^^^^
+
+warning: struct `PairedChain` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:222:8
+    |
+222 | struct PairedChain {
+    |        ^^^^^^^^^^^
+
+warning: struct `Receipt` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:227:8
+    |
+227 | struct Receipt {
+    |        ^^^^^^^
+
+warning: struct `EmissionPlan` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:231:8
+    |
+231 | struct EmissionPlan {
+    |        ^^^^^^^^^^^^
+
+warning: function `next_native` is never used
+   --> examples/panel_route_diploid_search/mod.rs:236:4
+    |
+236 | fn next_native(pair: [usize; 2], families: usize, fixed: bool) -> Option<[usize; 2]> {
+    |    ^^^^^^^^^^^
+
+warning: function `expansion_eligible` is never used
+   --> examples/panel_route_diploid_search/mod.rs:248:8
+    |
+248 | pub fn expansion_eligible(pair: &Pair, admitted: &[Pair]) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `route_slice` is never used
+   --> examples/panel_route_diploid_search/mod.rs:252:4
+    |
+252 | fn route_slice(route: &routes::Route, from: u64, to: u64) -> io::Result<Vec<routes::Segment>> {
+    |    ^^^^^^^^^^^
+
+warning: function `segment_slice` is never used
+   --> examples/panel_route_diploid_search/mod.rs:288:4
+    |
+288 | fn segment_slice(segment: &routes::Segment, from: u64, to: u64) -> io::Result<routes::Segment> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `project_segment` is never used
+   --> examples/panel_route_diploid_search/mod.rs:312:4
+    |
+312 | fn project_segment(
+    |    ^^^^^^^^^^^^^^^
+
+warning: struct `Engine` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:355:8
+    |
+355 | struct Engine<'a, 'b> {
+    |        ^^^^^^
+
+warning: multiple methods are never used
+    --> examples/panel_route_diploid_search/mod.rs:399:8
+     |
+ 397 | impl Engine<'_, '_> {
+     | ------------------- methods in this implementation
+ 398 |     /// One production dispatch, or finite retirement; errors preserve the current remainder.
+ 399 |     fn scheduler_step(&mut self) -> io::Result<bool> {
+     |        ^^^^^^^^^^^^^^
+...
+ 444 |     fn write_pending(&self) -> io::Result<()> {
+     |        ^^^^^^^^^^^^^
+...
+ 450 |     fn owned(&self) -> usize {
+     |        ^^^^^
+...
+ 453 |     fn account(&mut self, stage: &str) -> io::Result<()> {
+     |        ^^^^^^^
+...
+ 465 |     fn transfer(&mut self, work: Work) {
+     |        ^^^^^^^^
+...
+ 470 |     fn begin(&mut self, index: usize, grant: usize) -> io::Result<Work> {
+     |        ^^^^^
+...
+ 486 |     fn release_current(&mut self) -> io::Result<()> {
+     |        ^^^^^^^^^^^^^^^
+...
+ 496 |     fn geometry_grant(&self, t: &PairedTask) -> io::Result<usize> {
+     |        ^^^^^^^^^^^^^^
+...
+ 530 |     fn emission_plan(&mut self, p: &Emission) -> io::Result<EmissionPlan> {
+     |        ^^^^^^^^^^^^^
+...
+ 597 |     fn grant(&mut self, work: &Work) -> io::Result<usize> {
+     |        ^^^^^
+...
+ 618 |     fn ready(&mut self) -> io::Result<Option<(usize, usize, usize)>> {
+     |        ^^^^^
+...
+ 638 |     fn service_emission(&mut self, p: Emission, native: Option<NativeHead>) -> io::Result<()> {
+     |        ^^^^^^^^^^^^^^^^
+...
+ 690 |     fn dispatch(&mut self, work: Work) -> io::Result<()> {
+     |        ^^^^^^^^
+...
+ 723 |     fn score(&mut self, pair: &Pair, native: bool) -> io::Result<Scored> {
+     |        ^^^^^
+...
+ 736 |     fn eligible(&self, pair: &Pair) -> bool {
+     |        ^^^^^^^^
+...
+ 739 |     fn add_base(&mut self, scored: Scored, depth: u8, reason: &str) -> io::Result<()> {
+     |        ^^^^^^^^
+...
+ 786 |     fn completed_receipt(&mut self, s: &Scored) {
+     |        ^^^^^^^^^^^^^^^^^
+...
+ 796 |     fn remember(&mut self, s: &Scored) -> io::Result<bool> {
+     |        ^^^^^^^^
+...
+ 812 |     fn native(&mut self, families: [usize; 2]) -> io::Result<()> {
+     |        ^^^^^^
+...
+ 829 |     fn feedback(
+     |        ^^^^^^^^
+...
+ 903 |     fn confirm(&mut self, base: usize, copy: usize, p: continuation::Proposal) -> io::Result<()> {
+     |        ^^^^^^^
+...
+1117 |     fn ordinary(&mut self, t: PairedTask) -> io::Result<()> {
+     |        ^^^^^^^^
+...
+1157 |     fn admit_chains(&mut self) -> io::Result<()> {
+     |        ^^^^^^^^^^^^
+...
+1179 |     fn chain(&mut self) -> io::Result<()> {
+     |        ^^^^^
+
+warning: function `run` is never used
+    --> examples/panel_route_diploid_search/mod.rs:1235:8
+     |
+1235 | pub fn run(options: Options, fixed_family: Option<usize>) -> io::Result<Value> {
+     |        ^^^
+
+warning: function `test_intermediate_improvement_window` is never used
+    --> examples/panel_route_diploid_search/mod.rs:1392:8
+     |
+1392 | pub fn test_intermediate_improvement_window(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_engine` is never used
+    --> examples/panel_route_diploid_search/mod.rs:1461:4
+     |
+1461 | fn test_engine<'a, 'b>(
+     |    ^^^^^^^^^^^
+
+warning: function `test_frontier_transitions` is never used
+    --> examples/panel_route_diploid_search/mod.rs:1527:8
+     |
+1527 | pub fn test_frontier_transitions(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_scheduler_transitions` is never used
+    --> examples/panel_route_diploid_search/mod.rs:1771:8
+     |
+1771 | pub fn test_scheduler_transitions(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AxisFile` is never constructed
+  --> examples/panel_route_diploid_search/genome.rs:38:12
+   |
+38 | pub struct AxisFile {
+   |            ^^^^^^^^
+
+warning: function `load_axis` is never used
+  --> examples/panel_route_diploid_search/genome.rs:56:8
+   |
+56 | pub fn load_axis(path: &Path) -> io::Result<AxisFile> {
+   |        ^^^^^^^^^
+
+warning: function `load_bed_axis_partitions` is never used
+  --> examples/panel_route_diploid_search/genome.rs:89:8
+   |
+89 | pub fn load_bed_axis_partitions(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WindowDomainExtension` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:183:12
+    |
+183 | pub struct WindowDomainExtension {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WINDOW_DOMAIN_ADDED_OCCURRENCE_BASE` is never used
+   --> examples/panel_route_diploid_search/genome.rs:211:7
+    |
+211 | const WINDOW_DOMAIN_ADDED_OCCURRENCE_BASE: usize = 100_000_000_000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_window_domain_extension` is never used
+   --> examples/panel_route_diploid_search/genome.rs:219:8
+    |
+219 | pub fn build_window_domain_extension(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `port_word_seams` is never used
+   --> examples/panel_route_diploid_search/genome.rs:663:8
+    |
+663 | pub fn port_word_seams(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `split_candidates` is never used
+   --> examples/panel_route_diploid_search/genome.rs:693:8
+    |
+693 | pub fn split_candidates(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `SplitPairPrefilterStats` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:771:12
+    |
+771 | pub struct SplitPairPrefilterStats {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SplitPrefilterStats` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:780:12
+    |
+780 | pub struct SplitPrefilterStats {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_candidates_prefiltered` is never used
+   --> examples/panel_route_diploid_search/genome.rs:889:8
+    |
+889 | pub fn split_candidates_prefiltered<F, S>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `connected_path_subsample` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1020:8
+     |
+1020 | pub fn connected_path_subsample(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `event_profile_cost` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1125:8
+     |
+1125 | pub fn event_profile_cost(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `profile_event_seam` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1193:8
+     |
+1193 | pub fn profile_event_seam(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `covered_bytes` and `covered_records` are never read
+    --> examples/panel_route_diploid_search/genome.rs:1311:5
+     |
+1307 | struct RecordsSidecar {
+     |        -------------- fields in this struct
+...
+1311 |     covered_bytes: u64,
+     |     ^^^^^^^^^^^^^
+1312 |     covered_records: u64,
+     |     ^^^^^^^^^^^^^^^
+
+warning: associated items `open_filtered`, `retained_entries`, `loaded_from_sidecar`, and `open_filtered_guarded` are never used
+    --> examples/panel_route_diploid_search/genome.rs:1535:12
+     |
+1522 | impl ProfileCache {
+     | ----------------- associated items in this implementation
+...
+1535 |     pub fn open_filtered(path: &Path, retain: &dyn Fn(&str) -> bool) -> io::Result<Self> {
+     |            ^^^^^^^^^^^^^
+...
+1539 |     pub fn retained_entries(&self) -> usize {
+     |            ^^^^^^^^^^^^^^^^
+...
+1543 |     pub fn loaded_from_sidecar(&self) -> bool {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+1558 |     pub fn open_filtered_guarded(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `intern_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2109:8
+     |
+2109 | pub fn intern_profile(
+     |        ^^^^^^^^^^^^^^
+
+warning: function `profile_classes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2306:8
+     |
+2306 | pub fn profile_classes(alleles: &[GenomeAllele]) -> Vec<Vec<usize>> {
+     |        ^^^^^^^^^^^^^^^
+
+warning: function `class_for_alleles` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2317:4
+     |
+2317 | fn class_for_alleles(alleles: &[GenomeAllele]) -> (Vec<Profile>, Vec<usize>) {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: associated items `empty`, `observe_interior`, `observe_boundary`, `classification_label`, and `deferred` are never used
+    --> examples/panel_route_diploid_search/genome.rs:2426:12
+     |
+2425 | impl IncidenceTable {
+     | ------------------- associated items in this implementation
+2426 |     pub fn empty() -> Self {
+     |            ^^^^^
+...
+2433 |     pub fn observe_interior(&mut self, locus: usize, profile: &Profile) {
+     |            ^^^^^^^^^^^^^^^^
+...
+2439 |     pub fn observe_boundary(&mut self, boundary: usize, profile: &Profile) {
+     |            ^^^^^^^^^^^^^^^^
+...
+2469 |     pub fn classification_label(&self, key: &FeatureKey) -> String {
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+2477 |     pub fn deferred(&self) -> usize {
+     |            ^^^^^^^^
+
+warning: function `merged_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2672:4
+     |
+2672 | fn merged_profile(parts: &[&Profile]) -> io::Result<Profile> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `score_complete_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2685:4
+     |
+2685 | fn score_complete_profile(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `snapshot` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3051:12
+     |
+3034 | impl DpStageProbe {
+     | ----------------- associated function in this implementation
+...
+3051 |     pub fn snapshot() -> (Vec<f64>, u64) {
+     |            ^^^^^^^^
+
+warning: field `keys` is never read
+    --> examples/panel_route_diploid_search/genome.rs:3131:5
+     |
+3129 | struct FeatureUniverse {
+     |        --------------- field in this struct
+3130 |     /// fid -> feature, sorted by feature.
+3131 |     keys: Vec<FeatureKey>,
+     |     ^^^^
+
+warning: function `profile_value_fingerprint` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3371:4
+     |
+3371 | fn profile_value_fingerprint(feature: &FeatureKey, value: u64) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `conflict_copy_eligible` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4030:4
+     |
+4030 | fn conflict_copy_eligible(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `conflict_eligible` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4058:4
+     |
+4058 | fn conflict_eligible(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: method `peak_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4211:12
+     |
+4200 | impl PeriodicRssGuard {
+     | --------------------- method in this implementation
+...
+4211 |     pub fn peak_bytes(&self) -> u64 {
+     |            ^^^^^^^^^^
+
+warning: function `coalesced_route` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6321:8
+     |
+6321 | pub fn coalesced_route(ranges: &[SourceRange]) -> io::Result<routes::Route> {
+     |        ^^^^^^^^^^^^^^^
+
+warning: function `reconstruct_assignment` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1105:8
+     |
+1105 | pub fn reconstruct_assignment(
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Pair` is never constructed
+ --> examples/panel_route_diploid_search/score.rs:5:12
+  |
+5 | pub struct Pair {
+  |            ^^^^
+
+warning: method `key` is never used
+  --> examples/panel_route_diploid_search/score.rs:10:12
+   |
+ 8 | impl Pair {
+   | --------- method in this implementation
+ 9 |     /// A comparison key only: never reorder an immutable baseline's slots.
+10 |     pub fn key(&self) -> Self {
+   |            ^^^
+
+warning: struct `Factor` is never constructed
+  --> examples/panel_route_diploid_search/score.rs:17:12
+   |
+17 | pub struct Factor {
+   |            ^^^^^^
+
+warning: struct `Scored` is never constructed
+  --> examples/panel_route_diploid_search/score.rs:25:12
+   |
+25 | pub struct Scored {
+   |            ^^^^^^
+
+warning: function `add` is never used
+  --> examples/panel_route_diploid_search/score.rs:29:8
+   |
+29 | pub fn add(a: u64, b: u64) -> io::Result<u64> {
+   |        ^^^
+
+warning: function `loss` is never used
+  --> examples/panel_route_diploid_search/score.rs:33:8
+   |
+33 | pub fn loss(q: u64, observed: u64, histogram: u64) -> io::Result<(f64, f64)> {
+   |        ^^^^
+
+warning: struct `Scorer` is never constructed
+  --> examples/panel_route_diploid_search/score.rs:46:12
+   |
+46 | pub struct Scorer<'a, 'b> {
+   |            ^^^^^^
+
+warning: method `evaluate` is never used
+  --> examples/panel_route_diploid_search/score.rs:56:12
+   |
+55 | impl Scorer<'_, '_> {
+   | ------------------- method in this implementation
+56 |     pub fn evaluate(&mut self, pair: &Pair, native: bool) -> io::Result<Scored> {
+   |            ^^^^^^^^
+
+warning: `impg` (example "pooled_region_decompose" test) generated 66 warnings (run `cargo fix --example "pooled_region_decompose" -p impg --tests` to apply 2 suggestions)
+warning: `impg` (example "panel_route_seam_diagnostic" test) generated 65 warnings (65 duplicates)
+warning: `impg` (example "panel_route_genome_rescore" test) generated 66 warnings (66 duplicates)
+warning: function `expansion_eligible` is never used
+   --> examples/panel_route_diploid_search/mod.rs:248:8
+    |
+248 | pub fn expansion_eligible(pair: &Pair, admitted: &[Pair]) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `impg` (example "panel_route_diploid_search" test) generated 41 warnings (40 duplicates)
+warning: unused import: `machine::mechanism_checks`
+   --> examples/panel_route_completion_probe/mod.rs:209:16
+    |
+209 | pub(crate) use machine::mechanism_checks;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `machine::ready_family_checks`
+   --> examples/panel_route_completion_probe/mod.rs:211:16
+    |
+211 | pub(crate) use machine::ready_family_checks;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mechanism_checks` is never used
+   --> examples/panel_route_completion_probe/machine.rs:755:15
+    |
+755 | pub(crate) fn mechanism_checks(mut o: Options, e: &mut Evaluator<'_>) -> io::Result<Value> {
+    |               ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fixture_engine` is never used
+    --> examples/panel_route_completion_probe/machine.rs:1421:4
+     |
+1421 | fn fixture_engine<'a>(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `conservation` is never used
+    --> examples/panel_route_completion_probe/machine.rs:1459:4
+     |
+1459 | fn conservation(e: &Engine<'_>) {
+     |    ^^^^^^^^^^^^
+
+warning: function `legacy_drive` is never used
+    --> examples/panel_route_completion_probe/machine.rs:1491:4
+     |
+1491 | fn legacy_drive(
+     |    ^^^^^^^^^^^^
+
+warning: function `ready_family_checks` is never used
+    --> examples/panel_route_completion_probe/machine.rs:1548:15
+     |
+1548 | pub(crate) fn ready_family_checks(mut o: Options, e: &mut Evaluator<'_>) -> io::Result<Value> {
+     |               ^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (example "panel_route_completion_probe" test) generated 7 warnings (run `cargo fix --example "panel_route_completion_probe" -p impg --tests` to apply 2 suggestions)
+warning: variable does not need to be mutable
+   --> examples/panel_route_genome_smoke.rs:516:9
+    |
+516 |     let mut ranges = if options.all_paths {
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> examples/panel_route_genome_smoke.rs:528:10
+    |
+528 |     let (mut axis_intervals, mut ranges, slice_offset) = match options.locus_range.as_deref() {
+    |          ----^^^^^^^^^^^^^^
+    |          |
+    |          help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_genome_smoke.rs:1136:9
+     |
+1136 |     let mut probe_boundary_endpoints_seconds = boundary_endpoints_started.elapsed().as_secs_f64();
+     |         ----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: value assigned to `best_loss` is never read
+    --> examples/panel_route_genome_smoke.rs:1719:17
+     |
+1719 |                 best_loss = seed.loss.expect("checked");
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: associated function `open_filtered` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1535:12
+     |
+1522 | impl ProfileCache {
+     | ----------------- associated function in this implementation
+...
+1535 |     pub fn open_filtered(path: &Path, retain: &dyn Fn(&str) -> bool) -> io::Result<Self> {
+     |            ^^^^^^^^^^^^^
+
+warning: `impg` (example "panel_route_component_rescore" test) generated 66 warnings (66 duplicates)
+warning: `impg` (example "panel_route_genome_smoke" test) generated 55 warnings (50 duplicates) (run `cargo fix --example "panel_route_genome_smoke" -p impg --tests` to apply 3 suggestions)
+   Compiling impg v0.5.0 (/home/erikg/impg-genome-inference)
+warning: `impg` (example "panel_route_assignment_rescore" test) generated 66 warnings (66 duplicates)
+warning: unnecessary trailing semicolon
+    --> examples/panel_route_spine/mod.rs:1689:79
+     |
+1689 |             let right_sequence = decompose_segment_sequence(sources, &right)?;;
+     |                                                                               ^ help: remove this semicolon
+     |
+     = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `boundary`
+   --> examples/panel_route_spine/phasing.rs:245:5
+    |
+245 |     boundary: usize,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `overlap`
+   --> examples/panel_route_spine/phasing.rs:313:27
+    |
+313 |     for &(_, left, right, overlap) in canonical {
+    |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_overlap`
+
+warning: value assigned to `allele_profile` is never read
+   --> examples/panel_route_spine/phasing.rs:771:51
+    |
+771 |         let mut allele_profile: Option<Profile> = None;
+    |                                                   ^^^^ this value is reassigned later and never used
+...
+875 |             allele_profile = Some(profile);
+    |             -------------- `allele_profile` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/phasing.rs:2031:17
+     |
+2031 |             let mut draw =
+     |                 ----^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/phasing.rs:2649:5
+     |
+2649 |     mut spelled_out: Option<&mut HashMap<FeatureKey, Vec<crate::SpelledSpan>>>,
+     |     ----^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/phasing.rs:4392:9
+     |
+4392 |     let mut dry_run = std::env::var("IMPG_FINALIST_DRY_RUN").is_ok();
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `boundary`
+    --> examples/panel_route_spine/phasing.rs:3560:20
+     |
+3560 |             .map(|(boundary, draft)| {
+     |                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `boundary`
+    --> examples/panel_route_spine/phasing.rs:3543:16
+     |
+3543 |         .map(|(boundary, draft)| {
+     |                ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `coupling_started`
+    --> examples/panel_route_spine/phasing.rs:3963:9
+     |
+3963 |     let coupling_started = Instant::now();
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_coupling_started`
+
+warning: unused variable: `locus_classes`
+    --> examples/panel_route_spine/phasing.rs:6394:13
+     |
+6394 |         let locus_classes = LocusClassing {
+     |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_locus_classes`
+
+warning: unused variable: `model`
+    --> examples/panel_route_spine/phasing.rs:6684:13
+     |
+6684 |         let model = ScoreModel {
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_model`
+
+warning: unused variable: `partition`
+   --> examples/panel_route_spine/mod.rs:116:5
+    |
+116 |     partition: u32,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_partition`
+
+warning: unused variable: `routed_equal`
+   --> examples/panel_route_spine/mod.rs:119:5
+    |
+119 |     routed_equal: &crate::RoutedObs,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routed_equal`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_spine/mod.rs:1404:25
+     |
+1404 |                     let piece = (source, start, end, reverse, owner);
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `partitions`
+    --> examples/panel_route_spine/mod.rs:1755:5
+     |
+1755 |     partitions: &[u32],
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_partitions`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_spine/mod.rs:2271:21
+     |
+2271 |                 let piece = (source, start, end, reverse, piece_owner);
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `routed_equal`
+    --> examples/panel_route_spine/mod.rs:3627:5
+     |
+3627 |     routed_equal: &crate::RoutedObs,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routed_equal`
+
+warning: unused variable: `right_ranges`
+    --> examples/panel_route_spine/mod.rs:3754:5
+     |
+3754 |     right_ranges: &[genome::SpanningTraversal],
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_right_ranges`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:4529:34
+     |
+4529 |     let (mut margins_admissible, mut suffix_from_next) = compute_margins(&min_pair, &min_seam)?;
+     |                                  ----^^^^^^^^^^^^^^^^
+     |                                  |
+     |                                  help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:4541:9
+     |
+4541 |     let mut margins = compute_local_margins(&min_pair, &successors_ref, &viable);
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: value assigned to `partitions` is never read
+   --> examples/panel_route_mem_routed.rs:883:9
+    |
+883 |         partitions += extension.pure_new.len();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `pp`
+    --> examples/panel_route_mem_routed.rs:1944:37
+     |
+1944 | ...                   .map(|&(pp, occ)| occ as u64)
+     |                               ^^ help: if this is intentional, prefix it with an underscore: `_pp`
+
+warning: unused variable: `pp`
+    --> examples/panel_route_mem_routed.rs:1920:37
+     |
+1920 | ...                   .map(|&(pp, occ)| occ as u64)
+     |                               ^^ help: if this is intentional, prefix it with an underscore: `_pp`
+
+warning: unused variable: `run_end`
+    --> examples/panel_route_mem_routed.rs:2862:13
+     |
+2862 |         let run_end = run[1] as usize; // exclusive; read starts start..run_end-1
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_end`
+
+warning: unused variable: `run_end`
+    --> examples/panel_route_mem_routed.rs:2919:13
+     |
+2919 |         let run_end = run[1] as usize;
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_end`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:3490:9
+     |
+3490 |     let mut push_anchor_events = |pos: u64, events: &mut Vec<u64>| {
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:3813:9
+     |
+3813 |     let mut keys: BTreeSet<&FeatureKey> = oracle.keys().chain(geometric.keys()).collect();
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:4470:9
+     |
+4470 |         mut self,
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `rank`
+    --> examples/panel_route_mem_routed.rs:4478:14
+     |
+4478 |         for (rank, key) in self.ranking {
+     |              ^^^^ help: if this is intentional, prefix it with an underscore: `_rank`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:4977:9
+     |
+4977 |     let mut fnv_update = |value: &mut u64, bytes: &[u8]| {
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `aq`
+    --> examples/panel_route_mem_routed.rs:5296:24
+     |
+5296 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                        ^^ help: if this is intentional, prefix it with an underscore: `_aq`
+
+warning: unused variable: `ao`
+    --> examples/panel_route_mem_routed.rs:5296:28
+     |
+5296 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                            ^^ help: if this is intentional, prefix it with an underscore: `_ao`
+
+warning: unused variable: `bo`
+    --> examples/panel_route_mem_routed.rs:5297:48
+     |
+5297 |             (Some(&(_, aq, ao)), Some(&(_, bq, bo))) => {
+     |                                                ^^ help: if this is intentional, prefix it with an underscore: `_bo`
+
+warning: unused variable: `start`
+    --> examples/panel_route_mem_routed.rs:6464:35
+     |
+6464 | ...                   for &(start, end, member) in &spans[..prefix] {
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:7178:5
+     |
+7178 |     mut shared_piece_memo: Option<&mut HashMap<(usize, u64, u64), Profile>>,
+     |     ----^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:7183:5
+     |
+7183 |     mut shared_spelled_memo: Option<&mut SpelledMemo>,
+     |     ----^^^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_mem_routed.rs:7358:25
+     |
+7358 |                     let piece = (source, start, end, reverse, owner);
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `streamed`
+    --> examples/panel_route_mem_routed.rs:8693:17
+     |
+8693 |     if let Some(streamed) = &streamed_routing {
+     |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_streamed`
+
+warning: unused variable: `routing_seconds`
+    --> examples/panel_route_mem_routed.rs:8738:9
+     |
+8738 |     let routing_seconds = routing_started.elapsed().as_secs_f64();
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routing_seconds`
+
+warning: unused variable: `locus`
+    --> examples/panel_route_mem_routed.rs:9435:18
+     |
+9435 |     for (index, (locus, segments, identity, reverse)) in sample_candidates.iter().enumerate() {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_locus`
+
+warning: unused variable: `hi`
+    --> examples/panel_route_mem_routed.rs:9475:21
+     |
+9475 |                 let hi = lo + READ_LENGTH as u64;
+     |                     ^^ help: if this is intentional, prefix it with an underscore: `_hi`
+
+warning: variable does not need to be mutable
+     --> examples/panel_route_mem_routed.rs:10452:13
+      |
+10452 |         let mut profile = Profile::new();
+      |             ----^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: field `batch_peak_steps` is never read
+    --> examples/panel_route_mem_routed.rs:1371:5
+     |
+1365 | struct StreamedRouting {
+     |        --------------- field in this struct
+...
+1371 |     batch_peak_steps: u64,
+     |     ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `name` is never read
+    --> examples/panel_route_mem_routed.rs:2007:9
+     |
+2006 |     struct Side {
+     |            ---- field in this struct
+2007 |         name: &'static str,
+     |         ^^^^
+
+warning: function `merge_routed` is never used
+    --> examples/panel_route_mem_routed.rs:2255:4
+     |
+2255 | fn merge_routed(target: &mut RoutedObs, source: &RoutedObs) {
+     |    ^^^^^^^^^^^^
+
+warning: field `partitions` is never read
+    --> examples/panel_route_mem_routed.rs:2311:16
+     |
+2304 | pub(crate) struct SiteRecord {
+     |                   ---------- field in this struct
+...
+2311 |     pub(crate) partitions: Vec<u32>,
+     |                ^^^^^^^^^^
+
+warning: trait `SiteRecordSource` is never used
+    --> examples/panel_route_mem_routed.rs:2318:18
+     |
+2318 | pub(crate) trait SiteRecordSource {
+     |                  ^^^^^^^^^^^^^^^^
+
+warning: function `profile_loss_routed` is never used
+    --> examples/panel_route_mem_routed.rs:3975:4
+     |
+3975 | fn profile_loss_routed(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `merged_pair_loss_owned` is never used
+    --> examples/panel_route_mem_routed.rs:4164:4
+     |
+4164 | fn merged_pair_loss_owned(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `merged_pair_loss_multiplicity_owned` is never used
+    --> examples/panel_route_mem_routed.rs:4212:4
+     |
+4212 | fn merged_pair_loss_multiplicity_owned(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DpFinalist` is never constructed
+    --> examples/panel_route_mem_routed.rs:4293:8
+     |
+4293 | struct DpFinalist {
+     |        ^^^^^^^^^^
+
+warning: field `classes` is never read
+    --> examples/panel_route_mem_routed.rs:4820:5
+     |
+4819 | struct LazyPairTable<'a> {
+     |        ------------- field in this struct
+4820 |     classes: usize,
+     |     ^^^^^^^
+
+warning: constant `JOINT_PROJECTION_WINDOW` is never used
+  --> examples/panel_route_diploid_search/mod.rs:33:7
+   |
+33 | const JOINT_PROJECTION_WINDOW: u64 = 16;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `native_class_pair` is never read
+   --> examples/panel_route_spine/mod.rs:478:16
+    |
+462 | pub(super) struct LocusSweep {
+    |                   ---------- field in this struct
+...
+478 |     pub(super) native_class_pair: Option<[usize; 2]>,
+    |                ^^^^^^^^^^^^^^^^^
+
+warning: field `self_sum` is never read
+   --> examples/panel_route_spine/phasing.rs:568:19
+    |
+566 | pub(in super) struct HaploidAlleleExon {
+    |                      ----------------- field in this struct
+567 |     pub(in super) self_list: Vec<u32>,
+568 |     pub(in super) self_sum: f64,
+    |                   ^^^^^^^^
+
+warning: unused `Result` that must be used
+    --> examples/panel_route_spine/mod.rs:1386:17
+     |
+1386 | /                 ensure(
+1387 | |                     !reverse,
+1388 | |                     "spine reference decomposition met a reverse piece (unsupported)"
+1389 | |                 );
+     | |_________________^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+1386 |                 let _ = ensure(
+     |                 +++++++
+
+warning: unused `Result` that must be used
+    --> examples/panel_route_spine/mod.rs:4329:5
+     |
+4329 |     ensure(incumbent.is_finite(), "nonfinite spine incumbent");
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+4329 |     let _ = ensure(incumbent.is_finite(), "nonfinite spine incumbent");
+     |     +++++++
+
+warning: `impg` (example "panel_route_mem_routed" test) generated 111 warnings (53 duplicates) (run `cargo fix --example "panel_route_mem_routed" -p impg --tests` to apply 40 suggestions)
+    Finished `release` profile [optimized] target(s) in 13.74s
+     Running unittests examples/canonical_scheme_probe.rs (target/release/examples/canonical_scheme_probe-fe5f7d3d8d260c5b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/compare_gfa_paths.rs (target/release/examples/compare_gfa_paths-14e1fc75d5ed3042)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/genotyping_spell_dump.rs (target/release/examples/genotyping_spell_dump-7d7dd18863b38727)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/neighbor_merge_existing_gfa.rs (target/release/examples/neighbor_merge_existing_gfa-f3a5b05ea3728e52)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/panel_route_assignment_rescore.rs (target/release/examples/panel_route_assignment_rescore-bd11d7300ddae83e)
+
+running 23 tests
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+
+     Running unittests examples/panel_route_completion_probe.rs (target/release/examples/panel_route_completion_probe-d27a781ff0eb0f7e)
+
+running 12 tests
+test probe::adapter::tests::fixed_width_invalid_truncation_cuts_and_shared_seeks ... ok
+test probe::adapter::tests::permutation_exact_coverage_virtual_work_and_overflow ... ok
+test probe::adapter::tests::source_pair_order_breaks_parity_stall_with_fixed_width_records ... ok
+test probe::adapter::tests::source_pair_order_prefix_conservation_and_charged_skips ... ok
+test probe::machine::eligibility_tests::contiguous_same_source_storage_splits_remain_native_per_molecule ... ok
+test probe::machine::eligibility_tests::same_source_gaps_jumps_live_cut_and_completed_extents_are_changed ... ok
+test probe::machine::numeric_tests::target_bounds_compare_numeric_ids_across_little_endian_boundary ... ok
+test probe::machine::ready_tests::ready_family_local_keys_fifo_unready_and_all_outcome_grants ... ok
+test probe::machine::ready_tests::ready_family_storage_churn_releases_nodes_not_historical_capacity ... ok
+test probe::machine::ready_tests::ready_metadata_reservation_stops_before_growth ... ok
+test probe::machine::tests::earlier_entry_discards_detour_and_keeps_arbitrary_multidonor_prefix ... ok
+test probe::stream::tests::bounded_stream_syntax_eof_and_large_skipped_containers ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running unittests examples/panel_route_component_rescore.rs (target/release/examples/panel_route_component_rescore-4db836faa39c2170)
+
+running 23 tests
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.56s
+
+     Running unittests examples/panel_route_convex_diagnostic.rs (target/release/examples/panel_route_convex_diagnostic-c47e85a1cb69a79c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/panel_route_diploid_diagnostic.rs (target/release/examples/panel_route_diploid_diagnostic-bb45ec34a5b06b5d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/panel_route_diploid_search.rs (target/release/examples/panel_route_diploid_search-6672b94916aac834)
+
+running 23 tests
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s
+
+     Running unittests examples/panel_route_evidence_topology.rs (target/release/examples/panel_route_evidence_topology-dea44a7dcbf0b13c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/panel_route_feature_occurrences.rs (target/release/examples/panel_route_feature_occurrences-07b27ce68e2ad589)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/panel_route_genome_rescore.rs (target/release/examples/panel_route_genome_rescore-e47eb539139f0bd7)
+
+running 23 tests
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+
+     Running unittests examples/panel_route_genome_smoke.rs (target/release/examples/panel_route_genome_smoke-630534c93e6073bc)
+
+running 26 tests
+test rss_guard_tests::periodic_guard_tracks_peak_without_false_breach ... ok
+test rss_guard_tests::periodic_hot_loop_guard_breaches_at_its_sampling_interval ... ok
+test rss_guard_tests::rss_guard_fails_closed_at_a_hot_loop_checkpoint ... ok
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+     Running unittests examples/panel_route_mem_routed.rs (target/release/examples/panel_route_mem_routed-9b9cd4aace20a08c)
+
+running 50 tests
+test multiplicity_background_tests::attribution_loss_scales_only_pooled_credit ... ok
+test multiplicity_background_tests::attribution_weight_is_one_over_multiplicity ... ok
+test multiplicity_background_tests::chain_level_omission_exonerates_chain_explained_features ... ok
+test multiplicity_background_tests::cross_support_contribution_formula ... ok
+test multiplicity_background_tests::finalist_l_form_lower_bounds_chain_level_charge ... ok
+test multiplicity_background_tests::gentle_beta_formula ... ok
+test multiplicity_background_tests::in_window_observed_attribution_is_positional ... ok
+test multiplicity_background_tests::in_window_observed_deduplicates_repeat_features_per_occurrence ... ok
+test multiplicity_background_tests::instance_exoneration_charges_distinct_loci_instances ... ok
+test multiplicity_background_tests::instance_exoneration_group_shared_one_instance_stays_once ... ok
+test multiplicity_background_tests::omission_charge_unbaselined_term_and_preserved_discriminations ... ok
+test multiplicity_background_tests::omission_term_is_poisson_complete ... ok
+test multiplicity_background_tests::piece_span_coords_maps_reverse_pieces ... ok
+test multiplicity_background_tests::rc_symmetric_indexing_places_kmer_and_rc_stored_locus ... ok
+test multiplicity_background_tests::record_once_site_map_single_owner_bit_identity_and_cross_owner_dedup ... ok
+test multiplicity_background_tests::route_record_rc_orientation_mirrored_geometry_places_multi_anchor_rc_stored_walk ... ok
+test multiplicity_background_tests::sample_side_background_beta_genome_wide ... ok
+test multiplicity_background_tests::window_incidence_matches_containment_arithmetic ... ok
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+test spine::phasing::tests::coupling_transition_costs_subtract_adjacent_exoneration ... ok
+test spine::phasing::tests::diploid_posterior_marginals_are_exact_min_marginals ... ok
+test spine::phasing::tests::finalist_enumerator_skips_forbidden_transitions ... ok
+test spine::phasing::tests::finalist_enumerator_yields_all_chains_in_exact_total_order ... ok
+test spine::phasing::tests::haploid_admissibility_retains_the_backbone_allele_over_class_hygiene ... ok
+test spine::phasing::tests::haploid_posterior_backward_pass_over_empty_second_slot ... ok
+test spine::phasing::tests::haploid_states_charge_per_allele_record_once_losses ... ok
+test spine::phasing::tests::instance_coupling_credits_only_covered_instances ... ok
+test spine::phasing::tests::posterior_excludes_betaless_retained_states ... ok
+
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+
+     Running unittests examples/panel_route_residual_search.rs (target/release/examples/panel_route_residual_search-184702022fe7cd2b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/panel_route_seam_diagnostic.rs (target/release/examples/panel_route_seam_diagnostic-edfc7b084d26797e)
+
+running 23 tests
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+
+     Running unittests examples/poasta_order_driver.rs (target/release/examples/poasta_order_driver-dd89b025fd233db7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/pooled_region_decompose.rs (target/release/examples/pooled_region_decompose-9e21e5ddff0213b0)
+
+running 23 tests
+test search::genome_wide::tests::beam_pruning_counts_cutoff_ties ... ok
+test search::genome_wide::tests::binary_records_sidecar_serves_rebuilds_tail_syncs_and_corruption_fallback ... ok
+test search::genome_wide::tests::bounded_conflict_beam_reports_dropped_ties_and_rejects_overlapping_history ... ok
+test search::genome_wide::tests::chr_iii_public_sk1_gaps_receive_bridge_and_deletion_candidates ... ok
+test search::genome_wide::tests::consecutive_split_boundaries_never_profile_physical_pairs ... ok
+test search::genome_wide::tests::deletion_marker_exits_only_by_same_source_continuity ... ok
+test search::genome_wide::tests::event_compressed_profiles_equal_every_window_full_subwalks_and_cache_once ... ok
+test search::genome_wide::tests::extend_overlap_and_fresh_deltas_match_naive_path ... ok
+test search::genome_wide::tests::incremental_extend_fingerprint_and_score_match_from_scratch ... ok
+test search::genome_wide::tests::large_beam_class_guided_path_is_byte_identical_to_exact_physical_path ... ok
+test search::genome_wide::tests::midscale_eighty_kilobase_exact_dp_recovers_count_supported_switch ... ok
+test search::genome_wide::tests::native_endpoint_admission_rejects_full_donor_routes_before_scoring ... ok
+test search::genome_wide::tests::persistent_count_map_matches_flat_map_under_random_deltas ... ok
+test search::genome_wide::tests::port_word_equal_cross_source_seams_form_native_anchored_chain ... ok
+test search::genome_wide::tests::same_source_reverse_order_split_cut_is_rejected_before_admission ... ok
+test search::genome_wide::tests::source_path_completion_fills_missing_axis_loci_without_coordinate_projection ... ok
+test search::genome_wide::tests::split_refinement_recovers_supported_two_segment_middle_allele ... ok
+test search::genome_wide::tests::stitched_candidates_admit_only_adjacent_same_source_spanning_chains ... ok
+test search::genome_wide::tests::tie_rotation_passes_pool_finalists_and_merge_accounting_honestly ... ok
+test search::partition::tests::catalog_groups_preserve_occurrence_coordinates_multiplicity_and_orientation ... ok
+test search::partition::tests::five_token_linkage_survives_weighted_bwt_but_not_pair_projection ... ok
+test search::partition::tests::four_catalog_partitions_retain_long_mem_boundary_phase ... ok
+test search::partition::tests::subwalk_accumulation_equals_weighted_bwt_orbit_counts ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+
+     Running unittests examples/povu_decomp_report.rs (target/release/examples/povu_decomp_report-68ca5da17043f5df)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/rc_view_probe.rs (target/release/examples/rc_view_probe-470f8ecc27b8ab00)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/route_identity.rs (target/release/examples/route_identity-cd7ce1c4e0ab736b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/router_spell_diag.rs (target/release/examples/router_spell_diag-db23a7b495f8371f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/syncmer_mirror_probe.rs (target/release/examples/syncmer_mirror_probe-63c31daf30f79c06)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/syng_anchor_probe.rs (target/release/examples/syng_anchor_probe-626a5f89be6cd5e2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/syng_probe.rs (target/release/examples/syng_probe-40d7f35c6562e669)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/validate_gfa_path_sources.rs (target/release/examples/validate_gfa_path_sources-9d6021f57fcf9da1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

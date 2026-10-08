@@ -4364,6 +4364,58 @@ fn test_syng_filtered_wrapper_retains_dense_self_and_forward_homologs() {
     let hits = wrapper
         .query(query_id, 0, 10_000, false, None, None, false)
         .unwrap();
+    let mut masks = rustc_hash::FxHashMap::default();
+    for id in 0..wrapper.seq_index().len() as u32 {
+        let mut ranges = impg::impg::SortedRanges::new(10_000, 0);
+        ranges.insert((0, 10_000));
+        masks.insert(id, ranges);
+    }
+    let coordinates = |hits: &[impg::impg::AdjustedInterval]| {
+        hits.iter()
+            .map(|(iv, _, _)| (iv.metadata, iv.first, iv.last))
+            .collect::<Vec<_>>()
+    };
+    for dfs in [false, true] {
+        let masked_hits = if dfs {
+            wrapper.query_transitive_dfs(
+                query_id,
+                0,
+                10_000,
+                Some(&masks),
+                1,
+                0,
+                0,
+                None,
+                false,
+                None,
+                None,
+                false,
+                None,
+            )
+        } else {
+            wrapper.query_transitive_bfs(
+                query_id,
+                0,
+                10_000,
+                Some(&masks),
+                1,
+                0,
+                0,
+                None,
+                false,
+                None,
+                None,
+                false,
+                None,
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            coordinates(&hits),
+            coordinates(&masked_hits),
+            "syng masks are applied after discovery, not inside the wrapper"
+        );
+    }
     for name in ["self#0#chr1", "copy#0#chr1"] {
         let id = wrapper.seq_index().get_id(name).unwrap();
         assert!(
@@ -4612,10 +4664,101 @@ fn test_partition_syng_end_to_end_bed() {
         members.entry(fields[3]).or_default().insert(fields[0]);
     }
     assert!(
-        members.values().any(|names| names.contains("sampleA#1#chr1")
-            && names.contains("sampleB#1#chr1")),
+        members
+            .values()
+            .any(|names| names.contains("sampleA#1#chr1") && names.contains("sampleB#1#chr1")),
         "normal partitioning must still group discovered homologs, not just emit seeds: {bed}"
     );
+
+    // Bounded diagnostics must not change BED ownership or query eligibility.
+    // Exercise both raw and chained wrapper paths, including a late sample and
+    // a sample beyond the end of the run. Child env avoids global test races.
+    for anchors in ["0", "5"] {
+        let mut baseline = None;
+        for (label, limit, skip) in [
+            ("off", None, "0"),
+            ("first", Some("1"), "0"),
+            ("second", Some("1"), "1"),
+            ("past", Some("1"), "10000"),
+        ] {
+            let output = dir.join(format!("profile-{anchors}-{label}"));
+            let mut cmd = Command::new(&bin);
+            cmd.args([
+                "partition",
+                "-a",
+                syng_prefix.to_str().unwrap(),
+                "-w",
+                "1500",
+                "-d",
+                "100000",
+                "-o",
+                "bed",
+                "--output-folder",
+                output.to_str().unwrap(),
+                "--min-missing-size",
+                "100",
+                "--min-boundary-distance",
+                "0",
+                "--syng-min-chain-anchors",
+                anchors,
+                "-t",
+                "1",
+            ])
+            .env_remove("IMPG_PARTITION_PROFILE_MAX_QUERIES")
+            .env("IMPG_PARTITION_PROFILE_SKIP_QUERIES", skip);
+            if let Some(limit) = limit {
+                cmd.env("IMPG_PARTITION_PROFILE_MAX_QUERIES", limit);
+            }
+            let result = cmd.output().unwrap();
+            let log = String::from_utf8_lossy(&result.stderr);
+            assert!(result.status.success(), "{log}");
+            let profiled_bed = std::fs::read_to_string(output.join("partitions.bed")).unwrap();
+            if let Some(baseline) = &baseline {
+                assert_eq!(&profiled_bed, baseline);
+            } else {
+                baseline = Some(profiled_bed);
+            }
+            let rows: Vec<_> = log
+                .lines()
+                .filter(|l| l.contains("partition_profile_query "))
+                .collect();
+            let expected = usize::from(label == "first" || label == "second");
+            assert_eq!(rows.len(), expected, "{log}");
+            assert_eq!(
+                log.lines()
+                    .filter(|l| l.contains("partition_profile_dispatch "))
+                    .count(),
+                expected
+            );
+            assert_eq!(
+                log.lines()
+                    .filter(|l| l.contains("partition_profile_syng "))
+                    .count(),
+                expected
+            );
+            if expected > 0 {
+                assert!(
+                    rows[0].contains(&format!("dispatched={}", if skip == "0" { 1 } else { 2 }))
+                );
+                assert!(rows[0].contains("missing_core_bp="));
+                assert!(rows[0].contains("emitted_new_source_bp="));
+                assert!(rows[0].contains("error=false"));
+                assert!(log.contains(if anchors == "0" {
+                    "raw_anchors=None"
+                } else {
+                    "raw_anchors=Some("
+                }));
+            }
+            if limit.is_none() {
+                assert!(!log.contains("partition_profile_"));
+            } else {
+                assert!(log.contains("partition_profile_summary queued="));
+            }
+            for line in log.lines().filter(|l| l.contains("partition_profile_")) {
+                eprintln!("{anchors}/{label}: {line}");
+            }
+        }
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

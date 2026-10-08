@@ -5229,6 +5229,12 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
+    /// Experimental MEM-BWT bootstrap: provisional source-occurrence compatibility, not genotypes/mosaics
+    GenomeInfer {
+        #[command(subcommand)]
+        command: impg::commands::genome_infer::Command,
+    },
+
     /// Infer allele calls across ranges or partitions from graph-derived evidence
     Infer {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
@@ -6169,6 +6175,10 @@ fn run() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
+        Args::GenomeInfer { command } => {
+            env_logger::init();
+            impg::commands::genome_infer::run(command)?;
+        }
         Args::Index {
             common,
             alignment,

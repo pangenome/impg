@@ -1,4 +1,5 @@
 pub mod align;
+pub mod genome_infer;
 pub mod genotype;
 pub mod graph;
 pub mod infer;

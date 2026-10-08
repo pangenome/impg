@@ -1,0 +1,2260 @@
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:857:5
+    |
+854 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+857 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:879:16
+    |
+879 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:880:14
+    |
+880 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `generate_multi_level_candidates` is never used
+    --> src/resolution.rs:3397:4
+     |
+3397 | fn generate_multi_level_candidates(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7171:4
+     |
+7171 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10712:4
+      |
+10712 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib) generated 6 warnings
+warning: associated function `new` is never used
+  --> examples/panel_route_completion_probe/../../src/commands/genome_infer/panel_route_search_policy/adapter.rs:78:12
+   |
+77 | impl Permutation {
+   | ---------------- associated function in this implementation
+78 |     pub fn new(len: u64) -> Self {
+   |            ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `update` is never used
+   --> examples/panel_route_completion_probe/../../src/commands/genome_infer/panel_route_search_policy/adapter.rs:131:19
+    |
+123 | impl SourcePermutation {
+    | ---------------------- method in this implementation
+...
+131 |     pub(super) fn update(&mut self) -> io::Result<()> {
+    |                   ^^^^^^
+
+warning: variable does not need to be mutable
+   --> examples/panel_route_evidence_topology.rs:719:17
+    |
+719 |             let mut profile_bins: Vec<[u64; 5]> = (0..nbins)
+    |                 ----^^^^^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `w`
+   --> examples/panel_route_evidence_topology.rs:717:17
+    |
+717 |             let w = 3usize; // window in bins on each side
+    |                 ^ help: if this is intentional, prefix it with an underscore: `_w`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `min_count`
+   --> examples/panel_route_evidence_topology.rs:718:17
+    |
+718 |             let min_count = 20u64;
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_min_count`
+
+warning: fields `group`, `start`, and `end` are never read
+   --> examples/panel_route_evidence_topology.rs:209:5
+    |
+208 | struct OccRow {
+    |        ------ fields in this struct
+209 |     group: u32,
+    |     ^^^^^
+...
+212 |     start: u64,
+    |     ^^^^^
+213 |     end: u64,
+    |     ^^^
+    |
+    = note: `OccRow` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:1661:13
+     |
+1661 |         let mut mode;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `evaluated_state_classes` is assigned to, but never used
+    --> examples/panel_route_diploid_search/genome.rs:4790:13
+     |
+4790 |         let mut evaluated_state_classes = 0usize;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_evaluated_state_classes` instead
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `evaluated_state_classes` is never read
+    --> examples/panel_route_diploid_search/genome.rs:4946:17
+     |
+4946 |                 evaluated_state_classes += 1;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:5626:5
+     |
+5626 |     mut load_profiles: F,
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> examples/panel_route_genome_smoke.rs:516:9
+    |
+516 |     let mut ranges = if options.all_paths {
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> examples/panel_route_genome_smoke.rs:528:10
+    |
+528 |     let (mut axis_intervals, mut ranges, slice_offset) = match options.locus_range.as_deref() {
+    |          ----^^^^^^^^^^^^^^
+    |          |
+    |          help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_genome_smoke.rs:1136:9
+     |
+1136 |     let mut probe_boundary_endpoints_seconds = boundary_endpoints_started.elapsed().as_secs_f64();
+     |         ----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: value assigned to `best_loss` is never read
+    --> examples/panel_route_genome_smoke.rs:1719:17
+     |
+1719 |                 best_loss = seed.loss.expect("checked");
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: constant `JOINT_PROJECTION_WINDOW` is never used
+  --> examples/panel_route_diploid_search/mod.rs:33:7
+   |
+33 | const JOINT_PROJECTION_WINDOW: u64 = 16;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `line` is never used
+  --> examples/panel_route_diploid_search/mod.rs:41:4
+   |
+41 | fn line(f: &mut File, v: &impl Serialize) -> io::Result<()> {
+   |    ^^^^
+
+warning: methods `validate` and `meter_options` are never used
+   --> examples/panel_route_diploid_search/mod.rs:87:12
+    |
+ 86 | impl Options {
+    | ------------ methods in this implementation
+ 87 |     pub fn validate(&self) -> io::Result<()> {
+    |            ^^^^^^^^
+...
+112 |     fn meter_options(&self) -> haploid::Options {
+    |        ^^^^^^^^^^^^^
+
+warning: method `has_intents` is never used
+   --> examples/panel_route_diploid_search/mod.rs:153:8
+    |
+152 | impl Emission {
+    | ------------- method in this implementation
+153 |     fn has_intents(&self) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: variants `Emission` and `Native` are never constructed
+   --> examples/panel_route_diploid_search/mod.rs:166:5
+    |
+164 | enum Work {
+    |      ---- variants in this enum
+165 |     Geometry(PairedTask),
+166 |     Emission(Emission),
+    |     ^^^^^^^^
+167 |     Native(NativeHead),
+    |     ^^^^^^
+    |
+    = note: `Work` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `class` is never used
+   --> examples/panel_route_diploid_search/mod.rs:170:8
+    |
+169 | impl Work {
+    | --------- method in this implementation
+170 |     fn class(&self) -> usize {
+    |        ^^^^^
+
+warning: struct `Baseline` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:209:8
+    |
+209 | struct Baseline {
+    |        ^^^^^^^^
+
+warning: struct `PairedChain` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:222:8
+    |
+222 | struct PairedChain {
+    |        ^^^^^^^^^^^
+
+warning: struct `Receipt` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:227:8
+    |
+227 | struct Receipt {
+    |        ^^^^^^^
+
+warning: struct `EmissionPlan` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:231:8
+    |
+231 | struct EmissionPlan {
+    |        ^^^^^^^^^^^^
+
+warning: function `next_native` is never used
+   --> examples/panel_route_diploid_search/mod.rs:236:4
+    |
+236 | fn next_native(pair: [usize; 2], families: usize, fixed: bool) -> Option<[usize; 2]> {
+    |    ^^^^^^^^^^^
+
+warning: function `expansion_eligible` is never used
+   --> examples/panel_route_diploid_search/mod.rs:248:8
+    |
+248 | pub fn expansion_eligible(pair: &Pair, admitted: &[Pair]) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `route_slice` is never used
+   --> examples/panel_route_diploid_search/mod.rs:252:4
+    |
+252 | fn route_slice(route: &routes::Route, from: u64, to: u64) -> io::Result<Vec<routes::Segment>> {
+    |    ^^^^^^^^^^^
+
+warning: function `segment_slice` is never used
+   --> examples/panel_route_diploid_search/mod.rs:288:4
+    |
+288 | fn segment_slice(segment: &routes::Segment, from: u64, to: u64) -> io::Result<routes::Segment> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `project_segment` is never used
+   --> examples/panel_route_diploid_search/mod.rs:312:4
+    |
+312 | fn project_segment(
+    |    ^^^^^^^^^^^^^^^
+
+warning: struct `Engine` is never constructed
+   --> examples/panel_route_diploid_search/mod.rs:355:8
+    |
+355 | struct Engine<'a, 'b> {
+    |        ^^^^^^
+
+warning: multiple methods are never used
+    --> examples/panel_route_diploid_search/mod.rs:399:8
+     |
+ 397 | impl Engine<'_, '_> {
+     | ------------------- methods in this implementation
+ 398 |     /// One production dispatch, or finite retirement; errors preserve the current remainder.
+ 399 |     fn scheduler_step(&mut self) -> io::Result<bool> {
+     |        ^^^^^^^^^^^^^^
+...
+ 444 |     fn write_pending(&self) -> io::Result<()> {
+     |        ^^^^^^^^^^^^^
+...
+ 450 |     fn owned(&self) -> usize {
+     |        ^^^^^
+...
+ 453 |     fn account(&mut self, stage: &str) -> io::Result<()> {
+     |        ^^^^^^^
+...
+ 465 |     fn transfer(&mut self, work: Work) {
+     |        ^^^^^^^^
+...
+ 470 |     fn begin(&mut self, index: usize, grant: usize) -> io::Result<Work> {
+     |        ^^^^^
+...
+ 486 |     fn release_current(&mut self) -> io::Result<()> {
+     |        ^^^^^^^^^^^^^^^
+...
+ 496 |     fn geometry_grant(&self, t: &PairedTask) -> io::Result<usize> {
+     |        ^^^^^^^^^^^^^^
+...
+ 530 |     fn emission_plan(&mut self, p: &Emission) -> io::Result<EmissionPlan> {
+     |        ^^^^^^^^^^^^^
+...
+ 597 |     fn grant(&mut self, work: &Work) -> io::Result<usize> {
+     |        ^^^^^
+...
+ 618 |     fn ready(&mut self) -> io::Result<Option<(usize, usize, usize)>> {
+     |        ^^^^^
+...
+ 638 |     fn service_emission(&mut self, p: Emission, native: Option<NativeHead>) -> io::Result<()> {
+     |        ^^^^^^^^^^^^^^^^
+...
+ 690 |     fn dispatch(&mut self, work: Work) -> io::Result<()> {
+     |        ^^^^^^^^
+...
+ 723 |     fn score(&mut self, pair: &Pair, native: bool) -> io::Result<Scored> {
+     |        ^^^^^
+...
+ 736 |     fn eligible(&self, pair: &Pair) -> bool {
+     |        ^^^^^^^^
+...
+ 739 |     fn add_base(&mut self, scored: Scored, depth: u8, reason: &str) -> io::Result<()> {
+     |        ^^^^^^^^
+...
+ 786 |     fn completed_receipt(&mut self, s: &Scored) {
+     |        ^^^^^^^^^^^^^^^^^
+...
+ 796 |     fn remember(&mut self, s: &Scored) -> io::Result<bool> {
+     |        ^^^^^^^^
+...
+ 812 |     fn native(&mut self, families: [usize; 2]) -> io::Result<()> {
+     |        ^^^^^^
+...
+ 829 |     fn feedback(
+     |        ^^^^^^^^
+...
+ 903 |     fn confirm(&mut self, base: usize, copy: usize, p: continuation::Proposal) -> io::Result<()> {
+     |        ^^^^^^^
+...
+1117 |     fn ordinary(&mut self, t: PairedTask) -> io::Result<()> {
+     |        ^^^^^^^^
+...
+1157 |     fn admit_chains(&mut self) -> io::Result<()> {
+     |        ^^^^^^^^^^^^
+...
+1179 |     fn chain(&mut self) -> io::Result<()> {
+     |        ^^^^^
+
+warning: function `run` is never used
+    --> examples/panel_route_diploid_search/mod.rs:1235:8
+     |
+1235 | pub fn run(options: Options, fixed_family: Option<usize>) -> io::Result<Value> {
+     |        ^^^
+
+warning: constant `CONFLICT_BEAM_WIDTH` is never used
+  --> examples/panel_route_diploid_search/genome.rs:34:7
+   |
+34 | const CONFLICT_BEAM_WIDTH: usize = 128;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WindowDomainExtension` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:183:12
+    |
+183 | pub struct WindowDomainExtension {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WINDOW_DOMAIN_ADDED_OCCURRENCE_BASE` is never used
+   --> examples/panel_route_diploid_search/genome.rs:211:7
+    |
+211 | const WINDOW_DOMAIN_ADDED_OCCURRENCE_BASE: usize = 100_000_000_000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_window_domain_extension` is never used
+   --> examples/panel_route_diploid_search/genome.rs:219:8
+    |
+219 | pub fn build_window_domain_extension(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `covered_bytes` and `covered_records` are never read
+    --> examples/panel_route_diploid_search/genome.rs:1205:5
+     |
+1201 | struct RecordsSidecar {
+     |        -------------- fields in this struct
+...
+1205 |     covered_bytes: u64,
+     |     ^^^^^^^^^^^^^
+1206 |     covered_records: u64,
+     |     ^^^^^^^^^^^^^^^
+
+warning: associated function `open_filtered` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1429:12
+     |
+1416 | impl ProfileCache {
+     | ----------------- associated function in this implementation
+...
+1429 |     pub fn open_filtered(path: &Path, retain: &dyn Fn(&str) -> bool) -> io::Result<Self> {
+     |            ^^^^^^^^^^^^^
+
+warning: field `profile` is never read
+    --> examples/panel_route_diploid_search/genome.rs:1993:9
+     |
+1991 | pub struct GenomeAllele {
+     |            ------------ field in this struct
+1992 |     pub traversal: SpanningTraversal,
+1993 |     pub profile: Profile,
+     |         ^^^^^^^
+     |
+     = note: `GenomeAllele` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `intern_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2003:8
+     |
+2003 | pub fn intern_profile(
+     |        ^^^^^^^^^^^^^^
+
+warning: function `profile_classes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2200:8
+     |
+2200 | pub fn profile_classes(alleles: &[GenomeAllele]) -> Vec<Vec<usize>> {
+     |        ^^^^^^^^^^^^^^^
+
+warning: function `class_for_alleles` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2211:4
+     |
+2211 | fn class_for_alleles(alleles: &[GenomeAllele]) -> (Vec<Profile>, Vec<usize>) {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `incidence_table` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2293:8
+     |
+2293 | pub fn incidence_table(
+     |        ^^^^^^^^^^^^^^^
+
+warning: function `merged_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2566:4
+     |
+2566 | fn merged_profile(parts: &[&Profile]) -> io::Result<Profile> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `score_complete_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2579:4
+     |
+2579 | fn score_complete_profile(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `keys` is never read
+    --> examples/panel_route_diploid_search/genome.rs:3025:5
+     |
+3023 | struct FeatureUniverse {
+     |        --------------- field in this struct
+3024 |     /// fid -> feature, sorted by feature.
+3025 |     keys: Vec<FeatureKey>,
+     |     ^^^^
+
+warning: function `profile_value_fingerprint` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3265:4
+     |
+3265 | fn profile_value_fingerprint(feature: &FeatureKey, value: u64) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `conflict_copy_eligible` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3924:4
+     |
+3924 | fn conflict_copy_eligible(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `conflict_eligible` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3952:4
+     |
+3952 | fn conflict_eligible(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: method `peak_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4105:12
+     |
+4094 | impl PeriodicRssGuard {
+     | --------------------- method in this implementation
+...
+4105 |     pub fn peak_bytes(&self) -> u64 {
+     |            ^^^^^^^^^^
+
+warning: function `exact_chain_streaming` is never used
+    --> examples/panel_route_diploid_search/genome.rs:5614:8
+     |
+5614 | pub fn exact_chain_streaming<F>(
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `exact_chain` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6042:8
+     |
+6042 | pub fn exact_chain(
+     |        ^^^^^^^^^^^
+
+warning: struct `Allele` is never constructed
+  --> examples/panel_route_diploid_search/partition.rs:34:12
+   |
+34 | pub struct Allele {
+   |            ^^^^^^
+
+warning: struct `Seam` is never constructed
+  --> examples/panel_route_diploid_search/partition.rs:41:12
+   |
+41 | pub struct Seam {
+   |            ^^^^
+
+warning: enum `FeatureClass` is never used
+  --> examples/panel_route_diploid_search/partition.rs:48:10
+   |
+48 | pub enum FeatureClass {
+   |          ^^^^^^^^^^^^
+
+warning: struct `UniverseEntry` is never constructed
+  --> examples/panel_route_diploid_search/partition.rs:55:12
+   |
+55 | pub struct UniverseEntry {
+   |            ^^^^^^^^^^^^^
+
+warning: struct `Universe` is never constructed
+  --> examples/panel_route_diploid_search/partition.rs:62:12
+   |
+62 | pub struct Universe {
+   |            ^^^^^^^^
+
+warning: struct `FeatureSpectrumBin` is never constructed
+  --> examples/panel_route_diploid_search/partition.rs:67:12
+   |
+67 | pub struct FeatureSpectrumBin {
+   |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `catalog_ranges` is never used
+  --> examples/panel_route_diploid_search/partition.rs:80:8
+   |
+80 | pub fn catalog_ranges(catalog: &catalog::Catalog) -> io::Result<Vec<Vec<SourceRange>>> {
+   |        ^^^^^^^^^^^^^^
+
+warning: function `add_record_subwalks` is never used
+   --> examples/panel_route_diploid_search/partition.rs:146:8
+    |
+146 | pub fn add_record_subwalks(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `profile_read` is never used
+   --> examples/panel_route_diploid_search/partition.rs:179:8
+    |
+179 | pub fn profile_read(panel: &SyngIndex, read: &[u8], max_features: usize) -> io::Result<Profile> {
+    |        ^^^^^^^^^^^^
+
+warning: function `merge` is never used
+   --> examples/panel_route_diploid_search/partition.rs:188:4
+    |
+188 | fn merge(target: &mut Profile, source: &Profile, max_features: usize) -> io::Result<()> {
+    |    ^^^^^
+
+warning: function `profile_interior` is never used
+   --> examples/panel_route_diploid_search/partition.rs:196:8
+    |
+196 | pub fn profile_interior(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `profile_seam` is never used
+   --> examples/panel_route_diploid_search/partition.rs:219:8
+    |
+219 | pub fn profile_seam(
+    |        ^^^^^^^^^^^^
+
+warning: function `allele` is never used
+   --> examples/panel_route_diploid_search/partition.rs:250:8
+    |
+250 | pub fn allele(
+    |        ^^^^^^
+
+warning: function `catalog_alleles` is never used
+   --> examples/panel_route_diploid_search/partition.rs:274:8
+    |
+274 | pub fn catalog_alleles(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `seams_from_public_links` is never used
+   --> examples/panel_route_diploid_search/partition.rs:295:8
+    |
+295 | pub fn seams_from_public_links(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `seam` is never used
+   --> examples/panel_route_diploid_search/partition.rs:343:8
+    |
+343 | pub fn seam(
+    |        ^^^^
+
+warning: function `universe` is never used
+   --> examples/panel_route_diploid_search/partition.rs:370:8
+    |
+370 | pub fn universe(
+    |        ^^^^^^^^
+
+warning: function `feature_spectrum` is never used
+   --> examples/panel_route_diploid_search/partition.rs:445:8
+    |
+445 | pub fn feature_spectrum(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `sum_profiles` is never used
+   --> examples/panel_route_diploid_search/partition.rs:495:8
+    |
+495 | pub fn sum_profiles<'a>(
+    |        ^^^^^^^^^^^^
+
+warning: function `score_where` is never used
+   --> examples/panel_route_diploid_search/partition.rs:547:4
+    |
+547 | fn score_where(
+    |    ^^^^^^^^^^^
+
+warning: function `score_pair` is never used
+   --> examples/panel_route_diploid_search/partition.rs:573:8
+    |
+573 | pub fn score_pair(
+    |        ^^^^^^^^^^
+
+warning: struct `Diplotype` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:583:12
+    |
+583 | pub struct Diplotype {
+    |            ^^^^^^^^^
+
+warning: function `local_diplotypes` is never used
+   --> examples/panel_route_diploid_search/partition.rs:588:8
+    |
+588 | pub fn local_diplotypes(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `boundary_matchings` is never used
+   --> examples/panel_route_diploid_search/partition.rs:619:8
+    |
+619 | pub fn boundary_matchings(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `Accounting` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:665:12
+    |
+665 | pub struct Accounting {
+    |            ^^^^^^^^^^
+
+warning: associated items `charge`, `work`, `work_bounded`, `profile`, and `state` are never used
+   --> examples/panel_route_diploid_search/partition.rs:677:8
+    |
+676 | impl Accounting {
+    | --------------- associated items in this implementation
+677 |     fn charge(value: &mut u64, amount: u64, cap: u64, reason: &str) -> io::Result<()> {
+    |        ^^^^^^
+...
+683 |     fn work(&mut self, n: u64) -> io::Result<()> {
+    |        ^^^^
+...
+686 |     fn work_bounded(&mut self, n: u64, max_work: u64) -> io::Result<()> {
+    |        ^^^^^^^^^^^^
+...
+690 |     fn profile(&mut self, n: u64) -> io::Result<()> {
+    |        ^^^^^^^
+...
+698 |     fn state(&mut self, n: u64) -> io::Result<()> {
+    |        ^^^^^
+
+warning: struct `Backpointer` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:709:12
+    |
+709 | pub struct Backpointer {
+    |            ^^^^^^^^^^^
+
+warning: struct `ChainState` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:716:12
+    |
+716 | pub struct ChainState {
+    |            ^^^^^^^^^^
+
+warning: struct `ChainSearch` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:724:12
+    |
+724 | pub struct ChainSearch {
+    |            ^^^^^^^^^^^
+
+warning: function `logical_state_bytes` is never used
+   --> examples/panel_route_diploid_search/partition.rs:731:4
+    |
+731 | fn logical_state_bytes(partitions: usize) -> u64 {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `class_terms` is never used
+   --> examples/panel_route_diploid_search/partition.rs:737:4
+    |
+737 | fn class_terms(universe: &Universe, class: &FeatureClass) -> u64 {
+    |    ^^^^^^^^^^^
+
+warning: function `chain_diplotypes` is never used
+   --> examples/panel_route_diploid_search/partition.rs:748:8
+    |
+748 | pub fn chain_diplotypes(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `chain_diplotypes_bounded` is never used
+   --> examples/panel_route_diploid_search/partition.rs:757:8
+    |
+757 | pub fn chain_diplotypes_bounded(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ChainedCandidate` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:990:12
+    |
+990 | pub struct ChainedCandidate {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: function `rescore_chained` is never used
+   --> examples/panel_route_diploid_search/partition.rs:995:8
+    |
+995 | pub fn rescore_chained(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `reconstruct_sequence` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1082:8
+     |
+1082 | pub fn reconstruct_sequence(chain: &[&Allele]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reconstruct_route` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1089:8
+     |
+1089 | pub fn reconstruct_route(chain: &[&Allele]) -> routes::Route {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: function `reconstruct_assignment` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1105:8
+     |
+1105 | pub fn reconstruct_assignment(
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `profile_complete_sequence` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1159:8
+     |
+1159 | pub fn profile_complete_sequence(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Haplotype` is never constructed
+    --> examples/panel_route_diploid_search/partition.rs:1169:12
+     |
+1169 | pub struct Haplotype {
+     |            ^^^^^^^^^
+
+warning: function `source_spans_feasible` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1177:4
+     |
+1177 | fn source_spans_feasible(ranges: &[SourceRange]) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `enumerate_haplotypes_assessment_oracle` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1191:8
+     |
+1191 | pub fn enumerate_haplotypes_assessment_oracle(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RankedPair` is never constructed
+    --> examples/panel_route_diploid_search/partition.rs:1255:12
+     |
+1255 | pub struct RankedPair {
+     |            ^^^^^^^^^^
+
+warning: function `rank_pairs_assessment_oracle` is never used
+    --> examples/panel_route_diploid_search/partition.rs:1260:8
+     |
+1260 | pub fn rank_pairs_assessment_oracle(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Pair` is never constructed
+ --> examples/panel_route_diploid_search/score.rs:5:12
+  |
+5 | pub struct Pair {
+  |            ^^^^
+
+warning: method `key` is never used
+  --> examples/panel_route_diploid_search/score.rs:10:12
+   |
+ 8 | impl Pair {
+   | --------- method in this implementation
+ 9 |     /// A comparison key only: never reorder an immutable baseline's slots.
+10 |     pub fn key(&self) -> Self {
+   |            ^^^
+
+warning: struct `Factor` is never constructed
+  --> examples/panel_route_diploid_search/score.rs:17:12
+   |
+17 | pub struct Factor {
+   |            ^^^^^^
+
+warning: struct `Scored` is never constructed
+  --> examples/panel_route_diploid_search/score.rs:25:12
+   |
+25 | pub struct Scored {
+   |            ^^^^^^
+
+warning: function `add` is never used
+  --> examples/panel_route_diploid_search/score.rs:29:8
+   |
+29 | pub fn add(a: u64, b: u64) -> io::Result<u64> {
+   |        ^^^
+
+warning: function `loss` is never used
+  --> examples/panel_route_diploid_search/score.rs:33:8
+   |
+33 | pub fn loss(q: u64, observed: u64, histogram: u64) -> io::Result<(f64, f64)> {
+   |        ^^^^
+
+warning: struct `Scorer` is never constructed
+  --> examples/panel_route_diploid_search/score.rs:46:12
+   |
+46 | pub struct Scorer<'a, 'b> {
+   |            ^^^^^^
+
+warning: method `evaluate` is never used
+  --> examples/panel_route_diploid_search/score.rs:56:12
+   |
+55 | impl Scorer<'_, '_> {
+   | ------------------- method in this implementation
+56 |     pub fn evaluate(&mut self, pair: &Pair, native: bool) -> io::Result<Scored> {
+   |            ^^^^^^^^
+
+warning: `impg` (example "panel_route_completion_probe") generated 2 warnings
+warning: `impg` (example "panel_route_evidence_topology") generated 4 warnings (run `cargo fix --example "panel_route_evidence_topology" -p impg` to apply 3 suggestions)
+warning: `impg` (example "panel_route_genome_smoke") generated 98 warnings (run `cargo fix --example "panel_route_genome_smoke" -p impg` to apply 5 suggestions)
+warning: constant `MAX_STATE_BYTES` is never used
+  --> examples/panel_route_diploid_search/genome.rs:31:11
+   |
+31 | pub const MAX_STATE_BYTES: u64 = 134_217_728;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `MAX_COMPLETE_PAIRS` is never used
+  --> examples/panel_route_diploid_search/genome.rs:33:11
+   |
+33 | pub const MAX_COMPLETE_PAIRS: usize = 2_048;
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: struct `AxisFile` is never constructed
+  --> examples/panel_route_diploid_search/genome.rs:38:12
+   |
+38 | pub struct AxisFile {
+   |            ^^^^^^^^
+
+warning: struct `AxisInterval` is never constructed
+  --> examples/panel_route_diploid_search/genome.rs:46:12
+   |
+46 | pub struct AxisInterval {
+   |            ^^^^^^^^^^^^
+
+warning: function `load_axis` is never used
+  --> examples/panel_route_diploid_search/genome.rs:56:8
+   |
+56 | pub fn load_axis(path: &Path) -> io::Result<AxisFile> {
+   |        ^^^^^^^^^
+
+warning: function `load_bed_axis_partitions` is never used
+  --> examples/panel_route_diploid_search/genome.rs:89:8
+   |
+89 | pub fn load_bed_axis_partitions(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_COMPLETION_BRIDGE_BASES` is never used
+   --> examples/panel_route_diploid_search/genome.rs:159:11
+    |
+159 | pub const MAX_COMPLETION_BRIDGE_BASES: u64 = 30_000;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DomainCompletionException` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:396:12
+    |
+396 | pub struct DomainCompletionException {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DomainCompletionStats` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:405:12
+    |
+405 | pub struct DomainCompletionStats {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `complete_forward_source_paths` is never used
+   --> examples/panel_route_diploid_search/genome.rs:420:8
+    |
+420 | pub fn complete_forward_source_paths(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SpanningTraversal` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:520:12
+    |
+520 | pub struct SpanningTraversal {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: associated items `single`, `entry`, and `exit` are never used
+   --> examples/panel_route_diploid_search/genome.rs:527:12
+    |
+526 | impl SpanningTraversal {
+    | ---------------------- associated items in this implementation
+527 |     pub fn single(range: SourceRange) -> Self {
+    |            ^^^^^^
+...
+537 |     fn entry(&self) -> &SourceRange {
+    |        ^^^^^
+...
+540 |     fn exit(&self) -> &SourceRange {
+    |        ^^^^
+
+warning: function `retain_native_endpoint_candidates` is never used
+   --> examples/panel_route_diploid_search/genome.rs:545:8
+    |
+545 | pub fn retain_native_endpoint_candidates(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retain_native_endpoint_candidates_in_component_range` is never used
+   --> examples/panel_route_diploid_search/genome.rs:562:8
+    |
+562 | pub fn retain_native_endpoint_candidates_in_component_range(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `port_word_seams_with` is never used
+   --> examples/panel_route_diploid_search/genome.rs:589:4
+    |
+589 | fn port_word_seams_with<F>(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `port_word_seams` is never used
+   --> examples/panel_route_diploid_search/genome.rs:657:8
+    |
+657 | pub fn port_word_seams(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `legal_split_cut_order` is never used
+   --> examples/panel_route_diploid_search/genome.rs:678:4
+    |
+678 | fn legal_split_cut_order(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_candidates` is never used
+   --> examples/panel_route_diploid_search/genome.rs:687:8
+    |
+687 | pub fn split_candidates(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `SplitPairPrefilterStats` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:765:12
+    |
+765 | pub struct SplitPairPrefilterStats {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SplitPrefilterStats` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:774:12
+    |
+774 | pub struct SplitPrefilterStats {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_candidates_prefiltered` is never used
+   --> examples/panel_route_diploid_search/genome.rs:783:8
+    |
+783 | pub fn split_candidates_prefiltered<F, S>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `connected_path_subsample` is never used
+   --> examples/panel_route_diploid_search/genome.rs:914:8
+    |
+914 | pub fn connected_path_subsample(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `event_profile_cost` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1019:8
+     |
+1019 | pub fn event_profile_cost(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `profile_event_interior` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1068:8
+     |
+1068 | pub fn profile_event_interior(
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `profile_event_seam` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1087:8
+     |
+1087 | pub fn profile_event_seam(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `CacheRecord` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1114:8
+     |
+1114 | struct CacheRecord {
+     |        ^^^^^^^^^^^
+
+warning: struct `CacheSeal` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1122:8
+     |
+1122 | struct CacheSeal {
+     |        ^^^^^^^^^
+
+warning: function `dev_flag` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1135:4
+     |
+1135 | fn dev_flag(name: &str) -> bool {
+     |    ^^^^^^^^
+
+warning: function `fnv_update` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1139:4
+     |
+1139 | fn fnv_update(mut value: u64, bytes: &[u8]) -> u64 {
+     |    ^^^^^^^^^^
+
+warning: struct `CacheIndex` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1151:8
+     |
+1151 | struct CacheIndex {
+     |        ^^^^^^^^^^
+
+warning: struct `CacheHeader` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1157:8
+     |
+1157 | struct CacheHeader {
+     |        ^^^^^^^^^^^
+
+warning: struct `ProfileCache` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1161:12
+     |
+1161 | pub struct ProfileCache {
+     |            ^^^^^^^^^^^^
+
+warning: struct `RecordsSidecar` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1201:8
+     |
+1201 | struct RecordsSidecar {
+     |        ^^^^^^^^^^^^^^
+
+warning: struct `RecordSlot` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1210:8
+     |
+1210 | struct RecordSlot {
+     |        ^^^^^^^^^^
+
+warning: function `records_sidecar_path` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1216:4
+     |
+1216 | fn records_sidecar_path(path: &Path) -> PathBuf {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `put_u32` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1220:4
+     |
+1220 | fn put_u32(out: &mut Vec<u8>, value: u32) {
+     |    ^^^^^^^
+
+warning: function `put_u64` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1224:4
+     |
+1224 | fn put_u64(out: &mut Vec<u8>, value: u64) {
+     |    ^^^^^^^
+
+warning: function `encode_record_binary` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1228:4
+     |
+1228 | fn encode_record_binary(record: &CacheRecord) -> Vec<u8> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `take_u32` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1245:4
+     |
+1245 | fn take_u32(payload: &[u8], cursor: &mut usize, what: &str) -> io::Result<u32> {
+     |    ^^^^^^^^
+
+warning: function `take_u64` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1255:4
+     |
+1255 | fn take_u64(payload: &[u8], cursor: &mut usize, what: &str) -> io::Result<u64> {
+     |    ^^^^^^^^
+
+warning: function `take_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1265:4
+     |
+1265 | fn take_bytes<'a>(payload: &'a [u8], cursor: &mut usize, len: usize, what: &str) -> io::Result<&'a [u8]> {
+     |    ^^^^^^^^^^
+
+warning: function `decode_record_binary` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1275:4
+     |
+1275 | fn decode_record_binary(payload: &[u8], key: &str) -> io::Result<CacheRecord> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_jsonl_record` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1308:4
+     |
+1308 | fn read_jsonl_record(path: &Path, index: CacheIndex, key: &str) -> io::Result<CacheRecord> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `write_index_block` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1320:4
+     |
+1320 | fn write_index_block(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: associated items `find` and `load` are never used
+    --> examples/panel_route_diploid_search/genome.rs:1343:8
+     |
+1341 | impl RecordsSidecar {
+     | ------------------- associated items in this implementation
+1342 |     /// Locate a record slot by its unique JSONL record offset.
+1343 |     fn find(&self, jsonl_offset: u64) -> Option<RecordSlot> {
+     |        ^^^^
+...
+1352 |     fn load(path: &Path) -> Option<(Vec<RecordSlot>, u64, u64)> {
+     |        ^^^^
+
+warning: struct `CacheSidecarSeal` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1402:8
+     |
+1402 | struct CacheSidecarSeal {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: function `sidecar_path` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1408:4
+     |
+1408 | fn sidecar_path(path: &Path) -> PathBuf {
+     |    ^^^^^^^^^^^^
+
+warning: function `sidecar_seal_path` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1412:4
+     |
+1412 | fn sidecar_seal_path(path: &Path) -> PathBuf {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> examples/panel_route_diploid_search/genome.rs:1417:12
+     |
+1416 | impl ProfileCache {
+     | ----------------- associated items in this implementation
+1417 |     pub fn open(path: &Path) -> io::Result<Self> {
+     |            ^^^^
+...
+1429 |     pub fn open_filtered(path: &Path, retain: &dyn Fn(&str) -> bool) -> io::Result<Self> {
+     |            ^^^^^^^^^^^^^
+...
+1433 |     pub fn retained_entries(&self) -> usize {
+     |            ^^^^^^^^^^^^^^^^
+...
+1437 |     pub fn loaded_from_sidecar(&self) -> bool {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+1441 |     fn open_inner(
+     |        ^^^^^^^^^^
+...
+1452 |     pub fn open_filtered_guarded(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+1460 |     fn open_guarded(
+     |        ^^^^^^^^^^^^
+...
+1565 |     pub fn records_sidecar_report(&self) -> (bool, u64, &str, f64) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+1579 |     fn load_sidecar(
+     |        ^^^^^^^^^^^^
+...
+1651 |     fn sync_records_sidecar(
+     |        ^^^^^^^^^^^^^^^^^^^^
+...
+1830 |     fn rebuild_sidecar(
+     |        ^^^^^^^^^^^^^^^
+...
+1870 |     pub fn get_if_cached(&self, key: &str) -> io::Result<Option<(Profile, ProfileCost, u64)>> {
+     |            ^^^^^^^^^^^^^
+...
+1883 |     fn read_indexed_record(
+     |        ^^^^^^^^^^^^^^^^^^^
+...
+1907 |     pub fn get_or_insert_with(
+     |            ^^^^^^^^^^^^^^^^^^
+
+warning: struct `GenomeAllele` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1991:12
+     |
+1991 | pub struct GenomeAllele {
+     |            ^^^^^^^^^^^^
+
+warning: struct `GenomeSeam` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:1997:12
+     |
+1997 | pub struct GenomeSeam {
+     |            ^^^^^^^^^^
+
+warning: struct `BoundaryCompositionStats` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2027:12
+     |
+2027 | pub struct BoundaryCompositionStats {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deduplicated_boundary_profiles` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2034:8
+     |
+2034 | pub fn deduplicated_boundary_profiles<F>(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `SeenAt` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2081:6
+     |
+2081 | enum SeenAt {
+     |      ^^^^^^
+
+warning: method `observe` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2088:8
+     |
+2087 | impl SeenAt {
+     | ----------- method in this implementation
+2088 |     fn observe(&mut self, at: usize) {
+     |        ^^^^^^^
+
+warning: struct `Incidence` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2098:8
+     |
+2098 | struct Incidence {
+     |        ^^^^^^^^^
+
+warning: struct `IncidenceTable` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2106:12
+     |
+2106 | pub struct IncidenceTable {
+     |            ^^^^^^^^^^^^^^
+
+warning: enum `LocalClass` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2112:6
+     |
+2112 | enum LocalClass {
+     |      ^^^^^^^^^^
+
+warning: struct `LocalPairEvidence` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2119:12
+     |
+2119 | pub struct LocalPairEvidence {
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: struct `ChainAccounting` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2137:12
+     |
+2137 | pub struct ChainAccounting {
+     |            ^^^^^^^^^^^^^^^
+
+warning: struct `GenomeChain` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2173:12
+     |
+2173 | pub struct GenomeChain {
+     |            ^^^^^^^^^^^
+
+warning: struct `GenomeAudit` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2187:12
+     |
+2187 | pub struct GenomeAudit {
+     |            ^^^^^^^^^^^
+
+warning: function `profile_signature` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2193:4
+     |
+2193 | fn profile_signature(profile: &Profile) -> Vec<(FeatureKey, u64)> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `class_for_profiles` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2220:4
+     |
+2220 | fn class_for_profiles(physical: &[Profile]) -> (Vec<Profile>, Vec<usize>) {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `spans_feasible` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2239:4
+     |
+2239 | fn spans_feasible(ranges: &[SourceRange]) -> bool {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `key_hash` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2253:4
+     |
+2253 | fn key_hash(key: &FeatureKey, seed: u64) -> u64 {
+     |    ^^^^^^^^
+
+warning: function `observe_incidence` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2264:4
+     |
+2264 | fn observe_incidence(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> examples/panel_route_diploid_search/genome.rs:2320:12
+     |
+2319 | impl IncidenceTable {
+     | ------------------- associated items in this implementation
+2320 |     pub fn empty() -> Self {
+     |            ^^^^^
+...
+2327 |     pub fn observe_interior(&mut self, locus: usize, profile: &Profile) {
+     |            ^^^^^^^^^^^^^^^^
+...
+2333 |     pub fn observe_boundary(&mut self, boundary: usize, profile: &Profile) {
+     |            ^^^^^^^^^^^^^^^^
+...
+2345 |     fn classify(&self, key: &FeatureKey) -> LocalClass {
+     |        ^^^^^^^^
+...
+2360 |     pub fn len(&self) -> usize {
+     |            ^^^
+...
+2363 |     pub fn classification_label(&self, key: &FeatureKey) -> String {
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+2371 |     pub fn deferred(&self) -> usize {
+     |            ^^^^^^^^
+
+warning: struct `CountCache` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2385:8
+     |
+2385 | struct CountCache<'a> {
+     |        ^^^^^^^^^^
+
+warning: method `get` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2394:8
+     |
+2393 | impl CountCache<'_> {
+     | ------------------- method in this implementation
+2394 |     fn get(&mut self, key: &FeatureKey) -> io::Result<u64> {
+     |        ^^^
+
+warning: type alias `PreparedProfile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2421:6
+     |
+2421 | type PreparedProfile = Vec<(FeatureKey, u64, u64)>;
+     |      ^^^^^^^^^^^^^^^
+
+warning: function `prepare_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2423:4
+     |
+2423 | fn prepare_profile(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `score_prepared_pair` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2436:4
+     |
+2436 | fn score_prepared_pair(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `prepared_pair_totals` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2480:4
+     |
+2480 | fn prepared_pair_totals(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `score_local_pair` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2528:4
+     |
+2528 | fn score_local_pair(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentCountMap` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2598:8
+     |
+2598 | struct PersistentCountMap {
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `CountNode` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2603:8
+     |
+2603 | struct CountNode {
+     |        ^^^^^^^^^
+
+warning: enum `CountSlot` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2609:6
+     |
+2609 | enum CountSlot {
+     |      ^^^^^^^^^
+
+warning: constant `COUNT_CHUNK_BITS` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2614:7
+     |
+2614 | const COUNT_CHUNK_BITS: usize = 5;
+     |       ^^^^^^^^^^^^^^^^
+
+warning: constant `COUNT_FANOUT` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2615:7
+     |
+2615 | const COUNT_FANOUT: usize = 32;
+     |       ^^^^^^^^^^^^
+
+warning: function `count_chunk` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2617:4
+     |
+2617 | fn count_chunk(fid: u32, depth: usize) -> u32 {
+     |    ^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> examples/panel_route_diploid_search/genome.rs:2622:8
+     |
+2621 | impl PersistentCountMap {
+     | ----------------------- associated items in this implementation
+2622 |     fn get(&self, fid: u32) -> u64 {
+     |        ^^^
+...
+2644 |     fn from_sorted(entries: &[(u32, u64)]) -> Self {
+     |        ^^^^^^^^^^^
+...
+2650 |     fn build_node(entries: &[(u32, u64)], depth: usize) -> Arc<CountNode> {
+     |        ^^^^^^^^^^
+...
+2680 |     fn apply_delta(&self, delta: &[(u32, u64)]) -> io::Result<Self> {
+     |        ^^^^^^^^^^^
+...
+2686 |     fn apply_root(
+     |        ^^^^^^^^^^
+...
+2762 |     fn iter(&self) -> CountMapIter<'_> {
+     |        ^^^^
+...
+2773 |     fn len(&self) -> usize {
+     |        ^^^
+
+warning: struct `CountMapIter` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2787:8
+     |
+2787 | struct CountMapIter<'a> {
+     |        ^^^^^^^^^^^^
+
+warning: struct `PersistentProfile` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2815:8
+     |
+2815 | struct PersistentProfile {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: methods `cumulative_pairs` and `cumulative_equal` are never used
+    --> examples/panel_route_diploid_search/genome.rs:2836:8
+     |
+2828 | impl PersistentProfile {
+     | ---------------------- methods in this implementation
+...
+2836 |     fn cumulative_pairs(&self) -> CumulativePairs<'_> {
+     |        ^^^^^^^^^^^^^^^^
+...
+2855 |     fn cumulative_equal(&self, other: &PersistentProfile) -> bool {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: struct `CumulativePairs` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2871:8
+     |
+2871 | struct CumulativePairs<'a> {
+     |        ^^^^^^^^^^^^^^^
+
+warning: static `DP_STAGE_NANOS` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2909:8
+     |
+2909 | static DP_STAGE_NANOS: [std::sync::atomic::AtomicU64; 13] = [
+     |        ^^^^^^^^^^^^^^
+
+warning: static `DP_STAGE_PASSES` is never used
+    --> examples/panel_route_diploid_search/genome.rs:2924:8
+     |
+2924 | static DP_STAGE_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+     |        ^^^^^^^^^^^^^^^
+
+warning: struct `DpStageProbe` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2926:12
+     |
+2926 | pub struct DpStageProbe;
+     |            ^^^^^^^^^^^^
+
+warning: associated functions `add`, `note_pass`, and `snapshot` are never used
+    --> examples/panel_route_diploid_search/genome.rs:2929:8
+     |
+2928 | impl DpStageProbe {
+     | ----------------- associated functions in this implementation
+2929 |     fn add(slot: usize, started: Instant) {
+     |        ^^^
+...
+2936 |     fn note_pass() {
+     |        ^^^^^^^^^
+...
+2945 |     pub fn snapshot() -> (Vec<f64>, u64) {
+     |            ^^^^^^^^
+
+warning: struct `DpProbe` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:2959:8
+     |
+2959 | struct DpProbe;
+     |        ^^^^^^^
+
+warning: associated functions `on`, `counter`, `snapshot`, and `print_delta` are never used
+    --> examples/panel_route_diploid_search/genome.rs:2962:8
+     |
+2961 | impl DpProbe {
+     | ------------ associated functions in this implementation
+2962 |     fn on() -> bool {
+     |        ^^
+...
+2967 |     fn counter() -> &'static [std::sync::atomic::AtomicU64; 9] {
+     |        ^^^^^^^
+...
+2983 |     fn snapshot() -> [u64; 9] {
+     |        ^^^^^^^^
+...
+2999 |     fn print_delta(stage: &str, before: &[u64; 9]) {
+     |        ^^^^^^^^^^^
+
+warning: struct `FeatureUniverse` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3023:8
+     |
+3023 | struct FeatureUniverse {
+     |        ^^^^^^^^^^^^^^^
+
+warning: associated items `build`, `id`, and `fingerprint_value` are never used
+    --> examples/panel_route_diploid_search/genome.rs:3037:8
+     |
+3036 | impl FeatureUniverse {
+     | -------------------- associated items in this implementation
+3037 |     fn build(
+     |        ^^^^^
+...
+3088 |     fn id(&self, feature: &FeatureKey) -> io::Result<u32> {
+     |        ^^
+...
+3098 |     fn fingerprint_value(&self, fid: u32, value: u64) -> u64 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: type alias `ConvertedProfile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3105:6
+     |
+3105 | type ConvertedProfile = Vec<(u32, u64)>;
+     |      ^^^^^^^^^^^^^^^^
+
+warning: function `convert_profile` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3107:4
+     |
+3107 | fn convert_profile(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `convert_signature` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3119:4
+     |
+3119 | fn convert_signature(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `empty_component` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3131:4
+     |
+3131 | fn empty_component() -> Arc<ConvertedProfile> {
+     |    ^^^^^^^^^^^^^^^
+
+warning: struct `ComponentMerge` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3139:8
+     |
+3139 | struct ComponentMerge<'a> {
+     |        ^^^^^^^^^^^^^^
+
+warning: associated items `new`, `next`, and `next_tagged` are never used
+    --> examples/panel_route_diploid_search/genome.rs:3145:8
+     |
+3144 | impl<'a> ComponentMerge<'a> {
+     | --------------------------- associated items in this implementation
+3145 |     fn new(components: &'a [Arc<ConvertedProfile>; 4]) -> Self {
+     |        ^^^
+...
+3157 |     fn next(&mut self) -> io::Result<Option<(u32, u64)>> {
+     |        ^^^^
+...
+3190 |     fn next_tagged(&mut self) -> io::Result<Option<(u32, u64, Option<(usize, usize)>)>> {
+     |        ^^^^^^^^^^^
+
+warning: function `feature_potential` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3232:4
+     |
+3232 | fn feature_potential(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: struct `PairFreshConstants` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3285:8
+     |
+3285 | struct PairFreshConstants {
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentProfileInterner` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3292:8
+     |
+3292 | struct PersistentProfileInterner {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `clear_search_indexes`, `component_terms`, and `extend` are never used
+    --> examples/panel_route_diploid_search/genome.rs:3310:8
+     |
+3309 | impl PersistentProfileInterner {
+     | ------------------------------ methods in this implementation
+3310 |     fn clear_search_indexes(&mut self) {
+     |        ^^^^^^^^^^^^^^^^^^^^
+...
+3316 |     fn component_terms(
+     |        ^^^^^^^^^^^^^^^
+...
+3336 |     fn extend(
+     |        ^^^^^^
+
+warning: function `exit_memberships` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3529:4
+     |
+3529 | fn exit_memberships(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `audit_chain` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3564:8
+     |
+3564 | pub fn audit_chain(
+     |        ^^^^^^^^^^^
+
+warning: struct `PhysicalNode` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3614:8
+     |
+3614 | struct PhysicalNode {
+     |        ^^^^^^^^^^^^
+
+warning: function `cumulative_profile_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3620:4
+     |
+3620 | fn cumulative_profile_bytes(profiles: &BTreeMap<usize, Arc<PersistentProfile>>) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `physical_state_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3647:4
+     |
+3647 | fn physical_state_bytes(states: usize, nodes: &[PhysicalNode]) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `backtrack_physical` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3659:4
+     |
+3659 | fn backtrack_physical(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: struct `BeamKey` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3686:8
+     |
+3686 | struct BeamKey {
+     |        ^^^^^^^
+
+warning: struct `BeamCandidate` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3692:8
+     |
+3692 | struct BeamCandidate {
+     |        ^^^^^^^^^^^^^
+
+warning: struct `ScoreKey` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3700:8
+     |
+3700 | struct ScoreKey(f64);
+     |        ^^^^^^^^
+
+warning: function `tie_fingerprint` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3721:4
+     |
+3721 | fn tie_fingerprint(rotation: u64, key: &BeamKey) -> u64 {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `cmp_ranked` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3738:4
+     |
+3738 | fn cmp_ranked(rotation: u64, left: &BeamKey, right: &BeamKey) -> std::cmp::Ordering {
+     |    ^^^^^^^^^^
+
+warning: struct `RankKey` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3752:8
+     |
+3752 | struct RankKey {
+     |        ^^^^^^^
+
+warning: struct `BoundedSuccessors` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:3774:8
+     |
+3774 | struct BoundedSuccessors {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `cutoff`, `refresh_cutoff`, `record_drop`, `record_bulk_drop`, and `insert` are never used
+    --> examples/panel_route_diploid_search/genome.rs:3784:8
+     |
+3783 | impl BoundedSuccessors {
+     | ---------------------- associated items in this implementation
+3784 |     fn new(limit: usize, rotation: u64) -> Self {
+     |        ^^^
+...
+3795 |     fn cutoff(&self) -> Option<f64> {
+     |        ^^^^^^
+...
+3799 |     fn refresh_cutoff(&mut self, previous: Option<f64>) {
+     |        ^^^^^^^^^^^^^^
+...
+3808 |     fn record_drop(&mut self, score: f64) {
+     |        ^^^^^^^^^^^
+...
+3819 |     fn record_bulk_drop(&mut self, score: f64, count: u64) {
+     |        ^^^^^^^^^^^^^^^^
+...
+3830 |     fn insert(
+     |        ^^^^^^
+
+warning: function `conflict_eligible_members` is never used
+    --> examples/panel_route_diploid_search/genome.rs:3967:4
+     |
+3967 | fn conflict_eligible_members(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `prune_beam` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4008:4
+     |
+4008 | fn prune_beam(
+     |    ^^^^^^^^^^
+
+warning: function `completion_viability` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4035:4
+     |
+4035 | fn completion_viability(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `chain_resident_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4054:4
+     |
+4054 | fn chain_resident_bytes() -> io::Result<u64> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `statm_resident_bytes` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4069:4
+     |
+4069 | fn statm_resident_bytes() -> io::Result<u64> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PeriodicRssGuard` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:4087:12
+     |
+4087 | pub struct PeriodicRssGuard {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `peak_bytes`, `checkpoint`, and `sample` are never used
+    --> examples/panel_route_diploid_search/genome.rs:4095:12
+     |
+4094 | impl PeriodicRssGuard {
+     | --------------------- associated items in this implementation
+4095 |     pub fn new(budget_bytes: Option<u64>, every: u64) -> Self {
+     |            ^^^
+...
+4105 |     pub fn peak_bytes(&self) -> u64 {
+     |            ^^^^^^^^^^
+...
+4111 |     pub fn checkpoint(&mut self, stage: &str) -> io::Result<()> {
+     |            ^^^^^^^^^^
+...
+4121 |     pub fn sample(&mut self, stage: &str) -> io::Result<()> {
+     |            ^^^^^^
+
+warning: function `enforce_chain_rss` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4136:4
+     |
+4136 | fn enforce_chain_rss(budget: Option<u64>, stage: &str) -> io::Result<()> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: type alias `SuccessorClass` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4149:6
+     |
+4149 | type SuccessorClass = (usize, Vec<(FeatureKey, u64)>);
+     |      ^^^^^^^^^^^^^^
+
+warning: type alias `LocusSuccessors` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4150:6
+     |
+4150 | type LocusSuccessors = (
+     |      ^^^^^^^^^^^^^^^
+
+warning: struct `SharedLocusMachinery` is never constructed
+    --> examples/panel_route_diploid_search/genome.rs:4161:8
+     |
+4161 | struct SharedLocusMachinery {
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_pair_fresh_constants` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4178:4
+     |
+4178 | fn compute_pair_fresh_constants(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pair_fresh_constants` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4205:4
+     |
+4205 | fn pair_fresh_constants(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_locus_successors` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4235:4
+     |
+4235 | fn build_locus_successors(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `locus_weight_tables` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4278:4
+     |
+4278 | fn locus_weight_tables(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `locus_max_additions` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4315:4
+     |
+4315 | fn locus_max_additions(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `fresh_potentials` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4355:4
+     |
+4355 | fn fresh_potentials(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: constant `BOUND_PRUNE_EPSILON` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4390:7
+     |
+4390 | const BOUND_PRUNE_EPSILON: f64 = 1e-6;
+     |       ^^^^^^^^^^^^^^^^^^^
+
+warning: function `bounded_conflict_chain` is never used
+    --> examples/panel_route_diploid_search/genome.rs:4392:4
+     |
+4392 | fn bounded_conflict_chain(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bounded_chain_rotations` is never used
+    --> examples/panel_route_diploid_search/genome.rs:5458:4
+     |
+5458 | fn bounded_chain_rotations(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `exact_chain_streaming_with_audit` is never used
+    --> examples/panel_route_diploid_search/genome.rs:5655:8
+     |
+5655 | pub fn exact_chain_streaming_with_audit<F>(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `external_rescore` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6127:8
+     |
+6127 | pub fn external_rescore(
+     |        ^^^^^^^^^^^^^^^^
+
+warning: function `coalesced_route` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6215:8
+     |
+6215 | pub fn coalesced_route(ranges: &[SourceRange]) -> io::Result<routes::Route> {
+     |        ^^^^^^^^^^^^^^^
+
+warning: struct `SourceRange` is never constructed
+  --> examples/panel_route_diploid_search/partition.rs:24:12
+   |
+24 | pub struct SourceRange {
+   |            ^^^^^^^^^^^
+
+warning: `impg` (example "panel_route_genome_rescore") generated 231 warnings (89 duplicates)
+warning: constant `MAX_PROFILE_WORK` is never used
+  --> examples/panel_route_diploid_search/genome.rs:30:11
+   |
+30 | pub const MAX_PROFILE_WORK: u64 = 600_000_000;
+   |           ^^^^^^^^^^^^^^^^
+
+warning: function `add_cost` is never used
+   --> examples/panel_route_diploid_search/genome.rs:968:4
+    |
+968 | fn add_cost(a: &mut ProfileCost, b: ProfileCost) -> io::Result<()> {
+    |    ^^^^^^^^
+
+warning: function `write_run` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6071:4
+     |
+6071 | fn write_run(path: &Path, profile: Profile) -> io::Result<()> {
+     |    ^^^^^^^^^
+
+warning: function `next_run` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6080:4
+     |
+6080 | fn next_run(reader: &mut BufReader<File>) -> io::Result<Option<(FeatureKey, u64)>> {
+     |    ^^^^^^^^
+
+warning: function `merge_runs` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6090:4
+     |
+6090 | fn merge_runs(inputs: &[PathBuf], output: &Path) -> io::Result<()> {
+     |    ^^^^^^^^^^
+
+warning: function `external_rescore_components` is never used
+    --> examples/panel_route_diploid_search/genome.rs:6140:8
+     |
+6140 | pub fn external_rescore_components(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (example "panel_route_seam_diagnostic") generated 235 warnings (229 duplicates)
+warning: `impg` (example "panel_route_assignment_rescore") generated 231 warnings (231 duplicates)
+    Checking impg v0.5.0 (/home/erikg/impg-genome-inference)
+warning: `impg` (example "panel_route_component_rescore") generated 230 warnings (230 duplicates)
+warning: function `expansion_eligible` is never used
+   --> examples/panel_route_diploid_search/mod.rs:248:8
+    |
+248 | pub fn expansion_eligible(pair: &Pair, admitted: &[Pair]) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_FEATURES` is never used
+  --> examples/panel_route_diploid_search/genome.rs:32:11
+   |
+32 | pub const MAX_FEATURES: usize = 50_000;
+   |           ^^^^^^^^^^^^
+
+warning: struct `ProfileCost` is never constructed
+   --> examples/panel_route_diploid_search/genome.rs:961:12
+    |
+961 | pub struct ProfileCost {
+    |            ^^^^^^^^^^^
+
+warning: function `event_boundaries` is never used
+   --> examples/panel_route_diploid_search/genome.rs:980:4
+    |
+980 | fn event_boundaries(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `profile_event_runs` is never used
+    --> examples/panel_route_diploid_search/genome.rs:1036:8
+     |
+1036 | pub fn profile_event_runs(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: type alias `FeatureKey` is never used
+  --> examples/panel_route_diploid_search/partition.rs:20:10
+   |
+20 | pub type FeatureKey = Vec<u64>;
+   |          ^^^^^^^^^^
+
+warning: type alias `Profile` is never used
+  --> examples/panel_route_diploid_search/partition.rs:21:10
+   |
+21 | pub type Profile = BTreeMap<FeatureKey, u64>;
+   |          ^^^^^^^
+
+warning: function `feature_cap` is never used
+   --> examples/panel_route_diploid_search/partition.rs:121:4
+    |
+121 | fn feature_cap(max_features: usize) -> io::Result<()> {
+    |    ^^^^^^^^^^^
+
+warning: function `add` is never used
+   --> examples/panel_route_diploid_search/partition.rs:128:4
+    |
+128 | fn add(profile: &mut Profile, key: FeatureKey, n: u64, max_features: usize) -> io::Result<()> {
+    |    ^^^
+
+warning: function `add_record_subwalks_weighted` is never used
+   --> examples/panel_route_diploid_search/partition.rs:156:8
+    |
+156 | pub fn add_record_subwalks_weighted(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ScoreModel` is never constructed
+   --> examples/panel_route_diploid_search/partition.rs:507:12
+    |
+507 | pub struct ScoreModel {
+    |            ^^^^^^^^^^
+
+warning: methods `validate` and `loss` are never used
+   --> examples/panel_route_diploid_search/partition.rs:516:12
+    |
+515 | impl ScoreModel {
+    | --------------- methods in this implementation
+516 |     pub fn validate(&self) -> io::Result<()> {
+    |            ^^^^^^^^
+...
+528 |     pub fn loss(&self, q: u64, observed: u64) -> io::Result<f64> {
+    |            ^^^^
+
+warning: `impg` (example "panel_route_diploid_search") generated 223 warnings (211 duplicates)
+warning: unnecessary trailing semicolon
+    --> examples/panel_route_spine/mod.rs:1205:79
+     |
+1205 |             let right_sequence = decompose_segment_sequence(sources, &right)?;;
+     |                                                                               ^ help: remove this semicolon
+     |
+     = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `boundary`
+   --> examples/panel_route_spine/phasing.rs:245:5
+    |
+245 |     boundary: usize,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `overlap`
+   --> examples/panel_route_spine/phasing.rs:313:27
+    |
+313 |     for &(_, left, right, overlap) in canonical {
+    |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_overlap`
+
+warning: unused variable: `boundary`
+    --> examples/panel_route_spine/phasing.rs:1841:16
+     |
+1841 |         .map(|(boundary, draft)| {
+     |                ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `partition`
+   --> examples/panel_route_spine/mod.rs:116:5
+    |
+116 |     partition: u32,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_partition`
+
+warning: unused variable: `routed_equal`
+   --> examples/panel_route_spine/mod.rs:119:5
+    |
+119 |     routed_equal: &crate::RoutedObs,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routed_equal`
+
+warning: unused variable: `piece`
+   --> examples/panel_route_spine/mod.rs:920:25
+    |
+920 |                     let piece = (source, start, end, reverse, owner);
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unreachable pattern
+    --> examples/panel_route_spine/mod.rs:1705:17
+     |
+1701 |                 (Some(&(a_key, &a)), Some(&(_, _))) => {
+     |                 ----------------------------------- matches all the relevant values
+...
+1705 |                 (Some(_), Some(_)) => {
+     |                 ^^^^^^^^^^^^^^^^^^ no value can reach this
+     |
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `partitions`
+    --> examples/panel_route_spine/mod.rs:1242:5
+     |
+1242 |     partitions: &[u32],
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_partitions`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_spine/mod.rs:1463:21
+     |
+1463 |                 let piece = (source, start, end, reverse, piece_owner);
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `routed_equal`
+    --> examples/panel_route_spine/mod.rs:2624:5
+     |
+2624 |     routed_equal: &crate::RoutedObs,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routed_equal`
+
+warning: unused variable: `right_ranges`
+    --> examples/panel_route_spine/mod.rs:2751:5
+     |
+2751 |     right_ranges: &[genome::SpanningTraversal],
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_right_ranges`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:3505:34
+     |
+3505 |     let (mut margins_admissible, mut suffix_from_next) = compute_margins(&min_pair, &min_seam)?;
+     |                                  ----^^^^^^^^^^^^^^^^
+     |                                  |
+     |                                  help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:3517:9
+     |
+3517 |     let mut margins = compute_local_margins(&min_pair, &successors_ref, &viable);
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: value assigned to `partitions` is never read
+   --> examples/panel_route_mem_routed.rs:878:9
+    |
+878 |         partitions += extension.pure_new.len();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:1300:9
+     |
+1300 |     let mut push_anchor_events = |pos: u64, events: &mut Vec<u64>| {
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:1623:9
+     |
+1623 |     let mut keys: BTreeSet<&FeatureKey> = oracle.keys().chain(geometric.keys()).collect();
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:2280:9
+     |
+2280 |         mut self,
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `rank`
+    --> examples/panel_route_mem_routed.rs:2288:14
+     |
+2288 |         for (rank, key) in self.ranking {
+     |              ^^^^ help: if this is intentional, prefix it with an underscore: `_rank`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:2787:9
+     |
+2787 |     let mut fnv_update = |value: &mut u64, bytes: &[u8]| {
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `aq`
+    --> examples/panel_route_mem_routed.rs:2998:24
+     |
+2998 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                        ^^ help: if this is intentional, prefix it with an underscore: `_aq`
+
+warning: unused variable: `ao`
+    --> examples/panel_route_mem_routed.rs:2998:28
+     |
+2998 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                            ^^ help: if this is intentional, prefix it with an underscore: `_ao`
+
+warning: unused variable: `bo`
+    --> examples/panel_route_mem_routed.rs:2999:48
+     |
+2999 |             (Some(&(_, aq, ao)), Some(&(_, bq, bo))) => {
+     |                                                ^^ help: if this is intentional, prefix it with an underscore: `_bo`
+
+warning: unused variable: `start`
+    --> examples/panel_route_mem_routed.rs:4161:35
+     |
+4161 | ...                   for &(start, end, member) in &spans[..prefix] {
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_mem_routed.rs:4782:25
+     |
+4782 |                     let piece = (source, start, end, reverse, owner);
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `routing_seconds`
+    --> examples/panel_route_mem_routed.rs:5686:9
+     |
+5686 |     let routing_seconds = routing_started.elapsed().as_secs_f64();
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routing_seconds`
+
+warning: unused variable: `locus`
+    --> examples/panel_route_mem_routed.rs:6281:18
+     |
+6281 |     for (index, (locus, segments, identity, reverse)) in sample_candidates.iter().enumerate() {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_locus`
+
+warning: unused variable: `hi`
+    --> examples/panel_route_mem_routed.rs:6321:21
+     |
+6321 |                 let hi = lo + READ_LENGTH as u64;
+     |                     ^^ help: if this is intentional, prefix it with an underscore: `_hi`
+
+warning: function `merge_routed` is never used
+    --> examples/panel_route_mem_routed.rs:1147:4
+     |
+1147 | fn merge_routed(target: &mut RoutedObs, source: &RoutedObs) {
+     |    ^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `profile_loss_routed` is never used
+    --> examples/panel_route_mem_routed.rs:1785:4
+     |
+1785 | fn profile_loss_routed(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DpFinalist` is never constructed
+    --> examples/panel_route_mem_routed.rs:2103:8
+     |
+2103 | struct DpFinalist {
+     |        ^^^^^^^^^^
+
+warning: field `classes` is never read
+    --> examples/panel_route_mem_routed.rs:2630:5
+     |
+2629 | struct LazyPairTable<'a> {
+     |        ------------- field in this struct
+2630 |     classes: usize,
+     |     ^^^^^^^
+
+warning: constant `JOINT_PROJECTION_WINDOW` is never used
+  --> examples/panel_route_diploid_search/mod.rs:33:7
+   |
+33 | const JOINT_PROJECTION_WINDOW: u64 = 16;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `native_class_pair` is never read
+   --> examples/panel_route_spine/mod.rs:478:16
+    |
+462 | pub(super) struct LocusSweep {
+    |                   ---------- field in this struct
+...
+478 |     pub(super) native_class_pair: Option<[usize; 2]>,
+    |                ^^^^^^^^^^^^^^^^^
+
+warning: unused `Result` that must be used
+   --> examples/panel_route_spine/mod.rs:902:17
+    |
+902 | /                 ensure(
+903 | |                     !reverse,
+904 | |                     "spine reference decomposition met a reverse piece (unsupported)"
+905 | |                 );
+    | |_________________^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+902 |                 let _ = ensure(
+    |                 +++++++
+
+warning: unused `Result` that must be used
+    --> examples/panel_route_spine/mod.rs:3311:5
+     |
+3311 |     ensure(incumbent.is_finite(), "nonfinite spine incumbent");
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+3311 |     let _ = ensure(incumbent.is_finite(), "nonfinite spine incumbent");
+     |     +++++++
+
+warning: `impg` (example "panel_route_mem_routed") generated 235 warnings (199 duplicates) (run `cargo fix --example "panel_route_mem_routed" -p impg` to apply 25 suggestions)
+    Finished `release` profile [optimized] target(s) in 15.78s

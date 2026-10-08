@@ -1,0 +1,438 @@
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:857:5
+    |
+854 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+857 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:879:16
+    |
+879 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:880:14
+    |
+880 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `generate_multi_level_candidates` is never used
+    --> src/resolution.rs:3397:4
+     |
+3397 | fn generate_multi_level_candidates(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7171:4
+     |
+7171 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10712:4
+      |
+10712 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib) generated 6 warnings
+   Compiling impg v0.5.0 (/home/erikg/impg-genome-inference)
+warning: unnecessary trailing semicolon
+    --> examples/panel_route_spine/mod.rs:1205:79
+     |
+1205 |             let right_sequence = decompose_segment_sequence(sources, &right)?;;
+     |                                                                               ^ help: remove this semicolon
+     |
+     = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+error[E0124]: field `reverse_positions` is already declared
+    --> examples/panel_route_mem_routed.rs:1684:5
+     |
+1679 |     reverse_positions: Vec::new(),
+     |     ----------------------------- `reverse_positions` first declared here
+...
+1684 |     reverse_positions: Vec<(usize, u64)>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field already declared
+
+error: return type notation not allowed in this position yet
+    --> examples/panel_route_mem_routed.rs:1679:24
+     |
+1679 |     reverse_positions: Vec::new(),
+     |                        ^^^^^^^^^^
+     |
+help: furthermore, argument types not allowed with return type notation
+     |
+1679 |     reverse_positions: Vec::new(..),
+     |                                 ++
+
+error[E0308]: mismatched types
+    --> examples/panel_route_mem_routed.rs:1179:5
+     |
+1124 | ) -> (BTreeMap<u32, u64>, u64, Vec<(usize, u64)>) {
+     |      -------------------------------------------- expected `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)` because of return type
+...
+1179 |     (occurrences, total_occurrences, forward_positions, reverse_positions)
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected a tuple with 3 elements, found one with 4 elements
+     |
+     = note: expected tuple `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+                found tuple `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>, Vec<(usize, u64)>)`
+
+error[E0308]: mismatched types
+    --> examples/panel_route_mem_routed.rs:1362:13
+     |
+1362 |         let (every_occurrences, every_total, every_forward, _) = route_record(&anchors, territory, k, true);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^   ------------------------------------------ this expression has type `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+     |             |
+     |             expected a tuple with 3 elements, found one with 4 elements
+     |
+     = note: expected tuple `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+                found tuple `(_, _, _, _)`
+
+error[E0308]: mismatched types
+    --> examples/panel_route_mem_routed.rs:7552:17
+     |
+7552 |             let (occurrences, total_occurrences, forward_positions, reverse_positions) =
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected a tuple with 3 elements, found one with 4 elements
+7553 |                 route_record(&anchors, &territory, k, false);
+     |                 -------------------------------------------- this expression has type `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+     |
+     = note: expected tuple `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+                found tuple `(_, _, _, _)`
+
+error[E0308]: mismatched types
+    --> examples/panel_route_mem_routed.rs:7816:33
+     |
+7816 | ...                   let (occurrences, _, _, _) =
+     |                           ^^^^^^^^^^^^^^^^^^^^^^ expected a tuple with 3 elements, found one with 4 elements
+7817 | ...                       route_record(&anchors, &genome_index, k, false);
+     |                           ----------------------------------------------- this expression has type `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+     |
+     = note: expected tuple `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+                found tuple `(_, _, _, _)`
+
+error[E0308]: mismatched types
+    --> examples/panel_route_mem_routed.rs:7870:13
+     |
+7870 |         let (exact, _, _, _) = route_record(&anchors, &territory, k, true);
+     |             ^^^^^^^^^^^^^^^^   ------------------------------------------- this expression has type `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+     |             |
+     |             expected a tuple with 3 elements, found one with 4 elements
+     |
+     = note: expected tuple `(std::collections::BTreeMap<u32, u64>, u64, Vec<(usize, u64)>)`
+                found tuple `(_, _, _, _)`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:1767:13
+     |
+1767 |         let mut mode;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `evaluated_state_classes` is assigned to, but never used
+    --> examples/panel_route_diploid_search/genome.rs:4896:13
+     |
+4896 |         let mut evaluated_state_classes = 0usize;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_evaluated_state_classes` instead
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `evaluated_state_classes` is never read
+    --> examples/panel_route_diploid_search/genome.rs:5052:17
+     |
+5052 |                 evaluated_state_classes += 1;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_diploid_search/genome.rs:5732:5
+     |
+5732 |     mut load_profiles: F,
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable `parent_map` is assigned to, but never used
+    --> examples/panel_route_diploid_search/genome.rs:7424:17
+     |
+7424 |             let mut parent_map = PersistentCountMap::default();
+     |                 ^^^^^^^^^^^^^^
+     |
+     = note: consider using `_parent_map` instead
+
+warning: value assigned to `parent_map` is never read
+    --> examples/panel_route_diploid_search/genome.rs:7436:17
+     |
+7436 |                 parent_map = PersistentCountMap::from_sorted(&parent_counts);
+     |                 ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `boundary`
+   --> examples/panel_route_spine/phasing.rs:245:5
+    |
+245 |     boundary: usize,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `overlap`
+   --> examples/panel_route_spine/phasing.rs:313:27
+    |
+313 |     for &(_, left, right, overlap) in canonical {
+    |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_overlap`
+
+warning: value assigned to `allele_profile` is never read
+   --> examples/panel_route_spine/phasing.rs:748:51
+    |
+748 |         let mut allele_profile: Option<Profile> = None;
+    |                                                   ^^^^ this value is reassigned later and never used
+...
+852 |             allele_profile = Some(profile);
+    |             -------------- `allele_profile` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/phasing.rs:2277:5
+     |
+2277 |     mut spelled_out: Option<&mut HashMap<FeatureKey, Vec<crate::SpelledSpan>>>,
+     |     ----^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/phasing.rs:3693:9
+     |
+3693 |     let mut dry_run = std::env::var("IMPG_FINALIST_DRY_RUN").is_ok();
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `boundary`
+    --> examples/panel_route_spine/phasing.rs:2993:16
+     |
+2993 |         .map(|(boundary, draft)| {
+     |                ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `boundary`
+    --> examples/panel_route_spine/phasing.rs:2979:16
+     |
+2979 |         .map(|(boundary, draft)| {
+     |                ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary`
+
+warning: unused variable: `coupling_started`
+    --> examples/panel_route_spine/phasing.rs:3284:9
+     |
+3284 |     let coupling_started = Instant::now();
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_coupling_started`
+
+warning: value assigned to `stopped_by` is never read
+    --> examples/panel_route_spine/phasing.rs:3691:26
+     |
+3691 |     let mut stopped_by = "exhausted";
+     |                          ^^^^^^^^^^^ this value is reassigned later and never used
+...
+3720 |                 stopped_by = "containment_doubled";
+     |                 ---------------------------------- `stopped_by` is overwritten here before the previous value is read
+
+warning: unused variable: `locus_classes`
+    --> examples/panel_route_spine/phasing.rs:5084:13
+     |
+5084 |         let locus_classes = LocusClassing {
+     |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_locus_classes`
+
+warning: unused variable: `model`
+    --> examples/panel_route_spine/phasing.rs:5374:13
+     |
+5374 |         let model = ScoreModel {
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_model`
+
+warning: unused variable: `partition`
+   --> examples/panel_route_spine/mod.rs:116:5
+    |
+116 |     partition: u32,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_partition`
+
+warning: unused variable: `routed_equal`
+   --> examples/panel_route_spine/mod.rs:119:5
+    |
+119 |     routed_equal: &crate::RoutedObs,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routed_equal`
+
+warning: unused variable: `piece`
+   --> examples/panel_route_spine/mod.rs:920:25
+    |
+920 |                     let piece = (source, start, end, reverse, owner);
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `partitions`
+    --> examples/panel_route_spine/mod.rs:1271:5
+     |
+1271 |     partitions: &[u32],
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_partitions`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_spine/mod.rs:1787:21
+     |
+1787 |                 let piece = (source, start, end, reverse, piece_owner);
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: unused variable: `routed_equal`
+    --> examples/panel_route_spine/mod.rs:3143:5
+     |
+3143 |     routed_equal: &crate::RoutedObs,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_routed_equal`
+
+warning: unused variable: `right_ranges`
+    --> examples/panel_route_spine/mod.rs:3270:5
+     |
+3270 |     right_ranges: &[genome::SpanningTraversal],
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_right_ranges`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:4042:34
+     |
+4042 |     let (mut margins_admissible, mut suffix_from_next) = compute_margins(&min_pair, &min_seam)?;
+     |                                  ----^^^^^^^^^^^^^^^^
+     |                                  |
+     |                                  help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_spine/mod.rs:4054:9
+     |
+4054 |     let mut margins = compute_local_margins(&min_pair, &successors_ref, &viable);
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: value assigned to `partitions` is never read
+   --> examples/panel_route_mem_routed.rs:892:9
+    |
+892 |         partitions += extension.pure_new.len();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `run_end`
+    --> examples/panel_route_mem_routed.rs:2246:13
+     |
+2246 |         let run_end = run[1] as usize; // exclusive; read starts start..run_end-1
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_end`
+
+warning: unused variable: `run_end`
+    --> examples/panel_route_mem_routed.rs:2303:13
+     |
+2303 |         let run_end = run[1] as usize;
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_end`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:2874:9
+     |
+2874 |     let mut push_anchor_events = |pos: u64, events: &mut Vec<u64>| {
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:3197:9
+     |
+3197 |     let mut keys: BTreeSet<&FeatureKey> = oracle.keys().chain(geometric.keys()).collect();
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:3854:9
+     |
+3854 |         mut self,
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `rank`
+    --> examples/panel_route_mem_routed.rs:3862:14
+     |
+3862 |         for (rank, key) in self.ranking {
+     |              ^^^^ help: if this is intentional, prefix it with an underscore: `_rank`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:4361:9
+     |
+4361 |     let mut fnv_update = |value: &mut u64, bytes: &[u8]| {
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `aq`
+    --> examples/panel_route_mem_routed.rs:4680:24
+     |
+4680 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                        ^^ help: if this is intentional, prefix it with an underscore: `_aq`
+
+warning: unused variable: `ao`
+    --> examples/panel_route_mem_routed.rs:4680:28
+     |
+4680 |             (Some(&(_, aq, ao)), Some(&(_, _, _))) if j >= second.len() => true,
+     |                            ^^ help: if this is intentional, prefix it with an underscore: `_ao`
+
+warning: unused variable: `bo`
+    --> examples/panel_route_mem_routed.rs:4681:48
+     |
+4681 |             (Some(&(_, aq, ao)), Some(&(_, bq, bo))) => {
+     |                                                ^^ help: if this is intentional, prefix it with an underscore: `_bo`
+
+warning: unused variable: `start`
+    --> examples/panel_route_mem_routed.rs:5848:35
+     |
+5848 | ...                   for &(start, end, member) in &spans[..prefix] {
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:6562:5
+     |
+6562 |     mut shared_piece_memo: Option<&mut HashMap<(usize, u64, u64), Profile>>,
+     |     ----^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:6567:5
+     |
+6567 |     mut shared_spelled_memo: Option<&mut SpelledMemo>,
+     |     ----^^^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: unused variable: `piece`
+    --> examples/panel_route_mem_routed.rs:6742:25
+     |
+6742 |                     let piece = (source, start, end, reverse, owner);
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_piece`
+
+warning: variable does not need to be mutable
+    --> examples/panel_route_mem_routed.rs:9578:13
+     |
+9578 |         let mut profile = Profile::new();
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+Some errors have detailed explanations: E0124, E0308.
+For more information about an error, try `rustc --explain E0124`.
+warning: `impg` (example "panel_route_mem_routed" test) generated 43 warnings
+error: could not compile `impg` (example "panel_route_mem_routed" test) due to 7 previous errors; 43 warnings emitted

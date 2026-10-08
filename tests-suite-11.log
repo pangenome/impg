@@ -1,0 +1,110 @@
+=== suite started Tue Sep 22 06:46:12 PM UTC 2026 ===
+--- lib ---
+test result: ok. 496 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.03s
+--- integration (all tests/) ---
+     Running unittests src/lib.rs (target/release/deps/impg-f66689acbbb47dd7)
+test result: ok. 496 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 6.99s
+     Running unittests vendor/gfaffix/src/main.rs (target/release/deps/gfaffix-a5d86b6ba310f765)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/main.rs (target/release/deps/impg-ef9003367ef05702)
+test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running tests/test_agc_integration.rs (target/release/deps/test_agc_integration-7ed3a78d01be56a9)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/test_crush_integration.rs (target/release/deps/test_crush_integration-39d765955be4e8df)
+test result: ok. 11 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 111.44s
+     Running tests/test_genome_inference.rs (target/release/deps/test_genome_inference-c7a1e03789a52e19)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+     Running tests/test_genome_inference_quantitative.rs (target/release/deps/test_genome_inference_quantitative-42960ff1d3bf4115)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+     Running tests/test_genotype_gfa.rs (target/release/deps/test_genotype_gfa-def7147243974c97)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/test_genotype_validation_suite.rs (target/release/deps/test_genotype_validation_suite-d2cc6385ff621479)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+     Running tests/test_gfa_projection.rs (target/release/deps/test_gfa_projection-13027351aad3f65a)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/test_graph_output_crush.rs (target/release/deps/test_graph_output_crush-dc382bd74c32f4d8)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/test_graph_poa.rs (target/release/deps/test_graph_poa-842fbb246c684874)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+     Running tests/test_graph_seqwish.rs (target/release/deps/test_graph_seqwish-f751f0f0c788fcb6)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+     Running tests/test_joint_walks.rs (target/release/deps/test_joint_walks-95b6887680792e79)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+     Running tests/test_local_compression_testbed.rs (target/release/deps/test_local_compression_testbed-c0aa202652bdd4c0)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.04s
+     Running tests/test_panel_route_completion_probe.rs (target/release/deps/test_panel_route_completion_probe-19f9083644799dcd)
+test result: ok. 14 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.70s
+     Running tests/test_panel_route_continuation.rs (target/release/deps/test_panel_route_continuation-ac8e7ebf29fd15d9)
+test result: ok. 1 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 17.65s
+     Running tests/test_panel_route_convex_diagnostic.rs (target/release/deps/test_panel_route_convex_diagnostic-53a763c68839c7c1)
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running tests/test_panel_route_coupling.rs (target/release/deps/test_panel_route_coupling-5f576295ca930271)
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.24s
+     Running tests/test_panel_route_diploid_diagnostic.rs (target/release/deps/test_panel_route_diploid_diagnostic-8165340f2483e92f)
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.44s
+     Running tests/test_panel_route_diploid_search.rs (target/release/deps/test_panel_route_diploid_search-e4bb10111f1bdfb2)
+test result: ok. 37 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 43.06s
+     Running tests/test_panel_route_policy.rs (target/release/deps/test_panel_route_policy-01af0c8c877e9625)
+test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.50s
+     Running tests/test_panel_route_policy_coupling.rs (target/release/deps/test_panel_route_policy_coupling-8ba20f6a165326bb)
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.35s
+     Running tests/test_panel_route_residual_b2.rs (target/release/deps/test_panel_route_residual_b2-1e1b8f9bdcb228b0)
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 11.36s
+     Running tests/test_panel_route_residual_search.rs (target/release/deps/test_panel_route_residual_search-18efb6f5d65c140e)
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 19.24s
+     Running tests/test_panel_routes.rs (target/release/deps/test_panel_routes-86ec8b1f98dff404)
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.85s
+     Running tests/test_partition_observations.rs (target/release/deps/test_partition_observations-73477aa7ec39bc36)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+     Running tests/test_pipeline_integration.rs (target/release/deps/test_pipeline_integration-0fe78227b9ad50ac)
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/test_syng_integration.rs (target/release/deps/test_syng_integration-1ab549d11ef293af)
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.46s
+     Running tests/test_syng_startcount.rs (target/release/deps/test_syng_startcount-c1a613f295e397ab)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running tests/test_transitive_integrity.rs (target/release/deps/test_transitive_integrity-66a518af09b5d219)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+--- examples ---
+     Running unittests examples/compare_gfa_paths.rs (target/release/examples/compare_gfa_paths-14e1fc75d5ed3042)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/neighbor_merge_existing_gfa.rs (target/release/examples/neighbor_merge_existing_gfa-f3a5b05ea3728e52)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_assignment_rescore.rs (target/release/examples/panel_route_assignment_rescore-bd11d7300ddae83e)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.94s
+     Running unittests examples/panel_route_completion_probe.rs (target/release/examples/panel_route_completion_probe-d27a781ff0eb0f7e)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+     Running unittests examples/panel_route_component_rescore.rs (target/release/examples/panel_route_component_rescore-4db836faa39c2170)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.94s
+     Running unittests examples/panel_route_convex_diagnostic.rs (target/release/examples/panel_route_convex_diagnostic-c47e85a1cb69a79c)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_diploid_diagnostic.rs (target/release/examples/panel_route_diploid_diagnostic-bb45ec34a5b06b5d)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_diploid_search.rs (target/release/examples/panel_route_diploid_search-6672b94916aac834)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.94s
+     Running unittests examples/panel_route_evidence_topology.rs (target/release/examples/panel_route_evidence_topology-dea44a7dcbf0b13c)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_feature_occurrences.rs (target/release/examples/panel_route_feature_occurrences-07b27ce68e2ad589)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_genome_rescore.rs (target/release/examples/panel_route_genome_rescore-e47eb539139f0bd7)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.99s
+     Running unittests examples/panel_route_genome_smoke.rs (target/release/examples/panel_route_genome_smoke-630534c93e6073bc)
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.88s
+     Running unittests examples/panel_route_mem_routed.rs (target/release/examples/panel_route_mem_routed-9b9cd4aace20a08c)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.90s
+     Running unittests examples/panel_route_residual_search.rs (target/release/examples/panel_route_residual_search-184702022fe7cd2b)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/panel_route_seam_diagnostic.rs (target/release/examples/panel_route_seam_diagnostic-edfc7b084d26797e)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.87s
+     Running unittests examples/poasta_order_driver.rs (target/release/examples/poasta_order_driver-dd89b025fd233db7)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/povu_decomp_report.rs (target/release/examples/povu_decomp_report-68ca5da17043f5df)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/route_identity.rs (target/release/examples/route_identity-cd7ce1c4e0ab736b)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/syng_anchor_probe.rs (target/release/examples/syng_anchor_probe-626a5f89be6cd5e2)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/syng_probe.rs (target/release/examples/syng_probe-40d7f35c6562e669)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests examples/validate_gfa_path_sources.rs (target/release/examples/validate_gfa_path_sources-9d6021f57fcf9da1)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== suite finished Tue Sep 22 06:50:46 PM UTC 2026 ===

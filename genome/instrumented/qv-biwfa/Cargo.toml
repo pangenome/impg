@@ -1,0 +1,15 @@
+[package]
+name = "qv-biwfa"
+version = "0.1.0"
+edition = "2021"
+
+# Receipt-side assessment machinery (the called-vs-truth sequence-QV
+# stage): the same lib_wfa2 git revision the repository already pins
+# (Cargo.toml line 56), so the build resolves offline from the cargo
+# git cache. No product dependency, no src/ change.
+
+[dependencies]
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "32ad5bb4442df4a5782b35bf024a319ba0676f50" }
+
+[profile.release]
+opt-level = 3
