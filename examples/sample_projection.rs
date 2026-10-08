@@ -1475,8 +1475,12 @@ fn run_cut(
             (e - s) as usize == record.len(),
             &format!("locus record {header} length differs from its header interval"),
         )?;
+        // The offset candidates cover both committed extraction
+        // conventions (the generic exact-bed intervals and the pilot's
+        // one-base-earlier records) under the AGC range fetch's own
+        // 1-based-inclusive coordinate system; sequence identity decides.
         let mut delta: Option<i64> = None;
-        for candidate in [0i64, -1] {
+        for candidate in [0i64, -1, 1] {
             let lo = (s as i64 + candidate).max(0) as usize;
             let hi = lo + record.len();
             if let Ok(fetched) = agc.fetch_sequence(&global_name, lo as i32, hi as i32) {
