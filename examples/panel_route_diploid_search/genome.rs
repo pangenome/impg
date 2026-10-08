@@ -56,12 +56,22 @@ pub struct AxisInterval {
 pub fn load_axis(path: &Path) -> io::Result<AxisFile> {
     let axis: AxisFile =
         serde_json::from_reader(BufReader::new(File::open(path)?)).map_err(io::Error::other)?;
+    // The axis declaration discipline: version 1, a `declared-<X>-assembly-source-axis-v1`
+    // coordinate system (optionally with the `; no genotype prior or truth-conditioned
+    // candidate selection` disclaimer suffix). The yeast form hardcoded the S288C#0
+    // axis name; the declaration FORM is the contract, so any axis stating its own
+    // source assembly in the same form is accepted (the HG002 locus pilot declares
+    // the CHM13#0 locus axis).
+    let declared = axis
+        .coordinate_system
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
     ensure(
         axis.version == 1
-            && axis.coordinate_system
-                == "declared-S288C#0-assembly-source-axis-v1; no genotype prior or truth-conditioned candidate selection"
-                || axis.version == 1
-                    && axis.coordinate_system == "declared-S288C#0-assembly-source-axis-v1",
+            && declared.starts_with("declared-")
+            && declared.ends_with("-assembly-source-axis-v1"),
         "incompatible public reference axis",
     )?;
     ensure(!axis.intervals.is_empty(), "empty public reference axis")?;

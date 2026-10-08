@@ -1054,8 +1054,8 @@ fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64]
 /**
  * The READ-COVERING INCIDENCE of a window [window_lo, window_hi) on a
  * path of `path_len` bp: the number of read-start positions s whose
- * READ_LENGTH window [s, s+READ_LENGTH) contains it — s <= window_lo and
- * s + READ_LENGTH >= window_hi, s in [0, path_len - READ_LENGTH]. This is
+ * read_len() window [s, s+read_len()) contains it — s <= window_lo and
+ * s + read_len() >= window_hi, s in [0, path_len - read_len()]. This is
  * the established containment arithmetic of the structured-poisson
  * machinery's exposure conversion (`window_incidence` in the rescore:
  * a k-mer feature expects share mass proportional to the number of read
@@ -1065,11 +1065,11 @@ fn cluster_form_qual(s_win: f64, spectrum: &[(f64, f64)], tied: &[(usize, &[f64]
  * reported per locus (they can never be covered by a read).
  */
 fn window_incidence(path_len: u64, window_lo: u64, window_hi: u64) -> f64 {
-    if path_len < READ_LENGTH as u64 {
+    if path_len < read_len() as u64 {
         return 0.0;
     }
-    let lo = window_hi.saturating_sub(READ_LENGTH as u64);
-    let hi = window_lo.min(path_len - READ_LENGTH as u64);
+    let lo = window_hi.saturating_sub(read_len() as u64);
+    let hi = window_lo.min(path_len - read_len() as u64);
     if hi >= lo {
         (hi - lo + 1) as f64
     } else {
@@ -2992,7 +2992,7 @@ pub(super) fn dump_graph_likelihood(
         // The re-derivation ingredients.
         serde_json::to_writer(&mut ingredients, &serde_json::json!({
             "locus": locus + locus_offset,
-            "read_length": READ_LENGTH,
+            "read_length": read_len(),
             "k": k,
             "path_lengths": panel.name_map.path_to_length,
             "records": records.iter().map(|&record| {
@@ -3311,7 +3311,7 @@ pub(super) fn dump_admission_diagnostic(
         &serde_json::json!({
             "kind": "admission-diagnostic-header",
             "k": k,
-            "read_length": READ_LENGTH,
+            "read_length": read_len(),
             "locus_offset": locus_offset,
             "truth_routes": (0..2).map(|copy| serde_json::json!({
                 "copy": copy,
@@ -3758,7 +3758,7 @@ mod graph_tests {
     /// L-(gap+k)+1, and zero when no read fits the path.
     #[test]
     fn window_incidence_counts_read_starts() {
-        // READ_LENGTH = 150, k = 63: an interior node window [100, 163)
+        // read_len() = 150, k = 63: an interior node window [100, 163)
         // on a long path: starts in [13, 100] — 88 positions.
         assert_eq!(window_incidence(1000, 100, 163), 88.0);
         // Near the path start: window [10, 73): starts in [0, 10] — 11.

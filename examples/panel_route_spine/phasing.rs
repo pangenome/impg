@@ -902,7 +902,7 @@ pub(in super) fn haploid_allele_losses(
                 .iter()
                 .map(|segment| segment.end.saturating_sub(segment.start))
                 .sum();
-            if total_length < crate::READ_LENGTH as u64 {
+            if total_length < crate::read_len() as u64 {
                 exons.push(HaploidAlleleExon {
                     self_list: Vec::new(),
                     self_sum: 0.0,
@@ -1184,7 +1184,7 @@ pub(in super) fn build_boundary_transition_draft(
     retained_left: &HashSet<usize>,
     retained_right: &HashSet<usize>,
 ) -> io::Result<BoundaryTransitionDraft> {
-    let flank = READ_LENGTH - 1;
+    let flank = read_len() - 1;
     let sorted_left: Vec<usize> = {
         let mut list: Vec<usize> = retained_left.iter().copied().collect();
         list.sort_unstable();
@@ -1423,7 +1423,7 @@ pub(in super) fn build_boundary_transition_draft(
                 panel,
                 &left_flanks[left_id as usize],
                 &right_flanks[right_id as usize],
-                READ_LENGTH,
+                read_len(),
                 MAX_FEATURES,
             )?;
             Ok(profile)
@@ -6032,14 +6032,14 @@ pub(in super) fn run_correlation_phasing(
                     let column = costs.right_index[route[boundary + 1][copy]] as usize;
                     let restricted = costs.cost[row + column];
                     let (left_tail, _) =
-                        allele_endpoints(sources, flank_memo, &left.segments, READ_LENGTH - 1)?;
+                        allele_endpoints(sources, flank_memo, &left.segments, read_len() - 1)?;
                     let (right_head, _) =
-                        allele_endpoints(sources, flank_memo, &right.segments, READ_LENGTH - 1)?;
+                        allele_endpoints(sources, flank_memo, &right.segments, read_len() - 1)?;
                     let (profile, _) = genome::profile_event_seam(
                         panel,
                         &left_tail,
                         &right_head,
-                        READ_LENGTH,
+                        read_len(),
                         MAX_FEATURES,
                     )?;
                     let pooled = profile_loss_boundary(

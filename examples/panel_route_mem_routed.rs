@@ -45,7 +45,18 @@ use std::{
     time::Instant,
 };
 
-const READ_LENGTH: usize = 150;
+/// The reads' exact length: the model's containment arithmetic, the
+/// read-MEM slicing, and the sample's read-length histogram are all
+/// keyed to it. The yeast validation reads are 150bp (the committed
+/// default, unchanged); the HG002 locus pilot reads are 148bp (the
+/// GIAB BAM's uniformly trimmed length) - set ONCE at startup from
+/// --read-length before any parallel work starts.
+static READ_LENGTH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(150);
+#[inline]
+fn read_len() -> usize {
+    READ_LENGTH.load(std::sync::atomic::Ordering::Relaxed)
+}
 const SLACK: u64 = 150;
 const MAX_FEATURES: usize = genome::MAX_FEATURES;
 
@@ -75,6 +86,11 @@ struct Options {
     depth: f64,
     #[arg(long, default_value_t = 0.1)]
     background: f64,
+    /// The reads' exact length (the sample's read-length histogram key
+    /// and the model's containment arithmetic). 150 = the yeast
+    /// validation's committed default; the HG002 pilot reads are 148.
+    #[arg(long, default_value_t = 150)]
+    read_length: usize,
     /// Partition universe for support distribution: `component` (the
     /// inferred component's axis partitions) or `genome` (every axis
     /// partition; the honest marginalization, costs a full-territory index).
@@ -523,11 +539,11 @@ fn loss_fractional_entry(
 /// [0, length - L] — the model's own containment arithmetic
 /// (`anchor_contain_tail`).
 pub(crate) fn window_incidence(p_first: u64, p_last: u64, k: u64, length: u64) -> u64 {
-    if length < READ_LENGTH as u64 {
+    if length < read_len() as u64 {
         return 0;
     }
-    let lo = p_last.saturating_add(k).saturating_sub(READ_LENGTH as u64);
-    let hi = p_first.min(length - READ_LENGTH as u64);
+    let lo = p_last.saturating_add(k).saturating_sub(read_len() as u64);
+    let hi = p_first.min(length - read_len() as u64);
     if hi >= lo {
         hi - lo + 1
     } else {
@@ -3241,7 +3257,7 @@ pub(crate) fn oracle_segment_spans(
     panel: &SyngIndex,
     sequence: &[u8],
 ) -> io::Result<BTreeMap<FeatureKey, Vec<(u64, u64)>>> {
-    let read_length = READ_LENGTH;
+    let read_length = read_len();
     let mut spans: BTreeMap<FeatureKey, Vec<(u64, u64)>> = BTreeMap::new();
     if sequence.len() < read_length {
         return Ok(spans);
@@ -3837,9 +3853,9 @@ fn merge_profiles(profiles: &[&Profile]) -> io::Result<Profile> {
 
 /// Number of window starts s that contain the anchor-pair span, given an
 /// anchor at candidate position `pos`: contained iff s <= pos and
-/// pos + k <= s + READ_LENGTH, i.e. s in [pos + k - READ_LENGTH, pos].
-const fn anchor_contain_tail(k: u64) -> u64 {
-    READ_LENGTH as u64 - k
+/// pos + k <= s + read_len(), i.e. s in [pos + k - read_len(), pos].
+fn anchor_contain_tail(k: u64) -> u64 {
+    read_len() as u64 - k
 }
 
 /// RC-view maximal MEM records of one padded candidate extraction, in
@@ -3861,7 +3877,7 @@ fn geometric_ir_records(
     k: u64,
 ) -> io::Result<Vec<Vec<(i32, u64)>>> {
     let core_len = end - start;
-    if core_len < READ_LENGTH as u64 {
+    if core_len < read_len() as u64 {
         return Ok(Vec::new());
     }
     let lane_len = sources.lanes[source].1;
@@ -3873,7 +3889,7 @@ fn geometric_ir_records(
     let core_lo = start - pad_lo;
     // Anchors a candidate window can contain: pos in
     // [core_lo, core_lo + core_len - k] (the last window starts at
-    // core_len - READ_LENGTH and ends at core_len).
+    // core_len - read_len() and ends at core_len).
     let anchor_hi = core_lo + core_len - k;
     let reverse = impg::graph::reverse_complement(&padded);
     let raw = mem_records::own_orientation_mem_records(panel, &reverse)?;
@@ -3912,7 +3928,7 @@ fn geometric_ir_records(
 /// record whose (node, position) sequence is contained in a longer present
 /// record is dropped), and every surviving record contributes all its
 /// node-to-node subwalks with the run's window multiplicity. Window contain
-/// events (anchor enters at pos + k - READ_LENGTH, leaves at pos + 1) match
+/// events (anchor enters at pos + k - read_len(), leaves at pos + 1) match
 /// the oracle's event-compression boundaries exactly.
 fn geometric_sweep_profile(
     self_anchors: &[(i32, u64)],
@@ -3922,10 +3938,10 @@ fn geometric_sweep_profile(
     label: &str,
 ) -> io::Result<Profile> {
     let mut profile = Profile::new();
-    if len < READ_LENGTH as u64 {
+    if len < read_len() as u64 {
         return Ok(profile);
     }
-    let max_start = len - READ_LENGTH as u64;
+    let max_start = len - read_len() as u64;
     let tail = anchor_contain_tail(k);
     let mut events = vec![0u64, max_start + 1];
     let mut push_anchor_events = |pos: u64, events: &mut Vec<u64>| {
@@ -4048,7 +4064,7 @@ fn fetch_segment(
 }
 
 fn oracle_segment_profile(panel: &SyngIndex, sequence: &[u8]) -> io::Result<Profile> {
-    let (profile, _) = genome::profile_event_interior(panel, sequence, READ_LENGTH, MAX_FEATURES)?;
+    let (profile, _) = genome::profile_event_interior(panel, sequence, read_len(), MAX_FEATURES)?;
     Ok(profile)
 }
 
@@ -4063,7 +4079,7 @@ fn oracle_split_profile(
     let interior_left = oracle_segment_profile(panel, &left)?;
     let interior_right = oracle_segment_profile(panel, &right)?;
     let (seam, _) =
-        genome::profile_event_seam(panel, &left, &right, READ_LENGTH, MAX_FEATURES)?;
+        genome::profile_event_seam(panel, &left, &right, read_len(), MAX_FEATURES)?;
     merge_profiles(&[&interior_left, &interior_right, &seam])
 }
 
@@ -5522,7 +5538,7 @@ fn conflict_window_of(ranges: &[Vec<genome::SpanningTraversal>]) -> usize {
 /// interval), swept from the parent's self anchors and RC-view records.
 /// Window-relevant anchor decisions are context-identical within the parent's
 /// padded extraction (an anchor a partial window can contain lies at least
-/// READ_LENGTH - k inside the parent's core, so its syncmer decision context
+/// read_len() - k inside the parent's core, so its syncmer decision context
 /// is complete in the parent's extraction), and clipping a maximal record per
 /// window preserves the per-window record set, so the partial's profile is
 /// exactly the parent-data sweep over the partial's window grid.
@@ -5624,9 +5640,9 @@ pub(crate) fn oracle_allele_spans(
         let left_seq = if left.3 { impg::graph::reverse_complement(&left_seq) } else { left_seq };
         let right_seq = sources.fetch(right.0, right.1, right.2)?;
         let right_seq = if right.3 { impg::graph::reverse_complement(&right_seq) } else { right_seq };
-        let seam_spans = profile_event_seam_spans(panel, &left_seq, &right_seq, READ_LENGTH)?;
+        let seam_spans = profile_event_seam_spans(panel, &left_seq, &right_seq, read_len())?;
         let left_len = left_seq.len() as u64;
-        let left_take = left_len.min(READ_LENGTH as u64 - 1);
+        let left_take = left_len.min(read_len() as u64 - 1);
         for (feature, list) in &seam_spans {
             let entry = out.entry(feature.clone()).or_default();
             for &(is_left, lo, hi) in list {
@@ -5698,7 +5714,7 @@ pub(crate) fn oracle_allele_profile(
         }
         for pair in sequences.windows(2) {
             let (seam, _) =
-                genome::profile_event_seam(panel, &pair[0], &pair[1], READ_LENGTH, MAX_FEATURES)?;
+                genome::profile_event_seam(panel, &pair[0], &pair[1], read_len(), MAX_FEATURES)?;
             parts.push(seam);
         }
         merge_profiles(&parts.iter().collect::<Vec<&Profile>>())?
@@ -5743,7 +5759,7 @@ fn fetch_oriented(
 }
 
 /// L149 flank of one segment (head or tail), fetching only the needed crop:
-/// `profile_event_seam` consumes at most the first/last READ_LENGTH-1 bases
+/// `profile_event_seam` consumes at most the first/last read_len()-1 bases
 /// of each side, so split internal seams never need the full segments.
 fn segment_flank(
     sources: &routes::Sources,
@@ -6122,14 +6138,14 @@ fn run_routed_dp(
                         &flank_memo,
                         &traversal.segments[0],
                         false,
-                        READ_LENGTH - 1,
+                        read_len() - 1,
                     )?,
                     segment_flank(
                         sources,
                         &flank_memo,
                         &traversal.segments[1],
                         true,
-                        READ_LENGTH - 1,
+                        read_len() - 1,
                     )?,
                 ));
             }
@@ -6153,7 +6169,7 @@ fn run_routed_dp(
                         panel,
                         &junction.0,
                         &junction.1,
-                        READ_LENGTH,
+                        read_len(),
                         MAX_FEATURES,
                     )?;
                     Ok((junction.clone(), std::sync::Arc::new(seam)))
@@ -6236,14 +6252,14 @@ fn run_routed_dp(
                                 &flank_memo,
                                 left_segment,
                                 false,
-                                READ_LENGTH - 1,
+                                read_len() - 1,
                             )?,
                             segment_flank(
                                 sources,
                                 &flank_memo,
                                 right_segment,
                                 true,
-                                READ_LENGTH - 1,
+                                read_len() - 1,
                             )?,
                         );
                         parts.push(
@@ -6394,7 +6410,7 @@ fn run_routed_dp(
                     panel,
                     left_end,
                     right_start,
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 Ok(profile)
@@ -7526,7 +7542,7 @@ fn haploid_chain_explained_features(
                     panel,
                     &previous_sequence,
                     &sequence,
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 let cooccurring = spine::junction::segment_pair_gap(
@@ -7548,9 +7564,9 @@ fn haploid_chain_explained_features(
                     // distribute on both sides; each side's anchor run is
                     // one span on its own path).
                     let seam_spans =
-                        profile_event_seam_spans(panel, &previous_sequence, &sequence, READ_LENGTH)?;
+                        profile_event_seam_spans(panel, &previous_sequence, &sequence, read_len())?;
                     let left_len = previous_sequence.len() as u64;
-                    let left_take = left_len.min(READ_LENGTH as u64 - 1);
+                    let left_take = left_len.min(read_len() as u64 - 1);
                     for (feature, list) in &seam_spans {
                         let entry = spans_out.entry(feature.clone()).or_default();
                         for &(is_left, lo, hi) in list {
@@ -7846,7 +7862,7 @@ fn score_reference_m1(
                         panel,
                         &previous,
                         &sequence,
-                        READ_LENGTH,
+                        read_len(),
                         MAX_FEATURES,
                     )?;
                     let prev = previous_piece.expect("piece tracked with sequence");
@@ -8070,7 +8086,7 @@ fn score_reference_m1(
                     panel,
                     &previous_tails[copy],
                     &head,
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 let prev = previous_pieces[copy].expect("piece tracked with tail");
@@ -8374,6 +8390,9 @@ fn score_reference_m1(
 fn main() -> io::Result<()> {
     let started = Instant::now();
     let options = Options::parse();
+    ensure(options.read_length > 0, "read length must be positive")?;
+    // Set ONCE before any parallel work: every thread reads it Relaxed.
+    READ_LENGTH.store(options.read_length, Ordering::Release);
     let (locus_lo, mut locus_hi) = match &options.locus_range {
         Some(range) => {
             ensure(
@@ -8408,12 +8427,12 @@ fn main() -> io::Result<()> {
     let histogram = *sample_index
         .stats
         .read_lengths
-        .get(&READ_LENGTH)
-        .ok_or_else(|| invalid("sample lacks L150 histogram"))?;
+        .get(&read_len())
+        .ok_or_else(|| invalid("sample lacks the declared read-length histogram"))?;
     let model = ScoreModel {
-        read_length: READ_LENGTH as u64,
+        read_length: read_len() as u64,
         histogram,
-        denominator: (READ_LENGTH as u64 * histogram) as f64,
+        denominator: (read_len() as u64 * histogram) as f64,
         depth: options.depth,
         background: options.background,
     };
@@ -10141,10 +10160,10 @@ fn main() -> io::Result<()> {
                 // restricted (crossing reads only) and pooled (the OLD
                 // model's charge, for the before/after comparison).
                 let flank_memo: FlankMemo = std::sync::Mutex::new(HashMap::new());
-                let tail = segment_flank(&sources, &flank_memo, &left_range, false, READ_LENGTH - 1)?;
-                let head = segment_flank(&sources, &flank_memo, &right_range, true, READ_LENGTH - 1)?;
+                let tail = segment_flank(&sources, &flank_memo, &left_range, false, read_len() - 1)?;
+                let head = segment_flank(&sources, &flank_memo, &right_range, true, read_len() - 1)?;
                 let (profile, _) =
-                    genome::profile_event_seam(&panel, &tail, &head, READ_LENGTH, MAX_FEATURES)?;
+                    genome::profile_event_seam(&panel, &tail, &head, read_len(), MAX_FEATURES)?;
                 let (restricted, pooled) = if partitions.is_empty() {
                     (None, None)
                 } else {
@@ -10482,14 +10501,14 @@ fn main() -> io::Result<()> {
     let seam_truth = {
         let left = fetch_segment(&sources, truth_exit[0].0, truth_exit[0].1, truth_exit[0].2)?;
         let right = fetch_segment(&sources, truth_exit[1].0, truth_exit[1].1, truth_exit[1].2)?;
-        let (seam, _) = genome::profile_event_seam(&panel, &left, &right, READ_LENGTH, MAX_FEATURES)?;
+        let (seam, _) = genome::profile_event_seam(&panel, &left, &right, read_len(), MAX_FEATURES)?;
         seam
     };
     let seam_plateau = {
         let left = fetch_segment(&sources, plateau_exit[0].0, plateau_exit[0].1, plateau_exit[0].2)?;
         let right = fetch_segment(&sources, plateau_exit[1].0, plateau_exit[1].1, plateau_exit[1].2)?;
         let (seam, _) =
-            genome::profile_event_seam(&panel, &left, &right, READ_LENGTH, MAX_FEATURES)?;
+            genome::profile_event_seam(&panel, &left, &right, read_len(), MAX_FEATURES)?;
         seam
     };
     let truth_geometric = {
@@ -10695,20 +10714,20 @@ fn main() -> io::Result<()> {
             geometric_exact_candidates += 1;
         }
         profile_diffs.push(diff);
-        if index < 4 && !*reverse && end - start >= READ_LENGTH as u64 {
+        if index < 4 && !*reverse && end - start >= read_len() as u64 {
             let anchors =
                 contained_path_anchors(&panel, path_of_source[source], start, end, k)?;
             let len = end - start;
-            let stride = ((len as usize - READ_LENGTH) / 16).max(1);
-            for offset in (0..=(len as usize - READ_LENGTH)).step_by(stride).take(16) {
-                let window = &sequence[offset..offset + READ_LENGTH];
+            let stride = ((len as usize - read_len()) / 16).max(1);
+            for offset in (0..=(len as usize - read_len())).step_by(stride).take(16) {
+                let window = &sequence[offset..offset + read_len()];
                 let oracle_records =
                     mem_records::canonical_mem_records(&panel, window)?;
                 let lo = start + offset as u64;
-                let hi = lo + READ_LENGTH as u64;
+                let hi = lo + read_len() as u64;
                 let window_anchors: Vec<(i32, u64)> = anchors
                     .iter()
-                    .filter(|&&(_, bp)| bp >= offset as u64 && bp + k <= offset as u64 + READ_LENGTH as u64)
+                    .filter(|&&(_, bp)| bp >= offset as u64 && bp + k <= offset as u64 + read_len() as u64)
                     .map(|&(node, bp)| (node, bp - offset as u64))
                     .collect();
                 let geometric_records: Vec<Vec<u64>> = if window_anchors.is_empty() {
@@ -10724,7 +10743,7 @@ fn main() -> io::Result<()> {
                 window_diags.push(WindowDiag {
                     identity: identity.clone(),
                     window_start: lo,
-                    window_len: READ_LENGTH,
+                    window_len: read_len(),
                     oracle_records,
                     geometric_records,
                     matched_anchor_nodes: matched.iter().map(|&(node, _)| node).collect(),

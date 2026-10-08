@@ -1022,13 +1022,13 @@ pub struct RestrictedCharge {
 /// The maximal bp reach of a record's placement interval past its start
 /// (records live in L150 reads; the margin covers the k-mer overhang and
 /// the per-record extent offsets).
-const SPAN_SCAN_SLACK: u64 = READ_LENGTH as u64 + 128;
+fn span_scan_slack() -> u64 { read_len() as u64 + 128 }
 
 /// Bound on the measured seam-shared context between two rows' lanes (the
 /// single-record crossing forms only need context comparable to a record's
 /// reach, which is bounded by the read length; larger sharing is
 /// indistinguishable for L150 evidence).
-const SHARED_CONTEXT_CAP: u64 = READ_LENGTH as u64 + 128;
+fn shared_context_cap() -> u64 { read_len() as u64 + 128 }
 
 impl JunctionSpanIndex {
     /// Diagnostic upper bound for restricted-charge evidence on selected
@@ -1059,7 +1059,7 @@ impl JunctionSpanIndex {
     /// take = min(L149, segment length) — mirroring `segment_flank`'s crop
     /// (empty for zero-length segments, whose seam flank is empty too).
     fn exit_window(left: &SourceRange) -> (u64, u64) {
-        let take = (READ_LENGTH as u64 - 1).min(left.end.saturating_sub(left.start));
+        let take = (read_len() as u64 - 1).min(left.end.saturating_sub(left.start));
         if left.reverse {
             (left.start, left.start + take)
         } else {
@@ -1070,7 +1070,7 @@ impl JunctionSpanIndex {
     /// Entry flank window of a right segment (its first `take` bases in
     /// molecule orientation).
     fn entry_window(right: &SourceRange) -> (u64, u64) {
-        let take = (READ_LENGTH as u64 - 1).min(right.end.saturating_sub(right.start));
+        let take = (read_len() as u64 - 1).min(right.end.saturating_sub(right.start));
         if right.reverse {
             (right.end.saturating_sub(take), right.end)
         } else {
@@ -1101,7 +1101,7 @@ impl JunctionSpanIndex {
             return out;
         };
         let lower = list.partition_point(|&(start, _, _)| {
-            (start as u64) < window.0.saturating_sub(SPAN_SCAN_SLACK)
+            (start as u64) < window.0.saturating_sub(span_scan_slack())
         });
         for &(start, record, mirrored) in &list[lower..] {
             if start as u64 >= window.1 {
@@ -1212,7 +1212,7 @@ impl JunctionSpanIndex {
         x_l: u64,
         x_r: u64,
     ) -> io::Result<u64> {
-        let mut cap = SHARED_CONTEXT_CAP.min(if left.reverse {
+        let mut cap = shared_context_cap().min(if left.reverse {
             left.end.saturating_sub(x_l)
         } else {
             x_l.saturating_sub(left.start)
@@ -1249,7 +1249,7 @@ impl JunctionSpanIndex {
         x_l: u64,
         x_r: u64,
     ) -> io::Result<u64> {
-        let mut cap = SHARED_CONTEXT_CAP.min(if right.reverse {
+        let mut cap = shared_context_cap().min(if right.reverse {
             x_r.saturating_sub(right.start)
         } else {
             right.end.saturating_sub(x_r)
@@ -1332,7 +1332,7 @@ impl JunctionSpanIndex {
                     let lower = list.partition_point(|&(p, start, _)| {
                         p < path
                             || (p == path
-                                && (start as u64) < window.0.saturating_sub(SPAN_SCAN_SLACK))
+                                && (start as u64) < window.0.saturating_sub(span_scan_slack()))
                     });
                     for &(p, start, next_mirrored) in &list[lower..] {
                         if p > path || start as u64 >= window.1 {
@@ -1367,11 +1367,11 @@ impl JunctionSpanIndex {
                         p < path_of_source[left.source] as u32
                             || (p == path_of_source[left.source] as u32
                                 && (start as u64)
-                                    < x_l.saturating_sub(SPAN_SCAN_SLACK))
+                                    < x_l.saturating_sub(span_scan_slack()))
                     });
                     for &(p, start, self_mirrored) in &list[lower..] {
                         if p > path_of_source[left.source] as u32
-                            || start as u64 >= x_l + SPAN_SCAN_SLACK
+                            || start as u64 >= x_l + span_scan_slack()
                         {
                             break;
                         }
@@ -1415,11 +1415,11 @@ impl JunctionSpanIndex {
                     .map(|list| list.as_slice())
                     .unwrap_or(empty);
                 let lower = list.partition_point(|&(start, _, _)| {
-                    (start as u64) < x_r.saturating_sub(SPAN_SCAN_SLACK)
+                    (start as u64) < x_r.saturating_sub(span_scan_slack())
                 });
                 let mut seen: HashSet<(u32, u32)> = HashSet::new();
                 for &(start, record, mirrored) in &list[lower..] {
-                    if start as u64 >= x_r + SPAN_SCAN_SLACK {
+                    if start as u64 >= x_r + span_scan_slack() {
                         break;
                     }
                     let (lo, hi) = self.extents[record as usize][usize::from(mirrored)];
@@ -1563,7 +1563,7 @@ impl JunctionSpanIndex {
             return out;
         };
         let lower = list.partition_point(|&(start, _, _)| {
-            (start as u64) < window.0.saturating_sub(SPAN_SCAN_SLACK)
+            (start as u64) < window.0.saturating_sub(span_scan_slack())
         });
         for &(start, record, mirrored) in &list[lower..] {
             if start as u64 >= window.1 {

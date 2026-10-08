@@ -193,14 +193,14 @@ pub(super) fn class_locus_alleles(
                         flank_memo,
                         &pair[0],
                         false,
-                        READ_LENGTH - 1,
+                        read_len() - 1,
                     )?,
                     segment_flank(
                         sources,
                         flank_memo,
                         &pair[1],
                         true,
-                        READ_LENGTH - 1,
+                        read_len() - 1,
                     )?,
                 );
                 junctions.insert(junction.clone());
@@ -232,7 +232,7 @@ pub(super) fn class_locus_alleles(
                     panel,
                     &junction.0,
                     &junction.1,
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 Ok((junction.clone(), std::sync::Arc::new(seam)))
@@ -351,14 +351,14 @@ pub(super) fn class_locus_alleles(
                                 flank_memo,
                                 &pair[0],
                                 false,
-                                READ_LENGTH - 1,
+                                read_len() - 1,
                             )?,
                             segment_flank(
                                 sources,
                                 flank_memo,
                                 &pair[1],
                                 true,
-                                READ_LENGTH - 1,
+                                read_len() - 1,
                             )?,
                         );
                         match junction_outcomes.get(&junction) {
@@ -462,7 +462,7 @@ pub(super) fn scorable_classes(
             .iter()
             .map(|segment| segment.end.saturating_sub(segment.start))
             .sum::<u64>()
-            >= READ_LENGTH as u64
+            >= read_len() as u64
     };
     (0..classing.profiles.len())
         .map(|class| {
@@ -1484,7 +1484,7 @@ pub(super) fn spine_reference_local_losses(
                 )?;
                 if let Some((prev, prev_piece)) = &previous {
                     let (seam, _) =
-                        genome::profile_event_seam(panel, prev, &sequence, READ_LENGTH, MAX_FEATURES)?;
+                        genome::profile_event_seam(panel, prev, &sequence, read_len(), MAX_FEATURES)?;
                     let piece = (source, start, end, reverse, owner);
                     let cooccurring = junction::segment_pair_gap(
                         &junction::junction_range(prev_piece.0, prev_piece.1, prev_piece.2, prev_piece.3, u32::MAX),
@@ -1777,7 +1777,7 @@ fn decompose_row_profile(
                 panel,
                 &left_sequence,
                 &right_sequence,
-                READ_LENGTH,
+                read_len(),
                 MAX_FEATURES,
             )?;
             merge_profiles(&[&interior_left, &interior_right, &seam])
@@ -1801,7 +1801,7 @@ fn decompose_row_profile(
                     panel,
                     &pair[0],
                     &pair[1],
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 parts.push(seam);
@@ -2151,7 +2151,7 @@ pub(super) fn decompose_haploid_local_table(
                         panel,
                         previous_sequence,
                         &sequence,
-                        READ_LENGTH,
+                        read_len(),
                         MAX_FEATURES,
                     )?;
                     let cooccurring = junction::segment_pair_gap(
@@ -2209,10 +2209,10 @@ pub(super) fn decompose_haploid_local_table(
                     }
                 }
                 if head.is_none() {
-                    head = Some(sequence[..sequence.len().min(READ_LENGTH - 1)].to_vec());
+                    head = Some(sequence[..sequence.len().min(read_len() - 1)].to_vec());
                     head_piece = Some((source, start, end, reverse, piece_owner));
                 }
-                tail = sequence[sequence.len().saturating_sub(READ_LENGTH - 1)..].to_vec();
+                tail = sequence[sequence.len().saturating_sub(read_len() - 1)..].to_vec();
                 previous = Some((sequence, (source, start, end, reverse, piece_owner)));
             }
             exotic_charged_owners.push(owners);
@@ -2229,7 +2229,7 @@ pub(super) fn decompose_haploid_local_table(
                         panel,
                         &exotic_previous_tail,
                         head,
-                        READ_LENGTH,
+                        read_len(),
                         MAX_FEATURES,
                     )?;
                     let cooccurring = junction::segment_pair_gap(
@@ -2349,7 +2349,7 @@ pub(super) fn decompose_haploid_local_table(
                     panel,
                     previous_sequence,
                     &sequence,
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 let piece = (source, start, end, reverse, piece_owner);
@@ -2408,10 +2408,10 @@ pub(super) fn decompose_haploid_local_table(
                 }
             }
             if head.is_none() {
-                head = Some(sequence[..sequence.len().min(READ_LENGTH - 1)].to_vec());
+                head = Some(sequence[..sequence.len().min(read_len() - 1)].to_vec());
                 head_piece = Some((source, start, end, reverse, piece_owner));
             }
-            tail = sequence[sequence.len().saturating_sub(READ_LENGTH - 1)..].to_vec();
+            tail = sequence[sequence.len().saturating_sub(read_len() - 1)..].to_vec();
             previous = Some((sequence, (source, start, end, reverse, piece_owner)));
         }
         for key in profile.keys() {
@@ -2431,7 +2431,7 @@ pub(super) fn decompose_haploid_local_table(
                     panel,
                     &previous_tail,
                     head,
-                    READ_LENGTH,
+                    read_len(),
                     MAX_FEATURES,
                 )?;
                 let cooccurring = junction::segment_pair_gap(
@@ -3781,7 +3781,7 @@ pub(super) fn build_spine_boundary_draft(
         .par_iter()
         .map(|(left_end, right_start)| {
             let (profile, _) =
-                genome::profile_event_seam(panel, left_end, right_start, READ_LENGTH, MAX_FEATURES)?;
+                genome::profile_event_seam(panel, left_end, right_start, read_len(), MAX_FEATURES)?;
             Ok(std::sync::Arc::new(profile))
         })
         .collect::<io::Result<_>>()?;
