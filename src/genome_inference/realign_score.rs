@@ -2817,19 +2817,35 @@ pub fn run(options: Options) -> io::Result<()> {
     // ------------------------------------------- the scoring rate derivation
     let quality_started = Instant::now();
     let mut quality_bytes: BTreeSet<u8> = BTreeSet::new();
+    let mut quality_counts: BTreeMap<u8, u64> = BTreeMap::new();
     let mut total_reads = 0u64;
     stream_fastq(&options.reads, |_seq, qual| {
         total_reads += 1;
         for &q in qual {
             quality_bytes.insert(q);
+            *quality_counts.entry(q).or_insert(0) += 1;
         }
         Ok(())
     })?;
+    // The sample's own quality statement: the mean per-base error
+    // probability over every quality byte in the FASTQ (the yeast
+    // validation's uniform-quality reads reduce EXACTLY to their single
+    // Phred; real reads - the HG002 pilot - carry their measured
+    // per-base qualities).
     ensure(
-        quality_bytes.len() == 1,
-        "the sample does not carry uniform read qualities",
+        !quality_bytes.is_empty(),
+        "the sample carries no read qualities",
     )?;
-    let phred = *quality_bytes.iter().next().unwrap() - b'!';
+    let mut base_count = 0u64;
+    let mut error_sum = 0.0f64;
+    for (&q, &count) in quality_counts.iter() {
+        base_count += count;
+        error_sum += count as f64 * 10f64.powf(-((q - b'!') as f64) / 10.0);
+    }
+    ensure(base_count > 0, "the sample carries no read qualities")?;
+    let epsilon0 = error_sum / base_count as f64;
+    ensure(epsilon0 > 0.0 && epsilon0 < 1.0, "degenerate read qualities")?;
+    let phred = (-10.0 * epsilon0.log10()).round() as u8;
     let epsilon = 10f64.powf(-(phred as f64) / 10.0);
     let scoring = Scoring {
         a: (1.0 - epsilon).ln(),
