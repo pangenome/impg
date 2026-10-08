@@ -271,7 +271,20 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-const READ_LENGTH: usize = 150;
+/// The reads' exact length: the realignment model's placement
+/// arithmetic, the per-read mismatch log-probability base count, and
+/// the derive cache's read records are keyed to it. The yeast
+/// validation's committed reads are 150 (the default, behavior
+/// identical); the HG002 locus pilot reads are 148 (the GIAB BAM's
+/// uniformly trimmed length). Derived from the derive cache's own
+/// uniform read length at load (the cache is a pure function of the
+/// FASTQ and the panel).
+static READ_LENGTH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(150);
+#[inline]
+fn read_len() -> usize {
+    READ_LENGTH.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Options and small utilities (the slice A runner conventions).
@@ -1937,7 +1950,7 @@ impl Scoring {
     }
 
     /// The model's derived per-placement MINIMUM likelihood: every
-    /// base of the read mismatching (READ_LENGTH * ln(eps/3)) — the
+    /// base of the read mismatching (read_len() * ln(eps/3)) — the
     /// rigorous lower bound of the read's likelihood under ANY
     /// placement. It remains the stated lower bound of the local
     /// branch's per-placement terms; as a logsumexp term it
@@ -1945,7 +1958,7 @@ impl Scoring {
     /// exists (150 * ln(eps/3) ~ -1546 against placement scores ~ -1).
     #[inline]
     fn floor(&self) -> f64 {
-        READ_LENGTH as f64 * self.b
+        read_len() as f64 * self.b
     }
 }
 
@@ -2252,10 +2265,10 @@ fn unit_log_likelihood(
     scores: &[f64],
     fold_len: u64,
 ) -> f64 {
-    if scores.is_empty() || fold_len < READ_LENGTH as u64 {
+    if scores.is_empty() || fold_len < read_len() as u64 {
         return f64::NEG_INFINITY;
     }
-    let prior = -(2.0 * (fold_len - READ_LENGTH as u64 + 1) as f64).ln();
+    let prior = -(2.0 * (fold_len - read_len() as u64 + 1) as f64).ln();
     let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let sum: f64 = scores.iter().map(|&s| (s - best).exp()).sum();
     prior + best + sum.ln()
@@ -2865,7 +2878,7 @@ pub fn run(options: Options) -> io::Result<()> {
         .sum::<f64>()
         / strain_totals.len() as f64;
     let genome_diploid_bp = 2.0 * panel_mean_haploid_bp;
-    let elsewhere = elsewhere_log_prob(READ_LENGTH, scoring.a, genome_diploid_bp);
+    let elsewhere = elsewhere_log_prob(read_len(), scoring.a, genome_diploid_bp);
     let strain_list: Vec<serde_json::Value> = strain_totals
         .iter()
         .map(|(strain, &(paths, bp))| json!({"strain": strain, "paths": paths, "bp": bp}))
@@ -2895,10 +2908,13 @@ pub fn run(options: Options) -> io::Result<()> {
         Vec<Vec<(u32, Vec<(i32, u32)>)>>,
     ) = {
         let (tokens, lists, seqs, mults, records) = read_derive_cache(&options.derive_cache)?;
+        ensure(!seqs.is_empty(), "empty derive cache")?;
+        let declared = seqs[0].len();
         ensure(
-            seqs.iter().all(|seq| seq.len() == READ_LENGTH),
-            "cached read is not L150",
+            declared > 0 && seqs.iter().all(|seq| seq.len() == declared),
+            "cached reads do not share one length",
         )?;
+        READ_LENGTH.store(declared, Ordering::Release);
         (tokens, lists, seqs, mults, records)
     };
     let derive_seconds = derive_started.elapsed().as_secs_f64();
@@ -4606,7 +4622,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 let forward = physical_forward(orientation, unit.mirror);
                 let own_positions = own_positions_of(&canonical, unit.mirror, unit.w_lo);
                 let own_hull = own_positions_of(&canonical, unit.mirror, 0);
-                let skipped = skipped_positions(&own_positions, k, READ_LENGTH as u64);
+                let skipped = skipped_positions(&own_positions, k, read_len() as u64);
                 let mut votes: Vec<serde_json::Value> = Vec::new();
                 for &(lo, hi) in &skipped {
                     for i in lo..hi {
@@ -4855,7 +4871,7 @@ pub fn run(options: Options) -> io::Result<()> {
                             placement_offset(&pin.pinned, &own_hull, forward);
                         let own_positions =
                             own_positions_of(&canonical, unit.mirror, unit.w_lo);
-                        let skipped = skipped_positions(&own_positions, k, READ_LENGTH as u64);
+                        let skipped = skipped_positions(&own_positions, k, read_len() as u64);
                         let skipped_bp: u64 =
                             skipped.iter().map(|&(lo, hi)| hi - lo).sum();
                         let piecewise = placement_score(
@@ -5192,7 +5208,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 "epsilon": epsilon,
                 "match_log_prob": scoring.a,
                 "mismatch_log_prob": scoring.b,
-                "read_length": READ_LENGTH,
+                "read_length": read_len(),
                 "uniform_qualities": true,
                 "elsewhere_log_prob": elsewhere,
                 "genome_diploid_bp": genome_diploid_bp,

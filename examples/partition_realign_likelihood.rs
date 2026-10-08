@@ -102,7 +102,20 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-const READ_LENGTH: usize = 150;
+/// The reads' exact length: the model's placement arithmetic and the
+/// derive-cache record derivation are keyed to it. 150 = the yeast
+/// validation's committed reads; the HG002 locus pilot reads are 148
+/// (the GIAB BAM's uniformly trimmed length). Set ONCE at startup from
+/// --read-length.
+static READ_LENGTH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(150);
+/// The offset-histogram capacity: one bin per possible match count of
+/// the longest supported read (the validation lengths are 150 and 148).
+const READ_HIST_CAP: usize = 150 + 1;
+#[inline]
+fn read_len() -> usize {
+    READ_LENGTH.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Options and small utilities.
@@ -139,6 +152,10 @@ struct Options {
     /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard).
     #[arg(long, default_value_t = 64.0)]
     rss_budget_gib: f64,
+    /// The reads' exact length (150 = the yeast validation's committed
+    /// reads; the HG002 pilot reads are 148).
+    #[arg(long, default_value_t = 150)]
+    read_length: usize,
     /// Optional binary cache of the read-record derivation (written when
     /// absent, loaded when present) — the derivation pass is a pure
     /// function of the FASTQ and the panel, so the cache cannot change
@@ -558,7 +575,7 @@ impl Scoring {
     /// 1/(2*len)) — one expression, so integer-equal histograms imply
     /// bit-exact likelihoods. Terms ≥ 73 matches below the best
     /// underflow to +0.0 exactly and cannot perturb the sum.
-    fn row_log_likelihood(&self, hist: &[u64; READ_LENGTH + 1], len: u64) -> f64 {
+    fn row_log_likelihood(&self, hist: &[u64; READ_HIST_CAP], len: u64) -> f64 {
         let mut best = None::<usize>;
         for (m, &count) in hist.iter().enumerate() {
             if count > 0 {
@@ -574,7 +591,7 @@ impl Scoring {
                 sum += count as f64 * ((m as f64 - best as f64) * (self.a - self.b)).exp();
             }
         }
-        self.placement(best as u32, (READ_LENGTH - best) as u32) + sum.ln()
+        self.placement(best as u32, (read_len() - best) as u32) + sum.ln()
             - (2.0 * len as f64).ln()
     }
 }
@@ -740,15 +757,15 @@ fn frame_runs(
 fn offset_histogram(
     read: &[u8],
     seq: &[u8],
-) -> ([u64; READ_LENGTH + 1], Option<(u32, u64)>) {
-    let mut hist = [0u64; READ_LENGTH + 1];
+) -> ([u64; READ_HIST_CAP], Option<(u32, u64)>) {
+    let mut hist = [0u64; READ_HIST_CAP];
     let mut best: Option<(u32, u64)> = None;
-    if seq.len() >= READ_LENGTH {
-        let max_sigma = seq.len() - READ_LENGTH;
+    if seq.len() >= read_len() {
+        let max_sigma = seq.len() - read_len();
         for sigma in 0..=max_sigma {
-            let window = &seq[sigma..sigma + READ_LENGTH];
+            let window = &seq[sigma..sigma + read_len()];
             let mut m = 0u32;
-            for i in 0..READ_LENGTH {
+            for i in 0..read_len() {
                 m += (read[i] == window[i]) as u32;
             }
             hist[m as usize] += 1;
@@ -763,12 +780,12 @@ fn offset_histogram(
 
 /// The direct per-placement walk: (m, c) at one offset.
 fn direct_placement(read: &[u8], seq: &[u8], sigma: u64) -> (u32, u32) {
-    let window = &seq[sigma as usize..sigma as usize + READ_LENGTH];
+    let window = &seq[sigma as usize..sigma as usize + read_len()];
     let mut m = 0u32;
-    for i in 0..READ_LENGTH {
+    for i in 0..read_len() {
         m += (read[i] == window[i]) as u32;
     }
-    (m, READ_LENGTH as u32 - m)
+    (m, read_len() as u32 - m)
 }
 
 /// The FACTORIZED placement score from the cached pocket lists (the
@@ -782,7 +799,7 @@ fn factorized_placement(
     run: &FrameRun,
     frame_seq: &[u8],
 ) -> Option<(u32, u32)> {
-    let x_hi = projection.x0 + READ_LENGTH as u64;
+    let x_hi = projection.x0 + read_len() as u64;
     let a_hi = run.a_lo + (run.r_hi - run.r_lo);
     if projection.x0 < run.a_lo || x_hi > a_hi {
         return None;
@@ -828,7 +845,7 @@ fn factorized_placement(
         let row_base = if row_base == u8::MAX { frame_base } else { row_base };
         c += (read_base != row_base) as u32;
     }
-    Some((READ_LENGTH as u32 - c, c))
+    Some((read_len() as u32 - c, c))
 }
 
 fn node_unused() {}
@@ -905,8 +922,10 @@ fn unrank_pair(flat: usize) -> (usize, usize) {
 // ---------------------------------------------------------------------------
 
 fn main() -> io::Result<()> {
-    let started = Instant::now();
     let options = Options::parse();
+    ensure(options.read_length > 0 && options.read_length <= 150, "read length must be in (0, 150]")?;
+    READ_LENGTH.store(options.read_length, Ordering::Release);
+    let started = Instant::now();
     let rss = RssGuard::new(options.rss_budget_gib);
 
     // ------------------------------------------------------------- inputs
@@ -1605,7 +1624,7 @@ fn main() -> io::Result<()> {
         // walk begins at the own walk's first anchor position.
         for &read_index in &key_reads[key] {
             let read = &reads[read_index];
-            ensure(read.len() == READ_LENGTH, "bound read is not L150")?;
+            ensure(read.len() == read_len(), "bound read is not the declared read length")?;
             let own = read_records[read_index]
                 .iter()
                 .find(|r| r.key as usize == key)
@@ -1625,28 +1644,28 @@ fn main() -> io::Result<()> {
             let read_offset = if physical_forward {
                 w_lo
             } else {
-                READ_LENGTH as u64 - w_hi
+                read_len() as u64 - w_hi
             };
             let path_lo = occ.start.saturating_sub(read_offset);
             let seg_full = fetch_seq(
                 &panel.name_map.path_to_name[occ.path],
                 path_lo,
-                path_lo + READ_LENGTH as u64,
+                path_lo + read_len() as u64,
             )?;
             let strand_full = if physical_forward {
                 seg_full.clone()
             } else {
                 revcomp(&seg_full)
             };
-            ensure(strand_full.len() == READ_LENGTH, "full placed segment short")?;
+            ensure(strand_full.len() == read_len(), "full placed segment short")?;
             // The hull (both orientations place the same read window).
             ensure(
                 read[w_lo as usize..w_hi as usize]
                     == strand_full[w_lo as usize..w_hi as usize],
                 "the read hull differs from the placed path segment",
             )?;
-            edge_bp += READ_LENGTH as u64 - (w_hi - w_lo);
-            for i in 0..READ_LENGTH {
+            edge_bp += read_len() as u64 - (w_hi - w_lo);
+            for i in 0..read_len() {
                 if (i as u64) < w_lo || (i as u64) >= w_hi {
                     edge_mismatches += (read[i] != strand_full[i]) as u64;
                 }
@@ -1952,7 +1971,7 @@ fn main() -> io::Result<()> {
                             }
                         } else {
                             let rc_rel = span - k - rel;
-                            let rc_read_pos = (READ_LENGTH as u64 - w_hi) + rc_rel;
+                            let rc_read_pos = (read_len() as u64 - w_hi) + rc_rel;
                             let path_bp = occ.start + rc_rel;
                             let _ = path_bp;
                             if let Some(frame_hits) =
@@ -1989,10 +2008,10 @@ fn main() -> io::Result<()> {
                     // read equals its placed segment exactly (verified at
                     // binding); beyond the hull the read's real edge
                     // bases are compared as they are.
-                    if run.r_lo == 0 && run.r_hi >= READ_LENGTH as u64 {
+                    if run.r_lo == 0 && run.r_hi >= read_len() as u64 {
                         let x0 = run.a_lo;
                         let mut alts: Vec<(u64, u8)> = Vec::new();
-                        for i in 0..READ_LENGTH {
+                        for i in 0..read_len() {
                             let frame_pos = x0 + i as u64;
                             if frame_pos >= frame_seq.len() as u64 {
                                 break;
@@ -2100,9 +2119,9 @@ fn main() -> io::Result<()> {
                         let Some(run) = row.runs.iter().find(|run| {
                             let sigma = projection.x0 as i64 + run.delta;
                             sigma >= 0
-                                && sigma + READ_LENGTH as i64 <= row.len as i64
+                                && sigma + read_len() as i64 <= row.len as i64
                                 && projection.x0 >= run.a_lo
-                                && projection.x0 + READ_LENGTH as u64
+                                && projection.x0 + read_len() as u64
                                     <= run.a_lo + (run.r_hi - run.r_lo)
                         }) else {
                             fallback_torn += 1;
@@ -2169,7 +2188,7 @@ fn main() -> io::Result<()> {
                 let row = &rows[row_index];
                 // The budget is per (record, row): every candidate row
                 // sees the record's full base evidence under the model.
-                base_budget += record.multiplicity as f64 * READ_LENGTH as f64;
+                base_budget += record.multiplicity as f64 * read_len() as f64;
                 let Some((best_m, sigma, strand)) = dominant[row_index][r] else {
                     continue;
                 };
@@ -2197,7 +2216,7 @@ fn main() -> io::Result<()> {
                     }
                 }
                 let strand_read = if strand == 0 { &record.read } else { &record.read_rc };
-                for i in 0..READ_LENGTH {
+                for i in 0..read_len() {
                     let p = sigma as usize + i;
                     let matched = strand_read[i] == row.seq[p];
                     let lo = merged.partition_point(|&(a, _)| a <= sigma + i as u64);
@@ -2614,7 +2633,7 @@ fn main() -> io::Result<()> {
                 "epsilon": epsilon,
                 "match_log_prob": scoring.a,
                 "mismatch_log_prob": scoring.b,
-                "read_length": READ_LENGTH,
+                "read_length": read_len(),
             },
             "record_count": n_records,
             "rows": n_rows,
@@ -2743,7 +2762,7 @@ mod tests {
         };
         // The read: the frame with its own alt at 140 (matching the row)
         // and the frame base at 10 (differing from the row).
-        let mut read = frame[..READ_LENGTH].to_vec();
+        let mut read = frame[..read_len()].to_vec();
         read[140] = b'C';
         let projection = Projection {
             x0: 0,
@@ -2784,7 +2803,7 @@ mod tests {
     fn row_log_likelihood_prefers_exact_placements() {
         let s = scoring();
         let seq = vec![b'A'; 300];
-        let read = vec![b'A'; READ_LENGTH];
+        let read = vec![b'A'; read_len()];
         let (mut hist, best_f) = offset_histogram(&read, &seq);
         let (hist_rc, best_r) = offset_histogram(&read, &seq);
         for (h, r) in hist.iter_mut().zip(hist_rc.iter()) {

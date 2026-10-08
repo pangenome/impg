@@ -515,7 +515,10 @@ pub struct ScoreModel {
 impl ScoreModel {
     pub fn validate(&self) -> io::Result<()> {
         ensure(
-            self.read_length == 150
+            // Any positive declared read length with a consistent
+            // denominator normalizes identically (the yeast validation
+            // declares 150; the HG002 pilot reads are 148).
+            self.read_length > 0
                 && self.histogram > 0
                 && self.denominator == self.read_length as f64 * self.histogram as f64
                 && self.depth.is_finite()
