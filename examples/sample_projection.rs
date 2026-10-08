@@ -412,8 +412,6 @@ fn process_batch(
         seq_len: usize,
         reads_with_mems: bool,
         records: usize,
-        tokens: Vec<Vec<u64>>,
-        bytes: Vec<u8>,
     }
     let results: Vec<io::Result<Encoded>> = batch
         .par_iter()
@@ -421,25 +419,22 @@ fn process_batch(
             let records = derive_read(panel, seq)?;
             let tokens: Vec<Vec<u64>> = records.iter().map(|(t, _)| t.clone()).collect();
             let bytes = encode_read_packet(seq.as_slice(), &records);
+            // The channel send is thread-safe and moves the packet
+            // entirely; the main thread never touches the payload.
+            senders[*index]
+                .send(WriteMsg::Packet { bytes, tokens })
+                .map_err(|_| invalid("shard writer exited"))?;
             Ok(Encoded {
                 index: *index,
                 seq_len: seq.len(),
                 reads_with_mems: !records.is_empty(),
                 records: records.len(),
-                tokens,
-                bytes,
             })
         })
         .collect();
     batch.clear();
     for result in results {
         let encoded = result?;
-        senders[encoded.index]
-            .send(WriteMsg::Packet {
-                bytes: encoded.bytes,
-                tokens: encoded.tokens,
-            })
-            .map_err(|_| invalid("shard writer exited"))?;
         totals.reads += 1;
         totals.bases += encoded.seq_len as u64;
         if encoded.reads_with_mems {
@@ -486,7 +481,7 @@ fn run_project(
     let mut senders: Vec<crossbeam_channel::Sender<WriteMsg>> = Vec::new();
     let mut writer_handles = Vec::new();
     for name in &names {
-        let (tx, rx) = crossbeam_channel::bounded::<WriteMsg>(256);
+        let (tx, rx) = crossbeam_channel::bounded::<WriteMsg>(8192);
         let shard_path = out_dir.join(format!("shard.{name}.bin.gz"));
         let occ_path = out_dir.join(format!("shard.{name}.occ.bin"));
         writer_handles.push(std::thread::spawn(move || -> io::Result<u64> {
