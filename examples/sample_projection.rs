@@ -404,27 +404,52 @@ fn process_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    let results: Vec<io::Result<Vec<(Vec<u64>, OwnWalk)>>> = batch
+    // The whole per-read pipeline (MEM derivation AND packet encoding)
+    // is pure per-read work; only the channel send and the stats are
+    // sequential.
+    struct Encoded {
+        index: usize,
+        seq_len: usize,
+        reads_with_mems: bool,
+        records: usize,
+        tokens: Vec<Vec<u64>>,
+        bytes: Vec<u8>,
+    }
+    let results: Vec<io::Result<Encoded>> = batch
         .par_iter()
-        .map(|(_, seq, _)| derive_read(panel, seq))
+        .map(|(index, seq, _qual)| {
+            let records = derive_read(panel, seq)?;
+            let tokens: Vec<Vec<u64>> = records.iter().map(|(t, _)| t.clone()).collect();
+            let bytes = encode_read_packet(seq.as_slice(), &records);
+            Ok(Encoded {
+                index: *index,
+                seq_len: seq.len(),
+                reads_with_mems: !records.is_empty(),
+                records: records.len(),
+                tokens,
+                bytes,
+            })
+        })
         .collect();
-    for ((index, seq, _qual), result) in batch.drain(..).zip(results) {
-        let records = result?;
-        let tokens: Vec<Vec<u64>> = records.iter().map(|(t, _)| t.clone()).collect();
-        let bytes = encode_read_packet(seq.as_slice(), &records);
-        senders[index]
-            .send(WriteMsg::Packet { bytes, tokens })
+    batch.clear();
+    for result in results {
+        let encoded = result?;
+        senders[encoded.index]
+            .send(WriteMsg::Packet {
+                bytes: encoded.bytes,
+                tokens: encoded.tokens,
+            })
             .map_err(|_| invalid("shard writer exited"))?;
         totals.reads += 1;
-        totals.bases += seq.len() as u64;
-        if !records.is_empty() {
+        totals.bases += encoded.seq_len as u64;
+        if encoded.reads_with_mems {
             totals.reads_with_mems += 1;
         }
-        totals.records += records.len() as u64;
-        *totals.read_lengths.entry(seq.len()).or_insert(0) += 1;
+        totals.records += encoded.records as u64;
+        *totals.read_lengths.entry(encoded.seq_len).or_insert(0) += 1;
         *totals
             .per_shard_reads
-            .entry(names[index].clone())
+            .entry(names[encoded.index].clone())
             .or_insert(0) += 1;
     }
     Ok(())
@@ -565,7 +590,7 @@ fn run_project(
         per_shard_reads: BTreeMap::new(),
     };
     let peak_rss = AtomicU64::new(rss_now_kb());
-    let mut batch: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::with_capacity(4096);
+    let mut batch: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::with_capacity(16384);
     let mut received = 0u64;
     while let Ok((index, seq, qual)) = read_rx.recv() {
         received += 1;
@@ -573,7 +598,7 @@ fn run_project(
         if limit > 0 && received >= limit {
             stop.store(true, Ordering::Relaxed);
         }
-        if batch.len() == 4096 {
+        if batch.len() == 16384 {
             process_batch(&panel, &names, &senders, &mut batch, &mut totals)?;
         }
         if received % progress == 0 {
