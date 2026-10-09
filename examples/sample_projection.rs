@@ -185,6 +185,40 @@ enum Mode {
         #[arg(long)]
         out_dir: PathBuf,
     },
+    /// THE YIELD-ANOMALY AUTOPSY TRACE (receipt-side diagnostic; no
+    /// product machinery): one scan of the projection shards that
+    /// classifies, per locality and per read-class (sequence sets
+    /// supplied as FASTA), every record's remap fate - touching,
+    /// mappable-not-touching, unmappable - with the unmapped anchors'
+    /// in-slice vs out-of-slice split (the dictionary-superset class
+    /// vs the walk-exits-the-slices class) and the partial-remap
+    /// recovery projection (would the mapped-subwalk touch?).
+    Trace {
+        /// The GLOBAL panel syng prefix (the projection's panel).
+        #[arg(long)]
+        global_panel: String,
+        /// The global panel AGC.
+        #[arg(long)]
+        agc: PathBuf,
+        /// The projection output directory (the shard files).
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// JSON list of locality specs: [{name, panel, axis,
+        /// bed_directory, component, sources}, ...].
+        #[arg(long)]
+        localities: PathBuf,
+        /// JSON list of class specs: [{class: "<name>:<label>",
+        /// fasta: path}, ...]. Every read whose sequence is in a class
+        /// set is classified against that locality.
+        #[arg(long)]
+        classes: PathBuf,
+        /// Optional FASTA of query reads: per-record detail dump.
+        #[arg(long)]
+        queries: Option<PathBuf>,
+        /// Output directory (trace-agg.json, trace-detail.jsonl).
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,6 +1226,12 @@ struct CutStatsJson {
     territory_entries: usize,
     node_map_pairs: usize,
     offset_variants: BTreeMap<String, u64>,
+    /// The env-gated attribution mode receipts (false = the committed
+    /// all-or-nothing remap, byte-identical behavior).
+    partial_remap: bool,
+    local_derive: bool,
+    reads_routed: u64,
+    reads_unrouted: u64,
     load_seconds: f64,
     scan_seconds: f64,
     census_seconds: f64,
@@ -1206,6 +1246,11 @@ struct FileCut {
     records_mappable: u64,
     records_unmappable: u64,
     reads_with_unmappable: u64,
+    /// local-derive mode: reads carrying the global routing signal
+    /// (at least one globally-mappable record node).
+    reads_routed: u64,
+    /// local-derive mode: reads without the routing signal.
+    reads_unrouted: u64,
     reads: Vec<Vec<u8>>,
     pattern_mult: BTreeMap<Vec<u64>, u64>,
     key_tokens: Vec<Vec<u64>>,
@@ -1228,10 +1273,33 @@ impl FileCut {
     }
 }
 
+/// The cut's attribution mode, all env-gated (default Strict = the
+/// committed all-or-nothing remap, byte-identical).
+/// - PartialSubwalk (IMPG_CUT_PARTIAL_REMAP=1): the locally-expressible
+///   subwalk attribution (fragmentary patterns; binds on some
+///   substrates, rejected by the unchanged CLI's binding on others).
+/// - LocalDerive (IMPG_CUT_LOCAL_DERIVE=1): ROUTE GLOBALLY, ATTRIBUTE
+///   LOCALLY - the global projection is the read ROUTER (a read is a
+///   candidate iff any of its global records carries a
+///   locality-mappable node), and every candidate read's records are
+///   then derived by the committed local MEM accessor itself
+///   (mem_records::tagged_mem_records against the locality panel,
+///   verbatim the committed census re-derivation and derive-cache
+///   builder), so the emitted census records are committed-structured
+///   local MEM walks by construction.
+#[derive(Clone, Copy, PartialEq)]
+enum RemapMode {
+    Strict,
+    PartialSubwalk,
+    LocalDerive,
+}
+
 fn scan_shard_file(
     path: &Path,
     node_map: &HashMap<i32, i32>,
     territory_nodes_abs: &HashSet<u32>,
+    mode: RemapMode,
+    local_panel: Option<&SyngIndex>,
 ) -> io::Result<FileCut> {
     let mut cut = FileCut {
         reads_scanned: 0,
@@ -1239,6 +1307,8 @@ fn scan_shard_file(
         records_mappable: 0,
         records_unmappable: 0,
         reads_with_unmappable: 0,
+        reads_routed: 0,
+        reads_unrouted: 0,
         reads: Vec::new(),
         pattern_mult: BTreeMap::new(),
         key_tokens: Vec::new(),
@@ -1256,33 +1326,75 @@ fn scan_shard_file(
         let decoded: Vec<DecodedRead> = per_read
             .into_iter()
             .collect::<io::Result<_>>()?;
-        let remapped: Vec<io::Result<Vec<Option<(Vec<u64>, OwnWalk, bool)>>>> = decoded
+        let remapped: Vec<io::Result<(
+            Vec<Option<(Vec<u64>, OwnWalk, bool)>>,
+            bool,
+        )>> = decoded
             .par_iter()
             .map(|read| {
+                if mode == RemapMode::LocalDerive {
+                    // the global routing signal: any globally-mappable node
+                    let routed = read.records.iter().any(|(_, walk)| {
+                        walk.iter().any(|&(node, _)| node_map.contains_key(&node))
+                    });
+                    if !routed {
+                        return Ok((Vec::new(), false));
+                    }
+                    // ROUTE GLOBALLY, ATTRIBUTE LOCALLY: the candidate's
+                    // records are the committed local MEM derivation
+                    // itself (verbatim committed structure).
+                    let panel = local_panel
+                        .ok_or_else(|| invalid("local-derive mode needs the locality panel"))?;
+                    let local = derive_read(panel, &read.seq)?;
+                    let out: Vec<Option<(Vec<u64>, OwnWalk, bool)>> = local
+                        .into_iter()
+                        .map(|(tokens, walk)| {
+                            let touch = walk
+                                .iter()
+                                .any(|&(node, _)| {
+                                    territory_nodes_abs.contains(&node.unsigned_abs())
+                                });
+                            Some((tokens, walk, touch))
+                        })
+                        .collect();
+                    return Ok((out, true));
+                }
                 let mut out = Vec::with_capacity(read.records.len());
                 cut_records(
                     &read.records,
                     node_map,
                     territory_nodes_abs,
+                    mode == RemapMode::PartialSubwalk,
                     &mut out,
                 )?;
-                Ok(out)
+                Ok((out, false))
             })
             .collect();
         for (read, result) in decoded.into_iter().zip(remapped) {
-            let records = result?;
-            cut.records_scanned += records.len() as u64;
+            let (records, routed_flag) = result?;
+            if mode == RemapMode::LocalDerive {
+                cut.records_scanned += read.records.len() as u64;
+                if routed_flag {
+                    cut.reads_routed += 1;
+                    cut.records_mappable += records.len() as u64;
+                } else {
+                    cut.reads_unrouted += 1;
+                    cut.reads_with_unmappable += 1;
+                }
+            } else {
+                cut.records_scanned += records.len() as u64;
+            }
             let mut kept: Vec<(u32, OwnWalk)> = Vec::new();
             let mut any_touch = false;
-            let mut had_unmappable = false;
             for record in &records {
                 match record {
                     None => {
                         cut.records_unmappable += 1;
-                        had_unmappable = true;
                     }
                     Some((tokens, walk, touch)) => {
-                        cut.records_mappable += 1;
+                        if mode != RemapMode::LocalDerive {
+                            cut.records_mappable += 1;
+                        }
                         if *touch {
                             any_touch = true;
                             *cut.pattern_mult.entry(tokens.clone()).or_insert(0) += 1;
@@ -1291,9 +1403,6 @@ fn scan_shard_file(
                         kept.push((key, walk.clone()));
                     }
                 }
-            }
-            if had_unmappable {
-                cut.reads_with_unmappable += 1;
             }
             if any_touch {
                 let read_index = cut.reads.len();
@@ -1311,13 +1420,41 @@ fn scan_shard_file(
 /// Remap one read's records into locality node ids; None marks a record
 /// with at least one node absent from the locality panel (the global
 /// superset class — not expressible in the locality's node space).
+/// With `partial` (the env-gated attribution correction
+/// IMPG_CUT_PARTIAL_REMAP=1), a record whose walk carries global-only
+/// anchors is attributed by its LOCALLY-EXPRESSIBLE SUBWALK instead of
+/// being dropped: the OWN-FRAME walk is filtered to the steps whose
+/// nodes the locality panel expresses (true own positions preserved),
+/// and the canonical tokens are then DERIVED from the surviving own
+/// steps by the CLI's own mirror formula - so the emitted
+/// (tokens, own walk) pair satisfies the unchanged CLI's cache binding
+/// by construction (verified inline for both mirror frames; a record
+/// whose pair validates in neither frame is dropped). Records with no
+/// expressible step stay dropped. No thresholds; the committed default
+/// (unset) is the all-or-nothing remap, byte-identical to the committed
+/// cuts (proven by the cut2-control-L4 byte-identity run).
 fn cut_records(
     records: &[(Vec<u64>, OwnWalk)],
     node_map: &HashMap<i32, i32>,
     territory_nodes_abs: &HashSet<u32>,
+    partial: bool,
     out: &mut Vec<Option<(Vec<u64>, OwnWalk, bool)>>,
 ) -> io::Result<()> {
     for (tokens, walk) in records {
+        if partial {
+            let pair = partial_remap(tokens, walk, node_map)?;
+            match pair {
+                Some((new_tokens, own_kept)) => {
+                    let anchors = decode_tokens(&new_tokens)?;
+                    let touch = anchors
+                        .iter()
+                        .any(|&(node, _)| territory_nodes_abs.contains(&node.unsigned_abs()));
+                    out.push(Some((new_tokens, own_kept, touch)));
+                }
+                None => out.push(None),
+            }
+            continue;
+        }
         let anchors = decode_tokens(tokens)?;
         let mut mapped = Vec::with_capacity(anchors.len());
         let mut all_mapped = true;
@@ -1356,6 +1493,89 @@ fn cut_records(
         out.push(Some((new_tokens, walk_mapped, touch)));
     }
     Ok(())
+}
+
+/// The partial-remap pair construction: filter the own-frame walk to
+/// the locality-expressible steps, derive the canonical tokens from the
+/// survivors by the mirror formula (both frames tried; the CLI's own
+/// validation decides), and return the pair only when it binds.
+fn partial_remap(
+    tokens: &[u64],
+    walk: &OwnWalk,
+    node_map: &HashMap<i32, i32>,
+) -> io::Result<Option<(Vec<u64>, OwnWalk)>> {
+    let mut own_kept: OwnWalk = Vec::with_capacity(walk.len());
+    for &(node, pos) in walk {
+        if let Some(&local) = node_map.get(&node) {
+            own_kept.push((local, pos));
+        }
+    }
+    if own_kept.is_empty() {
+        return Ok(None);
+    }
+    let e_own = match encode_walk(&own_kept.iter().map(|&(n, p)| (n, p as u64)).collect::<Vec<_>>())
+    {
+        Ok(encoded) => encoded,
+        Err(_) => return Ok(None),
+    };
+    let mirrored = match encode_walk(
+        &walk.iter().map(|&(n, p)| (n, p as u64)).collect::<Vec<_>>(),
+    ) {
+        Ok(original) => tokens != original.as_slice(),
+        Err(_) => return Ok(None),
+    };
+    let m = own_kept.len();
+    let w_lo = own_kept[0].1 as u64;
+    let d: Vec<u64> = own_kept.iter().map(|&(_, p)| p as u64 - w_lo).collect();
+    let d_last = *d.last().unwrap();
+    for frame in [mirrored, !mirrored] {
+        let mut canonical_list: Vec<(i32, u64)> = Vec::with_capacity(m);
+        for j in 0..m {
+            let index = if frame { m - 1 - j } else { j };
+            let (node, _) = own_kept[index];
+            canonical_list.push((
+                if frame { -node } else { node },
+                if frame { d_last - d[index] } else { d[index] },
+            ));
+        }
+        let new_tokens = match encode_walk(&canonical_list) {
+            Ok(encoded) => canonical(&encoded),
+            Err(_) => continue,
+        };
+        if pair_binds(&new_tokens, &own_kept, &e_own)? {
+            return Ok(Some((new_tokens, own_kept)));
+        }
+    }
+    Ok(None)
+}
+
+/// The unchanged CLI's own cache-binding validation (realign_score's
+/// key_shape), verbatim semantics: the own walk must mirror the
+/// canonical tokens' walk (nodes and positions) in one of the two
+/// frames. `e_own` is the own walk's encoded form (the CLI derives the
+/// mirrored flag from exactly this comparison).
+fn pair_binds(tokens: &[u64], own: &OwnWalk, e_own: &[u64]) -> io::Result<bool> {
+    let mirrored = e_own != tokens;
+    let canonical = decode_tokens(tokens)?;
+    let m = canonical.len();
+    if own.len() != m {
+        return Ok(false);
+    }
+    let w_lo = own.first().map(|&(_, p)| p as u64).unwrap_or(0);
+    let last = canonical.last().map(|&(_, p)| p).unwrap_or(0);
+    for (t, &(own_node, own_pos)) in own.iter().enumerate() {
+        let j = if mirrored { m - 1 - t } else { t };
+        let expect_node = if mirrored { -canonical[j].0 } else { canonical[j].0 };
+        let expect_pos = if mirrored {
+            w_lo + (last - canonical[j].1)
+        } else {
+            w_lo + canonical[j].1
+        };
+        if own_node != expect_node || own_pos as u64 != expect_pos {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Parse a locus.fa record header of the form "path:start-end" (the
@@ -1546,9 +1766,33 @@ fn run_cut(
     ensure(!shard_paths.is_empty(), "no shard files found")?;
     let node_map_ref = &node_map;
     let territory_nodes_ref = &territory_nodes_abs;
+    // The env-gated attribution modes (default OFF = the committed
+    // all-or-nothing remap; the receipt fields in cut-stats.json name
+    // the mode).
+    let mode = if std::env::var("IMPG_CUT_LOCAL_DERIVE").ok().as_deref() == Some("1") {
+        eprintln!("[cut] local-derive remap: IMPG_CUT_LOCAL_DERIVE=1 (route globally, attribute locally - the committed local MEM derivation over the globally routed reads)");
+        RemapMode::LocalDerive
+    } else if std::env::var("IMPG_CUT_PARTIAL_REMAP").ok().as_deref() == Some("1") {
+        eprintln!("[cut] partial remap: IMPG_CUT_PARTIAL_REMAP=1 (locally-expressible subwalk attribution)");
+        RemapMode::PartialSubwalk
+    } else {
+        RemapMode::Strict
+    };
     let per_file: Vec<io::Result<FileCut>> = shard_paths
         .par_iter()
-        .map(|path| scan_shard_file(path, node_map_ref, territory_nodes_ref))
+        .map(|path| {
+            scan_shard_file(
+                path,
+                node_map_ref,
+                territory_nodes_ref,
+                mode,
+                if mode == RemapMode::LocalDerive {
+                    Some(&panel)
+                } else {
+                    None
+                },
+            )
+        })
         .collect();
 
     // Merge in file order (deterministic).
@@ -1564,6 +1808,8 @@ fn run_cut(
         records_mappable: u64,
         records_unmappable: u64,
         reads_with_unmappable: u64,
+        reads_routed: u64,
+        reads_unrouted: u64,
     }
     let mut merged = Merged {
         reads: Vec::new(),
@@ -1577,6 +1823,8 @@ fn run_cut(
         records_mappable: 0,
         records_unmappable: 0,
         reads_with_unmappable: 0,
+        reads_routed: 0,
+        reads_unrouted: 0,
     };
     fn intern_merged(merged: &mut Merged, tokens: &[u64]) -> u32 {
         if let Some(&index) = merged.key_index.get(tokens) {
@@ -1595,6 +1843,8 @@ fn run_cut(
         merged.records_mappable += cut.records_mappable;
         merged.records_unmappable += cut.records_unmappable;
         merged.reads_with_unmappable += cut.reads_with_unmappable;
+        merged.reads_routed += cut.reads_routed;
+        merged.reads_unrouted += cut.reads_unrouted;
         let base = merged.reads.len();
         for (index, seq) in cut.reads.into_iter().enumerate() {
             merged.reads.push(seq);
@@ -1867,6 +2117,10 @@ fn run_cut(
         territory_entries: territory.entries.len(),
         node_map_pairs,
         offset_variants,
+        partial_remap: mode == RemapMode::PartialSubwalk,
+        local_derive: mode == RemapMode::LocalDerive,
+        reads_routed: merged.reads_routed,
+        reads_unrouted: merged.reads_unrouted,
         load_seconds,
         scan_seconds,
         census_seconds,
@@ -1881,6 +2135,640 @@ fn run_cut(
         dropped_no_occurrence
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// trace: THE YIELD-ANOMALY AUTOPSY DIAGNOSTIC (receipt-side only; the
+// product/scoreboard machinery untouched). One scan of the projection
+// shards; per locality and read-class (sequence sets given as FASTA),
+// every record's remap fate is classified: touching, mappable without
+// touch, or unmappable - with the unmapped anchors split into the
+// in-slice class (the anchor position is a global-walk position of the
+// locality's own slices: the dictionary-superset class) and the
+// out-of-slice class (the record's walk anchors outside the locality's
+// sequences entirely: the paralog/walk-exit class) - plus the
+// partial-remap recovery projection (would the mapped subwalk touch?).
+// Query reads get a per-record detail dump.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct TraceLocalitySpec {
+    name: String,
+    panel: String,
+    axis: PathBuf,
+    bed_directory: PathBuf,
+    component: String,
+    sources: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+struct TraceClassSpec {
+    /// "<locality-name>:<label>".
+    class: String,
+    fasta: PathBuf,
+}
+
+struct TraceLocality {
+    name: String,
+    node_map: HashMap<i32, i32>,
+    territory_nodes_abs: HashSet<u32>,
+    /// Every global node id appearing in any locality slice's global
+    /// canonical walk (the in-slice reference for the unmapped-anchor
+    /// split).
+    slice_global_nodes: HashSet<i32>,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct Agg {
+    reads: u64,
+    reads_no_records: u64,
+    reads_touch: u64,
+    touching_records: u64,
+    notouch_records: u64,
+    unmappable_records: u64,
+    /// reads not kept whose failing records' unmapped anchors are all
+    /// in-slice (the dictionary-superset loss class).
+    reads_unm_inslice_only: u64,
+    /// reads not kept with at least one out-of-slice unmapped anchor
+    /// (the paralog/walk-exit loss class).
+    reads_unm_any_outslice: u64,
+    /// reads not kept, no unmappable record, but no touch either.
+    reads_notouch_only: u64,
+    unmapped_anchors: u64,
+    unmapped_in_slice: u64,
+    unmapped_out_slice: u64,
+    /// unmappable records whose mapped subwalk would touch (the
+    /// partial-remap recovery projection).
+    recover_touch_records: u64,
+    /// reads not kept that partial remap would recover.
+    recovered_reads: u64,
+    /// anchor-count histogram of touching records (16 bins, cap 15+).
+    touch_anchor_hist: Vec<u64>,
+    /// anchor-count histogram of recovered (partial-remap touch) records.
+    recover_anchor_hist: Vec<u64>,
+}
+
+impl Agg {
+    fn hist_bump(hist: &mut Vec<u64>, count: usize) {
+        if hist.is_empty() {
+            *hist = vec![0; 16];
+        }
+        hist[count.min(15)] += 1;
+    }
+}
+
+struct FileTrace {
+    reads_scanned: u64,
+    agg: HashMap<(u32, u32), Agg>,
+    detail: Vec<serde_json::Value>,
+}
+
+#[derive(Clone)]
+enum RecStatus {
+    Touch {
+        anchors: usize,
+    },
+    NoTouch {
+        anchors: usize,
+    },
+    Unmappable {
+        mapped: Vec<(i32, u64)>,
+        unmapped: Vec<(i32, bool)>,
+    },
+}
+
+fn trace_classify_record(
+    tokens: &[u64],
+    walk: &OwnWalk,
+    locality: &TraceLocality,
+) -> io::Result<RecStatus> {
+    let anchors = decode_tokens(tokens)?;
+    let mut mapped = Vec::with_capacity(anchors.len());
+    let mut unmapped = Vec::new();
+    for &(node, pos) in &anchors {
+        match locality.node_map.get(&node) {
+            Some(&local) => mapped.push((local, pos)),
+            None => unmapped.push((node, locality.slice_global_nodes.contains(&node))),
+        }
+    }
+    let mut walk_mapped = 0usize;
+    for &(node, _) in walk {
+        if locality.node_map.contains_key(&node) {
+            walk_mapped += 1;
+        }
+    }
+    if unmapped.is_empty() && walk_mapped == walk.len() {
+        let touch = mapped
+            .iter()
+            .any(|&(node, _)| locality.territory_nodes_abs.contains(&node.unsigned_abs()));
+        if touch {
+            Ok(RecStatus::Touch { anchors: mapped.len() })
+        } else {
+            Ok(RecStatus::NoTouch { anchors: mapped.len() })
+        }
+    } else {
+        Ok(RecStatus::Unmappable { mapped, unmapped })
+    }
+}
+
+fn scan_trace_file(
+    path: &Path,
+    localities: &[TraceLocality],
+    memberships: &HashMap<Vec<u8>, Vec<(u32, u32)>>,
+    query_set: &HashSet<Vec<u8>>,
+) -> io::Result<FileTrace> {
+    let mut trace = FileTrace {
+        reads_scanned: 0,
+        agg: HashMap::new(),
+        detail: Vec::new(),
+    };
+    for batch in shard_packet_stream(path, 1024)? {
+        let packets = batch?;
+        trace.reads_scanned += packets.len() as u64;
+        let per_read: Vec<io::Result<(
+            Vec<u8>,
+            Vec<Vec<RecStatus>>,
+            Vec<(u32, u32)>,
+            bool,
+        )>> = packets
+            .par_iter()
+            .map(|packet| {
+                let read = decode_read_packet(packet)?;
+                let memberships = memberships.get(&read.seq);
+                let is_query = query_set.contains(&read.seq);
+                if memberships.is_none() && !is_query {
+                    return Ok((read.seq, Vec::new(), Vec::new(), false));
+                }
+                let per_loc: Vec<Vec<RecStatus>> = localities
+                    .iter()
+                    .map(|locality| {
+                        let mut out = Vec::with_capacity(read.records.len());
+                        for (tokens, walk) in &read.records {
+                            out.push(trace_classify_record(tokens, walk, locality)?);
+                        }
+                        Ok(out)
+                    })
+                    .collect::<io::Result<_>>()?;
+                Ok((
+                    read.seq,
+                    per_loc,
+                    memberships.cloned().unwrap_or_default(),
+                    is_query,
+                ))
+            })
+            .collect();
+        for (seq, per_loc, memberships, is_query) in
+            per_read.into_iter().collect::<io::Result<Vec<_>>>()? {
+            if memberships.is_empty() && !is_query {
+                continue;
+            }
+            let qhash = if is_query { Some(fnv1a64(&seq)) } else { None };
+            let mut detail_loc: Vec<serde_json::Value> = Vec::new();
+            for (loc_index, statuses) in per_loc.into_iter().enumerate() {
+                let mut detail_recs: Option<Vec<serde_json::Value>> =
+                    is_query.then(|| Some(Vec::new())).flatten();
+                let mut any_touch = false;
+                let mut any_unm = false;
+                let mut any_notouch = false;
+                let mut any_outslice = false;
+                let mut recover_count = 0u64;
+                let mut agg: Option<&mut Agg> = None;
+                for &(loc_member, class_index) in &memberships {
+                    if loc_member as usize == loc_index {
+                        agg = Some(trace.agg.entry((loc_index as u32, class_index)).or_default());
+                        let a = agg.as_mut().unwrap();
+                        a.reads += 1;
+                        if statuses.is_empty() {
+                            a.reads_no_records += 1;
+                        }
+                        break;
+                    }
+                }
+                for status in statuses {
+                    match status {
+                        RecStatus::Touch { anchors } => {
+                            any_touch = true;
+                            if let Some(a) = agg.as_deref_mut() {
+                                a.touching_records += 1;
+                                Agg::hist_bump(&mut a.touch_anchor_hist, anchors);
+                            }
+                            if let Some(recs) = detail_recs.as_mut() {
+                                recs.push(serde_json::json!({"s": "touch", "a": anchors}));
+                            }
+                        }
+                        RecStatus::NoTouch { anchors } => {
+                            any_notouch = true;
+                            if let Some(a) = agg.as_deref_mut() {
+                                a.notouch_records += 1;
+                            }
+                            if let Some(recs) = detail_recs.as_mut() {
+                                recs.push(serde_json::json!({"s": "notouch", "a": anchors}));
+                            }
+                        }
+                        RecStatus::Unmappable { mapped, unmapped } => {
+                            any_unm = true;
+                            let recover = !mapped.is_empty()
+                                && mapped.iter().any(|&(node, _)| {
+                                    localities[loc_index]
+                                        .territory_nodes_abs
+                                        .contains(&node.unsigned_abs())
+                                });
+                            if recover {
+                                recover_count += 1;
+                            }
+                            for &(node, in_slice) in &unmapped {
+                                if !in_slice {
+                                    any_outslice = true;
+                                }
+                                if let Some(a) = agg.as_deref_mut() {
+                                    a.unmapped_anchors += 1;
+                                    if in_slice {
+                                        a.unmapped_in_slice += 1;
+                                    } else {
+                                        a.unmapped_out_slice += 1;
+                                    }
+                                }
+                            }
+                            if let Some(a) = agg.as_deref_mut() {
+                                a.unmappable_records += 1;
+                                if recover {
+                                    a.recover_touch_records += 1;
+                                    Agg::hist_bump(&mut a.recover_anchor_hist, mapped.len());
+                                }
+                            }
+                            if let Some(recs) = detail_recs.as_mut() {
+                                recs.push(serde_json::json!({
+                                    "s": "unm",
+                                    "r": recover,
+                                    "m": mapped.iter().map(|&(n, p)| vec![n as i64, p as i64]).collect::<Vec<_>>(),
+                                    "u": unmapped.iter().map(|&(n, s)| vec![n, if s {1} else {0}]).collect::<Vec<_>>(),
+                                }));
+                            }
+                        }
+                    }
+                }
+                if let Some(a) = agg.as_deref_mut() {
+                    if any_touch {
+                        a.reads_touch += 1;
+                    } else {
+                        if any_unm {
+                            if any_outslice {
+                                a.reads_unm_any_outslice += 1;
+                            } else {
+                                a.reads_unm_inslice_only += 1;
+                            }
+                        } else if any_notouch {
+                            a.reads_notouch_only += 1;
+                        }
+                        if recover_count > 0 {
+                            a.recovered_reads += 1;
+                        }
+                    }
+                }
+                if is_query {
+                    if let Some(recs) = detail_recs {
+                        detail_loc.push(serde_json::json!({
+                            "loc": localities[loc_index].name,
+                            "recs": recs,
+                        }));
+                    }
+                }
+            }
+            if let Some(qhash) = qhash {
+                trace.detail.push(serde_json::json!({
+                    "q": qhash,
+                    "locs": detail_loc,
+                }));
+            }
+        }
+    }
+    Ok(trace)
+}
+
+fn load_fasta_sequences(path: &Path) -> io::Result<Vec<Vec<u8>>> {
+    let mut seqs = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    for line in BufReader::new(std::fs::File::open(path)?).lines() {
+        let line = line?;
+        if let Some(_header) = line.strip_prefix('>') {
+            if !cur.is_empty() {
+                seqs.push(std::mem::take(&mut cur));
+            }
+        } else if !line.is_empty() {
+            cur.extend_from_slice(line.trim().as_bytes());
+        }
+    }
+    if !cur.is_empty() {
+        seqs.push(cur);
+    }
+    Ok(seqs)
+}
+
+/// The per-path node correspondence + territory for one trace locality
+/// (the committed cut's own construction, with the slice-global-node set
+/// additionally collected for the in-slice split).
+fn trace_load_locality(
+    spec: &TraceLocalitySpec,
+    global: &SyngIndex,
+    agc: &AgcIndex,
+    k: u64,
+) -> io::Result<TraceLocality> {
+    let panel = SyngIndex::load(&spec.panel, SyncmerParams::default())?;
+    ensure(
+        global.syncmer_length_bp() as u64 == k,
+        "global and locality syncmer lengths differ",
+    )?;
+    let axis: AxisFile = serde_json::from_str(&std::fs::read_to_string(&spec.axis)?)
+        .map_err(|e| invalid(format!("axis parse: {e}")))?;
+    let universe = load_universe_component(&axis, &spec.bed_directory, &spec.component)?;
+    let mut sources: HashMap<String, Vec<u8>> = HashMap::new();
+    {
+        let text = std::fs::read_to_string(&spec.sources)?;
+        let mut name: Option<String> = None;
+        let mut seq: Vec<u8> = Vec::new();
+        for line in text.lines() {
+            if let Some(header) = line.strip_prefix('>') {
+                if let Some(prev) = name.take() {
+                    sources.insert(prev, std::mem::take(&mut seq));
+                }
+                name = Some(header.split_whitespace().next().unwrap_or("").to_string());
+            } else if name.is_some() {
+                seq.extend_from_slice(line.trim().as_bytes());
+            }
+        }
+        if let Some(prev) = name {
+            sources.insert(prev, seq);
+        }
+    }
+    ensure(!sources.is_empty(), "no locus.fa records")?;
+    let territory = build_territory_index(&panel, &universe, &sources, k)?;
+    let territory_nodes_abs: HashSet<u32> = territory
+        .entries
+        .iter()
+        .map(|&(node, _, _)| node.unsigned_abs())
+        .collect();
+    let mut node_map: HashMap<i32, i32> = HashMap::new();
+    let mut slice_global_nodes: HashSet<i32> = HashSet::new();
+    for (header, record) in &sources {
+        let (global_name, s, e) = parse_locus_header(header)?;
+        ensure(
+            (e - s) as usize == record.len(),
+            &format!("locus record {header} length differs from its header interval"),
+        )?;
+        let mut delta: Option<i64> = None;
+        for candidate in [0i64, -1, 1] {
+            let lo = (s as i64 + candidate).max(0) as usize;
+            let hi = lo + record.len();
+            if let Ok(fetched) = agc.fetch_sequence(&global_name, lo as i32, hi as i32) {
+                if fetched == *record {
+                    delta = Some(candidate);
+                    break;
+                }
+            }
+        }
+        let delta = delta.ok_or_else(|| {
+            invalid(format!(
+                "locus record {header} is not identical to the AGC interval \
+                 under either offset convention"
+            ))
+        })?;
+        let lo = (s as i64 + delta).max(0) as i32;
+        let global_seq = agc
+            .fetch_sequence(&global_name, lo, lo + record.len() as i32)
+            .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
+        ensure(global_seq == *record, "AGC refetch mismatch")?;
+        let local_walk = mem_records::canonical_anchor_walk(&panel, record)?;
+        let global_walk = mem_records::canonical_anchor_walk(global, &global_seq)?;
+        let global_by_pos: HashMap<u64, i32> =
+            global_walk.iter().map(|&(node, pos)| (pos, node)).collect();
+        for &(gnode, _pos) in &global_walk {
+            slice_global_nodes.insert(gnode);
+        }
+        for &(lnode, lpos) in &local_walk {
+            let gnode = *global_by_pos
+                .get(&lpos)
+                .ok_or_else(|| invalid("locality anchor position absent from the global walk"))?;
+            match node_map.entry(gnode) {
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    ensure(*o.get() == lnode, "conflicting node correspondence")?;
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(lnode);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[trace] locality {}: {} node-map pairs, {} slice global nodes, {} territory rows",
+        spec.name,
+        node_map.len(),
+        slice_global_nodes.len(),
+        territory.territories.len()
+    );
+    Ok(TraceLocality {
+        name: spec.name.clone(),
+        node_map,
+        territory_nodes_abs,
+        slice_global_nodes,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_trace(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    localities_path: &Path,
+    classes_path: &Path,
+    queries_path: Option<&Path>,
+    out_dir: &Path,
+) -> io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    let started = Instant::now();
+    eprintln!("[trace] loading global panel");
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
+    let k = global.syncmer_length_bp() as u64;
+    let locality_specs: Vec<TraceLocalitySpec> =
+        serde_json::from_str(&std::fs::read_to_string(localities_path)?)
+            .map_err(|e| invalid(format!("localities spec parse: {e}")))?;
+    let class_specs: Vec<TraceClassSpec> =
+        serde_json::from_str(&std::fs::read_to_string(classes_path)?)
+            .map_err(|e| invalid(format!("classes spec parse: {e}")))?;
+    let mut localities: Vec<TraceLocality> = Vec::with_capacity(locality_specs.len());
+    for spec in &locality_specs {
+        localities.push(trace_load_locality(spec, &global, &agc, k)?);
+    }
+    let locality_index: HashMap<&str, u32> = locality_specs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.as_str(), i as u32))
+        .collect();
+    let mut class_labels: Vec<String> = Vec::new();
+    let mut label_index: HashMap<String, u32> = HashMap::new();
+    let mut memberships: HashMap<Vec<u8>, Vec<(u32, u32)>> = HashMap::new();
+    let mut class_summary: Vec<serde_json::Value> = Vec::new();
+    for spec in &class_specs {
+        let (loc_name, label) = spec
+            .class
+            .split_once(':')
+            .ok_or_else(|| invalid(&format!("class {} is not <locality>:<label>", spec.class)))?;
+        let loc_index = *locality_index
+            .get(loc_name)
+            .ok_or_else(|| invalid(&format!("class {} names unknown locality", spec.class)))?;
+        let class_index = match label_index.get(label) {
+            Some(&index) => index,
+            None => {
+                let index = class_labels.len() as u32;
+                class_labels.push(label.to_string());
+                label_index.insert(label.to_string(), index);
+                index
+            }
+        };
+        let seqs = load_fasta_sequences(&spec.fasta)?;
+        let mut members = 0u64;
+        for seq in seqs {
+            memberships
+                .entry(seq)
+                .or_default()
+                .push((loc_index, class_index));
+            members += 1;
+        }
+        class_summary.push(serde_json::json!({
+            "class": spec.class,
+            "sequences": members,
+        }));
+        eprintln!("[trace] class {}: {} sequences", spec.class, members);
+    }
+    let mut query_set: HashSet<Vec<u8>> = HashSet::new();
+    if let Some(path) = queries_path {
+        for seq in load_fasta_sequences(path)? {
+            query_set.insert(seq);
+        }
+        eprintln!("[trace] {} query sequences", query_set.len());
+    }
+    let load_seconds = started.elapsed().as_secs_f64();
+
+    let mut shard_paths: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(shards_dir)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
+            shard_paths.push(path);
+        }
+    }
+    shard_paths.sort();
+    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    let per_file: Vec<io::Result<FileTrace>> = shard_paths
+        .par_iter()
+        .map(|path| scan_trace_file(path, &localities, &memberships, &query_set))
+        .collect();
+    let mut merged = FileTrace {
+        reads_scanned: 0,
+        agg: HashMap::new(),
+        detail: Vec::new(),
+    };
+    for result in per_file {
+        let trace = result?;
+        merged.reads_scanned += trace.reads_scanned;
+        merged.detail.extend(trace.detail);
+        for (key, agg) in trace.agg {
+            let entry = merged.agg.entry(key).or_default();
+            merge_agg(entry, agg);
+        }
+    }
+    merged.detail.sort_by_key(|value| {
+        value["q"].as_u64().unwrap_or(0)
+    });
+    {
+        let mut out = io::BufWriter::new(std::fs::File::create(out_dir.join("trace-detail.jsonl"))?);
+        for value in &merged.detail {
+            serde_json::to_writer(&mut out, value)?;
+            out.write_all(b"\n")?;
+        }
+        out.flush()?;
+    }
+    #[derive(Serialize)]
+    struct TraceAggJson {
+        reads_scanned: u64,
+        classes: Vec<String>,
+        class_summary: Vec<serde_json::Value>,
+        localities: Vec<serde_json::Value>,
+        load_seconds: f64,
+        wall_seconds: f64,
+        peak_rss_kb: u64,
+    }
+    let locality_json: Vec<serde_json::Value> = localities
+        .iter()
+        .enumerate()
+        .map(|(loc_index, locality)| {
+            let classes: Vec<serde_json::Value> = class_labels
+                .iter()
+                .enumerate()
+                .map(|(class_index, label)| {
+                    let agg = merged
+                        .agg
+                        .get(&(loc_index as u32, class_index as u32));
+                    let value = match agg {
+                        Some(a) => serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                        None => serde_json::Value::Null,
+                    };
+                    serde_json::json!({ "label": label, "agg": value })
+                })
+                .collect();
+            serde_json::json!({ "name": locality.name, "classes": classes })
+        })
+        .collect();
+    let stats = TraceAggJson {
+        reads_scanned: merged.reads_scanned,
+        classes: class_labels.clone(),
+        class_summary,
+        localities: locality_json,
+        load_seconds,
+        wall_seconds: started.elapsed().as_secs_f64(),
+        peak_rss_kb: rss_now_kb(),
+    };
+    let text = serde_json::to_string_pretty(&stats)?;
+    std::fs::write(out_dir.join("trace-agg.json"), text + "\n")?;
+    eprintln!(
+        "[trace] DONE: {} reads scanned, {} detail lines [{:.1}s]",
+        merged.reads_scanned,
+        merged.detail.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn merge_agg(dst: &mut Agg, src: Agg) {
+    dst.reads += src.reads;
+    dst.reads_no_records += src.reads_no_records;
+    dst.reads_touch += src.reads_touch;
+    dst.touching_records += src.touching_records;
+    dst.notouch_records += src.notouch_records;
+    dst.unmappable_records += src.unmappable_records;
+    dst.reads_unm_inslice_only += src.reads_unm_inslice_only;
+    dst.reads_unm_any_outslice += src.reads_unm_any_outslice;
+    dst.reads_notouch_only += src.reads_notouch_only;
+    dst.unmapped_anchors += src.unmapped_anchors;
+    dst.unmapped_in_slice += src.unmapped_in_slice;
+    dst.unmapped_out_slice += src.unmapped_out_slice;
+    dst.recover_touch_records += src.recover_touch_records;
+    dst.recovered_reads += src.recovered_reads;
+    merge_hist(&mut dst.touch_anchor_hist, src.touch_anchor_hist);
+    merge_hist(&mut dst.recover_anchor_hist, src.recover_anchor_hist);
+}
+
+fn merge_hist(dst: &mut Vec<u64>, src: Vec<u64>) {
+    if dst.is_empty() {
+        *dst = src;
+    } else if !src.is_empty() {
+        if dst.len() < src.len() {
+            dst.resize(src.len(), 0);
+        }
+        for (i, v) in src.into_iter().enumerate() {
+            dst[i] += v;
+        }
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -1918,6 +2806,23 @@ fn main() -> io::Result<()> {
             &sources,
             &agc,
             &shards_dir,
+            &out_dir,
+        ),
+        Mode::Trace {
+            global_panel,
+            agc,
+            shards_dir,
+            localities,
+            classes,
+            queries,
+            out_dir,
+        } => run_trace(
+            &global_panel,
+            &agc,
+            &shards_dir,
+            &localities,
+            &classes,
+            queries.as_deref(),
             &out_dir,
         ),
     }
