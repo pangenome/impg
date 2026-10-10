@@ -473,6 +473,19 @@ pub struct Options {
 // call, zero edits). The material per fold is the fold's own spelled
 // sequence — the panel fetch of the member row [start, end) window,
 // the same convention-(a) material of the committed stage.
+//
+// BESIDE it, env-gated (IMPG_TRUTH_QV_ALLWAVE=1), THE OFFICIAL
+// SEQUENCE-QV CONVENTION (the owner's ruling: the sequence QV is
+// quantity 1, called-vs-truth sequence accuracy, in the likegt
+// max-qv form EXACTLY — allwave aligns the truth haplotypes against
+// the called haplotypes with likegt's own invocation `-i <fasta> -t
+// 4 -p tree:5:0:0`, identity = matches / query_span per PAF line,
+// QV = -10 log10(1 - identity) capped at 50, per-truth-hap BEST
+// alignment among the called homologs, the diplotype QV the mean of
+// the two per-hap QVs) — emitted as additive official_allwave fields
+// in the same test artifact, the committed biWFA fields untouched
+// and comparable. The env-unset default path is byte-identical to
+// the committed receipts.
 // ---------------------------------------------------------------------------
 
 /// One persistent biWFA helper child (stdin/stdout pipes; one
@@ -560,6 +573,258 @@ impl QvAligner {
             .wait()
             .map(|_| ())
             .map_err(|error| invalid(&format!("the qv-biwfa helper wait failed: {error}")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE OFFICIAL SEQUENCE-QV CONVENTION (the owner's ruling: the
+// sequence QV is quantity 1, called-vs-truth sequence accuracy,
+// computed by the likegt max-qv form EXACTLY — surveyed from
+// likegt's own implementation, /home/erikg/likegt's `max-qv` command
+// (src/commands/max_qv.rs, the README's allwave aligner), not
+// invented here). THE CONVENTION: allwave aligns the TRUTH
+// haplotypes (the queries) against the CALLED haplotypes (the
+// targets) with likegt's own invocation — `allwave -i <fasta> -t
+// <threads> -p tree:5:0:0` (the max-qv command's default
+// sparsification; allwave's OWN default dual-piece gap-affine scores
+// 0,5,8,2,24,1, no override) — then, per the max-qv PAF derivation,
+// identity = matches / query_span (query_span = query_end -
+// query_start: the per-base error is measured in TRUTH sequence
+// space over the ALIGNED SPAN, no forced End2End overhang), QV =
+// -10·log10(1 - identity) capped at 50 (a perfect alignment carries
+// QV 50.0 exactly); per TRUTH haplotype the BEST alignment among
+// the called homologs is taken (likegt's most-similar-haplotype
+// selection — the max-qv "best" rule; alignment lines from one
+// query to one target pool by (matches, query_span) sums, likegt's
+// per-target aggregation); and the diplotype sequence QV is the
+// MEAN of the two per-truth-hap QVs (likegt's avg_qv). This runs
+// BESIDE the committed biWFA End2End injective-assignment
+// computation, env-gated (IMPG_TRUTH_QV_ALLWAVE=1;
+// IMPG_TRUTH_QV_ALLWAVE_BIN overrides the allwave binary, default
+// "allwave" from PATH) — the committed fields stay byte-identical
+// and comparable.
+// ---------------------------------------------------------------------------
+
+/// One allwave state for the env-gated official-convention path: the
+/// binary and likegt's max-qv thread default (4).
+pub struct AllwaveQv {
+    binary: std::ffi::OsString,
+    threads: usize,
+}
+
+impl AllwaveQv {
+    /// The likegt max-qv QV derivation from an alignment identity:
+    /// QV = -10·log10(1 - identity), clamped to [0, 50]; a perfect
+    /// alignment (identity >= 1) is QV 50.0 exactly (likegt's own
+    /// cap-and-floor, max_qv.rs parse_paf_line).
+    fn qv_of_identity(identity: f64) -> f64 {
+        if identity >= 1.0 {
+            50.0
+        } else {
+            let error = 1.0 - identity;
+            if error <= 0.0 {
+                50.0
+            } else {
+                (-10.0 * error.log10()).clamp(0.0, 50.0)
+            }
+        }
+    }
+
+    /// Parse allwave's PAF stdout into (query, target, matches,
+    /// query_span) tuples — likegt's own fields: matches = field 10,
+    /// query_span = query_end - query_start (fields 3/4), the aligned
+    /// query span in TRUTH sequence space.
+    fn parse_paf(stdout: &str) -> io::Result<Vec<(String, String, u64, u64)>> {
+        let mut lines = Vec::new();
+        for line in stdout.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() < 12 {
+                // allwave's progress chatter never reaches stdout, but
+                // a malformed line is an error, not a silent skip.
+                return Err(invalid(&format!(
+                    "malformed allwave PAF line ({} fields): {line}",
+                    fields.len()
+                )));
+            }
+            let query_start: u64 = fields[2]
+                .parse()
+                .map_err(|_| invalid("non-numeric allwave PAF query start"))?;
+            let query_end: u64 = fields[3]
+                .parse()
+                .map_err(|_| invalid("non-numeric allwave PAF query end"))?;
+            let matches: u64 = fields[9]
+                .parse()
+                .map_err(|_| invalid("non-numeric allwave PAF matches"))?;
+            lines.push((
+                fields[0].to_string(),
+                fields[5].to_string(),
+                matches,
+                query_end.saturating_sub(query_start),
+            ));
+        }
+        Ok(lines)
+    }
+
+    /// One truth haplotype's best alignment among the called
+    /// homologs, in likegt's own form: the (query, target) pairs pool
+    /// their (matches, query_span) sums (max_qv.rs's per-target
+    /// aggregation), the best target is the highest pooled identity
+    /// (ties to the higher matches, then the higher query_span, then
+    /// the first called homolog). Returns (identity, matches,
+    /// query_span, best target name) — identity 0.0 when allwave
+    /// emitted no alignment for this truth haplotype.
+    fn best_for_hap(
+        paf: &[(String, String, u64, u64)],
+        truth: &str,
+        called: [&str; 2],
+    ) -> (f64, u64, u64, Option<String>) {
+        let mut best: Option<(u64, u64, usize)> = None; // (matches, span, called index)
+        for (index, target) in called.iter().enumerate() {
+            let (mut matches, mut span) = (0u64, 0u64);
+            for (query, t, m, s) in paf {
+                if query == truth && t == target {
+                    matches += m;
+                    span += s;
+                }
+            }
+            if span == 0 {
+                continue; // no alignment line for this pair
+            }
+            let identity = matches as f64 / span as f64;
+            let better = match best {
+                None => true,
+                Some((b_m, b_s, _)) => {
+                    let b_identity = b_m as f64 / b_s as f64;
+                    (identity, matches, span) > (b_identity, b_m, b_s)
+                }
+            };
+            if better {
+                best = Some((matches, span, index));
+            }
+        }
+        match best {
+            None => (0.0, 0, 0, None),
+            Some((matches, span, index)) => (
+                matches as f64 / span as f64,
+                matches,
+                span,
+                Some(called[index].to_string()),
+            ),
+        }
+    }
+
+    /// One locus under the official convention: the two truth
+    /// haplotypes' best alignments among the two called homologs, the
+    /// per-hap QVs, and the diplotype QV as their mean (likegt's
+    /// avg_qv form).
+    fn locus_qv(
+        &self,
+        locus: u32,
+        called0: &[u8],
+        called1: &[u8],
+        truth0: &[u8],
+        truth1: &[u8],
+    ) -> io::Result<serde_json::Value> {
+        ensure(
+            !called0.is_empty()
+                && !called1.is_empty()
+                && !truth0.is_empty()
+                && !truth1.is_empty(),
+            "empty sequence in the official-convention truth-QV path",
+        )?;
+        let fasta = std::env::temp_dir().join(format!(
+            "impg-truth-qv-allwave-{}-{locus}.fa",
+            std::process::id()
+        ));
+        {
+            use std::io::Write;
+            let mut out = std::fs::File::create(&fasta)?;
+            for (name, seq) in [
+                ("called0", called0),
+                ("called1", called1),
+                ("truth0", truth0),
+                ("truth1", truth1),
+            ] {
+                write!(out, ">{name}\n")?;
+                out.write_all(seq)?;
+                out.write_all(b"\n")?;
+            }
+        }
+        let output = std::process::Command::new(&self.binary)
+            .arg("-i")
+            .arg(&fasta)
+            .arg("-t")
+            .arg(self.threads.to_string())
+            .arg("-p")
+            .arg("tree:5:0:0")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|error| {
+                invalid(&format!("spawning allwave {binary:?}: {error}", binary = self.binary))
+            })?;
+        let _ = std::fs::remove_file(&fasta);
+        ensure(
+            output.status.success(),
+            "allwave failed in the official-convention truth-QV path",
+        )?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let paf = Self::parse_paf(&stdout)?;
+        let called = ["called0", "called1"];
+        let (id0, m0, s0, t0) = Self::best_for_hap(&paf, "truth0", called);
+        let (id1, m1, s1, t1) = Self::best_for_hap(&paf, "truth1", called);
+        let (qv0, qv1) = (Self::qv_of_identity(id0), Self::qv_of_identity(id1));
+        let pairs = |truth: &str| {
+            let mut value = serde_json::Map::new();
+            for target in called {
+                let (mut matches, mut span) = (0u64, 0u64);
+                for (query, t, m, s) in &paf {
+                    if query == truth && t == target {
+                        matches += m;
+                        span += s;
+                    }
+                }
+                value.insert(
+                    format!("truth_{truth}_vs_{target}"),
+                    if span > 0 {
+                        json!({
+                            "matches": matches,
+                            "query_span": span,
+                            "identity": matches as f64 / span as f64,
+                        })
+                    } else {
+                        serde_json::Value::Null
+                    },
+                );
+            }
+            serde_json::Value::Object(value)
+        };
+        Ok(json!({
+            "convention": "likegt-max-qv-allwave (the owner's official ruling)",
+            "invocation": format!(
+                "allwave -i <locus fasta> -t {} -p tree:5:0:0 (likegt's own max-qv default)",
+                self.threads
+            ),
+            "qv": (qv0 + qv1) / 2.0,
+            "qv_truth_hap0": qv0,
+            "qv_truth_hap1": qv1,
+            "identity_truth_hap0": id0,
+            "identity_truth_hap1": id1,
+            "best_called_hap_truth_hap0": t0,
+            "best_called_hap_truth_hap1": t1,
+            "perfect": id0 >= 1.0 && id1 >= 1.0,
+            "no_alignment_truth_hap0": t0.is_none(),
+            "no_alignment_truth_hap1": t1.is_none(),
+            "pairs": {
+                "truth0": pairs("truth0"),
+                "truth1": pairs("truth1"),
+            },
+            "best_matches": [m0, m1],
+            "best_query_spans": [s0, s1],
+        }))
     }
 }
 
@@ -4018,6 +4283,31 @@ pub fn run(options: Options) -> io::Result<()> {
         (true, Some(_)) => Some(std::sync::Mutex::new(QvAligner::spawn(&options.qv_biwfa)?)),
         _ => None,
     };
+    // THE OFFICIAL SEQUENCE-QV CONVENTION (the owner's ruling, the
+    // likegt max-qv form) — env-gated beside the committed biWFA
+    // computation: IMPG_TRUTH_QV_ALLWAVE=1 adds the official
+    // allwave-derived fields to the truth-QV test artifact (the
+    // committed biWFA fields stay byte-identical and comparable);
+    // IMPG_TRUTH_QV_ALLWAVE_BIN overrides the allwave binary
+    // (default "allwave" from PATH). The default path (env unset)
+    // is byte-identical to the committed receipts.
+    let truth_qv_allwave = match (truth_qv_mode, std::env::var("IMPG_TRUTH_QV_ALLWAVE")) {
+        (true, Ok(_)) => {
+            let binary = std::env::var_os("IMPG_TRUTH_QV_ALLWAVE_BIN")
+                .unwrap_or_else(|| "allwave".into());
+            eprintln!(
+                "[score] truth-QV official convention enabled (the likegt max-qv form): \
+                 allwave binary {binary:?}, sparsification tree:5:0:0, QV cap 50"
+            );
+            Some(AllwaveQv {
+                binary,
+                // likegt's own max-qv thread default (-t 4, the
+                // command's documented default).
+                threads: 4,
+            })
+        }
+        _ => None,
+    };
 
     // The identity gate (slice D): under IMPG_REALIGN_STORED_WALK_SKELETON
     // the pin skeleton stays the stored path walk (the slice-B/C
@@ -6274,9 +6564,7 @@ pub fn run(options: Options) -> io::Result<()> {
             // End2End 0/4/6/2, error = (mismatches + gap columns) /
             // total columns, QV = -10 log10(error) with the QV-60 cap
             // at error <= 1e-6.)
-            serde_json::to_writer(
-                &mut truth_qv_buf,
-                &match truth_pair_test {
+            let truth_qv_value = match truth_pair_test {
                     None => json!({
                         "locus": locus,
                         "partition": partition,
@@ -6373,7 +6661,7 @@ pub fn run(options: Options) -> io::Result<()> {
                         } else {
                             60.0
                         };
-                        json!({
+                        let mut record = json!({
                             "locus": locus,
                             "partition": partition,
                             "component": options.component,
@@ -6416,10 +6704,34 @@ pub fn run(options: Options) -> io::Result<()> {
                             "identity": 1.0 - error,
                             "qv": qv,
                             "perfect": edits == 0,
-                        })
+                        });
+                        // THE OFFICIAL SEQUENCE-QV CONVENTION (the
+                        // owner's ruling, the likegt max-qv form),
+                        // env-gated beside the committed biWFA fields:
+                        // allwave aligns the two truth haplotypes
+                        // against the two called homologs, per-hap
+                        // best selection, QV from the best
+                        // alignments' per-base error (identity =
+                        // matches / query_span, the QV-50 cap), the
+                        // diplotype QV the mean of the two per-hap
+                        // QVs. Additive only: the committed fields
+                        // above are byte-identical.
+                        if let Some(allwave) = truth_qv_allwave.as_ref() {
+                            let official = allwave.locus_qv(
+                                locus,
+                                &folds[winner_first].seq,
+                                &folds[winner_second].seq,
+                                &folds[truth_first_index].seq,
+                                &folds[truth_second_index].seq,
+                            )?;
+                            if let Some(object) = record.as_object_mut() {
+                                object.insert("official_allwave".to_string(), official);
+                            }
+                        }
+                        record
                     }
-                },
-            )?;
+                };
+            serde_json::to_writer(&mut truth_qv_buf, &truth_qv_value)?;
             truth_qv_buf.push(b'\n');
         }
         Ok(LocusOutput {
@@ -7776,6 +8088,154 @@ mod tests {
         let (chosen, receipt) = connected_truth_second(&folds, None, "HG002#2");
         assert_eq!(chosen, None);
         assert!(receipt.is_none());
+    }
+
+    // ------------------------------------------- the official sequence-QV
+    // convention (the owner's ruling, the likegt max-qv form):
+    // the PAF derivation, the per-hap best selection, the mean QV,
+    // and — when the allwave binary is present — the convention end
+    // to end on a known diplotype.
+
+    fn paf_line(query: &str, target: &str, qs: u64, qe: u64, matches: u64) -> String {
+        format!(
+            "{query}\t{qe}\t{qs}\t{qe}\t+\t{target}\t{qe}\t0\t{qe}\t{matches}\t{qe}\t60\n"
+        )
+    }
+
+    #[test]
+    fn allwave_paf_derivation_matches_likegt_max_qv() {
+        // identity = matches / query_span (the aligned query span,
+        // NOT the alignment length); QV = -10 log10(1 - identity)
+        // capped at 50, perfect = QV 50.0 exactly.
+        let paf = paf_line("truth0", "called0", 0, 1000, 995);
+        let lines = AllwaveQv::parse_paf(&paf).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].2, 995);
+        assert_eq!(lines[0].3, 1000);
+        assert!((AllwaveQv::qv_of_identity(0.995) - 23.010_299_956).abs() < 1e-9);
+        assert_eq!(AllwaveQv::qv_of_identity(1.0), 50.0);
+        assert_eq!(AllwaveQv::qv_of_identity(0.999999), 50.0, "the QV-50 cap");
+        assert!((AllwaveQv::qv_of_identity(0.5) - 3.010_299_956_639_78).abs() < 1e-9);
+        assert_eq!(AllwaveQv::qv_of_identity(0.0), 0.0);
+        // a malformed line is an error, never a silent skip
+        assert!(AllwaveQv::parse_paf("truth0\tshort\n").is_err());
+    }
+
+    #[test]
+    fn allwave_per_hap_best_pools_and_selects_like_max_qv() {
+        // truth0 -> called0: two alignment lines pooling to
+        // (matches 990, span 1000) = identity 0.99; truth0 ->
+        // called1: one line identity 0.995. The BEST alignment for
+        // the haplotype is called1 (the likegt most-similar rule).
+        let paf_text = format!(
+            "{}{}{}",
+            paf_line("truth0", "called0", 0, 500, 495),
+            paf_line("truth0", "called0", 500, 1000, 495),
+            paf_line("truth0", "called1", 0, 1000, 995),
+        );
+        let paf = AllwaveQv::parse_paf(&paf_text).unwrap();
+        let (identity, matches, span, target) =
+            AllwaveQv::best_for_hap(&paf, "truth0", ["called0", "called1"]);
+        assert!((identity - 0.995).abs() < 1e-12);
+        assert_eq!((matches, span), (995, 1000));
+        assert_eq!(target.as_deref(), Some("called1"));
+        // no alignment at all: identity 0, QV 0 (the honest floor —
+        // zero matched truth material, never a silent skip).
+        let (identity, _m, _s, target) =
+            AllwaveQv::best_for_hap(&paf, "truth9", ["called0", "called1"]);
+        assert_eq!(identity, 0.0);
+        assert!(target.is_none());
+        // an exact TIE between the called homologs keeps the FIRST
+        // (the stated deterministic order).
+        let tied = format!("{}{}", paf_line("t", "called0", 0, 100, 99), paf_line("t", "called1", 0, 100, 99));
+        let paf = AllwaveQv::parse_paf(&tied).unwrap();
+        let (_, _, _, target) = AllwaveQv::best_for_hap(&paf, "t", ["called0", "called1"]);
+        assert_eq!(target.as_deref(), Some("called0"));
+        // the diplotype QV is the MEAN of the per-hap QVs (likegt's
+        // avg_qv form), and a perfect call under the official
+        // convention is QV 50 (the cap), not the biWFA receipts' 60.
+        let perfect = format!(
+            "{}{}",
+            paf_line("truth0", "called0", 0, 100, 100),
+            paf_line("truth1", "called1", 0, 100, 99),
+        );
+        let paf = AllwaveQv::parse_paf(&perfect).unwrap();
+        let (id0, ..) = AllwaveQv::best_for_hap(&paf, "truth0", ["called0", "called1"]);
+        let (id1, ..) = AllwaveQv::best_for_hap(&paf, "truth1", ["called0", "called1"]);
+        let mean = (AllwaveQv::qv_of_identity(id0) + AllwaveQv::qv_of_identity(id1)) / 2.0;
+        assert!((mean - 35.0).abs() < 1e-9, "(50 + 20) / 2, QV of 99% identity is 20");
+    }
+
+    #[test]
+    fn allwave_official_convention_end_to_end_on_a_known_diplotype() {
+        // The convention live through the allwave binary: four
+        // ~2000bp sequences with KNOWN mismatch counts; skipped
+        // only when the allwave binary is absent from PATH (the
+        // hermetic derivation is covered by the tests above).
+        let binary = std::env::var_os("IMPG_TRUTH_QV_ALLWAVE_BIN")
+            .unwrap_or_else(|| "allwave".into());
+        let probe = std::process::Command::new(&binary)
+            .arg("--version")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        if probe.is_err() {
+            eprintln!("allwave absent: the end-to-end official-convention test is skipped");
+            return;
+        }
+        let mut base = vec![b'A'; 2000];
+        for (i, b) in base.iter_mut().enumerate() {
+            *b = b"ACGT"[i % 4];
+        }
+        // mutate a DISJOINT position set: every position truly changes
+        // base letter (the +1 map A->C, C->G, G->T, T->A), so the
+        // mismatch counts are exact.
+        let mutated = |offset: usize, n: usize| {
+            let mut seq = base.clone();
+            for i in 0..n {
+                let position = offset + 37 * i;
+                seq[position] = b"ACGT"[(seq[position] - b'A') as usize % 3 + 1];
+            }
+            seq
+        };
+        let truth0 = base.clone();
+        let truth1 = mutated(500, 20);      // 20 mismatches vs truth0
+        let called0 = mutated(0, 5);        // 5 vs truth0
+        // called1 = truth1 + 20 more mutations: 20 mismatches vs
+        // truth1, 40 vs truth0 — so truth1's best is called1 and
+        // truth0's best is called0.
+        let mut called1 = truth1.clone();
+        for i in 0..20 {
+            let position = 1200 + 37 * i;
+            called1[position] = b"ACGT"[(called1[position] - b'A') as usize % 3 + 1];
+        }
+        let allwave = AllwaveQv { binary, threads: 4 };
+        let record = allwave
+            .locus_qv(4242, &called0, &called1, &truth0, &truth1)
+            .unwrap();
+        // truth0 (the unmutated base) takes called0 (5 mismatches,
+        // identity 1995/2000); truth1 takes called1 (20 mismatches,
+        // identity 1980/2000).
+        assert!((record["identity_truth_hap0"].as_f64().unwrap() - 1995.0 / 2000.0).abs() < 1e-9);
+        assert!((record["identity_truth_hap1"].as_f64().unwrap() - 1980.0 / 2000.0).abs() < 1e-9);
+        assert_eq!(record["best_called_hap_truth_hap0"], "called0");
+        assert_eq!(record["best_called_hap_truth_hap1"], "called1");
+        let qv0 = -10.0 * (5.0f64 / 2000.0).log10();
+        let qv1 = -10.0 * (20.0f64 / 2000.0).log10();
+        assert!(
+            (record["qv"].as_f64().unwrap() - (qv0 + qv1) / 2.0).abs() < 1e-6,
+            "the diplotype QV is the mean of the per-hap QVs"
+        );
+        assert_eq!(record["perfect"], false);
+        // a PERFECT call: both truth haps identical to their called
+        // homolog — identity 1.0, QV 50.0 exactly (the official cap).
+        let perfect = allwave
+            .locus_qv(4243, &base, &base, &base.clone(), &base.clone())
+            .unwrap();
+        assert_eq!(perfect["identity_truth_hap0"], 1.0);
+        assert_eq!(perfect["identity_truth_hap1"], 1.0);
+        assert_eq!(perfect["qv"], 50.0);
+        assert_eq!(perfect["perfect"], true);
     }
 
 }
