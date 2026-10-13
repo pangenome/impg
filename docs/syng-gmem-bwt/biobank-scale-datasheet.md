@@ -1,5 +1,41 @@
 # The biobank-scale cost datasheet (post routes-lever)
 
+> **SESSION-OPEN INCREMENT — the projection bandwidth campaign (opened
+> before any measurement; this section is the plan of record, the
+> measurements will land as a later increment).** The owner's follow-up
+> ruling on the projection pole, verbatim: **"projection 25 minutes seems
+> a bit long... shouldn't even be running 192 cores"** — with the owner's
+> two observations to explain and exploit: (a) the committed 35x projection
+> is DRAM-bandwidth-bound, not compute-bound (568,680 reads/s with only
+> ~27-37 of the 192 configured cores busy — the receipt's own statement),
+> and (b) a 12-lane shape would hold a PRIVATE ~46GB in-RAM copy of the
+> panel syng index per lane (~550GB of duplicated RAM, all lanes
+> contending for the same DRAM bandwidth — the committed run's one shared
+> process is the counter-shape). The campaign's hypotheses, stated before
+> measurement: **H1 (locality batching)** — a cheap pre-pass that assigns
+> each read to a panel REGION (the grain: the input stream's own region
+> grouping, chromosome-grain, or finer from the index's own node space),
+> then bucket-by-bucket projection so concurrent threads walk the same
+> index pages (hot cache) — worth several-fold on a bandwidth-bound
+> process; **H2 (one shared index)** — a single process with ONE read-only
+> in-RAM index (all threads share the pages) beats N private per-lane
+> copies on both RAM and effective bandwidth; **H3 (the saturation
+> curve)** — reads/s vs thread count at 1,2,4,8,16,32,64,128 threads on
+> ONE index copy measures the bandwidth ceiling, confirms the 16-core
+> observation, and quantifies the headroom locality batching must unlock.
+> The measured object comes FIRST (the campaign's rule): a bounded slice
+> of the 35x BAM (5-10M reads), one shared-index process, the thread-count
+> sweep, cores-busy and (if cheaply available) the DRAM counters. The
+> identity gate is absolute: the optimized path's occurrence records must
+> be identical to the committed projection for the measured slice (same
+> records, same occurrences; the committed shard format's within-batch
+> packet order is the send-in-par scheduling's own nondeterminism, so the
+> standard is record/multiset identity, stated); a dropped or duplicated
+> multi-mapping read is a FAILURE, not an optimization. No thresholds, no
+> tuning constants (the thread counts are measurement points); the
+> committed census/shards are the immutable baseline; no implementation of
+> the streaming restructure without the owner's gate.
+
 The owner's ruling, verbatim: "biobank scale - the diploid genome for every
 genome in a biobank relative to the HPRC; no true realignment of reads, a
 projection onto a pangenome + local haplotype-aware genotyping; SOME MINOR
