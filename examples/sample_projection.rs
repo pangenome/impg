@@ -140,6 +140,19 @@ enum Mode {
         /// Stop after N reads (smoke mode; 0 = all).
         #[arg(long, default_value_t = 0)]
         limit: u64,
+        /// THE LOCALITY-BATCHING LEVER (H1): reorder each 16,384-read
+        /// arrival batch by input stream - the committed feed's own
+        /// region grouping (one chromosome per stream, the cheapest
+        /// possible pre-locator: zero pre-pass cost) - before the
+        /// parallel dispatch, so every rayon chunk is a run of one
+        /// stream's coordinate-adjacent reads (same-locus reads share
+        /// their kmer-hash probe lines and GBWT node records: hot cache)
+        /// while the packet sends stay spread across all shard channels
+        /// exactly as in the committed scheduling. The default path
+        /// (off) is the committed scheduling; the per-shard packet
+        /// multiset is identical either way.
+        #[arg(long, default_value_t = false)]
+        region_batching: bool,
     },
     /// Merge the shard pattern multisets into the occurrence stream.
     Dedup {
@@ -455,9 +468,23 @@ fn process_batch(
     senders: &[crossbeam_channel::Sender<WriteMsg>],
     batch: &mut Vec<(usize, Vec<u8>, Vec<u8>)>,
     totals: &mut Totals,
+    region_batching: bool,
 ) -> io::Result<()> {
     if batch.is_empty() {
         return Ok(());
+    }
+    // THE LOCALITY-BATCHING SCHEDULING (the sorted form): reorder the
+    // arrival batch by input stream (the committed feed's own region
+    // grouping - one chromosome per stream) before the parallel
+    // dispatch, so every rayon chunk is a run of ONE stream's
+    // coordinate-adjacent reads (same-locus reads share their kmer-hash
+    // probe lines and GBWT node records - hot cache) while the sends
+    // stay spread across ALL shard channels exactly as in the committed
+    // scheduling (no single-writer burst). Within-batch packet order is
+    // already the committed send-in-par scheduling's own
+    // nondeterminism; the per-shard packet multiset is unchanged.
+    if region_batching {
+        batch.sort_unstable_by_key(|(index, _, _)| *index);
     }
     // The whole per-read pipeline (MEM derivation AND packet encoding)
     // is pure per-read work; only the channel send and the stats are
@@ -512,6 +539,7 @@ fn run_project(
     map_cap: usize,
     progress: u64,
     limit: u64,
+    region_batching: bool,
 ) -> io::Result<()> {
     std::fs::create_dir_all(out_dir)?;
     let names: Vec<String> = inputs.iter().map(|i| shard_base_name(i)).collect();
@@ -649,7 +677,7 @@ fn run_project(
             stop.store(true, Ordering::Relaxed);
         }
         if batch.len() == 16384 {
-            process_batch(&panel, &names, &senders, &mut batch, &mut totals)?;
+            process_batch(&panel, &names, &senders, &mut batch, &mut totals, region_batching)?;
         }
         if received % progress == 0 {
             let rss = rss_now_kb();
@@ -661,7 +689,7 @@ fn run_project(
             );
         }
     }
-    process_batch(&panel, &names, &senders, &mut batch, &mut totals)?;
+    process_batch(&panel, &names, &senders, &mut batch, &mut totals, region_batching)?;
     for sender in &senders {
         let _ = sender.send(WriteMsg::Finish);
     }
@@ -3651,7 +3679,8 @@ fn main() -> io::Result<()> {
             map_cap,
             progress,
             limit,
-        } => run_project(&panel, &inputs, &out_dir, map_cap, progress, limit),
+            region_batching,
+        } => run_project(&panel, &inputs, &out_dir, map_cap, progress, limit, region_batching),
         Mode::Dedup {
             out_dir,
             occurrences,
