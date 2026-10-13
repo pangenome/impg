@@ -235,3 +235,141 @@ one-time, ~7-10 minutes of box time for the whole HPRC territory set, and
 Assessment-side truth only (the --truth-qv test mode); no thresholds; no
 tuning constants; the committed receipts unmodified; the scoreboard
 machinery untouched.
+
+## 8. The projection bandwidth campaign (closed; the pole measured, the
+##    lever committed, the next levers named)
+
+The owner's ruling at the head of this datasheet: **"projection 25
+minutes seems a bit long... shouldn't even be running 192 cores."** The
+campaign measured the pole, shipped one committed lever, and answered the
+question honestly. Co-tenant DRAM hammers (rpfbwt, bench-numa) ran the
+whole session: **±20% noise on every rate below**; matched back-to-back
+points are the primary evidence. No thresholds, no tuning constants —
+every thread count is a measurement point.
+
+**The measured object** (the campaign's own rule): a bounded slice of the
+35x BAM — 19 × 409,600 mid-chromosome reads (the committed 19-fifo
+feed's own stream windows) = 7,782,400 reads, exactly 9,557,434 records
+in every gated run. Receipts: `/home/erikg/hprcv2/proj-bandwidth/`.
+
+**H3 — the committed binary's saturation curve** (one shared index,
+reads/s post-load, T=1..256): 71,276 / 111,972 / 175,278 / 290,502 /
+500,782 / 464,039 / 549,868 / 566,308 / **204,380 → 503,609 → 592,328**
+(the committed 192-thread point's first run was a cold-cache artifact;
+immediate re-runs are the honest number) / 583,048. **The plateau is
+~500-600k reads/s from T=16 up; the committed 192-thread configuration
+is past the peak; per-busy-core efficiency collapses ~5-10x beyond
+T=16.**
+
+**H1 — the locality lever, v1 → v2 (committed as `--region-batching`,
+default off, the committed path byte-for-byte).** v1 (strict per-stream
+batches): +44/54/61% at T=1/2/4 but **−22% at T=192** — single-writer
+burst contention, diagnosed and replaced. v2 (each 16,384-read arrival
+batch sorted by input stream before the rayon dispatch — the committed
+feed's own chromosome-per-stream grouping, zero pre-pass cost, packet
+sends still spread across all 19 channels): s32 **709,814 reads/s** —
+above the whole baseline plateau; curve 56,883 / 145,106 / 128,329 /
+256,719 / 574,965 / **709,814 (T=32)** / 580,794 / 669,877 / 295,036 /
+190,218.
+
+**The identity gates — all PASS, any failure would have been a
+failure.** G1: slice vs committed whole-sample shards, 19/19 streams,
+packet/multiset identity with both jitter-guard legs. G2: the rebuilt
+binary's default path ≡ the committed binary's output. G3: default ≡
+v1-strict. g4/g5: the v2-sorted runs at T=32 and T=192 ≡ the default
+control. The commutative 128-bit per-shard multiset hash: identical on
+all five slice runs, 19/19 shards, records exactly 9,557,434 everywhere.
+
+**H2 — the decisive 12-lane leg (the owner's shape, measured).** 12
+processes × 16 rayon threads, each a **private 35.5GiB in-RAM index
+copy** (12 × 35.5 = 427GiB resident; the 120GiB guard never came close,
+minimum available 695GiB; guard math stated before launch), disjoint
+record-aligned splits of the same slice (records sum exactly 9,557,434;
+the union packet multiset ≡ the 19-shard multiset by the commutative
+hash). **Per-lane post-load 338k-453k reads/s; aggregate ≈4.74M reads/s
+— ~6.7x the best single-process point (709,814), ~8.3x the committed
+receipt's 568,680.** VERDICT: **the single-process plateau is a
+PER-PROCESS (single-address-space) ceiling, NOT the box's aggregate DRAM
+bandwidth — the box feeds 12 lanes at 4.7M reads/s.** The committed
+receipt's "DRAM-bandwidth-bound" statement was the per-process
+observation; H2 corrects it at the box level (the exact per-process
+mechanism — TLB/page-table/scheduler — is unmeasured, stated honestly).
+
+**The full-sample optimized run (the real wall-clock number).** The
+committed 35x runner verbatim (same BAM, same 19 region streams, same
+fifos, same map-cap, same guards) + `--region-batching` at **T=32**
+(the best gated point), one shared index, nohup + markers:
+
+| | committed (T=192) | optimized (v2, T=32) | delta |
+|---|---|---|---|
+| projection wall (incl. load) | 1467.05s = 24.45min | **1247.5s = 20.79min** | **−15.0%** |
+| index load | 175.6s | 178.4s | equal (noise) |
+| post-load rate | 568,680 reads/s | **686,965 reads/s** | **+20.8%** |
+| dedup wall | 118.4s | 114.5s | equal |
+| end-to-end projection+dedup | 1585.4s = 26.4min | **1362.0s = 22.7min** | −14.1% |
+| peak RSS | 43,013,472 kB | 43,021,228 kB | equal |
+
+**The full-sample identity gate — PASS at every level** (the committed
+projection is the immutable baseline): `occurrences.bin` (3.9GB
+canonical dedup stream) **BYTE-IDENTICAL**; per-shard pattern-multiset
+occ gates **19/19 IDENTICAL**; per-shard commutative packet-multiset
+hashes **19/19 IDENTICAL** (734,443,930 packets, 838,221,858 records
+— the 100% standard); projection-stats counters identical. Diagnostic
+note, stated: index-window sampling between two full runs is NOT a
+valid standard (packet order within a shard is the send-in-par
+nondeterminism over arrival-batch stream interleaving — measured ±17
+records per 409,600-packet window, the batch-edge jitter class,
+receipts kept); the whole-file commutative multiset cancels it and is
+the standard.
+
+**The datasheet, before/after.** Thread/RAM tenant: **one shared ~41GiB
+index at T=32** replaces the committed past-peak T=192 tenant at equal
+RAM — and the 12-lane shape would hold **12 private copies ≈ 427-492GiB
+of the box's 1,006GiB**. Per-sample end-to-end (projection + wave at
+230-256 lanes, serial-sum): **~40-42min** (was ~44min; the wave's
+~19-21min is now the dominant pole). The overlapped bound (streaming
+restructure below, owner-gated, NOT implemented) would be
+max(projection, wave) ≈ **~21min** at the s32 shape.
+
+**How can this be faster? (the honest answer, each lever with its
+measured motivation)**
+
+1. **Done and committed**: `--region-batching` at T=32 — +21%
+   post-load bandwidth, −15% whole-sample wall, byte-identical output,
+   same RAM, fewer threads. The committed 192-thread configuration was
+   past the peak; the same box and index do 21% more at 32 threads.
+2. **The lanes shape (H2, measured on the slice)**: 12 private-index
+   lanes × 16 threads aggregate **~4.74M reads/s** — the extrapolated
+   full-sample projection is load ~200s + 734.4M/4.74M ≈ 155s ≈
+   **~6min** (vs 20.8min measured single-process; extrapolation from
+   the slice, NOT measured at full scale — stated). Cost: ~492GiB of
+   private index copies, and **the box cannot co-run the wave's 870GB
+   lane fleet** — either lane fleet, not both.
+3. **The streaming restructure (the named NEXT lever, owner-gated, NOT
+   implemented)**: region-ordered emission + per-territory routing at
+   emission + a region→offset manifest would let the per-territory
+   wave tail the projection stream — hiding the whole projection pole
+   behind the wave (per-sample ≈ max(projection, wave) ≈ 21min).
+4. **Index packing (named lever)**: the index is 35.5GiB resident
+   (GBWT: 272,213,874 vertices / 683,539,246 edges) and its load is
+   178s — 14% of the s32 wall and the dominant term of the lanes
+   shape's per-lane economics. A packed layout shrinks the per-lane
+   private copies (12 × 35.5GiB → proportionally less), cuts the load,
+   and improves per-process cache/TLB locality.
+5. **NUMA placement (named lever)**: per-lane rates varied 338k-453k
+   (±15%) under co-tenant contention; node-affine placement of each
+   lane's private copy (one socket's DRAM per lane) removes cross-socket
+   DRAM traffic — the 4.74M aggregate is a floor for the un-pinned
+   shape; the wave's 870GB lane fleet needs the same discipline.
+6. **The wave is now the pole**: ~19-21min vs projection 20.8min
+   single-process (~6min lanes-extrapolated) — the next end-to-end
+   gains live in the wave's lane economics and the fixed-load levers of
+   section 6.
+
+Standing rules held throughout: the committed projection/shards were
+never touched; identity failures would have been failures; no
+thresholds or tuning constants; NO PR PUSH (the owner pushes); the
+64GiB single-process guard and the 120GiB multi-process guard armed and
+never tripped; intermediates cleaned, receipts kept at
+`/home/erikg/hprcv2/proj-bandwidth/` (the gates machinery committed at
+`genome/instrumented/projection-*`).
