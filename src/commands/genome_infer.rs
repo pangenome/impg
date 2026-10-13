@@ -285,6 +285,22 @@ pub enum Command {
         #[arg(long, default_value_t = 2000000)]
         max_profile_terms: usize,
     },
+    /// The call-path route inventory by lookup: graph.json's lanes from the panel's own name map, the census routing cross-check; no native ports/profiles (the calling path never reads them)
+    DeriveRoutes {
+        #[command(flatten)]
+        common: Common,
+        /// The re-anchored census receipt (jsonl or jsonl.gz) — every
+        /// occurrence's path id is cross-checked against the target
+        /// panel's name map (the routing bind)
+        #[arg(long)]
+        census: PathBuf,
+        #[arg(long, required=true, num_args=1..)]
+        sources: Vec<String>,
+        #[arg(long, required=true, value_delimiter=',', num_args=1..)]
+        read_lengths: Vec<u64>,
+        #[arg(long, default_value_t = 65536)]
+        core_bp: u64,
+    },
     /// Exact lazy full-genome route evaluation; fixed-universe background-relative objective only
     EvaluatePanelRoutes {
         #[command(flatten)]
@@ -802,6 +818,25 @@ pub fn run(command: Command) -> io::Result<()> {
                 &common.out_dir,
                 core_bp,
                 max_profile_terms,
+            )
+        }),
+        Command::DeriveRoutes {
+            common,
+            census,
+            sources,
+            read_lengths,
+            core_bp,
+        } => genome::with_output_model(&common.out_dir, panel_routes::MODEL, || {
+            let identity = genome::PanelIdentity::read(&common.panel)?;
+            let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
+            panel_routes::lookup(
+                &panel,
+                identity,
+                &census,
+                &sources,
+                read_lengths,
+                &common.out_dir,
+                core_bp,
             )
         }),
         Command::EvaluatePanelRoutes {

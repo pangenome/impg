@@ -739,3 +739,101 @@ fn review_bgzf_fai_and_gzi_are_bound_after_creation_and_not_recreated_on_reuse()
     }
     Evaluator::new(&out, &g, &p, &s, 1.0, 0.1, 100000, 0).unwrap();
 }
+
+#[test]
+fn lookup_derives_the_call_path_lane_inventory_identical_to_the_built_graph() {
+    let a = dna(400, 77);
+    let sequences = vec![
+        ("A#0#chr".into(), a),
+        ("B#0#other".into(), dna(300, 99)),
+        ("C#0#third".into(), dna(200, 123)),
+    ];
+    let (t, p, g, _s) = setup(sequences, vec![90, 250], 37);
+    // A tiny re-anchored census (the routing demand): every occurrence
+    // names a panel path id and its territory-touch partitions.
+    let census = t.path().join("census.jsonl");
+    fs::write(
+        &census,
+        concat!(
+            "{\"record\":0,\"occurrences\":[{\"path\":0,\"partitions\":[0,1]}]}\n",
+            "{\"occurrences\":[{\"path\":1,\"partitions\":[1]}]}\n",
+            "{\"record\":2,\"occurrences\":[{\"path\":2,\"partitions\":[2]},{\"path\":0,\"partitions\":[]}]}\n",
+        ),
+    )
+    .unwrap();
+    let out = t.path().join("routes-lookup");
+    super::super::with_output_model(&out, MODEL, || {
+        lookup(
+            &p,
+            identity(),
+            &census,
+            &g.source_paths,
+            g.read_lengths.clone(),
+            &out,
+            37,
+        )
+    })
+    .unwrap();
+    let lookup_graph: Graph = serde_json::from_str(&fs::read_to_string(out.join("graph.json")).unwrap())
+        .unwrap();
+    // The calling path's own contract (realign_score/diplotype_chain read
+    // graph.json directly): panel identity + generation_complete.
+    assert!(lookup_graph.generation_complete);
+    assert_eq!(lookup_graph.panel, g.panel);
+    // The call-consumed lane inventory is IDENTICAL to the built graph's
+    // (id, name, length, family, and the recomputed sequence hash).
+    assert_eq!(lookup_graph.lanes.len(), g.lanes.len());
+    for (x, y) in lookup_graph.lanes.iter().zip(&g.lanes) {
+        assert_eq!(
+            (x.id, &x.name, x.length, x.family, &x.sequence_fnv1a64),
+            (y.id, &y.name, y.length, y.family, &y.sequence_fnv1a64)
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&lookup_graph.families).unwrap(),
+        serde_json::to_string(&g.families).unwrap()
+    );
+    assert_eq!(lookup_graph.source_paths, g.source_paths);
+    assert_eq!(lookup_graph.k, g.k);
+    assert_eq!(lookup_graph.read_lengths, g.read_lengths);
+    assert_eq!(lookup_graph.total_source_bp, g.total_source_bp);
+    // Honest empty native artifacts: zero ports, zero profile runs.
+    assert_eq!(lookup_graph.port_count, 0);
+    assert!(lookup_graph.lanes.iter().all(|l| l.port_count == 0));
+    assert!(lookup_graph
+        .lanes
+        .iter()
+        .all(|l| l.profiles.iter().all(|x| x.runs == 0)));
+    // The search machinery fails CLOSED on the lookup artifact (its
+    // validate pins the built generation rule).
+    assert!(Graph::load(&out, &identity()).is_err());
+    // The receipt's census cross-check counts.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    let stats = &manifest["stats"];
+    assert_eq!(stats["census_records"], 3);
+    assert_eq!(stats["census_occurrences"], 4);
+    assert_eq!(stats["census_paths"], 3);
+    assert_eq!(stats["census_partitions"], 3);
+    // The routing bind fails closed: an occurrence naming a path id
+    // absent from the panel name map is refused.
+    let bad = t.path().join("census-bad.jsonl");
+    fs::write(
+        &bad,
+        "{\"record\":0,\"occurrences\":[{\"path\":99,\"partitions\":[0]}]}\n",
+    )
+    .unwrap();
+    let out_bad = t.path().join("routes-lookup-bad");
+    assert!(super::super::with_output_model(&out_bad, MODEL, || {
+        lookup(
+            &p,
+            identity(),
+            &bad,
+            &g.source_paths,
+            g.read_lengths.clone(),
+            &out_bad,
+            37,
+        )
+    })
+    .is_err());
+}

@@ -3,6 +3,7 @@ mod build;
 mod evaluate;
 mod graph;
 mod import;
+mod lookup;
 mod profiles;
 mod search;
 mod storage;
@@ -12,6 +13,7 @@ use crate::{
     syng::SyngIndex,
 };
 pub use build::build;
+pub use lookup::lookup;
 pub use evaluate::{Assignment, Evaluation, Evaluator, Route, Segment};
 pub use graph::{sources_fetch_probe_stats, Family, Graph, Lane, Ports, Sources};
 pub use search::{search, SearchBudget, SearchResult};
