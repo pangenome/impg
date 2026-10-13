@@ -2,7 +2,7 @@
 mod panel_route_search_policy;
 use crate::genome_inference::{
     self as genome, calling, catalog, diplotype_chain, diplotype_dosage, genotype, joint,
-    observations, panel_routes, realign_score, sample, threading,
+    observations, panel_routes, realign_score, reanchor, sample, threading,
 };
 use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
@@ -224,6 +224,51 @@ pub enum Command {
         /// + the test-mode artifact beside it
         #[arg(long)]
         out_dir: PathBuf,
+    },
+    /// THE K-REANCHOR TRANSFORM (the owner's dynamic local-graph design,
+    /// stated verbatim: "dynamically, take the sequences and build a local
+    /// syng graph using different kmer sizes and project the mappings we
+    /// have from the original set onto those"): the committed multi-matching
+    /// census records re-anchored onto a target panel's node grid by pure
+    /// COORDINATE LOOKUP — no census re-run, no re-alignment. Per merged
+    /// read-matched interval [lo, hi): the target panel's walk steps with
+    /// bp >= lo and bp + k_target <= hi (a mapping at sequence offset X
+    /// lands on whichever k node contains X); the `partitions` window-touch
+    /// field re-anchors by the routing's own territory-touch rule onto the
+    /// target tiling's beds. The occurrence structure (path, start,
+    /// orientation, multiplicity, t_r, share, anchors, total_occurrences,
+    /// pair_bins) is preserved verbatim; the empty-interval read-edge-anchor
+    /// class keeps its window attribution verbatim (the named zero-coverage
+    /// boundary of the pure coordinate lookup). The walks are loaded in
+    /// memory from the two syng indexes (no dump round trip); the census is
+    /// streamed; the transform is seconds-class for millions of occurrences.
+    ReanchorCensus {
+        /// The committed multi-matching census receipt (jsonl or jsonl.gz)
+        #[arg(long)]
+        census: PathBuf,
+        /// The source panel syng prefix (the grid the census records were
+        /// derived against; supplies the coordinate recovery)
+        #[arg(long)]
+        source_panel: String,
+        /// The target panel syng prefix (the new grid)
+        #[arg(long)]
+        panel: String,
+        /// The target tiling's partition bed directory (partitionN.bed)
+        #[arg(long)]
+        bed_dir: PathBuf,
+        /// The target locality map directory (windowN.gfa.map.json)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The component lane (the axis path whose member rows define the
+        /// window-to-partition mapping)
+        #[arg(long)]
+        component: String,
+        /// The re-anchored census output (jsonl or jsonl.gz)
+        #[arg(long)]
+        out: PathBuf,
+        /// Optional stats receipt path (the transform's measured counters)
+        #[arg(long)]
+        stats: Option<PathBuf>,
     },
     /// Automatic all-source lanes, all identity endpoint families, DNA hubs and indexed native start profiles
     BuildPanelRoutes {
@@ -718,6 +763,25 @@ pub fn run(command: Command) -> io::Result<()> {
                 "scope": "per-panel-segment-copy-counts-derived-from-the-two-molecules",
                 "truth_in_default_output": false,
             }))
+        }),
+        Command::ReanchorCensus {
+            census,
+            source_panel,
+            panel,
+            bed_dir,
+            partition_graphs,
+            component,
+            out,
+            stats,
+        } => reanchor::run(&reanchor::Options {
+            census,
+            source_panel,
+            panel,
+            bed_dir,
+            partition_graphs,
+            component,
+            out,
+            stats,
         }),
         Command::BuildPanelRoutes {
             common,
