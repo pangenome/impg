@@ -102,6 +102,18 @@ pub trait ImpgIndex: Send + Sync {
     /// Remove a cached tree from memory (for memory management).
     fn remove_cached_tree(&self, target_id: u32);
 
+    /// Loaded sub-indices, cached trees, and live tree nodes. Does not load data.
+    fn cache_stats(&self) -> (usize, usize, usize) {
+        (0, 0, 0)
+    }
+
+    fn cache_metadata_counts(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    /// Drop reloadable query trees after all queries have joined.
+    fn clear_cached_trees(&self) {}
+
     /// Get number of targets with trees.
     fn num_targets(&self) -> usize {
         self.target_ids().len()
@@ -373,6 +385,27 @@ impl ImpgIndex for ImpgWrapper {
         match self {
             ImpgWrapper::Single(impg) => impg.remove_cached_tree(target_id),
             ImpgWrapper::Multi(multi) => multi.remove_cached_tree(target_id),
+        }
+    }
+
+    fn cache_stats(&self) -> (usize, usize, usize) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.cache_stats(),
+            ImpgWrapper::Multi(multi) => multi.cache_stats(),
+        }
+    }
+
+    fn cache_metadata_counts(&self) -> (usize, usize) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.cache_metadata_counts(),
+            ImpgWrapper::Multi(multi) => multi.cache_metadata_counts(),
+        }
+    }
+
+    fn clear_cached_trees(&self) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.clear_cached_trees(),
+            ImpgWrapper::Multi(multi) => multi.clear_cached_trees(),
         }
     }
 

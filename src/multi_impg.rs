@@ -774,9 +774,41 @@ impl ImpgIndex for MultiImpg {
         self.forest_map.keys().copied().collect()
     }
 
-    fn remove_cached_tree(&self, _target_id: u32) {
-        // For MultiImpg, we don't cache trees at this level.
-        // Sub-indices manage their own tree caches.
+    fn remove_cached_tree(&self, target_id: u32) {
+        let indices = self.sub_indices.read().unwrap();
+        if let Some(locations) = self.forest_map.get(&target_id) {
+            for loc in locations {
+                if let Some(impg) = &indices[loc.index_idx] {
+                    impg.remove_cached_tree(loc.local_target_id);
+                }
+            }
+        }
+    }
+
+    fn cache_stats(&self) -> (usize, usize, usize) {
+        self.sub_indices
+            .read()
+            .unwrap()
+            .iter()
+            .flatten()
+            .map(|impg| impg.cache_stats())
+            .fold((0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))
+    }
+
+    fn cache_metadata_counts(&self) -> (usize, usize) {
+        self.sub_indices
+            .read()
+            .unwrap()
+            .iter()
+            .flatten()
+            .map(|impg| impg.cache_metadata_counts())
+            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    }
+
+    fn clear_cached_trees(&self) {
+        for impg in self.sub_indices.read().unwrap().iter().flatten() {
+            impg.clear_cached_trees();
+        }
     }
 
     fn num_targets(&self) -> usize {
@@ -917,6 +949,14 @@ impl MultiImpg {
                 };
                 if should_add_to_output {
                     results.push(result);
+                }
+
+                // At depth one no queued child can execute. Keep the current
+                // result but avoid cloning masks and allocating discarded work.
+                // Restrict this shortcut to depth one: deeper DFS queues merge
+                // ranges of different depths and need separate equivalence work.
+                if max_depth == 1 {
+                    continue;
                 }
 
                 // Only add non-overlapping portions to the stack for further exploration

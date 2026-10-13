@@ -42,117 +42,190 @@ fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result
 /// through runs of contiguous singletons.
 ///
 /// Alignment-source-agnostic — works identically on syng and paf partitions.
-pub fn rehome_singleton_slivers(collected_partitions: &mut Vec<(usize, Vec<Interval<u32>>)>) {
-    if collected_partitions.is_empty() {
-        return;
+pub fn rehome_singleton_slivers(partitions: &mut Vec<(usize, Vec<Interval<u32>>)>) {
+    // Preserve the public helper used by graph callers and regression tests.
+    let mut packed = Partitions::default();
+    for partition in std::mem::take(partitions) {
+        packed.push(partition);
     }
-    type Row = (u32, i32, i32, usize, Interval<u32>);
-    let mut rows: Vec<Row> = Vec::new();
-    for (pidx, (_, ivs)) in collected_partitions.iter().enumerate() {
-        for iv in ivs {
-            let (s, e) = if iv.first <= iv.last {
-                (iv.first, iv.last)
-            } else {
-                (iv.last, iv.first)
-            };
-            rows.push((iv.metadata, s, e, pidx, *iv));
-        }
-    }
-    rows.sort_by_key(|r| (r.0, r.1, r.2));
+    packed.rehome();
+    *partitions = packed.iter().map(|(n, v)| (n, v.to_vec())).collect();
+}
 
-    let mut counts = vec![0usize; collected_partitions.len()];
-    for r in &rows {
-        counts[r.3] += 1;
+/// Consecutive interval storage with (partition number, exclusive end) offsets.
+/// No per-partition allocations; identifiers and insertion order are preserved.
+#[derive(Default)]
+struct Partitions {
+    spans: Vec<(usize, usize)>,
+    intervals: Vec<Interval<u32>>,
+}
+impl Partitions {
+    fn len(&self) -> usize {
+        self.spans.len()
     }
-    let initial_singletons = counts.iter().filter(|&&c| c == 1).count();
-    if initial_singletons == 0 {
-        return;
+    fn is_empty(&self) -> bool {
+        self.spans.is_empty()
     }
-
-    let mut pass = 0;
-    loop {
-        pass += 1;
-        let singletons: std::collections::HashSet<usize> = counts
-            .iter()
-            .enumerate()
-            .filter(|(_, &c)| c == 1)
-            .map(|(i, _)| i)
-            .collect();
-        let mut pending: Vec<(usize, usize)> = Vec::new();
-        for i in 0..rows.len() {
-            let (c, s, e, pidx, _) = rows[i];
-            if !singletons.contains(&pidx) {
-                continue;
-            }
-            let left = if i > 0 && rows[i - 1].0 == c && rows[i - 1].2 == s {
-                Some(rows[i - 1].3)
-            } else {
-                None
-            };
-            let right = if i + 1 < rows.len() && rows[i + 1].0 == c && rows[i + 1].1 == e {
-                Some(rows[i + 1].3)
-            } else {
-                None
-            };
-            let ls = left.map(|p| !singletons.contains(&p)).unwrap_or(false);
-            let rs = right.map(|p| !singletons.contains(&p)).unwrap_or(false);
-            let target = if ls && rs {
-                let lp = left.unwrap();
-                let rp = right.unwrap();
-                if counts[lp] >= counts[rp] {
-                    lp
-                } else {
-                    rp
-                }
-            } else if ls {
-                left.unwrap()
-            } else if rs {
-                right.unwrap()
-            } else {
-                continue;
-            };
-            if target != pidx {
-                pending.push((i, target));
-            }
-        }
-        if pending.is_empty() || pass > 100 {
-            break;
-        }
-        for (row_idx, new_pidx) in &pending {
-            let old_pidx = rows[*row_idx].3;
-            counts[old_pidx] -= 1;
-            counts[*new_pidx] += 1;
-            rows[*row_idx].3 = *new_pidx;
-        }
+    fn push(&mut self, (number, intervals): (usize, Vec<Interval<u32>>)) {
+        self.intervals.extend(intervals);
+        self.spans.push((number, self.intervals.len()));
     }
-    let remaining = counts.iter().filter(|&&c| c == 1).count();
-    info!(
-        "Rehomed {} singleton slivers into flank partitions ({} → {} singletons, {} passes)",
-        initial_singletons - remaining,
-        initial_singletons,
-        remaining,
-        pass
-    );
-
-    let mut new_intervals: Vec<Vec<Interval<u32>>> = (0..collected_partitions.len())
-        .map(|_| Vec::new())
-        .collect();
-    for (_, _, _, pidx, iv) in rows.drain(..) {
-        new_intervals[pidx].push(iv);
-    }
-    let rebuilt: Vec<(usize, Vec<Interval<u32>>)> = collected_partitions
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (pnum, _))| {
-            let ivs = std::mem::take(&mut new_intervals[i]);
-            if ivs.is_empty() {
-                None
-            } else {
-                Some((*pnum, ivs))
-            }
+    fn iter(&self) -> impl Iterator<Item = (usize, &[Interval<u32>])> {
+        let mut start = 0;
+        self.spans.iter().map(move |&(number, end)| {
+            let slice = &self.intervals[start..end];
+            start = end;
+            (number, slice)
         })
-        .collect();
-    *collected_partitions = rebuilt;
+    }
+    fn rehome(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+        let mut counts: Vec<usize> = self.iter().map(|(_, v)| v.len()).collect();
+        let initial_singletons = counts.iter().filter(|&&c| c == 1).count();
+        if initial_singletons == 0 {
+            return;
+        }
+        type Row = (u32, i32, i32, usize, Interval<u32>);
+        let mut rows: Vec<Row> = Vec::with_capacity(counts.iter().sum());
+        let mut pidx = 0;
+        for (ordinal, iv) in std::mem::take(&mut self.intervals).into_iter().enumerate() {
+            while ordinal >= self.spans[pidx].1 {
+                pidx += 1;
+            }
+            let (s, e) = (iv.first.min(iv.last), iv.first.max(iv.last));
+            rows.push((iv.metadata, s, e, pidx, iv));
+        }
+        memory_process("rehome-rows");
+        rows.sort_by_key(|r| (r.0, r.1, r.2));
+        memory_process("rehome-sorted");
+
+        let mut pass = 0;
+        loop {
+            pass += 1;
+            let mut pending: Vec<(usize, usize)> = Vec::new();
+            for i in 0..rows.len() {
+                let (c, s, e, pidx, _) = rows[i];
+                if counts[pidx] != 1 {
+                    continue;
+                }
+                let left = if i > 0 && rows[i - 1].0 == c && rows[i - 1].2 == s {
+                    Some(rows[i - 1].3)
+                } else {
+                    None
+                };
+                let right = if i + 1 < rows.len() && rows[i + 1].0 == c && rows[i + 1].1 == e {
+                    Some(rows[i + 1].3)
+                } else {
+                    None
+                };
+                let ls = left.map(|p| counts[p] != 1).unwrap_or(false);
+                let rs = right.map(|p| counts[p] != 1).unwrap_or(false);
+                let target = if ls && rs {
+                    let lp = left.unwrap();
+                    let rp = right.unwrap();
+                    if counts[lp] >= counts[rp] {
+                        lp
+                    } else {
+                        rp
+                    }
+                } else if ls {
+                    left.unwrap()
+                } else if rs {
+                    right.unwrap()
+                } else {
+                    continue;
+                };
+                if target != pidx {
+                    pending.push((i, target));
+                }
+            }
+            if pending.is_empty() || pass > 100 {
+                break;
+            }
+            for (row_idx, new_pidx) in &pending {
+                let old_pidx = rows[*row_idx].3;
+                counts[old_pidx] -= 1;
+                counts[*new_pidx] += 1;
+                rows[*row_idx].3 = *new_pidx;
+            }
+        }
+        let remaining = counts.iter().filter(|&&c| c == 1).count();
+        info!(
+            "Rehomed {} singleton slivers into flank partitions ({} → {} singletons, {} passes)",
+            initial_singletons - remaining,
+            initial_singletons,
+            remaining,
+            pass
+        );
+
+        memory_process("rehome-rebuild");
+        let mut total = 0;
+        for ((_, end), count) in self.spans.iter_mut().zip(&mut counts) {
+            let length = *count;
+            *count = total; // reuse read-only pass counts as write cursors
+            total += length;
+            *end = total;
+        }
+        // Every slot is assigned exactly once below, including original orientation.
+        self.intervals = vec![
+            Interval {
+                first: 0,
+                last: 0,
+                metadata: 0
+            };
+            total
+        ];
+        for (_, _, _, pidx, iv) in rows {
+            self.intervals[counts[pidx]] = iv;
+            counts[pidx] += 1;
+        }
+        let mut previous_end = 0;
+        self.spans.retain(|&(_, end)| {
+            let keep = end != previous_end;
+            previous_end = end;
+            keep
+        });
+        memory_process("rehome-end");
+    }
+}
+
+fn memory_process(phase: &str) {
+    if std::env::var_os("IMPG_PARTITION_MEMORY_STATS").is_some() {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let rss: Vec<_> = status
+            .lines()
+            .filter(|s| s.starts_with("VmRSS:") || s.starts_with("VmHWM:"))
+            .collect();
+        info!("memory phase={phase} {}", rss.join(" "));
+    }
+}
+
+// Opt-in diagnostics: node counts are exact; the dependency hides node capacity.
+fn memory_sample(
+    impg: &impl ImpgIndex,
+    phase: &str,
+    partitions: &Partitions,
+    masks: &FxHashMap<u32, SortedRanges>,
+    missing: &FxHashMap<u32, SortedRanges>,
+) {
+    if std::env::var_os("IMPG_PARTITION_MEMORY_STATS").is_none() {
+        return;
+    }
+    let (indices, trees, nodes) = impg.cache_stats();
+    let iv_capacity = partitions.intervals.capacity();
+    let partition_capacity = partitions.spans.capacity();
+    let (metadata_sequences, metadata_targets) = impg.cache_metadata_counts();
+    let mask_capacity: usize = masks.values().map(|v| v.ranges.capacity()).sum();
+    let missing_capacity: usize = missing.values().map(|v| v.ranges.capacity()).sum();
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let rss = status
+        .lines()
+        .find(|s| s.starts_with("VmRSS:"))
+        .unwrap_or("VmRSS: unavailable");
+    info!("memory phase={phase} sub_indices={indices} trees={trees} nodes={nodes} tree_loads={} partitions={} partition_capacity={partition_capacity} metadata_sequences={metadata_sequences} metadata_targets={metadata_targets} interval_capacity={iv_capacity} mask_capacity={mask_capacity} missing_capacity={missing_capacity} {rss}",
+        crate::impg::TREE_LOADS.load(std::sync::atomic::Ordering::Relaxed), partitions.len());
 }
 
 pub fn partition_alignments(
@@ -333,8 +406,14 @@ pub fn partition_alignments(
     let mut temp_bed_files = Vec::new();
 
     // Collect partitions for single-file output
-    let mut collected_partitions: Vec<(usize, Vec<Interval<u32>>)> = Vec::new();
+    let mut collected_partitions = Partitions::default();
 
+    let mut cached_target = None;
+    let mut first_query = true;
+    let memory_stats = std::env::var_os("IMPG_PARTITION_MEMORY_STATS").is_some();
+    let mut last_memory_sample = std::time::Instant::now();
+    // Keep the diagnostic control outside the journal: retention cannot shape results.
+    let evict = max_depth == 1 && std::env::var_os("IMPG_PARTITION_KEEP_TREES").is_none();
     while !windows.is_empty() {
         let round_windows = windows.clone();
         let partitions_before_round = partition_num;
@@ -354,6 +433,16 @@ pub fn partition_alignments(
         }
 
         for (seq_id, start, end) in windows.drain(..) {
+            if memory_stats && last_memory_sample.elapsed().as_secs() >= 60 {
+                memory_sample(
+                    impg,
+                    "progress",
+                    &collected_partitions,
+                    &masked_regions,
+                    &missing_regions,
+                );
+                last_memory_sample = std::time::Instant::now();
+            }
             let chrom = impg.seq_index().get_name(seq_id).unwrap();
             let window_start = std::time::Instant::now();
 
@@ -415,11 +504,55 @@ pub fn partition_alignments(
             let mut overlaps = if let Some(ivs) = replayed {
                 ivs.into_iter()
                     .map(|q| {
-                        let t = Interval { first: q.first, last: q.last, metadata: q.metadata };
+                        let t = Interval {
+                            first: q.first,
+                            last: q.last,
+                            metadata: q.metadata,
+                        };
                         (q, Vec::new(), t)
                     })
                     .collect::<Vec<_>>()
             } else {
+                if first_query {
+                    memory_sample(
+                        impg,
+                        "replay-end",
+                        &collected_partitions,
+                        &masked_regions,
+                        &missing_regions,
+                    );
+                    first_query = false;
+                }
+                if cached_target != Some(seq_id) {
+                    let sample = memory_stats
+                        && (cached_target.is_none()
+                            || last_memory_sample.elapsed().as_secs() >= 60);
+                    if sample {
+                        memory_sample(
+                            impg,
+                            "target-before",
+                            &collected_partitions,
+                            &masked_regions,
+                            &missing_regions,
+                        );
+                    }
+                    if evict {
+                        if let Some(previous) = cached_target {
+                            impg.remove_cached_tree(previous);
+                        }
+                    }
+                    if sample {
+                        memory_sample(
+                            impg,
+                            "target-after",
+                            &collected_partitions,
+                            &masked_regions,
+                            &missing_regions,
+                        );
+                        last_memory_sample = std::time::Instant::now();
+                    }
+                    cached_target = Some(seq_id);
+                }
                 let mut overlaps = if transitive_dfs {
                     impg.query_transitive_dfs(
                         seq_id,
@@ -479,7 +612,11 @@ pub fn partition_alignments(
                 if let Some(j) = journal.as_mut() {
                     let ivs: Vec<Interval<u32>> = overlaps
                         .iter()
-                        .map(|(q, _, _)| Interval { first: q.first, last: q.last, metadata: q.metadata })
+                        .map(|(q, _, _)| Interval {
+                            first: q.first,
+                            last: q.last,
+                            metadata: q.metadata,
+                        })
                         .collect();
                     j.append(seq_id, start, end, &ivs)?;
                 }
@@ -591,11 +728,11 @@ pub fn partition_alignments(
                     match output_format {
                         "bed" => {
                             // Collect BED partitions
-                            collected_partitions.push((partition_num, query_intervals.clone()));
+                            collected_partitions.push((partition_num, query_intervals));
                         }
                         "gfa" | "vcf" if engine_config.partition_size.is_some() => {
                             // Partitioned GFA mode: collect intervals for later pipeline
-                            collected_partitions.push((partition_num, query_intervals.clone()));
+                            collected_partitions.push((partition_num, query_intervals));
                         }
                         "gfa" | "vcf" | "maf" | "fasta" => {
                             return Err(io::Error::new(
@@ -661,7 +798,8 @@ pub fn partition_alignments(
         // Stall guard: no partitions emitted this round and the selection
         // replayed the same windows. Mask the region by hand (it has no
         // homologs to mask it for us) and reselect, so the loop terminates.
-        if partition_num == partitions_before_round && last_round_windows.as_ref() == Some(&round_windows)
+        if partition_num == partitions_before_round
+            && last_round_windows.as_ref() == Some(&round_windows)
         {
             let stalled: Vec<String> = round_windows
                 .iter()
@@ -717,6 +855,23 @@ pub fn partition_alignments(
     if let Some(j) = journal.as_mut() {
         j.finish()?;
     }
+
+    memory_sample(
+        impg,
+        "query-end",
+        &collected_partitions,
+        &masked_regions,
+        &missing_regions,
+    );
+
+    if output_format == "bed" {
+        impg.clear_cached_trees();
+    }
+    drop(masked_regions);
+    drop(missing_regions);
+    drop(last_round_windows);
+    drop(windows);
+    memory_process("before-output");
 
     // Convert temporary BED files to graph/MAF if needed
     if !temp_bed_files.is_empty() {
@@ -774,7 +929,7 @@ pub fn partition_alignments(
     // leftover pieces created by greedy masking into the partition that owns
     // their biological context. Alignment-source-agnostic.
     if rehome_singletons && !separate_files && !collected_partitions.is_empty() {
-        rehome_singleton_slivers(&mut collected_partitions);
+        collected_partitions.rehome();
     }
 
     // Write collected partitions as single file if not using separate files
@@ -796,7 +951,7 @@ pub fn partition_alignments(
             // partition numbers; the usize is only needed for BED filename output.)
             let partition_intervals: Vec<Vec<Interval<u32>>> = collected_partitions
                 .iter()
-                .map(|(_, v)| v.clone())
+                .map(|(_, v)| v.to_vec())
                 .collect();
             let final_gfa = crate::partitioned_gfa_pipeline(
                 &partition_intervals,
@@ -1408,8 +1563,16 @@ fn mask_and_update_regions(
         // ranges inside cannot merge with it.
         if let Some(missing) = missing_regions.get_mut(&seq_id) {
             if let Some(masked) = masked_regions.get(&seq_id) {
-                let lo = mask_buffer.iter().map(|&(s, _)| s).min().unwrap_or(i32::MAX);
-                let hi = mask_buffer.iter().map(|&(_, e)| e).max().unwrap_or(i32::MIN);
+                let lo = mask_buffer
+                    .iter()
+                    .map(|&(s, _)| s)
+                    .min()
+                    .unwrap_or(i32::MAX);
+                let hi = mask_buffer
+                    .iter()
+                    .map(|&(_, e)| e)
+                    .max()
+                    .unwrap_or(i32::MIN);
                 // Ranges are sorted, disjoint and non-touching, so their ends
                 // are sorted too and both bounds are binary searches.
                 let first = missing.ranges.partition_point(|&(_, e)| e <= lo);
@@ -1836,7 +1999,7 @@ fn write_partition_fasta(
 }
 
 fn write_single_partition_file(
-    collected_partitions: &[(usize, Vec<Interval<u32>>)],
+    collected_partitions: &Partitions,
     impg: &impl ImpgIndex,
     output_format: &str,
     output_folder: Option<&str>,
@@ -1849,7 +2012,7 @@ fn write_single_partition_file(
             let file = File::create(full_path)?;
             let mut writer = BufWriter::new(file);
 
-            for (partition_num, query_intervals) in collected_partitions {
+            for (partition_num, query_intervals) in collected_partitions.iter() {
                 for query_interval in query_intervals {
                     let name = impg.seq_index().get_name(query_interval.metadata).unwrap();
                     let (start, end) = if query_interval.first <= query_interval.last {
