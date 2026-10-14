@@ -112,6 +112,16 @@ pub enum Command {
         /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
         #[arg(long, default_value_t = 64.0)]
         rss_budget_gib: f64,
+        /// THE DIPLOTYPE SEQUENCE EMISSION (the write-up codification,
+        /// the product): every called locus's reconstructed diploid
+        /// sequence - the chosen pair's walks from the local graph
+        /// spelled into per-locus hap1/hap2 records (the tied-class
+        /// calls emit the coalesced called set per the owner's
+        /// ambiguity ruling), each record carrying the model-internal
+        /// QUAL. Written to calls.jsonl.sequences.jsonl beside the
+        /// product calls. Truth-free product output.
+        #[arg(long)]
+        emit_sequences: bool,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -652,6 +662,7 @@ pub fn run(command: Command) -> io::Result<()> {
             rss_budget_gib,
             truth_qv,
             qv_biwfa,
+            emit_sequences,
             out_dir,
         } => genome::with_output_model(
             &out_dir,
@@ -682,6 +693,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     selection,
                     product_calls: Some(out_dir.join("calls.jsonl")),
                     truth_qv: truth_qv.unwrap_or_default(),
+                    product_sequences: emit_sequences,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
                     }),
@@ -690,12 +702,18 @@ pub fn run(command: Command) -> io::Result<()> {
                 realign_score::run(options)?;
                 let calls = out_dir.join("calls.jsonl");
                 let truth_qv_path = out_dir.join("calls.jsonl.truth-qv.jsonl");
+                let sequences_path = out_dir.join("calls.jsonl.sequences.jsonl");
                 Ok(serde_json::json!({
                     "calls": genome::reconstruction::fingerprint(&calls)?,
                     "calls_bytes": std::fs::metadata(&calls)?.len(),
                     "instrument_receipt": genome::reconstruction::fingerprint(
                         &out_dir.join("instrument-receipt.jsonl"),
                     )?,
+                    "sequences_emission": if emit_sequences {
+                        genome::reconstruction::fingerprint(&sequences_path)?
+                    } else {
+                        serde_json::Value::Null
+                    },
                     "truth_qv_test_mode": if truth_qv_enabled {
                         genome::reconstruction::fingerprint(&truth_qv_path)?
                     } else {

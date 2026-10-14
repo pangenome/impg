@@ -432,6 +432,19 @@ pub struct Options {
     /// instrument receipt (--out) is unchanged when this is unset.
     #[arg(long)]
     pub product_calls: Option<PathBuf>,
+    /// THE DIPLOTYPE SEQUENCE EMISSION (the write-up codification,
+    /// the owner's ruling: the diplotype sequence is a PRODUCT OUTPUT
+    /// at every called locus): per-locus hap1/hap2 records — the
+    /// chosen pair's walks from the local graph spelled into the
+    /// reconstructed diploid sequence, each record carrying the
+    /// model-internal QUAL, the called-class identity and the tied
+    /// classes' coalesced called set (every called fold's sequence,
+    /// the owner's ambiguity ruling). Requires --product-calls; emits
+    /// <product>.sequences.jsonl beside the product calls. Truth-free
+    /// (the called material is the product run's own; the called-vs-
+    /// truth sequence QV lives only behind --truth-qv).
+    #[arg(long, requires = "product_calls", default_value_t = false)]
+    pub product_sequences: bool,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -2862,6 +2875,35 @@ struct Pin {
     backbone_bp: u64,
 }
 
+/// The spelled fold sequence as a JSON-safe string (the sequence
+/// emission's material: the fold's own spelled walk from the local
+/// graph — the panel fetch of the member row [start, end) window,
+/// the same convention-(a) material the truth-QV alignments use).
+/// Fail-closed on non-ASCII bytes (the panel is DNA ASCII).
+pub fn fold_sequence_string(seq: &[u8]) -> io::Result<String> {
+    if seq.iter().any(|b| !b.is_ascii()) {
+        return Err(invalid(
+            "a called fold's spelled sequence carries non-ASCII bytes",
+        ));
+    }
+    Ok(seq.iter().map(|&b| b as char).collect())
+}
+
+/// The COALESCED CALLED SET (the owner's ambiguity ruling: a tied
+/// class call emits every called fold's sequence, not just the
+/// representative pair): the distinct folds of all called classes,
+/// sorted by fold index. An untied call's set is exactly the
+/// representative pair.
+pub fn coalesced_called_set(called: &[(usize, usize)]) -> Vec<usize> {
+    let mut folds: Vec<usize> = called
+        .iter()
+        .flat_map(|&(first, second)| [first, second])
+        .collect();
+    folds.sort_unstable();
+    folds.dedup();
+    folds
+}
+
 /// One folded candidate: identical sequence AND walk (relative) —
 /// coalesced copies are ONE hypothesis.
 struct Fold {
@@ -4361,6 +4403,20 @@ pub fn run(options: Options) -> io::Result<()> {
         !truth_qv_mode || product_emission,
         "--truth-qv requires --product-calls",
     )?;
+    // THE DIPLOTYPE SEQUENCE EMISSION (the product output at every
+    // called locus): <product>.sequences.jsonl beside the product
+    // calls, truth-free. The product calls stream itself is
+    // byte-identical whether or not this is set.
+    ensure(
+        !options.product_sequences || product_emission,
+        "--product-sequences requires --product-calls",
+    )?;
+    let mut product_sequences_out = match (&options.product_calls, options.product_sequences) {
+        (Some(path), true) => Some(BufWriter::new(File::create(
+            format!("{}.sequences.jsonl", path.display()),
+        )?)),
+        _ => None,
+    };
     ensure(
         !truth_qv_mode || options.truth_qv.len() == 2,
         "the diplotype truth-QV test mode requires exactly two truth haplotypes",
@@ -4499,6 +4555,7 @@ pub fn run(options: Options) -> io::Result<()> {
         report: Vec<u8>,
         anatomy: Vec<u8>,
         product: Vec<u8>,
+        product_sequences: Vec<u8>,
         truth_qv: Vec<u8>,
         factorized_checked: u64,
         factorized_equal: u64,
@@ -4513,6 +4570,7 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut report_buf: Vec<u8> = Vec::new();
         let mut anatomy_buf: Vec<u8> = Vec::new();
         let mut product_buf: Vec<u8> = Vec::new();
+        let mut product_sequences_buf: Vec<u8> = Vec::new();
         let mut truth_qv_buf: Vec<u8> = Vec::new();
         let window = locus as usize;
         let partition = window_partition[window];
@@ -6646,6 +6704,52 @@ pub fn run(options: Options) -> io::Result<()> {
                 serde_json::to_writer(&mut product_buf, &value)?;
             }
             product_buf.push(b'\n');
+            // ------------------ THE DIPLOTYPE SEQUENCE EMISSION
+            // (the write-up codification, the owner's ruling: the
+            // diplotype sequence is a PRODUCT OUTPUT at every called
+            // locus): the chosen pair's walks from the local graph
+            // spelled into per-locus hap1/hap2 records - the fold's
+            // own spelled sequence, the SAME material the truth-QV
+            // alignments consume - each record carrying the
+            // model-internal QUAL, the class identity, and the tied
+            // classes' coalesced called set (every called fold's
+            // sequence, the owner's ambiguity ruling). Truth-free:
+            // no truth name, alignment or QV field enters here.
+            if options.product_sequences {
+                let fold_record = |index: usize| -> io::Result<serde_json::Value> {
+                    Ok(json!({
+                        "fold_index": index,
+                        "members": folds[index].members.iter().map(|m| json!({
+                            "path_name": m.path_name, "start": m.start, "end": m.end,
+                        })).collect::<Vec<_>>(),
+                        "length": folds[index].len,
+                        "sequence": fold_sequence_string(&folds[index].seq)?,
+                    }))
+                };
+                let mut sequences_value = json!({
+                    "locus": locus,
+                    "partition": partition,
+                    "component": options.component,
+                    "qual": product_qual,
+                    "qual_unbounded": qual_unbounded,
+                    "class_count": pair_count,
+                    "called_class_count": called.len(),
+                    "hap1": fold_record(winner_first)?,
+                    "hap2": fold_record(winner_second)?,
+                });
+                if let Some(object) = sequences_value.as_object_mut() {
+                    object.insert(
+                        "called_set".to_string(),
+                        coalesced_called_set(&called)
+                            .into_iter()
+                            .map(fold_record)
+                            .collect::<io::Result<Vec<_>>>()?
+                            .into(),
+                    );
+                }
+                serde_json::to_writer(&mut product_sequences_buf, &sequences_value)?;
+                product_sequences_buf.push(b'\n');
+            }
             // ------------------------------- THE TRUTH-QV TEST MODE
             // (the owner's ruling: the called-vs-truth sequence QV
             // ONLY here, behind --truth-qv with the truth haplotypes
@@ -6834,6 +6938,7 @@ pub fn run(options: Options) -> io::Result<()> {
             report: report_buf,
             anatomy: anatomy_buf,
             product: product_buf,
+            product_sequences: product_sequences_buf,
             truth_qv: truth_qv_buf,
             factorized_checked,
             factorized_equal,
@@ -6861,6 +6966,9 @@ pub fn run(options: Options) -> io::Result<()> {
         if let Some(writer) = product_calls.as_mut() {
             writer.write_all(&output.product)?;
         }
+        if let Some(writer) = product_sequences_out.as_mut() {
+            writer.write_all(&output.product_sequences)?;
+        }
         if let Some(writer) = truth_qv_out.as_mut() {
             writer.write_all(&output.truth_qv)?;
         }
@@ -6877,6 +6985,9 @@ pub fn run(options: Options) -> io::Result<()> {
     ingredients.flush()?;
     records_file.flush()?;
     if let Some(writer) = product_calls.as_mut() {
+        writer.flush()?;
+    }
+    if let Some(writer) = product_sequences_out.as_mut() {
         writer.flush()?;
     }
     if let Some(writer) = truth_qv_out.as_mut() {
@@ -8328,6 +8439,39 @@ mod tests {
         assert_eq!(perfect["identity_truth_hap1"], 1.0);
         assert_eq!(perfect["qv"], 50.0);
         assert_eq!(perfect["perfect"], true);
+    }
+
+    #[test]
+    fn the_sequence_emission_spells_ascii_and_fails_closed() {
+        // The product emission's material: the fold's spelled
+        // sequence as a JSON-safe string, fail-closed on non-ASCII.
+        let spelled = b"ACGTNacgtn".as_slice();
+        assert_eq!(
+            fold_sequence_string(spelled).unwrap(),
+            "ACGTNacgtn".to_string()
+        );
+        assert_eq!(fold_sequence_string(&[]).unwrap(), "");
+        let mut poison = b"ACGT".to_vec();
+        poison.push(0xC3);
+        poison.push(0xA9); // UTF-8 continuation bytes are non-ASCII
+        assert!(fold_sequence_string(&poison).is_err());
+    }
+
+    #[test]
+    fn the_coalesced_called_set_is_the_distinct_sorted_called_folds() {
+        // The owner's ambiguity ruling: a tied-class call emits
+        // every called fold's sequence; an untied call's set is
+        // exactly the representative pair.
+        assert_eq!(coalesced_called_set(&[(3, 1)]), vec![1, 3]);
+        // Two tied classes sharing hap folds coalesce to the
+        // distinct union, sorted.
+        assert_eq!(
+            coalesced_called_set(&[(0, 5), (0, 2), (5, 2)]),
+            vec![0, 2, 5]
+        );
+        // A fold called on both haps of one class appears once.
+        assert_eq!(coalesced_called_set(&[(7, 7)]), vec![7]);
+        assert!(coalesced_called_set(&[]).is_empty());
     }
 
 }
