@@ -6748,6 +6748,18 @@ pub fn run(options: Options) -> io::Result<()> {
                     );
                 }
                 serde_json::to_writer(&mut product_sequences_buf, &sequences_value)?;
+                // The receipt's own serialization convention, mirrored
+                // from the product record: under the territory/locality
+                // conventions the record is reparsed through
+                // serde_json::from_slice before its final emission (the
+                // committed double-buffer discipline), so the emitted
+                // QUAL floats are bit-identical to the product call's.
+                if territory_normalized {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&product_sequences_buf)?;
+                    product_sequences_buf.clear();
+                    serde_json::to_writer(&mut product_sequences_buf, &value)?;
+                }
                 product_sequences_buf.push(b'\n');
             }
             // ------------------------------- THE TRUTH-QV TEST MODE
