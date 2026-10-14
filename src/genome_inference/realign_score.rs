@@ -4093,7 +4093,9 @@ pub fn run(options: Options) -> io::Result<()> {
                 match found.len() {
                     0 => return Ok(None),
                     1 => per_occurrence.push(found[0]),
-                    _ => return Err(invalid("key verifies at two origin shifts")),
+                    _ => return Err(invalid(&format!(
+                        "key verifies at two origin shifts (census record {record})"
+                    ))),
                 }
             }
             Ok(Some(per_occurrence))
@@ -4109,9 +4111,99 @@ pub fn run(options: Options) -> io::Result<()> {
                 surviving.push((key, per_occurrence));
             }
         }
+        // Env-gated bind diagnostic (the held-out masking experiment's
+        // walk-lock characterization): on a failed bind, dump the
+        // record's first occurrence and every candidate key's shape
+        // plus the panel slice the verify saw; for the first candidate
+        // also scan EVERY occurrence and name the first one that fails
+        // at all three origin shifts. Default (env unset): behavior
+        // identical to the committed path.
+        if surviving.len() != 1
+            && std::env::var("IMPG_REALIGN_BIND_DEBUG")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        {
+            if let Some(&key) = shaped_keys.first() {
+                if let Ok(shape) = key_shape(key, &key_tokens, &key_reads, &read_records, k) {
+                    for (index, occ) in line.occurrences.iter().enumerate() {
+                        let union_lo = (occ.start as i64 - 2).max(0) as u64;
+                        let union_hi = occ.start + shape.span + 1;
+                        let Ok(seq) = fetch_seq(
+                            &panel.name_map.path_to_name[occ.path],
+                            union_lo,
+                            union_hi,
+                        ) else {
+                            eprintln!(
+                                "[bind-debug] record {record}: occ {index}: fetch failed"
+                            );
+                            break;
+                        };
+                        let mut found = 0;
+                        for &shift in &shifts {
+                            if verify_key_at(&shape, occ, &reads, &seq, union_lo, k, shift) {
+                                found += 1;
+                            }
+                        }
+                        if found == 0 {
+                            eprintln!(
+                                "[bind-debug] record {record}: FIRST FAILING occ {index}: \
+                                 path {} ({}) start {} orient {} span {} seq.len {}",
+                                occ.path,
+                                &panel.name_map.path_to_name[occ.path],
+                                occ.start,
+                                occ.orientation,
+                                shape.span,
+                                seq.len(),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            for key in &shaped_keys {
+                let Ok(shape) = key_shape(*key, &key_tokens, &key_reads, &read_records, k)
+                else {
+                    eprintln!("[bind-debug] record {record}: candidate {key}: shape error");
+                    continue;
+                };
+                let seq = fetch_seq(
+                    &panel.name_map.path_to_name[occ.path],
+                    occ.start.saturating_sub(2),
+                    occ.start + shape.span + 1,
+                )
+                .unwrap_or_default();
+                let read = &reads[shape.read];
+                eprintln!(
+                    "[bind-debug] record {record}: occ path {} start {} orient {} \
+                     intervals[0] {:?}; candidate {key}: anchors {} span {} mirrored \
+                     {} read {} own_pos0 {:?} canonical0 {:?}; panel[0..16] {:?} \
+                     read[own0..own0+16] {:?}",
+                    occ.path,
+                    occ.start,
+                    occ.orientation,
+                    occ.intervals.first().map(|x| &x[..]),
+                    shape.canonical.len(),
+                    shape.span,
+                    shape.mirrored,
+                    shape.read,
+                    shape.own_positions.first(),
+                    shape.canonical.first(),
+                    String::from_utf8_lossy(&seq[..seq.len().min(16)]),
+                    String::from_utf8_lossy(
+                        &read[shape.own_positions[0] as usize
+                            ..(shape.own_positions[0] as usize + 16).min(read.len())],
+                    ),
+                );
+            }
+        }
         ensure(
             surviving.len() == 1,
-            "census record has no unique verifying key",
+            &format!(
+                "census record has no unique verifying key (census record {record}; \
+                 {} surviving of {} candidates)",
+                surviving.len(),
+                candidates_count
+            ),
         )?;
         Ok(BindOne {
             key: Some(surviving[0].0),

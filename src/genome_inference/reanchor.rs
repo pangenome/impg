@@ -30,9 +30,16 @@
 //!       occurrence's path overlaps the occurrence's interval union).
 //!
 //! Everything else in the record (multiplicity, t_r, share,
-//! total_occurrences, anchors, pair_bins, path, start, orientation)
+//! total_occurrences, anchors, pair_bins, start, orientation)
 //! is preserved VERBATIM — the committed occurrences are already
-//! computed; only the node grid changes. The one named boundary: the
+//! computed; only the node grid changes. The occurrence's PATH id is
+//! re-anchored BY NAME onto the target panel's id for the same
+//! sequence (the identity in the committed same-panel k-swap use,
+//! where both panels assign the same ids; a target panel that
+//! assigns different ids — e.g. a masked rebuild with the held-out
+//! sequences removed — receives the correct target ids; a path
+//! absent from the target keeps its source id verbatim, counted
+//! with the recovery-failure class). The one named boundary: the
 //! empty-interval occurrence class (read-edge anchors whose syncmer
 //! minimization context differs on the panel path — start off-grid,
 //! zero contained nodes, zero coverage mass) keeps `partitions`
@@ -387,6 +394,10 @@ struct Counters {
     parts_verbatim_empty: u64,
     starts_on_target_grid: u64,
     starts_on_source_grid: u64,
+    /// Occurrences whose path id was REMAPPED to the target panel's
+    /// id for the same name (zero in the committed same-panel k-swap
+    /// use; the masked-panel use where the target assigns new ids).
+    paths_remapped: u64,
 }
 
 impl Counters {
@@ -407,6 +418,7 @@ impl Counters {
             parts_verbatim_empty,
             starts_on_target_grid,
             starts_on_source_grid,
+            paths_remapped,
         } = other;
         self.records += records;
         self.occurrences += occurrences;
@@ -423,6 +435,7 @@ impl Counters {
         self.parts_verbatim_empty += parts_verbatim_empty;
         self.starts_on_target_grid += starts_on_target_grid;
         self.starts_on_source_grid += starts_on_source_grid;
+        self.paths_remapped += paths_remapped;
     }
 }
 
@@ -439,19 +452,24 @@ fn transform_record(
     counters.records += 1;
     for occurrence in record.occurrences.iter_mut() {
         counters.occurrences += 1;
-        let Some(source_grid) = context.source_grids.get(occurrence.path) else {
+        // The occurrence's PATH is a source-panel id; the same-named
+        // path's id in the TARGET panel is resolved once here (the
+        // two panels assign ids independently; in the committed
+        // same-panel k-swap use the correspondence is the identity).
+        let source_path = occurrence.path;
+        let target_path_id = context
+            .source_to_target
+            .get(source_path)
+            .copied()
+            .flatten();
+        let Some(source_grid) = context.source_grids.get(source_path) else {
             // The occurrence's path is outside the source panel:
             // kept VERBATIM and counted (never silently dropped).
             counters.recovery_failures += 1;
             continue;
         };
         // The target grid is the same-named path's grid.
-        let target_grid = context
-            .source_to_target
-            .get(occurrence.path)
-            .copied()
-            .flatten()
-            .and_then(|p| context.target_grids.get(p));
+        let target_grid = target_path_id.and_then(|p| context.target_grids.get(p));
         if source_grid.contains_bp(occurrence.start) {
             counters.starts_on_source_grid += 1;
         }
@@ -506,7 +524,7 @@ fn transform_record(
         // rule verbatim: the empty-interval class keeps its
         // window attribution, the named zero-coverage boundary).
         if recovered_all && !spans.is_empty() {
-            match context.source_to_target[occurrence.path] {
+            match context.source_to_target[source_path] {
                 Some(path_id) => {
                     let touched = context.territory.touched_windows(path_id, &spans);
                     let old: BTreeSet<u32> = occurrence.partitions.iter().copied().collect();
@@ -525,6 +543,19 @@ fn transform_record(
             }
         } else {
             counters.parts_verbatim_empty += 1;
+        }
+        // The occurrence's path id is re-anchored BY NAME onto the
+        // target panel's id (the committed k-swap panels share ids, so
+        // this is the identity there; a target panel that assigns
+        // different ids - e.g. a masked rebuild - gets the correct
+        // ids; a path absent from the target keeps its source id
+        // verbatim, counted with the recovery-failure class above by
+        // the census producer's contract).
+        if let Some(tp) = target_path_id {
+            if tp != source_path {
+                counters.paths_remapped += 1;
+            }
+            occurrence.path = tp;
         }
     }
     let mut bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
@@ -677,6 +708,7 @@ pub fn run(options: &Options) -> io::Result<()> {
         "parts_verbatim_empty": counters.parts_verbatim_empty,
         "starts_on_target_grid": counters.starts_on_target_grid,
         "starts_on_source_grid": counters.starts_on_source_grid,
+        "paths_remapped": counters.paths_remapped,
         "windows_target": n_windows,
         "k_source": k_source,
         "k_target": k_target,

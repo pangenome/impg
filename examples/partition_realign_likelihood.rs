@@ -1561,6 +1561,26 @@ fn main() -> io::Result<()> {
             .filter(|(_, key)| key.is_none())
             .map(|(record, _)| record)
             .collect();
+        // Env-gated diagnostic for the held-out masking experiment
+        // (IMPG_DERIVE_UNBOUND_FILE=<path>): the FULL list of census
+        // record positions that do not verify against this panel's own
+        // read derivation, one index per line, written before the
+        // fail-closed error — the receipt-side drop list for a census
+        // whose derivation predates the panel (e.g. the occurrence-level
+        // masked census re-anchored onto the masked panel). Default
+        // (env unset): behavior identical to the committed builder.
+        if let Ok(path) = std::env::var("IMPG_DERIVE_UNBOUND_FILE") {
+            use std::io::Write as _;
+            if let Ok(mut file) = std::fs::File::create(&path) {
+                for &record in unbound.iter() {
+                    let _ = writeln!(file, "{record}");
+                }
+                eprintln!(
+                    "[realign] unbound record list ({} records) written to {path}",
+                    unbound.len(),
+                );
+            }
+        }
         if !unbound.is_empty() {
             for &record in unbound.iter().take(5) {
                 let line = &census_records[record];
