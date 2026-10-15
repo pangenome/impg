@@ -2854,6 +2854,14 @@ fn run_cut_batch(
         .collect();
     let territories: Vec<BatchTerritory> = setups.into_iter().collect::<io::Result<_>>()?;
     let n_terr = territories.len();
+    // The per-territory fail-closed isolation bookkeeping: the emissions
+    // loop uses this to name and ISOLATE a failing territory (the
+    // 7479-class bind ambiguity fails ONE territory's cut, never the
+    // batch) - the batch's other territories keep their cuts.
+    let emit_specs: Vec<(String, std::path::PathBuf)> = territories
+        .iter()
+        .map(|t| (t.spec.name.clone(), t.spec.out_dir.clone()))
+        .collect();
 
     // The inverted routing index: global node -> territory ids. The
     // routing signal is exactly the single cut's (a read is a candidate
@@ -3021,15 +3029,37 @@ fn run_cut_batch(
             batch_emit_territory(t, files, load_seconds, scan_seconds, &started)
         })
         .collect();
-    for result in emissions {
-        let summary = result?;
-        eprintln!("[cut-batch] {}: {}", summary["name"], summary);
+    let mut n_emit_failed = 0usize;
+    for ((name, out_dir), result) in emit_specs.into_iter().zip(emissions) {
+        match result {
+            Ok(summary) => eprintln!("[cut-batch] {}: {}", summary["name"], summary),
+            Err(e) => {
+                // FAIL-CLOSED, ISOLATED: the territory is refused (its
+                // partial outputs removed, the failure named on disk);
+                // the batch's other territories proceed.
+                n_emit_failed += 1;
+                let _ = std::fs::write(out_dir.join("CUT-FAILED.txt"), format!("{e}\n"));
+                for f in [
+                    "cut-census.jsonl",
+                    "cut-cache.bin",
+                    "cut-reads.fasta",
+                    "cut-stats.json",
+                ] {
+                    let _ = std::fs::remove_file(out_dir.join(f));
+                }
+                eprintln!(
+                    "[cut-batch] {}: EMISSION FAILED (fail-closed, isolated): {e}",
+                    name
+                );
+            }
+        }
     }
     eprintln!(
-        "[cut-batch] DONE: {} territories in {:.0}s (peak RSS {}kB)",
+        "[cut-batch] DONE: {} territories in {:.0}s (peak RSS {}kB, {} emission-failures)",
         n_terr,
         started.elapsed().as_secs_f64(),
-        rss_now_kb()
+        rss_now_kb(),
+        n_emit_failed
     );
     Ok(())
 }
