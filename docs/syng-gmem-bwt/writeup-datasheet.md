@@ -217,12 +217,94 @@ pockets).
 
 ## 8. REPRODUCIBILITY
 
-One driver: `scripts/reproduce-writeup-receipts.sh` (stages: `chain-L1…L4,
-pilot`, `masked`, `qv-dist`, `yeast`, `biobank`, `ksweep`, opt-in
-`projection`). Durable inputs: the 35x BAM, the HPRC AGC/syng panel, the
+One driver: `scripts/reproduce-writeup-receipts.sh` (stages: `three-step`
+— THE THREE COMMANDS of §9 end to end over L1, `chain-L1…L4, pilot`,
+`masked`, `qv-dist`, `yeast`, `biobank`, `ksweep`, opt-in `projection`). Durable inputs: the 35x BAM, the HPRC AGC/syng panel, the
 committed 35x projection shards, the locality definitions. Runtime budget
 (honest): substrate ~10s/locality; the CLI call 20–90s/locality
 (minutes-class; +10–11min/locality when the cut must be re-run from the
 projection shards; the projection itself 20.79min once); the table legs
 seconds-to-minutes. A newcomer runs it and gets the numbers, or a loud
 gate failure naming the check.
+
+## 9. THE THREE-STEP UI (the owner's doctrine, consumed this session)
+
+The owner's steer: *"It shouldn't be a script chain, it should be like two
+or three impg commands... Like map, call... maybe you should have to do the
+partitions... For one of them, the partitions, you can reuse"* — and
+*"detect any locus, any position, any allele."* The three commands, as the
+user types them (the `three-step` leg of the driver demonstrates them end
+to end over L1):
+
+**STEP 1 — PARTITION (per panel, once; reused by every sample):**
+`impg genome-infer partition --name L1 --chrom chr1 --start 4632437
+--end 4883593 --sources <member-subset fasta> --component <axis path>
+--axis <axis json> --partition-graphs <locality maps> --census <any
+census> --read-lengths 148 --out-dir partitions/`. Emits THE ONE
+PARTITION ARTIFACT — a four-column BED (`chrom start end
+PARTITION_NAME`), each row a named reference range; the member subset
+per partition is DERIVED from the range (the sources fasta is the
+range's member subset; never a separate manifest). The 250kb territory
+grid as BED4 rows: `chr1 4632437 4883593 L1`, `chr1 4927969 5176455
+L2`, `chr1 5957849 6207716 L3`, `chr1 6696223 6945174 L4`. Beside the
+BED, the panel-side precomputes keyed by partition name under
+`partitions/<name>/`: the local syng (k=63 s=8 seed 7 pos64, ~2-3s),
+the window beds (regenerated verbatim from the committed locality
+maps), the call-path routes inventory (derive-routes, the lookup
+lever, with the census routing cross-check), and the partition.json
+registry. Cost at L1: 12s (measured).
+
+**STEP 2 — MAP (per sample, once):** `impg genome-infer map --panel
+<global syng> --agc <panel agc> --shards-dir <projection> --partitions
+partitions/ --reads <sample FASTQ> [--region ...] [--local-derive]
+--out-dir hg002-map/`. The projection is the sample's map at the
+whole-sample level (built once: 20.79min at 35x, or reuse the committed
+shards); the map step cuts every (selected) partition's territory
+evidence out of it — `hg002-map/<name>/{cut-census.jsonl,
+cut-cache.bin, cut-reads.fasta, cut-stats.json}`. Cost at L1:
+~11min (204s panel load + 398s shard scan + census; measured).
+
+**STEP 3 — CALL (per sample):** `impg genome-infer call-region --map
+hg002-map/ --partitions partitions/ [--region 'chr1:4700000-4800000' |
+--region L1] [--exclude-paths 'CHM13#*'] [--truth-qv <axis> <truth2>]
+--out-dir calls/`. Consumes map + partitions; calls every (selected)
+partition and emits the REFERENCE-ANCHORED outputs per partition:
+`calls/<name>/{calls.jsonl, calls.jsonl.sequences.jsonl, ...}` — the
+per-locus diplotype calls, the per-locus hap1/hap2 diplotype sequences
+(the emission, always on here), the model-internal QUAL, the dosage
+fields. Cost at L1: ~21s (measured; the heavy tail at the pilot-class
+territory is 75-90s).
+
+**The flags (region-as-interface):** `--region` accepts a comma-list of
+BED partition names or any `chr:start-end` range, resolved against the
+partition's own reference frame to the covered windows — any locus, any
+position, on demand; `--exclude-paths` is the masking operator (the
+held-out experiment's stranger filter: candidate rows whose member path
+names match any fnmatch glob leave the candidate universe, loudly
+counted per locus in the product record; the axis row is never excluded
+— it is the coordinate frame); `--truth-qv` the test mode. The literal
+`call` name is held by the legacy provisional presence-compatibility
+command (the committed CLI paths are immutable), so the CALL wrapper is
+named `call-region`; `call-diplotypes` itself carries `--region` and
+`--exclude-paths` directly.
+
+**The demonstration gates (L1, end to end, this session):** the fresh
+three-step path (partition 12s → map cut ~11min → call 21s) reproduces
+the committed receipt of record: calls.jsonl BYTE-IDENTICAL 25/25 records
+to the committed cut-L1-cli receipt; THE EMISSION GATE ALL CHECKS PASS
+(25/25 calls → sequences, the spell identity, the official_allwave
+identity EXACT 25/25 recomputed from the emitted sequences). The honest
+substrate note: the committed window-bed substrate of the L1-L4
+territories was disk-cleaned; the partition step regenerates the beds
+verbatim from the committed locality maps, and the fresh census differs
+at the margin (reads_kept 108,230 → 94,242; census_mult 115,012 →
+101,024 — the disk-cleaned substrate's price, stated, never assumed);
+the called product is nonetheless byte-identical. The interface gates:
+`--region chr1:4642437-4662437` resolves to loci [0,1,2] with the
+subset byte-identical to the full receipt's corresponding lines;
+`--exclude-paths` with a no-match glob leaves the product byte-identical,
+and with `CHM13#*` excludes exactly one member row per locus (25/25
+records carry the `excluded_rows` receipt field). The default-path
+regression gates on the same binary: chain-L1 invocation verbatim →
+calls.jsonl byte-identical, biWFA fields 25/25, the emission gate ALL
+CHECKS PASS.

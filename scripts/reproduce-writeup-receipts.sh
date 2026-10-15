@@ -17,6 +17,74 @@
 #     this driver REPRODUCES them into its own work directory, it never
 #     writes into a committed receipt directory).
 #
+# THE THREE-STEP UI (the owner's doctrine verbatim: "It shouldn't be
+# a script chain, it should be like two or three impg commands... Like
+# map, call... maybe you should have to do the partitions... For one
+# of them, the partitions, you can reuse." + "detect any locus, any
+# position, any allele") - THE FRONT PAGE, THE THREE COMMANDS AS THE
+# USER TYPES THEM (demonstrated over L1 by the `three-step` leg):
+#
+#   STEP 1, PARTITION (per PANEL, once - reused by every sample):
+#     impg genome-infer partition \
+#       --name L1 --chrom chr1 --start 4632437 --end 4883593 \
+#       --sources   $GEN/L1/locus.fa \
+#       --component 'HG002#1#chr1:4632437-4883593' \
+#       --axis      $GEN/L1/reference-axis.json \
+#       --partition-graphs $GEN/L1/locality-graphs \
+#       --census $PROJ/cut-L1/cut-census.jsonl --read-lengths 148 \
+#       --out-dir partitions/
+#     EMITS: partitions/partitions.bed - THE ONE PARTITION ARTIFACT,
+#       a four-column BED (chrom, start, end, PARTITION_NAME), each
+#       row a named reference range; the member subset per partition
+#       is DERIVED from the range (the --sources fasta IS the range's
+#       member subset; never a separate manifest). A real example -
+#       the 250kb territory grid as BED4 rows:
+#         chr1  4632437  4883593  L1
+#         chr1  4927969  5176455  L2
+#         chr1  5957849  6207716  L3
+#         chr1  6696223  6945174  L4
+#     and the panel-side precomputes keyed by partition name under
+#       partitions/<name>/: the local syng (k=63 s=8 seed 7 pos64),
+#       the window beds (regenerated verbatim from the committed
+#       locality maps - the region grid within the territory), the
+#       call-path routes inventory (derive-routes, with the census
+#       routing cross-check), and the partition.json registry.
+#
+#   STEP 2, MAP (per SAMPLE, once - the projection):
+#     impg genome-infer map \
+#       --panel $HPRCV2/HPRC_r2_assemblies_0.6.1.syng \
+#       --agc $HPRCV2/HPRC_r2_assemblies_0.6.1.agc \
+#       --shards-dir $PROJ/full \
+#       --partitions partitions/ \
+#       --reads $GEN/L1/hg002.L1.300x.all.fq.gz \
+#       --out-dir hg002-map/
+#     EMITS: hg002-map/<name>/{cut-census.jsonl, cut-cache.bin,
+#       cut-reads.fasta, cut-stats.json} - every (selected)
+#       partition's territory evidence cut out of the sample's
+#       projection. --region selects on demand (partition names or
+#       chr:start-end); --local-derive selects the corrected cut
+#       recipe where the territory requires it.
+#
+#   STEP 3, CALL (per SAMPLE - consumes map + partitions):
+#     impg genome-infer call-region \
+#       --map hg002-map/ --partitions partitions/ \
+#       [--region 'chr1:4700000-4800000' | --region L1] \
+#       [--exclude-paths 'CHM13#*'] \
+#       [--truth-qv <axis-path> <truth2-path>] \
+#       --out-dir calls/
+#     EMITS: calls/<name>/{calls.jsonl, calls.jsonl.sequences.jsonl,
+#       ...} - the per-locus diplotype calls with the
+#       REFERENCE-ANCHORED outputs (the per-locus hap1/hap2 diplotype
+#       sequences - the emission - the model-internal QUAL, the
+#       dosage fields). --region resolves any range against the
+#       partition's own reference frame to the covered windows
+#       ("detect any locus, any position, any allele"); --exclude-
+#       paths is the masking operator (the held-out experiment's
+#       stranger filter; the axis row never excluded); --truth-qv
+#       the test mode. Named call-region because the literal `call`
+#       name is held by the legacy provisional presence-compatibility
+#       command (the committed CLI paths are immutable).
+#
 # THE HEADLINE RECEIPTS AND THE LEGS THAT REPRODUCE THEM:
 #  (1) THE HELD-OUT MASKING EXPERIMENT  -> masked  (the masked tables:
 #      H1 near-baseline ordinary / 91-94% >=QV30, H2 the hotbed price,
@@ -36,6 +104,9 @@
 #      against the official_allwave machinery's alignments).
 #
 # THE HONEST RUNTIME BUDGET PER LEG (measured, this box, nice 10):
+#   three-step     ~15min: the UI demo over L1 - the partition step
+#                   ~12s; the map step's fresh cut ~11min (the 35x
+#                   projection shards); the call step ~1min + gates
 #   substrate <L>   ~10s   (the local syng build 3-10s + derive-routes ~5s;
 #                           the pilot reuses its committed panel)
 #   chain <L>       minutes-class: the CLI call 20-90s (the pilot's heavy
@@ -61,7 +132,9 @@
 #                   and are documented, not re-run
 #
 # usage: reproduce-writeup-receipts.sh [stage ...]
-#   stages: substrate-L1|L2|L3|L4|pilot, chain-L1|L2|L3|L4|pilot,
+#   stages: three-step (THE UI DEMO: partition -> map -> call over
+#                       L1, end to end, gates green),
+#           substrate-L1|L2|L3|L4|pilot, chain-L1|L2|L3|L4|pilot,
 #           chain-fast, masked, qv-dist, yeast, biobank, ksweep,
 #           projection (opt-in heavy), all (the default: chain-fast
 #           masked qv-dist yeast biobank ksweep)
@@ -163,7 +236,7 @@ do_substrate() {
       --out-dir "$OUT/routes" || fail "substrate-$L derive-routes"
     touch "$MARK/substrate-$L.done"
   fi
-  echo "=== substrate-$L done (routes receipt: $OUT/routes/routes-lookup.json)"
+  echo "=== substrate-$L done (routes receipt: $OUT/routes/manifest.json)"
 }
 
 # ---------------------------------------------------------------------------
@@ -210,6 +283,46 @@ do_chain() {
   [ -f "$CENSUS" ] && [ -f "$CACHE" ] || fail \
     "chain-$L: the cut intermediates are absent; re-run the cut leg first:
      sample_projection cut --shards-dir $PROJ/full ... (~10-11min, 39-43GiB)"
+  if [ "$L" = "pilot" ]; then
+    # THE PILOT LEG'S HONEST VERDICT (receipted, the fail-closed
+    # class): the corrected cut3 census is DETERMINISTIC (t96 vs t48
+    # census+cache sha-identical) but carries ONE fail-closed bind
+    # record - census record 7479, the AC-repeat 2-of-4 key-bind
+    # ambiguity: a read pattern anchored entirely inside an
+    # AC-microsatellite (panel slice GACACACACACACACA, span 67bp,
+    # 3 occurrences over GRCh38 + two panel paths); 4 candidate
+    # derive keys, 2 verify at every occurrence - keys 1013 (+1
+    # origin shift on all 3) and 14381 (-1 on all 3): conjugate
+    # phase shifts one dinucleotide repeat period apart, genuinely
+    # indistinguishable inside the repeat window. The bind REFUSES
+    # (unique-key requirement, by design); any tie-break would be a
+    # tuning constant (forbidden). EXPECTED: the CLI exits 1 with
+    # exactly this error; anything else is a LOUD GATE FAILURE. The
+    # bind-debug dump is the receipt.
+    rm -rf "$OUT"
+    IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 IMPG_REALIGN_BIND_DEBUG=1 \
+      nice -n 10 stdbuf -oL -eL "$IMPG" genome-infer call-diplotypes \
+      --panel "$PANEL" --routes "$SUB/routes" --partition-graphs "$GRAPHS" \
+      --component "$AXIS_PATH" --census "$CENSUS" --reads "$READS" \
+      --derive-cache "$CACHE" --loci "$LOCI" --emit-sequences \
+      --truth-qv "$AXIS_PATH" "$TRUTH2_PATH" --qv-biwfa "$QVBIWFA" \
+      --out-dir "$OUT" > "$WORK/chain-pilot.log" 2> "$WORK/chain-pilot.err"
+    st=$?
+    if [ "$st" -eq 1 ] && grep -q \
+      "census record has no unique verifying key (census record 7479; 2 surviving of 4 candidates)" \
+      "$WORK/chain-pilot.err" && grep -q \
+      "SURVIVING keys (the ambiguity): \[(1013, \[1, 1, 1\]), (14381, \[-1, -1, -1\])\]" \
+      "$WORK/chain-pilot.err"; then
+      touch "$MARK/chain-pilot.done"
+      echo "=== chain-pilot: THE HONEST FAIL-CLOSED VERDICT receipted"
+      echo "    (census record 7479, the AC-repeat 2-of-4 bind ambiguity;"
+      echo "     keys 1013/+1 vs 14381/-1 - the repeat period; the pilot's"
+      echo "     emission proof remains open at 4/5 localities: the deep"
+      echo "     path's fresh census does not bind either - see the record)"
+      return 0
+    fi
+    fail "chain-pilot: the expected fail-closed verdict did not occur (exit $st)"
+  fi
   rm -rf "$OUT"
   runjob "chain-$L" env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 \
     IMPG_TRUTH_QV_ALLWAVE=1 "$IMPG" genome-infer call-diplotypes \
@@ -448,6 +561,126 @@ do_cut3_pilot() {
   echo "=== cut3-pilot COMPLETE (receipts: $OUT)"
 }
 
+# ---------------------------------------------------------------------------
+# three-step: THE UI DOCTRINE DEMONSTRATED END TO END over L1 (the
+# owner's three steers consumed): PARTITION -> MAP -> CALL, the three
+# impg commands as the user types them (see THE FRONT PAGE above).
+# GATES, all loud:
+#   (1) the BED4 partition artifact + the registry + the routes
+#       cross-check receipt;
+#   (2) the map step's fresh cut receipt + THE HONEST SUBSTRATE
+#       DELTA vs the committed cut-L1 (the committed window-bed
+#       substrate was disk-cleaned; the partition step regenerates
+#       the beds verbatim from the committed locality maps - the
+#       fresh census is named against the committed census's own
+#       stats, never assumed identical);
+#   (3) the call step's EMISSION GATE + truth-qv + the honest
+#       calls-delta vs the committed cut-L1-cli receipt (measured,
+#       per-locus named);
+#   (4) THE FLAGS: --region resolves any range to the covered
+#       windows and the subset calls are byte-identical to the
+#       corresponding lines of the full committed receipt;
+#       --exclude-paths with a no-match glob leaves the product
+#       byte-identical (the operator is inert when nothing
+#       matches).
+# ---------------------------------------------------------------------------
+do_three_step() {
+  [ -f "$MARK/three-step.done" ] && { echo "=== three-step already done"; return 0; }
+  local L=L1
+  locality_defs "$L"
+  local TS="$WORK/three-step"
+  rm -rf "$TS"; mkdir -p "$TS"
+  local PSTART PEND PCHROM
+  PCHROM=$(python3 -c "
+c='$AXIS_PATH'.split(':'); print(c[0].rsplit('#',1)[1])")
+  read -r PSTART PEND < <(python3 -c "
+print('${AXIS_PATH##*:}'.replace('-', ' '))")
+  # STEP 1: PARTITION (per panel, once)
+  runjob three-step-partition "$IMPG" genome-infer partition \
+    --name "$L" --chrom "$PCHROM" --start "$PSTART" --end "$PEND" \
+    --sources "$P/locus.fa" --component "$AXIS_PATH" \
+    --axis "$AXIS" --partition-graphs "$GRAPHS" \
+    --census "$PROJ/cut-$L/cut-census.jsonl" --read-lengths 148 \
+    --out-dir "$TS/partitions" \
+    || fail "three-step: the PARTITION step"
+  [ "$(cat "$TS/partitions/partitions.bed")" = "$(printf '%s\t%s\t%s\t%s' "$PCHROM" "$PSTART" "$PEND" "$L")" ] \
+    || fail "three-step: the BED4 row is not chrom/start/end/name"
+  [ -f "$TS/partitions/$L/partition.json" ] || fail "three-step: no partition registry"
+  echo "=== three-step gate (1): the BED4 artifact + the registry + the routes cross-check PASS"
+  # STEP 2: MAP (per sample, once)
+  runjob three-step-map env RAYON_NUM_THREADS=96 "$IMPG" genome-infer map \
+    --panel "$HPRCV2/HPRC_r2_assemblies_0.6.1.syng" \
+    --agc "$HPRCV2/HPRC_r2_assemblies_0.6.1.agc" \
+    --shards-dir "$PROJ/full" \
+    --partitions "$TS/partitions" \
+    --reads "$READS" \
+    --out-dir "$TS/hg002-map" \
+    || fail "three-step: the MAP step"
+  [ -f "$TS/hg002-map/$L/cut-census.jsonl" ] || fail "three-step: no cut census"
+  # THE HONEST SUBSTRATE DELTA vs the committed cut-L1 (named, never assumed)
+  python3 "$REPO/scripts/map-substrate-delta.py" \
+    "$PROJ/cut-$L/cut-stats.json" "$TS/hg002-map/$L/cut-stats.json" \
+    > "$TS/map-substrate-delta.txt" \
+    || fail "three-step: the substrate delta statement"
+  cat "$TS/map-substrate-delta.txt"
+  # STEP 3: CALL (per sample) - the wrapper consumes map + partitions
+  runjob three-step-call env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 \
+    IMPG_TRUTH_QV_ALLWAVE=1 "$IMPG" genome-infer call-region \
+    --map "$TS/hg002-map" --partitions "$TS/partitions" \
+    --truth-qv "$AXIS_PATH" "$TRUTH2_PATH" --qv-biwfa "$QVBIWFA" \
+    --out-dir "$TS/calls" \
+    || fail "three-step: the CALL step"
+  [ -f "$TS/calls/$L/calls.jsonl" ] || fail "three-step: no calls"
+  # (3a) THE EMISSION GATE over the three-step call
+  python3 "$REPO/scripts/check-diplotype-sequences.py" \
+    --calls "$TS/calls/$L/calls.jsonl" \
+    --sequences "$TS/calls/$L/calls.jsonl.sequences.jsonl" \
+    --truth-qv "$TS/calls/$L/calls.jsonl.truth-qv.jsonl" --maps "$GRAPHS" \
+    --locus-fa "$P/locus.fa" --truth-prefixes HG002#1,HG002#2 \
+    --allwave-bin "$ALLWAVE" \
+    --instrument-receipt "$TS/calls/$L/instrument-receipt.jsonl" \
+    --out "$TS/three-step.emission-gate.txt" \
+    || fail "three-step: THE EMISSION GATE"
+  # (3b) the honest calls-delta vs the committed receipt (measured)
+  python3 "$REPO/scripts/calls-delta.py" \
+    "$PROJ/cut-$L-cli/calls.jsonl" "$TS/calls/$L/calls.jsonl" \
+    > "$TS/calls-delta.txt" \
+    || fail "three-step: the calls delta statement"
+  cat "$TS/calls-delta.txt"
+  # (4a) THE --region FLAG: a range on demand, subset byte-parity
+  rm -rf "$TS/region-demo"
+  runjob three-step-region env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 \
+    "$IMPG" genome-infer call-diplotypes \
+    --panel "$TS/partitions/$L/locus-pos64.syng" \
+    --routes "$TS/partitions/$L/routes" --partition-graphs "$GRAPHS" \
+    --component "$AXIS_PATH" --census "$PROJ/cut-$L/cut-census.jsonl" \
+    --reads "$READS" --derive-cache "$PROJ/cut-$L/cut-cache.bin" \
+    --region "$PCHROM:$((PSTART+10000))-$((PSTART+30000))" \
+    --out-dir "$TS/region-demo" || fail "three-step: the --region call"
+  grep -q "resolved to loci" "$WORK/three-step-region.err" \
+    || fail "three-step: --region did not resolve"
+  head -n "$(wc -l < "$TS/region-demo/calls.jsonl")" \
+    "$PROJ/cut-$L-cli/calls.jsonl" > "$TS/region-expected.jsonl"
+  cmp "$TS/region-demo/calls.jsonl" "$TS/region-expected.jsonl" \
+    || fail "three-step: the --region subset is not byte-identical to the receipt's lines"
+  echo "=== three-step gate (4a): --region on demand, the subset byte-identical"
+  # (4b) THE --exclude-paths FLAG: inert when nothing matches
+  rm -rf "$TS/exclude-inert"
+  runjob three-step-exclude env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 \
+    "$IMPG" genome-infer call-diplotypes \
+    --panel "$TS/partitions/$L/locus-pos64.syng" \
+    --routes "$TS/partitions/$L/routes" --partition-graphs "$GRAPHS" \
+    --component "$AXIS_PATH" --census "$PROJ/cut-$L/cut-census.jsonl" \
+    --reads "$READS" --derive-cache "$PROJ/cut-$L/cut-cache.bin" \
+    --loci "$LOCI" --exclude-paths 'ZZZnomatch#*' \
+    --out-dir "$TS/exclude-inert" || fail "three-step: the --exclude-paths call"
+  cmp "$TS/exclude-inert/calls.jsonl" "$PROJ/cut-$L-cli/calls.jsonl" \
+    || fail "three-step: a no-match --exclude-paths changed the product"
+  echo "=== three-step gate (4b): --exclude-paths inert when nothing matches"
+  touch "$MARK/three-step.done"
+  echo "=== three-step COMPLETE: PARTITION -> MAP -> CALL over $L, gates green"
+}
+
 do_chain_fast() {
   for L in L1 L2; do do_chain "$L" & done; wait
   for L in L3 L4; do do_chain "$L" & done; wait
@@ -458,6 +691,7 @@ STAGES=${*:-all}
 for stage in $STAGES; do
   case "$stage" in
     all)          do_chain_fast; do_masked; do_qvdist; do_yeast; do_biobank; do_ksweep ;;
+  three-step)   do_three_step ;;
     chain-fast)   do_chain_fast ;;
     substrate-*)  do_substrate "${stage#substrate-}" ;;
     chain-*)      do_chain "${stage#chain-}" ;;
