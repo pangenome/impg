@@ -308,3 +308,69 @@ records carry the `excluded_rows` receipt field). The default-path
 regression gates on the same binary: chain-L1 invocation verbatim →
 calls.jsonl byte-identical, biWFA fields 25/25, the emission gate ALL
 CHECKS PASS.
+
+## 10. THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design; OFF BY DEFAULT)
+
+`call-diplotypes`/`call-region --flank-overlap <N>` — a candidate-universe
+filter at the fold-construction site: a member row stays in a window's
+candidate universe only if it carries aligned material over BOTH FLANKS
+of the window's axis extent (the first and last N bp, in the focal
+reference's own coordinate frame; the partition maps' member rows live in
+that frame). Parameter forms: N in bp (`--flank-overlap 10000`) or a
+percent of the window length (`--flank-overlap 10%` → ceil(pct × length)).
+A window shorter than N degenerates to simple presence. The axis row is
+never excluded (the `--exclude-paths` precedent); the excluded rows are
+loudly counted and named per locus in the product record
+(`flank_excluded_rows`, `flank_overlap`). Default (unset): the committed
+candidate universe verbatim — the committed chain-L1 invocation with the
+flag unset reproduces calls.jsonl BYTE-IDENTICALLY (biWFA 25/25, the
+emission gate ALL CHECKS PASS).
+
+THE SEMANTICS (measured, then ruled): the partition maps' member rows are
+alignment-correspondence hulls that structurally stop 0–50bp short of the
+region's edges, so a literal containment reading of "covers the flank"
+would remove 91–100% of every window's universe INCLUDING the truth folds
+at ~every window (~36/466 survivors per window). The ruled semantics is
+PRESENCE (the owner's own degenerate-case wording): the row must OVERLAP
+both flank intervals — reach into both flanks.
+
+THE MEASURED VERDICT (five localities, both depths, both settings; the
+committed receipts as baselines; masked substrates equivalence-proven
+byte-identical before their legs; receipts: hprcv2/flank-overlap/):
+
+* THE CENSUS: the fragmentary class @10% is 1.1% of member rows at the
+  ordinary localities (L1–L4) but 60.4% at the pilot (the fragmentary
+  hotbed — its error windows carry 380–840 fragmentary members each);
+  @10kb it is 0.0% at L1–L4 (the degenerate case) and 32.0% at the pilot.
+  6/40 deep miss windows have fragmentary-BUILT called pairs (0/81
+  rank-1) — the bet holds exactly where the hotbed lives.
+* @10kb ON THE PILOT (deep): the fragmentary-call class IMPROVES — the
+  truth pair's rank improves at 9 of 14 changed windows (e.g. 2146→595,
+  5153→1571, 2315→1276, 78→31), the truth's material enters the called
+  pair at L19 (official QV 25.6→36.0) and L21 (34.5→46.5), rank-1 and
+  PERFECT unchanged 4/4 — at the price of 4 windows where the TRUTH
+  ITSELF is fragmentary (inexpressible; they were deep misses anyway).
+  @10kb on the ordinary localities: zero changed calls.
+* @10% IS REFUTED AS A GENERAL SETTING: it removes the truth rows at
+  scale (L2 at 35x: 13 windows inexpressible, rank-1 6→2; the pilot: 14
+  of 22 windows inexpressible including 3 of the 4 rank-1 PERFECT ones).
+  The truth haplotypes' own hulls genuinely miss flank material at those
+  windows; a 1kb flank demand on a 10kb window exceeds the truth's own
+  coverage. The owner's suspicion that the percent form is the safest
+  general form is REFUTED at the window scope — at these window sizes the
+  bp form is the safer example point (the degenerate case neutralizes it
+  on ordinary windows).
+* THE MASKED/STRANGER LEG (held-out): sequence accuracy vs the held-out
+  truth is UNCHANGED at every L1/L2 locus (the representative strains
+  churn among sequence-identical twins — the strangers map recomposes,
+  the wrong-copy classes do not change); masked L3 GAINS 4 windows to
+  QV50; the masked pilot's worst window improves 9.8→23.8 at both
+  settings, with one real regression (L2: 44.99→37.59 @10%). The masked
+  hotbed's hard tail stays wrong (L8 ~10.6, L9 ~15.9) — the filter does
+  not fix the stranger leg's deep-miss windows.
+
+DEFAULT-PRODUCT DECISION (the receipt informs it): the filter stays OFF
+by default — it is inert on ordinary localities at 10kb, a real lever on
+the pilot-class fragmentary hotbeds at 10kb, and a hazard at 10% (the
+truth-fragmentary inexpressibility class). It is a per-locality tool for
+fragmentary-member territories, not a default.
