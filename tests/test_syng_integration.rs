@@ -4331,6 +4331,176 @@ fn test_syng_identical_sequences_build_and_query() {
 }
 
 #[test]
+fn test_syng_filtered_wrapper_retains_dense_self_and_forward_homologs() {
+    use impg::impg_index::ImpgIndex;
+    let _guard = lock_syng();
+    let sequence = numeric_to_ascii(&make_sequence_numeric(10_000, 7));
+    let sequences = vec![
+        ("self#0#chr1".to_string(), sequence.clone()),
+        ("copy#0#chr1".to_string(), sequence.clone()),
+        (
+            "reverse#0#chr1".to_string(),
+            impg::graph::reverse_complement(&sequence),
+        ),
+    ];
+    let mut names = impg::seqidx::SequenceIndex::new();
+    for (name, seq) in &sequences {
+        names.get_or_insert_id(name, Some(seq.len()));
+    }
+    let query_id = names.get_id("self#0#chr1").unwrap();
+    let index = impg::syng::SyngIndex::build(
+        impg::syng::SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        },
+        sequences.into_iter(),
+    );
+    // Keep the RC fixture for reproduction, but do not claim reverse discovery
+    // is validated: raw syng emits too few reverse anchors here, before chaining.
+    // See docs/syng-gmem-bwt/partition-diagnosis.md. Dense reverse normalization
+    // and provenance are independently covered in syng_transitive unit tests.
+    let wrapper = impg::SyngImpgWrapper::new(index, names, 0).with_chain_filter(5, 0.5);
+    let hits = wrapper
+        .query(query_id, 0, 10_000, false, None, None, false)
+        .unwrap();
+    for name in ["self#0#chr1", "copy#0#chr1"] {
+        let id = wrapper.seq_index().get_id(name).unwrap();
+        assert!(
+            hits.iter()
+                .any(|(iv, _, _)| iv.metadata == id && iv.first <= 100 && iv.last >= 9900),
+            "filtered wrapper lost near-full exact occurrence {name}: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn test_partition_syng_retains_seed_when_all_hits_filtered() {
+    let _guard = lock_syng();
+    let bin = impg_binary().expect("impg binary is required for the partition progress regression");
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("seed.fa");
+    let prefix = dir.path().join("idx");
+    let sequence = numeric_to_ascii(&make_sequence_numeric(10_000, 7));
+    std::fs::write(
+        &fasta,
+        format!(">seed#0#chr1\n{}\n", String::from_utf8(sequence).unwrap()),
+    )
+    .unwrap();
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta.to_str().unwrap(),
+            "-o",
+            prefix.to_str().unwrap(),
+            "--syncmer-length",
+            "63",
+            "--smer-length",
+            "8",
+            "--syncmer-seed",
+            "7",
+            "--position-sample-rate",
+            "1",
+            "-t",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    {
+        use impg::impg_index::ImpgIndex;
+        let index = impg::syng::SyngIndex::load(
+            prefix.to_str().unwrap(),
+            impg::syng::SyncmerParams {
+                k: 8,
+                w: 55,
+                seed: 7,
+            },
+        )
+        .unwrap();
+        assert!(!index
+            .query_region_with_anchors_ext("seed#0#chr1", 0, 10_000, 0, 0)
+            .unwrap()
+            .is_empty());
+        let mut names = impg::seqidx::SequenceIndex::new();
+        let id = names.get_or_insert_id("seed#0#chr1", Some(10_000));
+        let wrapper = impg::SyngImpgWrapper::new(index, names, 0).with_chain_filter(5, 1.0);
+        assert!(
+            wrapper
+                .query(id, 0, 10_000, false, None, None, false)
+                .unwrap()
+                .is_empty(),
+            "the progress control must actually have no eligible hits"
+        );
+    }
+    // Fraction 1 rejects the seeded path's partial boundary support; .5
+    // retains it. Both runs must emit only the legitimate seed singleton.
+    for fraction in ["1", "0.5"] {
+        let out_dir = dir.path().join(fraction);
+        let stderr_path = dir.path().join(format!("{fraction}.stderr"));
+        let mut child = Command::new(&bin)
+            .args([
+                "partition",
+                "-a",
+                prefix.to_str().unwrap(),
+                "-w",
+                "10000",
+                "-d",
+                "1000",
+                "-o",
+                "bed",
+                "--output-folder",
+                out_dir.to_str().unwrap(),
+                "--min-missing-size",
+                "0",
+                "--min-boundary-distance",
+                "0",
+                "--syng-min-chain-anchors",
+                "5",
+                "--syng-min-chain-fraction",
+                fraction,
+                "-t",
+                "1",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("partition did not make progress for fraction={fraction}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(
+            status.success(),
+            "{}",
+            std::fs::read_to_string(stderr_path).unwrap()
+        );
+        let bed = std::fs::read_to_string(out_dir.join("partitions.bed")).unwrap();
+        let mut rows: Vec<Vec<&str>> = bed.lines().map(|line| line.split('\t').collect()).collect();
+        rows.sort();
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the legitimate seed singleton may be emitted: {bed}"
+        );
+        assert_eq!(&rows[0][..3], &["seed#0#chr1", "0", "10000"]);
+    }
+}
+
+#[test]
 fn test_partition_syng_end_to_end_bed() {
     // End-to-end: build syng index from FASTA, then run `impg partition -a`
     // and verify non-empty BED output. This is the path I added but never
@@ -4435,6 +4605,17 @@ fn test_partition_syng_end_to_end_bed() {
         .iter()
         .any(|e| std::fs::metadata(e.path()).unwrap().len() > 0);
     assert!(any_non_empty, "All partition BED files are empty");
+    let bed = std::fs::read_to_string(out_folder.join("partitions.bed")).unwrap();
+    let mut members: BTreeMap<&str, std::collections::BTreeSet<&str>> = BTreeMap::new();
+    for line in bed.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        members.entry(fields[3]).or_default().insert(fields[0]);
+    }
+    assert!(
+        members.values().any(|names| names.contains("sampleA#1#chr1")
+            && names.contains("sampleB#1#chr1")),
+        "normal partitioning must still group discovered homologs, not just emit seeds: {bed}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
