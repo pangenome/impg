@@ -463,6 +463,20 @@ pub struct Options {
     /// --loci. Conflicts with --loci.
     #[arg(long, conflicts_with = "loci")]
     pub region: Option<String>,
+    /// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the
+    /// presence semantics ruled at the measured fork): N in
+    /// bp (`--flank-overlap 10000`) or a percent of the window length
+    /// (`--flank-overlap 10%` -> ceil(pct x length)). A member row is
+    /// KEPT in a window's candidate universe only if it carries
+    /// aligned material over BOTH FLANK intervals of the window's
+    /// axis extent - the first N bp and the last N bp, in the focal
+    /// reference's own coordinate frame; a window shorter than N
+    /// degenerates to simple presence. The axis row is never
+    /// excluded (the --exclude-paths precedent).
+    /// Default (unset): no row is excluded - the committed candidate
+    /// universe verbatim, the committed receipts byte-identical.
+    #[arg(long)]
+    pub flank_overlap: Option<FlankOverlap>,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -3022,6 +3036,112 @@ pub fn row_is_excluded(path_name: &str, component: &str, globs: &[String]) -> bo
     path_name != component && globs.iter().any(|g| path_matches_glob(path_name, g))
 }
 
+/// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the
+/// presence semantics ruled at the fork): a panel member row is KEPT
+/// in a window's candidate universe only if its row CARRIES ALIGNED
+/// MATERIAL OVER BOTH FLANKS of the window's axis extent - the first
+/// N bp and the last N bp, in the FOCAL REFERENCE's own coordinate
+/// frame (the partition maps' member rows live in exactly that
+/// frame: the axis row spans the window's extent and every member
+/// row's [start, end) is its aligned extent in the same frame). THE
+/// HULL-EDGE GEOMETRY, measured before the semantics was ruled: the
+/// member rows are alignment-correspondence hulls and structurally
+/// stop 0-50bp SHORT of the region's edges (a syncmer window cannot
+/// start in the last k+w-1 bases - the truth haplotypes' own rows
+/// end ~25bp short), so a literal containment reading of "covers the
+/// flank" removes 91-100% of every window's universe INCLUDING the
+/// truth folds at ~every window; the ruled semantics is PRESENCE
+/// (the owner's own degenerate-case wording): the row must OVERLAP
+/// both flank intervals. N is an absolute bp count
+/// (`--flank-overlap 10000`) or a percent of the window length
+/// (`--flank-overlap 10%` -> ceil(pct x length)). THE DEGENERATE
+/// CASE: a window shorter than N reduces the rule to simple
+/// presence in the window. OFF BY DEFAULT (unset: the committed
+/// candidate universe verbatim).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FlankOverlap {
+    Bp(u64),
+    Percent(f64),
+}
+
+impl std::str::FromStr for FlankOverlap {
+    type Err = String;
+    fn from_str(text: &str) -> Result<Self, String> {
+        let invalid = || format!(
+            "invalid --flank-overlap {text:?}: N in bp (e.g. 10000) or a percent (e.g. 10%)"
+        );
+        if let Some(pct) = text.strip_suffix('%') {
+            let pct: f64 = pct.parse().map_err(|_| invalid())?;
+            if !(pct > 0.0 && pct <= 100.0) {
+                return Err(format!(
+                    "invalid --flank-overlap {text:?}: the percent must be in (0, 100]"
+                ));
+            }
+            Ok(FlankOverlap::Percent(pct))
+        } else {
+            let bp: u64 = text.parse().map_err(|_| invalid())?;
+            if bp == 0 {
+                return Err(format!(
+                    "invalid --flank-overlap {text:?}: N must be positive (0 is the default-off)"
+                ));
+            }
+            Ok(FlankOverlap::Bp(bp))
+        }
+    }
+}
+
+impl FlankOverlap {
+    /// The flank size N in bp for a window of the given length.
+    pub fn flank_bp(&self, window_len: u64) -> u64 {
+        match *self {
+            FlankOverlap::Bp(n) => n,
+            FlankOverlap::Percent(pct) => ((pct / 100.0) * window_len as f64).ceil() as u64,
+        }
+    }
+
+    /// The CLI spelling of the setting (the receipt field).
+    pub fn setting(&self) -> String {
+        match *self {
+            FlankOverlap::Bp(n) => n.to_string(),
+            FlankOverlap::Percent(pct) => format!("{pct}%"),
+        }
+    }
+}
+
+/// True when the member row [member_start, member_end) stays in the
+/// window's candidate universe under the flank-overlap rule (THE
+/// PRESENCE SEMANTICS, ruled at the measured fork): the row must
+/// CARRY ALIGNED MATERIAL OVER BOTH FLANK INTERVALS of the window's
+/// axis extent [axis_start, axis_end) - it must OVERLAP the first N
+/// bp [axis_start, axis_start+N) AND the last N bp
+/// [axis_end-N, axis_end). A window shorter than N degenerates to
+/// simple presence in the window. THE AXIS ROW IS NEVER EXCLUDED (it
+/// is the coordinate frame of the call - the --exclude-paths
+/// precedent); the caller enforces that, this predicate is pure.
+pub fn row_covers_flanks(
+    member_start: u64,
+    member_end: u64,
+    axis_start: u64,
+    axis_end: u64,
+    flank: FlankOverlap,
+) -> bool {
+    let window_len = axis_end.saturating_sub(axis_start);
+    let n = flank.flank_bp(window_len);
+    if window_len < n {
+        // THE DEGENERATE CASE (the owner's rule): the window is
+        // shorter than N - simple presence in the region.
+        return member_start < axis_end && member_end > axis_start;
+    }
+    // PRESENCE in the first N bp [axis_start, axis_start + n) and
+    // the last N bp [axis_end - n, axis_end): the row's aligned
+    // hull must reach into both flanks (overlap, not contain - the
+    // hull-edge geometry: rows structally stop short of the edges).
+    member_start < axis_start + n
+        && member_end > axis_start
+        && member_start < axis_end
+        && member_end > axis_end - n
+}
+
 /// The COALESCED CALLED SET (the owner's ambiguity ruling: a tied
 /// class call emits every called fold's sequence, not just the
 /// representative pair): the distinct folds of all called classes,
@@ -4756,7 +4876,30 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut fold_map: BTreeMap<(Vec<u8>, Vec<(u64, i32)>), usize> = BTreeMap::new();
         let mut folds: Vec<Fold> = Vec::new();
         let mut excluded_rows: u64 = 0;
+        let mut flank_excluded_rows: u64 = 0;
         for member in &map.members {
+            // THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design):
+            // a member row that does not cover BOTH FLANKS of the
+            // window's axis extent - the first N bp and the last N bp,
+            // in this frame (the partition maps' own coordinates) -
+            // leaves the candidate universe here, at fold construction,
+            // exactly as absent rows would. THE AXIS ROW IS NEVER
+            // EXCLUDED (it is the coordinate frame; the --exclude-paths
+            // precedent). Loudly counted per locus.
+            if let Some(flank) = options.flank_overlap {
+                if member.path_name != options.component
+                    && !row_covers_flanks(
+                        member.start,
+                        member.end,
+                        axis_start,
+                        axis_end,
+                        flank,
+                    )
+                {
+                    flank_excluded_rows += 1;
+                    continue;
+                }
+            }
             // THE MASKING OPERATOR (the call-locus --exclude-paths
             // surface): the stranger filter folded onto the call path
             // - matching rows leave the candidate universe here, at
@@ -6883,6 +7026,31 @@ pub fn run(options: Options) -> io::Result<()> {
                      --exclude-paths (the stranger filter; the axis row kept as the frame)"
                 );
             }
+            if flank_excluded_rows > 0 {
+                if let Some(object) = product_value.as_object_mut() {
+                    object.insert(
+                        "flank_excluded_rows".to_string(),
+                        json!(flank_excluded_rows),
+                    );
+                    object.insert(
+                        "flank_overlap".to_string(),
+                        json!(options
+                            .flank_overlap
+                            .map(|f| f.setting())
+                            .unwrap_or_default()),
+                    );
+                }
+                eprintln!(
+                    "[score] locus {locus} (partition {partition}): {flank_excluded_rows} \
+                     fragmentary candidate rows excluded by --flank-overlap {} \
+                     (missing a flank of [{axis_start}, {axis_end}); the axis row kept \
+                     as the frame)",
+                    options
+                        .flank_overlap
+                        .map(|f| f.setting())
+                        .unwrap_or_default()
+                );
+            }
             serde_json::to_writer(&mut product_buf, &product_value)?;
             // The receipt's own serialization convention, mirrored
             // exactly: under the territory/locality conventions the
@@ -8665,6 +8833,78 @@ mod tests {
         poison.push(0xC3);
         poison.push(0xA9); // UTF-8 continuation bytes are non-ASCII
         assert!(fold_sequence_string(&poison).is_err());
+    }
+
+    #[test]
+    fn the_flank_overlap_parses_both_forms() {
+        // The bp form and the percent form; the loud rejections.
+        assert_eq!("10000".parse::<FlankOverlap>(), Ok(FlankOverlap::Bp(10000)));
+        assert_eq!("10%".parse::<FlankOverlap>(), Ok(FlankOverlap::Percent(10.0)));
+        assert_eq!("100%".parse::<FlankOverlap>(), Ok(FlankOverlap::Percent(100.0)));
+        assert!("0".parse::<FlankOverlap>().is_err());
+        assert!("0%".parse::<FlankOverlap>().is_err());
+        assert!("101%".parse::<FlankOverlap>().is_err());
+        assert!("abc".parse::<FlankOverlap>().is_err());
+        assert!("".parse::<FlankOverlap>().is_err());
+        assert_eq!(FlankOverlap::Bp(10000).setting(), "10000");
+        assert_eq!(FlankOverlap::Percent(10.0).setting(), "10%");
+    }
+
+    #[test]
+    fn the_flank_rule_keeps_only_rows_reaching_into_both_flanks() {
+        // THE PRESENCE SEMANTICS (ruled at the measured fork): the
+        // window [1000, 1100) (100bp); N = 10bp - a member row is kept
+        // iff its hull OVERLAPS [1000, 1010) AND [1090, 1100).
+        let flank = FlankOverlap::Bp(10);
+        // full coverage: kept
+        assert!(row_covers_flanks(1000, 1100, 1000, 1100, flank));
+        assert!(row_covers_flanks(900, 1200, 1000, 1100, flank));
+        // rows reaching into both flanks (edge truncation is not
+        // fragmentation - the hull-edge geometry): kept
+        assert!(row_covers_flanks(1005, 1100, 1000, 1100, flank));
+        assert!(row_covers_flanks(1000, 1095, 1000, 1100, flank));
+        assert!(row_covers_flanks(1000, 1091, 1000, 1100, flank));
+        // missing the first flank entirely (starts after it ends):
+        // removed
+        assert!(!row_covers_flanks(1010, 1100, 1000, 1100, flank));
+        assert!(!row_covers_flanks(1095, 1200, 1000, 1100, flank));
+        // missing the last flank entirely (ends before it starts):
+        // removed
+        assert!(!row_covers_flanks(1000, 1090, 1000, 1100, flank));
+        // an interior row missing both flanks: removed
+        assert!(!row_covers_flanks(1020, 1080, 1000, 1100, flank));
+        // a disjoint row: removed
+        assert!(!row_covers_flanks(2000, 2100, 1000, 1100, flank));
+    }
+
+    #[test]
+    fn the_flank_percent_form_is_ceil_of_the_window_length() {
+        // 10% of a 10,036bp window is 1,004bp (ceil); 10% of 100bp is
+        // exactly 10bp.
+        assert_eq!(FlankOverlap::Percent(10.0).flank_bp(10_036), 1_004);
+        assert_eq!(FlankOverlap::Percent(10.0).flank_bp(100), 10);
+        assert_eq!(FlankOverlap::Percent(50.0).flank_bp(101), 51);
+        // at 100% the flank intervals span the whole window: the rule
+        // is presence in the window.
+        assert!(row_covers_flanks(1, 100, 0, 100, FlankOverlap::Percent(100.0)));
+        assert!(!row_covers_flanks(100, 200, 0, 100, FlankOverlap::Percent(100.0)));
+    }
+
+    #[test]
+    fn the_flank_rule_degenerates_to_presence_below_n() {
+        // THE DEGENERATE CASE (the owner's rule): a window shorter
+        // than N keeps every PRESENT row - even an interior fragment.
+        let flank = FlankOverlap::Bp(1000);
+        assert!(row_covers_flanks(20, 80, 0, 100, flank));
+        assert!(row_covers_flanks(0, 10, 0, 100, flank));
+        assert!(!row_covers_flanks(200, 300, 0, 100, flank));
+        // a window exactly N long: both flank intervals span the
+        // whole window - presence keeps every overlapping row (not
+        // the degenerate case - "shorter than N" - the same result
+        // either way).
+        assert!(row_covers_flanks(0, 1000, 0, 1000, flank));
+        assert!(row_covers_flanks(1, 999, 0, 1000, flank));
+        assert!(!row_covers_flanks(1000, 2000, 0, 1000, flank));
     }
 
     #[test]

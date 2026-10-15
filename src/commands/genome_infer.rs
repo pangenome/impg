@@ -141,6 +141,19 @@ pub enum Command {
         /// byte-identical to the committed receipts.
         #[arg(long, num_args = 1.., value_delimiter = ',')]
         exclude_paths: Vec<String>,
+        /// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the
+        /// presence semantics): N in bp (e.g. 10000) or a percent of the
+        /// window length (e.g. 10% -> ceil(pct x length)). A member row is
+        /// kept only if it carries aligned material over BOTH FLANK
+        /// intervals of the window's axis extent - the first and last
+        /// N bp, in the focal reference's own frame; a window shorter
+        /// than N degenerates to simple presence; the axis row never
+        /// excluded; the excluded rows loudly counted per locus.
+        /// Default: OFF (the committed candidate universe verbatim -
+        /// the default product path is byte-identical to the committed
+        /// receipts).
+        #[arg(long)]
+        flank_overlap: Option<realign_score::FlankOverlap>,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -678,6 +691,16 @@ pub enum Command {
         /// universe, loudly counted (the axis row never excluded). Default: none.
         #[arg(long, num_args = 1.., value_delimiter = ',')]
         exclude_paths: Vec<String>,
+        /// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the presence
+        /// semantics): N in bp (e.g. 10000) or a percent of the window length
+        /// (e.g. 10% -> ceil(pct x length)). A member row is kept only if it
+        /// carries aligned material over BOTH FLANK intervals of the window's
+        /// axis extent - the first and last N bp, in the focal reference's own
+        /// frame; a window shorter than N degenerates to simple presence; the
+        /// axis row never excluded; the excluded rows loudly counted per
+        /// partition. Default: OFF (the committed candidate universe verbatim).
+        #[arg(long)]
+        flank_overlap: Option<realign_score::FlankOverlap>,
         /// THE TEST MODE (assessment-side only): the truth haplotypes as panel path
         /// names, exactly two - the called-vs-truth sequence QV into
         /// calls.jsonl.truth-qv.jsonl per partition
@@ -814,6 +837,7 @@ pub fn run(command: Command) -> io::Result<()> {
             qv_biwfa,
             emit_sequences,
             exclude_paths,
+            flank_overlap,
             out_dir,
         } => genome::with_output_model(
             &out_dir,
@@ -846,6 +870,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     truth_qv: truth_qv.unwrap_or_default(),
                     product_sequences: emit_sequences,
                     exclude_paths,
+                    flank_overlap,
                     region,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
@@ -1692,6 +1717,7 @@ pub fn run(command: Command) -> io::Result<()> {
             partitions,
             region,
             exclude_paths,
+            flank_overlap,
             truth_qv,
             qv_biwfa,
             selection,
@@ -1780,6 +1806,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     // the emission is always on here.
                     emit_sequences: true,
                     exclude_paths: exclude_paths.clone(),
+                    flank_overlap,
                     out_dir: partition_out.clone(),
                 })?;
                 calls_receipts.push(serde_json::json!({
@@ -1802,6 +1829,7 @@ pub fn run(command: Command) -> io::Result<()> {
                 "partitions": partitions,
                 "region": region,
                 "exclude_paths": exclude_paths,
+                "flank_overlap": flank_overlap.map(|f| f.setting()),
                 "partitions_called": calls_receipts.len(),
                 "calls": calls_receipts,
                 "scope": "per-partition-diplotype-calls-reference-anchored",
