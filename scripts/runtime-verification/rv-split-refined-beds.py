@@ -50,7 +50,10 @@ for tid in sorted(bridge):
         open(f"{d}/split.rejected", "w").write("window-missing-from-query\n")
         continue
     stats["rows"] += len(rows)
-    axis = [r for r in rows if r[0].startswith("HG002#1#")]
+    slack = int(b[6]) - int(b[5])
+    axis = [r for r in rows
+            if r[0] == f"HG002#1#{b[1]}"
+            and r[1] < int(b[6]) + slack and r[2] > int(b[5]) - slack]
     hg2 = sum(1 for r in rows if r[0].startswith("HG002#2#"))
     stats["hg2_rows"] += hg2
     with open(f"{d}/locus.refined.bed", "w") as f:
@@ -61,11 +64,11 @@ for tid in sorted(bridge):
         json.dump({"rows": len(rows), "axis_rows": len(axis),
                    "hg002_2_rows": hg2}, f)
     if len(axis) == 0:
-        rejected.append((tid, "no-axis-row", len(rows), hg2))
-        open(f"{d}/split.rejected", "w").write("no-axis-row\n")
+        rejected.append((tid, "no-same-chrom-axis-row", len(rows), hg2))
+        open(f"{d}/split.rejected", "w").write("no-same-chrom-axis-row\n")
     elif len(axis) > 1:
-        rejected.append((tid, "multi-axis-row", len(rows), hg2))
-        open(f"{d}/split.rejected", "w").write("multi-axis-row\n")
+        rejected.append((tid, "multi-same-chrom-axis-row", len(rows), hg2))
+        open(f"{d}/split.rejected", "w").write("multi-same-chrom-axis-row\n")
     else:
         accepted.append(tid)
         with open(f"{d}/axis-path.txt", "w") as f:

@@ -17,25 +17,26 @@ export -f printf >/dev/null 2>&1 || true
 
 split_done_count() { ls "$Q"/shard-*.done 2>/dev/null | wc -l; }
 
-last_split=-1
 while true; do
+  # THE INCREMENTAL SPLIT (the pipeline overlap lever): windows are split as
+  # their per-window query-completion lines land - the prep pool starts hours
+  # before the query stage's shards complete
+  python3 "$RV/rv-split-incremental.py" "$RV" >> "$RV/prep-split.log" 2>&1
   n=$(split_done_count)
-  all_in=$(ls "$Q"/shard-*.bed 2>/dev/null | wc -l)
-  if [ "$n" -gt "$last_split" ]; then
-    # the split over every COMPLETED shard's output (idempotent recompute)
+  if [ -f "$Q/queries.done" ] && [ ! -f "$RV/prep/final-split.done" ]; then
+    # the closing reconciliation: the full split over the completed shards
     outs=()
     for d in "$Q"/shard-*.done; do
       [ -e "$d" ] || continue
       S=$(basename "$d" .done)
       outs+=("$Q/$S.out.bed")
     done
-    if [ "${#outs[@]}" -gt 0 ]; then
-      python3 "$RV/rv-split-refined-beds.py" "$RV" "$RV/../grid/bridge-accepted.bed" "${outs[@]}" \
-        >> "$RV/prep-split.log" 2>&1
-    fi
-    last_split=$n
-    echo "$(date -u +%FT%TZ) split at $n shards: $(tail -1 "$RV/prep-split.log")" >> "$RV/prep-master.log"
+    python3 "$RV/rv-split-refined-beds.py" "$RV" "$RV/../grid/bridge-accepted.bed" "${outs[@]}" \
+      >> "$RV/prep-split.log" 2>&1
+    touch "$RV/prep/final-split.done"
+    echo "$(date -u +%FT%TZ) FINAL split: $(tail -1 "$RV/prep-split.log")" >> "$RV/prep-master.log"
   fi
+  echo "$(date -u +%FT%TZ) $(tail -1 "$RV/prep-split.log")" >> "$RV/prep-master.log"
   # the prep pool over accepted, not-yet-done territories
   mapfile -t TODO < <(while read -r T; do
       [ -f "$RV/prep/$T/substrate.done" ] && continue
