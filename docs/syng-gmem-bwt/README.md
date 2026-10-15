@@ -10,6 +10,17 @@ graph is required.
 
 ## Documents
 
+- **[Yeast execution plan](yeast-plan.md)** — staged whole-pangenome chunk
+  catalog, sample index, in-graph/recombinant/hold-out validation, and genome
+  mosaic milestones.
+- **[Partition/inference contract and repair plan](partition-inference-contract.md)**
+  — current partition failure evidence, bounded scheduling repair, high-copy
+  states, occurrence ownership and shared-count/mosaic constraints.
+- **[Partition homology and graph-view diagnosis](partition-homology-diagnosis.md)**
+  — measured FastGA frequency dropout, smoothing loss of reverse-oriented
+  homology, node-sharing matrices and minimal regression controls.
+- **[Yeast baseline harness](yeast-baseline.md)** — implemented source inventory,
+  bounded explicit-query pilot and candidate diagnostics; not a genotyper.
 - **[Formal specification](genotyping.typ)** — the authoritative proposal:
   weighted substring counts, shared contextual features, exposure and off-locus
   background, contextual COSIGT/count scoring, and windowed mosaic inference.
@@ -38,7 +49,9 @@ the document and uploads the PDF as the `syng-gmem-bwt-genotyping` artifact.
 
 ## First implementation milestone
 
-Implement the sample count primitive and matching-coverage query, validate them
-against exhaustive counting on small MEM multisets, then compare contextual
-cosine with node-only coverage on fixed-truth HPRCv2 loci. The count-likelihood
-and chromosome-mosaic extensions require additional calibration and validation.
+Build and validate an impg-derived homologous chunk catalog over the yeast
+panel. Implement the sample count primitive and matching-coverage query, check
+them against exhaustive counting on small MEM multisets, then compare contextual
+cosine with node-only coverage on fixed-truth yeast genomes. HPRCv2 is a later
+scale test. The count-likelihood and chromosome-mosaic extensions require
+additional calibration and validation.

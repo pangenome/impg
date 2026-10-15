@@ -115,6 +115,22 @@ between separate gMEMs.
 
 = Locus candidates and contextual features
 
+== Partitions are not genotype or recombination boundaries
+
+Computational partitions organize source-coordinate occurrences, not disjoint
+sets of graph nodes. Refine them into homologous inference chunks with validated
+spanning candidates, orientation, boundaries and source-continuation links.
+Seed retention establishes source accounting, not homology or callable evidence.
+Recombination can occur inside these units. Keep core ownership separate from
+overlapping matching context, and count each predicted genomic occurrence once.
+
+Many panel homologs are alternative candidates, not sample copy number. Tandem
+repeat multiplicity belongs inside spanning candidate walks; dispersed copies
+retain their separate occurrence identities. Candidate equivalence classes must
+preserve source members and boundary compatibility, not just local feature
+vectors. The companion `partition-inference-contract.md` records the current
+yeast evidence, bounded scheduling repair and implementation gates.
+
 == Candidate genotypes
 
 For a locus $W$, retrieve homologous panel subwalks
@@ -197,6 +213,36 @@ Let $beta_f$ represent expected off-locus/error background. Estimate or constrai
 it independently of each candidate score; allowing arbitrary per-feature
 background to explain every mismatch would destroy identifiability.
 
+== Shared repeat factors across chunks
+
+For chunk $j$, let $n_(j h)$ be the selected chromosomal multiplicity of candidate
+$h$, with $sum_h n_(j h) = 2$ in a diploid. Let $a_(j h f)$ count feature
+occurrences assigned to that candidate's core under an explicit ownership rule;
+overlapping retrieval context must not duplicate a genomic occurrence. A joint
+extension is
+
+$ mu_f = d sum_(j=1)^J sum_(h in cal(H)_j)
+  e_(j h f) n_(j h) a_(j h f) + beta_f. $
+
+This expression applies only to occurrences whose existence and modeled
+exposure are determined by the owning chunk state. Unique ownership alone does
+not make boundary-spanning context local. A feature crossing a donor-switch
+boundary needs occurrence/exposure terms conditioned on the joint phased states
+on both sides (or all states spanned), or an explicit exclusion/approximation.
+
+For example, diploid mosaics `AB | ab` and `Ab | aB` have identical per-chunk
+multiplicities for left candidates `A/a` and right candidates `B/b`, but feature
+`AB` occurs once in the first and zero times in the second. Fixed candidate-local
+terms cannot distinguish them. Include this two-chunk counterexample in
+mathematical validation of boundary-feature scoring.
+
+Here exposure may depend on the candidate and must be calibrated. One global
+$C(f)$ supplies one shared evidence factor, rather than an independent emission
+for every chunk containing $f$. This does not make overlapping features
+statistically independent or identify copy placement when contexts cannot
+distinguish it. The expression is a proposed model, not an implemented or
+calibrated caller.
+
 = Local genotype scoring
 
 == Contextual COSIGT baseline
@@ -270,7 +316,11 @@ The transition model favors compatible source continuation and permits donor
 switches, preferably using genomic distance or a recombination map. If local
 scores are composite scores, this remains a penalized mosaic objective; their
 scale relative to transition penalties must be calibrated before a probabilistic
-interpretation is warranted.
+interpretation is warranted. The additive local-score form also requires
+consistent evidence allocation or local factors. Shared dispersed-repeat
+counts can couple distant chunks; ordinary local-state dynamic programming
+then requires joint treatment or an explicit approximation, not repeated use
+of the same count as independent evidence.
 
 Recombination can occur inside a chosen window. Permit subdivision and retain
 multiple local states rather than freezing a single early call. Reset inference
