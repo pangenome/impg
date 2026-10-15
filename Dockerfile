@@ -1,7 +1,7 @@
-FROM debian:bullseye-slim AS binary
+FROM debian:bookworm-slim AS binary
 
 LABEL description="impg: implicit pangenome graph"
-LABEL base_image="debian:bullseye-slim"
+LABEL base_image="debian:bookworm-slim"
 LABEL software="impg"
 LABEL about.home="https://github.com/pangenome/impg"
 LABEL about.license="SPDX:MIT"

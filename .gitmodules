@@ -4,4 +4,4 @@
 [submodule "vendor/syng"]
 	path = vendor/syng
 	url = https://github.com/pangenome/syng
-	branch = impg-integration
+	branch = main

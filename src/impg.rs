@@ -247,12 +247,116 @@ pub struct SortedRanges {
 }
 
 impl SortedRanges {
-    pub fn new(sequence_length: i32, min_distance: i32) -> Self {
+    pub fn with_distance(sequence_length: i32, min_distance: i32) -> Self {
         Self {
             ranges: Vec::new(),
             sequence_length,
             min_distance,
         }
+    }
+
+    pub fn new() -> Self {
+        Self {
+            ranges: Vec::new(),
+            sequence_length: 0,
+            min_distance: 0,
+        }
+    }
+
+    /// Insert a range, snapping its boundaries onto adjacent existing ranges
+    /// when they lie within `min_distance` (used for expansion ranges, to absorb
+    /// alignment boundary jitter while keeping novel territory).
+    ///
+    /// User-requested ranges must go through `insert`, which never snaps.
+    pub fn insert_with_boundary_snap(
+        &mut self,
+        new_range: (i32, i32),
+        min_distance: i32,
+    ) -> Vec<(i32, i32)> {
+        if min_distance <= 0 {
+            return self.insert(new_range);
+        }
+        self.insert_inner(new_range, min_distance)
+    }
+
+    fn insert_inner(&mut self, new_range: (i32, i32), min_distance: i32) -> Vec<(i32, i32)> {
+        let (mut start, mut end) = if new_range.0 <= new_range.1 {
+            (new_range.0, new_range.1)
+        } else {
+            (new_range.1, new_range.0)
+        };
+
+        // Find nearby ranges to potentially merge with
+        let i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range
+        if i > 0 && (start - self.ranges[i - 1].1).abs() < min_distance {
+            start = self.ranges[i - 1].1;
+        }
+
+        // Check next range
+        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < min_distance {
+            end = self.ranges[i].0;
+        }
+
+        // Return regions that don't overlap with existing ranges
+        let mut non_overlapping = Vec::new();
+        let mut current = start;
+
+        // Find the first range that could overlap
+        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range for overlap
+        if i > 0 && self.ranges[i - 1].1 > start {
+            i -= 1;
+        }
+
+        // Process all potentially overlapping ranges
+        while i < self.ranges.len() && current < end {
+            let (range_start, range_end) = self.ranges[i];
+            if range_start > end {
+                break;
+            }
+            if current < range_start {
+                non_overlapping.push((current, range_start));
+            }
+            current = max(current, range_end);
+            i += 1;
+        }
+
+        if current < end {
+            non_overlapping.push((current, end));
+        }
+
+        match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) | Err(pos) => {
+                // Check if we can merge with the previous range
+                if pos > 0 && self.ranges[pos - 1].1 >= start {
+                    self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
+                    self.merge_forward_from(pos - 1);
+                } else if pos < self.ranges.len() && end >= self.ranges[pos].0 {
+                    self.ranges[pos].0 = min(start, self.ranges[pos].0);
+                    self.ranges[pos].1 = max(end, self.ranges[pos].1);
+                    self.merge_forward_from(pos);
+                } else {
+                    self.ranges.insert(pos, (start, end));
+                }
+            }
+        }
+
+        // let adjusted_new_range = if new_range.0 <= new_range.1 {
+        //     (start, end)
+        // } else {
+        //     (end, start)
+        // };
+
+        non_overlapping
     }
 
     pub fn len(&self) -> usize {
@@ -284,14 +388,14 @@ impl SortedRanges {
         if i > 0 && (start - self.ranges[i - 1].1).abs() < self.min_distance {
             start = self.ranges[i - 1].1;
             i -= 1;
-        } else if start < self.min_distance {
+        } else if self.sequence_length > 0 && start < self.min_distance {
             start = 0;
         }
 
         // Check next range
         if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < self.min_distance {
             end = self.ranges[i].0;
-        } else if end > (self.sequence_length - self.min_distance) {
+        } else if self.sequence_length > 0 && end > (self.sequence_length - self.min_distance) {
             end = self.sequence_length;
         }
 
@@ -2050,7 +2154,7 @@ impl Impg {
             } else {
                 0
             };
-            SortedRanges::new(len, 0)
+            SortedRanges::with_distance(len, 0)
         })
     }
 

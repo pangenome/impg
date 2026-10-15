@@ -252,7 +252,7 @@ pub fn partition_alignments(
         .into_par_iter()
         .map(|id| {
             let len = impg.seq_index().get_len_from_id(id).unwrap();
-            (id, SortedRanges::new(len as i32, 0))
+            (id, SortedRanges::with_distance(len as i32, 0))
         })
         .collect();
 
@@ -261,7 +261,7 @@ pub fn partition_alignments(
         .into_par_iter()
         .map(|id| {
             let len = impg.seq_index().get_len_from_id(id).unwrap();
-            let mut ranges = SortedRanges::new(len as i32, 0);
+            let mut ranges = SortedRanges::with_distance(len as i32, 0);
             ranges.insert((0, len as i32));
             (id, ranges)
         })
@@ -1854,9 +1854,9 @@ mod tests {
     #[test]
     fn retained_seed_makes_progress_without_homologs() {
         let mut masked = FxHashMap::default();
-        masked.insert(0, SortedRanges::new(10_000, 0));
+        masked.insert(0, SortedRanges::with_distance(10_000, 0));
         let mut missing = FxHashMap::default();
-        let mut ranges = SortedRanges::new(10_000, 0);
+        let mut ranges = SortedRanges::with_distance(10_000, 0);
         ranges.insert((0, 10_000));
         missing.insert(0, ranges);
         let mut overlaps = Vec::new();
@@ -1882,12 +1882,12 @@ mod tests {
     fn retained_seed_respects_existing_masks_and_does_not_duplicate_self() {
         for merge_distance in [-1, 0, 1000] {
             let mut masked = FxHashMap::default();
-            let mut masks = SortedRanges::new(1000, 0);
+            let mut masks = SortedRanges::with_distance(1000, 0);
             masks.insert((0, 200));
             masks.insert((400, 600));
             masked.insert(1, masks);
             let mut missing = FxHashMap::default();
-            let mut ranges = SortedRanges::new(1000, 0);
+            let mut ranges = SortedRanges::with_distance(1000, 0);
             ranges.insert((200, 400));
             ranges.insert((600, 1000));
             missing.insert(1, ranges);

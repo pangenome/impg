@@ -4272,7 +4272,8 @@ struct TransitiveOpts {
     #[clap(long, value_parser)]
     min_transitive_len: Option<i32>,
 
-    /// Minimum distance between transitive ranges to consider on the same sequence
+    /// Minimum distance to an already-visited transitive range boundary below which the boundary is
+    /// snapped onto the new range, absorbing alignment boundary jitter while keeping novel territory
     #[arg(help_heading = "Transitive query options")]
     #[clap(long, value_parser, default_value_t = 10)]
     min_distance_between_ranges: i32,
@@ -5143,6 +5144,21 @@ GFA engine shorthand:
 
         #[clap(flatten)]
         engine_cli: EngineCliOpts,
+
+        /// Use MinHash sketching instead of POA-based MSA (much faster, approximate).
+        #[arg(help_heading = "Fast mode options")]
+        #[clap(long, action, conflicts_with = "engine_raw")]
+        fast: bool,
+
+        /// K-mer size for --fast (default: 15)
+        #[arg(help_heading = "Fast mode options")]
+        #[clap(long = "fast-kmer-size", value_parser, default_value_t = 15)]
+        fast_kmer_size: usize,
+
+        /// Sketch size cap for --fast (adaptive down from this based on median region length; default: 1000)
+        #[arg(help_heading = "Fast mode options")]
+        #[clap(long = "fast-sketch-size", value_parser, default_value_t = 1000)]
+        fast_sketch_size: usize,
 
         // --- PCA ---
         /// Perform PCA/MDS dimensionality reduction on the distance matrix
@@ -6598,6 +6614,26 @@ fn run() -> io::Result<()> {
 
             // ─── Syng query path ──────────────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
+                // The syng backend has its own transitive machinery and does not
+                // honor the alignment-backend transitive options; warn rather
+                // than silently no-op them.
+                let mut ignored_transitive_opts: Vec<&str> = Vec::new();
+                if query.transitive_opts.transitive_dfs {
+                    ignored_transitive_opts.push("--transitive-dfs");
+                }
+                if query.transitive_opts.effective_min_transitive_len() != 101 {
+                    ignored_transitive_opts.push("--min-transitive-len");
+                }
+                if query.transitive_opts.min_distance_between_ranges != 10 {
+                    ignored_transitive_opts.push("--min-distance-between-ranges");
+                }
+                if !ignored_transitive_opts.is_empty() {
+                    warn!(
+                        "syng index input ignores these alignment-backend transitive options, which have no effect here: {}",
+                        ignored_transitive_opts.join(", ")
+                    );
+                }
+
                 // Validate that alignment files are NOT also provided
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
@@ -7885,6 +7921,9 @@ fn run() -> io::Result<()> {
             polarize_n_prev,
             polarize_guide_samples,
             engine_cli,
+            fast,
+            fast_kmer_size,
+            fast_sketch_size,
         } => {
             initialize_threads_and_log(&common);
             query.validate_merge_distance("similarity")?;
@@ -7925,6 +7964,22 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Validate --fast-specific parameters before doing any expensive work
+            if fast {
+                if fast_kmer_size == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--fast-kmer-size must be greater than 0",
+                    ));
+                }
+                if fast_sketch_size == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--fast-sketch-size must be greater than 0",
+                    ));
+                }
+            }
+
             // Parse engine spec early
             let parsed_gfa_engine = engine_cli.parse_engine()?;
             let parsed_engine = parsed_gfa_engine.engine;
@@ -7937,13 +7992,15 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if parsed_engine == GfaEngine::Seqwish || parsed_engine == GfaEngine::Pggb {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa'.",
-                ));
+            if !fast {
+                if parsed_engine == GfaEngine::Seqwish || parsed_engine == GfaEngine::Pggb {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa' or --fast.",
+                    ));
+                }
+                engine_cli.validate_engine_params(parsed_engine)?;
             }
-            engine_cli.validate_engine_params(parsed_engine)?;
 
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -7952,7 +8009,8 @@ fn run() -> io::Result<()> {
             let force_large_region = gfa_maf_fasta.force_large_region;
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
-            // Setup POA/sequence resources (always required for similarity)
+            // Setup sequence resources (always needed).
+            // POA scoring is parsed regardless; it's dropped in --fast mode.
             let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
                 "gfa",
                 false,
@@ -7962,6 +8020,18 @@ fn run() -> io::Result<()> {
             )?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA scoring
+
+            // Build the similarity engine descriptor.
+            let similarity_engine = if fast {
+                similarity::SimilarityEngine::Mash {
+                    kmer_k: fast_kmer_size,
+                    sketch_cap: fast_sketch_size,
+                }
+            } else {
+                similarity::SimilarityEngine::Poa {
+                    scoring: scoring_params,
+                }
+            };
 
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
@@ -8081,7 +8151,7 @@ fn run() -> io::Result<()> {
                 &impg,
                 all_query_data,
                 &sequence_index,
-                scoring_params,
+                similarity_engine,
                 distances,
                 all,
                 delim,

@@ -60,9 +60,10 @@ separate homologs — they describe distinct biology.
 In `syng_transitive::distance_merge_anchored`, each `(target, strand)`
 group is merged using a bedtools `-d` semantic: two padded intervals
 whose target-axis gap is `≤ merge_distance` are coalesced and their
-anchor sets unioned. Honours the CLI's `-d` / `--min-distance-between-ranges`
-(default 0 = overlap-only, matching the existing PAF-based query
-convention).
+anchor sets unioned. Honours the CLI's `-d` / `--merge-distance`
+(default: no merging beyond overlap, matching the existing PAF-based
+query convention). The `--min-distance-between-ranges` flag is not
+honoured by the syng backend; a warning is emitted when it is passed.
 
 This collapses the syncmer-sparsity fragmentation: where padded hits
 don't quite overlap but sit within `-d` bp of each other on the target,
@@ -144,8 +145,8 @@ handle them correctly.
   `refine_boundaries`, `one_hop`, `query_transitive`.
 - `src/main.rs`: syng-index query routes through `query_transitive` for all
   output formats (bed, fasta, gbwt, gfa) when `--syng-raw` isn't set.
-  Passes `query.transitive_opts.min_distance_between_ranges` as the
-  merge distance.
+  Passes `-d` / `--merge-distance` (`effective_merge_distance()`) as the
+  merge distance. `--min-distance-between-ranges` is ignored with a warning.
 
 ## Known limitations
 

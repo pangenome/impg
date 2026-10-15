@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn missing_core_uses_half_open_intersections() {
-        let mut r = SortedRanges::new(100, 0);
+        let mut r = SortedRanges::with_distance(100, 0);
         r.insert((10, 20));
         r.insert((30, 31));
         r.insert((40, 50));
