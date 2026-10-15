@@ -8,7 +8,7 @@ use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
 use clap::{Args, Subcommand};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
 pub struct Common {
@@ -102,9 +102,17 @@ pub enum Command {
         #[arg(long)]
         derive_cache: PathBuf,
         /// The scored loci (window ids of the component, comma-separated,
-        /// distinct and sorted, e.g. 2,4,7)
-        #[arg(long)]
-        loci: String,
+        /// distinct and sorted, e.g. 2,4,7) — or state --region instead
+        /// (the two are mutually exclusive)
+        #[arg(long, required_unless_present = "region", conflicts_with = "region")]
+        loci: Option<String>,
+        /// THE REGION-AS-INTERFACE FILTER (the owner's ruling: "detect
+        /// any locus, any position, any allele"): a region chr:start-end
+        /// (0-based half-open, the component's own reference frame)
+        /// resolved against the component's axis rows to the covered
+        /// windows — the scored loci, in place of --loci
+        #[arg(long, required_unless_present = "loci", conflicts_with = "loci")]
+        region: Option<String>,
         /// The selection convention (default: the alignment-induced locality
         /// domain — the current best measured selection)
         #[arg(long, value_enum, default_value_t = realign_score::Selection::Locality)]
@@ -122,6 +130,17 @@ pub enum Command {
         /// product calls. Truth-free product output.
         #[arg(long)]
         emit_sequences: bool,
+        /// THE MASKING OPERATOR (the held-out experiment's stranger
+        /// filter, folded onto the call path): candidate rows whose
+        /// member path names match any of these fnmatch-style globs
+        /// (e.g. 'HG002#*') leave the candidate universe - loudly
+        /// counted per locus in the product record. THE AXIS ROW (the
+        /// --component lane) is never excluded: it is the coordinate
+        /// frame. Default (empty): no row is excluded, the committed
+        /// candidate universe verbatim - the default product path is
+        /// byte-identical to the committed receipts.
+        #[arg(long, num_args = 1.., value_delimiter = ',')]
+        exclude_paths: Vec<String>,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -547,6 +566,136 @@ pub enum Command {
         #[command(flatten)]
         options: CallOptions,
     },
+    /// THE THREE-STEP UI - PARTITION (the owner's UI doctrine: map -> partition -> call):
+    /// the PANEL-side step, built once per panel territory and REUSED by every sample.
+    /// Emits the partition's row into the ONE partition artifact - the four-column BED
+    /// (chrom, start, end, PARTITION_NAME) - and builds the panel-side precomputes keyed
+    /// by the partition name under <out-dir>/<name>/: the local syng (the committed
+    /// recipe: k=63, s=8, seed 7, pos64), the window beds (regenerated verbatim from the
+    /// committed locality maps - the region grid), and the call-path routes inventory
+    /// (derive-routes, the lookup lever). The member subset per partition is DERIVED from
+    /// the reference range (the --sources fasta IS the range's member subset); the
+    /// locality maps are the durable panel-side precompute and are REGISTERED, never
+    /// rebuilt here.
+    Partition {
+        /// The partition name (the BED4 fourth column; keys every panel-side precompute)
+        #[arg(long)]
+        name: String,
+        /// The reference range chromosome (the BED4 first column)
+        #[arg(long)]
+        chrom: String,
+        /// The reference range start, 0-based half-open (the BED4 second column)
+        #[arg(long)]
+        start: u64,
+        /// The reference range end (the BED4 third column)
+        #[arg(long)]
+        end: u64,
+        /// The member-subset fasta for the range (the panel sequences overlapping it;
+        /// the substrate of the local syng)
+        #[arg(long)]
+        sources: PathBuf,
+        /// The component lane - the reference axis path (e.g. HG002#1#chr1:start-end)
+        #[arg(long)]
+        component: String,
+        /// The reference axis JSON (the committed panel-side asset)
+        #[arg(long)]
+        axis: PathBuf,
+        /// The locality map directory (windowN.gfa.map.json - the committed window grid;
+        /// the window beds are regenerated from it verbatim)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The census receipt for the routes cross-check (any sample's census against
+        /// this panel; the routing bind)
+        #[arg(long)]
+        census: PathBuf,
+        /// The read lengths for the routes inventory
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = vec![148u64])]
+        read_lengths: Vec<u64>,
+        /// The partitions root output directory (partitions.bed + <name>/)
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// THE THREE-STEP UI - MAP (the owner's UI doctrine: map -> partition -> call): the
+    /// SAMPLE-side step, run ONCE per sample: the projection. Cuts every (selected)
+    /// partition's territory evidence out of the sample's projection - the per-partition
+    /// census, record-derivation cache and reads FASTA the CALL step consumes. The
+    /// projection itself (the shard directory) is the sample's map at the whole-sample
+    /// level and is built once per sample (sample_projection project + dedup); pass its
+    /// directory to reuse a committed projection. --local-derive selects the corrected
+    /// cut recipe (route globally, attribute locally) for territories that require it.
+    Map {
+        /// The GLOBAL panel syng prefix (the projection's panel)
+        #[arg(long)]
+        panel: String,
+        /// The global panel AGC (the projection's --sequence-files input)
+        #[arg(long)]
+        agc: PathBuf,
+        /// The sample's projection shard directory (the sample's map, built once:
+        /// sample_projection project + dedup)
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// The partitions root (the PARTITION step's out-dir: partitions.bed + <name>/)
+        #[arg(long)]
+        partitions: PathBuf,
+        /// The sample FASTQ (recorded in the map manifest; the CALL step's reads input)
+        #[arg(long)]
+        reads: PathBuf,
+        /// The region filter: a comma-list of partition names, or chr:start-end
+        /// (the BED rows overlapping the range)
+        #[arg(long)]
+        region: Option<String>,
+        /// The corrected cut recipe (route globally, attribute locally - the
+        /// pilot-class territory); default: the committed original recipe
+        #[arg(long, default_value_t = false)]
+        local_derive: bool,
+        /// New output directory (the map root: <name>/ per partition + manifest.json)
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// THE THREE-STEP UI - CALL (the owner's UI doctrine: map -> partition -> call): the
+    /// per-sample call over the partitions: consumes the MAP step's cuts + the PARTITION
+    /// step's panel-side precomputes and calls every (selected) partition - the per-locus
+    /// diplotype calls with the REFERENCE-ANCHORED outputs (the per-locus hap1/hap2
+    /// diplotype sequences - the emission - the model-internal QUAL, the dosage fields).
+    /// --region selects on demand: partition names, or any chr:start-end range resolved
+    /// against the partitions' own reference frames ("detect any locus, any position,
+    /// any allele"); --exclude-paths is the masking operator; --truth-qv the test mode.
+    /// Named call-region because the literal `call` name is held by the legacy
+    /// provisional presence-compatibility command (the committed CLI paths are immutable).
+    CallRegion {
+        /// The MAP step's output directory (the per-partition cuts + the manifest)
+        #[arg(long)]
+        map: PathBuf,
+        /// The partitions root (the PARTITION step's out-dir: partitions.bed + <name>/)
+        #[arg(long)]
+        partitions: PathBuf,
+        /// The region filter: a comma-list of partition names, or chr:start-end (the
+        /// covered windows of every overlapping partition)
+        #[arg(long)]
+        region: Option<String>,
+        /// THE MASKING OPERATOR (the held-out experiment's stranger filter): candidate
+        /// rows whose member path names match any fnmatch-style glob leave the candidate
+        /// universe, loudly counted (the axis row never excluded). Default: none.
+        #[arg(long, num_args = 1.., value_delimiter = ',')]
+        exclude_paths: Vec<String>,
+        /// THE TEST MODE (assessment-side only): the truth haplotypes as panel path
+        /// names, exactly two - the called-vs-truth sequence QV into
+        /// calls.jsonl.truth-qv.jsonl per partition
+        #[arg(long, num_args = 2)]
+        truth_qv: Option<Vec<String>>,
+        /// The pinned biWFA alignment helper for the --truth-qv test mode
+        #[arg(long)]
+        qv_biwfa: Option<PathBuf>,
+        /// The selection convention (default: the alignment-induced locality domain)
+        #[arg(long, value_enum, default_value_t = realign_score::Selection::Locality)]
+        selection: realign_score::Selection,
+        /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
+        #[arg(long, default_value_t = 64.0)]
+        rss_budget_gib: f64,
+        /// New output directory (the calls root: <name>/ per partition)
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
 }
 fn input(source: CatalogSource) -> io::Result<catalog::CatalogInput> {
     match (source.bed_dir, source.groups) {
@@ -658,11 +807,13 @@ pub fn run(command: Command) -> io::Result<()> {
             reads,
             derive_cache,
             loci,
+            region,
             selection,
             rss_budget_gib,
             truth_qv,
             qv_biwfa,
             emit_sequences,
+            exclude_paths,
             out_dir,
         } => genome::with_output_model(
             &out_dir,
@@ -676,7 +827,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     census,
                     reads,
                     derive_cache,
-                    loci,
+                    loci: loci.unwrap_or_default(),
                     // The instrument receipts land beside the product
                     // calls under the CLI's own output directory (the
                     // translation-gate and checker artifacts).
@@ -694,6 +845,8 @@ pub fn run(command: Command) -> io::Result<()> {
                     product_calls: Some(out_dir.join("calls.jsonl")),
                     truth_qv: truth_qv.unwrap_or_default(),
                     product_sequences: emit_sequences,
+                    exclude_paths,
+                    region,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
                     }),
@@ -1246,5 +1399,551 @@ pub fn run(command: Command) -> io::Result<()> {
             stats["catalog_bytes"] = std::fs::metadata(catalog_path)?.len().into();
             Ok(stats)
         }),
+
+        // ------------------------------------------------------------------
+        // THE THREE-STEP UI (the owner's doctrine: map -> partition ->
+        // call). Thin wrappers over the existing machinery - every
+        // step composes the committed commands, so every committed
+        // gate applies verbatim underneath.
+        // ------------------------------------------------------------------
+        Command::Partition {
+            name,
+            chrom,
+            start,
+            end,
+            sources,
+            component,
+            axis,
+            partition_graphs,
+            census,
+            read_lengths,
+            out_dir,
+        } => {
+            ensure(start < end, format!("the partition range is empty: {chrom}:{start}-{end}"))?;
+            std::fs::create_dir_all(&out_dir)?;
+            // THE ONE PARTITION ARTIFACT: the four-column BED
+            // (chrom, start, end, PARTITION_NAME). Each row a named
+            // reference range; a name is admitted once, and same-
+            // chromosome rows never overlap (the territory grid).
+            let bed = out_dir.join("partitions.bed");
+            let mut bed_rows = read_partitions_bed(&bed)?;
+            ensure(
+                !bed_rows.iter().any(|row| row.3 == name),
+                format!("the partition name {name:?} is already in {}", bed.display()),
+            )?;
+            for row in &bed_rows {
+                ensure(
+                    row.0 != chrom || row.2 <= start || end <= row.1,
+                    format!(
+                        "the partition {chrom}:{start}-{end} overlaps the existing \
+                         partition {} ({}:{}-{})",
+                        row.3,
+                        row.0,
+                        row.1,
+                        row.2
+                    ),
+                )?;
+            }
+            let dir = out_dir.join(&name);
+            ensure(
+                !dir.exists(),
+                format!(
+                    "the partition directory {} already exists (the committed-receipt \
+                     immutability discipline); remove it first if it is a discarded run",
+                    dir.display()
+                ),
+            )?;
+            std::fs::create_dir_all(&dir)?;
+            // The panel-side precompute 1: the local syng (the
+            // committed recipe verbatim: k=63, s=8, seed 7, pos64).
+            let syng = dir.join("locus-pos64.syng");
+            let started = std::time::Instant::now();
+            run_self(&[
+                "syng",
+                "-f",
+                &sources.display().to_string(),
+                "--syncmer-length",
+                "63",
+                "--smer-length",
+                "8",
+                "--syncmer-seed",
+                "7",
+                "--position-sample-rate",
+                "64",
+                "-o",
+                &syng.display().to_string(),
+            ])?;
+            let syng_seconds = started.elapsed().as_secs_f64();
+            // The panel-side precompute 2: the window beds - the
+            // region grid WITHIN the territory, regenerated verbatim
+            // from the committed locality maps (the maps are the
+            // durable panel-side asset; the member rows per window in
+            // the map's own order).
+            let beds = dir.join("beds");
+            std::fs::create_dir_all(&beds)?;
+            let mut windows = 0u64;
+            let started = std::time::Instant::now();
+            let mut maps: Vec<(u32, Vec<(String, u64, u64)>)> = Vec::new();
+            for entry in std::fs::read_dir(&partition_graphs)? {
+                let path = entry?.path();
+                let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !file.ends_with(".gfa.map.json") {
+                    continue;
+                }
+                let map: serde_json::Value = genome::read_json(&path)?;
+                let partition = map["partition"]
+                    .as_u64()
+                    .ok_or_else(|| invalid(format!("a locality map carries no partition id: {file}")))?
+                    as u32;
+                let mut rows = Vec::new();
+                for member in map["members"].as_array().unwrap_or(&Vec::new()) {
+                    let (path_name, mstart, mend) = (
+                        member["path_name"].as_str(),
+                        member["start"].as_u64(),
+                        member["end"].as_u64(),
+                    );
+                    if let (Some(path_name), Some(mstart), Some(mend)) = (path_name, mstart, mend)
+                    {
+                        rows.push((path_name.to_string(), mstart, mend));
+                    }
+                }
+                ensure(
+                    !rows.is_empty(),
+                    format!("a locality map carries no member rows: {file}"),
+                )?;
+                windows += 1;
+                maps.push((partition, rows));
+            }
+            ensure(
+                !maps.is_empty(),
+                format!("no locality maps in {}", partition_graphs.display()),
+            )?;
+            maps.sort_by_key(|(partition, _)| *partition);
+            for (partition, rows) in &maps {
+                let mut text = String::new();
+                for (path_name, mstart, mend) in rows {
+                    text.push_str(&format!("{path_name}\t{mstart}\t{mend}\n"));
+                }
+                std::fs::write(beds.join(format!("partition{partition}.bed")), text)?;
+            }
+            let beds_seconds = started.elapsed().as_secs_f64();
+            // The panel-side precompute 3: the call-path routes
+            // inventory (the lookup lever; the census cross-check).
+            let routes = dir.join("routes");
+            let read_lengths = read_lengths
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let started = std::time::Instant::now();
+            run_self(&[
+                "genome-infer",
+                "derive-routes",
+                "--panel",
+                &syng.display().to_string(),
+                "--sources",
+                &sources.display().to_string(),
+                "--read-lengths",
+                &read_lengths,
+                "--census",
+                &census.display().to_string(),
+                "--out-dir",
+                &routes.display().to_string(),
+            ])?;
+            let routes_seconds = started.elapsed().as_secs_f64();
+            // THE REGISTRY (keyed by the partition name): everything
+            // the MAP and CALL steps consume.
+            let manifest = serde_json::json!({
+                "version": 1,
+                "name": name,
+                "chrom": chrom,
+                "start": start,
+                "end": end,
+                "sources": sources,
+                "component": component,
+                "axis": axis,
+                "partition_graphs": partition_graphs,
+                "beds": beds,
+                "syng": syng,
+                "routes": routes,
+                "windows": windows,
+            });
+            genome::write_json(&dir.join("partition.json"), &manifest)?;
+            let row = format!("{chrom}\t{start}\t{end}\t{name}\n");
+            let mut text = std::fs::read_to_string(&bed).unwrap_or_default();
+            text.push_str(&row);
+            std::fs::write(&bed, text)?;
+            bed_rows.push((chrom.clone(), start, end, name.clone()));
+            let receipt = serde_json::json!({
+                "partition": name,
+                "bed": bed,
+                "bed4_rows": bed_rows.len(),
+                "windows": windows,
+                "syng_seconds": syng_seconds,
+                "beds_seconds": beds_seconds,
+                "routes_seconds": routes_seconds,
+                "routes_receipt": genome::reconstruction::fingerprint(
+                    &routes.join("manifest.json"),
+                )?,
+                "manifest": manifest,
+                "scope": "panel-side-precomputes-keyed-by-partition-name",
+            });
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
+        Command::Map {
+            panel,
+            agc,
+            shards_dir,
+            partitions,
+            reads,
+            region,
+            local_derive,
+            out_dir,
+        } => {
+            let bed_rows = read_partitions_bed(&partitions.join("partitions.bed"))?;
+            ensure(
+                !bed_rows.is_empty(),
+                format!("no partitions in {}", partitions.display()),
+            )?;
+            let selected = select_partition_rows(&bed_rows, region.as_deref())?;
+            ensure(
+                !out_dir.exists(),
+                format!(
+                    "the map directory {} already exists (the committed-receipt \
+                     immutability discipline)",
+                    out_dir.display()
+                ),
+            )?;
+            std::fs::create_dir_all(&out_dir)?;
+            let mut cut_receipts = Vec::new();
+            for index in &selected {
+                let (chrom, start, end, name) = &bed_rows[*index];
+                let manifest: serde_json::Value =
+                    genome::read_json(&partitions.join(name).join("partition.json"))?;
+                let cut_dir = out_dir.join(name);
+                ensure(
+                    !cut_dir.exists(),
+                    format!("the cut directory {} already exists", cut_dir.display()),
+                )?;
+                let mut command = std::process::Command::new(sample_projection_bin()?);
+                command
+                    .arg("cut")
+                    .arg("--global-panel").arg(&panel)
+                    .arg("--panel").arg(manifest["syng"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no syng"))?)
+                    .arg("--axis").arg(manifest["axis"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no axis"))?)
+                    .arg("--bed-directory").arg(manifest["beds"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no beds"))?)
+                    .arg("--component").arg(manifest["component"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no component"))?)
+                    .arg("--sources").arg(manifest["sources"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no sources"))?)
+                    .arg("--agc").arg(&agc)
+                    .arg("--shards-dir").arg(&shards_dir)
+                    .arg("--out-dir").arg(&cut_dir);
+                if local_derive {
+                    command.env("IMPG_CUT_LOCAL_DERIVE", "1");
+                }
+                let started = std::time::Instant::now();
+                let status = command
+                    .status()
+                    .map_err(|e| invalid(format!("the sample_projection helper failed to launch: {e}")))?;
+                ensure(
+                    status.success(),
+                    format!("the cut of partition {name} failed (status {status:?})"),
+                )?;
+                let seconds = started.elapsed().as_secs_f64();
+                let record = serde_json::json!({
+                    "partition": name,
+                    "chrom": chrom,
+                    "start": start,
+                    "end": end,
+                    "seconds": seconds,
+                    "census": genome::reconstruction::fingerprint(
+                        &cut_dir.join("cut-census.jsonl"))?,
+                    "cache": {
+                        "path": cut_dir.join("cut-cache.bin"),
+                        "bytes": std::fs::metadata(cut_dir.join("cut-cache.bin"))?.len(),
+                    },
+                });
+                println!("=== map: partition {name} cut ({seconds:.1}s)");
+                cut_receipts.push(record);
+            }
+            let manifest = serde_json::json!({
+                "version": 1,
+                "panel": panel,
+                "shards_dir": shards_dir,
+                "reads": reads,
+                "partitions": selected
+                    .iter()
+                    .map(|&i| bed_rows[i].3.clone())
+                    .collect::<Vec<_>>(),
+                "cuts": cut_receipts,
+                "local_derive": local_derive,
+            });
+            genome::write_json(&out_dir.join("manifest.json"), &manifest)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+            Ok(())
+        }
+        Command::CallRegion {
+            map,
+            partitions,
+            region,
+            exclude_paths,
+            truth_qv,
+            qv_biwfa,
+            selection,
+            rss_budget_gib,
+            out_dir,
+        } => {
+            let map_manifest: serde_json::Value = genome::read_json(&map.join("manifest.json"))?;
+            let reads: PathBuf = map_manifest["reads"]
+                .as_str()
+                .ok_or_else(|| invalid("the map manifest carries no reads"))?
+                .into();
+            let bed_rows = read_partitions_bed(&partitions.join("partitions.bed"))?;
+            let selected = select_partition_rows(&bed_rows, region.as_deref())?;
+            ensure(
+                !out_dir.exists(),
+                format!(
+                    "the calls directory {} already exists (the committed-receipt \
+                     immutability discipline)",
+                    out_dir.display()
+                ),
+            )?;
+            std::fs::create_dir_all(&out_dir)?;
+            let mut calls_receipts = Vec::new();
+            for index in &selected {
+                let (_, _, _, name) = &bed_rows[*index];
+                let manifest: serde_json::Value =
+                    genome::read_json(&partitions.join(name).join("partition.json"))?;
+                let component = manifest["component"].as_str()
+                    .ok_or_else(|| invalid("the partition manifest carries no component"))?
+                    .to_string();
+                let graphs: PathBuf = manifest["partition_graphs"].as_str()
+                    .ok_or_else(|| invalid("the partition manifest carries no graphs"))?
+                    .into();
+                // THE SCORED LOCI: every window of the partition, or
+                // the --region range resolved against the partition's
+                // own reference frame ("any locus, any position").
+                let axis_rows = realign_score::component_axis_rows(&graphs, &component)?;
+                let loci: Vec<u32> = match region_filter_range(region.as_deref())? {
+                    Some(range) => {
+                        let resolved =
+                            realign_score::resolve_region_loci(&component, &axis_rows, range)?;
+                        eprintln!(
+                            "[call] partition {name}: region {range:?} resolved to loci \
+                             {resolved:?} (frame {component})"
+                        );
+                        resolved
+                    }
+                    None => (0..axis_rows.len() as u32).collect(),
+                };
+                if loci.is_empty() {
+                    println!(
+                        "=== call: partition {name} skipped (the region covers no window)"
+                    );
+                    continue;
+                }
+                let loci = loci
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "=== call: partition {name} ({loci} windows, frame {component})"
+                );
+                let partition_out = out_dir.join(name);
+                run(Command::CallDiplotypes {
+                    panel: manifest["syng"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no syng"))?
+                        .into(),
+                    routes: manifest["routes"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no routes"))?
+                        .into(),
+                    partition_graphs: graphs,
+                    component,
+                    census: map.join(name).join("cut-census.jsonl"),
+                    reads: reads.clone(),
+                    derive_cache: map.join(name).join("cut-cache.bin"),
+                    loci: Some(loci),
+                    region: None,
+                    selection: selection.clone(),
+                    rss_budget_gib,
+                    truth_qv: truth_qv.clone(),
+                    qv_biwfa: qv_biwfa.clone(),
+                    // THE CALL STEP'S REFERENCE-ANCHORED PRODUCT: the
+                    // per-locus hap1/hap2 diplotype sequences are
+                    // part of the call (the owner's doctrine), so
+                    // the emission is always on here.
+                    emit_sequences: true,
+                    exclude_paths: exclude_paths.clone(),
+                    out_dir: partition_out.clone(),
+                })?;
+                calls_receipts.push(serde_json::json!({
+                    "partition": name,
+                    "calls": genome::reconstruction::fingerprint(
+                        &partition_out.join("calls.jsonl"))?,
+                    "sequences": genome::reconstruction::fingerprint(
+                        &partition_out.join("calls.jsonl.sequences.jsonl"))?,
+                    "truth_qv_test_mode": if truth_qv.is_some() {
+                        genome::reconstruction::fingerprint(
+                            &partition_out.join("calls.jsonl.truth-qv.jsonl"))?
+                    } else {
+                        serde_json::Value::Null
+                    },
+                }));
+            }
+            let receipt = serde_json::json!({
+                "version": 1,
+                "map": map,
+                "partitions": partitions,
+                "region": region,
+                "exclude_paths": exclude_paths,
+                "partitions_called": calls_receipts.len(),
+                "calls": calls_receipts,
+                "scope": "per-partition-diplotype-calls-reference-anchored",
+            });
+            genome::write_json(&out_dir.join("manifest.json"), &receipt)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
     }
+}
+
+fn ensure(ok: bool, message: impl Into<String>) -> io::Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(message))
+    }
+}
+
+/// THE BED4 READER (the one partition artifact: chrom, start, end,
+/// PARTITION_NAME - each row a named reference range).
+fn read_partitions_bed(path: &Path) -> io::Result<Vec<(String, u64, u64, String)>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut rows = Vec::new();
+    for (line_number, line) in text.lines().enumerate() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        ensure(
+            fields.len() == 4 && !fields.iter().any(|f| f.is_empty()),
+            format!(
+                "invalid BED4 row {} in {}: expected chrom\\tstart\\tend\\tPARTITION_NAME",
+                line_number + 1,
+                path.display()
+            ),
+        )?;
+        let (start, end) = (fields[1].parse::<u64>(), fields[2].parse::<u64>());
+        let (start, end) = match (start, end) {
+            (Ok(start), Ok(end)) => (start, end),
+            _ => {
+                return Err(invalid(format!(
+                    "invalid BED4 coordinates in row {}: {}",
+                    line_number + 1,
+                    line
+                )))
+            }
+        };
+        rows.push((fields[0].to_string(), start, end, fields[3].to_string()));
+    }
+    Ok(rows)
+}
+
+/// THE REGION FILTER (the owner's ruling: the interface is
+/// coordinates): a comma-list of partition names selects those BED
+/// rows; a chr:start-end range selects the BED rows overlapping it;
+/// absent selects every row.
+fn select_partition_rows(
+    bed_rows: &[(String, u64, u64, String)],
+    region: Option<&str>,
+) -> io::Result<Vec<usize>> {
+    let Some(region) = region else {
+        return Ok((0..bed_rows.len()).collect());
+    };
+    if let Some(range) = region_filter_range(Some(region))? {
+        let (chrom, bounds) = range
+            .split_once(':')
+            .ok_or_else(|| invalid("the region must be chr:start-end: {region:?}"))?;
+        let (lo, hi) = bounds
+            .split_once('-')
+            .and_then(|(s, e)| Some((s.parse::<u64>().ok()?, e.parse::<u64>().ok()?)))
+            .ok_or_else(|| invalid("the region must be chr:start-end: {region:?}"))?;
+        let selected: Vec<usize> = bed_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.0 == chrom && row.1 < hi && row.2 > lo)
+            .map(|(index, _)| index)
+            .collect();
+        ensure(
+            !selected.is_empty(),
+            format!("the region {region:?} covers no partition of the BED"),
+        )?;
+        return Ok(selected);
+    }
+    let names: Vec<&str> = region.split(',').map(|s| s.trim()).collect();
+    ensure(
+        names.iter().all(|name| bed_rows.iter().any(|row| row.3 == *name)),
+        "the region names {region:?} name partitions absent from the BED",
+    )?;
+    let selected: Vec<usize> = bed_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| names.contains(&row.3.as_str()))
+        .map(|(index, _)| index)
+        .collect();
+    ensure(
+            !selected.is_empty(),
+            format!("the region {region:?} selects no partition"),
+        )?;
+    Ok(selected)
+}
+
+/// The region's coordinate-range form, when it is one: a spec
+/// carrying `chrom:` is a chr:start-end range, not a name list.
+fn region_filter_range(region: Option<&str>) -> io::Result<Option<&str>> {
+    match region {
+        None => Ok(None),
+        Some(region) => Ok(region.contains(':').then_some(region)),
+    }
+}
+
+/// Run this binary with the given subcommand args (the thin-wrapper
+/// composition: the committed commands, as they are, in-process
+/// semantics identical to typing them).
+fn run_self(args: &[&str]) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let status = std::process::Command::new(&exe)
+        .args(args)
+        .status()
+        .map_err(|e| invalid(format!("failed to launch {}: {e}", exe.display())))?;
+    ensure(
+        status.success(),
+        format!("the command {:?} failed (status {status:?})", args),
+    )
+}
+
+/// The sample_projection helper binary (the projection machinery:
+/// project + dedup + cut), shipped beside the impg binary.
+fn sample_projection_bin() -> io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| invalid("no parent of the running binary"))?;
+    let candidate = dir.join("examples").join("sample_projection");
+    ensure(
+        candidate.is_file(),
+        format!(
+            "the sample_projection helper binary is absent at {} \
+             (build it: cargo build --release --bin impg --example sample_projection)",
+            candidate.display()
+        ),
+    )?;
+    Ok(candidate)
 }

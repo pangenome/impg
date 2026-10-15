@@ -445,6 +445,24 @@ pub struct Options {
     /// truth sequence QV lives only behind --truth-qv).
     #[arg(long, requires = "product_calls", default_value_t = false)]
     pub product_sequences: bool,
+    /// THE MASKING OPERATOR (the held-out experiment's stranger filter,
+    /// folded onto the call path; the region-as-interface flag set):
+    /// candidate rows whose member path names match any of these
+    /// fnmatch-style globs (e.g. 'HG002#*') leave the candidate universe
+    /// - loudly counted per locus in the product record and the receipt.
+    /// THE AXIS ROW (the --component lane) is never excluded: it is the
+    /// coordinate frame. Default (empty): no row is excluded, the
+    /// committed candidate universe verbatim.
+    #[arg(long, num_args = 1.., value_delimiter = ',')]
+    pub exclude_paths: Vec<String>,
+    /// THE REGION-AS-INTERFACE FILTER (the owner's ruling: "detect
+    /// any locus, any position, any allele"): a region `chr:start-end`
+    /// (0-based half-open, the component's own reference frame, e.g.
+    /// chr1:4700000-4800000) resolved against the component's axis
+    /// rows to the covered windows - the scored loci, in place of
+    /// --loci. Conflicts with --loci.
+    #[arg(long, conflicts_with = "loci")]
+    pub region: Option<String>,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -2889,6 +2907,121 @@ pub fn fold_sequence_string(seq: &[u8]) -> io::Result<String> {
     Ok(seq.iter().map(|&b| b as char).collect())
 }
 
+/// A minimal fnmatch-style glob matcher (`*` any run, `?` one char;
+/// no escapes) for the call-locus --exclude-paths operator (the
+/// held-out masking experiment's stranger filter, folded onto the
+/// call path: candidate rows whose member path names match any glob
+/// leave the candidate universe, loudly counted).
+pub fn path_matches_glob(path_name: &str, pattern: &str) -> bool {
+    fn inner(name: &[u8], pattern: &[u8]) -> bool {
+        match pattern.first() {
+            None => name.is_empty(),
+            Some(b'*') => (1..=name.len())
+                .rev()
+                .any(|k| inner(&name[k..], &pattern[1..]))
+                || inner(name, &pattern[1..]),
+            Some(b'?') => !name.is_empty() && inner(&name[1..], &pattern[1..]),
+            Some(&b) => name.first() == Some(&b) && inner(&name[1..], &pattern[1..]),
+        }
+    }
+    inner(path_name.as_bytes(), pattern.as_bytes())
+}
+
+/// The component's axis rows (start, end), in axis order, from the
+/// locality maps (windowN.gfa.map.json) - the same rows the scoring
+/// path derives from --partition-graphs (the axis intervals of the
+/// component lane, sorted by start). One spelling of the axis for
+/// every region-resolution site.
+pub fn component_axis_rows(
+    partition_graphs: &std::path::Path,
+    component: &str,
+) -> io::Result<Vec<(u64, u64)>> {
+    let mut rows: Vec<(u64, u64, u32)> = Vec::new();
+    for entry in std::fs::read_dir(partition_graphs)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.ends_with(".gfa.map.json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)?;
+        let map: PartitionMap = serde_json::from_str(&text)?;
+        for axis in map.members.iter().filter(|m| m.path_name == component) {
+            rows.push((axis.start, axis.end, map.partition));
+        }
+    }
+    ensure(
+        !rows.is_empty(),
+        &format!(
+            "the component {component:?} carries no axis rows in {:?}",
+            partition_graphs
+        ),
+    )?;
+    rows.sort_by_key(|&(start, end, partition)| (start, end, partition));
+    Ok(rows.into_iter().map(|(start, end, _)| (start, end)).collect())
+}
+
+/// THE REGION-AS-INTERFACE RESOLVER (the owner's ruling: the CLI's
+/// interface is COORDINATES - "detect any locus, any position, any
+/// allele"): a region `chr:start-end` (0-based half-open, the panel
+/// path-naming frame) resolves against the component's axis rows
+/// (the coordinate frame) to the covered windows' locus ids - the
+/// component-local indices of the rows that overlap the region in
+/// the component's own path frame. The returned loci are in axis
+/// order, distinct and sorted by construction - the --loci
+/// convention verbatim.
+pub fn resolve_region_loci(
+    component: &str,
+    axis_rows: &[(u64, u64)],
+    region: &str,
+) -> io::Result<Vec<u32>> {
+    let invalid_region = || invalid(&format!(
+        "the region must be chr:start-end (0-based half-open, the \
+         panel path-naming frame): {region:?}"));
+    let (chrom, bounds) = region.split_once(':').ok_or_else(invalid_region)?;
+    let (lo, hi) = bounds.split_once('-').ok_or_else(invalid_region)?;
+    let (lo, hi): (u64, u64) = (lo.parse().map_err(|_| invalid_region())?,
+        hi.parse().map_err(|_| invalid_region())?);
+    ensure(lo < hi, "the region is empty: {region:?}")?;
+    // the component's own path frame: its name ends chr:start-end
+    let (name, interval) = component
+        .rsplit_once(':')
+        .ok_or_else(|| invalid(&format!(
+            "the component name carries no coordinate frame: {component:?}")))?;
+    let component_chrom = name
+        .rsplit_once('#')
+        .map(|(_, chrom)| chrom)
+        .ok_or_else(|| invalid(&format!(
+            "the component name carries no chromosome: {component:?}")))?;
+    ensure(component_chrom == chrom,
+        "the region's chromosome {chrom:?} is not the axis frame {component_chrom:?}")?;
+    let (offset, end): (u64, u64) = interval
+        .split_once('-')
+        .and_then(|(s, e)| Some((s.parse().ok()?, e.parse().ok()?)))
+        .ok_or_else(|| invalid(&format!(
+            "the component name carries no interval: {component:?}")))?;
+    ensure(lo >= offset && hi <= end,
+        "the region {region:?} is outside the axis frame {component:?}")?;
+    let (lo, hi) = (lo - offset, hi - offset);
+    let mut loci = Vec::new();
+    for (index, (start, end)) in axis_rows.iter().enumerate() {
+        if *start < hi && *end > lo {
+            loci.push(index as u32);
+        }
+    }
+    ensure(!loci.is_empty(),
+        "the region {region:?} covers no axis window (frame {component:?})")?;
+    Ok(loci)
+}
+
+/// True when the member row leaves the candidate universe under the
+/// exclusion globs. THE AXIS ROW IS NEVER EXCLUDED (it is the
+/// coordinate frame of the call, not a candidate; the full substrate
+/// masking of the held-out experiment - axis included, panel rebuilt -
+/// remains the experiment's own path).
+pub fn row_is_excluded(path_name: &str, component: &str, globs: &[String]) -> bool {
+    path_name != component && globs.iter().any(|g| path_matches_glob(path_name, g))
+}
+
 /// The COALESCED CALLED SET (the owner's ambiguity ruling: a tied
 /// class call emits every called fold's sequence, not just the
 /// representative pair): the distinct folds of all called classes,
@@ -3380,19 +3513,35 @@ pub fn run(options: Options) -> io::Result<()> {
         Selection::Default => false,
         Selection::Territory | Selection::Locality => true,
     };
-    let loci: Vec<u32> = options
-        .loci
-        .split(',')
-        .map(|s| s.trim().parse::<u32>())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid("invalid loci list"))?;
-    ensure(!loci.is_empty(), "no loci requested")?;
-    {
-        let mut sorted = loci.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        ensure(sorted == loci, "loci must be distinct and sorted")?;
+    // THE SCORED LOCI - the request, resolved below once the
+    // component's axis rows are loaded: the explicit --loci list,
+    // or THE REGION-AS-INTERFACE FILTER (--region, the owner's
+    // ruling: "detect any locus, any position, any allele"), a
+    // chr:start-end range resolved against the component's own
+    // frame to the covered windows. The two are mutually exclusive.
+    enum LociRequest {
+        Listed(Vec<u32>),
+        Region(String),
     }
+    let loci_request = if let Some(region) = &options.region {
+        ensure(options.loci.is_empty(), "--region and --loci are mutually exclusive")?;
+        LociRequest::Region(region.clone())
+    } else {
+        let loci: Vec<u32> = options
+            .loci
+            .split(',')
+            .map(|s| s.trim().parse::<u32>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid("invalid loci list"))?;
+        ensure(!loci.is_empty(), "no loci requested")?;
+        {
+            let mut sorted = loci.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            ensure(sorted == loci, "loci must be distinct and sorted")?;
+        }
+        LociRequest::Listed(loci)
+    };
 
     // ------------------------------------------------------------- inputs
     // (Phase instrumentation for the dominance measurement: timers and
@@ -3579,6 +3728,22 @@ pub fn run(options: Options) -> io::Result<()> {
     // it, window-aware).
     let window_axis: Vec<(u64, u64)> =
         axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
+    // THE REGION-AS-INTERFACE RESOLUTION (the owner's ruling: the
+    // CLI's interface is COORDINATES - "detect any locus, any
+    // position, any allele"): the region resolved against the
+    // component's own axis rows to the covered windows - the same
+    // --loci convention, computed instead of typed.
+    let loci: Vec<u32> = match loci_request {
+        LociRequest::Listed(loci) => loci,
+        LociRequest::Region(region) => {
+            let loci = resolve_region_loci(&options.component, &window_axis, &region)?;
+            eprintln!(
+                "[score] region {region:?} resolved to loci {loci:?} (frame {})",
+                options.component
+            );
+            loci
+        }
+    };
     // The partition membership per window: a partition hosting more
     // than one of the component's windows cannot attribute an SK1
     // member row to a window by placement alone (measured at chrIV's
@@ -4165,6 +4330,13 @@ pub fn run(options: Options) -> io::Result<()> {
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
         {
+            // The fail-closed receipt's own precision: name the
+            // surviving keys (the ambiguity itself) before the
+            // candidate-shape dump.
+            eprintln!(
+                "[bind-debug] record {record}: SURVIVING keys (the ambiguity): {:?}",
+                surviving.iter().map(|(key, shifts)| (*key, shifts.clone())).collect::<Vec<_>>()
+            );
             if let Some(&key) = shaped_keys.first() {
                 if let Ok(shape) = key_shape(key, &key_tokens, &key_reads, &read_records, k) {
                     for (index, occ) in line.occurrences.iter().enumerate() {
@@ -4583,7 +4755,22 @@ pub fn run(options: Options) -> io::Result<()> {
         let fold_started = Instant::now();
         let mut fold_map: BTreeMap<(Vec<u8>, Vec<(u64, i32)>), usize> = BTreeMap::new();
         let mut folds: Vec<Fold> = Vec::new();
+        let mut excluded_rows: u64 = 0;
         for member in &map.members {
+            // THE MASKING OPERATOR (the call-locus --exclude-paths
+            // surface): the stranger filter folded onto the call path
+            // - matching rows leave the candidate universe here, at
+            // fold construction, exactly as absent rows would (the
+            // axis row is never excluded: it is the frame). Loudly
+            // counted per locus.
+            if row_is_excluded(
+                &member.path_name,
+                &options.component,
+                &options.exclude_paths,
+            ) {
+                excluded_rows += 1;
+                continue;
+            }
             let row_index = *store
                 .dedup
                 .get(&{
@@ -6652,9 +6839,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 },
                 (None, false) => serde_json::Value::Null,
             };
-            serde_json::to_writer(
-                &mut product_buf,
-                &json!({
+            let mut product_value = json!({
                     "locus": locus,
                     "partition": partition,
                     "component": options.component,
@@ -6684,8 +6869,21 @@ pub fn run(options: Options) -> io::Result<()> {
                         .map(|value| value["fold_indices"].clone())
                         .collect::<Vec<_>>(),
                     "nearest_rival_distance": nearest_rival_distance,
-                }),
-            )?;
+            });
+            if excluded_rows > 0 {
+                if let Some(object) = product_value.as_object_mut() {
+                    object.insert("excluded_rows".to_string(), json!(excluded_rows));
+                    object.insert(
+                        "exclude_paths".to_string(),
+                        json!(options.exclude_paths),
+                    );
+                }
+                eprintln!(
+                    "[score] locus {locus}: {excluded_rows} candidate rows excluded by \
+                     --exclude-paths (the stranger filter; the axis row kept as the frame)"
+                );
+            }
+            serde_json::to_writer(&mut product_buf, &product_value)?;
             // The receipt's own serialization convention, mirrored
             // exactly: under the territory/locality conventions the
             // receipt is reparsed through serde_json::from_slice
@@ -8467,6 +8665,108 @@ mod tests {
         poison.push(0xC3);
         poison.push(0xA9); // UTF-8 continuation bytes are non-ASCII
         assert!(fold_sequence_string(&poison).is_err());
+    }
+
+    #[test]
+    fn the_exclude_paths_glob_matches_fnmatch_style() {
+        // The masking operator's matcher: `*` any run, `?` one char,
+        // literal otherwise; no escapes.
+        assert!(path_matches_glob("HG002#1#chr1:1-100", "HG002#*"));
+        assert!(path_matches_glob("HG002#1#chr1:1-100", "*#chr1*"));
+        assert!(path_matches_glob("HG002#1#chr1:1-100", "HG002#?#chr1:1-100"));
+        assert!(path_matches_glob("HG002#1#chr1:1-100", "HG002#1#chr1:1-100"));
+        assert!(path_matches_glob("anything", "*"));
+        assert!(path_matches_glob("", "*"));
+        assert!(!path_matches_glob("HG002#1#chr1:1-100", "HG003*"));
+        // `?` consumes exactly one char: it matches the final `0`
+        // here, but cannot span two.
+        assert!(path_matches_glob("HG002#1#chr1:1-100", "HG002#1#chr1:1-10?"));
+        assert!(!path_matches_glob("HG002#1#chr1:1-100", "HG002#1#chr1:1-?"));
+        assert!(!path_matches_glob("HG002#1#chr1:1-100", "HG002#?"));
+        // a pattern ending in `*` must be able to consume the whole
+        // name (the `(1..=len).rev()` arm) and also match nothing.
+        assert!(path_matches_glob("abc", "abc*"));
+        assert!(path_matches_glob("abc", "a*bc*"));
+        assert!(!path_matches_glob("abc", "b*"));
+    }
+
+    #[test]
+    fn the_exclusion_never_drops_the_axis_row() {
+        // The coordinate frame stays in the candidate universe even
+        // when the glob matches it; every other matching row leaves.
+        let component = "HG002#1#chr1:0-1000";
+        let globs = vec!["HG002#*".to_string()];
+        assert!(!row_is_excluded(component, component, &globs));
+        assert!(row_is_excluded("HG002#2#chr1:0-1000", component, &globs));
+        assert!(!row_is_excluded("CHM13#0#chr1:0-1000", component, &globs));
+        // no globs: nothing is excluded (the default, the committed
+        // candidate universe verbatim).
+        assert!(!row_is_excluded("HG002#2#chr1:0-1000", component, &[]));
+    }
+
+    #[test]
+    fn the_region_resolves_to_the_covered_windows() {
+        // The component's own frame: HG002#1#chr1:4632437-4883593,
+        // windows of 10kbp.
+        let component = "HG002#1#chr1:4632437-4883593";
+        let rows: Vec<(u64, u64)> = (0..25).map(|i| (i * 10_000, (i + 1) * 10_000)).collect();
+        // a region covering exactly window 1, then windows 1..2
+        // (half-open bounds never bleed into the neighbors)
+        let loci = resolve_region_loci(component, &rows, "chr1:4642437-4652437").unwrap();
+        assert_eq!(loci, vec![1]);
+        let loci = resolve_region_loci(component, &rows, "chr1:4642437-4662437").unwrap();
+        assert_eq!(loci, vec![1, 2]);
+        // the whole frame: every window
+        let all = resolve_region_loci(
+            component,
+            &rows,
+            "chr1:4632437-4883593",
+        )
+        .unwrap();
+        assert_eq!(all, (0..25u32).collect::<Vec<_>>());
+        // a region touching only a boundary point covers nothing
+        // (half-open overlap)
+        assert!(resolve_region_loci(component, &rows, "chr1:4640000-4640000").is_err());
+        // empty region, outside the frame, wrong chromosome, and
+        // malformed forms all fail closed
+        assert!(resolve_region_loci(component, &rows, "chr1:4640000-4640000x").is_err());
+        assert!(resolve_region_loci(component, &rows, "chr1:1-100").is_err());
+        assert!(resolve_region_loci(component, &rows, "chr2:1-100").is_err());
+        assert!(resolve_region_loci(component, &rows, "chr1").is_err());
+        // a component name without a coordinate frame fails closed
+        assert!(resolve_region_loci("HG002#1", &rows, "chr1:1-100").is_err());
+        // a region past the component end fails closed
+        assert!(resolve_region_loci(
+            component,
+            &rows,
+            "chr1:4883593-4883594"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_component_axis_rows_load_from_the_locality_maps() {
+        // The axis rows: the component's member rows over the
+        // locality maps, in axis order (start), from real map files.
+        let dir = std::env::temp_dir().join("impg-test-region-axis-rows");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (partition, start) in [(3u32, 20_000u64), (1, 0u64), (2, 10_000u64)] {
+            let json = format!(
+                "{{\"partition\": {partition}, \"members\": [                  {{\"path_name\": \"HG002#1#chr1:0-30000\", \"start\": {start}, \"end\": {}}},                  {{\"path_name\": \"other#1#chr1:0-30000\", \"start\": 0, \"end\": 100}}]}}",
+                start + 10_000
+            );
+            std::fs::write(
+                dir.join(format!("window{partition}.gfa.map.json")),
+                json,
+            )
+            .unwrap();
+        }
+        let rows = component_axis_rows(&dir, "HG002#1#chr1:0-30000").unwrap();
+        assert_eq!(rows, vec![(0, 10_000), (10_000, 20_000), (20_000, 30_000)]);
+        // a component absent from the maps fails closed
+        assert!(component_axis_rows(&dir, "absent#1#chr1:0-30000").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
