@@ -21,7 +21,7 @@ def rows_for(recs):
     out_rows = []
     for name, seq in recs:
         for h in a.map(seq, cs=False):
-            if not h.m_primary:
+            if not h.is_primary:
                 continue
             out_rows.append(
                 f"{name}\t{len(seq)}\t{h.q_st}\t{h.q_en}\t{'+' if h.strand == 1 else '-'}\t"

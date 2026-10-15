@@ -6,7 +6,19 @@
 # fail-closed bind failures ISOLATED by the patched emissions loop - the
 # poison ledger names them). C concurrent batches; the disk floor gates every
 # launch (the streaming reaper must keep up). Marker-gated, resumable.
-# usage: run-cuts.sh   (env: RV, BATCH_W=32, N_CONCURRENT=2, RAYON=64,
+# THE WIDTH vs THE 64GiB GUARD (measured 2026-10-15): W=32 batches were
+# SIGKILLed by the per-process 64GiB guard at 65-69GB RSS (4/4 batches, 0
+# territories cut) - the batch memory grows with the batch's aggregate
+# routing-index nodes (779k nodes -> ~63GB at scan end; the dense batch
+# 1792039134-3 carried 1.76M nodes). THE GUARD IS LAW; the width yields:
+# BATCH_W=16. Two attribution rules fixed with it: (a) a guard kill
+# (exit 137) is a BATCH-PACKAGING event, never a per-territory strike - the
+# 54 false cut.exit terminals from the W=32 era were reset (poison.tsv
+# empty: zero intrinsic territory failures); (b) the pending list is
+# deterministically hash-interleaved before batch composition so genome-
+# adjacent density clumps spread across batches (per-batch memory ~ the
+# genome average, not the local clump).
+# usage: run-cuts.sh   (env: RV, BATCH_W=16, N_CONCURRENT=2, RAYON=48,
 #                       DISK_FLOOR_GB=1500)
 set -uo pipefail
 RV=${RV:-/home/erikg/hprcv2/wgs35x-fleet/runtime-verification}
@@ -14,9 +26,9 @@ BIN=/home/erikg/impg-genome-inference/target/release/examples/sample_projection
 SYNG=/home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.syng
 AGC=/home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc
 SHARDS=/home/erikg/hprcv2/hg002-projection/full
-W=${BATCH_W:-32}
+W=${BATCH_W:-16}
 C=${N_CONCURRENT:-2}
-RAYON=${RAYON:-64}
+RAYON=${RAYON:-48}
 FLOOR=${DISK_FLOOR_GB:-1500}
 CUTS=$RV/cuts
 mkdir -p "$CUTS"
@@ -68,6 +80,11 @@ one_batch() {
       echo -e "$T\t$(head -c 300 "$D/CUT-FAILED.txt" | tr '\n' ' ')" >> "$CUTS/poison.tsv"
       touch "$RV/prep/$T/cut.poison"
     else
+      if [ "$st" -eq 137 ]; then
+        # THE GUARD KILL IS A BATCH-PACKAGING EVENT, never a territory
+        # strike (the width's own failure, not the territory's)
+        echo "$(date -u +%FT%TZ) $T batch GUARD-KILLED (exit 137, packaging - no strike)" >> "$CUTS/batch-failures.log"
+      else
       # batch-level failure or a missing outcome: count the attempt;
       # 3 batch-level failures -> terminal (named in the ledger)
       n=$(cat "$RV/prep/$T/cut.attempts" 2>/dev/null || echo 0)
@@ -77,6 +94,7 @@ one_batch() {
         echo "$(date -u +%FT%TZ) $T TERMINAL after $n batch-level failures (last batch exit $st)" >> "$CUTS/batch-failures.log"
       else
         echo "$(date -u +%FT%TZ) $T batch-level failure (batch exit $st, attempt $n)" >> "$CUTS/batch-failures.log"
+      fi
       fi
     fi
   done
@@ -94,6 +112,13 @@ while true; do
       [ -f "$RV/prep/$T/cut.exit" ] && continue
       echo "$T"
     done < "$RV/prep/accepted.txt")
+  # THE DETERMINISTIC HASH INTERLEAVE: genome-adjacent territories carry
+  # correlated density (the segdup clumps); shuffling the pending list by a
+  # fixed hash makes every batch a uniform sample of the density profile -
+  # per-batch memory ~ the genome average, never the local clump
+  mapfile -t PENDING < <(printf '%s\n' "${PENDING[@]}" | while read -r T; do
+      printf '%s %s\n' "$(printf '%s' "$T" | md5sum | cut -c1-12)" "$T"
+    done | sort | awk '{print $2}')
   NPEND=${#PENDING[@]}
   NDONE=$(while read -r T; do [ -f "$RV/prep/$T/cut.done" ] && echo x; done < "$RV/prep/accepted.txt" | wc -l)
   NTOTAL=$(wc -l < "$RV/prep/accepted.txt")
