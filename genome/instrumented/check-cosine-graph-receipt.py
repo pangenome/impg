@@ -1,0 +1,1060 @@
+#!/usr/bin/env python3
+"""Independently reconcile the graph-space condensation pilot receipts.
+
+Checks, per component (chrMT, chrI), fail-closed and without recomputing
+scores: receipt markers; locus alignment with the balanced Stage-1 census and
+the row-space pilot; pure-route physical domain identity; truth survival masks;
+exhaustive pair-count bounds for BOTH arms (nodes-only and nodes+edges);
+every streamed competitor's arm flags, scores and truth references; the
+path-continuity audit (the chain-junction channel's measured emptiness); and
+the arm-delta summary (the edge layer's contribution as separate numbers).
+
+QUAL phase I (the committed share-form receipts, MEASURED FALSIFIED as a
+discrimination signal and kept untouched on disk as the record): the checker
+still reconciles them — stage-1 reproduction, the share re-derivation, the
+called-set machinery, the k-way bound and the tie-evidence stream — so the
+falsified form's artifacts remain auditable.
+
+QUAL phase II (the DELTA FORM receipts, kept on disk as the record): p = s_win /
+(k*s_win + a) with k = distinct material classes bit-tied at the maximum
+s_win and a = the best similarity among ALL classes outside the called set
+(a = 0 if none); QUAL = -10*log10(1 - p). The checker still reconciles
+them against stage-1 and the share-form machinery.
+
+QUAL phase III (the CLUSTER FORM, the current product semantics — the
+owner's ruling that the near-twin runner-ups are not real alternatives):
+the same formula applied BETWEEN CLUSTERS. The material distance between
+two classes is the observed mass on the symmetric difference of their
+node+edge usage signatures (signature-cosine distance as a second view);
+the cluster cut is the DERIVED KNEE of the winner's sorted distance
+spectrum (maximal relative jump between consecutive strictly-positive
+distances, ties to the largest index; no knee when the maximal jump does
+not exceed the median jump); k = DIVERGENT clusters whose best candidates
+bit-tie the maximum; a = the best similarity OUTSIDE the near-identical
+called cluster(s). The checker re-derives the knee, the cluster size, the
+exclusion union, k, a, p and QUAL from the emitted per-locus spectrum
+fail-closed, reconciles stage-1 and stage-2 machinery against the delta
+receipts, and prints the per-locus cluster tables plus the re-rated QUAL
+distribution against the delta-form band.
+"""
+import json
+import math
+from pathlib import Path
+
+D = Path('/home/erikg/yeast/genome-balanced-diploid-validation-20260930')
+# Stage-1 census fields the re-run must reproduce exactly: integers,
+# booleans, masks, row-index vectors. (identity_kinds compared as sorted
+# multisets below: it iterates a Rust HashMap whose order is not stable.)
+STAGE1_EXACT = [
+    'physical_rows', 'graph_rows', 'multi_segment_rows', 'disjoint_material_rows',
+    'record_count', 'node_universe_count', 'edge_universe_count',
+    'observed_node_mass', 'observed_edge_mass', 'eligible_pairs_nodes',
+    'eligible_pairs_combined', 'competitor_entries', 'truth_piece_presence',
+    'truth_pair_expressible', 'truth_rows', 'truth_graph_rows',
+    'nodes_truth_rank', 'nodes_truth_tied_pairs', 'nodes_higher_competitors',
+    'nodes_best_row_indices', 'combined_truth_rank',
+    'combined_truth_tied_pairs', 'combined_higher_competitors',
+    'combined_best_row_indices', 'rank_delta_combined_vs_nodes',
+]
+# Floating-point fields accumulated over HashMap iteration (the observed
+# norm-of-mass sums) or derived from them (every cosine): the summation
+# ORDER varies across processes, so cross-run values can differ by a few
+# f64 ULPs (measured max 4e-16 relative) without any rank, tie or count
+# changing. Reconciled, not equated: this is a receipt tolerance, not a
+# product constant.
+STAGE1_FLOAT_ULP = [
+    'observed_node_norm', 'observed_edge_norm', 'nodes_truth_cosine',
+    'combined_truth_cosine', 'nodes_best_cosine', 'combined_best_cosine',
+]
+
+
+def knee_cut(distances):
+    """The derived knee rule, mirrored from the Rust `spectrum_knee`: the
+    maximal relative jump between consecutive STRICTLY-POSITIVE sorted
+    distances (0/0 := 0), ties resolved to the largest index; no knee when
+    fewer than two positive distances exist or the maximal jump does not
+    exceed the median jump. Returns (has_knee, cut)."""
+    positives = [d for d in distances if d > 0.0]
+    if len(positives) < 2:
+        return False, 0.0
+    jumps = [(b - a) / b for a, b in zip(positives, positives[1:])]
+    ordered = sorted(jumps)
+    mid = len(ordered) // 2
+    typical = ordered[mid] if len(ordered) % 2 else 0.5 * (ordered[mid - 1] + ordered[mid])
+    best = max(jumps)
+    if best > typical:
+        return True, positives[max(i for i, j in enumerate(jumps) if j == best)]
+    return False, 0.0
+
+for component, expected in [('chrMT', 8), ('chrI', 17)]:
+    prefix = D / f'run-cosine-graph-pilot-{component}'
+    assert Path(f'{prefix}.done').exists()
+    assert Path(f'{prefix}.exit').read_text().strip() == '0'
+    old = json.loads((D / f'run-balanced-{component}.log').read_text())['spine']['stage1_sweep']['loci']
+    row_space = [json.loads(line) for line in (D / f'cosine-exhaustive-{component}.jsonl').open()]
+    rows = [json.loads(line) for line in (D / f'cosine-graph-exhaustive-{component}.jsonl').open()]
+    assert len(rows) == len(row_space) == len(old)
+    assert all(row['locus'] == prior['locus'] == sweep['locus']
+               for row, prior, sweep in zip(rows, row_space, old))
+    # The SAME pure-route domain: identical physical row counts and truth masks.
+    assert all(row['physical_rows'] == prior['physical_rows'] for row, prior in zip(rows, row_space))
+    assert all(row['truth_pair_expressible'] == prior['truth_pair_expressible']
+               for row, prior in zip(rows, row_space))
+    assert all(row['truth_piece_presence'] == prior['truth_piece_presence']
+               for row, prior in zip(rows, row_space))
+    assert sum(row['truth_pair_expressible'] for row in rows) == expected
+    # Fail-closed exhaustive enumeration bounds, both arms; graph coalescing
+    # never enlarges the domain.
+    for row in rows:
+        pairs = row['graph_rows'] * (row['graph_rows'] + 1) // 2
+        assert row['graph_rows'] <= row['physical_rows']
+        assert row['eligible_pairs_nodes'] <= pairs
+        assert row['eligible_pairs_combined'] <= pairs
+        # The pure-route domain's path-continuity audit: no candidate row can
+        # spell a junction adjacency that no single record spans.
+        assert row['disjoint_material_rows'] == 0, row['locus']
+        assert all(count > 0 for _, count in row['identity_kinds'])
+    by_locus = {row['locus']: row for row in rows}
+    entries = 0
+    per_arm = {'nodes': 0, 'combined': 0}
+    empty_usage_competitors = 0
+    with (D / f'cosine-graph-exhaustive-{component}.jsonl.competitors.jsonl').open() as stream:
+        for line in stream:
+            competitor = json.loads(line)
+            truth = by_locus[competitor['locus']]
+            assert truth['truth_pair_expressible']
+            for arm in ('nodes', 'combined'):
+                score = competitor[f'{arm}_cosine']
+                truth_score = competitor[f'truth_{arm}_cosine']
+                assert truth_score == truth[f'{arm}_truth_cosine']
+                better = score > truth_score + 1e-12
+                assert better == (arm in competitor['arms']), (arm, competitor['locus'])
+                per_arm[arm] += int(better)
+            assert len(competitor['identities']) == len(competitor['row_indices']) == 2
+            # An empty graph row (no fully-contained syncmer window in its
+            # material) contributes no expected mass; a pair with it scores
+            # as the other row alone. Counted, not excluded.
+            if any(count == 0 for count in competitor['node_counts']):
+                empty_usage_competitors += 1
+            entries += 1
+    assert entries == sum(row['competitor_entries'] for row in rows)
+    assert per_arm['nodes'] == sum(row['nodes_higher_competitors'] for row in rows
+                                   if row['nodes_higher_competitors'] is not None)
+    assert per_arm['combined'] == sum(row['combined_higher_competitors'] for row in rows
+                                      if row['combined_higher_competitors'] is not None)
+    survivors = [row for row in rows if row['truth_pair_expressible']]
+    for arm in ('nodes', 'combined'):
+        rank1 = sum(row[f'{arm}_truth_rank'] == 1 for row in survivors)
+        rank2 = sum(row[f'{arm}_truth_rank'] <= 2 for row in survivors)
+        ranks = {}
+        for row in survivors:
+            ranks[row[f'{arm}_truth_rank']] = ranks.get(row[f'{arm}_truth_rank'], 0) + 1
+        print(f'{component} {arm} arm: rank1 {rank1}/{expected}, rank<=2 {rank2}/{expected}, '
+              f'higher-scoring pairs {per_arm[arm]}')
+        print(f'  truth ranks by locus: {dict(sorted(ranks.items()))}')
+    changed = [row['locus'] for row in survivors
+               if row['rank_delta_combined_vs_nodes'] != 0]
+    edge_mass = sum(row['observed_edge_mass'] for row in rows)
+    node_mass = sum(row['observed_node_mass'] for row in rows)
+    print(f'{component}: edge-layer observed mass {edge_mass:.1f} vs node mass {node_mass:.1f}; '
+          f'{len(changed)} truth rank(s) changed by the edge layer: {changed}; '
+          f'{empty_usage_competitors} competitor pair(s) involve an empty-usage row')
+
+    # --- QUAL receipts phase I: the committed share-form record (FALSIFIED) ---
+    # The share form was measured falsified: it tracked the called class's
+    # fraction of the domain's TOTAL similarity (Q 0.0002-0.37 everywhere,
+    # no separation between a confident unique max and a genuine tie). Its
+    # receipts stay on disk untouched as the measured record and remain
+    # reconciled here; the delta form (phase II below) replaces ONLY the
+    # quality formula.
+    qprefix = D / f'run-cosine-graph-qual-pilot-{component}'
+    assert Path(f'{qprefix}.done').exists()
+    assert Path(f'{qprefix}.exit').read_text().strip() == '0'
+    qrows = [json.loads(line) for line in (D / f'cosine-graph-qual-{component}.jsonl').open()]
+    assert len(qrows) == len(rows)
+    for prior, row in zip(rows, qrows):
+        assert prior['locus'] == row['locus']
+        for field in STAGE1_EXACT:
+            assert prior[field] == row[field], (component, field, row['locus'])
+        for field in STAGE1_FLOAT_ULP:
+            old, new = prior[field], row[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, row['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, row['locus'])
+        # identity_kinds iterates a Rust HashMap: order is not stable across
+        # processes, so compare as sorted multisets.
+        assert sorted(map(list, prior['identity_kinds'])) == sorted(map(list, row['identity_kinds']))
+    tie_stream = {}
+    with (D / f'cosine-graph-qual-{component}.jsonl.ties.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            tie_stream.setdefault(entry['locus'], []).append(entry)
+    ties_total = bitexact_total = 0
+    for row in qrows:
+        eligible = row['eligible_pairs_combined']
+        classes = row['qual_called_classes']
+        k = row['qual_called_class_count']
+        if eligible == 0:
+            assert k == 0 and classes == []
+            assert row['qual_similarity_total'] is None
+            assert row['qual_share'] is None and row['qual'] is None
+        else:
+            assert k >= 1 and len(classes) == k
+            best = row['qual_best_similarity']
+            total = row['qual_similarity_total']
+            assert best == row['combined_best_cosine']
+            assert total >= best
+            share = row['qual_share']
+            assert share == best / total
+            if share == 1.0:
+                assert row['qual'] is None and row['qual_unbounded'] is True
+            else:
+                expected_qual = -10.0 * math.log10(1.0 - share)
+                assert row['qual'] is not None
+                assert abs(row['qual'] - expected_qual) <= 1e-9 * max(1.0, abs(expected_qual))
+                assert row['qual_unbounded'] is False
+            physical = 0
+            for position, cls in enumerate(classes):
+                (a, b) = cls['row_indices']
+                assert cls['combined_cosine'] == best
+                (ma, mb) = cls['row_member_counts']
+                pairs = ma * (ma + 1) // 2 if a == b else ma * mb
+                assert cls['physical_pair_members'] == pairs
+                physical += pairs
+                if position == 0:
+                    assert cls['node_distance_to_first_called_class'] == [0, 0]
+                    assert cls['edge_distance_to_first_called_class'] == [0, 0]
+                    assert cls['node_differing_observed_mass_to_first_called'] == 0.0
+                    assert cls['edge_differing_observed_mass_to_first_called'] == 0.0
+                else:
+                    # Fail-closed audit mirroring the truth-window stream: a
+                    # called-set tie between distinct classes is expected
+                    # only with zero observed mass on the differing segments.
+                    assert cls['combined_cosine'] == best
+                    assert cls['node_differing_observed_mass_to_first_called'] == 0.0
+                    assert cls['edge_differing_observed_mass_to_first_called'] == 0.0
+                if row['truth_pair_expressible']:
+                    assert cls['is_truth_class'] == (
+                        sorted(cls['row_indices']) == sorted(row['truth_graph_rows']))
+            assert row['qual_called_physical_pairs'] == physical
+            truth_score = row['combined_truth_cosine']
+            if truth_score is None:
+                expected_in = False
+            else:
+                expected_in = any(cls['is_truth_class'] for cls in classes)
+                # The called set is every class at the bit-identical maximum,
+                # so truth-in-called-set is exactly truth score == best.
+                assert expected_in == (truth_score == best)
+            if row['truth_pair_expressible']:
+                assert row['qual_truth_in_called_set'] == expected_in
+            else:
+                assert row['qual_truth_in_called_set'] is None
+            # Derived bound: for a k-way class tie, share <= 1/k (the k tied
+            # classes alone contribute k*best to the total), hence
+            # Q <= -10*log10(1 - 1/k), equality iff the tie holds all mass.
+            if k >= 2:
+                bound = -10.0 * math.log10(1.0 - 1.0 / k)
+                assert row['qual'] is not None
+                assert row['qual'] <= bound + 1e-9, (component, row['locus'])
+        # Tie-evidence stream reconciliation (the stage-1 1e-12 window around
+        # the truth class, including the truth class itself).
+        entries_here = tie_stream.get(row['locus'], [])
+        assert row['combined_ties_with_truth_streamed'] == len(entries_here)
+        ties_total += len(entries_here)
+        expected_count = row['combined_truth_tied_pairs']
+        assert len(entries_here) == (expected_count or 0)
+        if expected_count:
+            truth_score = row['combined_truth_cosine']
+            truth_rows = sorted(row['truth_graph_rows'])
+            truth_entries = 0
+            for entry in entries_here:
+                assert abs(entry['combined_cosine'] - truth_score) <= 1e-12
+                assert entry['truth_combined_cosine'] == truth_score
+                assert entry['combined_bit_exact'] == (entry['combined_ulp_delta'] == 0)
+                if entry['combined_bit_exact']:
+                    bitexact_total += 1
+                    assert entry['combined_cosine'] == truth_score
+                    # Fail-closed audit: a bit-exact score tie between
+                    # DISTINCT classes is only expected when every differing
+                    # segment carries zero observed mass; a tie with observed
+                    # mass on the differing segments would need exact f64
+                    # cancellation and must be flagged, not accepted.
+                    if not entry['is_truth_class']:
+                        assert entry['node_differing_observed_mass_vs_truth'] == 0.0
+                        assert entry['edge_differing_observed_mass_vs_truth'] == 0.0
+                if entry['is_truth_class']:
+                    truth_entries += 1
+                    assert sorted(entry['row_indices']) == truth_rows
+                    assert entry['node_distance_vs_truth_class'] == [0, 0]
+                    assert entry['edge_distance_vs_truth_class'] == [0, 0]
+                    assert entry['combined_ulp_delta'] == 0
+            assert truth_entries == 1
+    qsurvivors = [row for row in qrows if row['truth_pair_expressible']]
+    print(f'{component} share-form QUAL table (FALSIFIED record; material classes, '
+          f'combined arm), truth-expressible loci:')
+    for row in qsurvivors:
+        qual = 'inf' if row['qual_unbounded'] else ('%.2f' % row['qual'] if row['qual'] is not None else 'null')
+        print(f"  locus {row['locus']}: called classes {row['qual_called_class_count']}, "
+              f"physical pairs in called set {row['qual_called_physical_pairs']}, "
+              f"truth-in-called-set {'YES' if row['qual_truth_in_called_set'] else 'no'}, "
+              f"share {row['qual_share']:.6f}, QUAL {qual}")
+    finite_quals = sorted(row['qual'] for row in qsurvivors if row['qual'] is not None)
+    unbounded = sum(1 for row in qsurvivors if row['qual_unbounded'])
+    in_set = sum(1 for row in qsurvivors if row['qual_truth_in_called_set'])
+    tied_max = sum(1 for row in qsurvivors if row['qual_called_class_count'] >= 2)
+    if finite_quals:
+        median = finite_quals[len(finite_quals) // 2] if len(finite_quals) % 2 else \
+            0.5 * (finite_quals[len(finite_quals) // 2 - 1] + finite_quals[len(finite_quals) // 2])
+        summary = (f'min {finite_quals[0]:.2f}, median {median:.2f}, max {finite_quals[-1]:.2f}')
+    else:
+        summary = 'none finite'
+    print(f'{component} share-form QUAL summary (FALSIFIED record): truth-in-called-set '
+          f'{in_set}/{expected}, '
+          f'loci with >=2 called classes {tied_max}/{expected}, '
+          f'unbounded QUAL {unbounded}/{expected}; finite QUAL distribution: {summary}')
+    print(f'{component} tie evidence: {ties_total} streamed entries within the 1e-12 window '
+          f'of truth, {bitexact_total} bit-exact')
+
+    # --- QUAL receipts phase II: the DELTA FORM (current product semantics) ---
+    # p = s_win / (k*s_win + a): k = distinct material classes bit-tied at
+    # the maximum s_win; a = best similarity among ALL classes outside the
+    # called set (a = 0 if none); QUAL = -10*log10(1 - p). Every piece of
+    # stage-2 machinery (class coalescing, called set, null emission, ties
+    # stream) must reproduce the committed share-form receipts EXACTLY;
+    # only the quality formula differs.
+    dprefix = D / f'run-cosine-graph-qual-delta-pilot-{component}'
+    assert Path(f'{dprefix}.done').exists()
+    assert Path(f'{dprefix}.exit').read_text().strip() == '0'
+    drows = [json.loads(line) for line in (D / f'cosine-graph-qual-delta-{component}.jsonl').open()]
+    assert len(drows) == len(rows)
+    dtie_stream = {}
+    with (D / f'cosine-graph-qual-delta-{component}.jsonl.ties.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            dtie_stream.setdefault(entry['locus'], []).append(entry)
+    for prior, oldq, drow in zip(rows, qrows, drows):
+        assert prior['locus'] == oldq['locus'] == drow['locus']
+        # Stage-1 fields reproduce the committed exhaustive receipts.
+        for field in STAGE1_EXACT:
+            assert prior[field] == drow[field], (component, field, drow['locus'])
+        for field in STAGE1_FLOAT_ULP:
+            old, new = prior[field], drow[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, drow['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, drow['locus'])
+        assert sorted(map(list, prior['identity_kinds'])) == sorted(map(list, drow['identity_kinds']))
+        # Stage-2 machinery reproduces the share-form receipts exactly
+        # (integers, booleans, masks; floats within the documented cross-run
+        # ULP tolerance on the HashMap-ordered sums).
+        for field in ('qual_called_class_count', 'qual_called_physical_pairs',
+                      'qual_truth_in_called_set', 'combined_ties_with_truth_streamed'):
+            assert oldq[field] == drow[field], (component, field, drow['locus'])
+        old, new = oldq['qual_similarity_total'], drow['qual_similarity_total']
+        if old is None or new is None:
+            assert old is None and new is None, (component, 'qual_similarity_total', drow['locus'])
+        else:
+            assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, drow['locus'])
+        assert len(oldq['qual_called_classes']) == len(drow['qual_called_classes'])
+        for old_cls, new_cls in zip(oldq['qual_called_classes'], drow['qual_called_classes']):
+            for field in ('row_indices', 'row_member_counts', 'physical_pair_members',
+                          'row_node_counts', 'row_edge_counts', 'row_usage_hashes',
+                          'node_distance_to_first_called_class',
+                          'edge_distance_to_first_called_class',
+                          'node_differing_observed_mass_to_first_called',
+                          'edge_differing_observed_mass_to_first_called',
+                          'is_truth_class'):
+                assert old_cls[field] == new_cls[field], (component, field, drow['locus'])
+            assert abs(old_cls['combined_cosine'] - new_cls['combined_cosine']) <= \
+                1e-14 * max(1.0, abs(old_cls['combined_cosine'])), (component, drow['locus'])
+        old_best, new_best = oldq['qual_best_similarity'], drow['qual_best_similarity']
+        assert abs(new_best - old_best) <= 1e-14 * max(1.0, abs(old_best)), (component, drow['locus'])
+        # Delta-form derivation, fail-closed. The falsified share field is
+        # not emitted at all.
+        assert 'qual_share' not in drow
+        eligible = drow['eligible_pairs_combined']
+        k = drow['qual_called_class_count']
+        classes = drow['qual_called_classes']
+        best = drow['qual_best_similarity']
+        alt = drow['qual_alternative_similarity']
+        delta = drow['qual_delta_similarity']
+        p = drow['qual_p']
+        if eligible == 0:
+            assert k == 0 and classes == []
+            assert best is None and alt is None and delta is None
+            assert p is None and drow['qual'] is None and drow['qual_unbounded'] is False
+            assert drow['combined_ties_with_truth_streamed'] \
+                == len(dtie_stream.get(drow['locus'], [])) == 0
+            assert (drow['combined_truth_tied_pairs'] or 0) == 0
+            continue
+        assert k >= 1 and len(classes) == k
+        assert best == drow['combined_best_cosine']
+        assert (alt is None) == (delta is None)
+        if alt is not None:
+            assert alt < best  # every class outside the called set is strictly below the max
+            assert delta == best - alt
+        denominator = k * best + (alt if alt is not None else 0.0)
+        if denominator <= 0.0:
+            # Massless: no similarity mass anywhere (s_win = 0).
+            assert best == 0.0
+            assert p is None and drow['qual'] is None and drow['qual_unbounded'] is False
+        else:
+            assert p == best / denominator  # exact IEEE re-derivation
+            assert p <= 1.0 / k + 1e-12
+            if p >= 1.0:
+                assert drow['qual_unbounded'] is True and drow['qual'] is None
+                # Unbounded arises only at k = 1 with a = 0.
+                assert k == 1 and (alt is None or alt == 0.0)
+            else:
+                expected_qual = -10.0 * math.log10(1.0 - p)
+                assert drow['qual'] is not None
+                assert abs(drow['qual'] - expected_qual) <= 1e-9 * max(1.0, abs(expected_qual))
+                assert drow['qual_unbounded'] is False
+        if drow['truth_pair_expressible']:
+            expected_in = any(cls['is_truth_class'] for cls in classes)
+            assert expected_in == (drow['combined_truth_cosine'] == best)
+            assert drow['qual_truth_in_called_set'] == expected_in
+        else:
+            assert drow['qual_truth_in_called_set'] is None
+        # Derived bound: p <= 1/k, hence QUAL <= -10*log10(1 - 1/k), with
+        # equality iff a = 0 (the tie holds all the domain's similarity).
+        if k >= 2 and drow['qual'] is not None:
+            bound = -10.0 * math.log10(1.0 - 1.0 / k)
+            assert drow['qual'] <= bound + 1e-9, (component, drow['locus'])
+        # Tie-evidence stream: the same stage-1 window, reconciled against
+        # the new receipt AND the committed share-form stream.
+        entries_here = dtie_stream.get(drow['locus'], [])
+        assert drow['combined_ties_with_truth_streamed'] == len(entries_here)
+        expected_count = drow['combined_truth_tied_pairs']
+        assert len(entries_here) == (expected_count or 0)
+        old_entries = tie_stream.get(drow['locus'], [])
+        assert len(old_entries) == len(entries_here)
+        truth_rows = (sorted(drow['truth_graph_rows'])
+                      if drow['truth_graph_rows'] is not None else [])
+        truth_entries = 0
+        for old_entry, entry in zip(old_entries, entries_here):
+            assert sorted(entry['row_indices']) == sorted(old_entry['row_indices'])
+            for field in ('combined_bit_exact', 'combined_ulp_delta', 'is_truth_class',
+                          'shared_rows_with_truth', 'node_distance_vs_truth_class',
+                          'edge_distance_vs_truth_class', 'node_differing_observed_mass_vs_truth',
+                          'edge_differing_observed_mass_vs_truth', 'row_member_counts'):
+                assert entry[field] == old_entry[field], (component, field, drow['locus'])
+            for field in ('combined_cosine', 'truth_combined_cosine', 'nodes_cosine'):
+                assert abs(entry[field] - old_entry[field]) <= 1e-14 * max(1.0, abs(old_entry[field]))
+            assert entry['combined_bit_exact'] == (entry['combined_ulp_delta'] == 0)
+            if entry['combined_bit_exact'] and not entry['is_truth_class']:
+                # A bit-exact tie between DISTINCT classes is only expected
+                # with zero observed mass on the differing segments.
+                assert entry['node_differing_observed_mass_vs_truth'] == 0.0
+                assert entry['edge_differing_observed_mass_vs_truth'] == 0.0
+            if entry['is_truth_class']:
+                truth_entries += 1
+                assert sorted(entry['row_indices']) == truth_rows
+                assert entry['node_distance_vs_truth_class'] == [0, 0]
+                assert entry['edge_distance_vs_truth_class'] == [0, 0]
+                assert entry['combined_ulp_delta'] == 0
+        assert truth_entries == (1 if expected_count else 0)
+    dsurvivors = [row for row in drows if row['truth_pair_expressible']]
+    print(f'{component} DELTA-FORM QUAL table (k, s_win, a, delta, p, QUAL; '
+          f'truth-expressible loci, combined arm):')
+    for row in dsurvivors:
+        alt = row['qual_alternative_similarity']
+        a_str = 'none(0)' if alt is None else f'{alt:.6f}'
+        delta = row['qual_delta_similarity']
+        d_str = 'n/a' if delta is None else f'{delta:.6f}'
+        qual = 'inf' if row['qual_unbounded'] else (
+            '%.2f' % row['qual'] if row['qual'] is not None else 'null')
+        print(f"  locus {row['locus']}: k {row['qual_called_class_count']}, "
+              f"s_win {row['qual_best_similarity']:.6f}, a {a_str}, delta {d_str}, "
+              f"p {row['qual_p']:.6f}, QUAL {qual}, "
+              f"truth-in-called-set {'YES' if row['qual_truth_in_called_set'] else 'no'}")
+
+    def qual_summary(qual_list):
+        finite = sorted(q for q in qual_list if q is not None)
+        if not finite:
+            return 'none finite'
+        mid = len(finite) // 2
+        median = finite[mid] if len(finite) % 2 else 0.5 * (finite[mid - 1] + finite[mid])
+        return f'min {finite[0]:.4f}, median {median:.4f}, max {finite[-1]:.4f}'
+
+    share_quals = [row['qual'] for row in qrows]
+    delta_quals = [row['qual'] for row in drows]
+    share_unbounded = sum(1 for row in qrows if row['qual_unbounded'])
+    delta_unbounded = sum(1 for row in drows if row['qual_unbounded'])
+    print(f'{component} QUAL distributions side by side (all {len(drows)} loci): '
+          f'FALSIFIED share form {sum(q is not None for q in share_quals)} finite '
+          f'[{qual_summary(share_quals)}], {share_unbounded} unbounded VS delta form '
+          f'{sum(q is not None for q in delta_quals)} finite [{qual_summary(delta_quals)}], '
+          f'{delta_unbounded} unbounded')
+    in_set = sum(1 for row in dsurvivors if row['qual_truth_in_called_set'])
+    print(f'{component} delta-form summary: truth-in-called-set {in_set}/{expected}, '
+          f'loci with >=2 called classes '
+          f'{sum(1 for row in drows if row["qual_called_class_count"] >= 2)}/{len(drows)}, '
+          f'unbounded {delta_unbounded}/{len(drows)}')
+    # Measured monotonicity in a (unit-proven in source): across all k = 1
+    # loci, p = s_win/(s_win + a) falls as the a/s_win ratio rises.
+    single = []
+    for row in drows:
+        if row['qual_p'] is None or row['qual_called_class_count'] != 1:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity']
+        ratio = 0.0 if alt is None else alt / best
+        single.append((ratio, row['qual_p']))
+    single.sort(key=lambda item: item[0])
+    for (r0, p0), (r1, p1) in zip(single, single[1:]):
+        assert p1 <= p0 * (1.0 + 1e-9) + 1e-15, (component, r0, r1, p0, p1)
+    # Measured monotonicity in k (unit-proven in source): at each measured
+    # k >= 2 called set, the counterfactual k = 1 confidence with the SAME
+    # (s_win, a) is strictly higher — a wider bit-tied called set lowers the
+    # confidence in the single emitted material draw.
+    wide_loci = []
+    for row in drows:
+        k = row['qual_called_class_count']
+        if row['qual_p'] is None or k < 2:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity'] or 0.0
+        counterfactual = best / (best + alt)
+        assert counterfactual > row['qual_p'], (component, row['locus'])
+        wide_loci.append((row['locus'], k, row['qual_p'], counterfactual))
+    for locus, k, p_value, counterfactual in wide_loci:
+        print(f'{component} measured k-monotonicity at locus {locus}: k={k} p={p_value:.6f} < '
+              f'counterfactual k=1 p={counterfactual:.6f} (same s_win, a)')
+
+    # --- QUAL receipts phase III: the CLUSTER FORM (current product semantics) ---
+    # p = s_win/(k*s_win + a) BETWEEN CLUSTERS: the material distance is the
+    # observed mass on the symmetric difference of the node+edge usage
+    # signatures; the cluster cut is the derived knee of the winner's
+    # sorted distance spectrum; k = DIVERGENT clusters whose best
+    # candidates bit-tie the maximum; a = the best similarity OUTSIDE the
+    # near-identical called cluster(s). Everything re-derived from the
+    # emitted per-locus spectrum, fail-closed.
+    cprefix = D / f'run-cosine-graph-qual-cluster-pilot-{component}'
+    assert Path(f'{cprefix}.done').exists()
+    assert Path(f'{cprefix}.exit').read_text().strip() == '0'
+    crows = [json.loads(line) for line in (D / f'cosine-graph-qual-cluster-{component}.jsonl').open()]
+    assert len(crows) == len(rows)
+    ctie_stream = {}
+    with (D / f'cosine-graph-qual-cluster-{component}.jsonl.ties.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            ctie_stream.setdefault(entry['locus'], []).append(entry)
+    for prior, drow, crow in zip(rows, drows, crows):
+        assert prior['locus'] == drow['locus'] == crow['locus']
+        # Stage-1 fields reproduce the committed exhaustive receipts.
+        for field in STAGE1_EXACT:
+            assert prior[field] == crow[field], (component, field, crow['locus'])
+        for field in STAGE1_FLOAT_ULP:
+            old, new = prior[field], crow[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, crow['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, crow['locus'])
+        assert sorted(map(list, prior['identity_kinds'])) == sorted(map(list, crow['identity_kinds']))
+        # Stage-2 machinery reproduces the delta receipts exactly; the
+        # falsified share field never returns.
+        assert 'qual_share' not in crow
+        for field in ('qual_called_class_count', 'qual_called_physical_pairs',
+                      'qual_truth_in_called_set', 'combined_ties_with_truth_streamed'):
+            assert drow[field] == crow[field], (component, field, crow['locus'])
+        for field in ('qual_similarity_total', 'qual_best_similarity'):
+            old, new = drow[field], crow[field]
+            if old is None or new is None:
+                assert old is None and new is None, (component, field, crow['locus'])
+            else:
+                assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, crow['locus'])
+        assert len(drow['qual_called_classes']) == len(crow['qual_called_classes'])
+        for old_cls, new_cls in zip(drow['qual_called_classes'], crow['qual_called_classes']):
+            for field in ('row_indices', 'row_member_counts', 'physical_pair_members',
+                          'row_node_counts', 'row_edge_counts', 'row_usage_hashes',
+                          'node_distance_to_first_called_class',
+                          'edge_distance_to_first_called_class',
+                          'node_differing_observed_mass_to_first_called',
+                          'edge_differing_observed_mass_to_first_called',
+                          'is_truth_class'):
+                assert old_cls[field] == new_cls[field], (component, field, crow['locus'])
+        # The tie-evidence stream is identical to the delta receipts
+        # (integers exact, floats within the documented cross-run ULP
+        # tolerance — reconciled below via the same fields).
+        centries = ctie_stream.get(crow['locus'], [])
+        dentries = dtie_stream.get(crow['locus'], [])
+        assert crow['combined_ties_with_truth_streamed'] == len(centries) == len(dentries)
+        for dentry, entry in zip(dentries, centries):
+            assert sorted(entry['row_indices']) == sorted(dentry['row_indices'])
+            for field in ('combined_bit_exact', 'combined_ulp_delta', 'is_truth_class',
+                          'shared_rows_with_truth', 'node_distance_vs_truth_class',
+                          'edge_distance_vs_truth_class',
+                          'node_differing_observed_mass_vs_truth',
+                          'edge_differing_observed_mass_vs_truth', 'row_member_counts'):
+                assert entry[field] == dentry[field], (component, field, crow['locus'])
+        # Cluster re-derivation from the emitted spectrum.
+        eligible = crow['eligible_pairs_combined']
+        if eligible == 0:
+            assert crow['qual_called_class_count'] == 0
+            for field in ('qual_spectrum_shape', 'qual_knee_distance', 'qual_cluster_size',
+                          'qual_cluster_k', 'qual_spectrum_classes',
+                          'qual_spectrum_zero_distance_classes',
+                          'qual_excluded_class_count', 'qual_nearest_rival_distance',
+                          'qual_alternative_similarity', 'qual_delta_similarity',
+                          'qual_p', 'qual', 'qual_signature_view_knee',
+                          'qual_signature_view_knee_distance',
+                          'qual_signature_view_cluster_size'):
+                assert crow[field] is None, (component, field, crow['locus'])
+            assert crow['qual_unbounded'] is False
+            assert crow['qual_distance_spectrum'] == []
+            assert crow['qual_distance_spectrum_scores'] == []
+            assert crow['qual_signature_distance_spectrum'] == []
+            assert crow['qual_tied_class_bands'] == []
+            assert crow['qual_alternative_classes'] == []
+            continue
+        spec_d = crow['qual_distance_spectrum']
+        spec_s = crow['qual_distance_spectrum_scores']
+        spec_sig = crow['qual_signature_distance_spectrum']
+        assert len(spec_d) == len(spec_s) == len(spec_sig) == eligible - 1
+        assert all(a <= b for a, b in zip(spec_d, spec_d[1:]))  # sorted spectrum
+        has_knee, cut = knee_cut(spec_d)
+        assert crow['qual_knee_distance'] == (cut if has_knee else None)
+        assert crow['qual_spectrum_shape'] == (
+            'single_class' if not spec_d else ('knee' if has_knee else 'no_knee'))
+        assert crow['qual_spectrum_classes'] == len(spec_d)
+        in_band = [d <= cut for d in spec_d]
+        assert crow['qual_cluster_size'] == 1 + sum(in_band)
+        assert crow['qual_spectrum_zero_distance_classes'] == sum(d == 0.0 for d in spec_d)
+        nearest = next((d for d in spec_d if d > 0.0), None)
+        assert crow['qual_nearest_rival_distance'] == nearest
+        # Exclusion: the union of the near-identity bands of ALL called
+        # classes (the winner's band plus every tied class's band).
+        excluded = list(in_band)
+        bands = crow['qual_tied_class_bands']
+        assert len(bands) == crow['qual_called_class_count'] - 1
+        for band in bands:
+            assert len(band['band_distances']) == len(spec_d)
+            index = band['spectrum_index']
+            assert spec_d[index] == band['distance_to_winner']
+            assert band['band_distances'][index] == 0.0
+            for i, distance in enumerate(band['band_distances']):
+                if distance <= cut:
+                    excluded[i] = True
+        assert crow['qual_excluded_class_count'] == sum(excluded)
+        outside = [s for s, e in zip(spec_s, excluded) if not e]
+        alternative = max(outside) if outside else None
+        assert crow['qual_alternative_similarity'] == alternative
+        # k: single-linkage components among the called classes (the winner
+        # plus the tied classes) under near-identity distance <= cut.
+        n = 1 + len(bands)
+        parent = list(range(n))
+
+        def find(node):
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if i == 0:
+                    distance = bands[j - 1]['distance_to_winner']
+                elif j == 0:
+                    distance = bands[i - 1]['distance_to_winner']
+                else:
+                    distance = bands[i - 1]['band_distances'][bands[j - 1]['spectrum_index']]
+                if distance <= cut:
+                    parent[find(i)] = find(j)
+        k_clusters = len({find(i) for i in range(n)})
+        assert crow['qual_cluster_k'] == k_clusters
+        best = crow['qual_best_similarity']
+        assert alternative is None or alternative < best
+        denominator = k_clusters * best + (alternative or 0.0)
+        if denominator <= 0.0:
+            assert best == 0.0
+            assert crow['qual_p'] is None and crow['qual'] is None
+            assert crow['qual_unbounded'] is False
+        else:
+            p = best / denominator
+            assert crow['qual_p'] == p  # exact IEEE re-derivation
+            assert crow['qual_delta_similarity'] == (
+                None if alternative is None else best - alternative)
+            if p >= 1.0:
+                assert crow['qual_unbounded'] is True and crow['qual'] is None
+                assert k_clusters == 1 and not alternative  # only k=1 with a = 0
+            else:
+                expected_qual = -10.0 * math.log10(1.0 - p)
+                assert crow['qual'] is not None
+                assert abs(crow['qual'] - expected_qual) <= 1e-9 * max(1.0, abs(expected_qual))
+                assert crow['qual_unbounded'] is False
+                if k_clusters >= 2:
+                    bound = -10.0 * math.log10(1.0 - 1.0 / k_clusters)
+                    assert crow['qual'] <= bound + 1e-9, (component, crow['locus'])
+        # The best genuinely divergent rival is NAMED, and every class
+        # achieving it is listed (naming the top competitors as before).
+        achievers = [i for i, (s, e) in enumerate(zip(spec_s, excluded))
+                     if not e and s == alternative]
+        assert len(crow['qual_alternative_classes']) == len(achievers)
+        for i, entry in zip(achievers, crow['qual_alternative_classes']):
+            assert entry['spectrum_index'] == i
+            assert entry['distance'] == spec_d[i]
+            assert entry['signature_distance'] == spec_sig[i]
+            assert entry['similarity'] == alternative
+            assert len(entry['identities']) == 2
+        # Reduction (iv) audit: bit-identical (distance-0) classes are
+        # inside the cluster and never supply the alternative.
+        assert all(excluded[i] for i, d in enumerate(spec_d) if d == 0.0)
+        # Second view: the same derived knee on the signature-cosine
+        # distances (diagnostic; the product cut uses the material
+        # distance). An empty spectrum emits nulls.
+        if spec_sig:
+            sig_has_knee, sig_cut = knee_cut(sorted(spec_sig))
+            assert crow['qual_signature_view_knee'] == sig_has_knee
+            assert crow['qual_signature_view_knee_distance'] == (sig_cut if sig_has_knee else None)
+            assert crow['qual_signature_view_cluster_size'] == 1 + sum(s <= sig_cut for s in spec_sig)
+        else:
+            assert crow['qual_signature_view_knee'] is None
+            assert crow['qual_signature_view_knee_distance'] is None
+            assert crow['qual_signature_view_cluster_size'] is None
+        # Measured cluster-level monotonicity in a: absorbing the best
+        # divergent rival into the band (a falls to the next-best outside
+        # similarity) strictly raises the confidence.
+        if crow['qual_p'] is not None and alternative is not None and len(outside) >= 2:
+            next_best = sorted(outside)[-2]
+            if next_best < alternative:
+                assert best / (k_clusters * best + next_best) > crow['qual_p'], \
+                    (component, crow['locus'])
+    csurvivors = [row for row in crows if row['truth_pair_expressible']]
+    print(f'{component} CLUSTER-FORM QUAL table (shape, cluster size, knee distance, k, '
+          f's_win, a, a/s_win, p, QUAL, nearest rival distance; truth-expressible loci):')
+    for row in csurvivors:
+        alt = row['qual_alternative_similarity']
+        best = row['qual_best_similarity']
+        a_str = 'none(0)' if alt is None else f'{alt:.6f}'
+        ratio = 'inf' if alt is None else f'{alt / best:.4f}'
+        knee = row['qual_knee_distance']
+        knee_str = 'none' if knee is None else f'{knee:.4f}'
+        nearest = row['qual_nearest_rival_distance']
+        near_str = 'n/a' if nearest is None else f'{nearest:.4f}'
+        qual = 'inf' if row['qual_unbounded'] else (
+            '%.2f' % row['qual'] if row['qual'] is not None else 'null')
+        rivals = ' | '.join(e['identities'][0] for e in row['qual_alternative_classes'][:2])
+        print(f"  locus {row['locus']}: {row['qual_spectrum_shape']}, "
+              f"cluster {row['qual_cluster_size']}/{row['qual_spectrum_classes'] + 1}, "
+              f"knee {knee_str}, k {row['qual_cluster_k']}, s_win {best:.6f}, a {a_str} "
+              f"(a/s_win {ratio}), p {row['qual_p']:.6f}, QUAL {qual}, "
+              f"nearest rival {near_str}, truth-in "
+              f"{'YES' if row['qual_truth_in_called_set'] else 'no'}; top divergent: {rivals}")
+
+    def cluster_summary(qual_list):
+        finite = sorted(q for q in qual_list if q is not None)
+        if not finite:
+            return 'none finite'
+        mid = len(finite) // 2
+        median = finite[mid] if len(finite) % 2 else 0.5 * (finite[mid - 1] + finite[mid])
+        return f'min {finite[0]:.4f}, median {median:.4f}, max {finite[-1]:.4f}'
+
+    cluster_quals = [row['qual'] for row in crows]
+    cluster_unbounded = sum(1 for row in crows if row['qual_unbounded'])
+    print(f'{component} QUAL distributions side by side (all {len(crows)} loci): '
+          f'delta form {sum(q is not None for q in delta_quals)} finite '
+          f'[{cluster_summary(delta_quals)}], {delta_unbounded} unbounded VS cluster form '
+          f'{sum(q is not None for q in cluster_quals)} finite '
+          f'[{cluster_summary(cluster_quals)}], {cluster_unbounded} unbounded')
+    re_rated = sum(1 for d, c in zip(delta_quals, cluster_quals) if d != c)
+    print(f'{component} re-rated loci (cluster QUAL != delta QUAL): {re_rated}/{len(crows)}')
+    # Measured monotonicity in a at cluster level: across all k = 1 loci,
+    # p = s_win/(s_win + a) falls as the a/s_win ratio rises.
+    singles = []
+    for row in crows:
+        if row['qual_p'] is None or row['qual_cluster_k'] != 1:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity']
+        ratio = 0.0 if alt is None else alt / best
+        singles.append((ratio, row['qual_p']))
+    singles.sort(key=lambda item: item[0])
+    for (r0, p0), (r1, p1) in zip(singles, singles[1:]):
+        assert p1 <= p0 * (1.0 + 1e-9) + 1e-15, (component, r0, r1, p0, p1)
+    # Measured monotonicity in k at cluster level: at each k >= 2 locus the
+    # counterfactual k = 1 confidence with the same (s_win, a) is higher.
+    for row in crows:
+        k = row['qual_cluster_k']
+        if row['qual_p'] is None or k is None or k < 2:
+            continue
+        best = row['qual_best_similarity']
+        alt = row['qual_alternative_similarity'] or 0.0
+        counterfactual = best / (best + alt)
+        assert counterfactual > row['qual_p'], (component, row['locus'])
+    in_set = sum(1 for row in csurvivors if row['qual_truth_in_called_set'])
+    print(f'{component} cluster-form summary: truth-in-called-set {in_set}/{expected} '
+          f'(unchanged by the formula), loci with >=2 divergent tied clusters '
+          f'{sum(1 for row in crows if (row["qual_cluster_k"] or 0) >= 2)}/{len(crows)}, '
+          f'knee spectra {sum(1 for row in crows if row["qual_knee_distance"] is not None)}'
+          f'/{len(crows)}, no-knee spectra '
+          f'{sum(1 for row in crows if row["qual_spectrum_shape"] == "no_knee")}/{len(crows)}')
+    # --- QUAL receipts phase IV: the PER-RECORD LIKELIHOOD era (the
+    # 2026-10-02 owner go-ahead; the comparison becomes a per-record
+    # Poisson likelihood at read granularity in the graph's coordinates,
+    # the condensed node+edge coordinates unchanged). The checker
+    # re-derives spot class NLLs from the ingredients sidecar, the
+    # ranking/called-set/QUAL/posterior from the emitted class arrays,
+    # the knee from the emitted spectrum, the exact per-record identity,
+    # and prints the two blind-spot before/after tables and the QUAL
+    # distribution against the cosine-era band 3.01-3.56.
+    lprefix = D / f'run-cosine-likelihood-pilot-{component}'
+    assert Path(f'{lprefix}.done').exists()
+    assert Path(f'{lprefix}.exit').read_text().strip() == '0'
+    lrows = [json.loads(line) for line in (D / f'cosine-graph-likelihood-{component}.jsonl').open()]
+    assert len(lrows) == len(rows)
+    ling = {}
+    with (D / f'cosine-graph-likelihood-{component}.jsonl.ingredients.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            ling[entry['locus']] = entry
+    lrecords = {}
+    with (D / f'cosine-graph-likelihood-{component}.jsonl.records.jsonl').open() as stream:
+        for line in stream:
+            entry = json.loads(line)
+            lrecords[entry['locus']] = entry
+
+    def ingredient_class(g, pair):
+        """The merged incidence profile of one class from the ingredients."""
+        E = {}
+        for r in pair:
+            for k, mult, e in g['rows'][r]['nodes']:
+                E[('n', k)] = E.get(('n', k), 0.0) + e
+            for k, mult, e in g['rows'][r]['edges']:
+                E[('e', k)] = E.get(('e', k), 0.0) + e
+        return E
+
+    def ingredient_nll(g, pair, want_parts=False):
+        """The independent dense re-derivation of one class's log-likelihood
+        from the ingredients: per-key Poisson deviance over the whole
+        universe (budget-calibrated rate on the class's keys, uniform
+        background elsewhere), ascending key order. Returns
+        (log_likelihood, (zero_count_keys, covered_mass, unexplained_mass))
+        with None wherever the class fails closed."""
+        Cn = {k: c for k, c in g['universe_nodes']}
+        Ce = {k: c for k, c in g['universe_edges']}
+        arm_mass = sum(Cn.values()) + sum(Ce.values())
+        if arm_mass <= 0.0:
+            return None, None
+        beta = arm_mass / (len(Cn) + len(Ce))
+        E = ingredient_class(g, pair)
+        Q = sum(E.values())
+        zero_count_keys = 0
+        covered_mass = 0.0
+        for key in E:
+            c = Cn.get(key[1], 0.0) if key[0] == 'n' else Ce.get(key[1], 0.0)
+            if c > 0.0:
+                if E[key] <= 0.0 or Q <= 0.0:
+                    return None, None
+                covered_mass += c
+            else:
+                zero_count_keys += 1
+        nll = 0.0
+        for key in sorted(set(E) | {('n', k) for k in Cn} | {('e', k) for k in Ce}):
+            c = Cn.get(key[1], 0.0) if key[0] == 'n' else Ce.get(key[1], 0.0)
+            if key in E:
+                rate = arm_mass * E[key] / Q if Q > 0.0 else 0.0
+            else:
+                rate = beta
+            if c == 0.0:
+                nll += rate
+            else:
+                nll += rate - c * math.log(rate) + math.lgamma(c + 1.0)
+        if want_parts:
+            return -nll, (zero_count_keys, covered_mass, arm_mass - covered_mass)
+        return -nll, None
+
+    lik_truth_ranks = []
+    lik_quals = []
+    blindspot1_rows = []
+    for crow, lrow in zip(crows, lrows):
+        assert crow['locus'] == lrow['locus']
+        locus = lrow['locus']
+        g = ling[locus]
+        # Domain identity vs the cluster receipts: the same pure-route
+        # domain, the same coalescing, the same observation universe.
+        for field in ('physical_rows', 'graph_rows', 'record_count',
+                      'node_universe_count', 'edge_universe_count',
+                      'observed_node_mass', 'observed_edge_mass',
+                      'multi_segment_rows', 'disjoint_material_rows',
+                      'truth_piece_presence', 'truth_pair_expressible',
+                      'truth_graph_rows'):
+            assert crow[field] == lrow[field], (component, field, locus)
+        assert sorted(map(list, crow['identity_kinds'])) == sorted(map(list, lrow['identity_kinds']))
+        for field in ('observed_node_norm', 'observed_edge_norm'):
+            old, new = crow[field], lrow[field]
+            assert abs(new - old) <= 1e-14 * max(1.0, abs(old)), (component, field, locus)
+        # Exhaustive enumeration bound.
+        pairs = lrow['graph_rows'] * (lrow['graph_rows'] + 1) // 2
+        assert lrow['class_count'] == pairs == len(lrow['class_row_pairs'])
+        assert lrow['class_count'] == len(lrow['class_log_likelihoods'])
+        assert lrow['class_count'] == len(lrow['class_log_likelihoods_nodes'])
+        assert lrow['eligible_classes'] <= pairs
+        # Spot NLL re-derivation from the ingredients: the winner, the
+        # truth, and a deterministic sample (first, middle, last, every
+        # 257th eligible class).
+        logLs = lrow['class_log_likelihoods']
+        eligible_indices = [i for i, s in enumerate(logLs) if s is not None]
+        sample = {0, pairs - 1, pairs // 2}
+        sample |= {i for i in range(0, pairs, max(1, pairs // 8))}
+        sample |= {eligible_indices[i] for i in range(0, len(eligible_indices), 257)}
+        for i in sorted(sample):
+            emitted = logLs[i]
+            rederived, _ = ingredient_nll(g, lrow['class_row_pairs'][i])
+            if emitted is None:
+                assert rederived is None, (component, locus, i)
+            else:
+                assert rederived is not None, (component, locus, i)
+                assert abs(emitted - rederived) <= 1e-9 * max(1.0, abs(emitted)), \
+                    (component, locus, i, emitted, rederived)
+        # Ranking/called-set re-derivation from the class arrays (exact
+        # IEEE comparisons; no epsilon in the likelihood era).
+        best = max((s for s in logLs if s is not None), default=None)
+        if best is not None:
+            assert best == lrow['best_log_likelihood']
+            called = [i for i, s in enumerate(logLs) if s == best]
+            assert len(called) == lrow['qual_called_class_count']
+            assert [lrow['class_row_pairs'][i] for i in called] == \
+                [entry['row_indices'] for entry in lrow['qual_called_classes']]
+        if lrow['truth_log_likelihood'] is not None:
+            tp = tuple(sorted(lrow['truth_graph_rows']))
+            ti = next(i for i, p in enumerate(lrow['class_row_pairs'])
+                      if tuple(sorted(p)) == tp)
+            truthL = logLs[ti]
+            assert truthL == lrow['truth_log_likelihood']
+            higher = sum(1 for s in logLs if s is not None and s > truthL)
+            tied = sum(1 for i, s in enumerate(logLs)
+                       if s is not None and s == truthL and i != ti)
+            assert higher == lrow['higher_likelihood_competitors'], (component, locus)
+            assert higher + 1 == lrow['truth_rank']
+            assert tied == lrow['truth_tied_classes']
+            lik_truth_ranks.append((locus, lrow['truth_rank'], truthL))
+        # The QUAL block: knee from the emitted distance spectrum, the
+        # exclusion union, k, a (relative likelihood, underflow-honest),
+        # p = 1/(k + a) with L_win = 1, QUAL, and the posterior.
+        if best is not None:
+            dists = lrow['qual_distance_spectrum']
+            assert len(dists) == lrow['qual_spectrum_classes']
+            has_knee, cut = knee_cut(dists)
+            assert has_knee == (lrow['qual_knee_distance'] is not None)
+            if has_knee:
+                assert abs(cut - lrow['qual_knee_distance']) <= 1e-12 * max(1.0, cut)
+            applied_cut = lrow['qual_knee_distance'] or 0.0
+            excluded = [d <= applied_cut for d in dists]
+            for band in lrow['qual_tied_class_bands']:
+                for index, distance in enumerate(band['band_distances']):
+                    if distance <= applied_cut:
+                        excluded[index] = True
+            assert sum(excluded) + 1 == lrow['qual_cluster_size'], (component, locus)
+            assert lrow['qual_cluster_k'] >= 1
+            outside = [i for i in range(len(dists)) if not excluded[i]]
+            if outside:
+                a_rel = max(lrow['qual_distance_spectrum_scores'][i] for i in outside)
+                expected_a = lrow['qual_alternative_similarity']
+                assert expected_a is not None
+                assert abs(a_rel - expected_a) <= 1e-15 + 1e-12 * a_rel
+                p = 1.0 / (lrow['qual_cluster_k'] + a_rel)
+            else:
+                assert lrow['qual_alternative_similarity'] is None
+                p = 1.0 / lrow['qual_cluster_k']
+            assert abs(p - lrow['qual_p']) <= 1e-12 * max(1.0, p)
+            if p < 1.0:
+                assert abs(lrow['qual'] - (-10.0 * math.log10(1.0 - p))) <= 1e-9
+                assert not lrow['qual_unbounded']
+            else:
+                assert lrow['qual'] is None and lrow['qual_unbounded']
+            # The full-domain flat-prior posterior of the top cluster.
+            rels = [math.exp(s - best) for s in logLs if s is not None]
+            total = sum(rels)
+            logsumexp = best + math.log(total)
+            assert abs(logsumexp - lrow['qual_posterior_logsumexp']) <= 1e-9 * max(1.0, abs(logsumexp))
+            band_mass = 1.0 + sum(lrow['qual_distance_spectrum_scores'][i]
+                                  for i in range(len(dists)) if dists[i] <= applied_cut)
+            posterior = band_mass / total
+            assert abs(posterior - lrow['qual_posterior_top_cluster']) <= 1e-9, (component, locus)
+            lik_quals.append((locus, lrow['qual'], lrow['qual_unbounded'],
+                              lrow['qual_alternative_log_gap']))
+        # The exact per-record identity, spot-checked on the first named
+        # class of the records sidecar: the sum of the emitted per-record
+        # terms reconstitutes the class NLL.
+        rec = lrecords[locus]
+        if rec['classes']:
+            cls = rec['classes'][0]
+            total = sum(entry['per_record_nll'] for entry in cls['per_record'])
+            nll = -cls['log_likelihood']
+            assert abs(total - nll) <= 1e-6 * max(1.0, abs(nll)), (component, locus, total, nll)
+            assert len(cls['per_record']) == lrow['record_count']
+        # BLIND SPOT 1 (the before/after): the cluster era's NAMED best
+        # divergent rivals (the 78.8-99.99%-of-max-cosine classes differing
+        # on 0.7%-90% of the observed mass) - their likelihood-era rank and
+        # log-gap, joined by row indices (the domains are deterministic).
+        for rival in crow['qual_alternative_classes']:
+            pair = tuple(sorted(rival['row_indices']))
+            ri = next((i for i, p in enumerate(lrow['class_row_pairs'])
+                       if tuple(sorted(p)) == pair), None)
+            assert ri is not None, (component, locus, pair)
+            rl = logLs[ri]
+            rederived, parts = ingredient_nll(g, lrow['class_row_pairs'][ri], want_parts=True)
+            if rl is None:
+                assert rederived is None
+                rank, gap = 'ineligible', None
+            else:
+                assert rederived is not None
+                rank = 1 + sum(1 for s in logLs if s is not None and s > rl)
+                gap = best - rl
+            arm_mass = crow['observed_node_mass'] + crow['observed_edge_mass']
+            blindspot1_rows.append({
+                'locus': locus,
+                'identities': rival['identities'],
+                'cosine_fraction_of_max': rival['similarity'] / crow['qual_best_similarity'],
+                'distance_share': rival['distance'] / arm_mass,
+                'new_rank': rank,
+                'new_log_gap_to_winner': gap,
+                'parts': parts,
+                'arm_mass': arm_mass,
+            })
+    print(f'{component} phase IV: spot NLL re-derivations, ranking, knee/k/a/p/posterior and '
+          f'per-record identity reconciled on {len(lrows)} loci')
+    finite = [q for _, q, _, _ in lik_quals if q is not None]
+    unbounded_gaps = [gap for _, _, unb, gap in lik_quals if unb and gap is not None]
+    finite_text = (f'[{min(finite):.2f}..{max(finite):.2f}] median '
+                   f'{sorted(finite)[len(finite)//2]:.2f}') if finite else '[]'
+    gap_text = (f'[{min(unbounded_gaps):.1f}..{max(unbounded_gaps):.1f}]'
+                if unbounded_gaps else '[]')
+    print(f'{component} likelihood QUAL distribution: {len(finite)} finite {finite_text}, '
+          f'{sum(1 for _, _, unb, _ in lik_quals if unb)} unbounded '
+          f'(best-divergent-rival log-gaps {gap_text}) '
+          f'vs the cosine-era band 3.01-3.56')
+    rank1 = sum(1 for _, r, _ in lik_truth_ranks if r == 1)
+    print(f'{component} likelihood truth rank1 (bit-exact unique): {rank1}/{expected}; '
+          f'ranks by locus: ' + ', '.join(f'{l}:{r}' for l, r, _ in lik_truth_ranks))
+    print(f'{component} BLIND SPOT 1 (the cosine-era named divergent rivals, before/after):')
+    for entry in blindspot1_rows:
+        parts = entry['parts']
+        covered_text = ('ineligible (cannot explain observed mass on a '
+                        'zero-incidence key)') if parts is None else (
+            f"covers {parts[1]:.1f} of {entry['arm_mass']:.1f} observed mass "
+            f"({100*parts[1]/entry['arm_mass']:.1f}%), "
+            f"{parts[0]} predicted-unobserved keys")
+        rank = entry['new_rank']
+        gap = entry['new_log_gap_to_winner']
+        gap_text = 'ineligible' if gap is None else f'log-gap {gap:.1f}'
+        print(f"  locus {entry['locus']}: cosine {100*entry['cosine_fraction_of_max']:.2f}% of max "
+              f"(differing material {100*entry['distance_share']:.1f}% of observed mass) -> "
+              f"likelihood rank {rank}, {gap_text}; {covered_text}")
+    print(f'{component} BLIND SPOT 2 (predicted-but-unobserved, the likelihood winners):')
+    for lrow in lrows:
+        if lrow['best_log_likelihood'] is None:
+            continue
+        g = ling[lrow['locus']]
+        winner_pair = lrow['class_row_pairs'][
+            next(i for i, s in enumerate(lrow['class_log_likelihoods'])
+                 if s == lrow['best_log_likelihood'])]
+        logL, parts = ingredient_nll(g, winner_pair, want_parts=True)
+        arm_mass = lrow['observed_node_mass'] + lrow['observed_edge_mass']
+        print(f"  locus {lrow['locus']}: winner rows {list(winner_pair)} pays the zero-count "
+              f"structure on {parts[0]} predicted-unobserved keys while explaining "
+              f"{parts[1]:.1f} of {arm_mass:.1f} observed share mass "
+              f"({100*parts[1]/arm_mass:.1f}%); leaves {parts[2]:.1f} at the background")
+print('all checks passed')

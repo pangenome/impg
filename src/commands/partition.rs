@@ -1,6 +1,7 @@
 use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
+use crate::partition_profile::PartitionProfile;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use crate::EngineOpts;
 use coitrees::Interval;
@@ -10,7 +11,7 @@ use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-//use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Helper function to create output file path with optional output folder
 fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result<String> {
@@ -249,15 +250,19 @@ pub fn partition_alignments(
     // Initialize masked regions
     let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index().len() as u32)
         .into_par_iter()
-        .map(|id| (id, SortedRanges::new()))
+        .map(|id| {
+            let len = impg.seq_index().get_len_from_id(id).unwrap();
+            (id, SortedRanges::with_distance(len as i32, 0))
+        })
         .collect();
 
     // Initialize missing regions from sequence index
     let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index().len() as u32)
         .into_par_iter()
         .map(|id| {
-            let mut ranges = SortedRanges::new();
-            ranges.insert((0, impg.seq_index().get_len_from_id(id).unwrap() as i32));
+            let len = impg.seq_index().get_len_from_id(id).unwrap();
+            let mut ranges = SortedRanges::with_distance(len as i32, 0);
+            ranges.insert((0, len as i32));
             (id, ranges)
         })
         .collect();
@@ -270,14 +275,6 @@ pub fn partition_alignments(
         .sum::<usize>() as u64;
 
     info!("Partitioning");
-
-    // Force-progress bookkeeping: if a round emits no partitions and the
-    // next selection replays the exact same windows, the selected region has
-    // no homologs the backend can see (e.g. low-complexity sequence the
-    // syng/alignment query cannot anchor) and nothing will ever mask it.
-    // Re-querying it forever spins a single core in silence. Detect that
-    // state and force-mask the region so selection moves on.
-    let mut last_round_windows: Option<Vec<(u32, i32, i32)>> = None;
 
     // If no windows are yet defined, select initial windows based on selection_mode
     if windows.is_empty() {
@@ -296,10 +293,11 @@ pub fn partition_alignments(
     // Collect partitions for single-file output
     let mut collected_partitions: Vec<(usize, Vec<Interval<u32>>)> = Vec::new();
 
+    let mut profile = PartitionProfile::from_env();
     while !windows.is_empty() {
-        let round_windows = windows.clone();
-        let partitions_before_round = partition_num;
-
+        if let Some(profile) = profile.as_mut() {
+            profile.queued(windows.len());
+        }
         if debug {
             debug!("Processing new set of {} windows", windows.len());
             for (seq_id, start, end) in &windows {
@@ -316,7 +314,6 @@ pub fn partition_alignments(
 
         for (seq_id, start, end) in windows.drain(..) {
             let chrom = impg.seq_index().get_name(seq_id).unwrap();
-            let window_start = std::time::Instant::now();
 
             if debug {
                 debug!(
@@ -362,9 +359,16 @@ pub fn partition_alignments(
                 }
             }
 
-            // Query overlaps for current window
-            //let query_start = Instant::now();
-            let mut overlaps = if transitive_dfs {
+            // Coverage is ownership, not a proof that discovery is redundant.
+            // Profile the full original query without changing masks or context.
+            let query_profile = profile
+                .as_mut()
+                .and_then(|p| p.dispatch((seq_id, start, end), missing_regions.get(&seq_id)));
+            if let Some(p) = query_profile.as_ref() {
+                p.started(chrom);
+            }
+            let emitted_before = total_partitioned_length;
+            let query_result = if transitive_dfs {
                 impg.query_transitive_dfs(
                     seq_id,
                     start,
@@ -379,7 +383,7 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )?
+                )
             } else {
                 impg.query_transitive_bfs(
                     seq_id,
@@ -395,9 +399,23 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )?
+                )
             };
-            //let query_time = query_start.elapsed();
+            let query_time = query_profile
+                .as_ref()
+                .map(|p| p.elapsed())
+                .unwrap_or_default();
+            let mut overlaps = match query_result {
+                Ok(overlaps) => overlaps,
+                Err(error) => {
+                    if let Some(p) = query_profile.as_ref() {
+                        p.finish(query_time, Duration::ZERO, Duration::ZERO, 0, 0, true);
+                    }
+                    return Err(error);
+                }
+            };
+            let backend_overlaps = overlaps.len();
+            let post_start = query_profile.as_ref().map(|_| Instant::now());
             debug!("  Collected {} query overlaps", overlaps.len());
 
             retain_seed_occurrence(&mut overlaps, seq_id, start, end);
@@ -425,14 +443,15 @@ pub fn partition_alignments(
             //let extend_time = extend_start.elapsed();
 
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
-            //let mask_start = Instant::now();
+            let mask_start = query_profile.as_ref().map(|_| Instant::now());
             overlaps = mask_and_update_regions(
                 &mut overlaps,
                 &mut masked_regions,
                 &mut missing_regions,
                 min_missing_size,
             );
-            //let mask_time = mask_start.elapsed();
+            let mask_time = mask_start.map(|s| s.elapsed()).unwrap_or_default();
+            let mut post_time = post_start.map(|s| s.elapsed()).unwrap_or_default();
 
             if !overlaps.is_empty() {
                 debug!(
@@ -445,7 +464,7 @@ pub fn partition_alignments(
                     "  Collected {} query overlaps after re-merging",
                     overlaps.len()
                 );
-                //let merge2_time = merge2_start.elapsed();
+                post_time = post_start.map(|s| s.elapsed()).unwrap_or_default();
 
                 //let calc_start = Instant::now();
                 // Calculate current partition length
@@ -561,13 +580,6 @@ pub fn partition_alignments(
                     end,
                     end - start,
                 );
-                debug!(
-                    "  Window {}:{}-{} took {:?} (query + mask + write)",
-                    chrom,
-                    start,
-                    end,
-                    window_start.elapsed()
-                );
 
                 //info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, calc={:?}, write={:?}",
                 //    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, calc_time, write_time);
@@ -582,6 +594,16 @@ pub fn partition_alignments(
                     end - start
                 );
             }
+            if let Some(p) = query_profile.as_ref() {
+                p.finish(
+                    query_time,
+                    post_time,
+                    mask_time,
+                    backend_overlaps,
+                    total_partitioned_length - emitted_before,
+                    false,
+                );
+            }
         }
 
         //let window_start = Instant::now();
@@ -594,61 +616,6 @@ pub fn partition_alignments(
         )?;
         //let window_time = window_start.elapsed();
         //info!("  select_and_window_sequences={:?}", window_time);
-
-        // Stall guard: no partitions emitted this round and the selection
-        // replayed the same windows. Mask the region by hand (it has no
-        // homologs to mask it for us) and reselect, so the loop terminates.
-        if partition_num == partitions_before_round && last_round_windows.as_ref() == Some(&round_windows)
-        {
-            let stalled: Vec<String> = round_windows
-                .iter()
-                .map(|(seq_id, start, end)| {
-                    format!(
-                        "{}:{}-{}",
-                        impg.seq_index().get_name(*seq_id).unwrap_or("?"),
-                        start,
-                        end
-                    )
-                })
-                .collect();
-            log::warn!(
-                "No homologs found for {} selected region(s) ({}); force-masking to keep partitioning moving forward",
-                stalled.len(),
-                stalled.join(", ")
-            );
-            for (seq_id, start, end) in &round_windows {
-                let masked = masked_regions.entry(*seq_id).or_default();
-                masked.insert((*start, *end));
-                if let Some(missing) = missing_regions.get_mut(seq_id) {
-                    let mut rebuilt = Vec::with_capacity(missing.ranges.len() + 1);
-                    for &(ms, me) in missing.ranges.iter() {
-                        if me <= *start || ms >= *end {
-                            rebuilt.push((ms, me));
-                        } else {
-                            if ms < *start {
-                                rebuilt.push((ms, *start));
-                            }
-                            if me > *end {
-                                rebuilt.push((*end, me));
-                            }
-                        }
-                    }
-                    missing.ranges = rebuilt;
-                    if missing.is_empty() {
-                        missing_regions.remove(seq_id);
-                    }
-                }
-            }
-            windows.clear();
-            select_and_window_sequences(
-                &mut windows,
-                impg,
-                &missing_regions,
-                selection_mode,
-                window_size,
-            )?;
-        }
-        last_round_windows = Some(round_windows);
     }
 
     // Convert temporary BED files to graph/MAF if needed
@@ -1887,9 +1854,9 @@ mod tests {
     #[test]
     fn retained_seed_makes_progress_without_homologs() {
         let mut masked = FxHashMap::default();
-        masked.insert(0, SortedRanges::new(10_000, 0));
+        masked.insert(0, SortedRanges::with_distance(10_000, 0));
         let mut missing = FxHashMap::default();
-        let mut ranges = SortedRanges::new(10_000, 0);
+        let mut ranges = SortedRanges::with_distance(10_000, 0);
         ranges.insert((0, 10_000));
         missing.insert(0, ranges);
         let mut overlaps = Vec::new();
@@ -1915,12 +1882,12 @@ mod tests {
     fn retained_seed_respects_existing_masks_and_does_not_duplicate_self() {
         for merge_distance in [-1, 0, 1000] {
             let mut masked = FxHashMap::default();
-            let mut masks = SortedRanges::new(1000, 0);
+            let mut masks = SortedRanges::with_distance(1000, 0);
             masks.insert((0, 200));
             masks.insert((400, 600));
             masked.insert(1, masks);
             let mut missing = FxHashMap::default();
-            let mut ranges = SortedRanges::new(1000, 0);
+            let mut ranges = SortedRanges::with_distance(1000, 0);
             ranges.insert((200, 400));
             ranges.insert((600, 1000));
             missing.insert(1, ranges);
@@ -1954,3 +1921,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "partition_scheduling_tests.rs"]
+mod scheduling_tests;

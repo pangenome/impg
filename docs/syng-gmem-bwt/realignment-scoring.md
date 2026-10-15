@@ -1,0 +1,2464 @@
+# The realignment scoring layer (slice B of the local-realignment evidence model) — note of record
+
+Owner direction 2026-11-06; the anchor-projection layer (slice A,
+`partition_anchor_projection.rs`) stands as the placement machinery of
+record; this layer is the scoring built on it. Assessment-side only:
+`examples/partition_realign_score.rs` + `genome/instrumented/run-realign-score.sh`
++ `genome/instrumented/check-realign-scoring.py`. No `src/` file touched,
+no threshold, no tuning constant, scoreboard machinery unmodified.
+
+## The model, derived and stated
+
+**The scoring rate** comes from the reads' own base qualities: the
+sample's FASTQ carries one uniform quality byte (`I` = Phred 40,
+asserted by streaming the whole file), so the per-base error
+probability is `eps = 10^(-40/10) = 1e-4` and the substitution model
+gives `P(match) = 1 - eps`, `P(mismatch) = eps/3`. The per-base log
+weights are `A = ln(1 - eps)`, `B = ln(eps/3)`. The measured error
+profile is stated beside them: slice A measured zero unmatched
+placement bp over 1,063,522 verified occurrences.
+
+**Per (record, candidate row) skipped-base votes**, computed in-process
+by slice A's committed machinery (the unique-monotone anchor
+correspondence, the serving-anchor projection, the mirror equations —
+the same functions the slice A receipts and checker validated; the
+tens-of-GB full-fidelity per-path context is computed, never
+materialized). A candidate row's log-likelihood for one read instance
+is
+
+```
+LL(read | row) = -ln(2 * (len_row - 149))          # the uniform placement
+                                                  # prior, both strands
+                  + logsumexp over anchored placements of
+                    [ backbone + skipped-base votes ]
+                  with the derived all-mismatch FLOOR term
+```
+
+* **The backbone** is the merged bp of the PINNED anchor windows (the
+  anchors the row's contained walk shares with the required sign):
+  matches by node identity and orientation sign, identical across
+  near-identical paths (rows sharing the anchor chain share the
+  backbone), computed once per (record, placement), asserted per base
+  against the row's sequence by the direct check over the whole scored
+  domain.
+* **The skipped-base votes** are the read's bases outside its merged
+  anchor windows (the flanks; interior hull gaps measured zero, emitted
+  honestly per mirror state when present): each skipped base is
+  projected onto the row through its serving anchor (the bracketing
+  pinned anchor, slice A's committed rule) and votes `A` on a match,
+  `B` on a mismatch against the row's spelled sequence, complemented at
+  physically-reverse placements.
+* **The placement prior** is uniform over the row's full-read
+  placements: `2 * (len_row - 149)` of them — the derived count.
+* **The floor**: a read the row cannot anchor scores at the model's
+  per-read MINIMUM, `150 * B` (every base mismatching — the rigorous
+  lower bound of the read's likelihood under any placement), inside the
+  same logsumexp. As a term it underflows to +0.0 exactly wherever an
+  anchored placement exists, so it is a bit-exact no-op there. The
+  floor's magnitude is NOT the true unanchored likelihood (the best
+  unanchored alignment would sit near `-950`, not `-1546`); ranks are
+  floor-magnitude-robust (the floor enters every class through the
+  same constant), gap magnitudes are floor-dominated where unplaced
+  counts differ — the `log_gap_decomposition` field carries the
+  attribution (unplaced mass on each side and the both-placed
+  per-base evidence gap).
+* **Validity**: a placement exists only when every voted base
+  (backbone windows and skipped votes) projects inside the row's
+  spelled extent — the read lies fully inside the row, the uniform
+  prior's own support. Edge-discarded placements are counted per locus.
+* **The named remainder**: bases inside anchor windows the row does
+  not pin (absent or ambiguous anchors, and edge-overlapping windows —
+  a step whose 63bp window is not fully inside the row extent cannot
+  be a backbone anchor) abstain. Counted per locus as
+  `abstained_hull_bp`; measured negligible at the pilot (3.1 bp per
+  scored placement at chrI L7).
+
+**Record-once, no share-splitting**: each candidate row is an
+independent hypothesis; the record votes once per row — multiple
+occurrences of one record pin the SAME placement on a row (the pin is
+a property of the pattern, the orientation and the row) and count
+once. The record's instances are its evidence: every distinct read
+variant (mirror state, hull start, sequence) votes with its own
+instance count, and the class mixture is per instance.
+
+**The locality ruling** (measured before implementation): the locus's
+evidence set is the records with at least one occurrence TOUCHING the
+locus's window (the routing's own territory-touch rule — the same
+convention that defines the current instrument's per-locus record
+sets), and the occurrences that vote at the locus are exactly those
+touching occurrences. The measured outside class: ALL 2,142 chrMT +
+9,779 chrI occurrences outside built axis-partition rows are
+own-row-edge overhangs — the read's anchor hull crosses the
+alignment-induced membership boundary of its own path (the partition
+BED's chain end falls inside the read's hull; e.g. ADQ#0#chrI's
+partition-7 row ends at 71,751 while a 63bp read sits at
+71,744..71,807); ZERO occurrences are remote or foreign. Ruling: IN —
+structurally, the membership row boundary is the window-seam artifact
+the partition spine was built to dissolve, the likelihood a read
+supports a row is a property of (read, row sequence), and the
+placement-validity rule already restricts such reads to testify only
+where the row spells their bases. At the pilot windows the class is
+156/9,530 (chrI L2), 1,184/75,419 (L4), 688/90,206 (L7) of touching
+occurrences.
+
+**Candidates** fold by identical sequence AND contained walk —
+coalesced copies are ONE hypothesis (the identical-through-graph pair
+BTE#3/#4#block28_contig1 folds by construction; the checker verifies
+the two member rows spell identical sequence and walk from the
+committed GFAs). Classes are all unordered fold pairs `i <= j`; the
+class log-likelihood is the sum over the locus's evidence units
+(record, variant) of `count * ln(0.5 e^{LL_i} + 0.5 e^{LL_j})` — the
+equal 1/2 mixture is the balanced 15x/15x diploid prior. QUAL is the
+existing cluster machinery verbatim (`spectrum_knee`,
+`cluster_form_qual`, `qual_p`, `qual_from_p` and the material-distance
+spectrum over the likelihood ratios — mirrored pure functions from
+`panel_route_spine/cosine_probe.rs`), with the material distance the
+differing observed mass on merged node+edge usage multisets, observed
+mass = record multiplicity (no share split).
+
+## The exactness proof
+
+* **In-process, the whole scored domain**: for EVERY scored (unit,
+  fold, placement) the factorized `(m, c)` is asserted equal to the
+  direct per-base comparison — the backbone verified base-by-base
+  against the row's sequence (not trusted from node identity), over
+  the MERGED pinned-window coverage (syncmer windows overlap heavily;
+  counting per anchor would double-count the overlaps), and the
+  skipped votes recomputed. Integer equality, loud failure. The pilot
+  measured 768,827/768,827 EXACT. Two real defects were found and
+  fixed on the way, both unit-proven: the direct backbone double-count
+  (overlapping pinned windows), and the direct comparison direction at
+  physically-reverse placements (the read's window is the row window
+  REVERSED — offset `t` corresponds to row offset `k-1-t`).
+* **The independent checker** (`check-realign-scoring.py`, ALL PHASES
+  PASS, 6,637 checks, 0 failures) re-derives everything from the
+  committed artifacts: the folds' sequences and contained walks from
+  the GFAs (P/L/S spelling at the front-overhang offset, gap segments
+  excluded), the locality counts, and the exactness sample — 773
+  (record, fold) placements re-derived EXACTLY (114,382 per-base
+  votes and backbone bases; every sampled read verified present in
+  the FASTQ; the correspondence re-enumerated from the GFA walk), plus
+  the bounded-offset dominance scan (the anchored placement attains
+  the best single-offset substitution score within +/-150: 646/770
+  collinear placements dominate; the 124 named exceptions carry FLANK
+  indels — no single offset can collect both sides of a flank indel,
+  the piecewise serving projection does; the stated
+  shifted-mismatch rule) and the bounded edit-distance alignment
+  (646 indel-free, 124 with flank indels).
+* The class table is re-derived in full from the per-unit matrix
+  (all 40,169 classes across the three loci; max deviation 1.2e-6),
+  the truth ranks reproduced, the floor entries verified at
+  `prior + 150B` exactly, the QUAL cluster states reproduced.
+
+## The pilot receipts (chrI, exit 0, wall 61s, RSS peak 2.6 GB)
+
+| locus | folds | units | classes | truth rank | log-gap | QUAL | before (read-matched instrument) |
+|---|---|---|---|---|---|---|---|
+| 2 (identical-pair locus) | 31 | 6,987 | 496 | 4 | 151,917.18 | unbounded | truth NOT EXPRESSIBLE (FAILED-AS-BRACKETED) |
+| 4 (truth-rank1 control) | 190 | 4,576 | 18,145 | **1** | 0.0 | unbounded | rank 1, QUAL 109.51 |
+| 7 (the tail locus) | 207 | 5,851 | 21,528 | 1,644 | 1,247,492.61 | unbounded | rank 1,086, gap 3,105.9 |
+
+* **chrI L4 — the control holds**: the truth pair (S288C#0#chrI,
+  SK1#0#chrI folds) is the bit-exact winner; rank 1, gap 0.0.
+* **chrI L2 — the bracket opens**: the truth pair is now EXPRESSIBLE
+  (rank 4; the windowed instrument could not express it at all). The
+  winner is (the BTE#3/#4 block28_contig1 identical fold, the
+  S288C/W303 identical fold): the BTE scaffold pair replaces SK1's
+  homolog. The gap decomposes as 105 read-mass of unplaced
+  seam-straddlers (the BTE row extends 556 bp past SK1's row end and
+  places them; the truth pair floors them) plus 3,977 logs of per-base
+  evidence on jointly placed reads.
+* **chrI L7 — the tail widens**: truth rank 1,644 (was 1,086); the
+  winner is (ATV#3/#4 block43_contig1, BAD#3/#4 block96_contig1) —
+  scaffold pockets. The gap decomposes as 849 read-mass of floor (the
+  truth rows cannot place the pocket reads at all) plus 54,015 logs
+  of per-base evidence (the pocket rows spell the pocket reads
+  exactly — the multi-census stage's foreign-scaffold-mass finding
+  CONFIRMED in likelihood units: the tail is not an evidence-model
+  artifact; the lever remains the universe/row structure).
+* **The identical-through-graph pair stays tied — correctly**: 5397/
+  5545 fold to ONE candidate at L2 by identical sequence+walk
+  (verified from the GFAs); there are no separate candidates to tie.
+* **QUAL saturates unbounded at all three loci**: the cluster p-form
+  consumes RELATIVE likelihoods (`e^{ll - best}`), and at
+  realignment-scale separations (10^4+ logs between the winner and the
+  nearest divergent rival) they underflow to +0.0, giving `p = 1`. The
+  machinery is unmodified per the ruling; the saturation is the
+  honest behavior of likelihood ratios at these magnitudes (with the
+  true unanchored floor the separations would still underflow: ~600
+  logs per unplaced read).
+
+## What remains (next slice)
+
+The full exhaustive chrMT/chrI rerun under the realignment likelihood
+(all 35 loci), the before/after table against the committed
+read-matched receipts, and the prediction table (the tail loci, the
+controls, the near-twins). The named refinements the pilot exposed for
+the owner: (1) the unanchored FLOOR's magnitude (the derived minimum
+vs the true unanchored likelihood — ranks are robust, gap magnitudes
+are not); (2) the QUAL p-form's dynamic range under likelihood ratios;
+(3) the within-anchor variant positions (the abstained hull
+remainder, measured negligible at the pilot); (4) the row-extent seam
+effect (rows extending past a neighbor's end collect the
+straddler reads — a row-geometry lever, not an evidence lever).
+
+## Slice C: the generated-here/generated-elsewhere marginalization (2026-11-06)
+
+**The defect being fixed.** A locus's record set is defined by the
+routing's territory touch, so conserved pockets bring reads into the
+locale's evidence that a candidate spelling the pocket collects at full
+match score while a candidate that does not pays the all-mismatch floor
+(`150*B` ~ -1,546) — even though the read's own genome generated it
+somewhere the candidate models only as "outside this locale". The
+owner's rho-squared principle: conserved material cancels;
+locally-variable material discriminates.
+
+**The anatomy first (the form-deciding gate, measured at chrI L7).**
+For every unit in L7's record set, classified by whether the slice-B
+winner (the ATV/BAD scaffold pocket folds) and the truth pair place it,
+the placement anatomy on the winner and truth folds (the
+`--anatomy-out` emission on `partition_realign_score`): the
+anchored/skipped/abstained decomposition, the collinearity verdict
+(the pinned anchors at ONE offset), the slice-B piecewise (m, c) beside
+the one-continuous-path whole-read score, the per-skipped-base votes
+with their projected coordinates, and the read's FULL-READ match at
+its verified occurrences on the sample's own donor paths
+(S288C/SK1, origin-shift-corrected, strand-aware).
+
+* **THE VERDICT: CONTINUOUS.** The winner's pocket placements are
+  100% collinear — one continuous path through the pocket row's spell
+  — with m mean 148.7/150 (c = 0 on 75.5% of the 1,603 winner-only
+  placements, c = 1 on 17%). The flanks vote AGAINST the scaffold
+  rows' own context and MATCH it: the pocket copies extend identical
+  through the reads' full spans, and no read spans into unique flank
+  material within its 150 bp. No placement-continuity rule is
+  imposed; the marginalization carries the whole weight.
+* **THE ANATOMY'S HEADLINE FINDING: the pocket reads are NOT
+  foreign/remote-generated.** Every winner-only-placed unit (1,603
+  units, mass 1,677) has a FULL-READ 150/150 match on the sample's own
+  donor paths S288C#0#chrI / SK1#0#chrI: 1,051 units (66%) INSIDE
+  window 7's own truth rows, 426 (27%) in the neighboring ±2 kb seam,
+  only 126 far. Yet the truth folds place none of the in-window ones:
+  2,059 units (mass 2,140) at L7 have an in-window full-match donor
+  occurrence with NO valid truth placement.
+* **THE CAUSE, proven with a named example (record 113 / unit 84 /
+  node 92071): the pin skeleton's stored-walk frame blindness.** The
+  fold pin skeletons are built from `walk_path_range` — ONE frame's
+  syncmer selection — and reads whose anchor k-mers are
+  rc-frame-qualified on the truth path are ABSENT from that walk
+  (slice A's binding lesson, missed in the slice-B pin skeleton),
+  while the same k-mers appear canonical-forward on the
+  reverse-complement scaffold copies, which pin and collect the full
+  match. The truth's `150*B` floor for these reads is a
+  placement-machinery frame artifact, not an inability to spell them.
+  The slice-B "54,015 per-base logs" also decompose into
+  one-homolog floor asymmetries (±1,546-magnitude mixture terms), not
+  per-base evidence — on jointly-placed reads the truth's per-base
+  evidence is BETTER (m 146.8 / c 1.08 vs the winner's 142.9 / 2.93).
+  The frame repair (canonical-scheme pin skeletons, the territory
+  extraction slice A already validated) is the named next lever; the
+  marginalization bounds its cost at E in the meantime.
+
+**The marginalization (derived, no tuning constants).** Each read's
+likelihood under a candidate marginalizes the two generation branches:
+
+    LL(read | candidate) = logsumexp( local-spell branch , E(read) )
+
+The local-spell branch is rule 2's per-(record, row) likelihood (the
+uniform placement prior + the anchored placements). `E(read)` is the
+CANDIDATE-INDEPENDENT elsewhere branch: the read explained by the
+genome outside this locale at the derived background rate — the read
+matches its origin at the MEASURED per-base rate (the census measured
+zero unmatched placement bp over 1,063,522 verified occurrences:
+reads are exact segments of their origins, at the reads' own
+Phred-derived rate A), under the max-entropy uniform origin over the
+donor's diploid genome:
+
+    E(read) = len(read) * A - ln(2 * (G_diploid - len(read) + 1))
+
+The same max-entropy spirit as the old Poisson model's beta = M/|U|:
+the unit of match likelihood spread uniformly over the universe of
+placements. The genome size is measured truth-free from the panel —
+the instrument's own genome universe: the mean per-(strain,
+haplotype) total path length (14,199,901.5 bp over 235 haplotype
+path sets), doubled for the diploid generation model
+(G_diploid = 28,399,803 bp; E = -17.870035 on this sample).
+
+* **THE FLOOR for unexplained reads is E**, not the all-mismatch
+  150*B (which survives only as the per-placement lower bound inside
+  the local branch's logsumexp — a bit-exact no-op wherever an anchor
+  pins, since `e^{150*B}` underflows).
+* **A read whose local placements score no better than E does not
+  vote beyond E** (the mixture absorbs every local branch below E);
+  **the logsumexp is monotone in the local branch**, so a candidate
+  that spells a read at least as well as every rival under the local
+  branch keeps its per-unit ordering after the marginalization — the
+  L4-control preservation property (unit-proven).
+
+**The pilot, before (slice B) → after (slice C), all three loci
+checker-verified (check-realign-scoring.py --marginal, ALL PHASES
+PASS, 6,589 checks, 0 failures; the slice-B mode still passes its own
+receipts, 6,757 checks, 0 failures):**
+
+| locus | truth rank before → after | log gap before → after | winner before → after |
+|---:|---|---:|---|
+| 4 (control) | 1 → 1 | 0.0 → 0.0 | unchanged (bit-exact, checker-enforced) |
+| 2 | 4 → 2 | 151,917.18 → 60.74 | unchanged (BTE identical fold + S288C/W303 fold) |
+| 7 | 1,644 → 8 | 1,247,492.61 → 982.04 | (ATV+BAD scaffold pockets) → (S288C/AAA/SGDref fold + ATV pocket fold) |
+
+The pocket harvest shrinks 99.92% at L7; the winner stops being the
+pure scaffold-pocket pair; the both-placed evidence gap flips negative
+(-2,900.7: the truth's evidence is better on jointly-placed reads);
+the identical-through-graph fold stays one candidate by construction
+(checker-verified from the GFAs); QUAL stays unbounded (the cluster
+p-form's relative likelihoods underflow at the surviving separations).
+
+**What remains (next slices).** (1) THE FRAME REPAIR — the
+canonical-scheme pin skeletons (slice A's territory extraction) so
+that rc-frame-qualified anchors pin on the rows that spell them: at
+L7 alone this affects 2,059 in-window full-match units the truth
+currently cannot place; it is a slice-B machinery repair, needs its
+own exactness gates, and should land before or with the exhaustive
+rerun. (2) The exhaustive chrMT/chrI rerun under the marginal model
+(all 35 loci) with the before/after table. (3) The QUAL p-form's
+dynamic range (unchanged per the ruling; the saturation is named).
+
+## Slice D — the canonical-scheme pin skeleton (the frame repair)
+
+Slice C's anatomy proved the pocket reads are not foreign: 66% have a
+FULL-READ 150/150 match inside the window's own truth rows, and the
+truth's failure to place them is a PLACEMENT-MACHINERY FRAME ARTIFACT —
+the fold pin skeletons were built from the syng's stored path walk
+(`walk_path_range`), which carries only ONE frame's syncmer selection,
+so anchor k-mers that are rc-frame-qualified on a path are absent from
+the walk (slice A's binding lesson, missed in slice B's pin skeleton).
+Slice D repairs the skeletons.
+
+**The repair (the routing's own convention, ported from
+`build_territory_index_rows`):** a fold's pin skeleton is the
+CANONICAL-SCHEME selection over its row extent — per position, the
+frame that spells the k-mer's canonical form min(K, rc(K)) forward
+decides; the rc frame's qualifying k-mers come from the raw extraction
+on the fetched range's reverse complement (mapped back to path
+coordinates, the sign carrying the frame's orientation; node identity
+is frame-independent); a position whose canonical frame did not qualify
+carries NO step. The census records are derived under this same scheme,
+so every anchor of every record is present at every true occurrence of
+either orientation. Every emitted step is verified BY SEQUENCE at
+extraction time against the AGC-fetched panel sequence (`syncmer_seq`:
+the interned window at the claimed position, orientation-aware per the
+sign — this verification caught the kmerHashSeq lowercase convention on
+its first run), the frame decision is verified against the window's
+canonical form, and the forward part is verified complete against the
+stored walk. The before-record stays reproducible under
+`IMPG_REALIGN_STORED_WALK_SKELETON` (the identity gate).
+
+**The diagnosis (all axis-partition rows, both components):** EVERY row
+is affected — chrI 4,472 rows (added 678,789 rc-frame-only anchors,
+dropped 735,805 stored positions whose canonical frame did not
+qualify), chrMT 1,252 rows (added 97,371, dropped 174,719); the
+canonical selection is ~50/50 by frame on chrI. The named proof case
+(record 113/unit 84, node 92071): the truth row now carries (-92071, rc
+frame) at 73,906 where the stored walk has no step (its stored-frame
+neighbors 7446960/9705993 are what blinded it).
+
+**The gates (check-realign-scoring.py --frame, ALL PHASES PASS, 579,969
+checks, 0 failures):** the identity run reproduces the committed
+slice-C receipts on every semantic field with byte-identical sidecars;
+the factorized-vs-direct exactness gate re-ran in full (1,405,438/
+1,405,438 placements exact, up from 768,827 — the repaired skeletons
+place more); the no-regression sweep measured ZERO pin losses at all
+three loci (the dropped stored positions never carried a true pin), pin
+gains 39,114/297,196/300,301 (L2/L4/L7), pinned-both pairs with
+changed ll 3,096/16,967/36,330 (added alternative monotone assignments;
+max |delta| 0.0069/7.9709/0.0076, every changed placement per-base
+exact); the blinded-unit census (units with a full-match donor
+occurrence inside a truth-fold member row and no truth placement, the
+paired anatomy receipts): L7 2,003/mass 2,083 → 14/14, L4 2,115 → 33,
+L2 2,215 → 280 (the L7 remainders are edge-discard/ambiguity cases —
+anchors present and pinned but the read overhangs the row).
+
+**The pilot (chrI 2,4,7, before = the slice-C marginal receipts = the
+identity gate):**
+
+| locus | truth rank before → after | log gap before → after | winner before → after |
+|---:|---|---:|---|
+| 4 (control) | 1 → 1 | 0.0 → 0.0 | unchanged (bit-exact verdict; the winner IS the truth pair, checker-enforced) |
+| 2 | 2 → 4 | 60.74 → 273.96 | unchanged material (BTE identical fold + S288C/W303 fold) |
+| 7 | 8 → **1** | 982.04 → **0.0** | pocket pair → **the truth pair itself** (bit-exact winner) |
+
+At L7 the winner-only class collapses 1,198 units → 0 (the 1,051-unit
+winner-exclusive fuel fully re-absorbed: every unit the winner places,
+the truth also places) and the tail locus CLOSES. At L2 the repair is
+honest UNBIASED machinery — the rival BTE scaffold row gains its own
+rc-frame anchors and collects 105 → 225 units of seam-straddler mass
+(the row-geometry lever named since slice B: the BTE row extends 556 bp
+past SK1's row end), so the truth rank returns to 4 with a
+truth-favoring both-placed gap (-207.3). The L4 control holds bit-exact
+(rank 1, gap 0.0, the winner the truth pair, winner material unchanged).
+
+**What remains (the next slice):** THE EXHAUSTIVE chrMT/chrI RERUN
+under the marginal model with the repaired skeletons (all 35 loci) plus
+the before/after table — the instrument is now frame-unblinded and the
+rerun is the delivery. The L2 seam story (row extents) and the QUAL
+p-form's dynamic range stay named as before.
+
+## Slice E — the exhaustive chrMT/chrI rerun under the marginal model with repaired skeletons (2026-11-06)
+
+The delivery slice: every window of both components — all 14 chrMT + 21
+chrI = **35 loci** — scored exhaustively under the frame-unblinded
+instrument (`anchor-realign-v2-marginal-frame`: the marginal realignment
+likelihood, the canonical-scheme pin skeletons, the existing cluster
+QUAL machinery verbatim). No Rust source changed this slice; the
+instrument is the committed slice-D binary semantics, re-run over the
+full domains. Receipts `realign-exhaustive-{chrMT,chrI}.jsonl` (+ exactness,
+ingredients, records, skeleton sidecars) and run markers
+`run-realignexhaustive-{chrMT,chrI}-*` (exit 0; **walls 130 s + 472 s =
+602 s serial**; **RSS peaks 2,168,796 kB + 5,949,056 kB = 2.07 + 5.66
+GiB, both < 11× under the 64 GiB guard**). The in-process
+factorized-vs-direct gate re-verified EVERY placement over both full
+domains: **1,929,497/1,929,497 (chrMT) + 21,490,054/21,490,054 (chrI) =
+23,419,551/23,419,551 EXACT**.
+
+### The full per-locus table (before = the committed Poisson-era read-matched receipts, the instrument of record)
+
+chrMT (expressible = L2..L10; rank/gap n/a = truth pair not expressible
+under either instrument — L0, L1, L11, L12, L13 on both sides):
+
+| locus | rank before → after | log gap after | QUAL before → after | in called set | winner (after) |
+|---:|---|---:|---|---|---|
+| 0 | n/a | n/a | 9.50 → unbounded | n/a | DG1768+S288C [0,9041) pair |
+| 1 | n/a | n/a | 21.79 → 23.21 | n/a | BAL_1a [6913,12888) + DG1768/S288C/W303 fold |
+| 2 | 3 → **48** | 3,213.3 | 60.76 → unbounded | no | CBK+CBM [10519,17115) + SK1 [8858,15598) |
+| 3 | 1 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (DG1768/S288C + SK1) |
+| 4 | 15 → **1** | 0.0 | 14.11 → unbounded | **yes** | **the truth pair** (AAA/DG1768/S288C/SGDref + CBK/CBM/SK1 fold) |
+| 5 | 1 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (AAA/S288C/SGDref + SK1) |
+| 6 | 173 → **117** | 8,290.8 | unbounded → unbounded | no | DBVPG6044 [25902,36857) + S288C [33428,39044) |
+| 7 | 4 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (S288C + SK1) |
+| 8 | 2 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (DBVPG6044+SK1 fold + S288C) |
+| 9 | 3 → 3 | 2,072.1 | 156.54 → unbounded | no | AAA+SGDref [0,10902) + SK1 [58861,69265) |
+| 10 | 3 → **119** | 8,030.3 | unbounded → unbounded | no | DBVPG6044+SK1 fold + W303 [58915,65826) |
+| 11–13 | n/a | n/a | 140.41/unbounded/127.81 → unbounded | n/a | foreign/scaffold rows (non-expressible) |
+
+chrI (expressible = L2..L19 after — **L2 newly expressible**; L0, L1,
+L20 non-expressible on both sides):
+
+| locus | rank before → after | log gap after | QUAL before → after | in called set | winner (after) |
+|---:|---|---:|---|---|---|
+| 2 | n/a → **4** | 274.0 | 153.53 → unbounded | no | BTE#3/#4 block28 identical fold + S288C/W303 fold |
+| 3 | 13 → **2** | 12.9 | unbounded → unbounded | no | AAA+SGDref fold + SK1 fold |
+| 4 | 1 → **1** | 0.0 | 109.51 → unbounded | **yes** | **the truth pair** (S288C + SK1) — bit-exact control |
+| 5 | 1 → **1** | 0.0 | 57.10 → unbounded | **yes** | **the truth pair** (6-member S288C fold + SK1) |
+| 6 | 1 → **4** | 2,712.2 | unbounded → unbounded | no | CBM#1#chrI_2 [0,11799) + SK1 |
+| 7 | 1,086 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (AAA/S288C/SGDref + SK1) |
+| 8 | 1,123 → **1** | 0.0 | unbounded → unbounded | **yes** | **the truth pair** (7-member S288C fold + SK1) |
+| 9 | 259 → 4 | 882.2 | 151.76 → unbounded | no | S288C 6-member fold + CFF#1#chrI_1 [82727,95172) |
+| 10 | 47 → **1** | 0.0 | 15.50 → unbounded | **yes** | **the truth pair** (S288C + SK1) |
+| 11 | 43 → **1** | 0.0 | 18.87 → unbounded | **yes** | **the truth pair** (6-member S288C fold + SK1) |
+| 12 | 1 → **2** | 313.2 | 76.37 → unbounded | no | CFF#2#chrI_1 [105350,116305) + SK1 |
+| 13 | 3,487 → 1,082 | 35,914.9 | unbounded → unbounded | no | AGK [122220,132514) + CBM#2#chrI_3 [20643,31291) |
+| 14 | 61 → 12 | 1,984.8 | unbounded → unbounded | no | BTE#3/#4 block23 identical fold + SK1 |
+| 15 | 8,975 → 396 | 26,374.3 | unbounded → unbounded | no | ATV#3/#4 block146 identical fold + SK1 |
+| 16 | 18 → **6,613** | 62,913.7 | unbounded → unbounded | no | AIG#0#chrIV [1162863,1168638) + ASB#2#chrIV — cross-chromosome |
+| 17 | 3 → **2** | 488.5 | unbounded → unbounded | no | BEM#3/#4 block92 identical fold + SK1 |
+| 18 | 1,307 → 621 | 35,958.8 | unbounded → unbounded | no | AIS#1#chrI [167305,177537) + BTE#3/#4 block1 identical fold |
+| 19 | 108 → 182 | 19,779.7 | unbounded → unbounded | no | S288C 4-member fold + BFH#1#chrI [149862,160593) |
+
+### The aggregate
+
+Truth rank-1 under the realignment instrument vs the Poisson-era
+read-matched receipts: **chrMT 5 of 9 expressible (L3, L4, L5, L7, L8)
+vs 2 of 9 (L3, L5)** — the "2/8" convention used the older mask in
+which chrMT L4 was bracketed; the receipts measure L4 expressible at
+Poisson rank 15 and it CLOSES to rank 1 here. **chrI 6 of 18 expressible
+(L4, L5, L7, L8, L10, L11) vs 4 of 17 (L4, L5, L6, L12)** — chrI L2 the
+frame-gap-era bracket locus is NEWLY EXPRESSIBLE (rank 4). No locus
+expressible under the Poisson instrument is inexpressible under the
+realignment instrument (checker-enforced).
+
+### The prediction table, scored honestly
+
+- **The tail loci:** chrI L7 CLOSES to rank 1 (gap 0.0; expected from
+  the slice-D pilot); **L8 CLOSES to rank 1** (1,123 → 1); **L10 and
+  L11 CLOSE to rank 1** (47/43 → 1); L3 and L17 reach rank 2; L9 rank
+  4; L14 61 → 12. **L13 (1,082), L15 (396) and L18 (621) do NOT close** —
+  their gaps are unplaced-mass dominated (+19,298 / +12,095 / +17,316
+  truth-unplaced read mass: scaffold/conserved rows the winners place
+  and the truth rows cannot) with truth-favoring both-placed evidence
+  (−8,063.6 / −3,567.4 / −6,529.6). **L16 WORSENS 18 → 6,613** and is
+  the one locus where the both-placed evidence itself is winner-favoring
+  (+17,119): the winner is CROSS-CHROMOSOME chrIV repeat-family material
+  (AIG + ASB rows), 53,746 truth-unplaced mass — genuinely-matched
+  repeat material, not an evidence-model artifact. chrMT L2 WORSENS
+  3 → 48 and L10 WORSENS 3 → 119 (the winners' rows are 3×/2.7× the
+  truth row extents); L6 improves 173 → 117 but stays deep.
+- **The old wins:** chrMT L3 and L5 HOLD (bit-exact truth-pair
+  winners); chrI L4 and L5 HOLD (L4 the enforced bit-exact control).
+  **chrI L6 and L12 are LOST — the honest regressions of this rerun**
+  (L6 rank 1 → 4, gap 2,712.2; L12 rank 1 → 2, gap 313.2). Both are the
+  row-geometry/seam class: the winner replaces one truth homolog with a
+  LONGER row that places more of the window's reads (L6: the
+  CBM#1#chrI_2 scaffold row, len 11,799 vs the truth fold's 10,039,
+  unplaced-mass asymmetry +812, both-placed evidence −2,758.9
+  TRUTH-favoring; L12: the CFF#2#chrI_1 row len 10,955 vs 10,000,
+  asymmetry +295, both-placed −1,465.2 truth-favoring). The Poisson
+  instrument's rank-1 there was mass-share luck of the seed-matched
+  universe; under read-level likelihood the longer row wins on placed
+  mass while losing the per-base evidence — the lever is row extent /
+  the partition boundary geometry, exactly the L2 class named since
+  slice B.
+- **The identical-through-graph pairs stay tied — correctly, by
+  construction** (checker phase 7 re-proves from the GFAs: chrI L2's
+  BTE#3/#4 block28_contig1 fold members spell identical sequence and
+  walk; the L14/L15/L17/L18 winners carry their own identical
+  scaffold folds as single hypotheses).
+- **The frame-gap-era non-expressible loci now score:** chrI L2 — the
+  named bracket locus — is expressible and scores at rank 4. Every
+  locus the partition-graph expressibility census called jointly
+  spellable is expressible here; the remaining non-expressible sets are
+  unchanged (chrMT L0/L1/L11/L12/L13, chrI L0/L1/L20).
+- **The QUAL story:** under likelihood-ratio separations the cluster
+  p-form's relative likelihoods underflow (e^{ll−best} → 0) so p = 1 and
+  QUAL saturates UNBOUNDED at 34 of the 35 loci (the honest behavior of
+  the unmodified machinery, named since slice B); the single finite
+  value is chrMT L1's 23.21 (a 4-fold, 10-class domain). The Poisson
+  era's finite QUALs (0.37–156.5) all saturate; the QUAL signal must
+  come from a form with more dynamic range if it is to rank confidence
+  at realignment separations — the machinery itself stays untouched per
+  the ruling.
+
+### The residuals, named per locus with numbers
+
+Three classes cover every non-rank-1 expressible locus:
+1. **Row-geometry/seam (the L2 class):** the rival row is longer or
+   shifted and places reads the truth rows cannot; the truth WINS the
+   jointly-placed per-base evidence. chrI L2 (+225 unplaced mass,
+   −207.3 both-placed), L6 (+812, −2,758.9), L12 (+295, −1,465.2),
+   L17 (+856, −3,726.0), L9 (+554, −1,585.4), L3 (+2, −1.7), chrMT
+   L9 (+457, −172.4). Levers: row extents and window-seam geometry.
+2. **Truth-row fragmentation:** the alignment-induced partition
+   boundary cuts the truth homolog's material into short/multi-member
+   folds and reads over the cut cannot place. chrMT L2 (the truth
+   S288C co-fold spans only 2,231 bp beside the winner's 6,596 bp row),
+   chrMT L10 (truth S288C co-fold 2,527 bp vs the winner's 6,911 bp
+   W303 row), chrI L19 (truth SK1 row cut to 6,634 bp; the winner's
+   second fold is a foreign-window row BFH#1#chrI [149862,160593)),
+   chrI L13/L18 partially.
+3. **Genuinely-matched foreign/scaffold pocket mass (the multi-census
+   finding, now in likelihood units):** chrI L13 (+19,298 unplaced
+   mass), L15 (+12,095), L18 (+17,316), L16 (+12,511 and the only
+   winner-favoring both-placed evidence, +17,119 — cross-chromosome
+   chrIV repeat material), chrMT L6 (+1,857), L10 (+1,312). The pocket
+   rows spell the pocket reads exactly; no evidence-model repair can
+   close these — the lever is the candidate universe/row structure.
+   chrI L14's winner (the BTE block23 identical fold) also collects
+   +886 unplaced mass over a 12,580 bp row vs the truth fold's 10,027.
+
+### The independent checker, all modes
+
+`check-realign-scoring.py` gains the `--exhaustive chrMT|chrI` mode
+(phases 1–8 over every locus: markers/exit/wall/64 GiB guard; every
+fold's canonical skeleton re-verified against the partition GFAs with
+every frame decision checked — chrMT 1,099 rows / chrI 3,545 rows,
+added 89,318 + 536,927 and dropped 160,465 + 584,971 steps, 228,645 +
+830,785 byte-level sequence-verified against the S segments; the
+locality counts re-derived exactly; the sampled exactness re-derivation
+— 3,360 + 5,178 placements, every vote and backbone base; the E
+derivation audit and the ≥E bounding property over the whole matrices;
+ALL class log-likelihoods recomputed from the matrices — 1,169,912 +
+4,341,818 checks total, max deviations ≤ 1.2e-7; the QUAL states
+reproduced; the generalized identical-fold proof from the GFAs; the
+before/after verdicts with the old-wins PREDICTION VERDICTS — a lost
+old-win is reported as a NAMED MEASURED FINDING, never a receipt
+failure — and the chrI L4 control hard-gated and passing).
+**ALL PHASES PASS in every mode:** the new `--exhaustive chrMT` (1,169,912
+checks) and `--exhaustive chrI` (4,341,818 checks; the two prediction
+violations at L6/L12 named in the log), and the three prior modes
+unchanged on their committed receipts — default 6,760, `--marginal`
+6,592, `--frame` 579,972 checks, all 0 failures. Checker walls: 118 s
+(chrMT) + 366 s (chrI) = 484 s; the three prior modes ≈ 2 min each
+(poll-bounded). Checker RSS peaks ≈ 3 GB (chrMT) / 5 GB (chrI),
+observed well under the guard.
+
+### What remains (the levers, unchanged in kind)
+
+The candidate-universe/row-structure levers (row extents at window
+seams; the alignment-induced partition boundary that fragments truth
+rows; the scaffold/repeat pocket material and the cross-chromosome
+windows), and the QUAL p-form's dynamic range. No selection swap, no
+threshold, no scoreboard change; truth assessment-side only.
+
+## Phase 0 of the runtime plan — the dominance measurement (2026-11-06)
+
+The instrument's first wall-attribution slice (measure-before-lever;
+timers and counters only, emitted to stderr — no receipt field
+changes, no restructuring, no behavior change). `partition_realign_score`
+gains phase-local timers at its natural phase boundaries — inputs
+(panel+routes+census+partition maps), the FASTQ quality scan, the E
+derivation, the derive-cache load, the pilot-record BINDING phase (with
+sub-timers for its three cost drivers: the per-record canonical-scheme
+step extraction, the per-candidate key-shape re-derivation, and the
+per-(occurrence × shift) `verify_key_at` AGC fetch probes, plus measured
+counts — records, occurrences, candidate keys, verify probes, fetch
+calls, fetch bytes), the per-record read variants, the RowStore
+partition build (context assembly: per-row fetch + stored-walk
+extraction + canonical-scheme skeleton extraction, sequence-verified),
+and per locus: the touching/locality classification, the scoring
+matrix, the class enumeration, QUAL, the exactness sample, and the
+receipts/IO writes, with a `locus_N_receipts` RSS probe per locus for
+the memory-peak attribution. A global AGC-fetch counter attributes
+fetch volume per phase.
+
+### The timered exhaustive reruns (serial, exit 0, 64 GiB guard clean)
+
+chrMT all 14 loci: wall 150 s, poller RSS peak 2,195,864 kB; chrI all
+21 loci: wall 597 s, poller RSS peak 5,957,684 kB (the clean rerun;
+the committed slice-E run measured 5,949,056 kB — the same peak).
+Factorized-vs-direct 1,929,497 + 21,490,054 = 23,419,551/23,419,551
+EXACT in both. **THE ANSWER-PRESERVATION GATE passes on both
+components:** the timered receipts equal the committed slice-E
+receipts on every semantic field (only the walls/rss_kb timing fields
+differ; the walls field set unchanged), and all four sidecars
+(exactness/ingredients/records/skeleton) are BYTE-IDENTICAL — the
+instrumentation provably does not perturb the instrument.
+
+### THE DOMINANCE TABLE (the measured phase walls; chrMT 147.6 s and
+chrI 588.9 s in-process totals)
+
+| phase | chrMT wall | chrMT share | chrI wall | chrI share | the measured cost driver |
+|---|---:|---:|---:|---:|---|
+| inputs (panel+routes+census+maps) | 5.4 s | 3.7% | 6.6 s | 1.1% | the 10M-vertex/24M-edge GBWT + 4,891/13,905 census records |
+| quality scan | 2.7 s | 1.8% | 2.6 s | 0.4% | 2,439,103 reads streamed |
+| E derivation | 0.002 s | ~0% | 0.002 s | ~0% | 235 haplotype sets |
+| derive cache load | 1.4 s | 0.9% | 1.4 s | 0.2% | 2,439,103 reads / 666,327 keys |
+| **binding (anchor/pin placement + verify)** | **134.5 s** | **91.1%** | **551.1 s** | **93.6%** | 4,891/13,905 records; 234,472/1,415,203 occurrences; 4,954/14,629 candidate keys; **703,605/4,247,781 verify probes; 708,496/4,261,686 AGC fetches (51.4/308.5 MB)** |
+| read variants | 0.0 s | ~0% | 0.4 s | 0.1% | per-record variant census |
+| rows (context assembly) | 1.5 s | 1.0% | 6.3 s | 1.1% | 1,252/4,472 rows; 2,504/8,944 fetches (16.5/78.2 MB) |
+| loci: fold enum + units/locality + skeleton sidecar | 0.6 s | 0.4% | 2.0 s | 0.3% | Σ 1,099/3,545 folds; Σ 47,997/266,095 units |
+| loci: scoring matrix | 0.2 s | 0.1% | 1.9 s | 0.3% | 1,929,497/21,490,054 placements (rayon-parallel) |
+| loci: class LLs | 0.1 s | 0.1% | 3.0 s | 0.5% | Σ 59,225/378,306 classes × units mix_logsumexp (≈ 4.9 × 10^9 terms at chrI) |
+| loci: QUAL + exactness | 0.3 s | 0.2% | 1.4 s | 0.2% | spectra + 3,360/5,178 sample pairs |
+| loci: receipts/IO | 0.9 s | 0.6% | 12.1 s | 2.1% | the ingredients ll_matrix (Σ 47,997/266,095 units × folds; chrI L16 34.5 M entries) |
+
+Within the binding phase the verify probes are **99.1% (chrMT) /
+99.5% (chrI)** of the phase wall (133.3 s / 547.9 s); the step
+extraction is 0.8/2.3 s and the key-shape derivations 0.0/0.1 s.
+
+### THE INTERPRETATION — the lever mapping, measured
+
+**The dominant phase is the binding phase's per-(occurrence × shift ×
+candidate) sequence-fetch verification — 90% (chrMT) / 93% (chrI) of
+the whole instrument wall.** The natural unit cost is per-CALL, not
+per-byte: the average fetched verify range is ~72 bp (308.5 MB over
+4,261,686 fetches at chrI) and the measured cost is ~129 µs/probe —
+the random-access overhead of `sources.fetch` (per-call seek/decompress
+into the route sources), not the compared bytes. The mapping to the
+plan's levers:
+
+- **(a) Candidate-independent recomputation (the hoist-to-once class) —
+  THE lever this measurement names.** The verify loop fetches the SAME
+  per-occurrence range once per (candidate key × shift): measured
+  4,247,781 probes against 1,415,203 occurrences = a **3.01× pure
+  re-fetch redundancy** (the candidate multiplicity is small here —
+  14,629 candidate keys over 13,905 records — so the 3-shift loop is
+  the redundancy). Hoisting the fetch to once per (occurrence,
+  candidate) — or once per occurrence with the ±1 shift handled by
+  fetching one base of margin — bounds the dominant phase at ~1/3 of
+  its current wall (≈183 s at chrI) with NO model change. A per-range
+  fetch cache (the binding phase's ranges and the rows phase's ranges
+  overlap the already-fetched row sequences) would collapse the
+  per-call overhead further. Second-order members of the same class,
+  measured: the rows phase fetches each row's range twice (seq fetch +
+  the canonical-skeleton fetch of [start−k, end+k)) — 8,944 fetches
+  for 4,472 rows — at 6.3 s total; the per-(fold, unit)
+  `decode_record_tokens` re-derivation inside scoring is inside the
+  1.6 s scoring wall.
+- **(b) Per-class re-derivation (the Phase-2 vote-vector lever):**
+  the class enumeration re-walks all units per class — Σ classes ×
+  units ≈ 4.9 × 10^9 mix_logsumexp terms at chrI — for 3.0 s of
+  wall (0.5%; rayon-parallel; the CPU-seconds are larger but the wall
+  is the measure). Real CPU, but not where the wall lives.
+- **(c) Irreducible work:** the semantic per-occurrence verification
+  (one fetch + per-anchor compare per occurrence — 1,415,203
+  occurrences at chrI, each fetched range ~72 bp) and the scoring of
+  21,490,054 placements. Even fully hoisted, the binding phase
+  bounds at ~1/3 of its current wall; the remaining cost is the fetch
+  mechanism itself.
+
+**The memory-peak attribution (the 5.66 GiB):** NOT the binding phase
+(RSS 3.21 GB at chrI) and not scoring (4.27 GB at L16) — the peak is
+held in the per-locus **receipts/IO phase at the large-matrix loci**:
+the ingredients sidecar materializes the full ll_matrix as a serde
+JSON value tree before writing (chrI L16: 448 folds × 77,117 units =
+34.5 M entries ≈ +1.15 GB live over the 4.27 GB baseline), and the
+external poller catches 5.95 GB there (probe after the write: 4.80 GB
+retained). A streaming serializer (to_writerf over the matrix without
+the value-tree materialization) would remove the spike without
+touching the receipts' content.
+
+### The checker in the timered mode
+
+`check-realign-scoring.py --exhaustive chrMT|chrI --timered-base
+<base> --run-tag <tag>` re-runs every slice-E phase over the timered
+receipts and adds **phase 8t, the answer-preservation gate**: per
+locus, every semantic field must equal the committed slice-E receipt
+(only walls/rss_kb excluded, the walls field set checked unchanged
+against schema drift) and the four sidecars must be byte-identical.
+**ALL PHASES PASS:** chrMT 1,170,642 checks, chrI 4,342,914 checks, 0
+failures (the +730/+896 checks over slice E are phase 8t's own). The
+default paths and all prior modes are untouched.
+
+No thresholds, no tuning constants, no selection swap, no scoreboard
+change; assessment-side only; serial runs; the 64 GiB guard clean
+everywhere.
+
+## Phase 1 of the runtime plan — THE FETCH-PATH REBUILD (2026-11-06)
+
+The three levers the phase-0 dominance table named, all
+answer-preserving (the receipts must reproduce slice E field for
+field, the sidecars byte-identically — the identity-gate pattern from
+slice D, enforced by the checker's phase 8t). Phase 2's vote-vector
+lever stays unbuilt: the same measurement that named the levers
+disproved it (0.1%/0.5% of wall).
+
+### Lever 1 — the hoisted re-fetch
+
+The binding verify loop re-fetched the same per-occurrence range once
+per origin shift (the measured 3.01x redundancy: 4,247,781 probes over
+1,415,203 occurrence-ranges at chrI). The three shift ranges differ
+only in the low bound (`max(0, start + shift - 1)`, shifts −1/0/1) and
+share the high bound `start + span + 1`, so one union fetch
+`[max(0, start − 2), start + span + 1)` per (occurrence, candidate)
+covers all three. `verify_key_at` (now top-level) verifies each shift
+against the union buffer's tail from the shift's clamped low bound —
+byte-for-byte the crop the per-shift fetch returned, including the
+short/empty-crop edge cases (start near 0; range overhanging the path
+end). Unit-proven against a copy of the pre-rebuild per-shift-fetch
+code across interior/near-zero/path-end occurrence starts, both
+orientations, both mirror states, both verdicts.
+
+### Lever 2 — the per-lane in-memory AGC cache (the call-bound fix)
+
+Phase 0 measured the fetch CALL-bound: ~129–190 µs per ~72 bp crop
+(one random-access seek/decompress per `Sources::fetch` into the
+AGC). Measured first, as ordered: the AGC is one 93.3 MB file (9,901
+lanes, 3.34 GB uncompressed); the touched subset is 840 occurrence
+lanes / 384.5 MB at chrI (141 / 11.5 MB at chrMT), 1,286 lanes /
+514.7 MB with the partition-map member rows. **The derived choice:**
+each TOUCHED lane loads once, whole, through the same validated
+`Sources::fetch` path (one sequential decompression per lane — the
+per-locality batch-prefetch option taken at its natural locality, the
+contig; a window/block cache would still pay a decompression call per
+window), then every crop is a memory slice of the cached buffer.
+Byte-identity by construction: the lane buffer IS the 0..len crop
+`Sources::fetch` returns (length- and alphabet-validated,
+uppercased), so a crop of it is a crop of the answer. The cache holds
+only touched lanes (≤ ~515 MB at chrI), never the 3.34 GB panel.
+
+### Lever 3 — the streaming ingredients serializer
+
+The ll_matrix now serializes directly from the typed matrix, not
+through a serde_json value tree (phase 0 measured the chrI L16 tree
+at +1.15 GB live over the 4.27 GB scoring baseline). Object keys are
+written in the `json!` macro's map order (serde_json without
+`preserve_order`: alphabetical), each field through the same
+serializer — the sidecar stays byte-identical.
+
+### THE WALL TABLE (before = phase 0, after = the rebuilt runs)
+
+| phase | chrMT before | chrMT after | chrI before | chrI after |
+|---|---:|---:|---:|---:|
+| inputs | 5.4 s | 7.5 s | 6.6 s | 6.7 s |
+| quality scan | 2.7 s | 3.2 s | 2.6 s | 2.7 s |
+| derive cache | 1.4 s | 1.8 s | 1.4 s | 1.3 s |
+| **BINDING** | **134.5 s (91.1%)** | **1.7 s (79x)** | **551.1 s (93.6%)** | **10.0 s (55x)** |
+| read variants | 0.0 s | 0.0 s | 0.4 s | 0.3 s |
+| rows/context assembly | 1.5 s | 0.7 s | 6.3 s | 2.3 s |
+| the loci loop | 3.5 s | 3.2 s | 37.7 s | 11.4 s |
+| **in-process total** | **147.6 s** | **18.1 s** | **588.9 s** | **35.4 s (16.6x)** |
+| external wall | 150 s | **22 s** | 597 s | **37 s** |
+
+Inside the rebuilt binding phase: the verify probes are unchanged as
+a semantic count (703,605 / 4,247,781) but now run over 234,535 /
+1,415,927 union range fetches (the measured 3.01x hoist), served from
+141 / 840 lane loads (10.9 / 366.7 MB, 0.4 / 7.9 s of load time inside
+the phase); the phase's fetch calls fell 708,496→239,426 (chrMT) and
+4,261,686→1,429,832 (chrI). The factorized-vs-direct gate re-verified
+every placement: 1,929,497 + 21,490,054 = 23,419,551/23,419,551 EXACT.
+
+### THE MEMORY SPIKE (gate e)
+
+The external poller peak at chrI fell 5,957,684 kB → **4,203,688 kB**
+(the slice-E 5.66 GiB peak was held at the L16 receipts phase; the
+lane cache itself adds 366.7 MB). The in-process receipts probe at L16
+reads 4,422,448 kB after the write over the 3,846,188 kB scored
+baseline; the residual ~576 MB is the records-sidecar named-classes
+value tree — outside this lever's scope, named as the remaining
+receipts-phase allocation. chrMT peak 2,077,092 kB (was 2,195,864).
+The 64 GiB guard is clean everywhere.
+
+### The gates
+
+**(b) The identity gate:** the checker's `--timered-base` mode over
+the rebuilt receipts (`--exhaustive chrMT --timered-base
+realign-rebuilt-chrMT --run-tag realignrebuilt-chrMT-chrMT`, likewise
+chrI): **ALL PHASES PASS — chrMT 1,170,642 checks, chrI 4,342,914
+checks, 0 failures**, both including phase 8t (every semantic field
+equal to the committed slice-E receipts, only walls/rss_kb differing,
+walls field set unchanged; all four sidecars byte-identical). The
+rebuilt runs are a proven no-op on the answers. **(c) The prior
+modes** over their committed receipts: default 6,760, --marginal,
+--frame, all 0 failures (the phase-0 no-regression sweep repeated).
+**(d) Unit tests:** `partition_realign_score` 17/17 (16 prior + the
+hoisted-verify equivalence test), `panel_route_mem_routed` 80/80,
+`partition_anchor_projection` 8/8, `partition_graph_export` 1/1.
+
+Receipts: `realign-rebuilt-{chrMT,chrI}.{jsonl,exactness.jsonl,skeleton.jsonl}`
++ sidecars + run markers (`run-realignrebuilt-*`, external RSS poller
+files) + the checker logs (`check-rebuilt-*.log`) at the validation
+dir; the committed slice-E and timered receipts untouched on disk.
+Runner: `genome/instrumented/run-realign-rebuilt.sh`. Assessment-side
+only (no src/ file touched); no thresholds, no tuning constants, no
+selection swap, no scoreboard change, no 502, no PR push; serial; the
+64 GiB guard clean everywhere.
+
+What remains for the runtime plan: the parallelism pilot (the next
+stage, not started here) — with binding collapsed to 1.7 s/10.0 s, the
+loci loop and inputs are the next-largest walls, and the
+per-locality work is now dominated by in-memory computation.
+
+## Phase 3 of the runtime plan — the parallelism pilot, measured not assumed (2026-11-06)
+
+The serial-only rule comes from a MEASURED race in the OLD machinery's
+reference-rescore (7-wide and 2-wide both failed, solo passed; the
+race file parked, one line). This instrument is receipt-side and
+partition-local, but the discipline is measure-don't-assume: the race
+detector here is BYTE-IDENTITY — every rung of the width ladder must
+reproduce the committed phase-1 serial receipts on every semantic
+field with all four sidecars byte-identical.
+
+**The seams.** The two natural parallel seams in the phase-1 profile,
+both in `examples/partition_realign_score.rs` (assessment-side; no
+src/ file touched): **seam 1** the per-record binding loop (10.0 s of
+35.4 s at chrI); **seam 2** the per-locus loop (11.4 s at chrI). The
+shared-state proof is compiler-enforced, not asserted: each seam body
+is a pure per-record / per-locus function — every outer capture is an
+immutable shared reference (the panel, the census lines, the key
+indexes, the derive cache, the reads, the partition maps, the
+assembled row store, the bound keys/shifts/variants) or the
+thread-safe fetch path (the `AtomicU64` fetch counters; the
+`LaneCache`'s mutex-per-lane slots, whose loads hold the lane's mutex
+through `Sources::fetch`, so loads are serialized per lane and
+idempotent — no lane can load twice). The `&dyn Fn` row-store fetch
+is widened to `&(dyn Fn + Sync)` and the seam map's bound enforces
+`Sync` at compile time. Every seam result lands in its own pre-sized
+slot read out in item order, and every sidecar line is buffered per
+locus and written in LOCUS ORDER after the loop — the receipts are
+thread-interleaving-independent BY CONSTRUCTION.
+
+**The width semantics, measured twice.** The first attempt put the
+seams on the rayon pool with `RAYON_NUM_THREADS=2`: the chrMT loci
+phase went 1.8 s → 18.5 s. The control experiment isolated two
+stacked effects: (1) the committed "serial" runs were never
+single-threaded in the loci loop — the per-locus
+scoring/classes/spectrum par_iters ride rayon's DEFAULT pool (the
+whole box), and bounding the pool to the rung width silently
+serialized those phases too (serial code at width 2: loci 8.2 s);
+(2) nesting the seam par_iter in the same bounded pool adds
+contention on top (18.5 s). NO RACE — even that pathological run was
+byte-identical. The corrected mechanism (`seam_map`): the seams run
+on DEDICATED scoped std::threads at width N
+(`IMPG_REALIGN_PARALLEL_SEAMS=1 IMPG_REALIGN_SEAM_WIDTH=N`), and from
+a non-rayon thread every inner par_iter installs rayon's global pool —
+the committed inner behavior, unchanged. The committed default (no
+env) is the serial path, byte-for-byte.
+
+**The identity gate, every rung, both components: PASS.** All four
+sidecars byte-identical to the committed phase-1 rebuilt receipts
+(exactness/ingredients/records/skeleton), every semantic field equal
+(only walls/rss_kb differ), binding counters identical (chrI 13,905
+records / 1,415,203 occurrences / 14,629 candidates / 4,247,781
+verify probes over 1,415,927 range fetches / 840 lane loads). No race
+found at any width — the seam bodies touch no mutable shared state.
+
+**The wall ladder (external wall, house runner, 64 GiB guard clean
+everywhere; the poller RSS peak is the honest meter):**
+
+| phase (chrI) | serial (re-baseline) | 2-wide | 4-wide | 8-wide |
+|---|---:|---:|---:|---:|
+| inputs | 7.0 s | 7.1 s | 6.1 s | 6.9 s |
+| quality scan | 2.5 s | 2.6 s | 2.5 s | 2.6 s |
+| derive cache | 1.4 s | 1.3 s | 1.3 s | 1.5 s |
+| **binding (seam 1)** | **9.7 s** | **6.8 s** | **5.5 s** | **5.6 s** |
+| rows/context | 2.5 s | 2.4 s | 2.4 s | 2.3 s |
+| **the loci loop (seam 2)** | **13.1 s** | **14.7 s** | **16.1 s** | **24.2 s** |
+| external wall | **41 s** | **34 s** | **30 s** | **30 s** |
+| poller RSS peak | 5.71 GB | 5.52 GB | 6.26 GB | 6.66 GB |
+
+(chrMT: serial 18 s / 2w 14 s / 4w 14 s / 8w 14 s; binding 1.1 → 0.8
+s; loci 1.8 → 3.2 s at 8w; RSS peaks 2.31 / 2.33 / 1.73 / 1.79 GB —
+the peak's locus alignment shifts with the stride schedule, poller
+sampling noise included. The committed phase-1 reference walls under
+their day's load: chrI 37 s / chrMT 22 s, chrI peak 4.20 GB — the
+re-baseline serial peak reads higher because the emission buffering
+holds the largest ingredients line (~706 MB at L16) in memory before
+the ordered write; the same buffering is in every rung.)
+
+**The honest reading, measured:** the binding seam pays (9.7 s →
+5.5 s, plateauing at the serialized 840-lane load floor — the lane
+loads hold their per-lane mutexes through the decompression); the
+LOCI SEAM IS A WALL LOSS AT EVERY WIDTH (13.1 s → 14.7/16.1/24.2 s)
+because the inner phases already saturate the box's default pool and
+outer concurrency only adds live-loci memory pressure and scheduling
+churn. The whole-instrument gain is 41 s → 30 s at chrI (~1.35x),
+entirely from seam 1. The optimal measured rung is 4-wide; 8-wide
+adds nothing on the wall and costs RSS.
+
+**The scaling projection (EXTRAPOLATION, labeled as such).** A
+chrIV-class chromosome (~1.53 Mb, ~6.7x chrI's window count) under
+the measured per-phase rates projects: binding ~9.7 s x 6.7 ≈ 65 s
+serial, ~37 s at 4-wide (the lane-load floor scales with the touched
+lane set); the loci loop ~13.1 s x 6.7 ≈ 88 s serial (per-locus
+matrix sizes assumed similar; the L16-class large loci dominate).
+The whole genome (16 chromosomes, ~53x chrI) projects ~20 minutes
+serial per full-genome pass and ~17 minutes at 4-wide — the seam
+gain does not compound, because the loci seam is a measured loss and
+the remaining wall (inputs ~6.7 s + quality 2.6 s + derive 1.3 s
+constants + the serialized lane-load floor) is seam-invisible. The
+levers for chrIV-class walls remain algorithmic (the named
+records-sidecar value tree, the per-locus receipts/IO), not seam
+width.
+
+**The gates:** the checker `--timered-base` sweep over every rung's
+receipts (all phases + 8t), plus the three prior modes over their
+committed receipts; unit tests 17/17. Receipts `realign-par-{serial,2,4,8}-{chrMT,chrI}.*`
++ run markers (`run-realignpar-*`) + checker logs (`check-par-*.log`)
+at the validation dir; the committed receipts untouched on disk.
+Runner: `genome/instrumented/run-realign-parallel.sh`. Assessment-side
+only; no thresholds, no tuning constants, no selection swap, no
+scoreboard change, no 502, no PR push; the 64 GiB guard clean
+everywhere.
+
+## chrIV end-to-end, slice 2 — THE EXHAUSTIVE SCORING RUN (2026-11-06)
+
+The measurement that replaces the whole-genome extrapolation with
+arithmetic: all 167 chrIV loci under the marginal realignment model
+with repaired skeletons, the anchor-projection receipts at 1.5 Mb
+chromosome scale, and the domain/truth/wall tables against the chrI
+profile.
+
+**The input chain (the balanced-diploid validation's chrIV
+component):** the multi-census run (`run-cosine-multicensus.sh chrIV`,
+the committed pilots' recipe re-runnable per component) produced
+92,883 census records (6.68x chrI) / 12,753,283 verified occurrences
+(9.01x) / window span 0..166; the same run's Poisson-era read-matched
+receipt measured the windowed frame at 0/167 truth-pair-expressible
+(the slice-1 census's frame-gap prediction). The anchor-projection
+receipts (`anchor-projection-chrIV.*`, 2.6 GB + context + rows
+sidecars, exit 0, wall 704 s, poller peak 9.13 GB): 12,753,283/12,753,283
+occurrences interval-count and node-list matched against the census,
+shift 0 at every occurrence, 232 M hull checks; the sampled checker
+`check-anchor-projection.py chrIV` ALL PHASES PASS (297,745,711
+checks).
+
+**THE REPEAT-DOMAIN REPAIR (the exact-DP anchor correspondence).**
+The committed monotone-assignment enumeration is exponential in
+anchors-per-repeat-node; the first chrIV serial attempt measured
+locus 39 alone at 760.7 s in scoring (partition 175's repeat rows
+carry a syncmer node at 34 positions; 5,788 units x 179 folds), every
+other completed locus <= 0.6 s. The multiplicity map over the 158
+axis partitions names the hazard set (L71 a scaffold row with a node
+at 1,356 positions — benign there only because few units pin on it;
+L147 338; L78 103; L81 101; L166 96). The repair replaces the
+enumeration with an exact forward/backward feasibility DP: every
+complete monotone chain contains every candidate-bearing anchor, so a
+position is pinned iff it is the anchor's unique DISTINCT feasible
+candidate; >= 2 feasible = ambiguous None; none = the zero-leaf
+all-None outcome. Equivalence gates: unit test 18/18 (3,000
+randomized synthetic walks vs a verbatim copy of the committed
+enumeration — it caught the duplicate-position counting divergence on
+the way) and the chrMT/chrI serial byte-identity gates (all four
+sidecars byte-identical to the committed phase-1 rebuilt receipts, 0
+semantic diffs). With the DP, locus 39 scores in 0.0 s with
+IDENTICAL numbers (593,870/593,870 factorized placements).
+
+**THE WINDOW GENERALIZATION.** chrIV is the first component where
+windows are not 1:1 with axis partitions (167 windows over 158
+partitions; six partitions host 2-4 windows). Windows derive from
+the AXIS ROWS; the truth folds are window-aware (truth-first = the
+fold carrying the window's own axis row; truth-second = the committed
+path-name rule at single-window partitions, None at multi-window ones
+where an SK1 row cannot be attributed to a window by placement —
+chrIV partition 110's two SK1 rows are other windows' orthologs).
+Byte-identity-gated on chrMT/chrI (all sidecars byte-identical).
+
+**THE EXHAUSTIVE RUN OF RECORD (4-wide, the phase-3 clean rung; exit
+0; 64 GiB guard clean):** external wall 148 s (serial identity base
+236 s), poller RSS peak 28.58 GB (serial 26.79 GB); in-process phases
+(serial): inputs 12.0 s, quality 2.2 s, derive 1.1 s, binding 39.9 s,
+variants 0.9 s, rows/context 16.0 s, loci 138.0 s; at 4-wide the
+per-locus summed walls inflate (loci 260.4 s summed — the phase-3
+contention finding at chromosome scale) while the external wall
+falls. THE IDENTITY GATE: the 4-wide receipts equal the serial
+receipts on every semantic field, all FOUR sidecars byte-identical —
+no race at chrIV scale. Receipts `realign-exhaustive-chrIV.*` +
+`realign-par-serial-chrIV.*` + run markers at the validation dir.
+
+**THE DOMAIN-SCALING TABLE (chrIV vs chrI, measured):** windows 167
+vs 21 (7.95x); class pairs post-fold 4,279,081 vs 378,306 (11.31x);
+units 2,502,395 vs 266,095 (9.40x); records 128,215 vs 16,020
+(8.00x); factorized placements 202,871,144 vs 21,490,054 (9.44x);
+per-locus means 25,623 class pairs vs 18,015 (1.42x) and 14,984 units
+vs 12,671 (1.18x) — SUPERLINEAR in the class domain, dominated by the
+repeat-locality partitions: the largest loci are L92/L106 (partition
+24: 1,072 folds, 575,128 class pairs, 72,105 units, 18.4 M
+placements), L51 (partition 187: 956 folds, 457,446 pairs), L166
+(partition 289: 700 folds, 245,350 pairs — the chromosome-end
+subtelomeric locality), L66/L93/L107 (partition 16: the chrI-L16
+twin, 448 folds, 100,576 pairs), L121, L120/L134.
+
+**THE TRUTH-RANK TABLE (all 167 loci; classes from the slice-1
+expressibility census):** 143/167 truth-pair-expressible under the
+committed path-domain convention; truth rank-1 at 70 loci. By class:
+IN-AXIS-PARTITION 96 expressible, 48 rank-1; TILED-ELSEWHERE 46
+expressible (the one-window coordinate-offset class — the window's
+partition carries the NEIGHBOR window's aligned SK1 row; the paired
+class is named per locus in the checker's phase 8c, never silently
+passed as the ortholog), 21 of them rank-1; TILED-ELSEWHERE 23
+inexpressible (13 multi-window partitions, 8 no-SK1-row, L120/L134
+the ambiguous multi-window pair); ABSENT (the contig-end length
+polymorphism) — L163 EXPRESSIBLE and truth rank 1 (its axis
+partition 286 carries SK1's [1454080,1464091) row, the terminal
+material the slice-1 census's window query found), L166 inexpressible
+(its 289 partition carries no SK1#0#chrIV row at all; the winner
+harvests the cross-chromosome subtelomeric repeat family — AAA/SGDref
+chrXV + SK1 chrV folds — and is the only bounded-QUAL locus, 92.89).
+The identical pair AAA#0#chrIV/SGDref#0#chrIV folds to ONE candidate
+at every locus where either holds a row (checker phase 7: co-membership,
+identical intervals, identical sequence+walk from the GFAs).
+
+**THE WALL/MEMORY VERDICT vs THE EXTRAPOLATION:** the phase-3
+projection guessed chrIV-class binding ~65 s serial -> ~37 s at
+4-wide and a whole-instrument wall in the low minutes with an RSS
+guess of 10-20 GB. Measured: binding 39.9 s serial -> 22.5 s at
+4-wide (better than projected — the lane-cache floor scales with the
+touched lane set, 3,399 lane loads / 1.7 GB at the anchor layer and
+12,928,943 scoring fetches served from cache), the serial
+whole-instrument wall 236 s and 148 s at 4-wide — the honest
+arithmetic for the whole genome: chrIV is 7.95x chrI in windows but
+the wall is 3.6-4.9x chrI's (30-41 s), sublinear because the
+component constants (inputs, quality scan, derive cache) amortize;
+the whole genome (16 components, ~53x chrI) projects to ~15-20
+minutes at 4-wide per full-genome pass with the DP in place. The RSS
+peak 28.6 GB exceeds the 10-20 GB guess — the repeat-locality loci's
+matrices (L92's 72,105 units x 1,072 folds) are the cost; still well
+under the 64 GiB guard.
+
+**The gates:** the checker in all modes — `--exhaustive chrIV
+--timered-base realign-exhaustive-chrIV --run-tag
+realignexhaustive-chrIV-chrIV` over three --loci-slice invocations
+(every check per sliced locus; the slicing is a wall measure, not a
+sample), the anchor checker, the three prior modes unchanged on their
+committed receipts, unit tests 18/18 + 8/8; tables receipt-side via
+`realign-chrIV-tables.py`. The checker repairs the slice completion
+itself exposed, all checker-side, the receipts unaffected at every
+step (each failing check was one the receipts never claimed to
+satisfy): phase 8c assumed the instrument orders truth_folds
+(axis-row fold first — the instrument emits the pair sorted by fold
+index, so the SK1 fold can carry the lower index; 10 loci affected,
+fixed to the order-independent membership proof), and phase 7's
+twin and generic identical-pair branches compared members' FULL
+P-line spellings (and, in one repair round, the contained walk
+against the fold's CLAIMED walk — the claimed walk is the REPAIRED
+skeleton in this mode) — the fold key is (row sequence, contained
+STORED walk), and full spellings legitimately extend past the row
+extent differently (partition 110's 74bp repeat fold: 102 members,
+AMP_1a#0#chrIII_chrX/ANL/AVN members spell 135bp P lines;
+partition 111's 54bp fold at L91/L105: 137 members incl. fused-path
+rows) — fixed to the fold key itself, cross-member equality of
+the contained stored walk. The three prior modes re-run under the
+final checker: 6,760 / 6,592 / 579,972 checks, 0 failures each. Assessment-side only; no thresholds; the
+truth classes come from the committed slice-1 census receipt; no
+selection swap, no scoreboard change, no 502, no PR push; the 64 GiB
+guard clean everywhere.
+
+## The whole-genome fleet — all 17 components under the realignment instrument (closed 2026-10-05: 17 of 17)
+
+The owner's go: the remaining 14 balanced-diploid components
+(chrII, chrIII, chrV, chrVI, chrVII, chrVIII, chrIX, chrX, chrXI,
+chrXII, chrXIII, chrXIV, chrXV, chrXVI) through the chrIV recipe
+end-to-end — survey, partition-graph build, expressibility census,
+anchor-projection receipts, the serial identity base + the 4-wide
+exhaustive run of record (the marginal model with repaired
+skeletons, the 64GiB guard, external RSS polling), the corrected
+checker in its component-sliced modes, the per-component tables.
+chrMT, chrI and chrIV stand closed. The machinery is the committed
+chrIV-stage instrument, component-parameterized with every
+generalization gated byte-identical on chrIV (commit 87c0ded); the
+census's chrIV-only windowed-frame assert became a reported count
+(the fleet's balanced receipts carry windowed-frame truth-pair-
+expressible loci at most chromosomes — the phase-8 old-wins
+machinery is live genome-wide, unlike chrIV's vacuous 0/167 guard).
+
+Per-component sections land below as each chain closes; the
+whole-genome table is emitted by
+`genome/instrumented/genome-truth-rank-tables.py` (re-runnable
+mid-fleet; pending components reported as pending). Assessment-side
+only; no thresholds; no scoreboard change; serial within component
+where the recipe requires it.
+
+### chrVI — the first fleet component closed end-to-end (2026-11-06)
+
+The chrIV recipe, all gates: survey 47-partition build set / 29 loci;
+twins AAA#0/SGDref#chrVI (100% exact) + ALH_1b/ALH_1c (interval-close,
+the CLL class); census IN-AXIS 16 / NEIGHBOR 8 / FOREIGN 5 / CONTIG-END
+0; anchor 191s (peak 3.9GB); serial base 67s (8.4GB); 4-wide run of
+record 62s (9.6GB), byte-identity gate passed (phase 8t vs the serial
+receipts); anchor checker ALL PHASES PASS (59,482,753 checks); realign
+checker ALL PHASES PASS; graph checker ALL PHASES PASS. THE NUMBERS:
+25 of 29 loci truth-pair-expressible under the path-domain convention,
+TRUTH RANK-1 AT 15 (in-axis 11/16, tiled-elsewhere-neighbor 4/9); the
+windowed frame's 2 old wins BOTH HOLD (no prediction violations), 23
+loci newly expressible; the largest locus L28 (partition 376: 30,496
+units, 8,778 classes) ranks the truth 525th — the repeat-domain
+residual class. Census wall 937s (peak 23.1GB). The per-locus table:
+`realign-chrVI-tables.txt` beside the receipts.
+
+### chrIII — closed end-to-end (2026-11-06)
+
+38 loci / 48-partition build; twins AAA/SGDref only. Census IN-AXIS 19
+/ NEIGHBOR 11 / FOREIGN 8 / CONTIG-END 0. Walls: census 825s (24.8GB),
+anchor 354s (4.5GB), serial 105s (11.7GB), 4-wide 65s (13.6GB), the
+8t byte-identity gate passed. All three checkers ALL PHASES PASS
+(anchor 111,671,505 checks; realign 8,932,744/0; graph). TRUTH RANK-1
+AT 13 OF 28 EXPRESSIBLE (in-axis 10/19, tiled-elsewhere-neighbor 3/9);
+the windowed frame's old wins: 7 windowed-expressible before (see the
+phase-8 aggregate in the checker log); table at
+`realign-chrIII-tables.txt`.
+
+### chrVIII — closed end-to-end (2026-11-06)
+
+60 loci / 74-partition build; twins AAA/SGDref only. Census IN-AXIS 44
+/ NEIGHBOR 6 / FOREIGN 5 / CONTIG-END 5 (SK1's chrVIII ends short —
+the chrIV L163/L166 contig-end class). Walls: census 566s (26.6GB),
+anchor 197s (4.3GB), serial 96s (8.0GB), 4-wide 55s (8.4GB), the 8t
+gate passed. All three checkers ALL PHASES PASS (anchor 81,539,693;
+realign 11,431,917/0; graph). TRUTH RANK-1 AT 25 OF 50 EXPRESSIBLE
+(in-axis 23/44, tiled-elsewhere-neighbor 2/6); table at
+`realign-chrVIII-tables.txt`.
+
+The chrIII phase-8 record (the honest old-wins story): the windowed
+frame's 2 old wins became 4 rank-1 loci (locus 4 HOLDS), and locus 5
+is THE FLEET'S FIRST PREDICTION VIOLATION — an old win LOST under the
+realignment instrument (the chrI L6/L12 regression class, a named
+measured finding about the instruments, never a receipt failure).
+chrVIII: all 6 old wins HOLD, 12 rank-1 total.
+
+### chrV — closed end-to-end (2026-11-06)
+
+61 loci / 71-partition build; twins AAA/SGDref + BMB/BMC_2a. Census
+IN-AXIS 41 / NEIGHBOR 16 / FOREIGN 4. Walls: census 929s (28.2GB),
+anchor 442s (5.2GB), serial 92s (12.2GB), 4-wide 66s (12.0GB), the 8t
+gate passed. All checkers ALL PHASES PASS (anchor 125,047,477; realign
+3 slices 0/0; graph). TRUTH RANK-1 AT 24 OF 57 EXPRESSIBLE; the
+old-win record: locus 54 LOST (the regression class), locus 58 HOLDS.
+Table at `realign-chrV-tables.txt`.
+
+### chrXI — closed end-to-end (2026-11-06)
+
+66 loci / 74-partition build; the NEW structural class: the truth path
+S288C#0#chrXI itself is an interval-close near-twin of AAA#0/SGDref
+(the near-identical-assembly triple; the exact-fraction screen keeps
+the fold-to-one proof to AAA/SGDref). Census IN-AXIS 55 / NEIGHBOR 8 /
+FOREIGN 3. Walls: census 617s (27.8GB), anchor 175s (4.3GB), serial 84s
+(6.8GB), 4-wide 55s (7.0GB), the 8t gate passed. All checkers ALL
+PHASES PASS (anchor 75,336,268; realign 3 slices 0/0; graph). TRUTH
+RANK-1 AT 30 OF 66 EXPRESSIBLE — ALL 66 LOCI TRUTH-PAIR-EXPRESSIBLE
+(the fleet's first fully-expressible component); the old-win record:
+loci 15 and 19 LOST, 2 and 9 HOLD. Table at
+`realign-chrXI-tables.txt`.
+
+### chrXIII — closed end-to-end (2026-11-06)
+
+101 loci / 113-partition build; twins AAA/SGDref. Census IN-AXIS 64 /
+NEIGHBOR 27 / FOREIGN 10. Walls: census 1016s (32.2GB), anchor 359s
+(6.2GB), serial 135s (13.1GB), 4-wide 96s (13.7GB), the 8t gate
+passed. All checkers ALL PHASES PASS (anchor 146,110,496; realign 3
+slices 20,271,792/0; graph). TRUTH RANK-1 AT 37 OF 86 EXPRESSIBLE
+(in-axis 28/64, tiled-elsewhere 9/22; the remainder: 14
+tiled-elsewhere inexpressible + 1 partial); the old-win record: loci
+4 and 8 LOST, 6, 16 and 17 HOLD. Table at
+`realign-chrXIII-tables.txt`.
+
+### chrXVI — closed end-to-end (2026-11-06)
+
+107 loci / 118-partition build; twins AAA/SGDref. Census IN-AXIS 89 /
+NEIGHBOR 6 / FOREIGN 11 / CONTIG-END 1. Walls: census 1194s (32.1GB),
+anchor 494s (6.5GB), serial 186s (15.6GB), 4-wide 97s (17.2GB), the
+8t gate passed. All checkers ALL PHASES PASS (anchor 172,867,366;
+realign 3 slices 21,515,024/0; graph). TRUTH RANK-1 AT 40 OF 90
+EXPRESSIBLE (in-axis 40/89; the remainder: 15 tiled-elsewhere
+inexpressible + 1 tiled expressible + 1 partial + 1 absent); the
+old-win record: loci 63 and 66 LOST, 16 HOLD. The truth-second
+ambiguity seam (partitions 117/257) and the no-fabrication branch
+exercised by this component's serial rerun. THE CENSUS RECEIPT
+CORRUPTION FOUND AND FIXED: the graph checker's phase (c) caught a
+stale shared-partition read from the concurrent light lanes — the
+chrXVI census recorded partition 292 as 0/0/0 nodes (a partial read
+of `partition292.gfa` while another lane re-exported it), producing
+spurious 13/13 variant-pocket runs; the receipt was regenerated (all
+216 other records byte-identical, the (c) record's 292 entry
+234/234/234, pockets 0/0 — AAA/SGDref identical through the graph),
+the stale copy kept as `.stale292-read`, and the graph checker
+re-run to ALL PHASES PASS. Table at `realign-chrXVI-tables.txt`.
+
+### chrXIV (fleet component) — closed end-to-end (2026-11-06)
+
+82 loci / 103-partition build; twins AAA/SGDref. Census IN-AXIS 64 /
+NEIGHBOR 10 / FOREIGN 8. Walls: census 1139s (33.6GB), anchor 472s
+(6.0GB), serial 162s (13.1GB), 4-wide 88s (14.7GB), the 8t gate
+passed. All checkers ALL PHASES PASS (anchor 153,364,780; realign 3
+slices 17,331,466/0; graph). TRUTH RANK-1 AT 35 OF 71 EXPRESSIBLE
+(in-axis 34/64, tiled-elsewhere 1/7; 11 tiled-inexpressible the
+remainder); the old-win record: loci 40 and 49 LOST, 7 HOLD. THE
+COMPONENT THAT HIT THE TRUTH-SECOND AMBIGUITY SEAM FIRST: its
+pre-fix serial crashed at L9 (partition 16, the shared repeat
+locality, carries two interval-distinct SK1 rows); the fixed binary
+fabricates no truth pair there (inexpressible, the no-fabrication
+convention), and the serial re-run is the committed identity base.
+Table at `realign-chrXIV-tables.txt` (chromosome XIV — a different
+component from the chrIV pilot chromosome, whose committed tables
+stand at `realign-chrIV-tables.txt`).
+
+### chrX — closed end-to-end (2026-11-06)
+
+80 loci / 90-partition build; twins AAA/SGDref (identical through
+the graph, 0 pockets). Census IN-AXIS 67 / NEIGHBOR 6 / FOREIGN 7.
+Walls: census 948s (29.2GB), anchor 363s (5.8GB), serial 133s
+(13.3GB), 4-wide 97s (14.9GB), the 8t gate passed. All checkers ALL
+PHASES PASS (anchor 149,952,987; realign 3 slices 17,629,323/0 —
+s0/s1 single-writer driver logs, s2 a clean single-writer re-run
+after the concurrent-log disentanglement; graph). TRUTH RANK-1 AT
+35 OF 70 EXPRESSIBLE (in-axis 34/67, tiled-elsewhere 1/3; 10
+tiled-inexpressible the remainder); the old-win record: loci 6, 25
+and 36 LOST, 20 HOLD. Table at `realign-chrX-tables.txt`.
+
+### chrII — closed end-to-end (2026-11-06)
+
+81 loci / 99-partition build; twins AAA/SGDref (identical through
+the graph) + YPS128/YPS606 (a near-identical copy pair, 46/46
+variant-pocket bp runs). Census IN-AXIS 70 / NEIGHBOR 6 / FOREIGN 5.
+Walls: census 1124s (31.4GB), anchor 465s (6.3GB), serial 183s
+(13.3GB), 4-wide 107s (14.5GB), the 8t gate passed. All checkers ALL
+PHASES PASS (anchor 151,003,022; realign 3 slices 19,153,633/0 —
+s0 under the fixed checker after the LL-tolerance repair its locus
+22 E audit forced; graph). TRUTH RANK-1 AT 46 OF 76 EXPRESSIBLE
+(in-axis 44/70, tiled-elsewhere 2/6; 5 tiled-inexpressible the
+remainder); the old-win record: loci 28, 41, 50, 52, 56 and 61
+LOST, 15 HOLD. Table at `realign-chrII-tables.txt`.
+
+### chrXV — closed end-to-end (2026-11-06)
+
+119 loci / 138-partition build; twins AAA/SGDref (identical through
+the graph). Census IN-AXIS 62 / NEIGHBOR 49 / FOREIGN 4 / CONTIG-END
+4 — the fleet's biggest coordinate-offset (NEIGHBOR) class. Walls:
+census 1903s (37.2GB), anchor 660s (7.6GB), serial 287s (19.9GB),
+4-wide 167s (21.1GB), the 8t gate passed. All checkers ALL PHASES
+PASS (anchor 225,628,824; realign 3 slices 25,365,917/0; graph).
+TRUTH RANK-1 AT 57 OF 103 EXPRESSIBLE (in-axis 34/62,
+tiled-elsewhere 22/39 — the neighbor-material class resolving at
+better than half, absent-expressible 1/2; 14 tiled-inexpressible +
+2 absent the remainder); the old-win guard vacuous (the windowed
+frame scored 0/119 truth-pair-expressible — no old wins, no
+violations). Table at `realign-chrXV-tables.txt`.
+
+### chrVII — closed end-to-end (2026-11-06)
+
+117 loci / 103-partition build; twins AAA/SGDref (identical through
+the graph). Census IN-AXIS 85 / NEIGHBOR 18 / FOREIGN 13 / CONTIG-END
+1. Walls: census 3031s (39.1GB — the fleet's longest census), anchor
+721s (7.6GB), serial 331s (20.3GB), 4-wide 168s (22.8GB), the 8t
+gate passed. All checkers ALL PHASES PASS (anchor 243,737,794;
+realign 3 slices 25,286,033/0; graph). TRUTH RANK-1 AT 45 OF 102
+EXPRESSIBLE (in-axis 42/85, tiled-elsewhere 3/17; 13
+tiled-inexpressible + 1 partial + 1 absent the remainder); the
+old-win record: loci 14, 29, 62 and 74 LOST, 11 HOLD. The
+truth-second ambiguity seam's third component (partitions 16/111);
+its fixed-binary serial re-run is the committed identity base. Table
+at `realign-chrVII-tables.txt`.
+
+### chrXII — closed end-to-end (2026-11-06)
+
+119 loci / 138-partition build (the fleet's biggest component); twins
+AAA/SGDref (identical through the graph; 3 twin-only holder
+partitions). Census IN-AXIS 81 / NEIGHBOR 27 / FOREIGN 8 /
+CONTIG-END 3. Walls: census 2350s (37.8GB), anchor 836s (7.4GB),
+serial 180s (20.1GB), 4-wide 113s (22.9GB), the 8t gate passed. All
+checkers ALL PHASES PASS (anchor 230,237,832; realign 3 slices
+23,612,482/0 — all three single-writer re-runs after the
+concurrent-log disentanglement; graph). TRUTH RANK-1 AT 48 OF 99
+EXPRESSIBLE (in-axis 42/81, tiled-elsewhere 6/17, partial-expressible
+0/1; 17 tiled-inexpressible + 3 absent the remainder); the old-win
+record: loci 5, 8, 12, 17, 29 and 33 LOST, 13 HOLD. Table at
+`realign-chrXII-tables.txt`.
+
+### chrIX — closed end-to-end AFTER THE ANCHOR-PATHOLOGY AUTOPSY (2026-10-05; the fleet's 17th and last component)
+
+chrIX was the fleet's one killed run: its anchor projection ground
+for 18.1 wall hours (65,215s; 1,085 CPU-minutes single-threaded;
+killed by the owner's order at exit 143) inside the context-sample
+phase, a ~100x outlier against chrIV's 704s anchor wall. THE
+AUTOPSY (the artifacts read before any fix was designed):
+
+* THE SIGNATURE: the placement layer completed in ~90s CPU
+  (3,415,719/3,415,719 occurrences interval-count AND node-list
+  matched, own-row checked 3,395,330, hull checks 49,541,258), 787
+  context-sample lines were written (402MB), and then ZERO output
+  for 18 hours — the grind sat inside the per-sample row loop,
+  before a single JSON byte of the grinding sample could be written.
+* THE MONSTER, IDENTIFIED FROM THE ARTIFACTS: stride 3,416 over
+  3,415,719 occurrences = 1,000 samples; the last fully-written
+  sample is flat 2,688,392 (record 22910, occ 473); the grind is
+  SAMPLE 788 at flat 2,691,808 — census record 22914, occurrence 37
+  (path 512, start 115849, orientation 1), window 11, axis partition
+  554. Record 22914 is a PURE TANDEM-REPEAT READ: 12 canonical
+  anchors, and every one of its 672 occurrences' census intervals
+  spell the same node abs id 7263719 twelve times.
+* THE FOLD-STRUCTURE MEASUREMENT (partition 554's committed GFA):
+  node 7263719 sits on the '+' strand at up to 70 positions in one
+  row (BCE_3a#0#chrIX +70, BGN_3a +58, ANL#3/#4 +53, CGH_1#3/#4
+  +45, ... ~95 rows carry it, zero '-' copies — the orientation-1
+  required sign is '+', which the 18h stall itself proves). With 12
+  IDENTICAL anchors each holding the same candidate set, the
+  monotone-assignment leaf count is C(M,12): C(70,12) ~ 7.2e12 leaves
+  for the top row alone — the summed leaf volume over the traversing
+  rows IS the 18-hour grind, on ONE sampled occurrence.
+* THE ROOT CAUSE: `partition_anchor_projection.rs` carried its own
+  copy of the ORIGINAL EXPONENTIAL `anchor_correspondence`
+  enumeration — the chrIV slice-2 repeat-domain repair replaced the
+  enumeration with the exact feasibility DP in
+  `partition_realign_score.rs` ONLY; the anchor projection's copy
+  was never repaired. chrIV's own anchor run (and chrV/chrX/chrXVI,
+  which share partition 292's axis windows) survived by luck of the
+  sample draw: the pathology needs the JOINT structure — a
+  repeat-composed READ (12 identical anchors) x a repeat-dense ROW
+  (the node at dozens of positions) — and chrIX's sample 788 was the
+  first draw in the fleet that hit it.
+
+THE FIX (derived, not tuned; commit f23d50e): the enumeration body
+replaced by the exact feasibility DP ported verbatim from the
+scoring instrument's proven repair — a position is pinned iff it is
+the anchor's unique forward-AND-backward-feasible candidate; cost
+O(anchors x candidates) = 12x70 = 840 operations where the
+enumeration paid ~7.2e12 leaves. NO other behavior touched. THE
+GATES: unit tests 10/10 (the 8 prior + the 3,000-case randomized
+equivalence test against a verbatim copy of the committed
+enumeration + the chrIX-shape regression: 12 identical anchors x
+70 positions returns all-ambiguous in microseconds); THE IDENTITY
+GATES on the fixed binary — chrIV's and chrI's anchor receipts
+(main + context + rows sidecars) reproduce the committed receipts
+BYTE-IDENTICALLY (md5-equal, exit 0, walls 729.5s/64s, fetch-path
+counters identical): the repair is a proven no-op on the
+non-pathological components. The killed run's markers are preserved
+(`run-anchorproj-chrIX-chrIX.*.killed18h` + the partial outputs'
+md5s at the validation dir).
+
+THE CHAIN THEN FLEW: anchor 82s (18.1 hours -> 82 seconds, the
+~800x measured pay on the pathological component; poller RSS peak
+4.12GB; 1,000/1,000 samples, 99,972 traversing rows, 21,447,946
+per-base lookups; the killed run died at sample 788), serial
+identity base 56s (7.30GB), 4-wide run of record 41s (8.65GB),
+anchor checker ALL PHASES PASS (67,205,810 checks), realign checker
+ALL PHASES PASS (9,881,217 checks / 0 failures, single slice at 45
+loci, incl. the 8t byte-identity gate vs the serial receipts),
+graph checker ALL PHASES PASS. Census walls: 429s (26.6GB), from
+the fleet's earlier multicensus run.
+
+chrIX's NUMBERS: 45 loci / 71-partition build (the survey: IN-AXIS
+35, NEIGHBOR 5, FOREIGN 5, CONTIG-END 0; FOUR flagged twin pairs —
+AAA/SGDref identical-through-graph, BMB/UWOPS052272,
+CLL#0/CLL#1, UWOPS034614/UWOPS052272; 15 twin-only holder
+partitions). 40 of 45 truth-pair-expressible; TRUTH RANK-1 AT 18
+(in-axis 17/35, tiled-elsewhere 1/5; the 5 inexpressible are the
+bracketed subtelomeric windows L0-L3 + L44). Old-wins: 11 held /
+3 lost (L19 rank 15, L37 rank 2, L41 rank 3). The domain-scaling
+verdict vs chrI: 45 vs 21 windows for 2.32x the class pairs — the
+largest locus L0 (partition 292, the shared subtelomeric repeat
+family, 814 member rows, 699 folds, 244,650 class pairs, 62,073
+units, 13.9M placements) and L1 (partition 544, 62,074 units); the
+anchor pathology's own locus L11 (partition 554) is a MID-SIZED
+class domain (182 folds, 16,653 class pairs) — the disease is
+orthogonal to class-domain size, it lives in the READ-ROW ambiguity
+structure. Table at `realign-chrIX-tables.txt`; the sequence-QV row
+(40 expressible, 18 rank-1, 22 non-rank-1, median QV 16.64, min
+7.36 — chrIX contributes no worst-25 call) and the autopsy row (22
+non-rank-1: 9 extent-asymmetry, 13 repeat-domain — chrIX is the
+fleet's most repeat-domain-dense component at 59% of its non-rank-1
+set, consistent with its subtelomeric L0/L1 and the shared repeat
+families) in the aggregate sections below.
+
+## THE WHOLE-GENOME FLEET — the aggregate of record (17 of 17 components closed; chrIX landed 2026-10-05 after the anchor-pathology repair)
+
+THE WHOLE-GENOME TRUTH-RANK TABLE (the per-locus tables beside each
+component's receipts; the aggregate script
+`genome-truth-rank-tables.py`, re-runnable, writes
+`genome-truth-rank-tables.txt`):
+
+| component | loci | expressible | truth rank-1 | census in-axis | neighbor | foreign | contig-end |
+|-----------|------|-------------|--------------|----------------|----------|----------|------------|
+| chrMT     | 14   | 9           | 5            | —              | —        | —        | —          |
+| chrI      | 21   | 18          | 6            | —              | —        | —        | —          |
+| chrII     | 81   | 76          | 46           | 70             | 6        | 5        | 0          |
+| chrIII    | 38   | 28          | 13           | 19             | 11       | 8        | 0          |
+| chrIV     | 167  | 143         | 70           | 96             | 61       | 8        | 2          |
+| chrV      | 61   | 57          | 24           | 41             | 16       | 4        | 0          |
+| chrVI     | 29   | 25          | 15           | 16             | 8        | 5        | 0          |
+| chrVII    | 117  | 102         | 45           | 85             | 18       | 13       | 1          |
+| chrVIII   | 60   | 50          | 25           | 44             | 6        | 5        | 5          |
+| chrIX     | 45   | 40          | 18           | 35             | 5        | 5        | 0          |
+| chrX      | 80   | 70          | 35           | 67             | 6        | 7        | 0          |
+| chrXI     | 66   | 66          | 30           | 55             | 8        | 3        | 0          |
+| chrXII    | 119  | 99          | 48           | 81             | 27       | 8        | 3          |
+| chrXIII   | 101  | 86          | 37           | 64             | 27       | 10       | 0          |
+| chrXIV    | 82   | 71          | 35           | 64             | 10       | 8        | 0          |
+| chrXV     | 119  | 103         | 57           | 62             | 49       | 4        | 4          |
+| chrXVI    | 107  | 90          | 40           | 89             | 6        | 11       | 1          |
+
+THE AGGREGATE (17 closed components): 1307 loci, 1133
+truth-pair-expressible, TRUTH RANK-1 AT 549 (48.5% of expressible).
+By class across the closed fleet: the in-axis partition class
+resolves at roughly half everywhere (the variants discriminate where
+the material is genuinely placed); the one-window coordinate-offset
+(NEIGHBOR) class resolves at 22/39 at its biggest instance (chrXV);
+the windowed frame's own old-win record across the 14 components
+with non-vacuous guards: 105 old wins HOLD, 32 LOST under the
+realignment instrument (the prediction-violation class the chrIII L5
+finding named — the repeat-domain residuals, each named per locus in
+the component tables).
+
+THE MEASURED WALLS (external run markers; RSS = the external poller
+peak, all under the 64GiB guard):
+
+* census walls (17): 61+144+1124+825+2368+929+937+3031+566+429+948
+  +617+2350+1016+1139+1903+1194 = 19581s
+* anchor-projection walls (17): 153+600+465+354+704+442+191+721+197
+  +82+363+175+836+359+472+660+494 = 7268s (chrIX's 82s is the
+  post-repair wall; the killed pre-repair run was 65,215s — the
+  repair removed ~64,433s of that one component's anchor wall)
+* serial identity-base walls (17): 130+41+183+105+236+92+67+331+96
+  +56+133+84+180+135+162+287+186 = 2504s
+* 4-wide exhaustive walls (17): 14+30+107+65+148+66+62+168+55+41
+  +97+55+113+96+88+167+97 = 1469s
+* summed total (17): 19581+7268+2504+1469 = 30822s (513.7 min of
+  single-component walls — the fleet ran them concurrently; the
+  summed wall is the work, not the elapsed)
+* THE 4-WIDE SCORING PASS ALONE: 1469s = 24.5 min vs the grounded
+  chrIV-based extrapolation of ~20 min (7.9 x chrIV's 148s = 1169s
+  ≈ 19.5 min) — THE ESTIMATE HELD within ~26%: the residual is the
+  per-component fixed cost (inputs/quality/binding/derive-cache
+  phases) recurring 17 times where the single-component
+  extrapolation amortized it once. The scoring phase itself remains
+  sublinear in bp (chrIV's 12.1Mb is 7.9x chrI's 1.53Mb for 4.9x
+  the 4-wide wall).
+* RSS peaks (17 closed): census 45.5GB (chrIV), anchor 9.1GB
+  (chrIV), serial 26.8GB (chrIV), 4-wide 28.6GB (chrIV) — the
+  repeat-locality matrices dominate exactly where chrIV said they
+  would; every component under the 64GiB guard with headroom
+  (chrIX's peaks: census 26.6GB, anchor 4.1GB, serial 7.3GB, 4-wide
+  8.7GB).
+
+THE FLEET'S MEASURED FINDINGS (the machinery's own receipts):
+
+* THE TRUTH-SECOND AMBIGUITY SEAM (3 components): chrXIV (partition
+  16), chrXVI (117/257), chrVII (16/111) — single-window partitions
+  carrying several SK1-carrying folds; the no-fabrication convention
+  (no truth pair rather than a wrong pair) is the committed rule,
+  identity-gated byte-identical on chrMT/chrI.
+* THE OVER-STRICT ABSOLUTE LL TOLERANCE (found by chrII L22's
+  64M-entry E audit): the re-derivation's float64 summation error is
+  relative to the LL magnitude; the best-LL and truth-LL checks now
+  use the class check's relative convention; the chrIV regression
+  gate re-passed (a proven no-op there).
+* THE STALE SHARED-PARTITION READ (found by chrXVI's graph checker):
+  the concurrent light lanes re-export shared partition GFAs; the
+  chrXVI census read `partition292.gfa` mid-export and manufactured
+  13/13 spurious pocket runs; the receipt was regenerated (216/217
+  records byte-identical), the stale copy kept, the checker re-passed.
+* THE CONCURRENT-LOG DIS-ENTANGLEMENT: the dead fleet drivers and
+  the manual slice launches double-wrote 8 slice logs; every
+  affected slice was re-run single-writer under the fixed checker
+  (the receipts were never at risk — the checkers are read-only).
+
+CHRIX — CLOSED (the remainder paragraph superseded): the killed
+18.1h anchor run was autopsied to the exact (sample, row) pair, the
+exponential-enumeration copy in the anchor projection replaced by
+the exact feasibility DP (identity-gated byte-identical on
+chrIV/chrI), and the chain landed in minutes — anchor 82s, serial
+56s, 4-wide 41s, all checkers ALL PHASES PASS; the receipts, the
+killed run's preserved markers and the tables beside the fleet's
+set at the validation dir. THE WHOLE-GENOME FLEET IS CLOSED: 17 of
+17 components, 1307 loci, 549 truth rank-1 of 1133 expressible.
+
+## THE CALLED-VS-TRUTH SEQUENCE QV — the owner's correction of the log-gap "QV-like" pattern (17 closed components; chrIX landed 2026-10-05)
+
+The owner rejected the model-internal log-gap conversion as "the QV".
+The QV they mean is the likegt sequence-QV pattern: align the CALLED
+diplotype against the ACTUAL diplotype, per expressible locus. This
+section is the measured record of that stage — receipt-side machinery
+only (`realign-sequence-qv.py` + the `qv-biwfa` helper crate, the
+same lib_wfa2 revision the repository already pins; no product
+change; chrIX closed 2026-10-05, its 40 expressible loci in the
+aggregate below).
+
+THE CONVENTION (exact, stated): the called class's material is the
+winner fold pair's spelled sequences (the two homolog candidates);
+the truth pair's material is the truth folds' (the folds carrying
+the S288C and SK1 rows). Both orders of the injective no-replacement
+assignment are scored by the assignment-wide per-base error (summed
+edits / summed alignment columns) and the lower taken (the owner's
+yardstick; likegt's mean-identity rule computed beside it — it
+disagrees at 6 of 1133 loci, all named in the tables file, and the
+disagreement is bounded: the two rules never differ by more than the
+pairing itself). The alignment is biWFA gap-affine End2End at
+likegt's penalties (match 0 / mismatch 4 / gap-open 6 / gap-extend
+2), the CIGAR walked byte-by-byte against both sequences. Per-base
+error = (mismatch columns + gap columns) / (total columns over the
+chosen assignment's two pairs): indels enter as individual gap
+columns, the End2End span leaves NO unaligned overhang (every base of
+every sequence sits in exactly one column), so the denominator is the
+union of the assignment's aligned material. QV = -10*log10(error)
+with the likegt floor-and-cap: an error at or below 1e-6 — a perfect
+call, zero edits — is reported as QV 60.
+
+THE MATERIAL DERIVATION, DUAL-GATED per locus without touching the
+ingredients sidecars (they are the record; the main per-locus jsonl
+receipts are streamed): a fold's spelled sequence is the member row's
+panel window, fetched directly from the panel text (`yeast235.txt`,
+the concatenated panel + the names TSV), gated BOTH ways — (a) every
+member's own panel window is the identical row sequence (the fold
+criterion, re-verified member-by-member), and (b) the panel window is
+contained in the member row's partition-GFA P-line spelling at a
+front-overhang offset (the committed checker phase-2 derivation,
+L-overlap trimmed, gap segments included). Every used fold at every
+locus passed both gates: 3,072 folds over the 17 components (the
+per-component counts in the run log beside the receipts).
+
+THE RECEIPTS: `realign-sequence-qv-<C>.jsonl` per component (1,133
+per-locus records over the 17 closed components) + the aggregate
+`realign-sequence-qv-tables.txt` at the validation dir; 4,522 biWFA
+alignments; the full per-locus fields include the 2x2 pair matrix,
+both orders' scores, the chosen assignment, the per-pair match /
+mismatch / indel counts and the called/truth fold identities.
+
+THE GENOME-WIDE QV DISTRIBUTION (1,133 expressible loci): median
+17.77, p10 8.44, p90 60.00, min 0.05 (chrXVI L7); QV>=40 at 48.54%,
+QV>=30 at 48.72%, QV>=20 at 49.16% — the distribution is bimodal by
+construction: 549 perfect calls (QV 60, zero edits) at exactly the
+truth-rank-1 loci, and the 584 non-rank-1 calls clustered at QV
+6.9-16.3 (p10-p90; median 9.95).
+
+THE REFRACTIVE TABLE (the owner's question: how much sequence
+accuracy do the not-at-truth calls actually lose?):
+
+| stratum | n | median QV | p10-p90 QV | min | median per-base error | perfect |
+|---------|---|-----------|------------|-----|----------------------|---------|
+| rank-1 calls | 549 | 60.00 | 60-60 | 60 | 0 | 549 |
+| non-rank-1 calls | 584 | 9.95 | 6.95-16.33 | 0.05 | 0.101 | 0 |
+
+Every rank-1 call is a PERFECT sequence call (the called class IS the
+truth class: the same fold pair, the same spelled sequences — 549/549
+at zero edits). The non-rank-1 calls are NOT "effectively the same":
+their median identity to the truth diplotype is 89.89% (median
+per-base error 10.1%), only 3/584 (0.51%) reach >=99.9% identity
+(chrIII L5 at 99.990%, chrXVI L2 at 99.990%, chrI L3 at 99.952%),
+8/584 (1.37%) reach >=99%, 146/584 (25.00%) reach >=95%. The errors
+are STRUCTURAL, not point-mutational: the gap-column share of the
+edit count is 98.0% at the median (p10 82.9%) — the called class
+spells different-length, different-copy material (repeat-domain /
+foreign / seam windows), not the truth sequence with substitutions.
+By census class the non-rank-1 calls resolve: in-axis-partition 437
+(median QV 9.81), tiled-elsewhere/neighbor (the seam class) 105
+(11.23), tiled-elsewhere/foreign-repeat (the repeat-domain foreign
+class) 24 (10.88), absent/contig-end 1 (7.96), partial-elsewhere 1
+(15.09), pilot (chrMT/chrI, no census receipt) 16 (9.29).
+
+THE WORST CALLS, NAMED (the full 25-row table in the tables file;
+every one is a different-material call, the mismatches and the gap
+columns shown): chrXVI L7 (QV 0.05, 98.96% per-base error — the
+windowed truth pair is a 49bp repeat-domain fold pair while the call
+is a homozygous 4,417bp shared-window fold); chrV L59 (QV 1.71 —
+APG/CIH foreign copies vs the AAA/S288C window + SK1); chrXIV L11
+(QV 2.44 — AAC/BHH vs AAA/S288C + SK1); chrVII L56 (QV 3.07); chrMT
+L10 (QV 3.36 — a zero-mismatch, all-indel call: the same bases in a
+different-length arrangement); chrIV L63 and chrIV L104 (QV 4.84 /
+5.07 — the repeat-locality residuals the chrIV tables named). The
+worst-call rows carry the census class at every locus (the seam /
+foreign-repeat / contig-end classes named above).
+
+THE HONEST STATEMENTS: (1) the 549 rank-1 calls' perfect QVs are a
+construction-level fact (called class == truth class means the same
+folds, hence identical spelled sequences), reported because the
+owner's yardstick asks exactly this — the sequence the call spells
+against the sequence the truth spells; (2) the QV is an
+assessment-side measure, no threshold, no tuning constant (the Phred
+form and the likegt floor-and-cap are the standard conventions,
+stated above); (3) the windowed truth pair convention inherits the
+instrument's own per-locus truth-pair definition — at chrXVI L7 the
+"actual diplotype" is a 49bp fold pair by the committed windowed
+convention, and the QV states it rather than repairing it; (4) chrIX
+IS CLOSED (2026-10-05): its 40 expressible loci are in the
+aggregate above (18 rank-1 perfect, 22 non-rank-1, median QV 16.64,
+min 7.36 — no chrIX locus in the worst-25 list).
+
+## THE CAUSAL AUTOPSY OF THE NON-RANK-1 CALLS — measurement only, no fixes (584 records; 17 closed components; chrIX landed 2026-10-05)
+
+The owner's demand: WHY are the non-rank-1 calls made with
+gap-dominated ~10% structural divergence? (The original cohort was
+the 562 calls of the 16 components closed at measurement time;
+chrIX's 22 landed with its chain — 9 extent-asymmetry + 13
+repeat-domain — and every cohort number below is the 17/17
+re-derivation.) The hypothesis under test
+(stated as hypothesis, measured here): EXTENT ASYMMETRY —
+partition/window boundaries fragment the truth's in-domain rows while
+rival rows span longer across the seams, collecting orphaned read
+mass the fragmented truth cannot place (the unplaced-mass advantage),
+so the likelihood correctly prefers the longer explainer, and the QV
+comparison over mismatched extents produces end-gaps.
+
+MACHINERY (assessment-side, receipt-streamed; the ingredients sidecars
+never opened; `genome/instrumented/nonrank1-autopsy.py` + the biWFA
+helper's optional `--cigar` mode — the default protocol byte-identical
+to the committed QV stage's): per non-rank-1 expressible locus the
+autopsy re-aligns the QV stage's CHOSEN assignment's two pairs under
+the same biWFA machinery WITH the walked CIGAR, asserts every pair's
+counts equal the committed QV receipts pair-for-pair (all 584 passed;
+the assignment re-derived identically at every locus), and reads the
+main receipt's own `log_gap_decomposition` + the census receipts' tiling
+placements. Per-locus receipts: `realign-nonrank1-autopsy-<C>.jsonl`
+(extent comparison, end-vs-interior gap anatomy in bases, likelihood
+term decomposition, census class + the SK1 ortholog's tiling partitions
+— the cut points); the aggregate: `realign-nonrank1-autopsy-tables.txt`.
+
+THE MEASURED DECOMPOSITION TERMS (the receipt's own semantics):
+`both_placed_evidence_gap` = winner-minus-truth summed over units BOTH
+pairs place (negative = truth-favored); `residual_unplaced_gap` =
+log_gap minus that term = EXACTLY the winner-minus-truth over the
+units not both place (units neither places score at the same derived
+E and cancel); `e_scale_mass_asym` = mass asymmetry x E, the stated
+magnitude SCALE of the unplaced term (not its exact LL).
+
+(1) THE EXTENT MEASUREMENT: the called diplotype is LONGER than the
+truth at 533/584 loci (91.3%); median called-minus-truth length
++1,817bp; median called end-overhang 1,296bp vs truth end-overhang 0bp;
+68 loci carry overhangs on BOTH sides (the shifted-row shape). The
+end-gap share of all edits: median 73.4% (the gap columns remain 98%
+of edits per the QV stage; of those, end-gaps dominate at the median).
+
+(2) THE LIKELIHOOD TERM WINNERS: the unplaced-differential term is
+WINNER-favored at 582/584 loci (99.7%) — the unplaced-mass asymmetry
+(median 2,388 reads; E-scale median magnitude 42,674 LL) is essentially
+universal in the cohort; the both-placed evidence term is TRUTH-
+favored at 516/584 (88.4%, median magnitude 2,893 LL). The residual
+term exceeds the both-placed term at 573/584 loci; the median
+residual share of log_gap is 1.36 — the winner's advantage is MORE
+THAN ENTIRELY the unplaced-differential term, overcoming a
+truth-favoring shared-evidence deficit. THE LIKELIHOOD HALF OF THE
+HYPOTHESIS IS CONFIRMED AT COHORT SCALE: the winner collects orphaned
+read mass the truth cannot place, and the jointly placed reads
+already prefer the truth.
+
+(3) THE ANATOMY HALF: end-gap-dominated (end-gap columns > interior
+gap columns) at 322/584 loci (55.1%); interior-gap-dominated at 261
+(44.7%, median 5 interior gap runs — true material substitution);
+the full hypothesis shape (unplaced-mass advantage AND truth-favored
+shared evidence AND end-gap-dominated anatomy) at 308/584 (52.7%).
+The QV is the comparison over MISMATCHED EXTENTS exactly as
+hypothesized at the end-gap-dominated loci (median end-gap share
+98.2% in that class); at the interior-dominated loci the QV measures
+diverged-copy substitution instead (median end-gap share 0.2%).
+
+(4) THE CAUSAL DECOMPOSITION (primary cause per locus, stated
+precedence — contig-end class first, then the extent shape, then the
+interior shape, then the rival-dominant and shared-evidence shapes):
+
+| cause | n | frac | median QV | median identity | median end-gap share | median mass asym | median len_delta |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| extent-asymmetry (S1+S2+end-dominated) | 307 | 52.6% | 9.47 | 88.71% | 98.2% | 929 | +2,359bp |
+| repeat-domain substitution (S1+S2+interior) | 207 | 35.4% | 12.87 | 94.83% | 0.1% | 10,930 | +677bp |
+| rival-dominant (winner wins both-placed too) | 66 | 11.3% | 12.32 | 94.13% | 7.9% | 6,890 | +375bp |
+| shared-evidence rival (no unplaced advantage) | 2 | 0.3% | ~40 | 99.99% | 0% | 0 | 0 |
+| boundary (pure-mismatch shape) | 1 | 0.2% | 21.43 | 99.28% | 0% | 886 | 0 |
+| contig-end | 1 | 0.2% | 7.96 | 84.02% | 95.7% | 1,371 | +2,824bp |
+
+The cause x census-class cross-tab: extent-asymmetry is dominated by
+in-axis loci (252) but reaches every class; the seam class
+(tiled-elsewhere/neighbor, 105 loci) splits 33 extent / 41 interior /
+30 rival-dominant / 1 boundary. The row-geometry fact: the SK1 window
+ortholog tiles >1 partition at 267/296 of the census-covered
+extent-asymmetry loci (median 2 partitions) — the partition-boundary
+cut is the cohort's ambient geometry, the cut points named per locus
+in the receipts. The two shared-evidence rivals are the "effectively
+the same" calls (chrIII L5 QV 40.03, chrXVI L2 QV 39.89 at 99.99%
+identity — a near-identical rival winning on jointly placed reads
+alone); the boundary locus is chrXIV L79 (146 edits, all mismatches).
+chrIX's contribution: 9 extent-asymmetry + 13 repeat-domain — the
+fleet's most repeat-domain-dense component (59% of its non-rank-1
+set vs the fleet's 35.4%), consistent with its subtelomeric L0/L1
+windows and the shared repeat-family partitions.
+
+(5) THE FIX MAPPING (NO FIXES IMPLEMENTED — the measured expected
+conversions under the stated criterion: a mass-re-attribution repair
+converts a locus iff with the unplaced-differential term neutralized
+the both-placed evidence decides for the truth, i.e.
+both_placed_evidence_gap < 0):
+
+| lever (stated precedence: the most specific structural disease first) | addressed | expected conversions | not convertible |
+|---|---:|---:|---:|
+| extent normalization of the comparison domain | 274 | 274 | 0 |
+| repeat-domain repair | 166 | 166 | 0 |
+| partition-spine seam repair | 105 | 75 | 30 |
+| contig-end handling | 1 | 1 | 0 |
+| no mass-re-attribution lever (rival wins shared evidence too) | 38 | 0 | 38 |
+
+Total convertible under full neutralization: 516/584 (88.4%). THE
+HONEST ORDERING: extent normalization (274) > repeat-domain repair
+(166) > seam repair (75) > contig-end handling (1); the 68
+not-convertible loci (the rival-dominant class minus its seam members,
+plus the two shared-evidence rivals) need a different mechanism — the
+rival also wins the jointly placed reads (median both-placed gap
++4,772 in that class) — named, not hidden. The seam lever's
+not-convertible 30 are the seam loci whose rival wins shared evidence
+too.
+
+The honest caveats: (a) the conversion counts are upper bounds under
+FULL neutralization of the unplaced term — partial repairs convert
+subsets, measured per repair when built; (b) `e_scale_mass_asym` is
+the E-scale magnitude of the unplaced term, not its exact LL (the
+one-side-placed units' exact LLs are not in the receipt); the
+conversion criterion uses only the receipt-exact both-placed and
+residual terms; (c) the classification conventions (the signature
+definitions and the precedence) are stated above, like the census's
+own 50bp rule — no thresholds enter any instrument; (d) chrIX IS
+CLOSED (2026-10-05): its 22 non-rank-1 records are in every number
+above.
+
+THE CHRIX PATHOLOGY'S LESSON FOR THE REPEAT-DOMAIN LEVER (the
+owner's question: does the anchor blowup implicate the repeat-domain
+loci at inference time?): NO — the blowup was NOT in the product's
+inference path, and the defect class is now closed everywhere. The
+18.1h grind lived in the ASSESSMENT machinery — the anchor
+projection's own copy of the pre-repair exponential correspondence
+enumeration — while the inference-time scorer already carried the
+exact feasibility DP (the chrIV L39 repair, measured 760.7s -> 0.0s
+with identical answers). But the pathological structure IS the
+repeat-domain row geometry at its extreme: a repeat-composed READ
+(12 identical anchor nodes — a pure tandem-repeat read) against
+repeat-dense ROWS (a syncmer node at up to 70 positions in one row)
+is the same monotone-assignment ambiguity that makes the 207
+repeat-domain loci hard for the likelihood — repeat rows tie and
+steal read mass through exactly these multi-position anchor
+correspondences. The measured teachings: (i) the ambiguity degrades
+GRACEFULLY under the DP — C(70,12) ~ 7.2e12 monotone leaves collapse
+to O(anchors x candidates) with the answers unchanged (the DP-vs-
+enumeration equivalence unit-proven over randomized walks; chrIV
+and chrI anchor receipts byte-identical under the repair) — so NO
+repeat-domain locus can hang the inference path; the blowup risk was
+an artifact of the assessment instrument, not a property of the
+class; (ii) the pathology's own locus (chrIX L11, partition 554) is
+a MID-SIZED class domain (182 folds, 16,653 class pairs) whose call
+is a repeat-domain residual (truth rank 8, winner AMP_1a|
+S288C/W303, log_gap 847) — the hazard is orthogonal to class-domain
+size and lives entirely in the read-row ambiguity structure; (iii)
+chrIX's autopsy mix (13 of 22 non-rank-1 = repeat-domain, 59% vs
+the fleet's 35.4%) confirms the shared subtelomeric repeat
+partitions concentrate the class — and the same repair discipline
+applies to any future instrument that touches the correspondence
+layer: enumerate nothing over repeat rows; the closed form is exact.
+
+## STAGE 2 — THE EXTENT NORMALIZATION (the territory-image rule): derived, gated, and extended to the fleet (2026-10-05)
+
+The autopsy's top lever, measured at 307 extent-class loci, implemented
+as the owner's approved stage 2. NO THRESHOLDS, NO TUNING CONSTANTS:
+the comparison domain is DERIVED from the panel's own committed walk
+structure. The scoreboard machinery is untouched; the convention is
+env-gated (`IMPG_REALIGN_TERRITORY_NORMALIZED`) beside the committed
+default, and the env-unset path is proven a byte-identity no-op (the
+identity gate: chrMT's committed receipts reproduced with all four
+sidecars md5-identical, semantic fields zero-diff).
+
+THE NAIVE WITNESS FALSIFIED FIRST (receipt-side, committed to the
+record as `territory-normalization-predict.py`): the census's window
+territory is the PANGENOME territory (every candidate row sits wholly
+in-territory — the CBK/CBM row IS window 2's territory row), so
+restricting to the window's territory converts NOTHING (measured
+~zero out-of-territory mass at chrMT). The real defect, measured at
+the failing loci: the candidates' OWN row extents differ by thousands
+of bp within the same in-territory locale (chrMT L2: the winner's
+first homolog fold 73 = the CBK/CBM row len 6,596 vs the truth axis
+fold 109 len 2,231 — the winner shares its SECOND homolog with the
+truth and swaps the first for a 3x-longer row; L6: DBVPG 10,955 vs SK1
+5,852; L10: W303 6,911 vs axis 2,587), and the longer row harvests
+the orphaned read mass the fragmented truth cannot place.
+
+THE DERIVED RULE — THE TERRITORY IMAGE (rule 8 of the model section):
+the normalized comparison domain is the LOCUS'S OWN COORDINATE, the
+window's axis row. Per fold, its territory image = the interval
+spanned by the fold's walk steps SHARED with the axis row's walk (the
+alignment-induced correspondence — the instrument's own committed
+node-identity structure, the same semantics the pin machinery trusts).
+Placements and the uniform placement prior are restricted to the
+image; out-of-image mass falls to the CANDIDATE-INDEPENDENT E branch
+for BOTH candidates equally (it cannot vote for the spanner). An
+empty image (no shared anchor) admits no placement: every unit falls
+to E under that fold.
+
+THE EDGE REFINEMENT (the first fleet pass's one regression, named and
+diagnosed — chrV L24): the interval between the outermost shared
+anchors EXCLUDES variant pockets at the territory's edge — a true edge
+variant (no shared anchor on its outer side) cannot be bounded by an
+anchor and fell to E, silencing the truth's own edge material. THE
+DERIVED WITNESS separates the two edge populations by exact set
+membership over the component's own committed axis walks: edge
+material CLAIMED by another window's axis row is that window's
+territory (excluded — chrMT L2's winner-row head: 131 of 158 steps
+shared with the NEIGHBOR window's axis walk, the orphaned-mass
+harvest); edge material claimed by NO window's walk is this locus's
+own edge variant, in-territory BY ELIMINATION (included, bounded by
+the row's own extent — chrV L24's SK1 ortholog head: 12/12 steps
+shared with no window's walk, a true variant). Per-window axis-node
+attribution (rep = the first window whose axis row carries the node;
+count = how many windows' axis rows carry it) is built once per
+component; a fold's image extends to its own row edge on each side
+whose pocket no other window claims; a fold with no shared anchor at
+all is own-material iff no other window claims any of its steps; the
+window's own axis fold's image is its full extent.
+
+THE HONEST CHECK: the territory is the locus's own coordinate, not
+the truth's and not any candidate's. A true insertion/deletion
+haplotype's material WITHIN the window keeps full local evidence (the
+image is the interval between the outermost shared anchors — interior
+diverged pockets are included, and edge variants are included by the
+refinement); its material beyond the window is E for every candidate
+equally, so it loses no RELATIVE evidence and no rival can harvest
+it. Measured at the gate: the rule CONVERTS the extent-class loci and
+holds every rank-1 locus.
+
+THE CHRMT/CHRI GATES (the refined rule, exhaustive reruns, the
+checker in `--territory` mode — phase 5 re-derives the images from
+the GFAs' P lines and compares them exactly; the sampled re-derivations
+run under the image bounds; the tied-winner bands are emitted and
+consumed; phase 8t is skipped BY DESIGN — the env-unset identity gate
+is the separate no-op proof; NEW phase 8N is the hard-gated
+conversion/no-regression table):
+- chrMT: ALL PHASES PASS 1,182,231/0 — CONVERT [L2 48->1, L6 117->1,
+  L9 3->1, L10 119->1] HOLD 5 REGRESS NONE — truth rank-1 5 -> 9 of 9
+  expressible. The QV re-run: 9/9 PERFECT (zero edits).
+- chrI: ALL PHASES PASS 4,364,560/0 — CONVERT [L3, L6, L9, L12, L14,
+  L15, L17, L19] (the L6/L12 prediction class; ranks up to 396 -> 1)
+  HOLD 6 REGRESS NONE — truth rank-1 6 -> 14 of 18 expressible; the
+  residuals L2 (the near-twin) + L13/L16/L18 (the repeat-domain class)
+  are the NEXT lever's territory, named.
+- chrV (the regression case the edge refinement repairs): L24 HOLDS
+  rank-1, CONVERT 15, REGRESS NONE — truth rank-1 24 -> 39 of 57
+  expressible; the QV re-run 39/57 perfect with the non-perfect
+  median QV lifted to ~15.
+
+THE FLEET (the 17-component extension, the drivers nohup'd with
+done-markers; MID-FLEET SNAPSHOT at this writing, the four big
+components' serial identity bases still grinding the
+extended-image repeat loci): 13 of 17 components closed end-to-end
+(chrMT chrI chrII chrIII chrIV chrV chrVI chrVIII chrIX chrXI chrXIII
+chrXIV chrXVI — each: the territory serial identity base, the 4-wide
+exhaustive run of record, the `--territory` checker slices ALL PHASES
+PASS, 75.9M checks 0 failures across the landed slices so far);
+PENDING: chrVII chrX chrXII chrXV. THE MID-FLEET CONVERSION TABLE
+(`territory-conversion-tables.txt`, the per-locus rows in
+`territory-conversion-loci.jsonl`): CONVERT 225 / REGRESS 0 / moved
+220 (non-rank-1 loci that improved rank without reaching 1) over the
+759 expressible loci of the closed set; truth rank-1 364 -> 589
+(77.6% of expressible; the committed convention's whole-genome
+verdict was 48.5%). THE ZERO-REGRESSION GUARD HOLDS at every landed
+component — no rank-1 locus lost rank-1 anywhere in the fleet. THE
+CONVERSIONS BY THE AUTOPSY'S CAUSE (joined to the autopsy receipts):
+extent 185 (the autopsy's extent class: 307 loci fleet-wide, 274
+expected conversions under full neutralization — the four pending
+components hold a large share of the class), repeat-domain 37 (the
+image rule also repairs loci the autopsy classed by their interior
+anatomy), rival-dominant 3; THE TIE ANATOMY: 224 unique wins (the
+winner IS the truth pair) + 1 truth-tied-not-first (the truth is in
+the called set at the max LL; the enumerated winner is a
+likelihood-identical rival whose extra material is out-of-image).
+
+THE QV RE-RUN UNDER THE NORMALIZED CONVENTION (the owner's stage-4
+prediction, measured at 13 components): 588/759 perfect calls
+(QV 60, zero edits; was 549/1,133 = 48.5% under the committed
+convention whole-genome), median QV 60.00 (was 17.77), p10 13.79
+(was 8.40), QV>=40 at 77.87% (was 48.67%) — THE LOWER QV MODE HAS
+COLLAPSED: the extent-mismatch end-gaps are gone, and what remains
+below QV 60 is the repeat-domain class's true interior divergence
+(the next lever's territory). Receipts: `realign-sequence-qv-territory-<C>.jsonl`
++ `realign-sequence-qv-territory-tables.txt`; the committed
+default-convention QV receipts of record are untouched (the
+`--out-suffix` convention).
+
+THE CHECKER-SIDE REPAIRS THIS STAGE (both mirrors of the instrument's
+own documented conventions, both caught by the fleet): (1) the edge
+refinement's `axis_attribution()` was inserted at module scope but
+reads the main()-local `axis_rows` — every `--territory` checker died
+at phase-5 entry; it now takes the window list from the caller. (2)
+chrXIII's territory checker died forming the uniform-prior term
+eagerly for a sampled fold whose NON-EMPTY image is shorter than a
+read — the instrument's `unit_log_likelihood` documents and guards
+the degenerate case (NEG_INFINITY when the support is shorter than a
+read); the checker's prior is now formed lazily under the same guard.
+The aggregates: `genome-truth-rank-tables-territory.txt` (the
+committed aggregate of record untouched) and
+`territory-conversion-tables.txt`.
+
+Standing rules held throughout: truth assessment-side only; no
+thresholds (the image and the attribution are exact set membership
+over committed structures); the scoreboard machinery unmodified; no
+selection swap; no PR push; the receipts streamed, never slurped; the
+ingredients sidecars untouched; the 64GiB guard clean (the territory
+runs' RSS peaks within the committed envelopes); the census/anchor/
+graph artifacts stand (the convention changes only the comparison
+domain).
+
+## STAGE 2, THE WALL FIX — the degenerate-locus tie certificate (2026-10-05, W6)
+
+THE WALL, measured before the fix: the territory fleet's four
+stragglers did NOT land cleanly — chrX, chrXII and chrXV's 4-wides
+DIED at the 64GiB RSS guard (peaks 78.0, 85.9, 81.6 GB at their
+partition-110 monster loci; receipts zero bytes; the run wrapper's
+done-marker fires on failure too, which masked the deaths), and
+chrVII's 4-wide landed but peaked at 118.4 GB — its checker's
+phase-1 guard check FAILED on exactly that (the stale done-markers
+made the idempotent drivers skip the dead runs; all four markers
+removed, the chrVII superseded artifacts preserved
+`.guardviolated`). The serials had completed (peaks 16-21 GB) but
+at the monsters ground for 4,472-4,931 qual-seconds each.
+
+THE MECHANISM, exact: at a partition-110 window (chrXII L86,
+chrXV L14, chrX L52, chrVII L56 — one degenerate domain manifesting
+as four components' windows) EVERY fold's territory image is empty
+or shorter than a read (six non-empty images totalling 222 bp
+against READ_LENGTH 150), so no candidate places anything: every
+fold scores the candidate-independent E branch at every unit, EVERY
+one of the 35,511 classes ties at the pure-E score
+(called_class_count == class_count == 35,511, the winner [0,0] by
+flat order alone), and the tie certificate then materializes
+|called|-1 bands x |spectrum| observed-mass distances — 35,510 x
+35,510 = 1.26e9 multiset merges (the qual-seconds wall) — and
+emits them as a ~6 GB `qual_tied_bands` JSON DOM (the RSS-guard
+breach). The p-arithmetic confirms the structure digit-for-digit:
+k = 14,645 with alternative ~0 reproduces the receipts' QUAL
+0.00029655808123999367 exactly. The same degenerate class exists
+harmlessly at test scale in CLOSED chrIV (loci 67/94/108:
+called == class_count == 2,701, k = 331, 57 MB lines) — the
+checkers already digest those.
+
+THE FIX (the chrIX discipline applied to the QUAL phase — the
+naive enumeration replaced by an exact decidable form, the answers
+unchanged by construction): the cluster machinery consumes from
+each band ONLY its <=cut predicate set (the excluded-union and the
+union-find edges; band values above the knee cut are never read),
+so at a fully degenerate locus (called_class_count ==
+class_count — an exact structural equality, not a size threshold)
+the certificate is computed through SOUND two-sided O(1)
+observed-mass bounds — D >= |Sm_n(t)-Sm_n(e)| + |Sm_e(t)-Sm_e(e)|
+and D <= Sm_n(t)+Sm_n(e)+Sm_e(t)+Sm_e(e), where Sm is the observed
+mass of the (merged, additive) multiset — with the exact
+`differing_observed_mass` as the fallback for the undecided middle
+band, and emitted as the compact `qual_tied_cut_indices` (per tied
+class: its spectrum index and its band's exact <=cut member list)
+instead of the band matrix. Non-degenerate loci take the committed
+band path unchanged — byte-identical receipts — and the
+default-convention receipt schema is untouched (the emission stays
+territory-only). The checker's phase-6 mirror re-derives k from
+the compact lists with the same list-driven union-find (linear in
+the total predicate count instead of quadratic in the tied-class
+count — at the monster 35,510 tied classes would make the
+quadratic python loop the checker-side wall); the band-form path
+is unchanged.
+
+THE EXACTNESS PROOF, three layers: (1) the bounds are
+exact-deciding, not approximating — the upper bound <= cut proves
+the predicate TRUE, the lower bound > cut proves it FALSE, and the
+fallback computes the very distance the band would have carried,
+so the emitted predicate set equals the naive band matrix's by
+construction; (2) the unit gate
+`the_degenerate_tie_certificate_matches_the_naive_band_oracle`
+runs 3,000 randomized loci against a VERBATIM copy of the naive
+band construction as the oracle (predicate sets asserted equal,
+then the full cluster state — k, excluded, alternative,
+cluster_size, cut, shape, p — equal under both certificate forms),
+plus `the_degenerate_certificate_handles_the_monster_shape_fast`
+(the pathological shape at 40-fold scale, oracle-proven, inside
+the 60 s liveness bound); 21/21 tests pass. (3) the receipt gates:
+the fixed binary at chrXII L86 reproduces the landed SERIAL
+receipt's monster line on every answer field (QUAL, k = 14,645,
+cluster_size, excluded = 35,510, knee, posteriors, winner, LL —
+20/20 identical, the serial's naive slow path as the oracle);
+chrXIII's full 101-locus territory rerun is semantically identical
+line-for-line (walls/rss excepted) with the exactness and skeleton
+sidecars md5-identical — including the chrXIII L1 three-band tie,
+the non-degenerate tie path; and the env-unset chrMT run is
+semantically identical to the committed default receipts (the
+no-op proof: the default schema never carried tie fields and the
+degenerate compute is convention-agnostic).
+
+THE COST TABLE, per monster locus (the before side: the landed
+serial receipts' own walls; the after side: the fixed binary):
+
+| locus (window over partition 110) | qual_seconds before | qual_seconds after | locus_seconds before | locus_seconds after |
+|---|---:|---:|---:|---:|
+| chrXII L86 | 4,802.09 | 18.3 | 4,807.01 | 25.3 |
+| chrXV L14 | 4,472.48 | 18.0 | 4,477.48 | 21.8 |
+| chrX L52 | 4,931.34 | 16.9 | 4,935.43 | 19.7 |
+| chrVII L56 | 4,925.93 | 22.9 | 4,930.83 | 32.7 |
+
+(the measured pay at the four monsters: 215-292x on the qual phase;
+the re-run 4-wides' whole-component walls 106-226 s where chrVII's
+pre-fix 4-wide took 2,759 s; process RSS peaks 15.9-24.7 GB where
+the pre-fix runs breached the 64GiB guard at 78.0-118.4 GB — every
+monster locus's answer fields reproduce the landed serial receipts'
+naive-path values, QUAL 0.00029655808123999367 and k = 14,645
+included, 19/19 fields at all four; the receipts collapse from
+10.4 GB to 0.19 GB per component). The emission collapses 1.26e9
+band values into 1,256,064 predicate members per monster (a ~15 MB
+receipt line where the naive emission was ~6 GB) — the monster
+receipts are small enough that the checker's ordinary line
+parsing handles them.
+
+THE HONEST STATEMENT of what the compact certificate does not
+carry: the raw band values above the knee cut are not emitted at
+degenerate loci. Nothing consumes them — the cluster machinery
+reads only the <=cut predicates — but a future consumer that
+wanted the full distance matrix at a degenerate locus would need
+to recompute it (the naive path still exists in the code and the
+oracle test).
+
+The four straggler 4-wides re-run on the fixed binary (the stale
+markers removed, the drivers autonomous), the checker mirrors in
+place; the fleet closure and the final aggregate follow.
+
+## STAGE 2 CLOSED — THE 17/17 FLEET AGGREGATE UNDER THE NORMALIZED RULE (2026-10-05, W6)
+
+The four stragglers re-run on the fixed binary landed clean: whole-
+component 4-wide walls 106-226 s (chrVII's pre-fix 4-wide: 2,759 s),
+process RSS peaks 15.9-24.7 GB (the pre-fix runs breached the 64GiB
+guard at 78.0-118.4 GB), receipts 0.10-0.19 GB per component (the
+pre-fix chrVII receipt was 10.4 GB — the monster band emissions),
+and every monster locus reproduces the landed serial receipts'
+naive-path answers 19/19 fields (QUAL 0.00029655808123999367,
+k = 14,645, excluded 35,510, knee 4,763 — the serials' 4,472-4,931
+qual-second grind as the oracle).
+
+THE FINAL AGGREGATE (all 17 components; the committed default-
+convention aggregate of record untouched — the `--out-suffix`
+convention): 1,307 loci, 1,133 expressible, TRUTH RANK-1 AT
+876/1,133 = 77.3% (the committed convention's whole-genome verdict
+was 549/1,133 = 48.5%). CONVERT 327 / REGRESS 0 — the zero-
+regression guard holds fleet-wide (the mid-fleet 13-component
+snapshot was CONVERT 225 / REGRESS 0). The conversions by the
+causal autopsy's cause: extent 263 (the autopsy's measured extent
+class 307, 274 expected under full neutralization — HELD within
+4%), repeat-domain 59, rival-dominant 4, contig-end 1; the tie
+anatomy 325 unique wins + 2 truth-tied-not-first (the truth in the
+called set at the max LL with a likelihood-identical rival first
+in flat order).
+
+THE QV DISTRIBUTION (the lower mode's collapse quantified, 17/17):
+median 60.00 (was 17.77), p10 13.79 (was 8.40), p90 60.00; perfect
+calls (QV 60, zero edits) 874/1,133 = 77.2% (was 549/1,133 =
+48.5%); QV>=40 at 77.41% (was 48.67%); the non-rank-1 residue 257
+loci at median QV 14.18, median per-base error 3.8%. ARITHMETIC:
+rank-1 876 vs perfect 874 — the two rank-1-but-not-perfect loci
+are the degenerate ties (chrVII L56 class: the truth TIES at the
+pure-E maximum with every class, ranks 1 by the nothing-beats-it
+rule, but the CALLED class is the flat-order winner pair, not the
+truth pair — the degenerate locus's honest signature).
+
+THE CHECKER-HYGIENE REPAIR this closure caught: the run wrapper's
+per-run markers (.rss/.stages) are APPEND-mode, so the dead runs'
+78-118 GB peaks leaked into the clean re-runs' logs and the
+checker's phase-1 guard flagged the clean runs on stale history
+(the same marker disease that masked the deaths: the wrapper
+touches .done even on failure). The wrapper now clears .rss/
+.stages at launch (the history preserved in .fullhistory copies
+at the validation dir); the stragglers' logs filtered to the run
+of record; the checkers re-run on the clean markers.
+
+## STAGE 4 — THE RIVAL-DOMINANT AUTOPSY UNDER THE NORMALIZED RULE (2026-10-05, W6)
+
+Receipt-side, assessment-only: `genome/instrumented/rival-dominant-
+autopsy.py`, the per-locus receipts `realign-rival-autopsy-<C>.jsonl`
++ `realign-rival-autopsy-tables.txt` at the validation dir. THE
+COHORT, re-derived under the normalized rule (not inherited from the
+pre-normalization classing): every expressible locus whose truth is
+not rank-1 AND whose BOTH-PLACED EVIDENCE GAP is positive — the
+rival out-places the truth on the material BOTH pairs place. THE
+COUNT: 64 loci (the pre-normalization class was 66; 3 converted to
+rank-1, 13 left the cohort with the extent term neutralized — their
+shared evidence now favors the truth — and 14 NEW entrants joined:
+loci the default-convention classing called extent- or repeat-class
+whose exposed shared-evidence deficit is rival-favored under the
+normalized geometry; 50 of the 64 carry the pre-normalization
+S1-AND-NOT-S2 signature).
+
+WHY THE RIVAL OUT-PLACES THE TRUTH ON SHARED MATERIAL — the
+mechanism classes (primary, the stated precedence; every feature
+derived from the receipts, the cuts are the stated conventions):
+
+  - INTERIOR SUBSTITUTION: 57/64 (89.2%) — median both-placed gap
+    4,690.8 LL, median QV 13.23, median identity 95.25%; the win is
+    carried by INTERIOR GAP COLUMNS (gap_columns > mismatches): the
+    rival pair spells DIFFERENT-LENGTH INTERIOR MATERIAL — diverged
+    paralogous copies whose interior the reads genuinely match
+    better than the truth's. By census class: 31 in-axis, 22
+    tiled-elsewhere/neighbor (the seam), 2 foreign-repeat, 1
+    partial-elsewhere, 1 pilot. THE DOMINANT MECHANISM IS REAL
+    COPY-DIVERGENCE, not geometry: even with both pairs restricted
+    to equal comparison domains the diverged copies win the reads.
+  - TWIN INDISTINGUISHABLE: 4/64 (6.3%) — median both-placed gap
+    0.6 LL, median identity 99.99%, median QV 39.96: the called and
+    truth diplotypes spell effectively the same sequence and the
+    panel genuinely cannot distinguish them (the shared-evidence
+    rival class — chrIII L5 and chrXVI L2, plus two loci that
+    joined under the normalized rule).
+  - SUBSTITUTION BETTER MATCH: 3/64 (4.7%) — median gap 4,691.3,
+    median QV 17.88, identity 98.37%: the win is carried by base-
+    substitution columns — the rival copy's bases match better.
+  - ZYGOSITY/DOSAGE: 0/64 — no locus in the cohort has a
+    homozygous-vs-heterozygous winner/truth structure difference
+    (winner homozygous at 0 of 64); the dosage mechanism the owner
+    hypothesized is ABSENT in this cohort under the normalized rule.
+  - UNPLACED ASSIST: 58/64 also carry a winner-favored one-side-
+    placed residual (the winner still places some units the truth
+    pair cannot within its image) — but by the cohort definition
+    the SHARED evidence alone keeps the rival ahead: under FULL
+    neutralization of the unplaced term these loci still do not
+    convert.
+
+THE FIX MAPPING, honest: NO mass-re-attribution (geometry) lever
+applies to this cohort BY DEFINITION — the extent normalization
+stage already equalized the comparison domain and the jointly
+placed reads still prefer the rival. The named levers that remain
+are EVIDENCE-MODEL side, not geometry: (1) for the 57 interior-
+substitution loci, a placement-topology or copy-number prior that
+penalizes diverged-copy explanations would have to OVERRULE the
+reads' own likelihoods — a model change with product-wide
+consequences, not a repair; (2) for the 4 twins, nothing can
+distinguish what the panel does not contain — the indistinguishable
+copies are a PANEL property.
+
+THE HONEST NO-FIX VERDICT, stated plainly: at 64/1,133 expressible
+loci (5.7%) the truth is not the maximum-likelihood call under ANY
+comparison-domain repair — the evidence genuinely prefers the rival
+(or cannot distinguish it). What that means for the product: these
+loci are the IRREDUCIBLE RESIDUE of the panel's actual copy
+structure under the current evidence model; the truth assessment's
+expectation at deployment is bounded by them, and the remaining
+non-rank-1 total (257 loci, 22.7% of expressible) decomposes into
+this 64-locus irreducible core plus the 193 loci where a geometry
+lever still applies (the seam and repeat-domain interiors). No fix
+is recommended for this cohort; the honest statement is the
+deliverable.
+
+## THE ALIGNMENT-INDUCED LOCALITY DOMAIN — the owner's go, derived, and gated at chrMT/chrI (2026-10-06)
+
+**The design (no thresholds, no tuning constants).** The candidate
+domains come from ALIGNMENT-INDUCED LOCALITIES, not partition
+memberships:
+
+* **The locality** of a window is the alignment-connected structure
+  of its axis partition's pggb graph that contains the window's axis
+  row — the connected component (undirected, over the graph's own
+  segments and links, a path's own consecutive steps included) whose
+  segments the axis row's pggb path traverses. Partition membership
+  over-joins disconnected material; those rows leave the locus's
+  universe (measured at the gate components: 27 rows leave at chrMT,
+  45 at chrI; partition 14901 carries 24 components over 146 rows).
+* **The fold material** on each universe path is the path-interval
+  hull of the MAXIMAL MONOTONE AXIS-CORRESPONDENCE — the
+  order-preserving (path position, axis position) pairs pooled from
+  (i) the pggb shared segments (the within-partition real alignment;
+  the colinear LIS core, repeat-coincidence segments dropping out)
+  and (ii) the interned syng nodes shared with the axis row's walk,
+  chained along the path's own partition-BED tiling across partition
+  boundaries ONLY WITHIN the component's own axis partitions (the
+  window spine — the seam being repaired is the window boundary of
+  the axis path's own tiling) and admitted only at the
+  correspondence's monotone ends. Folds are PER ROW (one fold per
+  universe row, each extended along its own seam chain) with the
+  interval the exact extent hull of the pairs (segment pairs carry
+  their segment's own length, node pairs the window extent), so
+  identical rows yield identical intervals and coalesce under the
+  committed (sequence, relative-walk) fold key — the per-path hull
+  variant of this construction was MEASURED regressing chrMT
+  L2/L7/L9/L10 by breaking that coalescing, and repaired. The axis
+  path's fold is the window's axis row itself (the territory). A row
+  with no correspondence pair keeps its full row (the standing image
+  rule decides).
+* **The records re-derive per locality**: the territory-touch
+  convention on the new locality extents — an occurrence votes at
+  the locus iff its interval overlaps a locality fold row on the
+  occurrence's own path (the census's own coordinate-overlap rule
+  over the locality's rows instead of the partition's rows).
+* **The machinery stands** (the territory-image extent
+  normalization, the marginal realignment likelihood, the DP
+  disciplines, the QUAL bounds): the locality domain implies the
+  territory rule (the fold construction makes the images exact) and
+  every other mechanism is byte-identical. Env
+  `IMPG_REALIGN_LOCALITY_DOMAIN`; the maps are
+  `locality-domain-maps.py`'s window-keyed emissions (the scorer's
+  own `PartitionMap` schema, partition id = the window id).
+
+**The residual mechanism, measured first (chrI L13, the receipt's
+own `ll_matrix`).** The truth pair fails to place 19,761 of 23,943
+units (mass 27,881); the winner-only differential (4,779 units /
+10,423 mass over 37 records) is entirely high-multiplicity
+repeat-family reads (mult 700-1750, one to two anchors, hundreds of
+occurrences across the panel) whose window-13-touching occurrences
+sit on the DIVERGED COPY rows (CBM#2#chrI_3, AGK#0#chrI, ADM#2#chrI_1,
+CIC#1#chrI_2), not on severed truth material; the both-placed
+evidence favors the truth (-8,063). SK1's partition-13 row exactly
+covers the window's SK1 ortholog (the offset alignment S288C
+130058 ↔ SK1 132779; the abut point is the row boundary) — the
+truth is NOT severed at the chrI interior residuals, and the locality
+domain does not (and cannot honestly) remove the connected
+repeat-copy rows.
+
+**The gate table (phase 8N vs the committed normalized-rule receipts
+of record).** chrMT HOLD 9/9, CONVERT [], REGRESS []; chrI HOLD
+14/14 rank-1, CONVERT [], REGRESS []; the residuals unchanged in
+class (L2 rank 4, L13 1073, L16 4165 (improved from 5742, not
+converted), L18 621) — exactly the stated prediction. Expressibility
+unchanged at both components. The 4-wide runs reproduce the serial
+receipts with 0 semantic diffs and all four sidecars md5-identical.
+The checker's `--locality` mode re-derives each fold member's stored
+walk by the CONSTITUENT MERGE (the merged absolute-bp walks of the
+path's own tiling rows overlapping the fold interval, from the
+committed pggb projection sidecars) and runs the committed
+frame-skeleton audit over it; every member of a fold must re-derive
+the same relative stored walk (the coalescing proof).
+
+**The seam-coverage margins, honestly stated.** A fold whose
+correspondence core ends inside its row loses the edge material
+beyond the core (the truly diverged edge pockets with no exact
+segment or node sharing — the chrV-L24 head class): under the
+locality domain such material is not the territory's projection by
+the exact rule. The gate measures whether any rank-1 locus regresses
+for it (none did at chrMT/chrI); the fleet gate watches for it.
+
+**The fleet (gate 3, in flight).** The pggb builds for the 15
+remaining components' committed build sets (the 1358-partition union
+todo, two converging marker-idempotent serial lanes), then the
+per-component projection + locality maps + exhaustive runs + the
+checker, the new genome aggregate vs 876/1,133, the conversion
+count vs the 193 addressable prediction (the seam-class conversions
+are a fleet prediction — the tiled-elsewhere loci's wrong-material
+truth pairs become the real ortholog pairs through the seam chain),
+and the QV re-run. The honest verdict with the rival-dominant
+residue recomputed under the new domains follows the fleet.
+
+## Gate 3 — the fleet under the locality domains: the measured verdict
+
+**The substrate, closed.** Both converging build lanes completed the
+full 1358-partition union todo independently (each partition built
+once per lane; the fleet dir is the lane of record), and the
+committed projection tool proved the fleet substrate end-to-end:
+271,377/271,377 member rows spell exactly equal to their export GFA
+P lines (0 diffs), with the BED-completeness check per partition —
+together with the 56 gate partitions' committed proof, every
+partition the fleet touches is proven coordinate-continuous with
+the global syng interning.
+
+**The fleet chain, per component** (marker-idempotent drivers:
+maps → serial → 4-wide → identity → checker slices): the locality
+maps re-derive through the gate+fleet path resolution (per-partition:
+the committed chrMT/chrI gate receipts of record win, the fleet
+lanes fill the rest; the axis-row window list defaults to the
+committed export maps, member-identity-proven identical — the
+parameterized builder re-derives the committed gate maps
+byte-identically at both components); every component's serial and
+4-wide receipts land with 0 semantic diffs and all four sidecars
+md5-identical (the identity-gate pattern of record); the checkers
+run `--territory --locality` with phase 8N's BEFORE pointed at the
+committed normalized-rule receipts of record.
+
+**The aggregate (the honest scoreboard).** Truth rank-1 **880 of
+1,132 expressible = 77.7%** (the committed territory convention:
+876/1,133 = 77.3%). Expressibility moved both ways, every move
+named: gained 5 (chrX L50, chrXIV L9, chrXVI L8/L85/L93 — the seam
+chain made truth pairs spellable where the partition rule could
+not), lost 6 (chrV L59, chrVII L56+L83, chrXII L101, chrXV L49,
+chrXVI L7 — the truth-second rows left the axis component or the
+exact-correspondence rule dropped their material).
+
+**The conversion count vs the 193 prediction: REFUTED by
+measurement.** CONVERT **9** / REGRESS **5** / moved 350. The
+193-locus seam/repeat-interior "addressable" class converts only 9
+loci — all 9 unique wins (the winner IS the truth pair), by cause
+extent 4 / repeat-domain 4 / rival-dominant 1. The seam-class
+conversions the design predicted did not materialize: the residuals'
+winners are connected in-component repeat-copy rows placing
+genuinely-better-matched reads (the chrI-L13 mechanism, now measured
+genome-wide), and rejoining the severed ortholog material does not
+make the truth pair win — the likelihood's advantage lives in the
+evidence model, not the geometry.
+
+**The five regressions, autopsied from the receipts' own fold
+identities — two honest mechanism classes.**
+
+- *The edge-pocket/hull-sensitivity class* (4 loci): chrIII L20
+  (1→2, gap 0.27 nats — the SK1 truth fold truncated 20 bp at its
+  left edge by the exact-correspondence rule while a 1-bp-shorter
+  near-twin rival hull scores better), chrXI L39 (1→2, gap 0.23 —
+  the truth-second fold truncated 171 bp; a near-twin CENPK fold
+  paired with the truth's own second fold), chrXV L15 (1→2, gap
+  0.21 — a 1-bp-shorter CENPK hull paired with the truth's own
+  DBVPG/SK1 fold), and chrIII L35 (1→2, gap 162.5 — the seam chain
+  admitted a rival strain's REAL ortholog: BAQ_1a's chrIII row,
+  351 bp longer than SK1's own ortholog row, and the longer genuine
+  ortholog outplaces the truth's shorter one).
+- *The over-join separation class* (1 locus): chrVII L56, a
+  degenerate 15 bp contig-end axis window whose truth-second rows
+  are not alignment-connected to the axis row's component — the
+  truth pair becomes inexpressible. The honest cost of the exact
+  rule at a window where the panel's truth material has no
+  realignment connection.
+
+The checker's phase-8N zero-regression guard fires loudly at
+exactly these loci — the guard is the design's own "any regression =
+design failure, named" contract, and the fleet's verdict is carried
+honestly (the checker's regression check is untouched; the drivers
+record `check-locality-<C>.gateregressed` for the affected
+components).
+
+**The QV re-run under the locality domains**
+(`realign-sequence-qv-locality-tables.txt`; the material gate's
+locality mode = the constituent containment: a fold's interval is a
+derived hull, witnessed through the path's own tiling rows
+overlapping it — their union must cover the interval and every
+constituent row's export-GFA spelling must contain its panel
+window; every fold dual-gated, 0 gate failures): n=1,132, **perfect
+calls 880** (= the rank-1 count exactly — every rank-1 locus is a
+zero-edit call), median 60.00, p10 14.42 (was 13.79), QV≥40 at
+78.18% (was 77.41%). The lower mode is unchanged in kind: the 252
+non-rank-1 loci remain the repeat-domain constituency.
+
+**Gate 4 — the rival-dominant residue recomputed under the new
+domains** (`realign-rival-autopsy-tables-locality.txt`): the cohort
+is **71 of 252** non-rank-1 expressible (the territory convention:
+64 of 257; 50 carry the pre-normalization signature), mechanisms
+interior-substitution 60 / twin-indistinguishable 7 /
+substitution-better-match 4 / zygosity-dosage 0 (the hypothesized
+dosage mechanism absent again; winner homozygous 0/71). The residue
+decomposition, both axes shown:
+
+| the 252 non-rank-1 (1,132 expressible − 880 rank-1) | count |
+|---|---|
+| by census class: in-axis-partition (interior) | 159 |
+| tiled-elsewhere/neighbor (seam) | 74 |
+| tiled-elsewhere/foreign-repeat | 14 |
+| partial-elsewhere/foreign-repeat | 1 |
+| pilot (chrMT/chrI, no census receipt) | 4 |
+| by mechanism: rival-dominant (both-placed gap > 0) | 71 |
+| non-rival seam/repeat-interior (252 − 71) | 181 |
+
+The 181 are not addressable by geometry (measured: the locality
+lever converts 9); the 71 are the irreducible copy-structure
+residue.
+
+**The honest verdict for the arc.** The alignment-induced locality
+domain is measurement-complete: it is the first domain family that
+names its own universe from real alignment (the over-join
+separation measured, the seam chains rejoined, the spell-equality
+proof fleet-wide), and its honest yield is small and two-sided —
++4 net rank-1 with 9 conversions and 5 named regressions. The
+geometry-lever program is now measured to exhaustion: the
+territory normalization converted the extent class (225→327 over
+the arc), and the locality domain — the strongest geometry
+candidate, built on real alignment — converts 9 more while paying
+5 regressions. What remains (252 loci) is not addressable by
+geometry: 71 rival-dominant by the receipts' own both-placed
+evidence, and 181 seam/repeat-interior where the winners place
+genuinely-better-matched repeat-family reads on real ortholog
+material. The next lever, if any, lives in the evidence model — a
+decision for the owner, with the honest scoreboard now standing.
+
+## Gate 3 CLOSED — the checker sweep's 17/17 verdict and the arc's final state (2026-10-06, W10)
+
+**The sweep, closed end-to-end.** All 17 components' checker
+slices now stand on the fully-repaired machinery (the six checker
+repair classes landed and committed through the sweep:
+the phase-3 per-(locus, occurrence) mirror rule, the 8N
+expressibility-gain guard, the zero-regression guard's honest
+acceptance convention, the phase-8c locality attribution, the
+E-audit empty-matrix guard with the 0.0-convention class table,
+the held-rank-1 winner-equality not-applicable guard at the
+inexpressible regression, and the phase-8 expressibility-loss
+guard). **264,718,566 checks across the whole sweep**
+(fleet slices 259,435,511 + the chrMT/chrI gate logs 5,283,055),
+**8 failure lines, every one the zero-regression guard's own
+naming of the committed regression loci** (chrIII L20+L35,
+chrVII L56, chrXI L39, chrXV L15 — four components closed
+`gateregressed`, the guard's honest verdict, the checker itself
+untouched). The degenerate loci passed live on the committed
+guards: chrVII L56 ("E audit passed … 0 matrix entries at E; 1
+classes re-derived (max diff 0.00e+00); truth pair NOT
+expressible") and chrXII L86 (the identical empty-product
+convention), and chrVII L83 is honestly carried in the phase-8
+aggregate ("no longer expressible [83] (the exact rule's honest
+cost)") — the one locus genome-wide expressible under the Poisson
+instrument and lost under the locality domains.
+
+**chrVII, the last component — its honest three-slice closure:**
+s0 ALL PHASES PASS 7,852,721/0 (rank-1 30→30, CONVERT [],
+REGRESS []); s1 8,399,645/1 — the single failure the guard naming
+REGRESS [56] (rank-1 24→23, the degenerate contig-end locus's
+truth pair inexpressible, the over-join separation class);
+s2 ALL PHASES PASS 8,098,760/0 (rank-1 22→22, CONVERT [], REGRESS
+[]). Per-slice sum 30+23+22 = 75 = the aggregate table's chrVII
+row exactly; the 15/15 fleet markers stand
+(`fleet-locality-<C>.done` for every component).
+
+**The final aggregate of record, verified at 17/17** (arithmetic
+shown): truth rank-1 = 9+14+68+18+115+39+16+75+40+29+54+47+75+68+
+60+82+71 = **880**; expressible = 9+18+76+28+143+56+25+100+50+40+
+71+66+98+86+72+102+92 = **1,132**; **880/1,132 = 77.7%** (the
+committed territory convention: 876/1,133 = 77.3%; the committed
+default convention before the arc: 549/1,133 = 48.5%).
+CONVERT 9 / REGRESS 5 / moved 350 — the 193-locus addressable
+prediction refuted by measurement. The QV re-run: n=1,132,
+perfect 880 (= rank-1 exactly), median 60.00, p10 14.42, QV≥40
+78.18%. Gate 4: 71 rival-dominant of 252 non-rank-1. The locality
+chain's own walls: serial 3,086s + 4-wide 1,836s = 4,922s (17/17,
+the `.wall` markers of `run-realignlocality-{serial,4}-<C>`).
+
+**The arc's measured chain, start to final state.** The windowed
+reference frame excluded the SK1 truth pair at 805/1,307 windows
+and the product called one molecule everywhere (4/502 expressible
+truth pairs recovered; injective diploid distance 0.5128 on the
+6×/4× sample, 0.3001 on the balanced v2 sample). The realignment
+instrument — the per-locus marginal likelihood over the graph
+panel — recovered the expressible truth pairs and the committed
+default convention scored 549/1,133 = 48.5% rank-1. The extent
+normalization (the territory-image rule) converted the extent
+class: 876/1,133 = 77.3% (CONVERT 327 / REGRESS 0), QV median
+17.77→60.00. The alignment-induced locality domain — the owner's
+"try the thing you think is gonna work", the domain family that
+names its universe from real alignment — added +4 net: 880/1,132
+= 77.7%, CONVERT 9 / REGRESS 5, QV≥40 77.41%→78.18%. The residue
+at the final state: 252 non-rank-1 = 71 rival-dominant (the
+irreducible copy-structure residue, both-placed gap > 0, winner
+homozygous 0/71, dosage mechanism absent) + 181 seam/repeat-
+interior (the winners place genuinely-better-matched high-
+multiplicity repeat-family reads on real ortholog material; the
+geometry measured NOT to convert them). The geometry-lever
+program is measured to exhaustion; the next lever, if any, lives
+in the evidence model — a decision for the owner.
+
+Assessment-side only; no thresholds; the scoreboard machinery
+unmodified; no product selection swap; no 502.

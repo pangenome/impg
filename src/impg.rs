@@ -242,23 +242,25 @@ struct SerializableInterval {
 #[derive(Default, Clone)]
 pub struct SortedRanges {
     pub ranges: Vec<(i32, i32)>,
+    sequence_length: i32,
+    min_distance: i32,
 }
 
 impl SortedRanges {
+    pub fn with_distance(sequence_length: i32, min_distance: i32) -> Self {
+        Self {
+            ranges: Vec::new(),
+            sequence_length,
+            min_distance,
+        }
+    }
+
     pub fn new() -> Self {
-        Self { ranges: Vec::new() }
-    }
-
-    pub fn len(&self) -> usize {
-        self.ranges.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<'_, (i32, i32)> {
-        self.ranges.iter()
+        Self {
+            ranges: Vec::new(),
+            sequence_length: 0,
+            min_distance: 0,
+        }
     }
 
     /// Insert a range, snapping its boundaries onto adjacent existing ranges
@@ -275,10 +277,6 @@ impl SortedRanges {
             return self.insert(new_range);
         }
         self.insert_inner(new_range, min_distance)
-    }
-
-    pub fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
-        self.insert_inner(new_range, 0)
     }
 
     fn insert_inner(&mut self, new_range: (i32, i32), min_distance: i32) -> Vec<(i32, i32)> {
@@ -302,6 +300,103 @@ impl SortedRanges {
         // Check next range
         if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < min_distance {
             end = self.ranges[i].0;
+        }
+
+        // Return regions that don't overlap with existing ranges
+        let mut non_overlapping = Vec::new();
+        let mut current = start;
+
+        // Find the first range that could overlap
+        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range for overlap
+        if i > 0 && self.ranges[i - 1].1 > start {
+            i -= 1;
+        }
+
+        // Process all potentially overlapping ranges
+        while i < self.ranges.len() && current < end {
+            let (range_start, range_end) = self.ranges[i];
+            if range_start > end {
+                break;
+            }
+            if current < range_start {
+                non_overlapping.push((current, range_start));
+            }
+            current = max(current, range_end);
+            i += 1;
+        }
+
+        if current < end {
+            non_overlapping.push((current, end));
+        }
+
+        match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) | Err(pos) => {
+                // Check if we can merge with the previous range
+                if pos > 0 && self.ranges[pos - 1].1 >= start {
+                    self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
+                    self.merge_forward_from(pos - 1);
+                } else if pos < self.ranges.len() && end >= self.ranges[pos].0 {
+                    self.ranges[pos].0 = min(start, self.ranges[pos].0);
+                    self.ranges[pos].1 = max(end, self.ranges[pos].1);
+                    self.merge_forward_from(pos);
+                } else {
+                    self.ranges.insert(pos, (start, end));
+                }
+            }
+        }
+
+        // let adjusted_new_range = if new_range.0 <= new_range.1 {
+        //     (start, end)
+        // } else {
+        //     (end, start)
+        // };
+
+        non_overlapping
+    }
+
+    pub fn len(&self) -> usize {
+        self.ranges.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, (i32, i32)> {
+        self.ranges.iter()
+    }
+
+    pub fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
+        let (mut start, mut end) = if new_range.0 <= new_range.1 {
+            (new_range.0, new_range.1)
+        } else {
+            (new_range.1, new_range.0)
+        };
+
+        // Find nearby ranges to potentially merge with
+        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range
+        if i > 0 && (start - self.ranges[i - 1].1).abs() < self.min_distance {
+            start = self.ranges[i - 1].1;
+            i -= 1;
+        } else if self.sequence_length > 0 && start < self.min_distance {
+            start = 0;
+        }
+
+        // Check next range
+        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < self.min_distance {
+            end = self.ranges[i].0;
+        } else if self.sequence_length > 0 && end > (self.sequence_length - self.min_distance) {
+            end = self.sequence_length;
         }
 
         // Return regions that don't overlap with existing ranges
@@ -2048,11 +2143,19 @@ impl Impg {
     /// eager pre-population) and length 0 otherwise (matching the old `or_default()`).
     #[inline]
     fn visited_entry<'a>(
-        &'a self,
+        &self,
         visited_ranges: &'a mut FxHashMap<u32, SortedRanges>,
         id: u32,
+        masked_none: bool,
     ) -> &'a mut SortedRanges {
-        visited_ranges.entry(id).or_insert_with(SortedRanges::new)
+        visited_ranges.entry(id).or_insert_with(|| {
+            let len = if masked_none {
+                self.seq_index.get_len_from_id(id).unwrap() as i32
+            } else {
+                0
+            };
+            SortedRanges::with_distance(len, 0)
+        })
     }
 
     pub fn query_transitive_dfs(
@@ -2074,6 +2177,7 @@ impl Impg {
         // Seed from masked regions if given; other sequences are created lazily on
         // first touch (visited_entry) instead of pre-populating one SortedRanges per
         // sequence in the index on every query.
+        let masked_none = masked_regions.is_none();
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
         } else {
@@ -2082,7 +2186,7 @@ impl Impg {
 
         // Filter input range
         let filtered_input_range = self
-            .visited_entry(&mut visited_ranges, target_id)
+            .visited_entry(&mut visited_ranges, target_id, masked_none)
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
@@ -2229,17 +2333,53 @@ impl Impg {
 
                     // Only add non-overlapping portions to the stack for further exploration
                     if query_id != current_target_id {
-                        let ranges = self.visited_entry(&mut visited_ranges, query_id);
+                        let ranges = self.visited_entry(&mut visited_ranges, query_id, masked_none);
 
-                        let new_ranges = ranges.insert_with_boundary_snap(
-                            (adjusted_query_start, adjusted_query_end),
-                            min_distance_between_ranges,
-                        );
+                        let mut should_add = true;
 
-                        // Add non-overlapping portions to stack
-                        for (new_start, new_end) in new_ranges {
-                            if (new_end - new_start).abs() >= min_transitive_len {
-                                stack.push((query_id, new_start, new_end, current_depth + 1));
+                        // Check if the range is too close to any existing ranges
+                        if min_distance_between_ranges > 0 {
+                            let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
+                                (adjusted_query_start, adjusted_query_end)
+                            } else {
+                                (adjusted_query_end, adjusted_query_start)
+                            };
+
+                            // Find insertion point in sorted ranges
+                            let idx = match ranges
+                                .ranges
+                                .binary_search_by_key(&new_min, |&(start, _)| start)
+                            {
+                                Ok(i) => i,
+                                Err(i) => i,
+                            };
+
+                            // Only need to check adjacent ranges due to sorting
+                            if idx > 0 {
+                                // Check previous range
+                                let (_, prev_end) = ranges.ranges[idx - 1];
+                                if (new_min - prev_end).abs() < min_distance_between_ranges {
+                                    should_add = false;
+                                }
+                            }
+                            if idx < ranges.ranges.len() {
+                                // Check next range
+                                let (next_start, _) = ranges.ranges[idx];
+                                if (next_start - new_max).abs() < min_distance_between_ranges {
+                                    should_add = false;
+                                }
+                            }
+                        }
+
+                        if should_add {
+                            let new_ranges =
+                                ranges.insert((adjusted_query_start, adjusted_query_end));
+
+                            // Add non-overlapping portions to stack
+                            for (new_start, new_end) in new_ranges {
+                                if (new_end - new_start).abs() >= min_transitive_len {
+                                    stack.push((query_id, new_start, new_end, current_depth + 1));
+                                }
                             }
                         }
                     }
@@ -2291,6 +2431,7 @@ impl Impg {
         // Seed from masked regions if given; other sequences are created lazily on
         // first touch (visited_entry) instead of pre-populating one SortedRanges per
         // sequence in the index on every query.
+        let masked_none = masked_regions.is_none();
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
         } else {
@@ -2299,7 +2440,7 @@ impl Impg {
 
         // Filter input range
         let filtered_input_range = self
-            .visited_entry(&mut visited_ranges, target_id)
+            .visited_entry(&mut visited_ranges, target_id, masked_none)
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
@@ -2468,17 +2609,54 @@ impl Impg {
 
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
-                        let ranges = self.visited_entry(&mut visited_ranges, query_id);
+                        let ranges = self.visited_entry(&mut visited_ranges, query_id, masked_none);
 
-                        let new_ranges = ranges.insert_with_boundary_snap(
-                            (adjusted_query_start, adjusted_query_end),
-                            min_distance_between_ranges,
-                        );
+                        let mut should_add = true;
 
-                        // Add non-overlapping portions to next depth
-                        for (new_start, new_end) in new_ranges {
-                            if (new_end - new_start).abs() >= min_transitive_len {
-                                next_depth_ranges.push((query_id, new_start, new_end));
+                        // Check proximity to existing ranges
+                        if min_distance_between_ranges > 0 {
+                            let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
+                                (adjusted_query_start, adjusted_query_end)
+                            } else {
+                                (adjusted_query_end, adjusted_query_start)
+                            };
+
+                            // Find insertion point in sorted ranges
+                            let idx = match ranges
+                                .ranges
+                                .binary_search_by_key(&new_min, |&(start, _)| start)
+                            {
+                                Ok(i) => i,
+                                Err(i) => i,
+                            };
+
+                            // Only need to check adjacent ranges due to sorting
+                            if idx > 0 {
+                                // Check previous range
+                                let (_, prev_end) = ranges.ranges[idx - 1];
+                                if (new_min - prev_end).abs() < min_distance_between_ranges {
+                                    should_add = false;
+                                }
+                            }
+
+                            if should_add && idx < ranges.ranges.len() {
+                                // Check next range
+                                let (next_start, _) = ranges.ranges[idx];
+                                if (next_start - new_max).abs() < min_distance_between_ranges {
+                                    should_add = false;
+                                }
+                            }
+                        }
+
+                        if should_add {
+                            let new_ranges =
+                                ranges.insert((adjusted_query_start, adjusted_query_end));
+
+                            // Add non-overlapping portions to next depth
+                            for (new_start, new_end) in new_ranges {
+                                if (new_end - new_start).abs() >= min_transitive_len {
+                                    next_depth_ranges.push((query_id, new_start, new_end));
+                                }
                             }
                         }
                     }
