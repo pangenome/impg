@@ -9,16 +9,17 @@
 # THE WIDTH vs THE 64GiB GUARD (measured 2026-10-15): W=32 batches were
 # SIGKILLed by the per-process 64GiB guard at 65-69GB RSS (4/4 batches, 0
 # territories cut) - the batch memory grows with the batch's aggregate
-# routing-index nodes (779k nodes -> ~63GB at scan end; the dense batch
-# 1792039134-3 carried 1.76M nodes). THE GUARD IS LAW; the width yields:
-# BATCH_W=16. Two attribution rules fixed with it: (a) a guard kill
-# (exit 137) is a BATCH-PACKAGING event, never a per-territory strike - the
-# 54 false cut.exit terminals from the W=32 era were reset (poison.tsv
-# empty: zero intrinsic territory failures); (b) the pending list is
-# deterministically hash-interleaved before batch composition so genome-
-# adjacent density clumps spread across batches (per-batch memory ~ the
-# genome average, not the local clump).
-# usage: run-cuts.sh   (env: RV, BATCH_W=16, N_CONCURRENT=2, RAYON=48,
+# routing-index nodes). THE GUARD IS LAW; the width yields. THE ADAPTIVE
+# WIDTH (the guard is the ONLY oracle - the census working set is NOT
+# predictable pre-batch: a 8,956-row W=16 batch died at 69GB while its
+# 9,279-row sibling died at 72.5GB; 517k-node and 779k-node batches both
+# died): a batch starts at BATCH_W; the territories of a GUARD-KILLED batch
+# (exit 137) retry at HALF the width (recorded in prep/<T>/cut.width, min 1)
+# - the dense tail descends 8/4/2/1 as the guard demands, the ordinary bulk
+# stays at the widest starting width. A guard kill never strikes a
+# territory (the width's own failure, not the territory's); the 54 false
+# cut.exit terminals of the W=32 era were reset (poison.tsv empty).
+# usage: run-cuts.sh   (env: RV, BATCH_W=8, N_CONCURRENT=2, RAYON=48,
 #                       DISK_FLOOR_GB=1500)
 set -uo pipefail
 RV=${RV:-/home/erikg/hprcv2/wgs35x-fleet/runtime-verification}
@@ -26,7 +27,7 @@ BIN=/home/erikg/impg-genome-inference/target/release/examples/sample_projection
 SYNG=/home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.syng
 AGC=/home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc
 SHARDS=/home/erikg/hprcv2/hg002-projection/full
-W=${BATCH_W:-16}
+W=${BATCH_W:-8}
 C=${N_CONCURRENT:-2}
 RAYON=${RAYON:-48}
 FLOOR=${DISK_FLOOR_GB:-1500}
@@ -49,7 +50,7 @@ guard_poll() {
 }
 
 one_batch() {
-  local B=$1; shift
+  local B=$1; local w=$2; shift 2
   local TODO=("$@")
   mkdir -p "$B"
   : > "$B/manifest.jsonl"
@@ -76,14 +77,18 @@ one_batch() {
     local D=$RV/map/$T/$T
     if [ -f "$D/cut-stats.json" ]; then
       touch "$RV/prep/$T/cut.done"
+      rm -f "$RV/prep/$T/cut.width" "$RV/prep/$T/cut.attempts"
     elif [ -f "$D/CUT-FAILED.txt" ]; then
       echo -e "$T\t$(head -c 300 "$D/CUT-FAILED.txt" | tr '\n' ' ')" >> "$CUTS/poison.tsv"
       touch "$RV/prep/$T/cut.poison"
     else
       if [ "$st" -eq 137 ]; then
         # THE GUARD KILL IS A BATCH-PACKAGING EVENT, never a territory
-        # strike (the width's own failure, not the territory's)
-        echo "$(date -u +%FT%TZ) $T batch GUARD-KILLED (exit 137, packaging - no strike)" >> "$CUTS/batch-failures.log"
+        # strike - and the width HALVES for this batch's territories (the
+        # guard is the only oracle: the census working set is not
+        # predictable pre-batch)
+        echo $(( w > 1 ? w / 2 : 1 )) > "$RV/prep/$T/cut.width"
+        echo "$(date -u +%FT%TZ) $T batch GUARD-KILLED at width $w (exit 137, packaging - no strike, width -> $(( w > 1 ? w / 2 : 1 )))" >> "$CUTS/batch-failures.log"
       else
       # batch-level failure or a missing outcome: count the attempt;
       # 3 batch-level failures -> terminal (named in the ledger)
@@ -137,15 +142,24 @@ while true; do
     echo "$(date -u +%FT%TZ) disk floor: $(avail_gb)G < ${FLOOR}G - waiting for the reaper" >> "$CUTS/campaign.log"
     sleep 120; continue
   fi
-  # compose up to C batches of W
+  # compose up to C batches: THE ADAPTIVE WIDTH CLASSES (widest first;
+  # each class's members are slices of the hash-interleaved pending list)
   pids=()
-  idx=0
-  while [ "$idx" -lt "$NPEND" ] && [ "${#pids[@]}" -lt "$C" ]; do
-    TODO=()
-    for ((j=0; j<W && idx+j<NPEND; j++)); do TODO+=("${PENDING[$((idx+j))]}"); done
-    one_batch "$CUTS/batch-$(date +%s)-$BATCH_ID" "${TODO[@]}" &
-    pids+=("$!")
-    BATCH_ID=$((BATCH_ID+1)); idx=$((idx+W))
+  wl=$W
+  while [ "$wl" -ge 1 ] && [ "${#pids[@]}" -lt "$C" ]; do
+    mapfile -t CLASS < <(while read -r T; do
+        cw=$(cat "$RV/prep/$T/cut.width" 2>/dev/null || echo "$W")
+        [ "$cw" -eq "$wl" ] && echo "$T"
+      done < <(printf '%s\n' "${PENDING[@]}"))
+    idx=0; NC=${#CLASS[@]}
+    while [ "$idx" -lt "$NC" ] && [ "${#pids[@]}" -lt "$C" ]; do
+      TODO=()
+      for ((j=0; j<wl && idx+j<NC; j++)); do TODO+=("${CLASS[$((idx+j))]}"); done
+      one_batch "$CUTS/batch-$(date +%s)-$BATCH_ID" "$wl" "${TODO[@]}" &
+      pids+=("$!")
+      BATCH_ID=$((BATCH_ID+1)); idx=$((idx+wl))
+    done
+    wl=$(( wl / 2 ))
   done
   for pid in "${pids[@]}"; do wait "$pid"; done
 done
