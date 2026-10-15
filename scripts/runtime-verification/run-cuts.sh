@@ -28,7 +28,7 @@ guard_poll() {
   ( while kill -0 "$pid" 2>/dev/null; do
       rss_kb=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null) || continue
       echo "$(date -u +%FT%TZ) ${rss_kb:-0}" >> "$rssf"
-      if [ "${rss_kb:-0}" -gt $((64*1024*1024)); then
+      if [ "${rss_kb:-0}" -gt $((64*1024*1024)) ]; then
         echo "$(date -u +%FT%TZ) GUARD kill ${rss_kb}kB" >> "$rssf"
         kill -9 "$pid" 2>/dev/null; break
       fi

@@ -97,7 +97,7 @@ one_territory() {
     ( while kill -0 "$pid" 2>/dev/null; do
         rss_kb=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null) || continue
         echo "$(date -u +%FT%TZ) ${rss_kb:-0}" >> "$P/call.rss"
-        if [ "${rss_kb:-0}" -gt $((64*1024*1024)); then
+        if [ "${rss_kb:-0}" -gt $((64*1024*1024)) ]; then
           echo "$(date -u +%FT%TZ) GUARD kill ${rss_kb}kB" >> "$P/call.rss"
           kill -9 "$pid" 2>/dev/null; break
         fi
@@ -125,7 +125,7 @@ one_territory() {
   for m in call.wall gpartition.wall reads.wall extract.wall syng.wall beds.wall export.wall walks.wall maps.wall; do
     [ -f "$P/$m" ] && cp "$P/$m" "$R/$m"
   done
-  [ -f "$P/call.rss" ] && rss_peak "$P/call.rss" > "$R/call.peak_rss_kb"
+  if [ -f "$P/call.rss" ]; then rss_peak "$P/call.rss" > "$R/call.peak_rss_kb"; else echo 0 > "$R/call.peak_rss_kb"; fi
   [ -f "$P/call.exit.code" ] && cp "$P/call.exit.code" "$R/call.exit.code"
   # the receipts are real files, not empty
   [ -s "$R/calls.jsonl" ] || { touch "$P/call.exit"; echo "$(date -u +%FT%TZ) $T REAPER REFUSED (empty calls.jsonl)" >> "$RV/wave-logs/failures.txt"; return 1; }
@@ -149,7 +149,25 @@ while true; do
       [ -f "$RV/prep/$T/call.skipped-no-evidence" ] && continue
       echo "$T"
     done < "$RV/prep/accepted.txt")
-  [ "${#TODO[@]}" -eq 0 ] && break
+  if [ "${#TODO[@]}" -eq 0 ]; then
+    # nothing callable yet: wait while any accepted territory could still
+    # land a cut (the cut campaign runs behind the prep pool); exit only
+    # when every accepted territory is terminal
+    nopen=$(while read -r T; do
+        [ -f "$RV/prep/$T/call.done" ] && continue
+        [ -f "$RV/prep/$T/call.exit" ] && continue
+        [ -f "$RV/prep/$T/call.skipped-no-evidence" ] && continue
+        [ -f "$RV/prep/$T/cut.poison" ] && continue
+        [ -f "$RV/prep/$T/cut.exit" ] && continue
+        echo x
+      done < "$RV/prep/accepted.txt" | wc -l)
+    # terminal only when the upstream cut campaign is terminal too (the
+    # accepted set grows as the prep pool lands - the campaign.done marker
+    # is the wave's upstream-terminal signal)
+    if [ "$nopen" -eq 0 ] && [ -f "$RV/cuts/campaign.done" ]; then break; fi
+    sleep 60
+    continue
+  fi
   printf '%s\n' "${TODO[@]}" | xargs -P "$LANES" -I{} bash -c 'one_territory {}'
   sleep 30
 done

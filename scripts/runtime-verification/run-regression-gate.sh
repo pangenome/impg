@@ -53,7 +53,9 @@ done
 python3 - "$S/cut/cut-stats.json" "$COMMITTED/cut-stats.json" >> "$S/batch.log" 2>&1 <<'EOF'
 import json, sys
 a, b = (json.load(open(p)) for p in sys.argv[1:3])
-diff = {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if a.get(k) != b.get(k)}
+timing = {"wall_seconds", "load_seconds", "scan_seconds", "census_seconds", "peak_rss_kb"}
+diff = {k: (a.get(k), b.get(k)) for k in set(a) | set(b)
+        if k not in timing and a.get(k) != b.get(k)}
 print("cut-stats content diff:", diff if diff else "IDENTICAL")
 sys.exit(1 if diff else 0)
 EOF
