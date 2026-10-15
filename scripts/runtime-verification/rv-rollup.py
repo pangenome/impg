@@ -68,14 +68,20 @@ OUT["cut"] = {
 
 # ---- the wave: per-territory costs, the cost distribution
 calls = []
+def n_int(path):
+    try:
+        return int(open(path).read().strip() or 0)
+    except Exception:
+        return None
+
 for f in glob.glob(f"{RV}/receipts/*/call.wall"):
     T = os.path.basename(os.path.dirname(f))
     r = {"territory": T, "call_s": int(open(f).read()),
          "segdup": segdup.get(T, 0.0)}
     p = os.path.dirname(f)
-    r["reads_s"] = int(open(f"{p}/reads.wall").read()) if os.path.exists(f"{p}/reads.wall") else None
-    r["gpartition_s"] = int(open(f"{p}/gpartition.wall").read()) if os.path.exists(f"{p}/gpartition.wall") else None
-    r["peak_rss_kb"] = int(open(f"{p}/call.peak_rss_kb").read()) if os.path.exists(f"{p}/call.peak_rss_kb") else None
+    r["reads_s"] = n_int(f"{p}/reads.wall")
+    r["gpartition_s"] = n_int(f"{p}/gpartition.wall")
+    r["peak_rss_kb"] = n_int(f"{p}/call.peak_rss_kb")
     nloci = 0
     try:
         nloci = sum(1 for _ in open(f"{p}/calls.jsonl"))
@@ -93,7 +99,7 @@ for f in glob.glob(f"{RV}/prep/*/call.wall"):
     for m, k in [("reads.wall", "reads_s"), ("gpartition.wall", "gpartition_s"),
                  ("call.peak_rss_kb", "peak_rss_kb")]:
         if os.path.exists(f"{p}/{m}"):
-            r[k] = int(open(f"{p}/{m}").read())
+            r[k] = n_int(f"{p}/{m}")
     calls.append(r)
 
 def dist(vals):
@@ -119,16 +125,58 @@ OUT["wave"] = {
 
 # ---- the failure-class census
 rej = {}
-for line in open(f"{RV}/prep/rejected.tsv") if os.path.exists(f"{RV}/prep/rejected.tsv") else []:
-    a = line.rstrip("\n").split("\t")
-    rej[a[1]] = rej.get(a[1], 0) + 1
+exp_rows = exp_paths = 0
+for rf in (f"{RV}/prep/rejected.tsv", f"{RV}/prep/rejected-incremental.tsv"):
+    if not os.path.exists(rf):
+        continue
+    for line in open(rf):
+        a = line.rstrip("\n").split("\t")
+        if len(a) < 2:
+            continue
+        cls = a[1].split(" rows ")[0]
+        rej[cls] = rej.get(cls, 0) + 1
+        if cls == "transitive-expansion" and " rows " in a[1]:
+            try:
+                exp_rows += int(a[1].split(" rows ")[1].split(" paths ")[0])
+                exp_paths += int(a[1].split(" paths ")[1])
+            except Exception:
+                pass
+accepted = [l.strip() for l in open(f"{RV}/prep/accepted.txt")] if os.path.exists(f"{RV}/prep/accepted.txt") else []
+# the transitive-expansion bp census lives in the per-territory split.rejected
+for f in glob.glob(f"{RV}/prep/*/split.rejected"):
+    a = open(f, errors="replace").read().split()
+    if len(a) >= 5 and a[0] == "transitive-expansion" and a[1] == "rows" and a[3] == "paths":
+        try:
+            exp_rows += int(a[2]); exp_paths += int(a[4])
+        except Exception:
+            pass
+# the guard-kill class (the batch-width packaging events, never territory strikes)
+guard_kills = {}
+batch_exits = {}
+for f in glob.glob(f"{RV}/cuts/batch-*/batch.exit"):
+    st = open(f).read().strip()
+    batch_exits[st] = batch_exits.get(st, 0) + 1
+for line in open(f"{RV}/cuts/batch-failures.log") if os.path.exists(f"{RV}/cuts/batch-failures.log") else []:
+    if "GUARD-KILLED at width" in line:
+        w = line.split("at width ")[1].split(" ")[0]
+        guard_kills[w] = guard_kills.get(w, 0) + 1
+widths = {}
+for f in glob.glob(f"{RV}/prep/*/cut.width"):
+    w = open(f).read().strip()
+    widths[w] = widths.get(w, 0) + 1
 OUT["failures"] = {
     "split_rejected": rej,
+    "split_accepted": len(accepted),
+    "transitive_expansion_rows_sum": exp_rows,
+    "transitive_expansion_paths_sum": exp_paths,
     "cut_poison": [line.rstrip("\n").split("\t")[0] for line in
                    open(f"{RV}/cuts/poison.tsv")] if os.path.exists(f"{RV}/cuts/poison.tsv") else [],
     "no_evidence": len(glob.glob(f"{RV}/prep/*/call.skipped-no-evidence")),
     "call_exit": len(glob.glob(f"{RV}/prep/*/call.exit")),
     "cut_exit": len(glob.glob(f"{RV}/prep/*/cut.exit")),
+    "batch_exit_census": batch_exits,
+    "guard_kill_widths": guard_kills,
+    "adaptive_width_pending": widths,
 }
 
 # ---- the disk high-water + lane-packing from the heartbeat
