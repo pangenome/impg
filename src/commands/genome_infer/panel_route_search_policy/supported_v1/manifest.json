@@ -1,0 +1,11 @@
+{
+  "revision": "a520f13fbf0512dc28135324147f3172af682a39",
+  "version": "fair-sample-ranked-lazy-coupled-v1",
+  "files": {
+    "adapter.rs": "5561992c5b0a5c9e716c9e520b4ac8d2aae22c43fa96bf3a187c278861bbc3d0",
+    "checkpoint.rs": "d461d3764bf4bb01c94a9f309d35dcf57b547f99316ae64d21e53e25e614c30b",
+    "genome_infer.rs": "ba94880f1d607143a41382437b4e17c0b9f4ae63d0b4e2a41b0e24a14533fbbf",
+    "machine.rs": "928b75c022edeb95678c67e84b1403ef415b3f22c3963f4c903b0aab9e01fbc7",
+    "mod.rs": "dfb6fc336461271311b06bb0510d1bb9402c5cca8c1e706c83f4119d719af15f"
+  }
+}

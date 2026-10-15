@@ -1,0 +1,631 @@
+warning: field `candidates_seen` is never read
+   --> src/resolution.rs:857:5
+    |
+854 | struct CandidateFrontier {
+    |        ----------------- field in this struct
+...
+857 |     candidates_seen: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `CandidateFrontier` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:879:16
+    |
+879 |     Resolved { at_round: usize },
+    |     --------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `at_round` is never read
+   --> src/resolution.rs:880:14
+    |
+880 |     Failed { at_round: usize },
+    |     ------   ^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BubbleState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `find_candidate_frontier` is never used
+    --> src/resolution.rs:7171:4
+     |
+7171 | fn find_candidate_frontier(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_path_coordinate_suffix` is never used
+     --> src/resolution.rs:10712:4
+      |
+10712 | fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `impg` (lib test) generated 5 warnings
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running unittests src/lib.rs (target/release/deps/impg-f66689acbbb47dd7)
+
+running 498 tests
+test agc_index::tests::test_batch_range_calculation ... ok
+test alignment_record::tests::test_format_detection ... ok
+test alignment_record::tests::test_strand_operations ... ok
+test commands::align::tests::test_mash_sketch_and_distance ... ok
+test commands::align::tests::test_parse_sparsification ... ok
+test commands::genome_infer::panel_route_search_policy::adapter::tests::fixed_width_invalid_truncation_cuts_and_shared_seeks ... ok
+test commands::genome_infer::panel_route_search_policy::adapter::tests::permutation_exact_coverage_virtual_work_and_overflow ... ok
+test commands::genome_infer::panel_route_search_policy::adapter::tests::source_pair_order_breaks_parity_stall_with_fixed_width_records ... ok
+test commands::genome_infer::panel_route_search_policy::adapter::tests::source_pair_order_prefix_conservation_and_charged_skips ... ok
+test commands::genome_infer::panel_route_search_policy::checkpoint::tests::cumulative_ledger_preserves_exact_parent_prefix ... ok
+test commands::genome_infer::panel_route_search_policy::checkpoint::tests::interrupted_or_failed_stream_never_installs_a_checkpoint ... ok
+test commands::genome_infer::panel_route_search_policy::checkpoint::tests::streamed_checkpoint_bytes_match_existing_writer_without_newline ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::changed_geometry_includes_same_source_orientation_and_completed_routes ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::greatest_creation_intentional_red ... ignored, intentional RED proof: naive greatest-creation-ID cannot complete the frozen causal harness
+test commands::genome_infer::panel_route_search_policy::continuation::tests::head_middle_tail_peer_and_waiting_producer_handoffs ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::long_dead_chain_and_exhaustion_have_no_history_or_depth_cap ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::long_producer_causal_red_red_green ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::malformed_links_rejected_without_stale_cleanup ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::newest_ready_intentional_red ... ignored, intentional RED proof: current newest-ready cannot complete the frozen causal harness
+test commands::genome_infer::panel_route_search_policy::continuation::tests::start_closure_probe_success_and_conflict_keep_ordinary_returns ... ok
+test commands::genome_infer::panel_route_search_policy::continuation::tests::waiting_nonproducer_replacement_preserves_position_and_native_completion_unpins ... ok
+test commands::genome_infer::panel_route_search_policy::machine::tests::canonical_opposite_orientations_conflict_only_on_committed_spans ... ok
+test commands::genome_infer::panel_route_search_policy::machine::tests::fifo_share_and_preference_indices_have_single_ownership ... ok
+test commands::genome_infer::panel_route_search_policy::transition::tests::genuine_supported_v1_source_identity ... ok
+test commands::genome_infer::panel_route_search_policy::validation::tests::internal_counter_occupancy_and_link_checks_are_independent_of_seals ... ok
+test commands::genome_infer::panel_route_search_policy::validation::tests::strict_duplicate_containers_and_resource_overflow ... ok
+test commands::genotype::tests::graph_pack_requires_feature_space_declaration ... ok
+test commands::genotype::tests::length_normalized_model_changes_variable_length_node_weights ... ok
+test commands::genotype::tests::parses_p_line_paths_and_extracts_intervals ... ok
+test commands::genotype::tests::parses_w_line_walks_as_pansn_paths ... ok
+test commands::genotype::tests::prebuilt_gfa_and_query_graph_sources_are_equivalent ... ok
+test commands::genotype::tests::render_bundle_graph_source_calls_expected_heterozygote ... ok
+test commands::genotype::tests::repeated_gfa_path_steps_are_counted_in_candidate_vectors ... ok
+test commands::genotype::tests::star_segments_use_ln_tags_for_candidate_intervals_and_weights ... ok
+test commands::genotype::tests::synthetic_graph_calls_expected_heterozygote ... ok
+test commands::genotype::tests::synthetic_graph_calls_expected_homozygote ... ok
+test commands::graph::tests::graph_build_poa_uses_global_spoa_alignment ... ok
+test commands::graph::tests::restores_direct_fasta_coordinate_like_path_names_after_pggb_smoothing ... ok
+test commands::graph::tests::wfmash_raw_mapping_multiplicity_matches_local_filter_mode ... ok
+test commands::lace::tests::test_lace_subgraphs_contiguous_no_overlap ... ok
+test commands::lace::tests::test_lace_subgraphs_empty ... ok
+test commands::lace::tests::test_lace_subgraphs_id_compaction ... ok
+test commands::lace::tests::test_lace_subgraphs_link_deduplication ... ok
+test commands::lace::tests::test_lace_subgraphs_multi_segment_contiguous ... ok
+test commands::lace::tests::test_lace_subgraphs_multiple_paths ... ok
+test commands::lace::tests::test_lace_subgraphs_overlap_with_node_split ... ok
+test commands::lace::tests::test_lace_subgraphs_path_in_subset_of_chunks ... ok
+test commands::lace::tests::test_lace_subgraphs_single ... ok
+test commands::lace::tests::test_lace_subgraphs_three_contiguous_chunks ... ok
+test commands::lace::tests::test_lace_subgraphs_with_overlap ... ok
+test commands::lace::tests::test_range_containment_removal ... ok
+test commands::partition::scheduling_tests::covered_b_discovers_c_that_a_and_c_do_not_discover ... ok
+test commands::partition::scheduling_tests::covered_window_backend_errors_remain_errors ... ok
+test commands::partition::scheduling_tests::minimum_missing_size_absorbs_small_residual_without_omitting_source ... ok
+test commands::partition::scheduling_tests::mostly_covered_selected_group_keeps_partial_residual_query_context ... ok
+test commands::partition::scheduling_tests::repeated_distinct_occurrences_survive_and_duplicate_windows_repeat_work ... ok
+test commands::partition::scheduling_tests::stale_queued_window_dispatches_even_when_it_emits_nothing ... ok
+test commands::partition::tests::retained_seed_makes_progress_without_homologs ... ok
+test commands::partition::tests::retained_seed_respects_existing_masks_and_does_not_duplicate_self ... ok
+test commands::syng2gfa::tests::test_bluntify_gfa_bytes_handles_variable_overlaps ... ok
+test commands::syng2gfa::tests::test_cut_ns_splits_gap_segments_and_paths ... ok
+test commands::syng2gfa::tests::test_extra_segment_ids_are_numeric_and_unique ... ok
+test commands::syng2gfa::tests::test_gap_interner_reuses_only_same_sequence_and_context ... ok
+test commands::syng2gfa::tests::test_high_frequency_occurrence_policy_keeps_configured_exact_span_shared ... ok
+test commands::syng2gfa::tests::test_high_frequency_occurrence_policy_keeps_configured_run_shared ... ok
+test commands::syng2gfa::tests::test_high_frequency_occurrence_policy_splits_isolated_reuse ... ok
+test commands::syng2gfa::tests::test_local_repeat_context_clones_only_repeated_minor_context ... ok
+test commands::syng2gfa::tests::test_private_clone_blunt_spelling_uses_shared_trim_coordinates ... ok
+test commands::syng2gfa::tests::test_range_gfa_legacy_frequency_filter_drops_repetitive_syncmers_before_raw_gfa ... ok
+test commands::syng2gfa::tests::test_scaffold_context_dense_repeated_runs_stay_occurrence_level ... ok
+test commands::syng2gfa::tests::test_scaffold_context_keeps_indel_shifted_colinear_runs ... ok
+test commands::syng2gfa::tests::test_scaffold_context_preserves_compact_repeated_copy_structure ... ok
+test commands::syng2gfa::tests::test_scaffold_context_prunes_high_copy_singletons_without_global_blessing ... ok
+test commands::syng2gfa::tests::test_scaffold_context_rescues_spectrum_glue_with_high_frequency_run_policy ... ok
+test commands::syng2gfa::tests::test_scaffold_context_rescues_spectrum_glue_with_high_frequency_span_policy ... ok
+test commands::syng2gfa::tests::test_scaffold_context_retains_chain_members_and_splits_off_chain_occurrences ... ok
+test commands::syng2gfa::tests::test_scaffold_context_split_clones_only_weak_occurrences ... ok
+test commands::syng2gfa::tests::test_scaffold_context_splits_dispersed_high_copy_glue_from_spectrum ... ok
+test commands::syng2gfa::tests::test_sequence_k_191_chr1_reduced_fixture_preserves_blunt_path_spellings ... ok
+test commands::syng2gfa::tests::test_sequence_k_311_c4_reduced_fixture_preserves_blunt_path_spellings ... ok
+test commands::syng2gfa::tests::test_sequence_k_filter_uses_exact_span_or_scaffold_support ... ok
+test commands::syng2gfa::tests::test_syng_gfa_mode_parse_defaults_syng_to_blunt ... ok
+test commands::syng2gfa::tests::test_walked_path_segments_are_named_when_split ... ok
+test genome_inference::calling::tests::boundary_phase_counterexample_is_not_a_local_dosage_factor ... ok
+test genome_inference::calling::tests::scaffold_union_rejects_cross_component_overflow ... ok
+test genome_inference::calling::tests::scaffold_union_resets_chromosomes_and_deduplicates_overlaps ... ok
+test genome_inference::genotype::tests::absolute_count_magnitude_and_copy_multiplicity_change_the_winner ... ok
+test genome_inference::genotype::tests::bundles_deduplicate_overlapping_bed_rows_but_keep_physical_copies_and_change_calls ... ok
+test genome_inference::genotype::tests::read_span_exposure_and_sparse_poisson_match_dense_including_zeros ... ok
+test genome_inference::joint::tests::corrupt_layout_artifacts_and_assignment_provenance_fail_closed ... ok
+test genome_inference::joint::tests::coupled_objective_exhaustive_correlated_ties_zeros_residuals_and_budgets ... ok
+test genome_inference::joint::tests::native_fresh_walk_events_match_independent_singleton_bwt_across_multiple_joins_and_ends ... ok
+test genome_inference::joint::tests::physical_conflicts_connect_components_and_duplicate_descriptions_never_add_copies ... ok
+test genome_inference::observations::orientation::axis_tests::background_equivalent_status_blocks_reconstruction_replay ... ok
+test genome_inference::observations::orientation::axis_tests::derived_calls_preserve_all_non_orientation_bytes_and_link_original_content ... ok
+test genome_inference::observations::orientation::axis_tests::interval_index_matches_containment_with_nested_duplicate_and_disjoint_descriptions ... ok
+test genome_inference::observations::orientation::axis_tests::many_member_axis_evidence_is_linear_direct_and_records_assessed_zero ... ok
+test genome_inference::observations::orientation::axis_tests::reverse_index_epsilon_ties_reconstruct_but_duplicate_best_indices_fail ... ok
+test genome_inference::observations::orientation::axis_tests::selected_partial_group_with_only_exclusions_is_assessed_not_outside_scope ... ok
+test genome_inference::observations::orientation::tests::provenance_span_preserves_exact_numeric_lexemes_and_ignores_nested_fields ... ok
+test genome_inference::observations::tests::deterministic_merge_unions_descriptions_without_adding_profiles_and_rejects_disagreement ... ok
+test genome_inference::observations::tests::fixed_ownership_normalizes_duplicate_descriptions_and_rejects_conflicts ... ok
+test genome_inference::observations::tests::native_overlapping_mem_profiles_preserve_double_counts ... ok
+test genome_inference::observations::tests::native_partition_endpoints_recover_long_zero_exposure_across_empty_core ... ok
+test genome_inference::observations::tests::native_raw_crop_event_profiles_match_exhaustive_public_singletons ... ok
+test genome_inference::observations::tests::new_model_background_eligibility_and_reset_preserve_legacy_classification ... ok
+test genome_inference::observations::tests::occurrence_weighted_consumer_sums_copies_inside_one_rate_and_preserves_zero_factors ... ok
+test genome_inference::observations::tests::overlapping_survivors_and_two_copy_attribution_are_integer_not_detection ... ok
+test genome_inference::observations::tests::positive_endpoint_fallback_matches_shared_core_profile_across_ownership_boundary ... ok
+test genome_inference::observations::tests::shared_core_halos_match_bounded_native_fallback_without_per_hit_extraction ... ok
+test genome_inference::observations::tests::terminal_and_longer_than_source_contexts_are_nonlocal_but_profiles_stay_clipped ... ok
+test genome_inference::panel_routes::tests::automatic_inventory_ownership_views_inversions_zero_anchors_and_storage_segmentation ... ok
+test genome_inference::panel_routes::tests::corrupt_graph_histogram_source_and_partial_support_fail_closed ... ok
+test genome_inference::panel_routes::tests::native_index_plus_lazy_corrections_matches_public_singleton_bwt_all_orientations_and_ends ... ok
+test genome_inference::panel_routes::tests::oriented_switches_disjoint_reuse_and_two_slot_counts_once_inside_log ... ok
+test genome_inference::panel_routes::tests::repeat_hubs_keep_every_physical_port_and_budget_caps_do_not_change_rule ... ok
+test genome_inference::panel_routes::tests::resource_overlap_orientation_capacity_and_outward_bound ... ok
+test genome_inference::panel_routes::tests::review_bgzf_fai_and_gzi_are_bound_after_creation_and_not_recreated_on_reuse ... ok
+test genome_inference::panel_routes::tests::review_fai_offset_swap_with_unchanged_fasta_must_fail_before_source_open ... ok
+test genome_inference::panel_routes::tests::review_single_source_repeat_is_not_a_mixed_source_assignment ... ok
+test genome_inference::reconstruction::tests::disconnected_template_reuse_stays_visible_but_distinct_physical_copies_survive ... ok
+test genome_inference::reconstruction::tests::exact_overlap_gap_policy_reverse_and_provenance ... ok
+test genome_inference::reconstruction::tests::path_breaks_and_corrupt_linkage_states_blocks_rejected ... ok
+test genome_inference::reconstruction::tests::reference_gap_splits_deduplicate_physical_overlap_in_both_orientations ... ok
+test genome_inference::reconstruction::tests::sequence_equivalent_ties_not_ancestry_or_simultaneous_copy_deduplication ... ok
+test genome_inference::reconstruction::tests::unknown_or_poor_fit_tie_stays_unresolved_and_partial_failure_removes_results ... ok
+test genome_inference::sample::tests::containment_requires_coordinate_and_content_not_envelope ... ok
+test genome_inference::sample::tests::invalid_fastq_is_rejected ... ok
+test genome_inference::sequence_evaluation::tests::concatenated_xz_fails_closed_instead_of_shortening_truth ... ok
+test genome_inference::sequence_evaluation::tests::duplicate_reconstruction_and_alternative_mappings_never_double_credit ... ok
+test genome_inference::sequence_evaluation::tests::exact_mismatch_indels_denominator_qv_and_missing_truth ... ok
+test genome_inference::sequence_evaluation::tests::no_resolved_output_zero_truth_coverage_and_corrupt_cigar_rejected ... ok
+test genome_inference::sequence_evaluation::tests::reverse_clipping_unknowns_and_zero_errors_are_qualified ... ok
+test genome_inference::sequence_evaluation::tests::split_noncollinear_orientation_and_chromosome_diagnostics ... ok
+test genome_inference::threading::tests::exact_dp_matches_exhaustive_paths_with_reverse_ties_gaps_and_path_changes ... ok
+test genome_inference::threading::tests::signed_context_orientation_requires_consistency_not_majority ... ok
+test genotyping::tests::cosine_combination_search_enforces_budget ... ok
+test genotyping::tests::cosine_combination_search_f64_ranks_weighted_genotypes ... ok
+test genotyping::tests::cosine_combination_search_ranks_with_replacement_genotypes ... ok
+test genotyping::tests::stable_user_visible_names ... ok
+test gfa_self_loops::tests::c4_like_direct_loop_repeat_metrics_drop_to_zero_and_paths_compare ... ok
+test gfa_self_loops::tests::diagnoses_self_loop_edges_and_path_repeats ... ok
+test gfa_self_loops::tests::max_unit_len_limits_normalization_scope ... ok
+test gfa_self_loops::tests::normalizes_one_base_self_loop_runs_and_preserves_path_spelling ... ok
+test gfa_self_loops::tests::normalizes_two_base_self_loop_runs_and_preserves_reverse_walks ... ok
+test gfa_self_loops::tests::numeric_segment_graphs_get_numeric_run_node_ids ... ok
+test gfa_self_loops::tests::preserves_p_line_star_overlap_and_tags_when_rewriting_paths ... ok
+test graph::tests::global_spoa_engine_penalizes_unaligned_ends ... ok
+test graph::tests::terminal_n_clip_span_clips_both_ends ... ok
+test graph::tests::terminal_n_clip_span_clips_prefix_at_threshold ... ok
+test graph::tests::terminal_n_clip_span_clips_suffix_at_threshold ... ok
+test graph::tests::terminal_n_clip_span_keeps_sequence_unchanged_without_policy ... ok
+test graph::tests::terminal_n_clip_span_preserves_internal_n_run ... ok
+test graph::tests::terminal_n_clip_span_preserves_short_terminal_runs ... ok
+test graph::tests::test_gfa_to_msa_basic ... ok
+test graph::tests::test_gfa_to_msa_empty ... ok
+test graph::tests::test_gfa_to_msa_reverse_orient ... ok
+test graph::tests::test_gfa_to_msa_reverse_orient_asymmetric ... ok
+test graph::tests::test_gfa_to_msa_single_path ... ok
+test graph_pipeline::tests::parses_stage_params ... ok
+test graph_pipeline::tests::preserves_legacy_pipeline_shapes ... ok
+test graph_pipeline::tests::rejects_bad_params ... ok
+test graph_report::tests::embeds_dominant_flubble_traversal_paths ... ok
+test graph_report::tests::embeds_per_path_flubble_traversal_paths ... ok
+test graph_report::tests::formats_json_and_tsv ... ok
+test graph_report::tests::reports_basic_topology_and_long_links ... ok
+test graph_report::tests::reports_bp_white_space_and_sparse_coverage_runs ... ok
+test graph_report::tests::reports_node_path_coverage_metrics_on_known_fixture ... ok
+test graph_report::tests::reports_w_lines_and_local_repeat_contexts ... ok
+test impg::tests::test_edge_case_projection ... ok
+test impg::tests::test_forward_projection_simple ... ok
+test impg::tests::test_forward_projection_with_deletions ... ok
+test impg::tests::test_forward_projection_with_insertions ... ok
+test impg::tests::test_invert_cigar_empty ... ok
+test impg::tests::test_invert_cigar_forward_strand ... ok
+test impg::tests::test_invert_cigar_matches_only ... ok
+test impg::tests::test_invert_cigar_reverse_strand ... ok
+test impg::tests::test_parse_cigar_to_delta_basic ... ok
+test impg::tests::test_parse_paf_valid ... ok
+test impg::tests::test_project_target_range_through_alignment ... ok
+test impg::tests::test_project_target_range_through_alignment_forward ... ok
+test impg::tests::test_project_target_range_through_alignment_reverse ... ok
+test impg::tests::test_reverse_projection_simple ... ok
+test impg::tests::test_reverse_projection_with_mixed_operations ... ok
+test paf::tests::test_parse_paf_cigar_invalid ... ok
+test paf::tests::test_parse_paf_invalid ... ok
+test paf::tests::test_parse_paf_valid ... ok
+test paf::tests::test_parse_paf_valid_2 ... ok
+test partition_profile::tests::diagnostics_bound_storage_and_distinguish_exact_tuple_revisits ... ok
+test partition_profile::tests::missing_core_uses_half_open_intersections ... ok
+test render_bundle::tests::bundle_loader_validates_manifest_and_translation ... ok
+test render_bundle::tests::rendered_target_range_projects_source_coordinates ... ok
+test render_bundle::tests::translation_binary_roundtrips ... ok
+test resolution::tests::abpoa_ordered_sequence_helper_preserves_exact_paths_in_header_order ... ok
+test resolution::tests::abpoa_parse_name_accepts_aliases ... ok
+test resolution::tests::abpoa_replacement_corruption_is_hard_gated ... ok
+test resolution::tests::abpoa_replacement_preserves_semantic_path_names_without_synthetic_ids ... ok
+test resolution::tests::adaptive_min_match_policy_is_opt_in ... ok
+test resolution::tests::allwave_processes_candidate_regardless_of_pair_alignment_cap ... ok
+test resolution::tests::auto_prioritizes_direct_candidates_before_sweepga ... ok
+test resolution::tests::auto_resolves_indel_ladder_without_changing_path_sequences ... ok
+test resolution::tests::auto_routes_by_median_not_max ... ok
+test resolution::tests::auto_routes_large_median_to_sweepga ... ok
+test resolution::tests::auto_routes_medium_median_to_poasta ... ok
+test resolution::tests::auto_routes_small_median_to_spoa ... ok
+test resolution::tests::auto_routing_boundaries_are_exclusive_upper_bounds ... ok
+test resolution::tests::auto_routing_disabling_poasta_tier_falls_through_to_sweepga ... ok
+test resolution::tests::auto_routing_disabling_spoa_tier_falls_through_to_poasta ... ok
+test resolution::tests::built_candidate_tie_break_prefers_broader_residual_scale ... ok
+test resolution::tests::candidate_from_root_interval_carries_graph_path_names ... ok
+test resolution::tests::candidate_interval_name_matches_query_fasta_contract ... ok
+test resolution::tests::candidate_sequence_headers_preserve_source_path_names_when_available ... ok
+test resolution::tests::chain_greedy_groups_adjacent_reference_bubbles ... ok
+test resolution::tests::chain_povu_parse_name_accepts_aliases ... ok
+test resolution::tests::chain_povu_resolves_nested_parent_as_one_block ... ok
+test resolution::tests::chain_povu_selects_parent_subtree_under_cap ... ok
+test resolution::tests::compound_seqwish_tail_keeps_raw_many_to_many_condensation_path_correct ... ok
+test resolution::tests::compression_ratio_threshold_is_diagnostic_only ... ok
+test resolution::tests::coverage_objective_accepts_coverage_or_singleton_improvements ... ok
+test resolution::tests::deferred_identity_skip_ignores_flank_context_differences ... ok
+test resolution::tests::direct_poa_and_poasta_accept_topology_changing_replacements ... ok
+test resolution::tests::direct_poa_processes_candidate_within_max_traversal_budget ... ok
+test resolution::tests::direct_poa_processes_candidate_within_median_traversal_budget ... ok
+test resolution::tests::direct_poa_respects_max_traversal_budget ... ok
+test resolution::tests::direct_poa_respects_median_traversal_budget ... ok
+test resolution::tests::direct_poa_skips_over_budget_candidate_but_processes_eligible_candidate ... ok
+test resolution::tests::duplicate_source_intervals_get_meaningful_unique_suffixes ... ok
+test resolution::tests::explicit_method_pin_bypasses_auto_routing ... ok
+test resolution::tests::first_crush_round_accepts_path_step_growth_without_visual_tail_regression ... ok
+test resolution::tests::flank_aware_context_is_taken_from_the_same_repeated_occurrence ... ok
+test resolution::tests::flank_aware_context_records_requested_and_short_path_boundary_flanks ... ok
+test resolution::tests::flank_aware_diagnostics_expose_span_flanks_trim_and_orientation ... ok
+test resolution::tests::flank_aware_global_direct_resolvers_trim_simple_indel_context ... ok
+test resolution::tests::flank_aware_reverse_occurrence_trims_and_laces_in_original_orientation ... ok
+test resolution::tests::flank_aware_trim_rejects_inconsistent_boundaries_as_path_corruption_risk ... ok
+test resolution::tests::graph_quality_penalizes_path_white_space_bridges ... ok
+test resolution::tests::hierarchical_parse_name_accepts_aliases ... ok
+test resolution::tests::hierarchical_prioritizes_root_sweepga_before_subbubble_poasta ... ok
+test resolution::tests::hierarchical_routes_root_to_sweepga_and_subbubbles_to_poasta ... ok
+test resolution::tests::hierarchical_routing_ignores_size ... ok
+test resolution::tests::indexed_anchor_lookup_rejects_ambiguous_entry_exit_pairs ... ok
+test resolution::tests::iterative_multi_level_aggregates_complete_homologous_traversal_set_before_cap ... ok
+test resolution::tests::iterative_multi_level_caps_replacement_build_parallelism ... ok
+test resolution::tests::iterative_multi_level_generates_outward_residual_windows ... ok
+test resolution::tests::iterative_multi_level_generates_sibling_and_sliding_windows ... ok
+test resolution::tests::iterative_multi_level_largest_mode_forces_one_parent_frontier_candidate ... ok
+test resolution::tests::iterative_multi_level_materializes_window_sequences_before_build ... ok
+test resolution::tests::iterative_multi_level_parent_mode_uses_parent_frontier_sources ... ok
+test resolution::tests::iterative_multi_level_parent_priority_prefers_balanced_parent_spans ... ok
+test resolution::tests::iterative_multi_level_parse_name_and_modes_accept_aliases ... ok
+test resolution::tests::iterative_multi_level_preserves_paths_when_no_size_winner_exists ... ok
+test resolution::tests::iterative_multi_level_reports_total_bp_cap_without_filtering ... ok
+test resolution::tests::iterative_multi_level_reports_traversal_len_caps_without_filtering ... ok
+test resolution::tests::iterative_multi_level_routes_broad_residual_away_from_small_poa ... ok
+test resolution::tests::iterative_multi_level_routes_multi_bubble_windows_through_direct_auto_tiers ... ok
+test resolution::tests::largest_mode_prefers_broad_residual_scale_over_near_identity_child ... ok
+test resolution::tests::largest_mode_prioritizes_complete_homologous_before_partial_top_level_scale ... ok
+test resolution::tests::local_replacement_gfa_path_names_preserve_semantic_source_names ... ok
+test resolution::tests::local_replacement_visible_names_adjust_only_ranges ... ok
+test resolution::tests::local_wfmash_no_filter_raises_raw_mapping_multiplicity ... ok
+test resolution::tests::local_wfmash_replacement_uses_explicit_local_identity_default ... ok
+test resolution::tests::motif_local_discovers_sparse_offshoot_with_original_path_names_without_povu ... ok
+test resolution::tests::multi_tree_mash_schedule_perturbs_k_deterministically ... ok
+test resolution::tests::no_filter_disables_seqwish_min_match_and_identity_filters ... ok
+test resolution::tests::no_filter_overrides_kmer_frequency_auto_cap ... ok
+test resolution::tests::occupied_interval_frontier_only_rejects_overlaps_on_same_path ... ok
+test resolution::tests::outward_residual_build_budget_diagnostic_log_includes_source_and_limit ... ok
+test resolution::tests::outward_residual_build_budget_diagnostic_reports_poasta_work ... ok
+test resolution::tests::parses_w_walks_as_paths ... ok
+test resolution::tests::partial_homologous_lacing_can_improve_locally_but_grow_globally ... ok
+test resolution::tests::phase6_fresh_segment_ids_are_strictly_above_initial_max ... ok
+test resolution::tests::phase6_level_descent_terminates_below_max_iterations ... ok
+test resolution::tests::poasta_alignment_config_is_global_and_uses_two_piece_scoring_params ... ok
+test resolution::tests::poasta_gfa_clipped_w_walks_are_normalized_to_exact_paths ... ok
+test resolution::tests::poasta_global_two_piece_aligner_handles_end_indel_case ... ok
+test resolution::tests::poasta_ordered_sequence_helper_preserves_exact_paths_in_header_order ... ok
+test resolution::tests::poasta_ordered_sequence_helper_rejects_non_permutation_orders ... ok
+test resolution::tests::rejects_non_blunt_links ... ok
+test resolution::tests::repeat_aware_boundaries_reject_tiny_high_frequency_low_complexity_anchors ... ok
+test resolution::tests::replacement_at_path_start_is_ordered_before_first_surviving_original ... ok
+test resolution::tests::replacement_compression_ratio_handles_zero_and_basic_cases ... ok
+test resolution::tests::replacement_min_match_policy_can_be_fixed_or_disabled ... ok
+test resolution::tests::replacement_paf_sequence_names_match_fasta_headers ... ok
+test resolution::tests::replacement_scaffold_mass_defaults_to_zero_and_propagates ... ok
+test resolution::tests::replacement_scaffold_mass_user_override_propagates ... ok
+test resolution::tests::replacement_seqwish_filter_defaults_to_local_min_match_off ... ok
+test resolution::tests::residual_novelty_defers_immediate_near_identical_broad_top_level ... ok
+test resolution::tests::residual_novelty_guard_survives_intervening_small_acceptance ... ok
+test resolution::tests::residual_novelty_retains_same_interval_when_structure_changes ... ok
+test resolution::tests::resolves_deletion_bubble_with_poasta_without_changing_path_sequences ... ok
+test resolution::tests::resolves_independent_sites_in_one_round ... ok
+test resolution::tests::resolves_insertion_bubble_with_allwave_without_changing_path_sequences ... ok
+test resolution::tests::resolves_insertion_bubble_with_poasta_without_changing_path_sequences ... ok
+test resolution::tests::resolves_insertion_bubble_with_star_biwfa_without_changing_path_sequences ... ok
+test resolution::tests::resolves_insertion_bubble_without_changing_path_sequences ... ok
+test resolution::tests::resolves_long_gap_bubble_with_poasta_two_piece_affine ... ok
+test resolution::tests::resolves_maximal_eligible_nested_site_first ... ok
+test resolution::tests::resolves_simple_snp_bubble_without_changing_path_sequences ... ok
+test resolution::tests::resolves_sv_like_bubble_with_poasta_without_changing_path_sequences ... ok
+test resolution::tests::salted_random_pair_sampling_changes_between_trees ... ok
+test resolution::tests::skips_ambiguous_repeated_boundaries ... ok
+test resolution::tests::skips_sequence_identical_bubbles_after_deferred_materialization ... ok
+test resolution::tests::smooth_polish_preserves_replacement_path_sequences ... ok
+test resolution::tests::sweepga_replacement_frequency_auto_keeps_local_repeats_seedable ... ok
+test resolution::tests::top_flubble_sweepga_parse_name_accepts_aliases ... ok
+test resolution::tests::top_flubble_sweepga_routes_replacement_to_sweepga ... ok
+test resolution::tests::top_flubble_sweepga_selects_only_level_zero_roots ... ok
+test resolution::tests::wfmash_aligner_input_floor_does_not_hide_tool_length_semantics ... ok
+test sample_mem_bwt::tests::empty_serialization_and_invalid_structure ... ok
+test sample_mem_bwt::tests::exhaustive_weighted_substrings_spacing_repeats_boundaries_orientations ... ok
+test sample_mem_bwt::tests::observed_pairs_match_weighted_records_and_public_orbit_counts ... ok
+test sequence_namespace::tests::non_pansn_names_are_still_source_sequences ... ok
+test sequence_namespace::tests::pansn_parses_three_part_names ... ok
+test sequence_namespace::tests::source_interval_validates_coordinates_and_strand ... ok
+test sequence_namespace::tests::two_part_names_are_not_silently_parsed_as_pansn ... ok
+test smooth::tests::test_chop_graph ... ok
+test smooth::tests::test_compute_path_positions ... ok
+test smooth::tests::test_detect_repeat_no_repeat ... ok
+test smooth::tests::test_extract_path_range_sequence ... ok
+test smooth::tests::test_flubble_guided_blocks_errors_when_reference_hint_misses ... ok
+test smooth::tests::test_flubble_guided_blocks_use_level_ge_1_sites_and_cover_paths ... ok
+test smooth::tests::test_flubble_guided_smooth_preserves_path_sequences_on_nested_fixture ... ok
+test smooth::tests::test_neighbor_merge_blocks_select_povu_sites_on_nested_fixture ... ok
+test smooth::tests::test_neighbor_merge_poasta_preserves_path_sequences_on_nested_fixture ... ok
+test smooth::tests::test_neighbor_site_groups_merge_adjacent_sites_up_to_cap ... ok
+test smooth::tests::test_parse_gfa ... ok
+test smooth::tests::test_parse_path_coords ... ok
+test smooth::tests::test_passthrough_block_gfa_preserves_path_coverage ... ok
+test smooth::tests::test_smooth_block_retries_without_padding_when_trim_would_empty_core ... ok
+test smooth::tests::test_smoothable_blocks_simple ... ok
+test smooth::tests::test_union_find ... ok
+test subset_filter::tests::test_subset_filter_matches_variants ... ok
+test syng::tests::test_ambiguity_dictionary_replay_region_and_sidecar_roundtrip ... read GBWT with 139 vertices and 282 edges from /tmp/.tmpjOYcQ4/replay.syng.1gbwt
+read GBWT with 139 vertices and 282 edges from /tmp/.tmpjOYcQ4/replay.syng.1gbwt
+user 0.057727  system 0.002908  elapsed 0.060603  alloc_max 0.071  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmpjOYcQ4/replay.syng.1gbwt
+user 0.038018  system 0.015511  elapsed 0.052183  alloc_max 0.071  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmpjOYcQ4/region.syng.1gbwt
+user 0.050751  system 0.015399  elapsed 0.065293  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmpjOYcQ4/region.syng.1gbwt
+user 0.041048  system 0.001060  elapsed 0.042139  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmpjOYcQ4/region.syng.1gbwt
+user 0.043035  system 0.002051  elapsed 0.044097  alloc_max 0.088  max_RSS 0.000
+ok
+test syng::tests::test_ambiguity_full_window_alphabet_and_reference ... ok
+test syng::tests::test_ambiguity_legacy_unknown_and_positive_corruption_remain_errors ... read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.915914  system 0.035852  elapsed 0.950534  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.008980  system 0.008987  elapsed 0.017177  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.002389  system 0.013765  elapsed 0.016137  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.005310  system 0.000115  elapsed 0.005412  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.004170  system 0.001062  elapsed 0.005226  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.004027  system 0.001010  elapsed 0.005027  alloc_max 0.088  max_RSS 0.000
+read GBWT with 139 vertices and 282 edges from /tmp/.tmp2Hu2ab/legacy.syng.1gbwt
+user 0.005102  system 0.000039  elapsed 0.004782  alloc_max 0.088  max_RSS 0.000
+read GBWT with 36 vertices and 72 edges from /tmp/.tmp2Hu2ab/append.syng.1gbwt
+user 0.014092  system 0.009030  elapsed 0.023186  alloc_max 0.088  max_RSS 0.000
+ok
+test syng::tests::test_ambiguity_seed_free_save_rejected_without_output ... ok
+test syng::tests::test_bounded_walk_parallel_query_matches_single_thread ... ok
+test syng::tests::test_bounded_walk_seeds_recover_divergent_homolog_under_long_self_mem ... ok
+test syng::tests::test_build_empty ... ok
+test syng::tests::test_build_multiple_sequences ... ok
+test syng::tests::test_build_region_gbwt_empty_sequences ... ok
+test syng::tests::test_build_region_gbwt_loadable ... read GBWT with 103 vertices and 206 edges from /tmp/impg_test_region_gbwt_load/loadable_region.1gbwt
+user 0.066596  system 0.105213  elapsed 0.167524  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_build_region_gbwt_produces_files ... ok
+test syng::tests::test_build_region_gbwt_short_sequences_skipped ... ok
+test syng::tests::test_build_short_sequence ... ok
+test syng::tests::test_build_single_sequence ... ok
+test syng::tests::test_cli_gbwt_output_requires_prefix ... ok
+test syng::tests::test_gbwt_mems_for_walk_uses_syncmer_offsets ... ok
+test syng::tests::test_loaded_syng_requires_spos_but_repair_can_rebuild ... read GBWT with 311 vertices and 622 edges from /tmp/impg_test_syng_requires_spos/idx.1gbwt
+user 0.072238  system 0.008517  elapsed 0.095342  alloc_max 0.097  max_RSS 0.000
+read GBWT with 311 vertices and 622 edges from /tmp/impg_test_syng_requires_spos/idx.1gbwt
+user 0.006647  system 0.000868  elapsed 0.007507  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_locate_unsampled_syncmer_walks_forward_to_checkpoint ... ok
+test syng::tests::test_matched_syncmers_orients_reverse_complement_query ... ok
+test syng::tests::test_matched_syncmers_skip_ambiguous_query_bases ... ok
+test syng::tests::test_merge_with_anchors_adjacent ... ok
+test syng::tests::test_merge_with_anchors_dedup ... ok
+test syng::tests::test_merge_with_anchors_empty ... ok
+test syng::tests::test_merge_with_anchors_multiple_groups ... ok
+test syng::tests::test_merge_with_anchors_no_overlap ... ok
+test syng::tests::test_merge_with_anchors_overlapping ... ok
+test syng::tests::test_merge_with_anchors_single ... ok
+test syng::tests::test_name_map_add ... ok
+test syng::tests::test_name_map_default ... ok
+test syng::tests::test_name_map_new ... ok
+test syng::tests::test_name_map_pansn_format ... ok
+test syng::tests::test_name_map_save_load_roundtrip ... ok
+test syng::tests::test_name_map_special_characters ... ok
+test syng::tests::test_onecode_magic_bytes_gbwt ... ok
+test syng::tests::test_onecode_magic_bytes_khash ... ok
+test syng::tests::test_online_sampled_positions_exact_mapping_roundtrip ... read GBWT with 68 vertices and 137 edges from /tmp/impg_test_syng_spos_roundtrip/idx.1gbwt
+user 0.043392  system 0.012776  elapsed 0.054933  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_paf_based_gbwt_output ... ok
+test syng::tests::test_parallel_regular_position_rebuild_matches_serial ... read GBWT with 457 vertices and 914 edges from /tmp/impg_test_syng_parallel_regular_repair/idx.1gbwt
+user 0.017531  system 0.007438  elapsed 0.051296  alloc_max 0.097  max_RSS 0.000
+read GBWT with 457 vertices and 914 edges from /tmp/impg_test_syng_parallel_regular_repair/idx.1gbwt
+user 0.004894  system 0.000962  elapsed 0.005844  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_preloaded_dictionary_replay_supports_query ... ok
+test syng::tests::test_query_completeness_no_false_negatives_interior ... ok
+test syng::tests::test_query_completeness_shared_backbone ... ok
+test syng::tests::test_query_padding_clamped_to_genome_length ... ok
+test syng::tests::test_query_padding_extends_intervals ... ok
+test syng::tests::test_query_padding_zero_vs_nonzero ... ok
+test syng::tests::test_query_region_basic ... ok
+test syng::tests::test_query_region_entire_sequence ... ok
+test syng::tests::test_query_region_from_sequence_matches_path_query ... ok
+test syng::tests::test_query_region_identical_sequences ... ok
+test syng::tests::test_query_region_isolated_region ... ok
+test syng::tests::test_query_region_no_path_start_info ... ok
+test syng::tests::test_query_region_out_of_range ... ok
+test syng::tests::test_query_region_padding ... ok
+test syng::tests::test_query_region_sampled_positions_three_genomes ... ok
+test syng::tests::test_query_region_save_load_roundtrip ... read GBWT with 27 vertices and 54 edges from /tmp/impg_test_query_rt/test.1gbwt
+user 0.084986  system 0.012794  elapsed 0.091452  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_query_region_single_sequence_index ... ok
+test syng::tests::test_query_region_unknown_genome ... ok
+test syng::tests::test_query_region_uses_walked_target_positions_for_unsampled_anchors ... ok
+test syng::tests::test_query_region_zero_width ... ok
+test syng::tests::test_rebuild_sampled_position_indexes_from_gbwt_repairs_sidecars ... read GBWT with 304 vertices and 608 edges from /tmp/impg_test_syng_repair_sidecars/idx.1gbwt
+user 0.034846  system 0.005704  elapsed 0.038996  alloc_max 0.097  max_RSS 0.000
+read GBWT with 304 vertices and 608 edges from /tmp/impg_test_syng_repair_sidecars/idx.1gbwt
+user 0.005116  system 0.001044  elapsed 0.005914  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_region_gbwt_from_query_results ... ok
+test syng::tests::test_region_gbwt_loadable_as_syng_index ... read GBWT with 25 vertices and 50 edges from /tmp/impg_test_region_gbwt_load_syng/region_loadable.1gbwt
+user 0.041225  system 0.009092  elapsed 0.049025  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_region_gbwt_nodes_subset_of_full_index ... read GBWT with 297 vertices and 594 edges from /tmp/impg_test_region_nodes_subset/full.1gbwt
+user 0.026676  system 0.004887  elapsed 0.030741  alloc_max 0.097  max_RSS 0.000
+read GBWT with 146 vertices and 292 edges from /tmp/impg_test_region_nodes_subset/region_subset.1gbwt
+user 0.004196  system 0.002072  elapsed 0.006255  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_region_gbwt_nonexistent_directory_fails ... ok
+test syng::tests::test_region_gbwt_onecode_format ... ok
+test syng::tests::test_region_gbwt_output_prefix_with_directory ... ok
+test syng::tests::test_region_gbwt_single_genome ... read GBWT with 17 vertices and 34 edges from /tmp/impg_test_region_gbwt_single/single_genome_region.1gbwt
+user 0.067319  system 0.009770  elapsed 0.077037  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_region_gbwt_very_small_region ... ok
+test syng::tests::test_regular_sampled_positions_use_step_grid_and_terminal_step ... ok
+test syng::tests::test_roundtrip_query_gbwt_query ... ok
+test syng::tests::test_sampled_path_range_includes_unsampled_boundary_overlap ... ok
+test syng::tests::test_sampled_path_steps_resume_gbwt_traversal ... ok
+test syng::tests::test_save_load_roundtrip ... read GBWT with 192 vertices and 386 edges from /tmp/impg_test_syng_roundtrip/test_index.1gbwt
+user 0.067527  system 0.007577  elapsed 0.073284  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_save_load_uses_saved_syncmer_params ... read GBWT with 329 vertices and 658 edges from /tmp/impg_test_syng_saved_params/idx.1gbwt
+user 0.012753  system 0.004910  elapsed 0.017563  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syncmer_params_default ... ok
+test syng::tests::test_syncmer_params_to_c ... ok
+test syng::tests::test_syng_build_empty_sequence ... ok
+test syng::tests::test_syng_build_exactly_syncmer_length ... ok
+test syng::tests::test_syng_build_mixed_lengths ... ok
+test syng::tests::test_syng_build_sequence_shorter_than_syncmer ... ok
+test syng::tests::test_syng_build_single_path_in_gbwt ... read GBWT with 35 vertices and 70 edges from /tmp/impg_test_syng_single_path/single.1gbwt
+user 0.034694  system 0.006257  elapsed 0.040580  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_cli_fasta_roundtrip ... read GBWT with 44 vertices and 88 edges from /tmp/impg_test_syng_cli/cli_output.1gbwt
+user 0.004564  system 0.002842  elapsed 0.036273  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_cli_gbwt_output_from_syng_index ... ok
+test syng::tests::test_syng_cli_query_bed_output ... ok
+test syng::tests::test_syng_cli_query_gfa_output ... ok
+test syng::tests::test_syng_default_params_build_and_reload ... read GBWT with 150 vertices and 300 edges from /tmp/impg_test_syng_default_reload/idx.1gbwt
+user 0.017060  system 0.009380  elapsed 1.896024  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_different_params_different_syncmer_counts ... ok
+test syng::tests::test_syng_ffi_kmerhash_create_destroy ... ok
+test syng::tests::test_syng_ffi_seqhash_create_destroy ... ok
+test syng::tests::test_syng_ffi_syngbwt_create_destroy ... ok
+test syng::tests::test_syng_index_accessors ... ok
+test syng::tests::test_syng_index_create_drop ... ok
+test syng::tests::test_syng_index_custom_params ... ok
+test syng::tests::test_syng_load_missing_files ... ok
+test syng::tests::test_syng_roundtrip_lengths_match ... read GBWT with 618 vertices and 1,236 edges from /tmp/impg_test_syng_rt_lengths/rt_lengths.1gbwt
+user 0.044791  system 0.038539  elapsed 0.082493  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_roundtrip_names_match ... read GBWT with 297 vertices and 594 edges from /tmp/impg_test_syng_rt_names/rt_names.1gbwt
+user 0.012452  system 0.002168  elapsed 0.014079  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_roundtrip_path_count_preserved ... read GBWT with 546 vertices and 1,092 edges from /tmp/impg_test_syng_rt_paths/rt_paths.1gbwt
+user 0.008800  system 0.003926  elapsed 0.012318  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_save_load_with_edge_cases ... read GBWT with 73 vertices and 146 edges from /tmp/impg_test_syng_edge_rt/edge.1gbwt
+user 0.010198  system 0.003074  elapsed 0.013014  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_save_load_with_sampled_positions ... read GBWT with 61 vertices and 123 edges from /tmp/impg_test_syng_spos_query_roundtrip/idx.1gbwt
+user 0.011719  system 0.002264  elapsed 0.013308  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_suffix_prefix_does_not_duplicate_sidecar_names ... read GBWT with 73 vertices and 146 edges from /tmp/impg_test_syng_suffix_sidecars/idx.syng.1gbwt
+user 0.010218  system 0.002081  elapsed 0.012087  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_syng_suffix_prefix_loads_legacy_duplicated_sidecars ... read GBWT with 71 vertices and 142 edges from /tmp/impg_test_syng_suffix_legacy_sidecars/idx.syng.1gbwt
+user 0.010918  system 0.001972  elapsed 0.012875  alloc_max 0.097  max_RSS 0.000
+ok
+test syng::tests::test_terminal_sampled_for_short_paths ... ok
+test syng::tests::test_top_frequency_seed_filter_drops_only_top_fraction ... ok
+test syng_graph::tests::all_pairs_three_sequences ... ok
+test syng_graph::tests::anchor_seeded_identical_with_one_anchor ... ok
+test syng_graph::tests::anchor_seeded_rejects_non_colinear ... ok
+test syng_graph::tests::anchor_seeded_with_insertion_in_gap ... ok
+test syng_graph::tests::anchor_seeded_zero_anchors_falls_through_to_full_biwfa ... ok
+test syng_graph::tests::biwfa_empty_returns_none ... ok
+test syng_graph::tests::biwfa_identical_sequences ... ok
+test syng_graph::tests::biwfa_with_insertion ... ok
+test syng_graph::tests::biwfa_with_substitution ... ok
+test syng_graph::tests::build_gfa_three_identical_sequences ... ok
+test syng_graph::tests::cigar_stats_basic ... ok
+test syng_graph::tests::compact_cigar_basic ... ok
+test syng_graph::tests::pair_anchor_plane_sweep_keeps_indel_shifted_chain ... ok
+test syng_graph::tests::pair_anchor_plane_sweep_keeps_multiple_scaffold_chains ... ok
+test syng_graph::tests::pair_anchor_plane_sweep_keeps_supported_diagonal ... ok
+test syng_graph::tests::seqwish_tail_does_not_rescue_records_dropped_by_explicit_filter ... ok
+test syng_graph_norm::tests::empty_cigar ... ok
+test syng_graph_norm::tests::identity_noop ... ok
+test syng_graph_norm::tests::insertion_against_non_homopolymer_no_shift ... ok
+test syng_graph_norm::tests::no_indel_no_change ... ok
+test syng_graph_norm::tests::shift_stops_at_mismatch ... ok
+test syng_graph_norm::tests::simple_deletion_shifts_left ... ok
+test syng_graph_norm::tests::simple_insertion_shifts_left_over_homopolymer ... ok
+test syng_parallel::tests::canonical_packing_is_orientation_invariant ... ok
+test syng_transitive::tests::chain_anchors_absorbs_within_drift_tolerance ... ok
+test syng_transitive::tests::chain_anchors_colinear_forms_one_chain ... ok
+test syng_transitive::tests::chain_anchors_empty_and_single ... ok
+test syng_transitive::tests::chain_anchors_range_constraint_rejects_out_of_range_pair ... ok
+test syng_transitive::tests::chain_anchors_respects_strand_boundaries ... ok
+test syng_transitive::tests::chain_anchors_tandem_emits_parallel_chains ... ok
+test syng_transitive::tests::chain_anchors_with_limits_can_span_large_bubble_flanks ... ok
+test syng_transitive::tests::dedupe_is_per_path_not_cross_path ... ok
+test syng_transitive::tests::dedupe_keeps_majority_strand_on_overlap ... ok
+test syng_transitive::tests::dedupe_preserves_distinct_real_inversion ... ok
+test syng_transitive::tests::effective_min_chain_anchors_scales_with_query_span ... ok
+test syng_transitive::tests::exact_seed_blocks_keep_gaps_diagonals_and_reverse_bounds ... ok
+test syng_transitive::tests::linear_projection_reverse_strand_reports_forward_bounds ... ok
+test syng_transitive::tests::linear_projection_uses_leftmost_and_rightmost_anchors ... ok
+test syng_transitive::tests::merge_nearby_on_same_path_no_merge_keeps_touching_and_overlapping_intervals ... ok
+test syng_transitive::tests::merge_nearby_on_same_path_uses_user_gap_distance ... ok
+test syng_transitive::tests::project_clamps_to_target_bounds ... ok
+test syng_transitive::tests::project_forward_strand_linear ... ok
+test syng_transitive::tests::project_reverse_strand_linear ... ok
+test syng_transitive::tests::query_scaled_chain_limits_do_not_treat_alignment_budget_as_sv_budget ... ok
+test syng_transitive::tests::query_scaled_chain_limits_use_merge_distance_before_refinement ... ok
+test syng_transitive::tests::sweepga_exact_blocks_preserve_paths_strands_and_parallel_copies ... ok
+test syng_transitive::tests::sweepga_exact_blocks_use_union_mass_not_anchor_count_or_gap_span ... ok
+test syng_transitive::tests::sweepga_irregular_dense_exact_forward_preserves_extent_and_memberships ... ok
+test syng_transitive::tests::sweepga_irregular_dense_exact_reverse_preserves_extent_and_memberships ... ok
+test syng_transitive::tests::sweepga_scaffold_mass_filters_short_off_diagonal_hits ... ok
+test tests::graph_output_crush_finalization_normalizes_self_loop_runs ... ok
+test tests::graph_output_crush_preserves_path_names_and_spellings_through_finalization ... ok
+test tests::query_gfa_cut_n_removes_terminal_n_tips_before_graph_build ... ok
+test tests::query_gfa_keeps_terminal_ns_by_default ... ok
+test tests::syng_local_blunt_crush_round_trips_source_sequence ... read GBWT with 177 vertices and 364 edges from /tmp/impg-syng-gfa-4i1UlE/region.1gbwt
+user 0.029161  system 0.040666  elapsed 0.066047  alloc_max 0.097  max_RSS 0.000
+ok
+test tests::syng_local_rebuild_uses_requested_syncmer_length ... read GBWT with 1 vertices and 2 edges from /tmp/impg-syng-gfa-paauWA/region.1gbwt
+user 0.028932  system 0.023213  elapsed 0.047370  alloc_max 0.097  max_RSS 0.000
+ok
+test tests::test_crush_transform_is_applied_path_preserving ... ok
+test tests::test_syng_impg_wrapper_no_hit_query_returns_empty_ok ... ok
+test tests::test_syng_impg_wrapper_query_bfs_same_as_dfs ... ok
+test tests::test_syng_impg_wrapper_query_failure_returns_error ... ok
+test tests::test_syng_impg_wrapper_query_transitive_dfs ... ok
+test tests::test_syng_impg_wrapper_seq_index ... ok
+test tests::test_syng_impg_wrapper_unknown_target ... ok
+test tests::test_syng_impg_wrapper_with_padding ... ok
+
+test result: ok. 496 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 9.36s
+

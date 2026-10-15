@@ -1,6 +1,7 @@
 use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
+use crate::partition_profile::PartitionProfile;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use crate::EngineOpts;
 use coitrees::Interval;
@@ -10,7 +11,7 @@ use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-//use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Helper function to create output file path with optional output folder
 fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result<String> {
@@ -292,7 +293,11 @@ pub fn partition_alignments(
     // Collect partitions for single-file output
     let mut collected_partitions: Vec<(usize, Vec<Interval<u32>>)> = Vec::new();
 
+    let mut profile = PartitionProfile::from_env();
     while !windows.is_empty() {
+        if let Some(profile) = profile.as_mut() {
+            profile.queued(windows.len());
+        }
         if debug {
             debug!("Processing new set of {} windows", windows.len());
             for (seq_id, start, end) in &windows {
@@ -354,9 +359,16 @@ pub fn partition_alignments(
                 }
             }
 
-            // Query overlaps for current window
-            //let query_start = Instant::now();
-            let mut overlaps = if transitive_dfs {
+            // Coverage is ownership, not a proof that discovery is redundant.
+            // Profile the full original query without changing masks or context.
+            let query_profile = profile
+                .as_mut()
+                .and_then(|p| p.dispatch((seq_id, start, end), missing_regions.get(&seq_id)));
+            if let Some(p) = query_profile.as_ref() {
+                p.started(chrom);
+            }
+            let emitted_before = total_partitioned_length;
+            let query_result = if transitive_dfs {
                 impg.query_transitive_dfs(
                     seq_id,
                     start,
@@ -371,7 +383,7 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )?
+                )
             } else {
                 impg.query_transitive_bfs(
                     seq_id,
@@ -387,9 +399,23 @@ pub fn partition_alignments(
                     sequence_index,
                     approximate_mode,
                     None, // No subset filter for partition
-                )?
+                )
             };
-            //let query_time = query_start.elapsed();
+            let query_time = query_profile
+                .as_ref()
+                .map(|p| p.elapsed())
+                .unwrap_or_default();
+            let mut overlaps = match query_result {
+                Ok(overlaps) => overlaps,
+                Err(error) => {
+                    if let Some(p) = query_profile.as_ref() {
+                        p.finish(query_time, Duration::ZERO, Duration::ZERO, 0, 0, true);
+                    }
+                    return Err(error);
+                }
+            };
+            let backend_overlaps = overlaps.len();
+            let post_start = query_profile.as_ref().map(|_| Instant::now());
             debug!("  Collected {} query overlaps", overlaps.len());
 
             retain_seed_occurrence(&mut overlaps, seq_id, start, end);
@@ -417,14 +443,15 @@ pub fn partition_alignments(
             //let extend_time = extend_start.elapsed();
 
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
-            //let mask_start = Instant::now();
+            let mask_start = query_profile.as_ref().map(|_| Instant::now());
             overlaps = mask_and_update_regions(
                 &mut overlaps,
                 &mut masked_regions,
                 &mut missing_regions,
                 min_missing_size,
             );
-            //let mask_time = mask_start.elapsed();
+            let mask_time = mask_start.map(|s| s.elapsed()).unwrap_or_default();
+            let mut post_time = post_start.map(|s| s.elapsed()).unwrap_or_default();
 
             if !overlaps.is_empty() {
                 debug!(
@@ -437,7 +464,7 @@ pub fn partition_alignments(
                     "  Collected {} query overlaps after re-merging",
                     overlaps.len()
                 );
-                //let merge2_time = merge2_start.elapsed();
+                post_time = post_start.map(|s| s.elapsed()).unwrap_or_default();
 
                 //let calc_start = Instant::now();
                 // Calculate current partition length
@@ -565,6 +592,16 @@ pub fn partition_alignments(
                     start,
                     end,
                     end - start
+                );
+            }
+            if let Some(p) = query_profile.as_ref() {
+                p.finish(
+                    query_time,
+                    post_time,
+                    mask_time,
+                    backend_overlaps,
+                    total_partitioned_length - emitted_before,
+                    false,
                 );
             }
         }
@@ -1884,3 +1921,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "partition_scheduling_tests.rs"]
+mod scheduling_tests;

@@ -1,4 +1,5 @@
 // lib.rs
+#![recursion_limit = "512"]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 pub mod agc_index;
@@ -6,6 +7,7 @@ pub mod alignment_record;
 pub mod commands;
 pub mod faidx;
 pub mod forest_map;
+pub mod genome_inference;
 pub mod genotyping;
 pub mod gfa_self_loops;
 pub mod graph;
@@ -17,9 +19,11 @@ pub mod multi_impg;
 pub mod onealn;
 pub mod pack;
 pub mod paf;
+mod partition_profile;
 pub mod projection;
 pub mod render_bundle;
 pub mod resolution;
+pub mod sample_mem_bwt;
 pub mod seqidx;
 pub mod sequence_index;
 pub mod sequence_namespace;
@@ -314,6 +318,7 @@ impl SyngImpgWrapper {
         range_start: i32,
         range_end: i32,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let profile_start = partition_profile::backend_enabled().then(std::time::Instant::now);
         let intervals = self
             .syng_index
             .query_region(
@@ -331,6 +336,13 @@ impl SyngImpgWrapper {
                     ),
                 )
             })?;
+        if let Some(start) = profile_start {
+            partition_profile::record_backend(partition_profile::BackendMetrics {
+                raw_hits: intervals.len(),
+                lookup: start.elapsed(),
+                ..Default::default()
+            });
+        }
         Ok(intervals
             .into_iter()
             .filter_map(|iv| {
@@ -349,6 +361,7 @@ impl SyngImpgWrapper {
         min_anchors: usize,
         min_fraction: f64,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        let profile_start = partition_profile::backend_enabled().then(std::time::Instant::now);
         let hits = self
             .syng_index
             .query_region_with_anchors_ext(
@@ -367,6 +380,16 @@ impl SyngImpgWrapper {
                     ),
                 )
             })?;
+        let mut metrics = profile_start.map(|start| {
+            let lookup = start.elapsed();
+            partition_profile::BackendMetrics {
+                raw_hits: hits.len(),
+                raw_anchors: Some(hits.iter().map(|h| h.anchors.len()).sum()),
+                lookup,
+                ..Default::default()
+            }
+        });
+        let chain_start = profile_start.map(|_| std::time::Instant::now());
         let syncmer_len = (self.syng_index.params.w + self.syng_index.params.k) as u64;
         let query_range_len = (range_end - range_start).max(0) as u64;
         let effective_min = syng_transitive::effective_min_chain_anchors_for_syncmer(
@@ -383,8 +406,12 @@ impl SyngImpgWrapper {
             syng_transitive::DEFAULT_EXTEND_BUDGET_BP,
             (effective_min as u64).saturating_mul(syncmer_len),
         );
+        if let Some(m) = metrics.as_mut() {
+            m.chains = Some(chained.len());
+            m.passing_chains = Some(0);
+        }
         let min_extent_bp = (query_range_len as f64 * min_fraction.max(0.0)) as u64;
-        Ok(chained
+        let result = chained
             .into_iter()
             .filter(|c| {
                 if c.anchors.len() < effective_min {
@@ -402,6 +429,9 @@ impl SyngImpgWrapper {
                 qmax.saturating_sub(qmin).saturating_add(syncmer_len) >= min_extent_bp
             })
             .filter_map(|c| {
+                if let Some(m) = metrics.as_mut() {
+                    *m.passing_chains.as_mut().unwrap() += 1;
+                }
                 let tid = self.seq_index.get_id(&c.genome)?;
                 // Match raw-path AdjustedInterval shape: both fields are the
                 // target (homolog) interval. partition uses the first element
@@ -410,7 +440,12 @@ impl SyngImpgWrapper {
                 let t_iv = coitrees::Interval::new(c.start as i32, c.end as i32, tid);
                 Some((t_iv, Vec::<impg::CigarOp>::new(), t_iv))
             })
-            .collect())
+            .collect();
+        if let Some(mut metrics) = metrics {
+            metrics.chaining = chain_start.map(|start| start.elapsed());
+            partition_profile::record_backend(metrics);
+        }
+        Ok(result)
     }
 }
 
