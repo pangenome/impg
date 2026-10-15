@@ -37,6 +37,22 @@ while true; do
     echo "$(date -u +%FT%TZ) FINAL split: $(tail -1 "$RV/prep-split.log")" >> "$RV/prep-master.log"
   fi
   echo "$(date -u +%FT%TZ) $(tail -1 "$RV/prep-split.log")" >> "$RV/prep-master.log"
+  # THE PIPELINE VALVE (the owner's disk ruling is law): prep only while the
+  # cut campaign's backlog is bounded - the substrate footprint is ~250MB per
+  # territory and the cuts are the slower stage; without the valve the
+  # pending-substrate window grows without bound
+  NPENDCUT=$(while read -r T; do
+      [ -f "$RV/prep/$T/substrate.done" ] || continue
+      [ -f "$RV/prep/$T/cut.done" ] && continue
+      [ -f "$RV/prep/$T/cut.poison" ] && continue
+      [ -f "$RV/prep/$T/cut.exit" ] && continue
+      echo x
+    done < "$RV/prep/accepted.txt" | wc -l)
+  if [ "$NPENDCUT" -ge "${PREP_VALVE:-160}" ]; then
+    echo "$(date -u +%FT%TZ) VALVE: $NPENDCUT substrates pending cut (>= ${PREP_VALVE:-160}) - holding the prep pool" >> "$RV/prep-master.log"
+    sleep 120
+    continue
+  fi
   # the prep pool over accepted, not-yet-done territories
   mapfile -t TODO < <(while read -r T; do
       [ -f "$RV/prep/$T/substrate.done" ] && continue

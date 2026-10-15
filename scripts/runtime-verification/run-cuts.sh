@@ -83,6 +83,7 @@ one_batch() {
   echo "$(date -u +%FT%TZ) batch $B done exit=$st wall=$(cat "$B/batch.wall")s" >> "$CUTS/campaign.log"
 }
 
+Q=$RV/query
 BATCH_ID=0
 while true; do
   # the pending set: substrate done, not cut, not poisoned
@@ -97,7 +98,13 @@ while true; do
   NDONE=$(while read -r T; do [ -f "$RV/prep/$T/cut.done" ] && echo x; done < "$RV/prep/accepted.txt" | wc -l)
   NTOTAL=$(wc -l < "$RV/prep/accepted.txt")
   if [ "$NPEND" -eq 0 ]; then
-    [ "$NDONE" -ge "$NTOTAL" ] && break
+    # terminal only when the upstream is terminal too: the query stage done,
+    # the final reconciliation split done, and every accepted territory has a
+    # terminal cut state (the accepted set grows while the query runs)
+    if [ -f "$Q/queries.done" ] && [ -f "$RV/prep/final-split.done" ]; then
+      NTERM=$((NDONE + $(ls "$RV"/prep/*/cut.poison 2>/dev/null | wc -l) + $(ls "$RV"/prep/*/cut.exit 2>/dev/null | wc -l)))
+      [ "$NTERM" -ge "$NTOTAL" ] && break
+    fi
     echo "$(date -u +%FT%TZ) waiting for substrates ($NDONE/$NTOTAL cut)" >> "$CUTS/campaign.log"
     sleep 120; continue
   fi
