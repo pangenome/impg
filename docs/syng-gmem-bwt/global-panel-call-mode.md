@@ -408,4 +408,92 @@ emission's back-translation cancels it exactly.
    structural candidates are all edge-band classes; the §9
    three-step precedent — a 13% census margin with byte-identical
    calls — is the prior, not the proof).
+
+## 10.1 The content-origin increment's receipts (steps 0-1 of the
+resume point: DONE; the exact state at the handoff)
+
+**The `--record-origin <d>` parameter LANDED** (commit c899569):
+the cut (`sample_projection cut --record-origin`, refused in the
+local frame), the call (`call-diplotypes --record-origin`, requires
+`--global-frame`), the three-step registry (partition records it,
+call-region states it), the frame module (translate_row + the frame
+table at `start + d`; the back-translation CANCELS d exactly — 4 new
+unit tests; the mini-panel proof gains the ONE-BASE-LATER substrate
+class). Tests 558/0. BOTH committed substrate conventions stand,
+explicit and fail-closed: L1-L4 d=1 (delta=1 receipts), the pilot d=0
+(its own delta=0 receipt — the smoke-cut-pilot's offset_variants).
+
+**THE LEGACY-PANEL OPT-IN LANDED** (commit 56588b4, escalated and
+supervisor-ratified): PanelIdentity's metadata-v2 gate (8f6a385)
+refused the ONE committed global panel (metadata v1, May 13-14) at
+BOTH derive-routes and call-diplotypes — the gate's rationale ("legacy
+ambiguity-derived dictionaries are not acceptable for NEW samples")
+does not cover this use: the panel is the committed evidence base's
+OWN dictionary (the 35x shards' records carry ITS node ids; a fresh
+rebuild renumbers every id and byte-identity becomes unattainable by
+construction). `IMPG_PANEL_LEGACY_V1_OK=1` is the fail-closed-by-
+default opt-in; every accepted use prints the loud provenance line;
+derive-routes' manifest receipts panel_metadata_version +
+panel_legacy_opt_in. THE RETIREMENT PATH (named follow-up): a
+metadata re-stamp of the SAME dictionary (provenance upgrade, no
+rebuild, no id churn) would retire the opt-in honestly.
+
+**The d=1 cuts (the fresh window beds for L2-L4 via the fresh
+partition steps — receipts in $WORK/partitions; L1 uses the committed
+three-step beds)**:
+
+| cut (frame global) | wall | routed | reads_kept | census_mult | committed local (routed / mult) |
+|---|---:|---:|---:|---:|---|
+| L1 --record-origin 1 | 563.4s | 3,775/3,797 | 304,793 | 384,056 | 3,514 / 115,012 |
+| L2 --record-origin 1 | 542.5s | 3,542/3,546 | 141,920 | 156,976 | 3,412 / 43,051 |
+| L3 --record-origin 1 | 504.2s | 3,660/3,709 | n/a | 567,243 | 3,450 / 17,887 |
+| pilot --record-origin 0 | 485.0s | 12,286/12,310 | n/a | 513,836 | 12,218 / 512,323 |
+
+(The global-frame census is a SUPERSET of the committed one — the
+expressibility/record-edge class — reads_kept 2.8x at L1 but routed
+patterns only +7%; the pilot, whose committed cut shares the same
+smoke shards and exact-header convention, is nearly exact: +0.6%
+routed, +0.3% mult. L4's cut is NOT yet run.)
+
+**The occurrence-delta probe at L1 d=1** ($WORK/probe-L1-d1.txt):
+the −1 off-by-one class is GONE (zero collapsible keys); 2,886 of
+3,015 committed physical occurrence patterns match EXACTLY at the
+translated content origin; the residual: 129 committed-only
+patterns (mult 14,191) and 362 global-only (the record-edge superset
+class) — the named structural risk #1/#2 of §6, now measured. The
+census MASS divergence (committed 111,926 vs global 369,851 over the
+common pattern set) is the real gate risk: the global census keeps
+2.8x the reads (the superset expressibility class); whether the
+calls are robust to it is exactly what the gate decides — the §9
+precedent (13% margin, byte-identical) is the prior, not the proof.
+
+**THE EXACT RESUME POINT** (nothing else in flight except the named
+background jobs; all receipts in $WORK=/home/erikg/hprcv2/global-
+panel-call-mode):
+1. derive-routes over the d=1 L1 census → $WORK/global-routes WAS IN
+   FLIGHT at the handoff (setsid, started ~15:47Z, ~30min expected,
+   IMPG_PANEL_LEGACY_V1_OK=1; on completion verify graph.json +
+   manifest panel_legacy_opt_in; if the process died, rerun
+   $WORK/run-derive-routes.sh — idempotent, it rm -rf's first).
+2. The L4 global cut: `$WORK/run-global-cut.sh L4 global-cut-L4-d1`
+   (the L4 beds exist at $WORK/partitions/L4/beds; d=1).
+3. THE GATES: `$WORK/run-global-call.sh L1 $WORK/global-cut-L1-d1 1
+   $PROJ/cut-L1-cli/calls.jsonl` (likewise L2/L3/L4 vs cut-L*-cli);
+   the PILOT: the committed-path baseline call failed once (the
+   pilot's committed routes dir was reaped) — rerun run-smoke-cli-
+   cut.sh with --routes /home/erikg/hprcv2/writeup-codification/
+   substrate-pilot/routes (the v2 rebuild of the same substrate,
+   built over the same smoke-cut-pilot census), then
+   `$WORK/run-global-call.sh pilot $WORK/global-cut-pilot-d0 0
+   <that-baseline>/calls.jsonl pilot-d0` AND a second cmp against
+   $P/cli-product-hap1-alignfold/calls.jsonl (the on-disk committed
+   receipt — expected to differ by the evidence-set margin, the L1
+   precedent cut-L1.calls-diff.txt; receipt both honestly).
+4. Lane scaling: N=1 (the L1 gate call is the solo baseline), then
+   N=2/4 concurrent run-global-call.sh lanes (each RAYON threads=1,
+   same box co-tenancy); the poller now logs Pss/RssAnon/shared per
+   lane — the ~15GB private + page-cache model must hold or be
+   corrected.
+5. Restate the 20-min budget from the receipts; write §10 fully;
+   commit per gate, explicit paths only; NO PR PUSH.
 ## 10. The measured receipts (updated as the gates land)
