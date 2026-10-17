@@ -850,6 +850,23 @@ receipt lands)
    artifacts and writes the receipt to
    `serial-vs-par.routes-cmp-receipt.txt` in the work dir. Never
    polled in-session by design.
+4. THE NEXT INCREMENT'S EXACT RESUME POINT (the 10x path, from the
+   §10.5.5 receipts): (a) THE SHARED-INDEX CUT+CALL SEAM — the
+   per-lane inputs pole is now 244.7s of the 419s seam wall (58%):
+   the call's `Options` accepts panel PATHS, not a loaded index; the
+   seam is an injected-index form (or a combined cut+call process —
+   the memory model allows it: the cut process already holds the
+   panel at 76.3GB peak) so the ONE 345s/36.5GB load serves the
+   batch's cuts AND calls; (b) THE SPAN-CACHE DELTA-EXTEND FIX — the
+   bind's load pole re-decompresses the WHOLE grown span per miss
+   (~482x at L1: 56.7GB fetched for ~117.6MB unique); extend the
+   cached span by the missing sub-ranges instead of regrowing it
+   whole — byte-identity by the served-crop argument (every crop is
+   a slice of a Sources::fetch answer covering it), gate byte-
+   identity vs the serial receipts as always; (c) the census-superset
+   ANSWER question — the owner's, not ours (§10.5.4's shadow: ~6%
+   wall at saturated territories, accuracy-dominated); (d) lever 4's
+   marathon tail (the cross_lcp_merge segdup core) — unchanged, open.
 
 ## 10.5 The 10x-path receipts (the bind-seam profile +
 parallelization, the shared-index cut lanes, the census shadow)
