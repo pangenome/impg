@@ -841,3 +841,145 @@ receipt lands)
    RESOLVED (exit 0, wall 1680s, DELTA vs the different-evidence-
    chain receipt, per-field in §10.3's pilot paragraph) — all five
    gates and all scaling waves are COMPLETE.
+3. THE SERIAL FULL-PANEL CMP WATCHER (duty 5 of the 10x-path
+   increment): a detached nohup loop
+   (`routes-cmp-watcher.sh`, setsid, PID receipted in
+   `routes-cmp-watcher.pid`) polls every 5 min for the serial run's
+   `graph.json`; on completion it cmps the serial and parallel
+   artifacts and writes the receipt to
+   `serial-vs-par.routes-cmp-receipt.txt` in the work dir. Never
+   polled in-session by design.
+
+## 10.5 The 10x-path receipts (the bind-seam profile +
+parallelization, the shared-index cut lanes, the census shadow)
+
+### 10.5.1 THE BIND-SEAM PROFILE (measured before any code change)
+
+**Method.** `perf(1)` is BLOCKED on this box (kernel
+`perf_event_paranoid=4` — no unprivileged sampling; `samply` uses the
+same `perf_event_open`), so the method is the committed phase
+instrumentation — the `Instant` phase timers and atomic counters the
+binary already prints to stderr (overhead: sub-1%, they wrap the same
+code the committed receipts ride) — plus `/proc/PID/smaps`
+per-mapping Pss snapshots every 5 min (no target overhead) and the
+rss/pss poller. THE FRESH INSTRUMENTED RUN: the exact L1-fix baseline
+recipe re-run serial (same binary, same inputs), exit 0, wall 1450s,
+`calls.jsonl` BYTE-IDENTICAL to the committed baseline — the profile
+run doubles as a free determinism re-gate.
+
+**The serial-bind fraction of the per-lane wall** (the five lanes'
+committed phase summaries + the fresh profile run):
+
+| lane | wall | inputs | bind (serial) | loci | bind share |
+|---|---:|---:|---:|---:|---:|
+| L1 (baseline) | 1445s | 237.9s | 1006.6s | 159.6s | **70%** |
+| L1 (profile re-run) | 1450s | 232.0s | 1013.8s | 163.5s | 70% |
+| L2 (N=4) | 542s | 248.5s | 203.6s | 47.8s | 38% |
+| L3 (N=4) | 464s | 245.3s | 25.1s | 150.6s | 5% |
+| L4 (N=4) | 522s | 242.0s | 121.3s | 119.0s | 23% |
+| pilot (N=4+1) | 1680s | 252.2s | 697.4s | 685.1s | 42% |
+
+**What the bind is actually doing.** The bind is NOT the
+panel-record pairing (the candidate lookup: `steps` 2.3-13.6s per
+lane) and NOT the occurrence assembly compute (`shapes` ~0.0s) — it
+is 99.3-99.7% the per-occurrence AGC sequence verification, and the
+verification is ~100% **span-load time** (the `LaneCache`'s own nanos
+counter ≈ the verify seconds at every lane):
+
+| lane | records | occurrences | bind s | verify s | lane loads | load MB | load-time s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| L1 | 3,775 | 1,448,220 | 1013.8 | 1001.2 | 277,796 | 56,671.6 | 1016.3 |
+| L2 | 3,542 | 1,387,508 | 203.6 | 201.2 | 47,704 | 10,713.2 | 209.0 |
+| L3 | 3,660 | 1,405,637 | 25.1 | 22.0 | 7,211 | 995.3 | 29.0 |
+| L4 | 3,698 | 1,415,097 | 121.3 | 118.6 | 30,291 | 6,638.0 | 125.6 |
+| pilot | 12,286 | 5,793,360 | 697.4 | 683.4 | 159,540 | 38,468.3 | 685.6 |
+
+THE REDUNDANCY DISEASE the counters name: mean load size 209KB ≈ the
+territory extent (L1's 251kb) — every span-cache miss re-decompresses
+the WHOLE grown span, and the union-growth policy misses 19.2% of the
+1,448,348 range fetches (277,796 loads). L1 fetched **56.7GB for a
+~117.6MB unique territory envelope set** (the 466 records' 117,621,348
+bp; ~482x re-decompression), at the same ~3.0-4.3ms per load and
+~46-58MB/s per-fetch AGC throughput the routes campaign receipted
+(~55Mbp/s). THE LOAD VARIANCE IS THE ORDER, NOT THE MASS: L1-L4 all
+carry ~1.39-1.45M occurrences, but their loads vary 38x (7,211 to
+277,796) — the per-lane union-regrowth count is the occurrence VISIT
+ORDER's geometry, not census mass. (The mean-load redundancy and its
+fix — delta-extend the span instead of regrowing it whole — is the
+named follow-on pole, receipted here, NOT implemented in this
+increment: the mandated lever was the seam parallelization, and the
+loads parallelize across lanes under it.)
+
+**Where the 34-41GB working set comes from** (smaps per-mapping Pss
+at the bind plateau, Pss 34.4GB): the working set is reached AT THE
+INPUTS PHASE (rss inputs 36.5GB — the bind adds only ~0.3GB, rss
+binding 36.9GB serial): the largest anon arena Pss **12.13GB** plus a
+second **4.31GB** arena and the heap (1.26GB) and a tail of smaller
+arenas — the panel's in-RAM index sidecars (the loader's own printed
+material: the 9.5GB `.1gbwt` as 272,213,874 vertices / 683,539,246
+edges; attribution by the loader's counts, not per-structure
+measurement) — plus the census (3,775 records / 1.45M occurrences), the
+routes inventory (graph.json 34.7MB, 38,790 lanes), the derive cache
+(304,793 reads), and the reads. The FILE-BACKED touched sidecars
+(pstep/spos class) are only ~0.8GB Pss — the page-cache-shared
+component, matching §10.3's ~1.7-1.9GB shared receipt. The 34-41GB
+private lane footprint is therefore the GLOBAL PANEL'S OWN IN-RAM
+SIDELOADS, not call state — the structural fact the shared-index
+lever (below) is built on.
+
+### 10.5.2 THE BIND-SEAM PARALLELIZATION (the committed phase-3 seam,
+released under the global frame) + the AGC per-thread decompressor
+fix (the enabling change)
+
+The seam machinery itself was already committed (phase 3:
+`IMPG_REALIGN_PARALLEL_SEAMS=1 IMPG_REALIGN_SEAM_WIDTH=N` runs the
+per-record binding loop and the per-locus loop on dedicated scoped
+std::threads); the global-frame gates had simply never set it. THE
+PROFILE'S BLOCKING FINDING FIRST: releasing the seam naively would
+have been a NO-OP on the measured pole — `AgcIndex::fetch_sequence`
+indexed its decompressor pools by `rayon::current_thread_index()` and
+routed EVERY non-rayon thread (all seam threads) to the ONE fallback
+slot behind a single Mutex (`unwrap_or(len-1)`), serializing every
+seam-thread AGC fetch. THE FIX (src/agc_index.rs, committed with this
+increment): every rayon thread keeps its own lazily-initialized slot
+(exactly as before); every NON-rayon OS thread now claims its OWN pool
+lazily, keyed by thread id — decompressors are independent readers of
+immutable files, so which pool serves a fetch never changes the
+bytes.
+
+**THE GATE (byte-identity vs the serial bind on L1 — the bar: the
+L1-fix baseline receipts on disk):**
+
+| run | wall | bind | loci | peak Pss | calls.jsonl | sequences |
+|---|---:|---:|---:|---:|---|---|
+| serial baseline (L1-fix) | 1445s | 1006.6s | 159.6s | 38.2GB | — (the baseline) | — |
+| serial profile re-run | 1450s | 1013.8s | 163.5s | 38.2GB | BYTE-IDENTICAL | — |
+| seam W=16, rayon pinned to 1 | 551s | **110.4s (9.2x)** | 1750.5s | 47.7GB | **BYTE-IDENTICAL** | **BYTE-IDENTICAL** |
+| seam W=16, rayon pool 16 | 419s | **118.1s (8.6x)** | 107.6s (1.5x) | 47.5GB | **BYTE-IDENTICAL** | **BYTE-IDENTICAL** |
+
+Verdict: the bind seam is GATED at both rungs — `calls.jsonl` and the
+sequences sidecar byte-identical to the serial bind; the machinery
+is thread-schedule-independent at the seam too (the span cache's
+union-regrowth LOAD COUNT varies with the schedule — 125,573 and
+100,266 vs the serial 277,796 — but every served crop is a slice of
+the same Sources::fetch answer, so the OUTPUTS are invariant; the
+load counters are stderr diagnostics, and their sums differ from the
+serial run's by construction, receipted here). The two honest
+cautions: (1) the per-thread sub-timers now SUM across threads
+(steps 363.9s + verify 1402.6s over a 110.4s phase) — timer sums are
+no longer walls, only the phase seconds are; (2) THE LOCUS SEAM AT
+RAYON-PINNED-1 IS A MEASURED 10.7x REGRESSION (16 seam threads each
+enqueueing inner scoring par_iter jobs onto the same ONE-worker
+global rayon pool: loci 1750.5s vs 163.5s serial) — the released-pool
+rung (W=16, pool 16) is the receipted shape: loci 107.6s (the inner
+par_iters get the 16-worker pool), bind 118.1s, wall **419s ≈ 7 min
+vs 1450s ≈ 24 min — 3.5x per lane**. The memory cost of the released
+seam: peak Pss 47.5GB vs 38.2GB serial (+9.3GB — the in-flight loads
+and per-thread decompressors), which corrects the lane ceiling at
+this rung to ~21 concurrent lanes at 1TB.
+
+**The per-lane wall after the seam** (L1, the pole lane): inputs
+244.7s / bind 118.1s / rows 23.1s / loci 107.6s / quality+elsewhere+
+derive ~3s — THE NEW POLE IS THE INPUTS PHASE (the global panel's
+own load, 244.7s of 419s = 58%), which is exactly the shared-index
+lever's territory.

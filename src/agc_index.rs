@@ -7,9 +7,22 @@ use std::sync::{Arc, Mutex};
 
 // Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
-    /// Per-thread decompressor pools. Indexed by rayon::current_thread_index().
-    /// Each slot is lazily initialized on first access by opening the AGC files.
-    thread_decompressors: Vec<Mutex<Option<Vec<Decompressor>>>>,
+    /// Per-RAYON-thread decompressor pools. Indexed by
+    /// rayon::current_thread_index(). Each slot is lazily initialized
+    /// on first access by opening the AGC files.
+    rayon_decompressors: Vec<Mutex<Option<Vec<Decompressor>>>>,
+    /// Per-OS-thread decompressor pools for NON-rayon threads (the
+    /// realign-score parallel seams run on scoped std::threads, not
+    /// the rayon pool). Measured disease, the bind-seam profile's own
+    /// pole: the committed code routed EVERY non-rayon thread to the
+    /// ONE fallback slot behind a single Mutex, serializing all
+    /// seam-thread AGC fetches (the parallel bind would have paid the
+    /// serial decompression wall unchanged). Every OS thread now
+    /// claims its OWN pool, lazily, keyed by thread id — decompressors
+    /// are independent readers of immutable files, so which pool
+    /// serves a fetch never changes the bytes returned.
+    other_decompressors:
+        Mutex<FxHashMap<std::thread::ThreadId, Arc<Mutex<Vec<Decompressor>>>>>,
     pub agc_paths: Vec<String>,
     // Maps use Arc<str> for zero-cost sharing (String key for efficient lookup)
     sample_contig_to_agc: FxHashMap<String, usize>,
@@ -21,9 +34,17 @@ impl fmt::Debug for AgcIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgcIndex")
             .field("agc_paths", &self.agc_paths)
-            .field("num_thread_slots", &self.thread_decompressors.len())
+            .field("num_rayon_slots", &self.rayon_decompressors.len())
             .finish_non_exhaustive()
     }
+}
+
+/// The calling thread's decompressor pool: a rayon thread's own
+/// lazily-initialized slot, or a non-rayon (seam) thread's own
+/// per-thread pool.
+enum PoolRef<'a> {
+    Rayon(&'a Mutex<Option<Vec<Decompressor>>>),
+    Other(Arc<Mutex<Vec<Decompressor>>>),
 }
 
 impl AgcIndex {
@@ -119,12 +140,12 @@ impl AgcIndex {
             }
         }
 
-        // Initialize per-thread decompressor slots (+1 for main-thread fallback)
-        let num_slots = rayon::current_num_threads() + 1;
-        let thread_decompressors: Vec<_> = (0..num_slots).map(|_| Mutex::new(None)).collect();
+        // Initialize per-rayon-thread decompressor slots (slot 0 reuses
+        // the metadata decompressors to avoid re-opening AGC files)
+        let num_slots = rayon::current_num_threads();
+        let rayon_decompressors: Vec<_> = (0..num_slots).map(|_| Mutex::new(None)).collect();
 
-        // Reuse the metadata decompressors in thread slot 0 to avoid re-opening AGC files
-        thread_decompressors[0]
+        rayon_decompressors[0]
             .lock()
             .unwrap()
             .replace(saved_decomps);
@@ -134,13 +155,40 @@ impl AgcIndex {
         contig_to_sample_info.shrink_to_fit();
 
         Ok(AgcIndex {
-            thread_decompressors,
+            rayon_decompressors,
+            other_decompressors: Mutex::new(FxHashMap::default()),
             agc_paths: agc_files.to_vec(),
             sample_contig_to_agc,
             contig_to_sample_info,
         })
     }
 
+    /// The calling thread's decompressor pool: rayon threads use
+    /// their own indexed slot (lazily initialized, exactly the
+    /// committed code); every OTHER OS thread claims its OWN pool,
+    /// lazily, keyed by thread id — never the ONE shared fallback
+    /// slot the committed code put every non-rayon thread behind
+    /// (the bind-seam profile's named serialization pole).
+    fn open_decompressors(&self) -> Vec<Decompressor> {
+        self.agc_paths
+            .iter()
+            .map(|path| {
+                Decompressor::open(path, DecompressorConfig { verbosity: 0 })
+                    .unwrap_or_else(|e| panic!("Failed to open AGC '{path}' for thread: {e}"))
+            })
+            .collect()
+    }
+    fn my_pool(&self) -> PoolRef<'_> {
+        if let Some(index) = rayon::current_thread_index() {
+            return PoolRef::Rayon(&self.rayon_decompressors[index]);
+        }
+        let thread_id = std::thread::current().id();
+        let mut map = self.other_decompressors.lock().unwrap();
+        PoolRef::Other(Arc::clone(
+            map.entry(thread_id)
+                .or_insert_with(|| Arc::new(Mutex::new(Vec::new()))),
+        ))
+    }
     fn parse_query(&self, seq_name: &str) -> (String, String, Option<usize>) {
         if let Some((contig, sample)) = seq_name.split_once('@') {
             let agc_idx = self.sample_contig_to_agc.get(seq_name).copied();
@@ -164,26 +212,39 @@ impl AgcIndex {
             )
         })?;
 
-        // Use per-thread decompressors to avoid mutex contention
-        let thread_idx =
-            rayon::current_thread_index().unwrap_or(self.thread_decompressors.len() - 1);
-        let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
-        let decomps = slot.get_or_insert_with(|| {
-            self.agc_paths
-                .iter()
-                .map(|path| {
-                    Decompressor::open(path, DecompressorConfig { verbosity: 0 })
-                        .unwrap_or_else(|e| panic!("Failed to open AGC '{path}' for thread: {e}"))
-                })
-                .collect()
-        });
-        let sequence = decomps[agc_idx]
-            .get_contig_range(&sample, &contig, start as usize, end as usize)
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "Failed to fetch sequence '{contig}@{sample}:{start}-{end}': {e}"
-                ))
-            })?;
+        // Use per-thread decompressors to avoid mutex contention: rayon
+        // threads take their own slot; every non-rayon OS thread claims
+        // its own pool by thread id (the bind seam's scoped std::threads
+        // would otherwise ALL queue on one shared fallback slot).
+        let sequence = match self.my_pool() {
+            PoolRef::Rayon(slot) => {
+                let mut guard = slot.lock().unwrap();
+                let decomps = guard.get_or_insert_with(|| self.open_decompressors());
+                decomps[agc_idx].get_contig_range(
+                    &sample,
+                    &contig,
+                    start as usize,
+                    end as usize,
+                )
+            }
+            PoolRef::Other(pool) => {
+                let mut guard = pool.lock().unwrap();
+                if guard.is_empty() {
+                    *guard = self.open_decompressors();
+                }
+                guard[agc_idx].get_contig_range(
+                    &sample,
+                    &contig,
+                    start as usize,
+                    end as usize,
+                )
+            }
+        }
+        .map_err(|e| {
+            io::Error::other(format!(
+                "Failed to fetch sequence '{contig}@{sample}:{start}-{end}': {e}"
+            ))
+        })?;
 
         // Convert from numeric encoding (0-3) to ASCII (A,C,G,T)
         Ok(sequence
@@ -208,23 +269,23 @@ impl AgcIndex {
             )
         })?;
 
-        let thread_idx =
-            rayon::current_thread_index().unwrap_or(self.thread_decompressors.len() - 1);
-        let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
-        let decomps = slot.get_or_insert_with(|| {
-            self.agc_paths
-                .iter()
-                .map(|path| {
-                    Decompressor::open(path, DecompressorConfig { verbosity: 0 })
-                        .unwrap_or_else(|e| panic!("Failed to open AGC '{path}' for thread: {e}"))
-                })
-                .collect()
-        });
-        let length = decomps[agc_idx]
-            .get_contig_length(&sample, &contig)
-            .map_err(|e| {
-                io::Error::other(format!("Failed to get length for '{contig}@{sample}': {e}"))
-            })?;
+        let length = match self.my_pool() {
+            PoolRef::Rayon(slot) => {
+                let mut guard = slot.lock().unwrap();
+                let decomps = guard.get_or_insert_with(|| self.open_decompressors());
+                decomps[agc_idx].get_contig_length(&sample, &contig)
+            }
+            PoolRef::Other(pool) => {
+                let mut guard = pool.lock().unwrap();
+                if guard.is_empty() {
+                    *guard = self.open_decompressors();
+                }
+                guard[agc_idx].get_contig_length(&sample, &contig)
+            }
+        }
+        .map_err(|e| {
+            io::Error::other(format!("Failed to get length for '{contig}@{sample}': {e}"))
+        })?;
 
         Ok(length)
     }
