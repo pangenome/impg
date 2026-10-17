@@ -1103,7 +1103,7 @@ pub fn run(command: Command) -> io::Result<()> {
         } => genome::with_output_model(&common.out_dir, panel_routes::MODEL, || {
             let identity = genome::PanelIdentity::read(&common.panel)?;
             let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
-            panel_routes::lookup(
+            let mut receipt = panel_routes::lookup(
                 &panel,
                 identity,
                 &census,
@@ -1111,7 +1111,26 @@ pub fn run(command: Command) -> io::Result<()> {
                 read_lengths,
                 &common.out_dir,
                 core_bp,
-            )
+            )?;
+            // THE LEGACY-PANEL OPT-IN RECEIPT (the route graph's own
+            // manifest): the panel's metadata version and the opt-in
+            // state are part of the artifact's provenance — a v1 panel
+            // is admissible ONLY under IMPG_PANEL_LEGACY_V1_OK=1 for
+            // committed-evidence continuity (the graph's identity
+            // checksums bind it to the exact sidecars either way).
+            if let Some(value) = receipt.as_object_mut() {
+                value.insert(
+                    "panel_metadata_version".into(),
+                    serde_json::json!(genome::panel_metadata_version(&common.panel)?),
+                );
+                value.insert(
+                    "panel_legacy_opt_in".into(),
+                    serde_json::json!(
+                        std::env::var("IMPG_PANEL_LEGACY_V1_OK").ok().as_deref() == Some("1")
+                    ),
+                );
+            }
+            Ok(receipt)
         }),
         Command::EvaluatePanelRoutes {
             common,
