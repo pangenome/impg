@@ -1820,3 +1820,73 @@ present); the prep master mid-dispatch chunk (sub 2,294). Assessment-side only; 
 committed projection/shards/receipts immutable; the run uses the SYNG-NATIVE EXPORT
 MAPS (K=63) = EXPORT-PROFILE answers - THE RUNTIME RECEIPT, NOT THE ACCURACY RECEIPT.
 NO PR PUSH (the owner pushes).
+
+## RUNTIME VERIFICATION RIDE CONTINUATION 75 WINDOW CLOSE (09:46Z 2026-10-17) - THE CADENCE PASS 44 RECEIPTED (+24M APPARENT ~4s, CUMULATIVE ~= 180.3G ACROSS 44 IDEMPOTENT PASSES); CENSUS 107/107 HONEST ZERO KILLS SINCE THE SWAP; THE EXCLUSION PROOF A THIRTY-EIGHTH TIME; ZERO NEW FAILS, ZERO HAND KILLS, ZERO MASTERS TOUCHED
+(1) THE REAPER PASS 44 (09:43:49-53Z, ~4s, detached pid 1509137, receipt prep-reaper.log +
+prep-reaper-r75.nohup; bash -n CLEAN + md5 b804a7d366844d27ac58e2e0c8b64802 UNCHANGED
+re-verified at the open): class A 0 (nothing new rejected), class B 24 files 39M +
+syng/export/walks/walkreq markers dropped on 40 cut-awaiting-call (census: pending=104
+cut-awaiting-call=44), class C 0 + export.done/walks.done/walkreq.done markers dropped on
+100 pending (idempotence holding); lean buffer 104 <= 200 - no eviction (the prep valve
+at 160 is the standing bound); freed 24M apparent (prep 93,962 -> 93,938M; df 632G steady
+at the pass). CUMULATIVE SUBSTRATE-REAPER FREED ~= 180.3G apparent across 44 idempotent
+passes (129G ride-32 + the 42 cadence passes since), every cut/call input and every
+split ledger kept throughout.
+(2) THE EXCLUSION PROOF A THIRTY-EIGHTH TIME (SIX-FILE SYNG SIDECAR RULE): the pass's
+in-flight list correctly named the batch-107 cut cohort (T02541/T02722/T03187/T03208) +
+the prep tail lane (T03679, mid-syng ~2h47m, the named syng segdup-tail class) + the 4
+live call lanes (T03912/T04013/T04019/T04063); the batch-107 cohort verified 6/6 syng
+sidecars intact (1gbwt/1khash/meta/names/pstep/spos) + locus.fa KEPT (117-439M); the
+live lanes verified locus.fa 116-319M + reference-axis.json + locality-graphs intact
+(3-24 graphs - the call reads NO syng; call.done 0/4 as expected, in-flight - the
+ride-62 clarification standing); class-B spot-checks (the batch-106 cohort
+T03929/T03967/T03527/T03943, resolved after pass 43): syng sidecars GONE (0/6 each),
+locus.fa 112-219M + the definitional beds KEPT (locus.refined.bed 465-951 rows /
+locus.members.bed 466-952), producer markers dropped (0 present), cut.done present 4/4 -
+the reap exactly where intended.
+(3) THE WIDTH-4 CENSUS: batches post-swap = 107/107 HONEST ALL exit=0, ZERO non-zero,
+ZERO guard kills since the 18:52:42Z swap, re-verified BY TIMESTAMP CUTOFF (epoch
+1792176762 = the swap; 538 batch.exit markers on disk, the pre-swap non-zero are
+campaign history, not the census); batch-107 (cohort T02541/T02722/T03187/T03208,
+dispatched 09:41Z) in flight at close; batch-106's honest receipt restated (473s, peak
+~48-50GB in band per its rss trace); cut.done 2,148 steady - the width-4 pace holding
+(~29-35 territories/h).
+(4) CALLS - ZERO NEW FAILS THIS WINDOW: fail-closed 587 STEADY (the last, T03855
+09:31:04Z guard-137, receipted at the ride-73 close, predates this open); callok 1,517
+steady (the 4 lanes in flight ~72-74m, receipts land at call.done); cut.exit 16; poison
+4 terminal; the lanes ordinary niced but CLIMBING (call.rss traces: T04063 53.4GB @
+~74m the widest, T04013 45.1GB, T04019 38.8GB, T03912 28.0GB - the deep-lane watch
+under the guard-oracle, never kill by hand; T04063 on the T03855-like climb, the guard
+is the oracle); NO deep lanes at guard pressure at close.
+(5) CONTINGENCIES: the 300G hard floor NEVER approached (df band 632G steady, margin
+~332G); guard-oracle held (zero hand kills, zero masters touched); the prep master
+mid-dispatch 64-wide chunk continuing (sub 2,294 steady, the T03679 tail lane alive
+~2h47m on syng - watched, never hand-killed); terminal classes terminal; the ladder NOT
+opened (df << 1,600G, backlog present); the ancient impg-reference benign - NEVER
+KILLED (pids 1846398/1846402 alive, untouched).
+FINAL POLL 09:45:14Z: split 9,891 / acc 5,844 (59.1% final) / sub 2,294 / cut.done
+2,148 / map dirs 85 (batch-107 in flight) / call-terminal 2,124 = callok 1,517 +
+fail-closed 587 + cut.exit 16 + poison 4 = 2,124 of 5,844 (36.3% of accepted) / df 632G
+/ mem 739-773Gib / rvsize 164-165G apparent. MASTERS AT CLOSE: prep 411760 (~1-15:17h,
+mid-dispatch chunk), cuts 3838087 (width-4-direct BATCH_W=4 N_CONCURRENT=1
+RAYON_NUM_THREADS=24 DISK_FLOOR_GB=300, ~14:51h), chunked wave 2810146 (LANES=128
+CHUNK_MULT=2, ~22:46h); heartbeat live. THE STALE RIDE-30/31 ORIENTATION RESTATED (the
+reaper RUN since ride-32, the regen CLOSED ride-35 - not redone). THE SUCCESSOR RESUMES:
+sparse SHORT polls; the width-4 census continuation (batch-107 in flight); the JIT
+reaper cadence; the deep-lane watch (T04063 the one to watch - never kill by hand); the
+300G hard floor (self-gates; DO NOT lower without the owner); the ladder only at backlog
+drained AND df >= 1,600G (cuts master MID-WAIT only, by exact pid, never the wave, never
+with marathons in flight; C=4 -> C=6 the flock ceiling, never RAM); poison-first on prep
+stalls; AT CAMPAIGN CLOSE (all 5,844 accepted terminal): rv-rollup.py -> FILL
+datasheet-runtime.md (the standing close list + the width-4-direct delta + the
+inventory finding + the JIT-prep rule + THE REAPER RECEIPTS: ~180.3G cumulative freed
+classes A/B/C across 44 idempotent passes, the walkreq marker-gap finding + fix, the
+~22s regen measurement, the T03194 full-chain re-entry/call receipt, the syng
+segdup-tail class's 4 CONFIRMED members + the T03679 live member, the mid-dispatch
+valve patch's live proof, the guard-oracle receipts incl. T03641 11,084s/71.1GB
+deepest-lane + the named guard-137 points T00129/T04052/T01895/T03855 + rides 55/56's
+clusters + the ride-69 consumption-burst receipt) -> the record's closing increment ->
+the commit. SCOPE STANDING: the run uses the SYNG-NATIVE EXPORT MAPS (c-rider
+locality-maps-export, K=63) = EXPORT-PROFILE answers - THE RUNTIME RECEIPT, NOT THE
+ACCURACY RECEIPT. Assessment-side only; the committed projection/shards/receipts
+immutable. NO PR PUSH (the owner pushes).
