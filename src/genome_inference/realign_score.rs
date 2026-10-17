@@ -3806,19 +3806,24 @@ pub fn run(options: Options) -> io::Result<()> {
             source: usize,
             start: u64,
             end: u64,
-        ) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        ) -> io::Result<(u64, std::sync::Arc<Vec<u8>>)> {
             // The GLOBAL-frame policy: the cached span grows by union
             // to cover the requested crop; a covering span serves the
             // crop as a slice (the same bytes the direct fetch
             // returns). One lane's span converges to its touched
             // envelope in a handful of loads (the growth is monotone
             // and every crop is served between loads from the span).
+            // The span's OWN [lo, hi) bounds are returned WITH it: the
+            // span is span-RELATIVE memory (a span grown from lo > 0
+            // is not addressable by absolute path coordinates — the
+            // fetch below slices at (start - lo), and a covered crop
+            // equals the direct fetch exactly).
             let started = Instant::now();
             let mut slot = self.seqs[source].lock().unwrap();
             let len = self.lane_lengths[source];
             if let Some((lo, hi, seq)) = slot.as_ref() {
                 if *lo <= start && end <= *hi {
-                    return Ok(std::sync::Arc::clone(seq));
+                    return Ok((*lo, std::sync::Arc::clone(seq)));
                 }
                 let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
                 let grown = std::sync::Arc::new(self.sources.fetch(source, new_lo, new_hi)?);
@@ -3827,7 +3832,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 self.nanos
                     .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 *slot = Some((new_lo, new_hi, std::sync::Arc::clone(&grown)));
-                return Ok(grown);
+                return Ok((new_lo, grown));
             }
             let seq = std::sync::Arc::new(self.sources.fetch(source, start, end.min(len))?);
             self.loads.fetch_add(1, Ordering::Relaxed);
@@ -3835,7 +3840,7 @@ pub fn run(options: Options) -> io::Result<()> {
             self.nanos
                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
             *slot = Some((start, end.min(len), std::sync::Arc::clone(&seq)));
-            Ok(seq)
+            Ok((start, seq))
         }
         fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
             // The Sources::fetch contract, mirrored exactly.
@@ -3851,9 +3856,9 @@ pub fn run(options: Options) -> io::Result<()> {
                 let hi = end as usize;
                 return Ok(lane[lo..hi].to_vec());
             }
-            let span = self.span(source, start, end)?;
-            let lo = start as usize;
-            let hi = end as usize;
+            let (span_lo, span) = self.span(source, start, end)?;
+            let lo = (start - span_lo) as usize;
+            let hi = (end - span_lo) as usize;
             Ok(span[lo..hi].to_vec())
         }
     }
@@ -4221,20 +4226,53 @@ pub fn run(options: Options) -> io::Result<()> {
     // documented construction: two haploid homologs).
     let mut strain_totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let elsewhere_started = Instant::now();
-    for (name, &len) in panel
-        .name_map
-        .path_to_name
-        .iter()
-        .zip(panel.name_map.path_to_length.iter())
-    {
-        let haplotype: String = name
-            .splitn(3, '#')
-        .take(2)
-            .collect::<Vec<_>>()
-            .join("#");
-        let entry = strain_totals.entry(haplotype).or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += len;
+    // THE GLOBAL-FRAME RECORD CONTEXT (the first L1 gate's named
+    // divergence class, fixed by the supervisor ruling): the committed
+    // local panel IS the territory's member record set — its name map
+    // iterates exactly the ~251kb `path:start-end` slices, so the
+    // committed E is measured at the TERRITORY'S RECORD context. The
+    // global panel's name map iterates whole chromosomes (mean haploid
+    // ~3.01 Gbp over the same strain families) — a DIFFERENT model
+    // quantity: the first L1 gate receipted E -14.418156 (local, 251150.0
+    // bp mean haploid) vs -23.810253 (global name map, 3011203926.4 bp)
+    // — a uniform -9.392 per-component additive shift, QUAL-inflating
+    // at 12+ loci. Under --global-frame the branch is therefore
+    // computed at the SAME RECORD CONTEXT as the committed path: the
+    // territory's own record statements (the frame table's records
+    // enumeration — the frame-invariant extents `end - start`, grouped
+    // by the same haplotype rule), reproducing the committed model
+    // quantity exactly. The whole-chromosome context remains the
+    // global-frame-NATIVE profile — arguably the more truthful
+    // universe (the 251kb slices were the materialization-era
+    // artifact) — named in the design doc as the OWNER's product
+    // decision, never switched silently.
+    if let Some(frame) = territory_frame.as_ref() {
+        for (path, start, end) in frame.records() {
+            let haplotype: String = path
+                .splitn(3, '#')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("#");
+            let entry = strain_totals.entry(haplotype).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += end - start;
+        }
+    } else {
+        for (name, &len) in panel
+            .name_map
+            .path_to_name
+            .iter()
+            .zip(panel.name_map.path_to_length.iter())
+        {
+            let haplotype: String = name
+                .splitn(3, '#')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("#");
+            let entry = strain_totals.entry(haplotype).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += len;
+        }
     }
     ensure(!strain_totals.is_empty(), "the panel has no paths")?;
     let panel_mean_haploid_bp: f64 = strain_totals
@@ -4251,8 +4289,15 @@ pub fn run(options: Options) -> io::Result<()> {
     eprintln!(
         "[score] elsewhere branch: E = {elsewhere:.6} \
          (panel strains {}, mean haploid {panel_mean_haploid_bp:.1} bp, \
-         diploid {genome_diploid_bp:.1} bp)",
+         diploid {genome_diploid_bp:.1} bp{})",
         strain_totals.len(),
+        if territory_frame.is_some() {
+            "; the territory's RECORD context (the committed local panel's \
+             own record set; the global panel's whole-chromosome context is \
+             the named native-profile alternative)"
+        } else {
+            ""
+        },
     );
     eprintln!(
         "[score] phase elsewhere: E derivation over {} haplotype sets \

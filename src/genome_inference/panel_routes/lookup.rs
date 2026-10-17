@@ -167,7 +167,7 @@ pub fn lookup(
     // receipt. Serves the whole-panel routes inventory (lever 1)
     // and the shared-index cut lanes (lever 2) alike.)
     let mut total_source_bp = 0u64;
-    for &(id, ref name, length) in &lanes {
+    for &(_id, ref _name, length) in &lanes {
         add(&mut total_source_bp, length)?;
     }
     let graph_lanes: Vec<Lane> = lanes

@@ -586,3 +586,77 @@ shape at the cut's territory index build).
 
 ## 10.3 The gates' receipts (the byte-identity cmps, lane scaling,
 and the 20-minute budget restatement — landing as they run)
+
+**THE FIRST L1 GATE (the span-scoped LaneCache bug + the ELSEWHERE
+FINDING — the headline).** The first complete global-panel call
+(the parallel routes inventory, the L1 d=1 cut, run-global-call.sh L1;
+wall 1489s solo: inputs 238.2s + binding 1047.7s single-threaded +
+loci 162.1s; 1,475,421 AGC fetches / 358.9 MB; peak RSS 39.0GB)
+needed one engine fix to complete at all and then RECEIPTED THE DIVERGENCE THE GATES EXIST TO DECIDE:
+
+1. **The span-scoped LaneCache mis-slice (fixed, committed with this
+increment):** d843da1's span-scoped fetch sliced the union-grown
+span with ABSOLUTE path coordinates instead of span-relative ones —
+the first non-zero-start span fetch panicked ('range start index
+4764432 out of range for slice of length 426'); the covered-span
+branch would have served wrong-offset bytes silently had the fresh
+fetch not panicked first (the mini-panel proof never saw it: its
+spans start at 0). The fix returns the span's OWN [lo,hi) bounds
+with it and slices at start−lo; every served crop is a slice of the
+same Sources::fetch answer, exactly as the policy's own contract
+states.
+2. **THE ELSEWHERE BRANCH IS PATH-LENGTH-CARRIED (the named structural
+divergence, fixed by the supervisor ruling):** the committed local
+panel IS the territory's member record set — its name map iterates
+exactly the ~251kb `path:start-end` slices, so the committed E is
+measured at the TERRITORY'S RECORD context (L1: E −14.418156, 466
+strains, mean haploid 251,150.0 bp). The global panel's name map
+iterates WHOLE CHROMOSOMES (mean haploid 3,011,203,926.4 bp over the
+same 466 strain families) — a different model quantity: the first
+gate receipted E −23.810253, a uniform −9.392 per-component additive
+shift, QUAL-inflating at 12+ loci (mean Δqual +14,222, max
++161,986), and 8 called-fold-material flips. THE FIX (the ruling's
+principled form, not a tuning constant): under --global-frame the
+elsewhere branch is computed at the SAME RECORD CONTEXT as the
+committed path — the territory's own record statements (the frame
+table's `records()` enumeration, the frame-invariant extents
+`end−start`, grouped by the same haplotype rule; verified pre-impl:
+466 distinct records / 466 strains, mean 251,150.049 ≡ the committed
+251,150.0; the per-window-crop alternative — the maps' 11,649 member
+rows — measures 250,752.58 and is NOT the committed context). THE
+RECEIPT: the fixed L1 call prints E = −14.418156, mean haploid
+251,150.0 bp — the committed quantity reproduced EXACTLY; the
+elsewhere_log_prob field is now IDENTICAL at every locus. THE
+HONEST ALTERNATIVE (named for the owner, never switched silently):
+the whole-chromosome context is arguably the MORE TRUTHFUL universe
+— the 251kb slices were the materialization-era artifact — a
+global-frame-NATIVE answer profile with the −9.392 shift named; a
+new native profile is the OWNER's product decision, not ours.
+
+**THE L1-FIX GATE (the bar: byte-identity vs cut-L1-cli; verdict:
+DELTA, measured per-field, the remainder NAMED).** With the record
+context in place: **3/25 loci FULLY IDENTICAL** (byte-equal call
+records), 22/25 differ. The remaining divergence is exactly the two
+named §6 risk classes, now measured:
+
+- the census read-mass margin (§6 risk #2, the §10.1-known open
+  question: the global census keeps 2.8x the reads — reads_kept
+  304,793 vs 108,230): record_count/unit_count at 19/25 loci,
+  best_log_likelihood at 22, alternative_log_gap at 20, qual at 20
+  (marginal — mean Δqual dominated by 6 loci with |Δ|>0.5, max
+  +33,630; the other 19 sit within ±0.21);
+- the record-edge superset expressibility class (§6 risk #1: +2.2%
+  identity anchors, +2.0% territory entries): class_count at 12/25,
+  qual_alternative_fold_pairs at 9, called_classes/diplotype at 8,
+  and the CALLED FOLD MATERIAL at **5/25 loci (2, 11, 13, 18, 22)**
+  — the product-level divergence; 20/25 loci call the same fold
+  material (id-identical or superset-renumbered).
+
+Per the ruling: measured, named, and STOPPED — no further tuning;
+the §9 precedent (a 13% census margin with byte-identical calls) is
+NOT confirmed at L1's 2.8x margin: the census margin moves the
+QUAL spectrum and flips 5 loci' fold material. The stale pre-fix
+N=2 wave (L2-n2/L3-n2, walls 524s/451s, both DELTA) ran the
+pre-fix binary and is superseded; its walls are warm-cache shapes,
+not the scaling receipt.
+

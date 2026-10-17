@@ -167,6 +167,25 @@ impl TerritoryFrame {
         self.records.values().map(|intervals| intervals.len()).sum()
     }
 
+    /// The territory's own record statements, as the table holds them:
+    /// (the global panel path name, the header start, the header end).
+    /// THE RECORD CONTEXT enumeration — the committed local panel's
+    /// name map is this same record set (the ~251kb `path:start-end`
+    /// slices, each length `end - start`); the global panel's name map
+    /// is NOT (whole chromosomes), so any model quantity the committed
+    /// path measured over the local panel's name map must, under the
+    /// global frame, be measured over THIS enumeration instead —
+    /// the frame-invariant record context (the elsewhere branch's
+    /// per-strain haploid sizes; the lengths are origin-independent:
+    /// `d` shifts the interval, never its length).
+    pub fn records(&self) -> impl Iterator<Item = (&str, u64, u64)> + '_ {
+        self.records.iter().flat_map(|(path, intervals)| {
+            intervals
+                .iter()
+                .map(move |&(lo, hi)| (path.as_str(), lo, hi))
+        })
+    }
+
     /// The global panel path name of a local record name.
     pub fn global_name(&self, local_name: &str) -> io::Result<String> {
         Ok(split_local_name(local_name)?.0.to_string())
