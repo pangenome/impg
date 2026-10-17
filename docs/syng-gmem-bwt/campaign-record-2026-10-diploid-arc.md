@@ -1890,3 +1890,26 @@ the commit. SCOPE STANDING: the run uses the SYNG-NATIVE EXPORT MAPS (c-rider
 locality-maps-export, K=63) = EXPORT-PROFILE answers - THE RUNTIME RECEIPT, NOT THE
 ACCURACY RECEIPT. Assessment-side only; the committed projection/shards/receipts
 immutable. NO PR PUSH (the owner pushes).
+
+## RUNTIME VERIFICATION RIDE CONTINUATION 76 SESSION-OPEN (09:48Z 2026-10-17)
+THE WIDTH-4 RIDE CONTINUES. Live at 09:46:42Z (poll-once): split 9,891 / acc 5,844
+(59.1% final) / sub 2,294 / map dirs 84 (batch-107 in flight, cut pid ~46GB niced
+mid-scan) / callok 1,518 + fail-closed 587 (the bind ambiguities + the guard-137
+call-tail class T00129/T04052/T01895/T03855) + cut.exit 16 + poison 4 = 2,125
+terminals of 5,844 (36.3%) / df 633G (the 300G hard floor never approached, margin
+~333G) / mem 766Gib / rvsize 164G apparent. Reaper verified at the open: bash -n
+CLEAN, md5 b804a7d366844d27ac58e2e0c8b64802 UNCHANGED (mtime Oct 16 20:13). THE
+ORIENTATION STANDING (rides 38-76): the ride-30/31 "reaper written not run" prompt
+is STALE - the substrate reaper has RUN since ride-32 (129G first pass; cumulative
+~= 180.3G across 44 idempotent passes) and THE REGEN RECEIPT IS CLOSED (ride-35:
+the ~22s on-demand regen measurement, the T03194 full-chain
+evict->rebuild->cut/call re-entry receipt, beds + ledgers kept) - a fresh eviction
+of a pending territory would only delete cut/call inputs the live campaign still
+needs; NOT redone this window. The T03679 syng segdup-tail lane watched (2h42m
+mid-syng, never hand-killed); the deep-lane watch T04063 54.9GB @ 1h09m climbing
+(the guard is the oracle, never hand-kill); the ancient impg-reference benign -
+pids 1846398/1846402 alive, untouched; the ladder NOT opened (df << 1,600G,
+backlog present); the prep master mid-dispatch chunk (sub 2,294). Assessment-side
+only; the committed projection/shards/receipts immutable; the run uses the
+SYNG-NATIVE EXPORT MAPS (K=63) = EXPORT-PROFILE answers - THE RUNTIME RECEIPT,
+NOT THE ACCURACY RECEIPT. NO PR PUSH (the owner pushes).
