@@ -1457,26 +1457,11 @@ fn scan_shard_file(
         )>> = decoded
             .par_iter()
             .map(|read| {
-                if mode == RemapMode::GlobalFrame {
-                    // THE GLOBAL FRAME (lever 1): the projection's records
-                    // are already panel-frame — kept VERBATIM (tokens
-                    // and own walk untouched); the territory touch is
-                    // computed on the record's own canonical-token
-                    // nodes (the same node set the own walk carries).
-                    let out: Vec<Option<(Vec<u64>, OwnWalk, bool)>> = read
-                        .records
-                        .iter()
-                        .map(|(tokens, walk)| {
-                            let touch = decode_tokens(tokens)?
-                                .iter()
-                                .any(|&(node, _)| {
-                                    territory_nodes_abs.contains(&node.unsigned_abs())
-                                });
-                            Ok(Some((tokens.clone(), walk.clone(), touch)))
-                        })
-                        .collect::<io::Result<_>>()?;
-                    return Ok((out, !read.records.is_empty()));
-                }
+                // (THE GLOBAL FRAME runs this same committed remap flow
+                // with the IDENTITY node map over the territory's own
+                // canonical anchors — the expressibility rule is the
+                // node map's real role, preserved in the panel's own
+                // frame; the tokens and walks come out verbatim.)
                 if mode == RemapMode::LocalDerive {
                     // the global routing signal: any globally-mappable node
                     let routed = read.records.iter().any(|(_, walk)| {
@@ -1517,7 +1502,7 @@ fn scan_shard_file(
             .collect();
         for (read, result) in decoded.into_iter().zip(remapped) {
             let (records, routed_flag) = result?;
-            if mode == RemapMode::LocalDerive || mode == RemapMode::GlobalFrame {
+            if mode == RemapMode::LocalDerive {
                 cut.records_scanned += read.records.len() as u64;
                 if routed_flag {
                     cut.reads_routed += 1;
@@ -1537,7 +1522,7 @@ fn scan_shard_file(
                         cut.records_unmappable += 1;
                     }
                     Some((tokens, walk, touch)) => {
-                        if mode != RemapMode::LocalDerive && mode != RemapMode::GlobalFrame {
+                        if mode != RemapMode::LocalDerive {
                             cut.records_mappable += 1;
                         }
                         if *touch {
@@ -1990,10 +1975,13 @@ fn run_cut(
                     if lo >= hi {
                         return Ok(Vec::new());
                     }
-                    // fetch(A, B) returns the 0-based [A-1, B-1) slice
-                    // (the AGC-verified convention above).
+                    // fetch(A, B) IS the 0-based [A, B) slice (the
+                    // frame-offset probe's receipt: the canonical walk
+                    // of fetch(s, s+len) aligns EXACTLY with the
+                    // panel's own walk steps — 82/82 anchors — while
+                    // the shifted candidates are off-by-one, 83/83).
                     Ok(agc_ref
-                        .fetch_sequence(name, (lo + 1) as i32, (hi + 1) as i32)
+                        .fetch_sequence(name, lo as i32, hi as i32)
                         .map_err(|e| invalid(format!("AGC fetch {name}: {e}")))?)
                 };
             territory = build_territory_index(&global, &universe_global, &fetch_lane, k)?;
@@ -2011,9 +1999,57 @@ fn run_cut(
             // frame: the translated component's contig suffix.
             component_contig_source =
                 territory_frame::split_local_name(component)?.0.to_string();
+            // THE EXPRESSIBILITY MAP (the node map's real role, in the
+            // panel's own frame): the committed local cut's node map is
+            // not merely an id conversion — it is the EVIDENCE FILTER
+            // (a record survives iff EVERY anchor is one of the
+            // substrate's own canonical anchors: the slice-context
+            // canonical walk; the read-edge qualification class is
+            // dropped by construction). The global frame derives the
+            // SAME set from the global panel's own grid: the canonical
+            // anchor walk of each record's content — fetched from the
+            // AGC at the record's own header interval (the verified
+            // delta convention; a fetch of the wrong length under
+            // every candidate offset fails closed) — and remaps every
+            // node to ITSELF. The projection's records then ride the
+            // committed remap flow unchanged: the expressible ones
+            // verbatim, the rest dropped exactly as the strict local
+            // cut drops them.
+            let mut expressibility_pairs = 0usize;
+            let mut record_names: BTreeSet<&str> = BTreeSet::new();
+            for row in &universe {
+                record_names.insert(row.path_name.as_str());
+            }
+            for header in &record_names {
+                let (global_name, start, end) = parse_locus_header(header)?;
+                let length = (end - start) as usize;
+                let content = agc
+                    .fetch_sequence(&global_name, start as i32, (start + length as u64) as i32)
+                    .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
+                ensure(
+                    content.len() == length,
+                    &format!("record {header} fetch length {} != {length}", content.len()),
+                )?;
+                let walk = mem_records::canonical_anchor_walk(&global, &content)?;
+                for &(node, _position) in &walk {
+                    match node_map.entry(node) {
+                        std::collections::hash_map::Entry::Occupied(o) => {
+                            ensure(*o.get() == node, "conflicting identity entry")?;
+                        }
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(node);
+                            expressibility_pairs += 1;
+                        }
+                    }
+                }
+            }
+            node_map_pairs = expressibility_pairs;
             eprintln!(
-                "[cut] global frame: no node map (the projection's records \
-                 are kept verbatim); component contig {component_contig_source}"
+                "[cut] global frame: the identity expressibility map over \
+                 {} records: {} canonical anchors; component contig {}",
+                record_names.len(),
+                expressibility_pairs,
+                component_contig_source
             );
         }
     }
@@ -2038,8 +2074,9 @@ fn run_cut(
     // records are already panel-frame — nothing to remap or re-derive.
     let mode = if frame == CutFrame::Global {
         eprintln!(
-            "[cut] global frame: the projection's records kept verbatim \
-             (no remap, no re-derivation; the census/cache are global-frame)"
+            "[cut] global frame: the committed remap flow over the IDENTITY \
+             expressibility map (the territory's own canonical anchors, \
+             derived from the global panel; the census/cache are global-frame)"
         );
         RemapMode::GlobalFrame
     } else if std::env::var("IMPG_CUT_LOCAL_DERIVE").ok().as_deref() == Some("1") {

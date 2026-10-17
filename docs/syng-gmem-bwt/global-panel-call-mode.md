@@ -105,14 +105,34 @@ index against the GLOBAL panel over the translated rows — the per-row
 slices for the reverse-frame extraction are fetched from the AGC by
 coordinate (the same bytes the locus.fa extraction produced, by the
 cut's own AGC-identity receipt: delta=1 uniform across 466-467
-records, the committed offset convention); (4) scan the shards keeping
-reads whose records touch the territory's node set — the projection's
-own global records, verbatim, no remap, no re-derivation; (5) route
-every touching pattern through the unchanged committed routing
-machinery against the global-frame territory index. The emitted
+records, the committed offset convention); (4) derive the IDENTITY
+EXPRESSIBILITY MAP — the canonical anchor walk of each record's own
+content (fetched from the AGC at the record's header interval)
+against the global panel's grid, every node mapping to itself; (5)
+scan the shards through the committed remap flow over that map: a
+record survives iff every anchor is one of the substrate's own
+canonical anchors — exactly the strict local cut's evidence rule
+(the node map's real role is the EXPRESSIBILITY FILTER, not the id
+conversion; the read-edge qualification class is dropped by
+construction either way), the survivors verbatim; (6) route every
+touching pattern through the unchanged committed routing machinery
+against the global-frame territory index. The emitted
 census/cache/reads are in the GLOBAL frame: occurrence path ids are
 global panel path ids, canonical tokens are global node ids, own
 walks are the projection's own.
+
+**The measurement that forced the expressibility rule** (the honest
+course-correction, receipted): the first global-frame cut kept the
+projection's records with NO expressibility filter and produced a
+census 8.5x fatter than the committed one (reads_kept 891,230 vs
+108,230; census_mult 976,657 vs 115,012 at L1; the fat dominated by
+single-anchor high-multiplicity patterns concentrated in repeat
+windows) — the read-edge qualification class: a short record's
+syncmer qualification is computed on the READ's truncated windows,
+so the committed slice-context rule drops almost all of them. The
+call would have consumed a different evidence set, not a converted
+one — the conversion principle requires the committed filter, restated
+in the panel's own frame.
 
 **CALL** (`genome-infer call-region`) gains `--global-panel <prefix>`
 + `--global-routes <dir>`: when set, every selected partition is
@@ -290,7 +310,102 @@ break byte-identity, each measured by the gate, never hidden:
   call → `cmp` against the committed `$PROJ/cut-L*-cli/calls.jsonl`).
 - [ ] Measurements + budget restatement (§10).
 
-## 10. The measured receipts (updated as the gates land)
+## 10. The measured receipts (the state at this increment)
 
-(to be filled by the measurement passes; every number a wall or a
-  byte-identity verdict, no extrapolation unlabeled)
+**The L1 global-frame cut** (the three-step regenerated window beds,
+the committed 35x projection shards, 64 rayon threads, the box shared
+with the live campaign):
+
+| | committed local cut-L1 | global-frame cut (attempt 2) |
+|---|---:|---:|
+| wall | 606s | 533s (attempt 1, no filter: 674s) |
+| load pole | 205s (local syng + node map + AGC verify) | 325s (the ONE global panel load; NO node map, NO locus.fa, NO AGC-identity walk pairing) |
+| territory rows | 11,649 | 11,649 (the translation is exact on rows) |
+| territory entries | 2,696,729 | 2,751,623 (+2.0% — the global grid's superset class at row edges) |
+| expressibility anchors | 13,130 (node_map pairs) | 13,418 (the identity map; +2.2% — the record-edge class) |
+| peak RSS | 38.0GB | 69.3GB (the +15GB panel; above the campaign's 64GiB per-process guard — the batch shape must carry it, or the gbwt-free load must land first) |
+
+**The two course-corrections the measurements forced** (each receipted,
+none hidden):
+
+1. **The expressibility rule** (attempt 1 -> 2): keeping the
+   projection's records with NO filter produced a census 8.5x fatter
+   than the committed one (reads_kept 891,230 vs 108,230; census_mult
+   976,657 vs 115,012) — dominated by single-anchor high-multiplicity
+   patterns (the read-edge qualification class: a short record's
+   syncmer qualification is computed on the READ's truncated windows).
+   The committed node map's real role is the EXPRESSIBILITY FILTER;
+   the global frame now derives the same set from the global panel's
+   own grid (the identity map over the territory records' canonical
+   anchors) and rides the committed remap flow.
+2. **The AGC fetch convention** (attempt 2 -> 3): the frame-offset
+   probe (examples/frame_offset_probe.rs, over the committed record
+   HG002#1#chr1:4632437-4883593) proved the library fetch is
+   0-BASED HALF-OPEN: the canonical anchor walk of fetch(s, s+len)
+   aligns EXACTLY with the panel's own walk steps (82/82 anchors),
+   while the shifted candidates are off-by-one (83/83). Attempt 2's
+   +1-late reverse-arm steps corrupted the territory index (78% of
+   CHM13 occurrence placements +1 vs the committed census; 1,848
+   touching patterns dropped at routing). The committed local cut's
+   "delta=1" receipt was the LOCUS.FA extraction convention (the
+   substrate records are one base later than their headers), not the
+   fetch convention — the global frame, reading the panel and the AGC
+   directly, is freed of both.
+
+**The identity gate: OPEN.** The attempt-3 census correspondence check
+(the physical occurrence comparison, frame-independent) is the next
+gate step; then the whole-panel routes inventory (derive-routes over
+the global panel + AGC, once, panel-side), then the global-panel call
+(recipe: run-gate-L1.sh in the work directory), then `cmp` against
+$PROJ/cut-L1-cli/calls.jsonl. The named residual risks after the
+convention fix: the expressibility superset (+2.2% anchors), the
+territory-entry superset (+2.0%), and the record-edge anchor band —
+each measurable at the census and the call.
+
+**Attempt 3's receipts** (after the convention fix): routed 3,775 of
+3,797 touching patterns (99.4% — the routing-drop class collapsed
+from 1,848 to 22), wall 558.9s, reads_kept 304,793, census_mult
+384,056. The physical-occurrence probe still shows a −1 delta vs the
+committed local census — now UNDERSTOOD and it is NOT a bug: the
+committed substrates' locus.fa content sits ONE BASE LATER than the
+record headers (the delta=1 AGC-identity receipt, uniform across 933
+records of both substrate classes: L1 466, T00000 467), so the
+substrate frame's origin is s+1, while the global census sits at the
+panel's TRUE positions. The committed call never needed the absolute
+truth (a closed frame); the global-frame call DOES — the cut and the
+call must translate by the SAME per-record content origin, and the
+emission's back-translation cancels it exactly.
+
+**The resume point** (the exact next steps, nothing else outstanding):
+0. THE CONTENT-ORIGIN PARAMETER (the one implementation step that
+   remains before the gate can run): the substrates' extraction
+   convention is carried by their locus.fa, which the global frame
+   deletes by design — so it must be stated as the cut/call's
+   `--record-origin <d>` parameter (default 0 = the header's own
+   interval; the committed substrates: d=1, per the delta=1 receipts —
+   a convention restated from the receipts, not tuned). The cut
+   applies it to the universe-row translation + the expressibility
+   content fetch; the call applies it to the map translation (the
+   frame table's origins = s + d); the emission's back-translation is
+   origin-independent (it cancels). With d=1 the cut's territory, the
+   call's folds, and the census occurrences all sit at the substrate's
+   TRUE content, reproducing the committed grid exactly.
+1. Re-run the L1 cut with --record-origin 1 (~9min) and re-run the
+   occurrence-delta probe (the −1 class must collapse to exact
+   matches against the committed census translated at s+1).
+2. `impg genome-infer derive-routes --panel <global syng> --sources
+   <panel AGC> --read-lengths 148 --census <the attempt-3 cut census>
+   --out-dir <work>/global-routes` (~30min panel-side, once).
+3. The L1 global-panel call via run-gate-L1.sh stage B (~5min incl.
+   the panel load), then the byte-identity `cmp` (stage C).
+4. On a pass: extend to L2-L4 (each needs a fresh partition step for
+   its regenerated window beds, then the global cut ~9-11min each,
+   then the call), then the lane-scaling measurement (N concurrent
+   call processes against the shared index, N=1..4 over L1-L4), then
+   the 20-minute budget restatement with levers 2 and 4's remaining
+   share.
+5. On a fail: receipt the per-locus delta honestly (the named
+   structural candidates are all edge-band classes; the §9
+   three-step precedent — a 13% census margin with byte-identical
+   calls — is the prior, not the proof).
+## 10. The measured receipts (updated as the gates land)
