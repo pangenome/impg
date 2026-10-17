@@ -496,4 +496,61 @@ panel-call-mode):
    corrected.
 5. Restate the 20-min budget from the receipts; write §10 fully;
    commit per gate, explicit paths only; NO PR PUSH.
-## 10. The measured receipts (updated as the gates land)
+## 10.2 The gate-preparation increment's receipts (duties 1-3's
+measured state; the gates' own receipts land in §10.3 as they run)
+
+**The L4 d=1 global cut** (the last of the four committed-substrate
+cuts; `run-global-cut.sh L4 global-cut-L4-d1`, the $WORK/partitions/L4
+beds, exit 0): wall **554.2s**, routed **3,698/3,712** touching
+patterns, reads_kept 240,407, census_mult 275,405, territory rows
+11,610 / entries 2,931,539, load pole 324.6s, peak RSS **72.6GB** (the
+same +15GB panel class as L1-L3; the cut path runs unguarded — the
+batch shape carries it, per §4). The four-cut table (§10.1) now
+reads: L1 563.4s / L2 542.5s / L3 504.2s / L4 554.2s / pilot d=0
+485.0s.
+
+**THE MEASURED SERIAL ROUTES WALL — the §10.1 "~30min panel-side,
+once" estimate is WRONG by ~15x, and the correction is a lever in its
+own right.** The whole-panel derive-routes (in flight, started
+15:46Z Oct 17) passed its panel load and is in the per-lane source
+hash: `panel_routes::lookup` computes each lane's `sequence_fnv1a64`
+by reading the lane's FULL source bytes through the AGC
+(core_bp=65536 crops), SERIALLY, one core at 100% — a linear pass
+over the whole **1.403 Tbp / 38,790-lane** panel at a steady **~55
+Mbp/s** (measured over the per-lane `source-ports/{id}.bin` creation
+timestamps: ~500 lanes / 7.3 min, steady from lane 500 through lane
+2200; ~6.1% of the panel bp at 16:25Z). Projected completion from
+the 15:46Z start: **~23:30Z — a ~7.5h panel-side wall.** The run
+STAYS ALIVE (setsid; supervisor-ratified): it is now the free
+full-panel SERIAL byte-identity receipt generator — its graph.json
+is the cmp target for the parallel artifact below.
+
+**THE PILOT'S COMMITTED-PATH BASELINE: NO BASELINE EXISTS, BY PRIOR
+RECEIPT — the §10.1 rerun recipe cannot produce one.** Rerunning
+`run-smoke-cli-cut.sh` with the substitute routes
+(`writeup-codification/substrate-pilot/routes`, the v2 rebuild built
+over the same smoke-cut-pilot census; manifest verified) fails at
+the CLI bind: `census occurrence start has no panel step` (exit 1,
+wall 7s; receipts `smoke-cli-cut-v2routes.*` in hg002-projection).
+This is NOT the reaped-routes issue the §10.1 resume point assumed:
+the substitute routes loaded fine — the failure is the census-panel
+bind, and it is the ALREADY-RECEIPTED fragmentary-record class
+(d1cc84c: "the smoke-cut census is the autopsy's named
+fragmentary-record bind rejection"; `scripts/reproduce-
+writeup-receipts.sh` routes the pilot chain over the corrected cut3
+census instead — and the cut3-based chain-pilot leg itself failed
+fail-closed at census record 7479, the named 2-of-4 key ambiguity,
+its manifest receipts status "failed"). So the smoke-shard cut
+census is NOT a callable committed-path input in EITHER frame's
+terms, and no committed-path baseline calls.jsonl exists to cmp
+against. THE HONEST PILOT GATE FORM (supervisor-ratified): run the
+global-frame pilot call over global-cut-pilot-d0; `cmp` against
+`hg002-locus-pilot/cli-product-hap1-alignfold/calls.jsonl` — the
+on-disk committed receipt, A DIFFERENT EVIDENCE CHAIN (the
+`cosine-multi-census-hap1` derive-cache census, not a cut census;
+named as such in the receipt) — with the delta receipted per-field
+honestly as the evidence-set margin (the cut-L1.calls-diff.txt
+precedent), and the committed-path bind failure carried verbatim.
+
+## 10.3 The gates' receipts (the byte-identity cmps, lane scaling,
+and the 20-minute budget restatement — landing as they run)
