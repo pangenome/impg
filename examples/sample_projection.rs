@@ -44,7 +44,7 @@
 
 use clap::Parser;
 use impg::agc_index::AgcIndex;
-use impg::genome_inference::mem_records;
+use impg::genome_inference::{mem_records, territory_frame};
 use impg::sample_mem_bwt::{canonical, encode_walk};
 use impg::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
@@ -166,14 +166,29 @@ enum Mode {
         #[arg(long, default_value_t = 32)]
         partitions: usize,
     },
-    /// One locality's cut of the projected evidence.
+    /// One locality's cut of the projected evidence. The committed
+    /// frame (default) is LOCAL: --panel names the locality's own
+    /// syng and --sources its locus.fa, and the cut converts the
+    /// projection's global records into the locality's node space
+    /// (the node map). --frame global (the campaign's lever 1, the
+    /// global-panel call mode) binds the cut to the ONE global panel
+    /// alone: no --panel, no --sources — the universe rows translate
+    /// to the global frame by their own record headers, the per-row
+    /// slices come from the AGC by coordinate, and the projection's
+    /// records are kept VERBATIM (no remap, no re-derivation); the
+    /// census/cache are emitted in the global frame.
     Cut {
         /// The GLOBAL panel syng prefix (the projection's panel).
         #[arg(long)]
         global_panel: String,
-        /// The LOCALITY panel syng prefix (the committed substrate).
-        #[arg(long)]
-        panel: String,
+        /// The cut's frame: local (the committed substrate) or global
+        /// (the global-panel call mode; --panel/--sources omitted).
+        #[arg(long, value_enum, default_value_t = CutFrame::Local)]
+        frame: CutFrame,
+        /// The LOCALITY panel syng prefix (the committed substrate;
+        /// required in the local frame).
+        #[arg(long, required_unless_present = "frame")]
+        panel: Option<String>,
         /// The locality axis JSON (the committed substrate).
         #[arg(long)]
         axis: PathBuf,
@@ -184,9 +199,9 @@ enum Mode {
         #[arg(long)]
         component: String,
         /// The locality locus.fa (the committed substrate; the territory
-        /// source sequences).
-        #[arg(long)]
-        sources: PathBuf,
+        /// source sequences; required in the local frame).
+        #[arg(long, required_unless_present = "frame")]
+        sources: Option<PathBuf>,
         /// The global panel AGC (the committed --sequence-files input).
         #[arg(long)]
         agc: PathBuf,
@@ -1109,15 +1124,38 @@ fn load_universe_component(
     Ok(rows)
 }
 
+/// The committed local frame's lane fetch over the locus.fa record
+/// slices (clip at the record end, empty when the interval is empty) —
+/// the exact semantics the inlined lookup had (byte-identical).
+fn lane_fetch_over(sources: &HashMap<String, Vec<u8>>) -> impl Fn(&str, u64, u64) -> io::Result<Vec<u8>> + '_ {
+    move |name: &str, lo: u64, hi: u64| {
+        let lane = sources
+            .get(name)
+            .ok_or_else(|| invalid(&format!("source {name} absent")))?;
+        let hi_clip = hi.min(lane.len() as u64);
+        if lo >= hi_clip {
+            Ok(Vec::new())
+        } else {
+            Ok(lane[lo as usize..hi_clip as usize].to_vec())
+        }
+    }
+}
+
 /// The committed territory step construction (the canonical scheme),
 /// verbatim semantics: forward steps from the panel's own stored path
 /// walk (sampled sidecars exactly as the committed census saw them),
 /// the rc frame's steps from the complete raw extraction, and the
 /// per-position canonical-frame selection.
+/// THE LANE FETCH (the frame seam): `fetch_lane(name, lo, hi)` returns
+/// the panel-frame bytes [lo, hi) clipped at the lane's end, empty
+/// when the interval is empty — the local frame serves the locus.fa
+/// record slices (the committed bytes), the global frame the AGC's
+/// coordinate slices (the same bytes the locus.fa extraction produced,
+/// by the cut's own AGC-identity receipt).
 fn build_territory_index(
     panel: &SyngIndex,
     rows: &[UniverseRow],
-    sources: &HashMap<String, Vec<u8>>,
+    fetch_lane: &(dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>> + Sync),
     k: u64,
 ) -> io::Result<TerritoryIndex> {
     let path_of_name: HashMap<&str, usize> = panel
@@ -1144,16 +1182,8 @@ fn build_territory_index(
                 .collect();
             let seq_lo = lo.saturating_sub(syncmer_len);
             let seq_hi = hi + syncmer_len;
-            let lane = sources
-                .get(&row.path_name)
-                .ok_or_else(|| invalid(&format!("source {} absent", row.path_name)))?;
-            let hi_clip = seq_hi.min(lane.len() as u64);
-            let seq: &[u8] = if seq_lo >= hi_clip {
-                &[]
-            } else {
-                &lane[seq_lo as usize..hi_clip as usize]
-            };
-            let rc_seq = impg::graph::reverse_complement(seq);
+            let seq: Vec<u8> = fetch_lane(&row.path_name, seq_lo, seq_hi)?;
+            let rc_seq = impg::graph::reverse_complement(&seq);
             let reverse_steps: Vec<(u64, i32)> = mem_records::raw_matched_syncmers(panel, &rc_seq)?
                 .into_iter()
                 .map(|(signed_node, q)| {
@@ -1262,6 +1292,10 @@ fn write_derive_cache(
 
 #[derive(Serialize)]
 struct CutStatsJson {
+    /// The cut's frame: "local" (the committed substrate path,
+    /// node-map conversion) or "global" (the global-panel call mode,
+    /// lever 1: the projection's records kept verbatim).
+    frame: String,
     reads_scanned: u64,
     reads_kept: u64,
     records_scanned: u64,
@@ -1279,6 +1313,9 @@ struct CutStatsJson {
     /// all-or-nothing remap, byte-identical behavior).
     partial_remap: bool,
     local_derive: bool,
+    /// The global-frame receipt (lever 1: the projection's records
+    /// kept verbatim; the census/cache are global-frame).
+    global_frame: bool,
     reads_routed: u64,
     reads_unrouted: u64,
     load_seconds: f64,
@@ -1336,11 +1373,50 @@ impl FileCut {
 ///   verbatim the committed census re-derivation and derive-cache
 ///   builder), so the emitted census records are committed-structured
 ///   local MEM walks by construction.
+/// THE CUT'S FRAME (the global-panel call mode's switch, lever 1:
+/// docs/syng-gmem-bwt/global-panel-call-mode.md). Local (the default)
+/// is the committed substrate path byte-for-byte: the locality's own
+/// syng + locus.fa, and the projection's global records converted
+/// into the locality's node space (the node map). Global binds the
+/// cut to the ONE global panel alone — conversion-not-materialization:
+/// the universe rows translate by their own record headers, the
+/// per-row slices come from the AGC by coordinate, and the
+/// projection's records are kept verbatim (no remap, no
+/// re-derivation); the census/cache come out in the global frame.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+enum CutFrame {
+    Local,
+    Global,
+}
+
+impl CutFrame {
+    /// The local-frame-only argument gate: a `--frame global` run
+    /// refuses a locality substrate argument loudly (never ignores
+    /// it); the local frame requires it.
+    fn select<T>(self, value: Option<T>, flag: &str) -> io::Result<Option<T>> {
+        match (self, value) {
+            (CutFrame::Local, None) => Err(invalid(&format!(
+                "the local frame requires {flag}"
+            ))),
+            (CutFrame::Global, Some(_)) => Err(invalid(&format!(
+                "the global frame takes no {flag} (the ONE global panel \
+                 is the frame; conversion-not-materialization)"
+            ))),
+            (_, value) => Ok(value),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum RemapMode {
     Strict,
     PartialSubwalk,
     LocalDerive,
+    /// The GLOBAL frame (CutFrame::Global): the projection's records
+    /// are already panel-frame — kept verbatim; the territory touch is
+    /// computed on their own nodes; nothing is remapped, nothing is
+    /// re-derived. The census/cache are emitted in the global frame.
+    GlobalFrame,
 }
 
 fn scan_shard_file(
@@ -1381,6 +1457,26 @@ fn scan_shard_file(
         )>> = decoded
             .par_iter()
             .map(|read| {
+                if mode == RemapMode::GlobalFrame {
+                    // THE GLOBAL FRAME (lever 1): the projection's records
+                    // are already panel-frame — kept VERBATIM (tokens
+                    // and own walk untouched); the territory touch is
+                    // computed on the record's own canonical-token
+                    // nodes (the same node set the own walk carries).
+                    let out: Vec<Option<(Vec<u64>, OwnWalk, bool)>> = read
+                        .records
+                        .iter()
+                        .map(|(tokens, walk)| {
+                            let touch = decode_tokens(tokens)?
+                                .iter()
+                                .any(|&(node, _)| {
+                                    territory_nodes_abs.contains(&node.unsigned_abs())
+                                });
+                            Ok(Some((tokens.clone(), walk.clone(), touch)))
+                        })
+                        .collect::<io::Result<_>>()?;
+                    return Ok((out, !read.records.is_empty()));
+                }
                 if mode == RemapMode::LocalDerive {
                     // the global routing signal: any globally-mappable node
                     let routed = read.records.iter().any(|(_, walk)| {
@@ -1421,7 +1517,7 @@ fn scan_shard_file(
             .collect();
         for (read, result) in decoded.into_iter().zip(remapped) {
             let (records, routed_flag) = result?;
-            if mode == RemapMode::LocalDerive {
+            if mode == RemapMode::LocalDerive || mode == RemapMode::GlobalFrame {
                 cut.records_scanned += read.records.len() as u64;
                 if routed_flag {
                     cut.reads_routed += 1;
@@ -1441,7 +1537,7 @@ fn scan_shard_file(
                         cut.records_unmappable += 1;
                     }
                     Some((tokens, walk, touch)) => {
-                        if mode != RemapMode::LocalDerive {
+                        if mode != RemapMode::LocalDerive && mode != RemapMode::GlobalFrame {
                             cut.records_mappable += 1;
                         }
                         if *touch {
@@ -1649,11 +1745,12 @@ fn parse_locus_header(header: &str) -> io::Result<(String, u64, u64)> {
 #[allow(clippy::too_many_arguments)]
 fn run_cut(
     global_panel_prefix: &str,
-    panel_prefix: &str,
+    frame: CutFrame,
+    panel_prefix: Option<&str>,
     axis_path: &Path,
     bed_directory: &Path,
     component: &str,
-    sources_path: &Path,
+    sources_path: Option<&Path>,
     agc_path: &Path,
     shards_dir: &Path,
     out_dir: &Path,
@@ -1671,135 +1768,255 @@ fn run_cut(
         )?;
     }
     let started = Instant::now();
-    eprintln!("[cut] loading panels");
+    eprintln!(
+        "[cut] loading panels (frame {:?})",
+        frame
+    );
     let load_started = Instant::now();
-    let panel = SyngIndex::load(panel_prefix, SyncmerParams::default())?;
-    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
     let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    // THE FRAME'S PANEL: the local frame loads the locality's own syng
+    // beside the global one (the node-map conversion needs both); the
+    // global frame binds to the ONE global panel alone — no locality
+    // index is built, nothing is materialized per territory.
+    let local_panel = match frame {
+        CutFrame::Local => {
+            let panel = SyngIndex::load(
+                panel_prefix.ok_or_else(|| invalid("the local frame requires --panel"))?,
+                SyncmerParams::default(),
+            )?;
+            ensure(
+                global.syncmer_length_bp() as u64
+                    == panel.syncmer_length_bp() as u64,
+                "global and locality syncmer lengths differ",
+            )?;
+            Some(panel)
+        }
+        CutFrame::Global => None,
+    };
+    // The machinery's panel: whichever frame the cut runs in, the
+    // census/cache below are emitted against THIS panel's frame.
+    let panel: &SyngIndex = local_panel.as_ref().unwrap_or(&global);
     let k = panel.syncmer_length_bp() as u64;
-    ensure(
-        global.syncmer_length_bp() as u64 == k,
-        "global and locality syncmer lengths differ",
-    )?;
 
     let axis: AxisFile =
         serde_json::from_str(&std::fs::read_to_string(axis_path)?).map_err(|e| invalid(format!("axis parse: {e}")))?;
     let universe = load_universe_component(&axis, bed_directory, component)?;
     eprintln!("[cut] universe rows: {}", universe.len());
 
-    // The locus sources (the committed substrate's sequences).
-    let mut sources: HashMap<String, Vec<u8>> = HashMap::new();
-    {
-        let text = std::fs::read_to_string(sources_path)?;
-        let mut name: Option<String> = None;
-        let mut seq: Vec<u8> = Vec::new();
-        for line in text.lines() {
-            if let Some(header) = line.strip_prefix('>') {
-                if let Some(prev) = name.take() {
-                    sources.insert(prev, std::mem::take(&mut seq));
-                }
-                name = Some(header.split_whitespace().next().unwrap_or("").to_string());
-            } else if name.is_some() {
-                seq.extend_from_slice(line.trim().as_bytes());
-            }
-        }
-        if let Some(prev) = name {
-            sources.insert(prev, seq);
-        }
-    }
-    ensure(!sources.is_empty(), "no locus.fa records")?;
-
-    let territory = build_territory_index(&panel, &universe, &sources, k)?;
-    eprintln!(
-        "[cut] territory: {} rows, {} entries",
-        territory.territories.len(),
-        territory.entries.len()
-    );
-    let territory_nodes_abs: HashSet<u32> = territory
-        .entries
-        .iter()
-        .map(|&(node, _, _)| node.unsigned_abs())
-        .collect();
-
-    // The per-path node correspondence: the complete canonical walk of
-    // the SAME AGC-verified sequence through both syngs, paired by
-    // position. Each locus.fa header states its own provenance — the
-    // global panel path and interval "path:start-end" (the refined-bed
-    // rows and the axis-window records alike) — so the correspondence
-    // is derived from the substrate's own statement, with the offset
-    // convention (exact or one-base-earlier) verified by sequence
-    // identity against the AGC.
+    // THE FRAME SETUP: the local frame materializes the locus.fa
+    // slices and derives the global→local node correspondence (the
+    // committed path, byte-identical); the global frame TRANSLATES the
+    // universe rows by their own record headers and fetches the
+    // per-row slices from the AGC by coordinate — no locus.fa, no
+    // locality syng, no node map (conversion-not-materialization).
     let mut node_map: HashMap<i32, i32> = HashMap::new();
     let mut node_map_pairs = 0usize;
     let mut global_only_anchor_total = 0usize;
     let mut offset_variants: BTreeMap<String, u64> = BTreeMap::new();
-    for (header, record) in &sources {
-        let (global_name, s, e) = parse_locus_header(header)?;
-        ensure(
-            (e - s) as usize == record.len(),
-            &format!("locus record {header} length differs from its header interval"),
-        )?;
-        // The offset candidates cover both committed extraction
-        // conventions (the generic exact-bed intervals and the pilot's
-        // one-base-earlier records) under the AGC range fetch's own
-        // 1-based-inclusive coordinate system; sequence identity decides.
-        let mut delta: Option<i64> = None;
-        for candidate in [0i64, -1, 1] {
-            let lo = (s as i64 + candidate).max(0) as usize;
-            let hi = lo + record.len();
-            if let Ok(fetched) = agc.fetch_sequence(&global_name, lo as i32, hi as i32) {
-                if fetched == *record {
-                    delta = Some(candidate);
-                    break;
+    let territory;
+    let territory_nodes_abs: HashSet<u32>;
+    let component_contig_source: String;
+    match frame {
+        CutFrame::Local => {
+            // The locus sources (the committed substrate's sequences).
+            let mut sources: HashMap<String, Vec<u8>> = HashMap::new();
+            {
+                let text = std::fs::read_to_string(
+                    sources_path.ok_or_else(|| invalid("the local frame requires --sources"))?,
+                )?;
+                let mut name: Option<String> = None;
+                let mut seq: Vec<u8> = Vec::new();
+                for line in text.lines() {
+                    if let Some(header) = line.strip_prefix('>') {
+                        if let Some(prev) = name.take() {
+                            sources.insert(prev, std::mem::take(&mut seq));
+                        }
+                        name = Some(header.split_whitespace().next().unwrap_or("").to_string());
+                    } else if name.is_some() {
+                        seq.extend_from_slice(line.trim().as_bytes());
+                    }
+                }
+                if let Some(prev) = name {
+                    sources.insert(prev, seq);
                 }
             }
-        }
-        let delta = delta.ok_or_else(|| {
-            invalid(format!(
-                "locus record {header} is not identical to the AGC interval \
-                 under either offset convention"
-            ))
-        })?;
-        *offset_variants
-            .entry(format!("delta={delta}"))
-            .or_insert(0) += 1;
-        let lo = (s as i64 + delta).max(0) as i32;
-        let global_seq = agc
-            .fetch_sequence(&global_name, lo, lo + record.len() as i32)
-            .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
-        ensure(global_seq == *record, "AGC refetch mismatch")?;
-        let local_walk = mem_records::canonical_anchor_walk(&panel, record)?;
-        let global_walk = mem_records::canonical_anchor_walk(&global, &global_seq)?;
-        // The locality dictionary is a subset of the global one, so every
-        // locality anchor position must appear in the global walk; the
-        // global walk may carry EXTRA anchors (the superset class). Pair
-        // on the locality positions (the true correspondence); the
-        // global-only positions have no locality node and stay unmapped.
-        let global_by_pos: HashMap<u64, i32> =
-            global_walk.iter().map(|&(node, pos)| (pos, node)).collect();
-        for &(lnode, lpos) in &local_walk {
-            let gnode = *global_by_pos
-                .get(&lpos)
-                .ok_or_else(|| invalid("locality anchor position absent from the global walk"))?;
-            match node_map.entry(gnode) {
-                std::collections::hash_map::Entry::Occupied(o) => {
-                    ensure(
-                        *o.get() == lnode,
-                        "conflicting node correspondence",
-                    )?;
+            ensure(!sources.is_empty(), "no locus.fa records")?;
+
+            let sources_ref = &sources;
+            let fetch_lane =
+                move |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+                    let lane = sources_ref
+                        .get(name)
+                        .ok_or_else(|| invalid(&format!("source {name} absent")))?;
+                    let hi_clip = hi.min(lane.len() as u64);
+                    if lo >= hi_clip {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(lane[lo as usize..hi_clip as usize].to_vec())
+                    }
+                };
+            territory = build_territory_index(panel, &universe, &fetch_lane, k)?;
+            eprintln!(
+                "[cut] territory: {} rows, {} entries",
+                territory.territories.len(),
+                territory.entries.len()
+            );
+            territory_nodes_abs = territory
+                .entries
+                .iter()
+                .map(|&(node, _, _)| node.unsigned_abs())
+                .collect();
+            component_contig_source = component.to_string();
+
+            // The per-path node correspondence: the complete canonical
+            // walk of the SAME AGC-verified sequence through both syngs,
+            // paired by position. Each locus.fa header states its own
+            // provenance — the global panel path and interval
+            // "path:start-end" (the refined-bed rows and the axis-window
+            // records alike) — so the correspondence is derived from the
+            // substrate's own statement, with the offset convention
+            // (exact or one-base-earlier) verified by sequence identity
+            // against the AGC.
+            for (header, record) in &sources {
+                let (global_name, s, e) = parse_locus_header(header)?;
+                ensure(
+                    (e - s) as usize == record.len(),
+                    &format!("locus record {header} length differs from its header interval"),
+                )?;
+                // The offset candidates cover both committed extraction
+                // conventions (the generic exact-bed intervals and the
+                // pilot's one-base-earlier records) under the AGC range
+                // fetch's own 1-based-inclusive coordinate system;
+                // sequence identity decides.
+                let mut delta: Option<i64> = None;
+                for candidate in [0i64, -1, 1] {
+                    let lo = (s as i64 + candidate).max(0) as usize;
+                    let hi = lo + record.len();
+                    if let Ok(fetched) =
+                        agc.fetch_sequence(&global_name, lo as i32, hi as i32)
+                    {
+                        if fetched == *record {
+                            delta = Some(candidate);
+                            break;
+                        }
+                    }
                 }
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(lnode);
-                    node_map_pairs += 1;
+                let delta = delta.ok_or_else(|| {
+                    invalid(format!(
+                        "locus record {header} is not identical to the AGC interval \
+                         under either offset convention"
+                    ))
+                })?;
+                *offset_variants
+                    .entry(format!("delta={delta}"))
+                    .or_insert(0) += 1;
+                let lo = (s as i64 + delta).max(0) as i32;
+                let global_seq = agc
+                    .fetch_sequence(&global_name, lo, lo + record.len() as i32)
+                    .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
+                ensure(global_seq == *record, "AGC refetch mismatch")?;
+                let local_walk = mem_records::canonical_anchor_walk(panel, record)?;
+                let global_walk = mem_records::canonical_anchor_walk(&global, &global_seq)?;
+                // The locality dictionary is a subset of the global one, so
+                // every locality anchor position must appear in the global
+                // walk; the global walk may carry EXTRA anchors (the
+                // superset class). Pair on the locality positions (the true
+                // correspondence); the global-only positions have no
+                // locality node and stay unmapped.
+                let global_by_pos: HashMap<u64, i32> = global_walk
+                    .iter()
+                    .map(|&(node, pos)| (pos, node))
+                    .collect();
+                for &(lnode, lpos) in &local_walk {
+                    let gnode = *global_by_pos.get(&lpos).ok_or_else(|| {
+                        invalid("locality anchor position absent from the global walk")
+                    })?;
+                    match node_map.entry(gnode) {
+                        std::collections::hash_map::Entry::Occupied(o) => {
+                            ensure(
+                                *o.get() == lnode,
+                                "conflicting node correspondence",
+                            )?;
+                        }
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(lnode);
+                            node_map_pairs += 1;
+                        }
+                    }
                 }
+                global_only_anchor_total += global_walk.len() - local_walk.len();
             }
+            eprintln!(
+                "[cut] node map: {node_map_pairs} pairs, {global_only_anchor_total} global-only anchors ({:?})",
+                offset_variants
+            );
         }
-        global_only_anchor_total += global_walk.len() - local_walk.len();
+        CutFrame::Global => {
+            // THE GLOBAL FRAME (lever 1): the universe rows translate to
+            // the global panel's frame by their own record headers —
+            // the re-anchor principle (k-independent panel
+            // coordinates; conversion-not-materialization). The AGC is
+            // the sequence authority, fetched by coordinate under the
+            // cut's own verified offset convention (delta=1 uniform,
+            // the committed AGC-identity receipt).
+            let universe_global: Vec<UniverseRow> = universe
+                .iter()
+                .map(|row| {
+                    let translated =
+                        territory_frame::translate_row(&row.path_name, row.start, row.end)?;
+                    Ok::<_, io::Error>(UniverseRow {
+                        partition: row.partition,
+                        path_name: translated.path_name,
+                        start: translated.start,
+                        end: translated.end,
+                    })
+                })
+                .collect::<io::Result<_>>()?;
+            let path_lengths: HashMap<&str, u64> = global
+                .name_map
+                .path_to_name
+                .iter()
+                .zip(&global.name_map.path_to_length)
+                .map(|(name, &length)| (name.as_str(), length))
+                .collect();
+            let agc_ref = &agc;
+            let fetch_lane =
+                move |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+                    let path_len = *path_lengths
+                        .get(name)
+                        .ok_or_else(|| invalid("universe path absent from the global panel"))?;
+                    let hi = hi.min(path_len);
+                    if lo >= hi {
+                        return Ok(Vec::new());
+                    }
+                    // fetch(A, B) returns the 0-based [A-1, B-1) slice
+                    // (the AGC-verified convention above).
+                    Ok(agc_ref
+                        .fetch_sequence(name, (lo + 1) as i32, (hi + 1) as i32)
+                        .map_err(|e| invalid(format!("AGC fetch {name}: {e}")))?)
+                };
+            territory = build_territory_index(&global, &universe_global, &fetch_lane, k)?;
+            eprintln!(
+                "[cut] territory (global frame): {} rows, {} entries",
+                territory.territories.len(),
+                territory.entries.len()
+            );
+            territory_nodes_abs = territory
+                .entries
+                .iter()
+                .map(|&(node, _, _)| node.unsigned_abs())
+                .collect();
+            // The pair-bins' contig comparison runs in the panel's own
+            // frame: the translated component's contig suffix.
+            component_contig_source =
+                territory_frame::split_local_name(component)?.0.to_string();
+            eprintln!(
+                "[cut] global frame: no node map (the projection's records \
+                 are kept verbatim); component contig {component_contig_source}"
+            );
+        }
     }
-    eprintln!(
-        "[cut] node map: {node_map_pairs} pairs, {global_only_anchor_total} global-only anchors ({:?})",
-        offset_variants
-    );
     let load_seconds = load_started.elapsed().as_secs_f64();
 
     // The shard scan (parallel over files; deterministic merge order).
@@ -1817,8 +2034,15 @@ fn run_cut(
     let territory_nodes_ref = &territory_nodes_abs;
     // The env-gated attribution modes (default OFF = the committed
     // all-or-nothing remap; the receipt fields in cut-stats.json name
-    // the mode).
-    let mode = if std::env::var("IMPG_CUT_LOCAL_DERIVE").ok().as_deref() == Some("1") {
+    // the mode). The GLOBAL frame ignores them: the projection's
+    // records are already panel-frame — nothing to remap or re-derive.
+    let mode = if frame == CutFrame::Global {
+        eprintln!(
+            "[cut] global frame: the projection's records kept verbatim \
+             (no remap, no re-derivation; the census/cache are global-frame)"
+        );
+        RemapMode::GlobalFrame
+    } else if std::env::var("IMPG_CUT_LOCAL_DERIVE").ok().as_deref() == Some("1") {
         eprintln!("[cut] local-derive remap: IMPG_CUT_LOCAL_DERIVE=1 (route globally, attribute locally - the committed local MEM derivation over the globally routed reads)");
         RemapMode::LocalDerive
     } else if std::env::var("IMPG_CUT_PARTIAL_REMAP").ok().as_deref() == Some("1") {
@@ -1964,7 +2188,14 @@ fn run_cut(
     // placement machinery; emit the committed JSONL schema.
     let census_started = Instant::now();
     let mut out = io::BufWriter::new(std::fs::File::create(out_dir.join("cut-census.jsonl"))?);
-    let component_contig = component.rsplit('#').next().unwrap_or(component).to_string();
+    // (THE GLOBAL FRAME's pair-bins convention: the contig comparison
+    // runs in the panel's own frame — the translated component's
+    // contig suffix; the committed local frame keeps its own.)
+    let component_contig = component_contig_source
+        .rsplit('#')
+        .next()
+        .unwrap_or(&component_contig_source)
+        .to_string();
     let mut routed_patterns = 0u64;
     let mut census_mult_total = 0u64;
     let mut dropped_no_occurrence = 0u64;
@@ -2153,6 +2384,10 @@ fn run_cut(
     let census_seconds = census_started.elapsed().as_secs_f64();
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
+        frame: match frame {
+            CutFrame::Local => "local".into(),
+            CutFrame::Global => "global".into(),
+        },
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
         records_scanned: merged.records_scanned,
@@ -2168,6 +2403,7 @@ fn run_cut(
         offset_variants,
         partial_remap: mode == RemapMode::PartialSubwalk,
         local_derive: mode == RemapMode::LocalDerive,
+        global_frame: mode == RemapMode::GlobalFrame,
         reads_routed: merged.reads_routed,
         reads_unrouted: merged.reads_unrouted,
         load_seconds,
@@ -2360,7 +2596,7 @@ fn batch_build_node_map(
     global: &SyngIndex,
     panel: &SyngIndex,
     agc: &AgcIndex,
-    sources: HashMap<String, Vec<u8>>,
+    sources: &HashMap<String, Vec<u8>>,
 ) -> io::Result<(
     HashMap<i32, i32>,
     usize,
@@ -2379,7 +2615,7 @@ fn batch_build_node_map(
     let mut node_map_pairs = 0usize;
     let mut global_only_anchor_total = 0usize;
     let mut offset_variants: BTreeMap<String, u64> = BTreeMap::new();
-    for (header, record) in &sources {
+    for (header, record) in sources {
         let (global_name, s, e) = parse_locus_header(header)?;
         ensure(
             (e - s) as usize == record.len(),
@@ -2712,6 +2948,7 @@ fn batch_emit_territory(
     let census_seconds = census_started.elapsed().as_secs_f64();
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
+        frame: "local-batch".into(),
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
         records_scanned: merged.records_scanned,
@@ -2727,6 +2964,7 @@ fn batch_emit_territory(
         offset_variants,
         partial_remap: mode == RemapMode::PartialSubwalk,
         local_derive: mode == RemapMode::LocalDerive,
+        global_frame: mode == RemapMode::GlobalFrame,
         reads_routed: merged.reads_routed,
         reads_unrouted: merged.reads_unrouted,
         load_seconds,
@@ -2821,7 +3059,8 @@ fn run_cut_batch(
             let universe = load_universe_component(&axis, &spec.bed_directory, &spec.component)?;
             eprintln!("[cut-batch] {} universe rows: {}", spec.name, universe.len());
             let sources = batch_load_sources(&spec.sources)?;
-            let territory = build_territory_index(&panel, &universe, &sources, k)?;
+            let fetch_lane = lane_fetch_over(&sources);
+            let territory = build_territory_index(&panel, &universe, &fetch_lane, k)?;
             eprintln!(
                 "[cut-batch] {} territory: {} rows, {} entries",
                 spec.name,
@@ -2834,7 +3073,7 @@ fn run_cut_batch(
                 .map(|&(node, _, _)| node.unsigned_abs())
                 .collect();
             let (node_map, node_map_pairs, global_only_anchor_total, offset_variants) =
-                batch_build_node_map(&global, &panel, &agc, sources)?;
+                batch_build_node_map(&global, &panel, &agc, &sources)?;
             eprintln!(
                 "[cut-batch] {} node map: {} pairs, {} global-only anchors",
                 spec.name, node_map_pairs, global_only_anchor_total
@@ -3429,7 +3668,8 @@ fn trace_load_locality(
         }
     }
     ensure(!sources.is_empty(), "no locus.fa records")?;
-    let territory = build_territory_index(&panel, &universe, &sources, k)?;
+    let fetch_lane = lane_fetch_over(&sources);
+    let territory = build_territory_index(&panel, &universe, &fetch_lane, k)?;
     let territory_nodes_abs: HashSet<u32> = territory
         .entries
         .iter()
@@ -3718,6 +3958,7 @@ fn main() -> io::Result<()> {
         } => run_dedup(&out_dir, &occurrences, partitions),
         Mode::Cut {
             global_panel,
+            frame,
             panel,
             axis,
             bed_directory,
@@ -3726,17 +3967,22 @@ fn main() -> io::Result<()> {
             agc,
             shards_dir,
             out_dir,
-        } => run_cut(
-            &global_panel,
-            &panel,
-            &axis,
-            &bed_directory,
-            &component,
-            &sources,
-            &agc,
-            &shards_dir,
-            &out_dir,
-        ),
+        } => {
+            let panel = frame.select(panel, "--panel")?;
+            let sources = frame.select(sources, "--sources")?;
+            run_cut(
+                &global_panel,
+                frame,
+                panel.as_deref(),
+                &axis,
+                &bed_directory,
+                &component,
+                sources.as_deref(),
+                &agc,
+                &shards_dir,
+                &out_dir,
+            )
+        }
         Mode::CutBatch {
             global_panel,
             agc,
@@ -3760,5 +4006,190 @@ fn main() -> io::Result<()> {
             queries.as_deref(),
             &out_dir,
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE GLOBAL-FRAME CONVERSION PROOF (the mini-panel test): the
+// territory index against the ONE global panel over the TRANSLATED
+// rows routes a read to exactly the occurrences the committed local
+// substrate produces, modulo the coordinate rename — the
+// conversion-not-materialization property at test scale (the re-anchor
+// principle: node ids are opaque interned k-mer tokens; every semantic
+// quantity is coordinate- and content-carried).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod global_frame_tests {
+    use super::*;
+    use impg::syng::SyncmerParams;
+
+    /// A deterministic ACGT generator (reproducible, no external deps).
+    fn deterministic_sequence(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            out.push(b"ACGT"[(state >> 33) as usize % 4]);
+        }
+        out
+    }
+
+    #[test]
+    fn the_global_frame_routes_what_the_local_substrate_routes() {
+        // Small syncmers (k=4 inner, w=7 window -> 11bp syncmers) over
+        // a mini "chromosome": the territory record is a mid-path slice
+        // (the edge-band classes live at the record's head/tail; the
+        // read is interior, the agreeing domain).
+        let params = SyncmerParams { k: 4, w: 7, seed: 7 };
+        let k = (params.k + params.w) as u64;
+        let origin = 400u64;
+        let record_len = 1000u64;
+        let chromosome = deterministic_sequence(0x5eed, 2000);
+        let record = chromosome[origin as usize..(origin + record_len) as usize].to_vec();
+        let record_name = format!("A#0#chr1:{origin}-{}", origin + record_len);
+        let global_name = "A#0#chr1";
+
+        let global_panel = SyngIndex::build(
+            params,
+            vec![(global_name.to_string(), chromosome.clone())].into_iter(),
+        );
+        let local_panel =
+            SyngIndex::build(params, vec![(record_name.clone(), record.clone())].into_iter());
+        // the syng metadata-v2 discipline: both panels built by the
+        // same fresh builder in-process.
+
+        // the territory rows: the local frame's window grid (the
+        // member row in the record's own coordinates) and its global
+        // translation (the record header IS the frame statement).
+        let window = (100u64, 900u64);
+        let local_rows = vec![UniverseRow {
+            partition: 0,
+            path_name: record_name.clone(),
+            start: window.0,
+            end: window.1,
+        }];
+        let translated = territory_frame::translate_row(
+            &record_name,
+            window.0,
+            window.1,
+        )
+        .unwrap();
+        let global_rows = vec![UniverseRow {
+            partition: 0,
+            path_name: translated.path_name.clone(),
+            start: translated.start,
+            end: translated.end,
+        }];
+        assert_eq!(translated.start, origin + window.0);
+        assert_eq!(translated.end, origin + window.1);
+
+        // the lane fetches: the local frame serves the record slice
+        // (the locus.fa bytes); the global frame serves the panel-path
+        // slice by coordinate (the AGC's role, the same bytes).
+        let mut local_sources: HashMap<String, Vec<u8>> = HashMap::new();
+        local_sources.insert(record_name.clone(), record.clone());
+        let local_fetch = lane_fetch_over(&local_sources);
+        let mut path_sources: HashMap<String, Vec<u8>> = HashMap::new();
+        path_sources.insert(global_name.to_string(), chromosome.clone());
+        let global_fetch = lane_fetch_over(&path_sources);
+
+        let local_territory =
+            build_territory_index(&local_panel, &local_rows, &local_fetch, k).unwrap();
+        let global_territory =
+            build_territory_index(&global_panel, &global_rows, &global_fetch, k).unwrap();
+        assert_eq!(local_territory.territories.len(), 1);
+        assert_eq!(global_territory.territories.len(), 1);
+
+        // an INTERIOR read (its every anchor is in the two grids'
+        // agreeing domain: away from the record head/tail and the
+        // window edges by more than a syncmer window).
+        let read = &record[300 as usize..(300 + 120) as usize];
+        let local_records = derive_read(&local_panel, read).unwrap();
+        let global_records = derive_read(&global_panel, read).unwrap();
+        assert!(!local_records.is_empty());
+
+        let local_nodes: HashSet<u32> = local_territory
+            .entries
+            .iter()
+            .map(|&(node, _, _)| node.unsigned_abs())
+            .collect();
+        let global_nodes: HashSet<u32> = global_territory
+            .entries
+            .iter()
+            .map(|&(node, _, _)| node.unsigned_abs())
+            .collect();
+
+        for ((local_tokens, _), (global_tokens, _)) in
+            local_records.iter().zip(global_records.iter())
+        {
+            let local_anchors = decode_tokens(local_tokens).unwrap();
+            let global_anchors = decode_tokens(global_tokens).unwrap();
+            // the same read content: the same anchor structure
+            assert_eq!(local_anchors.len(), global_anchors.len());
+            for (&(_, local_pos), &(_, global_pos)) in
+                local_anchors.iter().zip(global_anchors.iter())
+            {
+                assert_eq!(local_pos, global_pos);
+            }
+            // the local touch (remapped onto the local grid) and the
+            // global touch agree: the record touches the window in
+            // both frames
+            let local_touch = local_anchors
+                .iter()
+                .any(|&(node, _)| local_nodes.contains(&node.unsigned_abs()));
+            let global_touch = global_anchors
+                .iter()
+                .any(|&(node, _)| global_nodes.contains(&node.unsigned_abs()));
+            assert_eq!(local_touch, global_touch);
+            if !global_touch {
+                continue;
+            }
+            // THE ROUTING EQUIVALENCE: route the pattern against each
+            // frame's territory index; the occurrences are the same
+            // modulo the coordinate rename (path, start+origin) and
+            // the window id.
+            let (local_occ, local_total, _, _) =
+                route_record(&local_anchors, &local_territory, k);
+            let (global_occ, global_total, _, _) =
+                route_record(&global_anchors, &global_territory, k);
+            assert_eq!(local_total, global_total);
+            assert_eq!(local_occ.len(), global_occ.len());
+            for ((partition, local_mult), (gpartition, global_mult)) in
+                local_occ.iter().zip(global_occ.iter())
+            {
+                assert_eq!(partition, gpartition);
+                assert_eq!(local_mult, global_mult);
+            }
+        }
+
+        // THE OCCURRENCE POSITIONS: route_record returns them in its
+        // positional side channels; verify through the public routing
+        // seam: the global frame's occurrences translated by -origin
+        // equal the local frame's (the conversion is exactly the
+        // coordinate rename).
+        for ((local_tokens, _), (global_tokens, _)) in
+            local_records.iter().zip(global_records.iter())
+        {
+            let local_anchors = decode_tokens(local_tokens).unwrap();
+            let global_anchors = decode_tokens(global_tokens).unwrap();
+            if !global_anchors.iter().any(|&(node, _)| {
+                global_nodes.contains(&node.unsigned_abs())
+            }) {
+                continue;
+            }
+            let (_, _, local_forward, local_reverse) =
+                route_record(&local_anchors, &local_territory, k);
+            let (_, _, global_forward, global_reverse) =
+                route_record(&global_anchors, &global_territory, k);
+            let translate =
+                |positions: &[(usize, u64)]| -> Vec<(usize, u64)> {
+                    positions
+                        .iter()
+                        .map(|&(path, start)| (path, start + origin))
+                        .collect()
+                };
+            assert_eq!(translate(&local_forward), global_forward);
+            assert_eq!(translate(&local_reverse), global_reverse);
+        }
     }
 }

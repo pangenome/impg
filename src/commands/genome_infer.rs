@@ -154,6 +154,20 @@ pub enum Command {
         /// receipts).
         #[arg(long)]
         flank_overlap: Option<realign_score::FlankOverlap>,
+        /// THE GLOBAL-PANEL FRAME (the campaign's lever 1, the
+        /// global-panel call mode:
+        /// docs/syng-gmem-bwt/global-panel-call-mode.md). When set,
+        /// --panel names the ONE global panel and --partition-graphs
+        /// the territory-local substrate (member rows "path:start-end",
+        /// slice-relative coordinates): the maps are translated to
+        /// the global frame at load, the machinery runs against the
+        /// global grid, and the product emission is translated back
+        /// to the partition's own frame (the committed
+        /// reference-anchored output shape). Default (unset): the
+        /// per-territory frame verbatim — the committed path
+        /// byte-for-byte.
+        #[arg(long, default_value_t = false)]
+        global_frame: bool,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -624,6 +638,22 @@ pub enum Command {
         /// The read lengths for the routes inventory
         #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = vec![148u64])]
         read_lengths: Vec<u64>,
+        /// THE GLOBAL-PANEL CALL MODE (the campaign's lever 1:
+        /// docs/syng-gmem-bwt/global-panel-call-mode.md): the ONE
+        /// global panel syng prefix. When set (with --global-routes),
+        /// the per-territory local syng build and the per-territory
+        /// derive-routes are SKIPPED (the cut and the call bind to
+        /// the global panel; prep's panel-side pole collapses to the
+        /// window-bed regeneration) and the registry records the
+        /// global pair with "frame": "global". Default (unset): the
+        /// committed per-territory precomputes verbatim.
+        #[arg(long, requires = "global_routes")]
+        global_panel: Option<String>,
+        /// The whole-panel routes inventory (derive-routes --panel
+        /// <global syng> --sources <panel AGC>, built once,
+        /// panel-side) — the call reads only its lane inventory.
+        #[arg(long, requires = "global_panel")]
+        global_routes: Option<PathBuf>,
         /// The partitions root output directory (partitions.bed + <name>/)
         #[arg(long)]
         out_dir: PathBuf,
@@ -712,6 +742,22 @@ pub enum Command {
         /// The selection convention (default: the alignment-induced locality domain)
         #[arg(long, value_enum, default_value_t = realign_score::Selection::Locality)]
         selection: realign_score::Selection,
+        /// THE GLOBAL-PANEL CALL MODE (the campaign's lever 1:
+        /// docs/syng-gmem-bwt/global-panel-call-mode.md): the ONE
+        /// global panel syng prefix. When set (with --global-routes),
+        /// every selected partition is called against the global
+        /// panel + the ONE whole-panel routes inventory instead of
+        /// the registry's per-territory syng/routes — the maps are
+        /// translated to the global frame at load and the product
+        /// emission back to the partition's own frame. Default
+        /// (unset): the committed per-territory path byte-for-byte.
+        #[arg(long, requires = "global_routes")]
+        global_panel: Option<String>,
+        /// The whole-panel routes inventory (derive-routes --panel
+        /// <global syng> --sources <panel AGC>, built once,
+        /// panel-side) — the call reads only its lane inventory.
+        #[arg(long, requires = "global_panel")]
+        global_routes: Option<PathBuf>,
         /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
         #[arg(long, default_value_t = 64.0)]
         rss_budget_gib: f64,
@@ -838,6 +884,7 @@ pub fn run(command: Command) -> io::Result<()> {
             emit_sequences,
             exclude_paths,
             flank_overlap,
+            global_frame,
             out_dir,
         } => genome::with_output_model(
             &out_dir,
@@ -872,6 +919,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     exclude_paths,
                     flank_overlap,
                     region,
+                    global_frame,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
                     }),
@@ -1442,6 +1490,8 @@ pub fn run(command: Command) -> io::Result<()> {
             partition_graphs,
             census,
             read_lengths,
+            global_panel,
+            global_routes,
             out_dir,
         } => {
             ensure(start < end, format!("the partition range is empty: {chrom}:{start}-{end}"))?;
@@ -1479,26 +1529,80 @@ pub fn run(command: Command) -> io::Result<()> {
                 ),
             )?;
             std::fs::create_dir_all(&dir)?;
-            // The panel-side precompute 1: the local syng (the
-            // committed recipe verbatim: k=63, s=8, seed 7, pos64).
-            let syng = dir.join("locus-pos64.syng");
-            let started = std::time::Instant::now();
-            run_self(&[
-                "syng",
-                "-f",
-                &sources.display().to_string(),
-                "--syncmer-length",
-                "63",
-                "--smer-length",
-                "8",
-                "--syncmer-seed",
-                "7",
-                "--position-sample-rate",
-                "64",
-                "-o",
-                &syng.display().to_string(),
-            ])?;
-            let syng_seconds = started.elapsed().as_secs_f64();
+            // THE GLOBAL-PANEL CALL MODE (lever 1): under
+            // --global-panel/--global-routes the per-territory local
+            // syng and per-territory routes inventory are NOT BUILT —
+            // the cut and the call bind to the ONE global panel and
+            // the ONE whole-panel routes inventory (the registry
+            // records them with the frame marker); the window beds
+            // are regenerated verbatim either way (the locality maps
+            // are the durable panel-side asset).
+            let (syng, syng_seconds, routes, routes_seconds, frame) = match (
+                &global_panel,
+                &global_routes,
+            ) {
+                (Some(panel), Some(routes_dir)) => (
+                    panel.clone(),
+                    0.0,
+                    routes_dir.display().to_string(),
+                    0.0,
+                    "global",
+                ),
+                _ => {
+                    // The panel-side precompute 1: the local syng (the
+                    // committed recipe verbatim: k=63, s=8, seed 7, pos64).
+                    let syng = dir.join("locus-pos64.syng");
+                    let started = std::time::Instant::now();
+                    run_self(&[
+                        "syng",
+                        "-f",
+                        &sources.display().to_string(),
+                        "--syncmer-length",
+                        "63",
+                        "--smer-length",
+                        "8",
+                        "--syncmer-seed",
+                        "7",
+                        "--position-sample-rate",
+                        "64",
+                        "-o",
+                        &syng.display().to_string(),
+                    ])?;
+                    let syng_seconds = started.elapsed().as_secs_f64();
+                    // The panel-side precompute 3 (local frame only):
+                    // the call-path routes inventory (the lookup lever;
+                    // the census cross-check).
+                    let routes = dir.join("routes");
+                    let read_lengths = read_lengths
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let started = std::time::Instant::now();
+                    run_self(&[
+                        "genome-infer",
+                        "derive-routes",
+                        "--panel",
+                        &syng.display().to_string(),
+                        "--sources",
+                        &sources.display().to_string(),
+                        "--read-lengths",
+                        &read_lengths,
+                        "--census",
+                        &census.display().to_string(),
+                        "--out-dir",
+                        &routes.display().to_string(),
+                    ])?;
+                    let routes_seconds = started.elapsed().as_secs_f64();
+                    (
+                        syng.display().to_string(),
+                        syng_seconds,
+                        routes.display().to_string(),
+                        routes_seconds,
+                        "local",
+                    )
+                }
+            };
             // The panel-side precompute 2: the window beds - the
             // region grid WITHIN the territory, regenerated verbatim
             // from the committed locality maps (the maps are the
@@ -1552,32 +1656,11 @@ pub fn run(command: Command) -> io::Result<()> {
                 std::fs::write(beds.join(format!("partition{partition}.bed")), text)?;
             }
             let beds_seconds = started.elapsed().as_secs_f64();
-            // The panel-side precompute 3: the call-path routes
-            // inventory (the lookup lever; the census cross-check).
-            let routes = dir.join("routes");
-            let read_lengths = read_lengths
-                .iter()
-                .map(|l| l.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let started = std::time::Instant::now();
-            run_self(&[
-                "genome-infer",
-                "derive-routes",
-                "--panel",
-                &syng.display().to_string(),
-                "--sources",
-                &sources.display().to_string(),
-                "--read-lengths",
-                &read_lengths,
-                "--census",
-                &census.display().to_string(),
-                "--out-dir",
-                &routes.display().to_string(),
-            ])?;
-            let routes_seconds = started.elapsed().as_secs_f64();
             // THE REGISTRY (keyed by the partition name): everything
-            // the MAP and CALL steps consume.
+            // the MAP and CALL steps consume. Under the global-panel
+            // mode the syng/routes entries name the ONE global pair
+            // and the frame marker states it; the committed local
+            // registry is unchanged otherwise.
             let manifest = serde_json::json!({
                 "version": 1,
                 "name": name,
@@ -1591,6 +1674,7 @@ pub fn run(command: Command) -> io::Result<()> {
                 "beds": beds,
                 "syng": syng,
                 "routes": routes,
+                "frame": frame,
                 "windows": windows,
             });
             genome::write_json(&dir.join("partition.json"), &manifest)?;
@@ -1599,17 +1683,21 @@ pub fn run(command: Command) -> io::Result<()> {
             text.push_str(&row);
             std::fs::write(&bed, text)?;
             bed_rows.push((chrom.clone(), start, end, name.clone()));
+            let routes_manifest = std::path::Path::new(&routes).join("manifest.json");
             let receipt = serde_json::json!({
                 "partition": name,
                 "bed": bed,
                 "bed4_rows": bed_rows.len(),
                 "windows": windows,
+                "frame": frame,
                 "syng_seconds": syng_seconds,
                 "beds_seconds": beds_seconds,
                 "routes_seconds": routes_seconds,
-                "routes_receipt": genome::reconstruction::fingerprint(
-                    &routes.join("manifest.json"),
-                )?,
+                "routes_receipt": if routes_manifest.is_file() {
+                    genome::reconstruction::fingerprint(&routes_manifest)?
+                } else {
+                    serde_json::Value::Null
+                },
                 "manifest": manifest,
                 "scope": "panel-side-precomputes-keyed-by-partition-name",
             });
@@ -1721,6 +1809,8 @@ pub fn run(command: Command) -> io::Result<()> {
             truth_qv,
             qv_biwfa,
             selection,
+            global_panel,
+            global_routes,
             rss_budget_gib,
             out_dir,
         } => {
@@ -1782,13 +1872,32 @@ pub fn run(command: Command) -> io::Result<()> {
                     "=== call: partition {name} ({loci} windows, frame {component})"
                 );
                 let partition_out = out_dir.join(name);
+                // THE GLOBAL-PANEL CALL MODE (lever 1): the ONE global
+                // panel + the ONE whole-panel routes inventory replace
+                // the registry's per-territory syng/routes; the
+                // engine's --global-frame switch carries the frame
+                // translation (maps on load, product rows on emission).
+                let (panel, routes, global_frame) = match (&global_panel, &global_routes) {
+                    (Some(panel), Some(routes)) => {
+                        println!(
+                            "=== call: partition {name} against the GLOBAL panel {}",
+                            panel
+                        );
+                        (panel.clone(), routes.clone(), true)
+                    }
+                    _ => (
+                        manifest["syng"].as_str()
+                            .ok_or_else(|| invalid("the partition manifest carries no syng"))?
+                            .into(),
+                        manifest["routes"].as_str()
+                            .ok_or_else(|| invalid("the partition manifest carries no routes"))?
+                            .into(),
+                        false,
+                    ),
+                };
                 run(Command::CallDiplotypes {
-                    panel: manifest["syng"].as_str()
-                        .ok_or_else(|| invalid("the partition manifest carries no syng"))?
-                        .into(),
-                    routes: manifest["routes"].as_str()
-                        .ok_or_else(|| invalid("the partition manifest carries no routes"))?
-                        .into(),
+                    panel,
+                    routes,
                     partition_graphs: graphs,
                     component,
                     census: map.join(name).join("cut-census.jsonl"),
@@ -1807,6 +1916,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     emit_sequences: true,
                     exclude_paths: exclude_paths.clone(),
                     flank_overlap,
+                    global_frame,
                     out_dir: partition_out.clone(),
                 })?;
                 calls_receipts.push(serde_json::json!({
@@ -1830,6 +1940,8 @@ pub fn run(command: Command) -> io::Result<()> {
                 "region": region,
                 "exclude_paths": exclude_paths,
                 "flank_overlap": flank_overlap.map(|f| f.setting()),
+                "global_panel": global_panel,
+                "global_routes": global_routes,
                 "partitions_called": calls_receipts.len(),
                 "calls": calls_receipts,
                 "scope": "per-partition-diplotype-calls-reference-anchored",

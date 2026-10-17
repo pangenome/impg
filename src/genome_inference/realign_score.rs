@@ -304,7 +304,7 @@
 //!    is unchanged.
 
 use clap::Args;
-use crate::genome_inference::{panel_routes as routes, read_json, PanelIdentity};
+use crate::genome_inference::{panel_routes as routes, read_json, territory_frame, PanelIdentity};
 use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -477,6 +477,20 @@ pub struct Options {
     /// universe verbatim, the committed receipts byte-identical.
     #[arg(long)]
     pub flank_overlap: Option<FlankOverlap>,
+    /// THE GLOBAL-PANEL FRAME (the campaign's lever 1, the
+    /// global-panel call mode: docs/syng-gmem-bwt/global-panel-call-mode.md):
+    /// --panel names the ONE global panel and --partition-graphs the
+    /// territory-local substrate (member rows "path:start-end",
+    /// slice-relative coordinates — the committed locality maps).
+    /// When set, the maps' member rows and the component lane are
+    /// translated to the global frame at load (the record header IS
+    /// the frame statement — the re-anchor principle), the machinery
+    /// runs against the global grid, and the product emission is
+    /// translated back to the partition's own frame (the committed
+    /// reference-anchored output shape). Default (unset): the
+    /// per-territory frame verbatim — the committed path byte-for-byte.
+    #[arg(long, default_value_t = false)]
+    pub global_frame: bool,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -3715,10 +3729,32 @@ pub fn run(options: Options) -> io::Result<()> {
     // per-call AGC fetch it replaces — the identity gate proves it
     // end-to-end. The cache holds only touched lanes (<= ~515MB at
     // chrI), never the 3.34GB whole panel.)
+    // (THE GLOBAL-PANEL CALL MODE's amendment: under --global-frame
+    // the routes' lanes are WHOLE PANEL PATHS (a territory's member
+    // rows span hundreds of chromosome-scale lanes), so the whole-
+    // lane policy would hold the panel in RAM per territory. The
+    // span-scoped policy serves the same bytes from the touched
+    // SPAN per lane — the derived bound is the crops the call
+    // itself requests; the committed local frame keeps the
+    // whole-lane policy verbatim.)
     struct LaneCache {
         sources: routes::Sources,
         lane_lengths: Vec<u64>,
-        seqs: Vec<std::sync::Mutex<Option<std::sync::Arc<Vec<u8>>>>>,
+        /// The load policy: whole-lane (the committed per-territory
+        /// frame — the lanes are the locus.fa record slices) or
+        /// span-scoped (the GLOBAL frame — the lanes are whole panel
+        /// paths, so the cache holds the touched SPAN per lane, grown
+        /// by union on demand; the derived bound is the crops actually
+        /// requested, never a constant. Byte-identity: every served
+        /// crop is a slice of the same Sources::fetch answer, so a
+        /// crop of a grown span equals the direct fetch — the same
+        /// argument the whole-lane cache makes, at the span scope.)
+        whole_lane: bool,
+        seqs: Vec<
+            std::sync::Mutex<
+                Option<(u64, u64, std::sync::Arc<Vec<u8>>)>,
+            >,
+        >,
         loads: AtomicU64,
         bytes: AtomicU64,
         nanos: AtomicU64,
@@ -3727,7 +3763,7 @@ pub fn run(options: Options) -> io::Result<()> {
         fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
             let started = Instant::now();
             let mut slot = self.seqs[source].lock().unwrap();
-            if let Some(seq) = slot.as_ref() {
+            if let Some((_, _, seq)) = slot.as_ref() {
                 return Ok(std::sync::Arc::clone(seq));
             }
             let len = self.lane_lengths[source];
@@ -3736,7 +3772,43 @@ pub fn run(options: Options) -> io::Result<()> {
             self.bytes.fetch_add(len, Ordering::Relaxed);
             self.nanos
                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            *slot = Some(std::sync::Arc::clone(&seq));
+            *slot = Some((0, len, std::sync::Arc::clone(&seq)));
+            Ok(seq)
+        }
+        fn span(
+            &self,
+            source: usize,
+            start: u64,
+            end: u64,
+        ) -> io::Result<std::sync::Arc<Vec<u8>>> {
+            // The GLOBAL-frame policy: the cached span grows by union
+            // to cover the requested crop; a covering span serves the
+            // crop as a slice (the same bytes the direct fetch
+            // returns). One lane's span converges to its touched
+            // envelope in a handful of loads (the growth is monotone
+            // and every crop is served between loads from the span).
+            let started = Instant::now();
+            let mut slot = self.seqs[source].lock().unwrap();
+            let len = self.lane_lengths[source];
+            if let Some((lo, hi, seq)) = slot.as_ref() {
+                if *lo <= start && end <= *hi {
+                    return Ok(std::sync::Arc::clone(seq));
+                }
+                let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
+                let grown = std::sync::Arc::new(self.sources.fetch(source, new_lo, new_hi)?);
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                self.bytes.fetch_add(new_hi - new_lo, Ordering::Relaxed);
+                self.nanos
+                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                *slot = Some((new_lo, new_hi, std::sync::Arc::clone(&grown)));
+                return Ok(grown);
+            }
+            let seq = std::sync::Arc::new(self.sources.fetch(source, start, end.min(len))?);
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            self.bytes.fetch_add(end.min(len) - start, Ordering::Relaxed);
+            self.nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            *slot = Some((start, end.min(len), std::sync::Arc::clone(&seq)));
             Ok(seq)
         }
         fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
@@ -3747,13 +3819,22 @@ pub fn run(options: Options) -> io::Result<()> {
                     && end <= self.lane_lengths[source],
                 "invalid source crop",
             )?;
-            let lane = self.lane(source)?;
-            Ok(lane[start as usize..end as usize].to_vec())
+            if self.whole_lane {
+                let lane = self.lane(source)?;
+                let lo = start as usize;
+                let hi = end as usize;
+                return Ok(lane[lo..hi].to_vec());
+            }
+            let span = self.span(source, start, end)?;
+            let lo = start as usize;
+            let hi = end as usize;
+            Ok(span[lo..hi].to_vec())
         }
     }
     let lane_cache = LaneCache {
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
         sources,
+        whole_lane: !options.global_frame,
         seqs: (0..graph.lanes.len())
             .map(|_| std::sync::Mutex::new(None))
             .collect(),
@@ -3852,7 +3933,10 @@ pub fn run(options: Options) -> io::Result<()> {
     // CLI's interface is COORDINATES - "detect any locus, any
     // position, any allele"): the region resolved against the
     // component's own axis rows to the covered windows - the same
-    // --loci convention, computed instead of typed.
+    // --loci convention, computed instead of typed. (Resolved BEFORE
+    // the global-frame translation: the region is typed in the
+    // component's own LOCAL frame and the window ids are
+    // frame-independent.)
     let loci: Vec<u32> = match loci_request {
         LociRequest::Listed(loci) => loci,
         LociRequest::Region(region) => {
@@ -3864,6 +3948,55 @@ pub fn run(options: Options) -> io::Result<()> {
             loci
         }
     };
+    // THE GLOBAL-PANEL FRAME TRANSLATION (the campaign's lever 1:
+    // --panel names the ONE global panel; the locality maps are the
+    // committed territory-local substrate). The record header IS the
+    // frame statement: every member row "path:start-end" and the
+    // component lane translate to the global frame by the interval
+    // offset (conversion-not-materialization, the re-anchor
+    // principle); the product emission translates back via the
+    // inverse table. Default (unset): the maps verbatim, the
+    // component verbatim — the committed per-territory path
+    // byte-for-byte.
+    let (territory_frame, panel_component): (
+        Option<territory_frame::TerritoryFrame>,
+        String,
+    ) = if options.global_frame {
+        let frame = territory_frame::TerritoryFrame::from_local_names(
+            maps
+                .values()
+                .flat_map(|map| map.members.iter().map(|row| row.path_name.as_str())),
+        )?;
+        let panel_component = frame.global_name(&options.component)?;
+        for map in maps.values_mut() {
+            for row in &mut map.members {
+                let translated =
+                    territory_frame::translate_row(&row.path_name, row.start, row.end)?;
+                row.path_name = translated.path_name;
+                row.start = translated.start;
+                row.end = translated.end;
+            }
+        }
+        for row in axis_rows.iter_mut() {
+            let translated = territory_frame::translate_row(&options.component, row.1, row.2)?;
+            row.1 = translated.start;
+            row.2 = translated.end;
+        }
+        eprintln!(
+            "[score] global-panel frame: component {:?} -> {panel_component:?} \
+             over {} records",
+            options.component,
+            frame.records_len(),
+        );
+        (Some(frame), panel_component)
+    } else {
+        (None, options.component.clone())
+    };
+    // The window's OWN axis row, in the panel's frame (the machinery
+    // consumes the translated extents under the global frame; the
+    // region resolution above consumed the local ones).
+    let window_axis: Vec<(u64, u64)> =
+        axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
     // The partition membership per window: a partition hosting more
     // than one of the component's windows cannot attribute an SK1
     // member row to a window by placement alone (measured at chrIV's
@@ -3893,7 +4026,7 @@ pub fn run(options: Options) -> io::Result<()> {
     let axis_node_attribution: Option<(HashMap<u32, u32>, HashMap<u32, u32>)> =
         if territory_normalized {
             let path_idx = *path_of_name
-                .get(&options.component)
+                .get(&panel_component)
                 .ok_or_else(|| invalid("component path absent from the syng"))?;
             let path_len = panel.name_map.path_to_length[path_idx];
             let mut rep: HashMap<u32, u32> = HashMap::new();
@@ -4760,8 +4893,7 @@ pub fn run(options: Options) -> io::Result<()> {
         None => None,
     };
     let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
-    let contig = options
-        .component
+    let contig = panel_component
         .splitn(3, '#')
         .nth(2)
         .ok_or_else(|| invalid("component lacks a contig suffix"))?
@@ -4838,7 +4970,25 @@ pub fn run(options: Options) -> io::Result<()> {
     } else {
         std::borrow::Cow::Borrowed(model_name)
     };
-    let truth_qv_haplotypes = &options.truth_qv;
+    // (The truth haplotypes as panel path names: under the global
+    // frame a name carrying the territory-local interval form
+    // translates with the maps — the committed CLI input shape is
+    // preserved verbatim, and a name already in the panel's own
+    // frame passes through.)
+    let truth_qv_haplotypes: Vec<String> = options
+        .truth_qv
+        .iter()
+        .map(|name| {
+            if options.global_frame {
+                territory_frame::translate_row(name, 0, 1)
+                    .map(|row| row.path_name)
+                    .unwrap_or_else(|_| name.clone())
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let truth_qv_haplotypes = &truth_qv_haplotypes;
     struct LocusOutput {
         skeleton: Vec<u8>,
         exactness: Vec<u8>,
@@ -4887,7 +5037,7 @@ pub fn run(options: Options) -> io::Result<()> {
             // EXCLUDED (it is the coordinate frame; the --exclude-paths
             // precedent). Loudly counted per locus.
             if let Some(flank) = options.flank_overlap {
-                if member.path_name != options.component
+                if member.path_name != panel_component
                     && !row_covers_flanks(
                         member.start,
                         member.end,
@@ -4908,7 +5058,7 @@ pub fn run(options: Options) -> io::Result<()> {
             // counted per locus.
             if row_is_excluded(
                 &member.path_name,
-                &options.component,
+                &panel_component,
                 &options.exclude_paths,
             ) {
                 excluded_rows += 1;
@@ -5010,7 +5160,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 .enumerate()
                 .filter(|(_, fold)| {
                     fold.members.iter().any(|m| {
-                        m.path_name == options.component
+                        m.path_name == panel_component
                             && m.start == axis_start
                             && m.end == axis_end
                     })
@@ -5554,7 +5704,7 @@ pub fn run(options: Options) -> io::Result<()> {
         let merge_axis_fold = territory_axis_fold.or_else(|| {
             folds.iter().position(|fold| {
                 fold.members.iter().any(|m| {
-                    m.path_name == options.component
+                    m.path_name == panel_component
                         && m.start == axis_start
                         && m.end == axis_end
                 })
@@ -5659,7 +5809,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 .enumerate()
                 .filter(|(_, fold)| {
                     fold.members.iter().any(|m| {
-                        m.path_name == options.component
+                        m.path_name == panel_component
                             && m.start == axis_start
                             && m.end == axis_end
                     })
@@ -5732,7 +5882,7 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut truth_second_correspondence_test: Option<serde_json::Value> = None;
         let truth_pair_test = if truth_qv_mode {
             ensure(
-                truth_qv_haplotypes[0] == options.component,
+                truth_qv_haplotypes[0] == panel_component,
                 "the first --truth-qv haplotype must be the component lane \
                  (the window's own axis row is the truth-first fold)",
             )?;
@@ -6863,18 +7013,40 @@ pub fn run(options: Options) -> io::Result<()> {
                           indistinguishability: bit-identical per-unit 
                           likelihood columns and zero observed read mass on 
                           every variant pocket, or the fold does not happen",
-                "merge_groups": merge_groups.iter().map(|group| json!({
+                "merge_groups": merge_groups.iter().map(|group| {
+                    let row = match &territory_frame {
+                        Some(frame) => {
+                            let (name, start, end) = frame
+                                .local_row(
+                                    &group.representative_row.path_name,
+                                    group.representative_row.start,
+                                    group.representative_row.end,
+                                )
+                                .unwrap_or_else(|_| (
+                                    group.representative_row.path_name.clone(),
+                                    group.representative_row.start,
+                                    group.representative_row.end,
+                                ));
+                            (name, start, end)
+                        }
+                        None => (
+                            group.representative_row.path_name.clone(),
+                            group.representative_row.start,
+                            group.representative_row.end,
+                        ),
+                    };
+                    json!({
                     "fold": group.index,
                     "representative": group.representative,
                     "representative_row": {
-                        "path_name": group.representative_row.path_name,
-                        "start": group.representative_row.start,
-                        "end": group.representative_row.end,
+                        "path_name": row.0,
+                        "start": row.1,
+                        "end": row.2,
                     },
                     "members": group.members,
                     "pocket_node_mass": group.pocket_node_mass,
                     "pocket_edge_mass": group.pocket_edge_mass,
-                })).collect::<Vec<_>>(),
+                })}).collect::<Vec<_>>(),
                 "counters": {
                     "equal_column_pairs": merge_counters.equal_column_pairs,
                     "refused_outside_bubble": merge_counters.refused_outside_bubble,
@@ -6923,21 +7095,42 @@ pub fn run(options: Options) -> io::Result<()> {
         // QUAL and the E/alternative-gap fields — truth-free; the
         // instrument receipt above is unchanged, and this record is
         // emitted ONLY when --product-calls is given).
+        // (THE FRAME BACK-TRANSLATION, the global-panel call mode: the
+        // product rows are emitted in the PARTITION'S OWN frame — the
+        // committed reference-anchored output shape — via the inverse
+        // record table; the machinery's global rows translate back
+        // fail-closed. Under the default frame this is the identity.)
         if product_emission {
-            let product_fold = |index: usize| {
+            let product_fold = |index: usize| -> io::Result<serde_json::Value> {
                 let (image_lo, image_hi) = territory[index];
-                json!({
+                let members: Vec<serde_json::Value> = folds[index]
+                    .members
+                    .iter()
+                    .map(|m| match &territory_frame {
+                        Some(frame) => {
+                            let (name, start, end) =
+                                frame.local_row(&m.path_name, m.start, m.end)?;
+                            Ok(json!({
+                                "path_name": name, "start": start, "end": end,
+                            }))
+                        }
+                        None => Ok(json!({
+                            "path_name": m.path_name, "start": m.start, "end": m.end,
+                        })),
+                    })
+                    .collect::<io::Result<Vec<_>>>()?;
+                // (The territory image is FOLD-RELATIVE — the same
+                // extent in either frame; no translation.)
+                Ok(json!({
                     "fold_index": index,
-                    "members": folds[index].members.iter().map(|m| json!({
-                        "path_name": m.path_name, "start": m.start, "end": m.end,
-                    })).collect::<Vec<_>>(),
+                    "members": members,
                     "length": folds[index].len,
                     "territory_image": if image_hi > image_lo {
                         json!([image_lo, image_hi])
                     } else {
                         serde_json::Value::Null
                     },
-                })
+                }))
             };
             let (winner_first, winner_second) = winner_pair;
             // THE MODEL-INTERNAL QUAL (the owner's cluster semantics,
@@ -6989,7 +7182,7 @@ pub fn run(options: Options) -> io::Result<()> {
                     "model": model_name,
                     "diplotype": {
                         "fold_indices": [winner_first, winner_second],
-                        "paths": [product_fold(winner_first), product_fold(winner_second)],
+                        "paths": [product_fold(winner_first)?, product_fold(winner_second)?],
                     },
                     "class_count": pair_count,
                     "called_class_count": called.len(),
@@ -7083,11 +7276,25 @@ pub fn run(options: Options) -> io::Result<()> {
             // no truth name, alignment or QV field enters here.
             if options.product_sequences {
                 let fold_record = |index: usize| -> io::Result<serde_json::Value> {
+                    let members: Vec<serde_json::Value> = folds[index]
+                        .members
+                        .iter()
+                        .map(|m| match &territory_frame {
+                            Some(frame) => {
+                                let (name, start, end) =
+                                    frame.local_row(&m.path_name, m.start, m.end)?;
+                                Ok(json!({
+                                    "path_name": name, "start": start, "end": end,
+                                }))
+                            }
+                            None => Ok(json!({
+                                "path_name": m.path_name, "start": m.start, "end": m.end,
+                            })),
+                        })
+                        .collect::<io::Result<Vec<_>>>()?;
                     Ok(json!({
                         "fold_index": index,
-                        "members": folds[index].members.iter().map(|m| json!({
-                            "path_name": m.path_name, "start": m.start, "end": m.end,
-                        })).collect::<Vec<_>>(),
+                        "members": members,
                         "length": folds[index].len,
                         "sequence": fold_sequence_string(&folds[index].seq)?,
                     }))

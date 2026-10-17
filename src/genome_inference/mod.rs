@@ -13,6 +13,7 @@ pub mod reanchor;
 pub mod reconstruction;
 pub mod sample;
 pub mod sequence_evaluation;
+pub mod territory_frame;
 pub mod threading;
 
 use crate::sample_mem_bwt::invalid;
