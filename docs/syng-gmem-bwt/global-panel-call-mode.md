@@ -829,13 +829,14 @@ argument says, at the measured constant.
 receipt lands)
 
 1. The serial whole-panel derive-routes (started 15:46Z Oct 17,
-   setsid, ALIVE at 19:13Z at ~12.9k/38,790 lanes, ~55 Mbp/s serial,
-   ETA past midnight under co-tenancy) — on completion: `cmp` its
+   setsid, ALIVE at 21:24Z at ~22.6k/38,790 lanes, ~55 Mbp/s serial,
+   ETA ~02:00Z under co-tenancy) — on completion: `cmp` its
    `graph.json` against `$WORK/global-routes-par/graph.json` (the
    free full-panel byte-identity receipt; the same HEAD compiler
    identity — expected byte-identical; if it differs, name it
    per-field and re-examine the gates' verdicts against the serial
-   artifact).
+   artifact). THE DETACHED WATCHER (10.4 item 3) performs this
+   unattended and writes the receipt.
 2. The L1 N=4 lane RESOLVED (wall 1454s, DELTA, its calls BYTE-IDENTICAL
    to the solo run — §10.3's table updated) AND THE PILOT GATE LANE
    RESOLVED (exit 0, wall 1680s, DELTA vs the different-evidence-
@@ -983,3 +984,149 @@ this rung to ~21 concurrent lanes at 1TB.
 derive ~3s — THE NEW POLE IS THE INPUTS PHASE (the global panel's
 own load, 244.7s of 419s = 58%), which is exactly the shared-index
 lever's territory.
+
+### 10.5.3 THE SHARED-INDEX CUT LANES (lever 2: the batch-amortized
+loads) + the byte-identity gate
+
+`sample_projection` gains `cut-batch-global`: ONE global syng + AGC
+load serving a BATCH of global-frame territories (the projection
+campaign's region-batching shape, at the global frame; manifest: one
+JSONL row per territory {name, axis, bed_directory, component,
+out_dir, record_origin}). Per territory the setup reproduces the
+single global cut's own Global-frame branch verbatim (the translated
+universe, the territory index over the shared AGC lane fetch, the
+identity expressibility map); the ONE shard scan routes each read
+through an inverted index (global node → territory ids — the local
+fleet batch's own routing shape) and runs every routed territory's
+committed identity remap; the per-(file, territory) states fold in
+read order and merge in file order exactly as the single cut's do,
+so each territory's outputs are the single cut's, byte for byte.
+
+**THE GATE (the four-territory L1-L4 batch vs the committed single
+cut receipts, all 12 files):**
+
+| territory | cut-census.jsonl | cut-cache.bin | cut-reads.fasta |
+|---|---|---|---|
+| L1 | BYTE-IDENTICAL | BYTE-IDENTICAL | BYTE-IDENTICAL |
+| L2 | BYTE-IDENTICAL | BYTE-IDENTICAL | BYTE-IDENTICAL |
+| L3 | BYTE-IDENTICAL | BYTE-IDENTICAL | BYTE-IDENTICAL |
+| L4 | BYTE-IDENTICAL | BYTE-IDENTICAL | BYTE-IDENTICAL |
+
+Every semantic cut-stats.json field identical per territory; only the
+timing fields differ (the amortized-load receipt below). **THE
+MEASUREMENTS:** the 4-territory batch: wall 593s (613s process), of
+which the ONE global load 344.7s (58%) — shared across all four —
+and the scan 150.4s for ALL FOUR TOGETHER (vs 146.7-197.3s per SINGLE
+territory: the shard decode dominates the scan and the per-territory
+routing tests are cheap; the marginal scan cost is sub-linear in
+batch width at this rung), setup + census emission ~100s. Against
+the four single cuts' walls (563.4 / 542.5 / 504.2 / 554.2s =
+2,164s total) the batch is **3.7x — the per-territory marginal cut
+cost drops from ~541s to ~62s** once the load amortizes. THE MEMORY
+MODEL AT BATCH WIDTH: peak RSS 76.3GB at width 4 vs 72.6GB for a
+single cut — only +3.7GB for 3 extra territories (the shared ~40GB
+panel dominates; per-territory indexes ~1-3GB), so the batch width
+is memory-loose: at the same shape, width-16 batches stay in the
+~110GB class, far inside 1TB — the cuts' fleet-parallelism ceiling is
+process count, not memory.
+
+**THE CUT+CALL SHARING QUESTION (measured facts, machinery NOT built
+this increment):** the cut's loaded global SyngIndex and the call's
+inputs-phase load are THE SAME PANEL (~36.5GB in RAM, 244.7s to load
+at L1) — a combined cut+call process (or an injected-index call API)
+would amortize the load across both phases; the memory model ALLOWS
+it (a cut process already holds the panel at 76.3GB peak, and the
+call's own working set beyond inputs is ~2-9GB), but the call's
+`Options` accepts panel PATHS, not a loaded index — the injection
+seam is the named next step, not silently built.
+
+### 10.5.4 THE CENSUS-SUPERSET PERFORMANCE SHADOW (duty 4 — the
+owner's accuracy decision UNTOUCHED; only its cost measured)
+
+The question is the owner's (§10.3: the global census keeps 2.8x the
+committed read mass — reads_kept 304,793 vs 108,230 at L1); this
+increment measures only what that mass COSTS. THE INSTRUMENT
+(receipt-side, default OFF): `IMPG_CUT_READSET_FASTA` restricts the
+cut scan to the reads in a stated FASTA — here the committed
+cut-L1/cut-reads.fasta (the committed 1x evidence mass, the natural
+anchor). THE SHADOW CUT (exit 0, wall 523s): reads_kept **95,558**
+(the committed set ∩ the global routing — 9,393 of the committed
+distinct sequences sit in the global frame's inexpressible class and
+do not route), routed_patterns 3,586 (vs the 2.8x run's 3,775; the
+committed cut's 3,514), census_mult **141,114 vs 384,056 — the shadow
+census is 0.37x the mass**. THE SHADOW CALL (the same global-frame
+call machinery, serial, over the shadow census/cache; no answer gate —
+the accuracy question is out of scope):
+
+| phase | shadow (1x mass) | the 2.8x run (serial profile) |
+|---|---:|---:|
+| inputs | 247.1s | 232.0s |
+| binding | 989.7s | 1013.8s |
+| — lane loads | 278,591 / 57.0GB / 990.9s | 277,796 / 56.7GB / 1016.3s |
+| — occurrences | 1,415,645 | 1,448,220 |
+| loci (scoring) | **85.7s** | **163.5s** |
+| wall | 1364s | 1450s |
+| peak Pss | 37.3GB | 38.2GB |
+
+**THE SHADOW, honestly: at a SATURATED-pattern territory the 2.8x
+read-mass costs the call almost nothing.** The mass arrives as
+MULTIPLICITY on the same pattern set (3,586 vs 3,775 records), and
+the call's poles are both read-mass-invariant: the inputs (the panel
+load — rss inputs identical at 36.5GB either way; the derive cache
+95,558 vs 304,793 reads moves nothing measurable) and the bind (the
+per-record occurrence structure: 1.42M vs 1.45M occurrences, the same
+~278k span loads — the load work is order-geometry, not mass). THE
+ONE REAL SHADOW: the loci/scoring phase, which scales with census
+mult — **~78s per lane at L1 (85.7s vs 163.5s, 1.9x)** and ~1GB of
+peak working set (37.3 vs 38.2GB) — a ~6% wall effect net. THE CUT
+SIDE: the shadow cut's wall 523s vs the 2.8x cut's 563-586s (~8% —
+the scan decodes the same shards either way). THE OWNER'S CAVEAT,
+measured at the other end: where the pattern set is NOT saturated the
+mass DOES bite — the pilot, the largest census (12,286 records /
+5.79M occurrences), paid bind 697s with the largest working set of
+the set (41.3GB Pss). The superset question is therefore ACCURACY-
+dominated at saturated territories (§10.3's fold flips) with a small
+performance shadow — the owner's decision needs the accuracy case,
+not a performance case.
+
+### 10.5.5 The 20-minute budget, restated from the new receipts
+
+- **map ~3 min** — unchanged (the 12-lane projection receipt).
+- **prep ZERO per sample**; the panel-side ONE-TIME routes inventory
+  1505s parallel, once per panel — unchanged (§10.3).
+- **cuts — THE BATCH RECEIPT (§10.5.3):** the 4-territory batch cut
+  runs 593s of which the ONE 345s global load is shared by all four —
+  the per-territory marginal cut is **~62s vs ~541s single** (8.7x);
+  the scan's shard decode is shared per batch (150s for all four
+  together, sub-linear in width at the measured rung). Peak RSS
+  76.3GB at width 4 (+3.7GB for 3 extra territories — the shared
+  ~40GB panel dominates): the batch width is memory-loose, the fleet
+  ceiling is process count and scan CPU.
+- **calls — THE SEAM RECEIPT (§10.5.2):** the per-lane wall at the
+  receipted rung (seam W=16, pool 16) is **419s ≈ 7 min at L1** (vs
+  1450s serial = 3.5x), gate-PASS byte-identical; peak Pss 47.5GB
+  corrects the concurrent-lane ceiling to **~21 lanes at 1TB**.
+- **The census-superset shadow (§10.5.4):** at saturated territories
+  ~6% wall / ~1GB / the owner's accuracy decision, not a performance
+  lever.
+- **THE REMAINING POLES, each named with its receipt:** (1) the
+  per-lane inputs phase — **244.7s = 58% of the 419s wall** — the
+  global panel's own load, the same panel the cut process already
+  holds (the combined cut+call process, or an injected-index call
+  API: the memory model ALLOWS it, ~76-85GB at width 4; the seam is
+  the named next machinery step); (2) the span cache's union-regrowth
+  re-decompression — the ~482x receipt (56.7GB fetched for ~117.6MB
+  unique at L1; a delta-extend span policy is the named follow-on
+  pole, byte-identity by the same served-crop argument); (3) lever
+  4's marathon tail — unchanged (T03641 11,084s/71.1GB,
+  T03203 2,884s/70.6GB — the cross_lcp_merge segdup core, still open).
+- **The honest bottom line:** the per-locality cost at the new
+  receipts is ~62s (batch-marginal cut) + ~419s (call) per territory;
+  at the ~21-lane ceiling a 5,844-territory genome is ~30 lane-hours
+  of calls alone — the 20-minute line still needs the per-lane wall
+  down ~10x, and the receipts now name exactly where it lives: the
+  inputs pole (the shared-index cut+call seam), the load redundancy
+  (the delta-extend fix), and the marathon tail. No number above is
+  extrapolated beyond its receipt; the whole-genome cut/call wall at
+  fleet scale is fleet-parallelism-bound (process count × scan CPU ×
+  the 1TB memory model), not machinery-bound at the measured margins.

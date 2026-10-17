@@ -252,6 +252,30 @@ enum Mode {
         #[arg(long)]
         manifest: PathBuf,
     },
+    /// THE SHARED-INDEX CUT LANES (lever 2 — the global frame's
+    /// batch-amortized-load form): ONE global syng + AGC load serving a
+    /// BATCH of global-frame territories per process. The single global
+    /// cut re-pays the ~325s global GBWT load pole every run; the batch
+    /// amortizes it over the whole manifest. Each territory's outputs
+    /// are byte-identical to the single global cut's (the gate).
+    CutBatchGlobal {
+        /// The GLOBAL panel syng prefix (the projection's panel).
+        #[arg(long)]
+        global_panel: String,
+        /// The global panel AGC (the committed --sequence-files input).
+        #[arg(long)]
+        agc: PathBuf,
+        /// The projection output directory (the shard files; ONE scan
+        /// serves every manifest territory).
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// JSONL manifest: one territory per row {name, axis,
+        /// bed_directory, component, out_dir, record_origin} (the
+        /// single global cut's own substrate inputs; record_origin
+        /// defaults to 0 = the header's own interval).
+        #[arg(long)]
+        manifest: PathBuf,
+    },
     /// THE YIELD-ANOMALY AUTOPSY TRACE (receipt-side diagnostic; no
     /// product machinery): one scan of the projection shards that
     /// classifies, per locality and per read-class (sequence sets
@@ -1448,6 +1472,47 @@ fn scan_shard_file(
     mode: RemapMode,
     local_panel: Option<&SyngIndex>,
 ) -> io::Result<FileCut> {
+    // THE CENSUS-SUPERSET SHADOW INSTRUMENT (receipt-side diagnostic,
+    // default OFF — the committed behavior is byte-identical): with
+    // IMPG_CUT_READSET_FASTA naming a FASTA of read sequences, the scan
+    // keeps ONLY the reads whose sequence is in that set (by FNV hash
+    // of the exact bytes), everything else is scanned-and-skipped. The
+    // owner's census-superset question (§10.3: the global cut keeps
+    // 2.8x the committed read mass) is an ACCURACY decision; this
+    // instrument makes its PERFORMANCE shadow measurable without
+    // touching the answer profile — the emitted census/cache are the
+    // same machinery at the stated read mass, nothing more.
+    let readset: Option<std::collections::HashSet<u64>> = std::env::var(
+        "IMPG_CUT_READSET_FASTA",
+    )
+    .ok()
+    .filter(|value| !value.is_empty())
+    .map(|path| -> io::Result<_> {
+        let text = std::fs::read_to_string(&path)?;
+        let mut set = std::collections::HashSet::new();
+        let mut seq: Vec<u8> = Vec::new();
+        for line in text.lines() {
+            if let Some(header) = line.strip_prefix('>') {
+                let _ = header;
+                if !seq.is_empty() {
+                    set.insert(fnv1a64(&seq));
+                }
+                seq.clear();
+            } else {
+                seq.extend_from_slice(line.trim().as_bytes());
+            }
+        }
+        if !seq.is_empty() {
+            set.insert(fnv1a64(&seq));
+        }
+        eprintln!(
+            "[cut] read-set shadow instrument: {} reads from {path}",
+            set.len()
+        );
+        Ok(set)
+    })
+    .transpose()?;
+    let readset_ref = readset.as_ref();
     let mut cut = FileCut {
         reads_scanned: 0,
         records_scanned: 0,
@@ -1473,6 +1538,13 @@ fn scan_shard_file(
         let decoded: Vec<DecodedRead> = per_read
             .into_iter()
             .collect::<io::Result<_>>()?;
+        let decoded: Vec<DecodedRead> = match readset_ref {
+            Some(set) => decoded
+                .into_iter()
+                .filter(|read| set.contains(&fnv1a64(&read.seq)))
+                .collect(),
+            None => decoded,
+        };
         let remapped: Vec<io::Result<(
             Vec<Option<(Vec<u64>, OwnWalk, bool)>>,
             bool,
@@ -2534,6 +2606,40 @@ struct CutBatchSpec {
     out_dir: PathBuf,
 }
 
+/// One GLOBAL-frame batch territory's manifest row (the shared-index
+/// cut lanes): the single global cut's own substrate inputs — no
+/// locality panel, no locus.fa (conversion-not-materialization) — plus
+/// the substrate's stated content origin.
+#[derive(serde::Deserialize)]
+struct CutBatchGlobalSpec {
+    name: String,
+    axis: PathBuf,
+    bed_directory: PathBuf,
+    component: String,
+    out_dir: PathBuf,
+    /// The substrate's stated content origin (the single global
+    /// cut's --record-origin d; 1 = the L1-L4 one-base-later
+    /// convention, 0 = the pilot's exact headers).
+    #[serde(default)]
+    record_origin: u64,
+}
+
+/// One loaded GLOBAL-frame batch territory: the shared panel is held
+/// ONCE by the batch; per territory only the committed component
+/// territory index and the identity expressibility map are loaded.
+struct GlobalBatchTerritory {
+    spec: CutBatchGlobalSpec,
+    territory: TerritoryIndex,
+    territory_nodes_abs: HashSet<u32>,
+    /// The identity expressibility map (the single global cut's own
+    /// node_map: the territory's own canonical anchors, every node
+    /// remapped to itself — the evidence filter, in the panel's own
+    /// frame).
+    node_map: HashMap<i32, i32>,
+    node_map_pairs: usize,
+    component_contig_source: String,
+}
+
 /// One loaded batch territory: the locality panel, the committed
 /// component territory index, and the global<->locality node map.
 struct BatchTerritory {
@@ -3390,6 +3496,714 @@ fn run_cut_batch(
 
 
 // ---------------------------------------------------------------------------
+// cut-batch-global: THE SHARED-INDEX CUT LANES (lever 2 — the 325s
+// global GBWT load pole amortized over a batch of global-frame
+// territories; one shard scan serves every territory). The per-file,
+// per-read fold and the per-territory merge reproduce the single
+// global cut's own accumulation order exactly (fold in read order per
+// file; merge in file order per territory), so each territory's
+// cut-census.jsonl / cut-cache.bin / cut-reads.fasta are byte-
+// identical to the single cut's — the gate.
+// ---------------------------------------------------------------------------
+fn run_cut_batch_global(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    manifest_path: &Path,
+) -> io::Result<()> {
+    let mut specs: Vec<CutBatchGlobalSpec> = Vec::new();
+    for line in BufReader::new(std::fs::File::open(manifest_path)?).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        specs.push(
+            serde_json::from_str(&line)
+                .map_err(|e| invalid(format!("manifest row: {e}")))?,
+        );
+    }
+    ensure(!specs.is_empty(), "empty batch manifest")?;
+    ensure(specs.len() <= 65535, "batch wider than the u16 territory index")?;
+    for spec in &specs {
+        std::fs::create_dir_all(&spec.out_dir)?;
+        for name in [
+            "cut-census.jsonl",
+            "cut-cache.bin",
+            "cut-reads.fasta",
+            "cut-stats.json",
+        ] {
+            ensure(
+                !spec.out_dir.join(name).exists(),
+                &format!(
+                    "cut output {name} already exists in {}",
+                    spec.out_dir.display()
+                ),
+            )?;
+        }
+    }
+    let started = Instant::now();
+    eprintln!(
+        "[cut-batch-global] loading the global panel + AGC once for {} territories",
+        specs.len()
+    );
+    let load_started = Instant::now();
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
+    let k = global.syncmer_length_bp() as u64;
+    // The shared AGC lane fetch (the single global cut's own closure,
+    // verbatim): fetch(A, B) is the 0-based [A, B) slice, clipped at
+    // the path end, empty when the interval is empty.
+    let path_lengths: HashMap<&str, u64> = global
+        .name_map
+        .path_to_name
+        .iter()
+        .zip(&global.name_map.path_to_length)
+        .map(|(name, &length)| (name.as_str(), length))
+        .collect();
+    let agc_ref = &agc;
+    let fetch_lane =
+        move |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+            let path_len = *path_lengths
+                .get(name)
+                .ok_or_else(|| invalid("universe path absent from the global panel"))?;
+            let hi = hi.min(path_len);
+            if lo >= hi {
+                return Ok(Vec::new());
+            }
+            Ok(agc_ref
+                .fetch_sequence(name, lo as i32, hi as i32)
+                .map_err(|e| invalid(format!("AGC fetch {name}: {e}")))?)
+        };
+
+    // Per-territory setup (parallel; every territory's own universe,
+    // territory index, and identity expressibility map — the single
+    // global cut's Global-frame branch, verbatim).
+    let global_ref = &global;
+    let setups: Vec<io::Result<GlobalBatchTerritory>> = specs
+        .into_par_iter()
+        .map(|spec| {
+            let axis: AxisFile = serde_json::from_str(&std::fs::read_to_string(&spec.axis)?)
+                .map_err(|e| invalid(format!("axis parse: {e}")))?;
+            let universe =
+                load_universe_component(&axis, &spec.bed_directory, &spec.component)?;
+            eprintln!(
+                "[cut-batch-global] {} universe rows: {}",
+                spec.name,
+                universe.len()
+            );
+            let record_origin = spec.record_origin;
+            let universe_global: Vec<UniverseRow> = universe
+                .iter()
+                .map(|row| {
+                    let translated = territory_frame::translate_row(
+                        &row.path_name,
+                        row.start,
+                        row.end,
+                        record_origin,
+                    )?;
+                    Ok::<_, io::Error>(UniverseRow {
+                        partition: row.partition,
+                        path_name: translated.path_name,
+                        start: translated.start,
+                        end: translated.end,
+                    })
+                })
+                .collect::<io::Result<_>>()?;
+            let territory = build_territory_index(global_ref, &universe_global, &fetch_lane, k)?;
+            eprintln!(
+                "[cut-batch-global] {} territory (global frame): {} rows, {} entries",
+                spec.name,
+                territory.territories.len(),
+                territory.entries.len()
+            );
+            let territory_nodes_abs: HashSet<u32> = territory
+                .entries
+                .iter()
+                .map(|&(node, _, _)| node.unsigned_abs())
+                .collect();
+            let component_contig_source =
+                territory_frame::split_local_name(&spec.component)?.0.to_string();
+            // THE IDENTITY EXPRESSIBILITY MAP (the single global cut's
+            // own derivation, verbatim): the canonical anchor walk of
+            // every record's content — fetched from the AGC at the
+            // record's CONTENT origin start + d — every node remapped
+            // to itself.
+            let mut node_map: HashMap<i32, i32> = HashMap::new();
+            let mut expressibility_pairs = 0usize;
+            let mut record_names: BTreeSet<&str> = BTreeSet::new();
+            for row in &universe {
+                record_names.insert(row.path_name.as_str());
+            }
+            for header in &record_names {
+                let (global_name, start, end) = parse_locus_header(header)?;
+                let length = (end - start) as usize;
+                let content_start = start
+                    .checked_add(record_origin)
+                    .ok_or_else(|| invalid(format!(
+                        "record {header}: the content origin start+{record_origin} overflows"
+                    )))?;
+                let content = agc_ref
+                    .fetch_sequence(
+                        &global_name,
+                        content_start as i32,
+                        (content_start + length as u64) as i32,
+                    )
+                    .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
+                ensure(
+                    content.len() == length,
+                    &format!(
+                        "record {header}: the content fetch at origin +{record_origin} \
+                         returned {} bytes, not the record's {length} (the content origin \
+                         leaves the path; state the substrate's own convention)",
+                        content.len()
+                    ),
+                )?;
+                let walk = mem_records::canonical_anchor_walk(global_ref, &content)?;
+                for &(node, _position) in &walk {
+                    match node_map.entry(node) {
+                        std::collections::hash_map::Entry::Occupied(o) => {
+                            ensure(*o.get() == node, "conflicting identity entry")?;
+                        }
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(node);
+                            expressibility_pairs += 1;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "[cut-batch-global] {} identity expressibility map over {} records: \
+                 {} canonical anchors",
+                spec.name,
+                record_names.len(),
+                expressibility_pairs
+            );
+            Ok(GlobalBatchTerritory {
+                spec,
+                territory,
+                territory_nodes_abs,
+                node_map,
+                node_map_pairs: expressibility_pairs,
+                component_contig_source,
+            })
+        })
+        .collect();
+    let territories: Vec<GlobalBatchTerritory> =
+        setups.into_iter().collect::<io::Result<_>>()?;
+    let n_terr = territories.len();
+    let emit_specs: Vec<(String, std::path::PathBuf)> = territories
+        .iter()
+        .map(|t| (t.spec.name.clone(), t.spec.out_dir.clone()))
+        .collect();
+
+    // The inverted routing index: global node -> territory ids. A read
+    // is a candidate for a territory iff any of its records' walk
+    // nodes is one of the territory's expressibility keys — the exact
+    // completeness argument of the local batch's routing index (an
+    // expressible record has EVERY node in the map, so a record that
+    // touches has a key node; a read no territory routes contributes
+    // only inexpressible records to every territory, exactly as the
+    // single cut's all-or-nothing remap drops them).
+    let mut routing: HashMap<i32, Vec<u16>> = HashMap::new();
+    for (index, t) in territories.iter().enumerate() {
+        for &gnode in t.node_map.keys() {
+            routing.entry(gnode).or_default().push(index as u16);
+        }
+    }
+    eprintln!(
+        "[cut-batch-global] routing index: {} global nodes over {} territories",
+        routing.len(),
+        n_terr
+    );
+    let load_seconds = load_started.elapsed().as_secs_f64();
+
+    // The ONE shard scan (parallel over files; per read, every routed
+    // territory's committed identity remap; the per-(file, territory)
+    // states accumulate in read order exactly as the single cut's
+    // per-file state does).
+    let mut shard_paths: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(shards_dir)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
+            shard_paths.push(path);
+        }
+    }
+    shard_paths.sort();
+    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    let routing_ref = &routing;
+    let territories_ref = &territories;
+    let scan_started = Instant::now();
+    let per_file: Vec<io::Result<HashMap<u16, FileCut>>> = shard_paths
+        .par_iter()
+        .map(|path| {
+            let mut per: HashMap<u16, FileCut> = HashMap::new();
+            let mut file_reads = 0u64;
+            let mut file_records = 0u64;
+            // Per territory: the routed reads' record total (for the
+            // file-end unmappable remainder — every record of every
+            // UNROUTED read is inexpressible for the territory, exactly
+            // the single cut's all-or-nothing accounting).
+            let mut routed_records: HashMap<u16, u64> = HashMap::new();
+            for batch in shard_packet_stream(path, 1024)? {
+                let packets = batch?;
+                file_reads += packets.len() as u64;
+                let decoded: Vec<DecodedRead> = packets
+                    .par_iter()
+                    .map(|packet| decode_read_packet(packet))
+                    .collect::<io::Result<_>>()?;
+                file_records += decoded
+                    .iter()
+                    .map(|read| read.records.len() as u64)
+                    .sum::<u64>();
+                // Per read: the routed territory set, then every
+                // routed territory's committed identity remap (parallel
+                // over reads).
+                let processed: Vec<
+                    io::Result<
+                        Option<(
+                            Vec<u8>,
+                            Vec<(u16, Vec<Option<(Vec<u64>, OwnWalk, bool)>>)>,
+                        )>,
+                    >,
+                > = decoded
+                    .into_par_iter()
+                    .map(|read| {
+                        let mut routed: Vec<u16> = Vec::new();
+                        for (_, walk) in &read.records {
+                            for &(node, _) in walk {
+                                if let Some(list) = routing_ref.get(&node) {
+                                    routed.extend_from_slice(list);
+                                }
+                            }
+                        }
+                        routed.sort_unstable();
+                        routed.dedup();
+                        if routed.is_empty() {
+                            return Ok(None);
+                        }
+                        let mut out = Vec::with_capacity(routed.len());
+                        for &ti in &routed {
+                            let t = &territories_ref[ti as usize];
+                            let mut records: Vec<Option<(Vec<u64>, OwnWalk, bool)>> =
+                                Vec::with_capacity(read.records.len());
+                            cut_records(
+                                &read.records,
+                                &t.node_map,
+                                &t.territory_nodes_abs,
+                                false,
+                                &mut records,
+                            )?;
+                            out.push((ti, records));
+                        }
+                        Ok(Some((read.seq, out)))
+                    })
+                    .collect();
+                // Fold in read order (the single cut's per-read
+                // accumulation, per territory).
+                for result in processed {
+                    let Some((seq, per_terr)) = result? else {
+                        continue;
+                    };
+                    for (ti, records) in per_terr {
+                        let cut = per.entry(ti).or_insert_with(FileCut::empty);
+                        *routed_records.entry(ti).or_insert(0) += records.len() as u64;
+                        let mut kept: Vec<(u32, OwnWalk)> = Vec::new();
+                        let mut any_touch = false;
+                        for record in &records {
+                            if let Some((tokens, walk, touch)) = record {
+                                cut.records_mappable += 1;
+                                if *touch {
+                                    any_touch = true;
+                                    *cut.pattern_mult.entry(tokens.clone()).or_insert(0) += 1;
+                                }
+                                let key = cut.intern_key(tokens);
+                                kept.push((key, walk.clone()));
+                            } else {
+                                cut.records_unmappable += 1;
+                            }
+                        }
+                        if any_touch {
+                            let read_index = cut.reads.len();
+                            for (key, _walk) in &kept {
+                                cut.key_reads[*key as usize].push(read_index);
+                            }
+                            cut.reads.push(seq.clone());
+                            cut.read_records.push(std::mem::take(&mut kept));
+                        }
+                    }
+                }
+            }
+            // The file's full-scan accounting, per territory (the single
+            // global cut counts every scanned read/record in its
+            // per-file state; the batch reproduces that per territory,
+            // with the unrouted reads' records counted unmappable —
+            // every such record is inexpressible, the all-or-nothing
+            // rule's own accounting).
+            for index in 0..n_terr {
+                let ti = index as u16;
+                let cut = per.entry(ti).or_insert_with(FileCut::empty);
+                cut.reads_scanned = file_reads;
+                cut.records_scanned = file_records;
+                let routed = routed_records.get(&ti).copied().unwrap_or(0);
+                cut.records_unmappable += file_records - routed;
+            }
+            Ok(per)
+        })
+        .collect();
+    let scan_seconds = scan_started.elapsed().as_secs_f64();
+    let per_file: Vec<HashMap<u16, FileCut>> =
+        per_file.into_iter().collect::<io::Result<_>>()?;
+    eprintln!(
+        "[cut-batch-global] scan done in {scan_seconds:.0}s; emitting {n_terr} territories"
+    );
+
+    // Per territory: the per-file states in file order, then the single
+    // global cut's emission tail (parallel over territories).
+    let mut per_terr_files: Vec<Vec<FileCut>> = (0..n_terr).map(|_| Vec::new()).collect();
+    for per in per_file {
+        for (ti, cut) in per {
+            per_terr_files[ti as usize].push(cut);
+        }
+    }
+    let emissions: Vec<io::Result<serde_json::Value>> = territories
+        .into_par_iter()
+        .zip(per_terr_files)
+        .map(|(t, files)| {
+            batch_global_emit_territory(&global, t, files, load_seconds, scan_seconds, &started)
+        })
+        .collect();
+    let mut n_emit_failed = 0usize;
+    for ((name, out_dir), result) in emit_specs.into_iter().zip(emissions) {
+        match result {
+            Ok(summary) => eprintln!("[cut-batch-global] {}: {}", summary["name"], summary),
+            Err(e) => {
+                // FAIL-CLOSED, ISOLATED (the local batch's own rule): the
+                // territory is refused, its partial outputs removed, the
+                // failure named on disk; the batch's other territories
+                // proceed.
+                n_emit_failed += 1;
+                let _ = std::fs::write(out_dir.join("CUT-FAILED.txt"), format!("{e}\n"));
+                for f in [
+                    "cut-census.jsonl",
+                    "cut-cache.bin",
+                    "cut-reads.fasta",
+                    "cut-stats.json",
+                ] {
+                    let _ = std::fs::remove_file(out_dir.join(f));
+                }
+                eprintln!(
+                    "[cut-batch-global] {}: EMISSION FAILED (fail-closed, isolated): {e}",
+                    name
+                );
+            }
+        }
+    }
+    eprintln!(
+        "[cut-batch-global] DONE: {} territories in {:.0}s (peak RSS {}kB, {} emission-failures)",
+        n_terr,
+        started.elapsed().as_secs_f64(),
+        rss_now_kb(),
+        n_emit_failed
+    );
+    Ok(())
+}
+
+/// One global-frame batch territory's emission: the single global
+/// cut's emission tail (derive cache, reads FASTA, census routing over
+/// the territory index, stats), over the territory's merged per-file
+/// state.
+fn batch_global_emit_territory(
+    panel: &SyngIndex,
+    t: GlobalBatchTerritory,
+    files: Vec<FileCut>,
+    load_seconds: f64,
+    scan_seconds: f64,
+    started: &Instant,
+) -> io::Result<serde_json::Value> {
+    let GlobalBatchTerritory {
+        spec,
+        territory,
+        territory_nodes_abs: _,
+        node_map: _,
+        node_map_pairs,
+        component_contig_source,
+    } = t;
+    let out_dir = spec.out_dir.as_path();
+    let record_origin = spec.record_origin;
+    let merged = batch_merge_file(MergedBatch::new(), files);
+    // The derive cache (the committed format): multiplicity by
+    // identical sequence, first representative carries the count.
+    let reads = merged.reads;
+    let mut read_counts: HashMap<u64, u32> = HashMap::new();
+    for seq in &reads {
+        *read_counts.entry(fnv1a64(seq)).or_insert(0) += 1;
+    }
+    let mut read_multiplicity: Vec<u32> = Vec::with_capacity(reads.len());
+    {
+        let mut first_seen: HashMap<u64, usize> = HashMap::new();
+        for seq in &reads {
+            let hash = fnv1a64(seq);
+            match first_seen.get(&hash) {
+                Some(_) => read_multiplicity.push(0),
+                None => {
+                    first_seen.insert(hash, 0);
+                    read_multiplicity.push(*read_counts.get(&hash).unwrap_or(&1));
+                }
+            }
+        }
+    }
+    write_derive_cache(
+        &out_dir.join("cut-cache.bin"),
+        &merged.key_tokens,
+        &merged.key_reads,
+        &reads,
+        &read_multiplicity,
+        &merged.read_records,
+    )?;
+    {
+        let mut out =
+            io::BufWriter::new(std::fs::File::create(out_dir.join("cut-reads.fasta"))?);
+        for (index, seq) in reads.iter().enumerate() {
+            writeln!(out, ">cutread:{index}")?;
+            out.write_all(seq)?;
+            out.write_all(b"\n")?;
+        }
+        out.flush()?;
+    }
+
+    // The cut census: route every touching pattern through the
+    // committed placement machinery; emit the committed JSONL schema
+    // (the single global cut's emission, verbatim — the component
+    // contig comparison in the panel's own frame).
+    let census_started = Instant::now();
+    let k = panel.syncmer_length_bp() as u64;
+    let mut out = io::BufWriter::new(std::fs::File::create(out_dir.join("cut-census.jsonl"))?);
+    let component_contig = component_contig_source
+        .rsplit('#')
+        .next()
+        .unwrap_or(&component_contig_source)
+        .to_string();
+    let mut routed_patterns = 0u64;
+    let mut census_mult_total = 0u64;
+    let mut dropped_no_occurrence = 0u64;
+    let sorted: Vec<(Vec<u64>, u64)> = merged
+        .pattern_mult
+        .clone()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .collect();
+    let routed: Vec<io::Result<Option<(serde_json::Value, u64)>>> = sorted
+        .par_iter()
+        .map(|(tokens, multiplicity)| {
+            let anchors = decode_tokens(tokens)?;
+            let (occurrence_map, total_occurrences, forward_positions, reverse_positions) =
+                route_record(&anchors, &territory, k);
+            if occurrence_map.is_empty() {
+                return Ok(None);
+            }
+            let anchor_count = anchors.len();
+            struct CensusOcc {
+                path: usize,
+                start: u64,
+                orientation: u8,
+                intervals: Vec<(u64, u64)>,
+                partitions: Vec<u32>,
+            }
+            let mut occurrences: Vec<CensusOcc> = Vec::new();
+            let rc_anchors = reverse_complement_walk(&anchors, k);
+            let orientations: [(&[(i32, u64)], &[(usize, u64)], u8); 2] = [
+                (&anchors, &forward_positions, 0),
+                (&rc_anchors, &reverse_positions, 1),
+            ];
+            for (walk, positions, orientation) in orientations {
+                for &(path, start) in positions.iter() {
+                    let mut windows: Vec<(u64, u64)> = walk
+                        .iter()
+                        .map(|&(_, rel)| {
+                            (
+                                start.saturating_add(rel),
+                                start.saturating_add(rel).saturating_add(k),
+                            )
+                        })
+                        .collect();
+                    windows.sort_unstable();
+                    let mut intervals: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
+                    for (lo, hi) in windows {
+                        match intervals.last_mut() {
+                            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+                            _ => intervals.push((lo, hi)),
+                        }
+                    }
+                    let mut partitions: Vec<u32> = Vec::new();
+                    for &(_, rel) in walk {
+                        for partition in territory.partitions_at(path, start + rel, k) {
+                            if !partitions.contains(&partition) {
+                                partitions.push(partition);
+                            }
+                        }
+                    }
+                    partitions.sort_unstable();
+                    occurrences.push(CensusOcc {
+                        path,
+                        start,
+                        orientation,
+                        intervals,
+                        partitions,
+                    });
+                }
+            }
+            let mut occurrence_nodes: Vec<Vec<Vec<u32>>> =
+                vec![Vec::with_capacity(1); occurrences.len()];
+            let mut by_path: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+            for (position, occ) in occurrences.iter().enumerate() {
+                by_path.entry(occ.path).or_default().push(position);
+            }
+            for (path, members) in &by_path {
+                let lo_min = members
+                    .iter()
+                    .flat_map(|&position| occurrences[position].intervals.iter().map(|&(lo, _)| lo))
+                    .min()
+                    .unwrap_or(0);
+                let hi_max = members
+                    .iter()
+                    .flat_map(|&position| {
+                        occurrences[position].intervals.iter().map(|&(_, hi)| hi)
+                    })
+                    .max()
+                    .unwrap_or(0);
+                if hi_max <= lo_min {
+                    continue;
+                }
+                let mut steps: Vec<(u64, i32)> = panel
+                    .walk_path_range(*path, lo_min, hi_max)?
+                    .into_iter()
+                    .map(|(node, bp)| (bp, node))
+                    .collect();
+                steps.sort_unstable_by_key(|&(bp, _)| bp);
+                for &position in members {
+                    for &(lo, hi) in &occurrences[position].intervals {
+                        let start = steps.partition_point(|&(bp, _)| bp < lo);
+                        let end = steps.partition_point(|&(bp, _)| bp.saturating_add(k) <= hi);
+                        let contained = &steps[start..end.max(start)];
+                        occurrence_nodes[position]
+                            .push(contained.iter().map(|&(_, node)| node.unsigned_abs()).collect());
+                    }
+                }
+            }
+            let mut pair_bins = [0u64; MULTI_CENSUS_PAIR_BINS.len()];
+            let contigs: Vec<bool> = occurrences
+                .iter()
+                .map(|occ| {
+                    panel.name_map.path_to_name[occ.path]
+                        .rsplit('#')
+                        .next()
+                        .map(|contig| contig == component_contig)
+                        .unwrap_or(false)
+                })
+                .collect();
+            let occurrence_node_sets: Vec<BTreeSet<u32>> = occurrence_nodes
+                .iter()
+                .map(|intervals| intervals.iter().flatten().copied().collect())
+                .collect();
+            for left in 0..occurrences.len() {
+                for right in left + 1..occurrences.len() {
+                    let bin = multi_census_pair_bin(
+                        &occurrence_node_sets[left].iter().copied().collect::<Vec<_>>(),
+                        &occurrence_node_sets[right].iter().copied().collect::<Vec<_>>(),
+                        &occurrences[left].partitions,
+                        &occurrences[right].partitions,
+                        contigs[left] && contigs[right],
+                    );
+                    pair_bins[bin] += 1;
+                }
+            }
+            let occurrences_json: Vec<serde_json::Value> = occurrences
+                .iter()
+                .enumerate()
+                .map(|(position, occ)| {
+                    serde_json::json!({
+                        "path": occ.path,
+                        "start": occ.start,
+                        "orientation": occ.orientation,
+                        "partitions": occ.partitions,
+                        "intervals": occurrence_nodes[position]
+                            .iter()
+                            .map(|nodes| serde_json::json!(nodes))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let pair_bins_json: serde_json::Value = MULTI_CENSUS_PAIR_BINS
+                .iter()
+                .enumerate()
+                .map(|(bin, name)| (name.to_string(), serde_json::json!(pair_bins[bin])))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+                .into();
+            let line = serde_json::json!({
+                "multiplicity": multiplicity,
+                "t_r": occurrence_map.len(),
+                "share": *multiplicity as f64 / occurrence_map.len() as f64,
+                "total_occurrences": total_occurrences,
+                "anchors": anchor_count,
+                "occurrences": occurrences_json,
+                "pair_bins": pair_bins_json,
+            });
+            Ok(Some((line, *multiplicity)))
+        })
+        .collect();
+    for result in routed {
+        if let Some((mut line, multiplicity)) = result? {
+            line["record"] = serde_json::json!(routed_patterns);
+            writeln!(out, "{line}")?;
+            routed_patterns += 1;
+            census_mult_total += multiplicity;
+        } else {
+            dropped_no_occurrence += 1;
+        }
+    }
+    out.flush()?;
+    let census_seconds = census_started.elapsed().as_secs_f64();
+    let wall_seconds = started.elapsed().as_secs_f64();
+    let stats = CutStatsJson {
+        frame: "global".into(),
+        record_origin,
+        reads_scanned: merged.reads_scanned,
+        reads_kept: reads.len() as u64,
+        records_scanned: merged.records_scanned,
+        records_mappable: merged.records_mappable,
+        records_unmappable_global_only: merged.records_unmappable,
+        reads_with_unmappable_records: merged.reads_with_unmappable,
+        touching_patterns: merged.pattern_mult.len() as u64,
+        routed_patterns,
+        census_mult: census_mult_total,
+        territory_rows: territory.territories.len(),
+        territory_entries: territory.entries.len(),
+        node_map_pairs,
+        offset_variants: BTreeMap::new(),
+        partial_remap: false,
+        local_derive: false,
+        global_frame: true,
+        reads_routed: merged.reads_routed,
+        reads_unrouted: merged.reads_unrouted,
+        load_seconds,
+        scan_seconds,
+        census_seconds,
+        wall_seconds,
+        peak_rss_kb: rss_now_kb(),
+    };
+    let text = serde_json::to_string_pretty(&stats)?;
+    std::fs::write(out_dir.join("cut-stats.json"), text + "\n")?;
+    Ok(serde_json::json!({
+        "name": spec.name,
+        "reads_kept": stats.reads_kept,
+        "routed_patterns": stats.routed_patterns,
+        "census_mult": stats.census_mult,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // trace: THE YIELD-ANOMALY AUTOPSY DIAGNOSTIC (receipt-side only; the
 // product/scoreboard machinery untouched). One scan of the projection
 // shards; per locality and read-class (sequence sets given as FASTA),
@@ -4081,6 +4895,12 @@ fn main() -> io::Result<()> {
             shards_dir,
             manifest,
         } => run_cut_batch(&global_panel, &agc, &shards_dir, &manifest),
+        Mode::CutBatchGlobal {
+            global_panel,
+            agc,
+            shards_dir,
+            manifest,
+        } => run_cut_batch_global(&global_panel, &agc, &shards_dir, &manifest),
         Mode::Trace {
             global_panel,
             agc,
