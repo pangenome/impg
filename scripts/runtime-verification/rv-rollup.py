@@ -9,6 +9,19 @@ claims (projection 20.79min committed; per-territory cut ~387s serial; call
 ~23s; the wave ~19-21min at 230-256 lanes EXTRAPOLATED; serial-sum
 ~40-42min).
 usage: rv-rollup.py <RV> [--json out.json]
+
+CLOSE-OUT ADAPTATION (2026-10-17T12:43Z, the STOPPED-BY-OWNER partial-drain close -
+receipted here per the close order): the rollup does NOT demand all-terminal state;
+it emits the partial-drain close honestly from whatever markers exist (2,189 of 5,844
+call-terminal at the owner's stop; the never-called 3,655 counted as exactly that;
+batch-127's wrapper-side markers absent with its work complete - counted by its four
+map/<T>/<T>/cut-stats.json receipts, never fabricated). The one measurement fix at
+the close: the two split-rejection ledgers (rejected.tsv + rejected-incremental.tsv)
+record the SAME windows (the incremental pass and the final reconciliation agree) -
+deduped by territory so each rejection counts ONCE (3,252 transitive-expansion +
+795 ambiguous-axis-bridge = 4,047). Verified idempotent at the close: consecutive
+runs byte-identical (rollup-final.json / rollup-final.txt, heartbeat_lines 3,353
+final after the heartbeat daemon was stopped at the close).
 """
 import json, os, sys, glob, statistics as st
 
@@ -125,14 +138,17 @@ OUT["wave"] = {
 
 # ---- the failure-class census
 rej = {}
+rej_seen = set()  # the two ledgers record the same windows (the incremental
+# pass and the final reconciliation agree); count each territory ONCE
 exp_rows = exp_paths = 0
 for rf in (f"{RV}/prep/rejected.tsv", f"{RV}/prep/rejected-incremental.tsv"):
     if not os.path.exists(rf):
         continue
     for line in open(rf):
         a = line.rstrip("\n").split("\t")
-        if len(a) < 2:
+        if len(a) < 2 or a[0] in rej_seen:
             continue
+        rej_seen.add(a[0])
         cls = a[1].split(" rows ")[0]
         rej[cls] = rej.get(cls, 0) + 1
         if cls == "transitive-expansion" and " rows " in a[1]:
@@ -142,8 +158,12 @@ for rf in (f"{RV}/prep/rejected.tsv", f"{RV}/prep/rejected-incremental.tsv"):
             except Exception:
                 pass
 accepted = [l.strip() for l in open(f"{RV}/prep/accepted.txt")] if os.path.exists(f"{RV}/prep/accepted.txt") else []
-# the transitive-expansion bp census lives in the per-territory split.rejected
+# the per-territory split.rejected bp census lives in the per-territory split.rejected
+# (only for territories the deduped ledgers above did not already count)
 for f in glob.glob(f"{RV}/prep/*/split.rejected"):
+    T = os.path.basename(os.path.dirname(f))
+    if T in rej_seen:
+        continue
     a = open(f, errors="replace").read().split()
     if len(a) >= 5 and a[0] == "transitive-expansion" and a[1] == "rows" and a[3] == "paths":
         try:
