@@ -1799,3 +1799,24 @@ Opened 09:36Z (session-open increment ad7dbbc). THE ORIENTATION STANDING (rides 
 (4) CALLS - ZERO NEW FAILS THIS WINDOW: fail-closed 587 STEADY (the last, T03855 09:31:04Z guard-137, receipted at the ride-73 close, predates this open); callok 1,517 steady (the 4 lanes in flight ~1h04m, receipts land at call.done); cut.exit 16; poison 4 terminal; the lanes ordinary niced (widest T04063 48.4GB @ 1h04m climbing slowly, T04013 41.0GB, T03912 26.7GB, T04019 22.8GB - the deep-lane watch under the guard-oracle, never kill by hand); NO deep lanes at guard pressure at close.
 (5) CONTINGENCIES: the 300G hard floor NEVER approached (df band 629-632G, margin ~329G); guard-oracle held (zero hand kills, zero masters touched); the prep master mid-dispatch 64-wide chunk continuing (sub 2,294 steady, the T03679 tail lane alive 2h37m on syng - the named syng segdup-tail class member, watched, never hand-killed); terminal classes terminal; the ladder NOT opened (df << 1,600G, backlog present); the ancient impg-reference benign - NEVER KILLED (pids 1846398/1846402 alive, untouched).
 FINAL POLL 09:41:02Z: split 9,891 / acc 5,844 (59.1% final) / sub 2,294 / cut.done 2,148 / map dirs 85 (batch-107 in flight) / call-terminal 2,124 = callok 1,517 + fail-closed 587 + cut.exit 16 + poison 4 = 2,124 of 5,844 (36.3% of accepted) / df 632G / mem 793Gib / rvsize 165G apparent. MASTERS AT CLOSE: prep 411760 (~1-15:11h, mid-dispatch chunk), cuts 3838087 (width-4-direct BATCH_W=4 N_CONCURRENT=1 RAYON_NUM_THREADS=24 DISK_FLOOR_GB=300, ~14:45h), chunked wave 2810146 (LANES=128 CHUNK_MULT=2, ~22:40h); heartbeat live. THE SUCCESSOR RESUMES: sparse SHORT polls; the width-4 census continuation (batch-107 in flight); the JIT reaper cadence (~5-12s a pass, idempotent, re-runnable anytime; the SIX-FILE SYNG SIDECAR rule on every exclusion proof; verify call.done/receipts before reading inputs-gone as a reaper miss - the ride-62 clarification standing); the deep-lane watch under the guard-oracle (never kill by hand); the prep pole + df watch vs the 300G hard floor (self-gates; DO NOT lower without the owner); the ladder only at backlog drained AND df >= 1,600G (cuts master MID-WAIT only, by exact pid, never the wave, never with marathons in flight; C=4 -> C=6 the flock ceiling, never RAM); poison-first on prep stalls (the class is 4 members); AT CAMPAIGN CLOSE (all 5,844 accepted terminal): rv-rollup.py -> FILL datasheet-runtime.md (the standing close list + the width-4-direct delta + the inventory finding + the JIT-prep rule + THE REAPER RECEIPTS: ~180.3G cumulative freed classes A/B/C across 43 idempotent passes, the walkreq marker-gap finding + fix, the ~22s regen measurement, the T03194 full-chain re-entry/call receipt, the syng segdup-tail class's 4 CONFIRMED members + the T03679 live member, the mid-dispatch valve patch's live proof, the guard-oracle receipts incl. T03641 11,084s/71.1GB deepest-lane + the named guard-137 points T00129/T04052/T01895/T03855 + rides 55/56's clusters + the ride-69 consumption-burst receipt) -> the record's closing increment -> the commit. SCOPE STANDING: the run uses the SYNG-NATIVE EXPORT MAPS (c-rider locality-maps-export, K=63) = EXPORT-PROFILE answers - THE RUNTIME RECEIPT, NOT THE ACCURACY RECEIPT. Assessment-side only; the committed projection/shards/receipts immutable. NO PR PUSH (the owner pushes).**
+
+## RUNTIME VERIFICATION RIDE CONTINUATION 75 SESSION-OPEN (09:43Z 2026-10-17)
+THE WIDTH-4 RIDE CONTINUES. Live at 09:42:54Z (poll-once): split 9,891 / acc 5,844
+(59.1% final) / sub 2,294 / map dirs 85 (batch-107 in flight, cohort
+T02541/T02722/T03187/T03208) / callok 1,517 + fail-closed 587 (the bind ambiguities +
+the guard-137 call-tail class T00129/T04052/T01895/T03855) + cut.exit 16 + poison 4 =
+2,124 terminals of 5,844 (36.3%) / df 632G (the 300G hard floor never approached) /
+mem 773Gib / rvsize 165G apparent. Reaper verified at the open: bash -n CLEAN, md5
+b804a7d366844d27ac58e2e0c8b64802 UNCHANGED. THE ORIENTATION STANDING (rides 38-75):
+the ride-30/31 "reaper written not run" prompt is STALE - the substrate reaper has RUN
+since ride-32 (129G first pass; cumulative ~= 180.3G across 43 idempotent passes) and
+THE REGEN RECEIPT IS CLOSED (ride-35: the ~22s on-demand regen measurement, the
+T03194 full-chain evict->rebuild->cut/call re-entry receipt, beds + ledgers kept) - a
+fresh eviction of a pending territory would only delete cut/call inputs the live
+campaign still needs; NOT redone this window. The T03679 syng segdup-tail lane
+watched (never hand-killed); the ancient impg-reference benign - pids
+1846398/1846402 alive, untouched; the ladder NOT opened (df << 1,600G, backlog
+present); the prep master mid-dispatch chunk (sub 2,294). Assessment-side only; the
+committed projection/shards/receipts immutable; the run uses the SYNG-NATIVE EXPORT
+MAPS (K=63) = EXPORT-PROFILE answers - THE RUNTIME RECEIPT, NOT THE ACCURACY RECEIPT.
+NO PR PUSH (the owner pushes).
