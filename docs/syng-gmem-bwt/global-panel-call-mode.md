@@ -660,3 +660,165 @@ N=2 wave (L2-n2/L3-n2, walls 524s/451s, both DELTA) ran the
 pre-fix binary and is superseded; its walls are warm-cache shapes,
 not the scaling receipt.
 
+**THE FULL GATE TABLE (all gates run against the parallel routes
+inventory `global-routes-par`, the fixed binary, `cmp` against the
+committed cut-L*-cli receipts; per-field receipts in
+$WORK/gate-*.calls-diff.txt and the analysis tables below):**
+
+| gate | loci | FULLY IDENTICAL | elsewhere E | fold-material flips |
+|---|---:|---:|---|---:|
+| L1 | 25 | **3** | EXACT (−14.418156) | 5 (2, 11, 13, 18, 22) |
+| L2 | 25 | **4** | EXACT | 4 (5, 6, 16, 17) |
+| L3 | 24 | **2** | EXACT | 5 (0, 1, 17, 19, 23) |
+| L4 | 25 | **0** | −14.413791 vs committed −14.414212 | 2 (6, 23) |
+| pilot | 22 | (vs a DIFFERENT evidence chain) | −14.825332 vs −14.827120 | (receipted below) |
+
+The gate verdict is **DELTA at every locality — never byte-identity**,
+with the divergence exactly the two named §6 risk classes at every
+locality (the census read-mass margin moving record_count/unit_count/
+best_log_likelihood/alternative_log_gap/qual at 15-25 loci each, the
+QUAL deltas marginal outside a handful of loci; the record-edge
+superset expressibility class moving class_count/called_classes and
+flipping the called FOLD MATERIAL at 2-5 loci per locality). The
+§9 precedent (a 13% census margin with byte-identical calls) is NOT
+confirmed at the 2.8x margin: L1-L4 flip fold material at 2-5 loci
+each. THE DETERMINISM CROSS-CHECK: the N=2 and N=4 reruns of L2 and
+L3 produced BYTE-IDENTICAL calls.jsonl (cmp clean) — the machinery
+is thread-schedule-independent and the waves' walls measure real
+concurrency, not noise.
+
+**THE PANEL-EXTRA-RECORD CLASS (L4 + the pilot's small E mismatch,
+measured and named).** L1-L3's frame tables reproduce their panels'
+record sets exactly (E exact); L4's record-context E is −14.413791 vs
+the committed −14.414212 (mean haploid 250,056.4 vs 250,161.7 — a
+~49kb total difference over 466 strains) and the pilot's is −14.825332
+vs −14.827120 (265,636.3 vs 266,111.6). THE PILOT'S CAUSE, measured
+exactly (its panel is durable): the committed pilot panel carries
+458 records, the called component's locality maps carry 457 — the
+panel contains ONE record the maps do not (`NA20809#2#JBIREA010000087.
+1:0-210118`, 210,118bp; 117,621,348 − 210,118 = 117,411,230 exactly
+the maps' total), so the committed E was computed over a record the
+global frame's only record statement (the maps) never states. L4's
+committed panel was disk-cleaned (d1cc84c) so its ~49kb difference is
+the same class by shape (the committed panels carried records outside
+the called component's maps; the L1-L3 panels happened not to). This
+is NOT fixable from the maps alone — the global frame's territory
+record statement IS the maps — and per the ruling it is receipted,
+not patched: restoring it would need a territory-record artifact
+beyond the approved interface.
+
+**THE PILOT GATE (the ratified honest form).** The committed-path
+baseline does not exist and cannot be produced (§10.2: the
+smoke-shard census fails the CLI bind in BOTH frames — the d1cc84c
+fragmentary-record class, receipted verbatim; the cut3-based
+chain-pilot leg itself failed fail-closed at record 7479). The
+global-frame pilot call ran against `global-cut-pilot-d0` and the
+cmp target is the on-disk committed receipt
+`hg002-locus-pilot/cli-product-hap1-alignfold/calls.jsonl` — A
+DIFFERENT EVIDENCE CHAIN (the `cosine-multi-census-hap1` derive-cache
+census, not a cut census): the delta is expected by the
+cut-L1.calls-diff.txt precedent and carries BOTH the evidence-set
+margin AND the panel-extra-record class; receipted per-field, never
+tuned.
+
+**THE LANE-SCALING RECEIPT (N concurrent call lanes against the ONE
+shared index, RAYON_NUM_THREADS=1 per lane, the live campaign a
+stated co-tenant throughout; per-lane wall + peak RSS/Pss/shared from
+the poller logs):**
+
+| lane | wave | wall | peak RSS | peak Pss (private) | shared |
+|---|---|---:|---:|---:|---:|
+| L1 (solo) | N=1 | 1445s | 39.1GB | 38.2GB | 1.7GB |
+| L2 | N=2 | 525s | 35.5GB | 34.2GB | 1.7GB |
+| L3 | N=2 | 452s | 38.0GB | 36.8GB | 1.7GB |
+| L1 | N=4 | 1454s | 39.5GB | 38.7GB | 1.7GB |
+| L2 | N=4 | 542s | 35.5GB | 34.0GB | 1.7GB |
+| L3 | N=4 | 464s | 38.0GB | 36.3GB | 1.7GB |
+| L4 | N=4 | 522s | 37.3GB | 35.8GB | 1.7GB |
+
+The scaling shape is NEARLY FLAT: L2/L3 at N=4 vs N=2 cost +3.2%/+2.7%
+wall at double concurrency, and L1 at N=4 (1454s) vs its solo run
+(1445s) costs **+0.6%** — with the N=1 and N=4 outputs
+BYTE-IDENTICAL (cmp clean), the determinism receipt at both ends of
+the curve (the bind is single-threaded per lane; the box absorbs 4
+lanes trivially). THE MEMORY-MODEL CORRECTION (the
+design doc's §4 must be corrected by this receipt): the "~15GB
+private per call process" understates the measured per-lane private
+footprint ~2.4x — **peak Pss 34-38GB private per lane** (the panel
+sidecars' ~15GB PLUS the call's own working set; the committed local
+call peaks at ~0.86GB for the same machinery, and the global census
+is 2.8x the committed one — the superset class inflates the working
+set), with only **~1.7GB shared** per lane (the touched pstep/spos
+spans + the AGC — the page-cache-shared component of the model
+holds, small). The lane ceiling at ~1TB therefore corrects from the
+design doc's 40-60 to **~25-28 concurrent global-panel call lanes** —
+memory-bounded by the private side, exactly as the doc's own
+argument says, at the measured constant.
+
+**THE 20-MINUTE BUDGET RESTATEMENT (from receipts only):**
+
+- **map ~3 min** (the 12-lane projection basis, receipted in the
+  closed runtime-verification campaign: 4.74M reads/s aggregate,
+  byte-identical outputs) — unchanged.
+- **prep ZERO per sample** (the global panel deletes the
+  per-territory chain; §1's table). The panel-side ONE-TIME cost,
+  now measured honestly: the whole-panel routes inventory is
+  **1505s (~25 min) parallel** (the ratified parallel lane-hash, run
+  once per panel, amortized over every sample and every territory;
+  the serial form's ~7.5h wall is receipted in §10.2) — plus the
+  window-bed regeneration (~12s/territory, the three-step partition
+  receipt). THIS COST IS PER-PANEL, NOT PER-SAMPLE: at fleet scale
+  it is ~0 per sample.
+- **cuts**: measured 504-563s per sampled locality at 64 threads on
+  the co-tenant box, of which **325s is the ONE global-panel load**
+  (the amortizable pole — lever 2's shared-index cut lanes exist to
+  share it): the marginal per-locality cut work is ~180-240s. For
+  the whole genome (the live campaign's own census: 5,844 accepted
+  territories), the per-territory marginal cut at the campaign's
+  measured width-4 rate (459-712s per 4-territory batch) is the
+  same minutes class; the whole-genome cut wall is then
+  fleet-parallelism-bound, not machinery-bound.
+- **calls**: the measured per-lane wall at N=4 is **~8.7-9.0 min**
+  (522-542s) per sampled locality with the bind run
+  single-threaded per lane (L1's bind pole: 1007s of its 1445s solo
+  wall over 1.45M AGC fetches). The phase-3 bind seam is
+  rayon-parallel in the committed code — the walls above pin it to
+  1 thread per lane for lane comparability; releasing it is a
+  per-lane thread-count decision, not new machinery. At the measured
+  N=4 shape and the corrected ~25-28-lane memory ceiling, a
+  5,844-territory genome at 25 lanes × ~9 min/lane is ~35 lane-hours
+  — the 20-minute line is NOT reachable by lane parallelism alone at
+  this per-lane wall: it needs the per-lane wall down ~10x (the
+  parallel bind + the census-superset resolution both named) AND the
+  marathon tail bounded (lever 4: the campaign's own deep-lane
+  receipts — T03641 11,084s/71.1GB, T03203 2,884s/70.6GB — the
+  cross_lcp_merge segdup core, still open).
+- **The honest bottom line**: at the measured shape, the global-panel
+  mode delivers map ~3min + prep ~0 + panel-side ~25min ONCE, and
+  per-locality cuts/calls in the ~8.7-9.5 min/lane band at N=4 —
+  the 20-minute whole-genome line remains BEYOND the current
+  receipts, conditional on the named levers: lever 2 (shared-index
+  cut lanes), the parallel bind seam, the census-superset question
+  (the 2.8x margin — an accuracy-relevant divergence, §10.3's gate
+  table), and lever 4 (the marathon tail). No number in this
+  restatement is extrapolated beyond a measured receipt.
+
+## 10.4 The exact resume point (if the budget ends before the last
+receipt lands)
+
+1. The serial whole-panel derive-routes (started 15:46Z Oct 17,
+   setsid, ALIVE at 19:13Z at ~12.9k/38,790 lanes, ~55 Mbp/s serial,
+   ETA past midnight under co-tenancy) — on completion: `cmp` its
+   `graph.json` against `$WORK/global-routes-par/graph.json` (the
+   free full-panel byte-identity receipt; the same HEAD compiler
+   identity — expected byte-identical; if it differs, name it
+   per-field and re-examine the gates' verdicts against the serial
+   artifact).
+2. The L1 N=4 lane RESOLVED (wall 1454s, DELTA, its calls BYTE-IDENTICAL
+   to the solo run — §10.3's table updated); the PILOT GATE lane was
+   IN FLIGHT at the docs commit (`global-call-pilot-d0-fix`, the
+   largest census of the set at 12,286 records): on completion
+   receipt its per-field delta exactly as §10.3's table shape (its
+   cmp target is the DIFFERENT-evidence-chain receipt, per §10.3's
+   pilot paragraph, and its E carries the named panel-extra-record
+   class: −14.825332 vs −14.827120).
