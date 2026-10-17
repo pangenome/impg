@@ -491,6 +491,22 @@ pub struct Options {
     /// per-territory frame verbatim — the committed path byte-for-byte.
     #[arg(long, default_value_t = false)]
     pub global_frame: bool,
+    /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
+    /// content-origin parameter): the committed substrate's locus.fa
+    /// content need not sit at its header's own interval — the L1-L4
+    /// substrates' content sits ONE BASE LATER (d=1, the uniform
+    /// delta=1 AGC-identity receipts), the pilot's at the header
+    /// interval exactly (d=0). The global frame, which deletes
+    /// locus.fa by design, must be TOLD the convention: the maps'
+    /// member rows and the component lane translate at the content
+    /// origin `start + d` (the frame table likewise), and the
+    /// emission's back-translation cancels d exactly (the product
+    /// output is origin-independent). Default 0 = the header's own
+    /// interval. Fail-closed: a nonzero origin WITHOUT --global-frame
+    /// is refused (the committed local frame is closed — it never
+    /// needed the absolute truth).
+    #[arg(long, default_value_t = 0, requires = "global_frame")]
+    pub record_origin: u64,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -3576,6 +3592,16 @@ fn seam_map<T: Sync, R: Send>(
 pub fn run(options: Options) -> io::Result<()> {
     let started = Instant::now();
     let rss = RssGuard::new(options.rss_budget_gib);
+    // (THE RECORD-ORIGIN GATE: the content-origin parameter belongs to
+    // the GLOBAL frame alone — the committed local frame is a closed
+    // frame that derives the substrate's content convention itself,
+    // per record, against the AGC; a nonzero origin without the
+    // global frame is a caller error, refused loudly.)
+    ensure(
+        options.record_origin == 0 || options.global_frame,
+        "--record-origin requires --global-frame (the committed local frame \
+         is closed: it never needed the absolute content origin)",
+    )?;
     // (Phase 3 — the parallelism pilot: THE SEAM SWITCH. The committed
     // default is the serial code path — byte-for-byte the phase-1
     // behavior. With IMPG_REALIGN_PARALLEL_SEAMS set (and the width in
@@ -3966,27 +3992,30 @@ pub fn run(options: Options) -> io::Result<()> {
             maps
                 .values()
                 .flat_map(|map| map.members.iter().map(|row| row.path_name.as_str())),
+            options.record_origin,
         )?;
         let panel_component = frame.global_name(&options.component)?;
         for map in maps.values_mut() {
             for row in &mut map.members {
                 let translated =
-                    territory_frame::translate_row(&row.path_name, row.start, row.end)?;
+                    territory_frame::translate_row(&row.path_name, row.start, row.end, options.record_origin)?;
                 row.path_name = translated.path_name;
                 row.start = translated.start;
                 row.end = translated.end;
             }
         }
         for row in axis_rows.iter_mut() {
-            let translated = territory_frame::translate_row(&options.component, row.1, row.2)?;
+            let translated =
+                territory_frame::translate_row(&options.component, row.1, row.2, options.record_origin)?;
             row.1 = translated.start;
             row.2 = translated.end;
         }
         eprintln!(
             "[score] global-panel frame: component {:?} -> {panel_component:?} \
-             over {} records",
+             over {} records (record origin +{})",
             options.component,
             frame.records_len(),
+            options.record_origin,
         );
         (Some(frame), panel_component)
     } else {
@@ -4980,7 +5009,7 @@ pub fn run(options: Options) -> io::Result<()> {
         .iter()
         .map(|name| {
             if options.global_frame {
-                territory_frame::translate_row(name, 0, 1)
+                territory_frame::translate_row(name, 0, 1, options.record_origin)
                     .map(|row| row.path_name)
                     .unwrap_or_else(|_| name.clone())
             } else {

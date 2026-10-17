@@ -185,6 +185,24 @@ enum Mode {
         /// (the global-panel call mode; --panel/--sources omitted).
         #[arg(long, value_enum, default_value_t = CutFrame::Local)]
         frame: CutFrame,
+        /// THE RECORD-ORIGIN CONVENTION (the global frame's
+        /// content-origin parameter): the committed substrate's
+        /// locus.fa content need not sit at its header's own interval
+        /// — the L1-L4 substrates' content sits ONE BASE LATER (d=1,
+        /// the uniform delta=1 AGC-identity receipts), the pilot's
+        /// at the header interval exactly (d=0). The global frame,
+        /// which deletes locus.fa by design, must be TOLD the
+        /// convention: the universe rows translate and the
+        /// expressibility content is fetched at `start + d`, so the
+        /// cut's territory and census sit at the substrate's TRUE
+        /// content (the emission-side back-translation cancels it
+        /// exactly). Default 0 = the header's own interval. The
+        /// LOCAL frame refuses it (it derives the convention per
+        /// record against the AGC, fail-closed on neither
+        /// convention matching — a stated origin is redundant and
+        /// a conflicting one is a caller error).
+        #[arg(long, default_value_t = 0)]
+        record_origin: u64,
         /// The LOCALITY panel syng prefix (the committed substrate;
         /// required in the local frame).
         #[arg(long, required_unless_present = "frame")]
@@ -1296,6 +1314,10 @@ struct CutStatsJson {
     /// node-map conversion) or "global" (the global-panel call mode,
     /// lever 1: the projection's records kept verbatim).
     frame: String,
+    /// The stated content-origin convention (the --record-origin d:
+    /// the substrate's locus.fa content sits at `header_start + d`;
+    /// the L1-L4 substrates: 1, the pilot: 0).
+    record_origin: u64,
     reads_scanned: u64,
     reads_kept: u64,
     records_scanned: u64,
@@ -1731,6 +1753,7 @@ fn parse_locus_header(header: &str) -> io::Result<(String, u64, u64)> {
 fn run_cut(
     global_panel_prefix: &str,
     frame: CutFrame,
+    record_origin: u64,
     panel_prefix: Option<&str>,
     axis_path: &Path,
     bed_directory: &Path,
@@ -1941,15 +1964,23 @@ fn run_cut(
             // THE GLOBAL FRAME (lever 1): the universe rows translate to
             // the global panel's frame by their own record headers —
             // the re-anchor principle (k-independent panel
-            // coordinates; conversion-not-materialization). The AGC is
-            // the sequence authority, fetched by coordinate under the
-            // cut's own verified offset convention (delta=1 uniform,
-            // the committed AGC-identity receipt).
+            // coordinates; conversion-not-materialization) — AT THE
+            // SUBSTRATE'S STATED CONTENT ORIGIN `start + d` (the
+            // --record-origin convention: d=1 = the committed L1-L4
+            // substrates' one-base-later content, the uniform delta=1
+            // AGC-identity receipts; d=0 = the pilot's exact headers).
+            // The AGC is the sequence authority, fetched by coordinate
+            // at the same origin — the true content the locus.fa
+            // extraction produced.
             let universe_global: Vec<UniverseRow> = universe
                 .iter()
                 .map(|row| {
-                    let translated =
-                        territory_frame::translate_row(&row.path_name, row.start, row.end)?;
+                    let translated = territory_frame::translate_row(
+                        &row.path_name,
+                        row.start,
+                        row.end,
+                        record_origin,
+                    )?;
                     Ok::<_, io::Error>(UniverseRow {
                         partition: row.partition,
                         path_name: translated.path_name,
@@ -2008,13 +2039,14 @@ fn run_cut(
             // dropped by construction). The global frame derives the
             // SAME set from the global panel's own grid: the canonical
             // anchor walk of each record's content — fetched from the
-            // AGC at the record's own header interval (the verified
-            // delta convention; a fetch of the wrong length under
-            // every candidate offset fails closed) — and remaps every
-            // node to ITSELF. The projection's records then ride the
-            // committed remap flow unchanged: the expressible ones
-            // verbatim, the rest dropped exactly as the strict local
-            // cut drops them.
+            // AGC at the record's CONTENT origin `start + d` (the
+            // stated --record-origin convention: the same bytes the
+            // locus.fa extraction produced; a fetch that clips short
+            // at the path end fails closed with a named error, never
+            // a truncated walk) — and remaps every node to ITSELF.
+            // The projection's records then ride the committed remap
+            // flow unchanged: the expressible ones verbatim, the rest
+            // dropped exactly as the strict local cut drops them.
             let mut expressibility_pairs = 0usize;
             let mut record_names: BTreeSet<&str> = BTreeSet::new();
             for row in &universe {
@@ -2023,12 +2055,26 @@ fn run_cut(
             for header in &record_names {
                 let (global_name, start, end) = parse_locus_header(header)?;
                 let length = (end - start) as usize;
+                let content_start = start
+                    .checked_add(record_origin)
+                    .ok_or_else(|| invalid(format!(
+                        "record {header}: the content origin start+{record_origin} overflows"
+                    )))?;
                 let content = agc
-                    .fetch_sequence(&global_name, start as i32, (start + length as u64) as i32)
+                    .fetch_sequence(
+                        &global_name,
+                        content_start as i32,
+                        (content_start + length as u64) as i32,
+                    )
                     .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
                 ensure(
                     content.len() == length,
-                    &format!("record {header} fetch length {} != {length}", content.len()),
+                    &format!(
+                        "record {header}: the content fetch at origin +{record_origin} \
+                         returned {} bytes, not the record's {length} (the content origin \
+                         leaves the path; state the substrate's own convention)",
+                        content.len()
+                    ),
                 )?;
                 let walk = mem_records::canonical_anchor_walk(&global, &content)?;
                 for &(node, _position) in &walk {
@@ -2425,6 +2471,7 @@ fn run_cut(
             CutFrame::Local => "local".into(),
             CutFrame::Global => "global".into(),
         },
+        record_origin,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
         records_scanned: merged.records_scanned,
@@ -2986,6 +3033,7 @@ fn batch_emit_territory(
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
         frame: "local-batch".into(),
+        record_origin: 0,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
         records_scanned: merged.records_scanned,
@@ -3996,6 +4044,7 @@ fn main() -> io::Result<()> {
         Mode::Cut {
             global_panel,
             frame,
+            record_origin,
             panel,
             axis,
             bed_directory,
@@ -4007,9 +4056,15 @@ fn main() -> io::Result<()> {
         } => {
             let panel = frame.select(panel, "--panel")?;
             let sources = frame.select(sources, "--sources")?;
+            ensure(
+                record_origin == 0 || frame == CutFrame::Global,
+                "--record-origin belongs to the global frame (the committed local frame \
+                 derives the content convention per record against the AGC, fail-closed)",
+            )?;
             run_cut(
                 &global_panel,
                 frame,
+                record_origin,
                 panel.as_deref(),
                 &axis,
                 &bed_directory,
@@ -4109,6 +4164,7 @@ mod global_frame_tests {
             &record_name,
             window.0,
             window.1,
+            0,
         )
         .unwrap();
         let global_rows = vec![UniverseRow {
@@ -4228,5 +4284,138 @@ mod global_frame_tests {
             assert_eq!(translate(&local_forward), global_forward);
             assert_eq!(translate(&local_reverse), global_reverse);
         }
+    }
+
+    /// THE ONE-BASE-LATER SUBSTRATE CLASS (the committed L1-L4
+    /// convention, the uniform delta=1 AGC-identity receipts): the
+    /// substrate's locus.fa content sits ONE BASE LATER than its
+    /// record headers. The committed local frame is closed (its
+    /// coordinates are slice-relative to the CONTENT, so it never
+    /// sees the difference); the global frame must be TOLD the
+    /// convention — with the stated `--record-origin 1` the
+    /// conversion property holds exactly (the occurrences are the
+    /// coordinate rename by `origin + 1`), and the emission-side
+    /// back-translation cancels it (the round trip through the
+    /// frame table is the identity).
+    #[test]
+    fn the_one_base_later_substrate_routes_at_the_stated_content_origin() {
+        let params = SyncmerParams { k: 4, w: 7, seed: 7 };
+        let k = (params.k + params.w) as u64;
+        let origin = 400u64;
+        let record_len = 1000u64;
+        let chromosome = deterministic_sequence(0x5eed, 2000);
+        // THE SUBSTRATE CONVENTION: the header states [origin, origin
+        // + record_len) but the extraction carried the one-base-later
+        // content [origin + 1, origin + 1 + record_len).
+        let record = chromosome[(origin + 1) as usize..(origin + 1 + record_len) as usize].to_vec();
+        let record_name = format!("A#0#chr1:{origin}-{}", origin + record_len);
+        let global_name = "A#0#chr1";
+        let record_origin = 1u64;
+
+        let global_panel = SyngIndex::build(
+            params,
+            vec![(global_name.to_string(), chromosome.clone())].into_iter(),
+        );
+        // the committed local frame's own panel: built over the
+        // CONTENT (the locus.fa bytes), slice-relative — closed.
+        let local_panel =
+            SyngIndex::build(params, vec![(record_name.clone(), record.clone())].into_iter());
+
+        let window = (100u64, 900u64);
+        let local_rows = vec![UniverseRow {
+            partition: 0,
+            path_name: record_name.clone(),
+            start: window.0,
+            end: window.1,
+        }];
+        // the global frame at the STATED content origin: the row
+        // lands at origin + 1 + window (the true content position).
+        let translated = territory_frame::translate_row(
+            &record_name,
+            window.0,
+            window.1,
+            record_origin,
+        )
+        .unwrap();
+        assert_eq!(translated.start, origin + record_origin + window.0);
+        assert_eq!(translated.end, origin + record_origin + window.1);
+        let global_rows = vec![UniverseRow {
+            partition: 0,
+            path_name: translated.path_name.clone(),
+            start: translated.start,
+            end: translated.end,
+        }];
+
+        let mut local_sources: HashMap<String, Vec<u8>> = HashMap::new();
+        local_sources.insert(record_name.clone(), record.clone());
+        let local_fetch = lane_fetch_over(&local_sources);
+        let mut path_sources: HashMap<String, Vec<u8>> = HashMap::new();
+        path_sources.insert(global_name.to_string(), chromosome.clone());
+        let global_fetch = lane_fetch_over(&path_sources);
+
+        let local_territory =
+            build_territory_index(&local_panel, &local_rows, &local_fetch, k).unwrap();
+        let global_territory =
+            build_territory_index(&global_panel, &global_rows, &global_fetch, k).unwrap();
+
+        // an INTERIOR read of the substrate's own content.
+        let read = &record[300usize..(300 + 120)];
+        let local_records = derive_read(&local_panel, read).unwrap();
+        let global_records = derive_read(&global_panel, read).unwrap();
+        assert!(!local_records.is_empty());
+
+        let global_nodes: HashSet<u32> = global_territory
+            .entries
+            .iter()
+            .map(|&(node, _, _)| node.unsigned_abs())
+            .collect();
+
+        for ((local_tokens, _), (global_tokens, _)) in
+            local_records.iter().zip(global_records.iter())
+        {
+            let local_anchors = decode_tokens(local_tokens).unwrap();
+            let global_anchors = decode_tokens(global_tokens).unwrap();
+            if !global_anchors
+                .iter()
+                .any(|&(node, _)| global_nodes.contains(&node.unsigned_abs()))
+            {
+                continue;
+            }
+            let (_, _, local_forward, local_reverse) =
+                route_record(&local_anchors, &local_territory, k);
+            let (_, _, global_forward, global_reverse) =
+                route_record(&global_anchors, &global_territory, k);
+            // THE ROUTING EQUIVALENCE AT THE STATED ORIGIN: the global
+            // occurrences are the local ones renamed by origin +
+            // record_origin (the true content position).
+            let translate =
+                |positions: &[(usize, u64)]| -> Vec<(usize, u64)> {
+                    positions
+                        .iter()
+                        .map(|&(path, start)| (path, start + origin + record_origin))
+                        .collect()
+                };
+            assert_eq!(translate(&local_forward), global_forward);
+            assert_eq!(translate(&local_reverse), global_reverse);
+        }
+
+        // THE EMISSION CANCEL: a product row at a true content position
+        // back-translates through the SAME stated convention to the
+        // substrate's own slice-relative extent, and the record NAME
+        // keeps the header's own interval (the committed output
+        // shape) — the origin cancels exactly.
+        let frame =
+            impg::genome_inference::territory_frame::TerritoryFrame::from_local_names(
+                [record_name.as_str()],
+                record_origin,
+            )
+            .unwrap();
+        let product = territory_frame::translate_row(&record_name, 250, 350, record_origin)
+            .unwrap();
+        let (name, start, end) = frame
+            .local_row(&product.path_name, product.start, product.end)
+            .unwrap();
+        assert_eq!(name, record_name);
+        assert_eq!((start, end), (250, 350));
     }
 }

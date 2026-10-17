@@ -168,6 +168,21 @@ pub enum Command {
         /// byte-for-byte.
         #[arg(long, default_value_t = false)]
         global_frame: bool,
+        /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
+        /// content-origin parameter): the committed substrate's
+        /// locus.fa content need not sit at its header's own interval
+        /// — the L1-L4 substrates' content sits ONE BASE LATER (d=1,
+        /// the uniform delta=1 AGC-identity receipts), the pilot's at
+        /// the header interval exactly (d=0). The global frame, which
+        /// deletes locus.fa by design, must be TOLD the convention:
+        /// the maps and the component lane translate at the content
+        /// origin start+d, and the emission's back-translation
+        /// cancels it exactly (the product output is
+        /// origin-independent). Default 0. Requires --global-frame
+        /// (the committed local frame is closed — it derives the
+        /// convention itself, per record, against the AGC).
+        #[arg(long, default_value_t = 0, requires = "global_frame")]
+        record_origin: u64,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -654,6 +669,19 @@ pub enum Command {
         /// panel-side) — the call reads only its lane inventory.
         #[arg(long, requires = "global_panel")]
         global_routes: Option<PathBuf>,
+        /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
+        /// content-origin parameter, recorded in the registry so the
+        /// CALL step states the same convention): the committed
+        /// substrate's locus.fa content need not sit at its header's
+        /// own interval — the L1-L4 substrates' content sits ONE BASE
+        /// LATER (d=1, the uniform delta=1 AGC-identity receipts),
+        /// the pilot's at the header interval exactly (d=0). The
+        /// global frame, which deletes locus.fa by design, must be
+        /// TOLD the convention; the committed local frame derives it
+        /// per record against the AGC and needs no statement.
+        /// Default 0. Requires --global-panel.
+        #[arg(long, default_value_t = 0, requires = "global_panel")]
+        record_origin: u64,
         /// The partitions root output directory (partitions.bed + <name>/)
         #[arg(long)]
         out_dir: PathBuf,
@@ -885,6 +913,7 @@ pub fn run(command: Command) -> io::Result<()> {
             exclude_paths,
             flank_overlap,
             global_frame,
+            record_origin,
             out_dir,
         } => genome::with_output_model(
             &out_dir,
@@ -920,6 +949,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     flank_overlap,
                     region,
                     global_frame,
+                    record_origin,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
                     }),
@@ -1492,6 +1522,7 @@ pub fn run(command: Command) -> io::Result<()> {
             read_lengths,
             global_panel,
             global_routes,
+            record_origin,
             out_dir,
         } => {
             ensure(start < end, format!("the partition range is empty: {chrom}:{start}-{end}"))?;
@@ -1675,6 +1706,7 @@ pub fn run(command: Command) -> io::Result<()> {
                 "syng": syng,
                 "routes": routes,
                 "frame": frame,
+                "record_origin": record_origin,
                 "windows": windows,
             });
             genome::write_json(&dir.join("partition.json"), &manifest)?;
@@ -1835,6 +1867,13 @@ pub fn run(command: Command) -> io::Result<()> {
                 let (_, _, _, name) = &bed_rows[*index];
                 let manifest: serde_json::Value =
                     genome::read_json(&partitions.join(name).join("partition.json"))?;
+                // THE RECORD-ORIGIN CONVENTION (the registry's own
+                // statement): the partition step recorded the
+                // substrate's content-origin convention; the call
+                // states the same one (the committed local frame
+                // recorded 0 and never consumes it — the global
+                // frame's maps translate at start+d).
+                let record_origin: u64 = manifest["record_origin"].as_u64().unwrap_or(0);
                 let component = manifest["component"].as_str()
                     .ok_or_else(|| invalid("the partition manifest carries no component"))?
                     .to_string();
@@ -1917,6 +1956,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     exclude_paths: exclude_paths.clone(),
                     flank_overlap,
                     global_frame,
+                    record_origin,
                     out_dir: partition_out.clone(),
                 })?;
                 calls_receipts.push(serde_json::json!({
