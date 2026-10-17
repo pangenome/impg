@@ -324,8 +324,20 @@ use std::time::Instant;
 /// uniformly trimmed length). Derived from the derive cache's own
 /// uniform read length at load (the cache is a pure function of the
 /// FASTQ and the panel).
+/// THE FRESH-PROCESS READ LENGTH (the static's committed initial
+/// value): every committed receipt computes the elsewhere branch E
+/// BEFORE the derive cache stores the cache's own declared read
+/// length, so E is measured at THIS value in every standalone run.
+/// The combined cut+call process (multiple calls per process) must
+/// reset the process-global at every call entry or a later call's E
+/// would read the previous call's cache length — the first combined
+/// gate's measured divergence: L2's E at L1's stale 148 vs the
+/// committed 150, a uniform +0.0063 shift at every locus, no fold-
+/// material flips (the reset pins every call to the fresh-process
+/// trajectory, byte-identity by construction).
+const READ_LENGTH_FRESH: usize = 150;
 static READ_LENGTH: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(150);
+    std::sync::atomic::AtomicUsize::new(READ_LENGTH_FRESH);
 #[inline]
 fn read_len() -> usize {
     READ_LENGTH.load(Ordering::Relaxed)
@@ -3721,7 +3733,28 @@ impl LaneCache {
     }
 }
 
+/// THE INJECTED-INDEX SEAM (the shared-index cut+call lever): `run` is
+/// the committed path — it loads the panel itself, exactly as before.
+/// `run_injected` runs the SAME machinery over a panel the caller
+/// already holds loaded (the combined cut+call process: the ONE
+/// global-panel load serves the batch's cuts AND calls, deleting the
+/// per-call inputs pole — the ~245s global load, 58-70% of the seam
+/// rung's per-lane wall). The injected panel must be the panel named
+/// by `options.panel` (the identity check below binds it to the
+/// routes graph exactly as the loaded path does; a mismatched panel
+/// fails loudly at that check).
 pub fn run(options: Options) -> io::Result<()> {
+    run_injected(options, None)
+}
+pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io::Result<()> {
+    // (THE COMBINED-PROCESS CALL BOUNDARY: the read length is a
+    // process-global in the committed single-call-per-process shape;
+    // a combined process's Nth call must see the FRESH-PROCESS state
+    // exactly — E is computed before the derive cache stores the
+    // cache's own declared length, so the reset pins every call's E
+    // to the committed fresh-process value, never the previous
+    // call's cache length.)
+    READ_LENGTH.store(READ_LENGTH_FRESH, Ordering::Release);
     let started = Instant::now();
     let rss = RssGuard::new(options.rss_budget_gib);
     // (THE RECORD-ORIGIN GATE: the content-origin parameter belongs to
@@ -3843,7 +3876,14 @@ pub fn run(options: Options) -> io::Result<()> {
     let fetch_calls = AtomicU64::new(0);
     let fetch_bytes = AtomicU64::new(0);
     let identity = PanelIdentity::read(&options.panel)?;
-    let panel = SyngIndex::load(&options.panel, SyncmerParams::default())?;
+    let loaded_panel;
+    let panel: &SyngIndex = match injected_panel {
+        Some(panel) => panel,
+        None => {
+            loaded_panel = SyngIndex::load(&options.panel, SyncmerParams::default())?;
+            &loaded_panel
+        }
+    };
     let k = panel.syncmer_length_bp() as u64;
     let graph: routes::Graph = read_json(&options.routes.join("graph.json"))?;
     if graph.panel != identity || !graph.generation_complete {

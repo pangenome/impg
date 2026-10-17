@@ -44,7 +44,7 @@
 
 use clap::Parser;
 use impg::agc_index::AgcIndex;
-use impg::genome_inference::{mem_records, territory_frame};
+use impg::genome_inference::{mem_records, realign_score, territory_frame};
 use impg::sample_mem_bwt::{canonical, encode_walk};
 use impg::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
@@ -275,6 +275,45 @@ enum Mode {
         /// defaults to 0 = the header's own interval).
         #[arg(long)]
         manifest: PathBuf,
+    },
+    /// THE SHARED-INDEX CUT+CALL SEAM (the combined process): ONE
+    /// global panel + AGC load serving a BATCH of global-frame
+    /// territories' cuts AND calls — the cut phase is cut-batch-global's
+    /// own core over the loaded panel, then each manifest row carrying
+    /// a "call" object is CALLED IN-PROCESS over the SAME loaded panel
+    /// (the injected-index form of call-diplotypes: the call's
+    /// per-process inputs pole — the panel's own load — vanishes into
+    /// the shared load). The call rows' outputs are the committed CLI
+    /// shape (calls.jsonl + the instrument receipts, the output-model
+    /// discipline); the gate is byte-identity vs the committed-path
+    /// receipts.
+    CutCallBatchGlobal {
+        /// The GLOBAL panel syng prefix (the projection's panel).
+        #[arg(long)]
+        global_panel: String,
+        /// The global panel AGC (the committed --sequence-files input).
+        #[arg(long)]
+        agc: PathBuf,
+        /// The projection output directory (the shard files; ONE scan
+        /// serves every manifest territory).
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// JSONL manifest: one territory per row {name, axis,
+        /// bed_directory, component, out_dir, record_origin, call?}
+        /// where call = {reads, partition_graphs, loci, out_dir}.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The whole-panel routes inventory directory (graph.json +
+        /// sources — the call's --routes input, shared by every call
+        /// row).
+        #[arg(long)]
+        routes: PathBuf,
+        /// Per-call resident-set guard in GiB (0 = unguarded — the
+        /// combined process holds the shared panel by design, the
+        /// cut batch's own rule; a per-call guard sized like the
+        /// single-process default would kill the shared-load shape).
+        #[arg(long, default_value_t = 0.0)]
+        call_rss_budget_gib: f64,
     },
     /// THE YIELD-ANOMALY AUTOPSY TRACE (receipt-side diagnostic; no
     /// product machinery): one scan of the projection shards that
@@ -2622,6 +2661,31 @@ struct CutBatchGlobalSpec {
     /// convention, 0 = the pilot's exact headers).
     #[serde(default)]
     record_origin: u64,
+    /// THE COMBINED CUT+CALL ROW (cut-call-batch-global only; ignored
+    /// by cut-batch-global): when present, the SAME process calls the
+    /// territory after its cut, over the ONE loaded panel — the
+    /// shared-index cut+call seam (the call's per-process inputs pole
+    /// — the panel's own load — vanishes into the shared load).
+    #[serde(default)]
+    call: Option<CutBatchGlobalCall>,
+}
+
+/// The per-territory call row of the combined cut+call manifest: the
+/// call-diplotypes CLI's own inputs (the cut's census/cache are the
+/// cut's own outputs, bound by construction).
+#[derive(serde::Deserialize, Clone)]
+struct CutBatchGlobalCall {
+    /// The sample FASTQ (read identity + the quality-byte assertion).
+    reads: PathBuf,
+    /// The territory's locality map directory (window<N>.gfa.map.json
+    /// — the committed per-territory substrate).
+    partition_graphs: PathBuf,
+    /// The scored loci (window ids of the component, comma-separated,
+    /// distinct and sorted — the committed --loci form).
+    loci: String,
+    /// The call's output directory (calls.jsonl + the instrument
+    /// receipts; refused if it exists — the CLI's own discipline).
+    out_dir: PathBuf,
 }
 
 /// One loaded GLOBAL-frame batch territory: the shared panel is held
@@ -3505,12 +3569,9 @@ fn run_cut_batch(
 // cut-census.jsonl / cut-cache.bin / cut-reads.fasta are byte-
 // identical to the single cut's — the gate.
 // ---------------------------------------------------------------------------
-fn run_cut_batch_global(
-    global_panel_prefix: &str,
-    agc_path: &Path,
-    shards_dir: &Path,
+fn cut_batch_global_parse_manifest(
     manifest_path: &Path,
-) -> io::Result<()> {
+) -> io::Result<Vec<CutBatchGlobalSpec>> {
     let mut specs: Vec<CutBatchGlobalSpec> = Vec::new();
     for line in BufReader::new(std::fs::File::open(manifest_path)?).lines() {
         let line = line?;
@@ -3541,7 +3602,16 @@ fn run_cut_batch_global(
             )?;
         }
     }
-    let started = Instant::now();
+    Ok(specs)
+}
+
+fn run_cut_batch_global(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    manifest_path: &Path,
+) -> io::Result<()> {
+    let specs = cut_batch_global_parse_manifest(manifest_path)?;
     eprintln!(
         "[cut-batch-global] loading the global panel + AGC once for {} territories",
         specs.len()
@@ -3549,6 +3619,23 @@ fn run_cut_batch_global(
     let load_started = Instant::now();
     let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
     let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
+    let load_seconds = load_started.elapsed().as_secs_f64();
+    cut_batch_global_with(&global, &agc, shards_dir, specs, load_seconds)
+}
+
+/// THE SHARED-INDEX CORE: the batch cut over a CALLER-HELD loaded
+/// panel + AGC (the load wall measured by the caller; the body is
+/// run_cut_batch_global's own verbatim from the path-length map down)
+/// — the combined cut+call process's cut phase, and the single-load
+/// seam the call phase injects the same panel through.
+fn cut_batch_global_with(
+    global: &SyngIndex,
+    agc: &AgcIndex,
+    shards_dir: &Path,
+    specs: Vec<CutBatchGlobalSpec>,
+    load_seconds: f64,
+) -> io::Result<()> {
+    let started = Instant::now();
     let k = global.syncmer_length_bp() as u64;
     // The shared AGC lane fetch (the single global cut's own closure,
     // verbatim): fetch(A, B) is the 0-based [A, B) slice, clipped at
@@ -3560,7 +3647,7 @@ fn run_cut_batch_global(
         .zip(&global.name_map.path_to_length)
         .map(|(name, &length)| (name.as_str(), length))
         .collect();
-    let agc_ref = &agc;
+    let agc_ref = agc;
     let fetch_lane =
         move |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
             let path_len = *path_lengths
@@ -3578,7 +3665,7 @@ fn run_cut_batch_global(
     // Per-territory setup (parallel; every territory's own universe,
     // territory index, and identity expressibility map — the single
     // global cut's Global-frame branch, verbatim).
-    let global_ref = &global;
+    let global_ref = global;
     let setups: Vec<io::Result<GlobalBatchTerritory>> = specs
         .into_par_iter()
         .map(|spec| {
@@ -3715,7 +3802,6 @@ fn run_cut_batch_global(
         routing.len(),
         n_terr
     );
-    let load_seconds = load_started.elapsed().as_secs_f64();
 
     // The ONE shard scan (parallel over files; per read, every routed
     // territory's committed identity remap; the per-(file, territory)
@@ -3906,6 +3992,121 @@ fn run_cut_batch_global(
         rss_now_kb(),
         n_emit_failed
     );
+    Ok(())
+}
+
+/// THE COMBINED CUT+CALL PROCESS (the shared-index seam): parse the
+/// manifest, load the ONE global panel + AGC, run the batch cut over
+/// them (cut_batch_global_with), then call every row carrying a `call`
+/// object IN-PROCESS over the SAME loaded panel — the injected-index
+/// form of call-diplotypes (realign_score::run_injected): the call's
+/// per-process inputs pole (the panel's own load) vanishes into the
+/// shared load. The per-call options reproduce the committed CLI's
+/// construction verbatim (the instrument receipts + the product
+/// emission under the output-model discipline, --selection Locality,
+/// --emit-sequences, --global-frame), with --panel naming the same
+/// global panel the process holds (the identity check binds it to
+/// the routes graph exactly as the loaded path does).
+fn run_cut_call_batch_global(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    manifest_path: &Path,
+    routes_dir: &Path,
+    call_rss_budget_gib: f64,
+) -> io::Result<()> {
+    let specs = cut_batch_global_parse_manifest(manifest_path)?;
+    ensure(
+        specs.iter().any(|spec| spec.call.is_some()),
+        "no manifest row carries a call object (cut-batch-global is the cut-only form)",
+    )?;
+    // The call rows, extracted before the cut phase consumes the
+    // specs: (name, component, record_origin, the cut's out_dir, the
+    // call row itself).
+    let call_rows: Vec<(String, String, u64, PathBuf, CutBatchGlobalCall)> = specs
+        .iter()
+        .filter_map(|spec| {
+            spec.call.as_ref().map(|call| {
+                (
+                    spec.name.clone(),
+                    spec.component.clone(),
+                    spec.record_origin,
+                    spec.out_dir.clone(),
+                    call.clone(),
+                )
+            })
+        })
+        .collect();
+    eprintln!(
+        "[cut-call-batch-global] loading the global panel + AGC once for {} territories ({} to call in-process)",
+        specs.len(),
+        call_rows.len()
+    );
+    let load_started = Instant::now();
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
+    let load_seconds = load_started.elapsed().as_secs_f64();
+    let cut_started = Instant::now();
+    cut_batch_global_with(&global, &agc, shards_dir, specs, load_seconds)?;
+    eprintln!(
+        "[cut-call-batch-global] cut phase done in {:.0}s; calling {} territories over the loaded panel",
+        cut_started.elapsed().as_secs(),
+        call_rows.len()
+    );
+    for (name, component, record_origin, cut_dir, call) in call_rows {
+        let call_started = Instant::now();
+        let out_dir = call.out_dir.clone();
+        impg::genome_inference::with_output_model(&out_dir, realign_score::MODEL, || {
+            let options = realign_score::Options {
+                panel: global_panel_prefix.to_string(),
+                routes: routes_dir.to_path_buf(),
+                partition_graphs: call.partition_graphs.clone(),
+                component: component.clone(),
+                census: cut_dir.join("cut-census.jsonl"),
+                reads: call.reads.clone(),
+                derive_cache: cut_dir.join("cut-cache.bin"),
+                loci: call.loci.clone(),
+                out: out_dir.join("instrument-receipt.jsonl"),
+                exactness_out: out_dir.join("instrument-receipt.exactness.jsonl"),
+                exactness_sample: 100,
+                skeleton_out: Some(out_dir.join("instrument-receipt.skeleton.jsonl")),
+                anatomy_out: None,
+                frame_audit_only: false,
+                rss_budget_gib: call_rss_budget_gib,
+                selection: realign_score::Selection::Locality,
+                product_calls: Some(out_dir.join("calls.jsonl")),
+                truth_qv: Vec::new(),
+                product_sequences: true,
+                exclude_paths: Vec::new(),
+                flank_overlap: None,
+                region: None,
+                global_frame: true,
+                record_origin,
+                qv_biwfa: "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into(),
+            };
+            realign_score::run_injected(options, Some(&global))?;
+            let calls = out_dir.join("calls.jsonl");
+            let sequences = out_dir.join("calls.jsonl.sequences.jsonl");
+            Ok(serde_json::json!({
+                "calls": impg::genome_inference::reconstruction::fingerprint(&calls)?,
+                "calls_bytes": std::fs::metadata(&calls)?.len(),
+                "instrument_receipt": impg::genome_inference::reconstruction::fingerprint(
+                    &out_dir.join("instrument-receipt.jsonl"),
+                )?,
+                "sequences_emission": impg::genome_inference::reconstruction::fingerprint(
+                    &sequences,
+                )?,
+                "selection": "Locality",
+                "scope": "per-locus-diplotype-calls-with-model-internal-qual",
+                "shared_panel_load_seconds": load_seconds,
+            }))
+        })?;
+        eprintln!(
+            "[cut-call-batch-global] {} called in {:.0}s",
+            name,
+            call_started.elapsed().as_secs()
+        );
+    }
     Ok(())
 }
 
@@ -4901,6 +5102,21 @@ fn main() -> io::Result<()> {
             shards_dir,
             manifest,
         } => run_cut_batch_global(&global_panel, &agc, &shards_dir, &manifest),
+        Mode::CutCallBatchGlobal {
+            global_panel,
+            agc,
+            shards_dir,
+            manifest,
+            routes,
+            call_rss_budget_gib,
+        } => run_cut_call_batch_global(
+            &global_panel,
+            &agc,
+            &shards_dir,
+            &manifest,
+            &routes,
+            call_rss_budget_gib,
+        ),
         Mode::Trace {
             global_panel,
             agc,
