@@ -552,5 +552,37 @@ named as such in the receipt) — with the delta receipted per-field
 honestly as the evidence-set margin (the cut-L1.calls-diff.txt
 precedent), and the committed-path bind failure carried verbatim.
 
+**THE RATIFIED PARALLEL LANE-HASH (the serial wall's own lever;
+supervisor-ratified before implementation, gated before any big
+run).** The wall's entire content is `panel_routes::lookup`'s
+per-lane source hash, so THAT loop is now parallel across lanes:
+rayon `par_iter` over the lane vector with `collect` preserving lane
+order; the per-lane crop loop is UNCHANGED; the fetch path is
+thread-safe by construction (`Sources::fetch` is `&self`, the AGC
+keeps per-rayon-thread decompressor pools, and core_bp crops exceed
+the small-crop fetch memo — no shared mutable state anywhere in the
+body). NO OUTPUT CHANGES, gated three ways: (a) the new unit test
+`lookup_lane_hashes_are_deterministic_and_crop_independent` — the
+lane rows are identical across core_bp crop partitionings (37 / 64 /
+65536) and across reruns, in lane order (the hash is a pure function
+of the lane's own bytes, the thread schedule invisible in the
+artifact); (b) THE MINI-PANEL SERIAL-VS-PARALLEL CMP: the pilot panel
+(458 lanes, the same inputs as the committed substitute artifact)
+derived by a rebuilt HEAD-serial binary and by the parallel binary —
+graph.json **BYTE-IDENTICAL, including compiler_identity** (the
+parallelization contributes zero bytes); the Oct-14 committed
+substitute artifact differs from BOTH only at compiler_identity
+(byte 665, line 39) — the named code-drift class since Oct 14 (the
+identity chain's own sources, vendor/syng's submodule state; the lane
+rows — all 458 sequence_fnv1a64, families, source_paths, panel
+identity, total_source_bp — identical); (c) cargo test --release
+--lib **559/0** (+1), the sample_projection example proof **2/2**.
+The serial whole-panel run STAYS ALIVE: its binary is the same HEAD
+identity, so its graph.json (~23:30Z) is the free full-panel identity
+receipt — expected BYTE-IDENTICAL to the parallel artifact byte for
+byte. The parallel form serves lever 1's whole-panel routes inventory
+AND lever 2's shared-index cut lanes (the same per-lane source-hash
+shape at the cut's territory index build).
+
 ## 10.3 The gates' receipts (the byte-identity cmps, lane scaling,
 and the 20-minute budget restatement — landing as they run)
