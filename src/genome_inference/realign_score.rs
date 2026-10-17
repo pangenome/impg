@@ -3589,6 +3589,138 @@ fn seam_map<T: Sync, R: Send>(
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// THE SPAN-CACHED LANE SEQUENCE SOURCE (phase 1, lever 2's call-bound fix,
+// at module scope so the cache's own byte-identity contract is unit-tested
+// directly). The load policy: whole-lane (the committed per-territory frame
+// — the lanes are the locus.fa record slices) or span-scoped (the GLOBAL
+// frame — the lanes are whole panel paths, so the cache holds the touched
+// SPAN per lane, grown by union on demand; the derived bound is the crops
+// actually requested, never a constant).
+//
+// THE DELTA-EXTEND GROWTH RULE (the union-regrowth re-decompression fix):
+// on a miss the cached span is extended by ONLY the missing sub-ranges —
+// fetch [new_lo, lo) and/or [hi, new_hi) — and stitched to the cached
+// interior; the covered interior is never re-decompressed. The committed
+// union-regrowth form re-fetched the WHOLE grown span on every miss (the
+// measured disease: 277,796 loads fetching 56.7GB for L1's ~117.6MB unique
+// territory envelope — ~482x re-decompression; SS10.5.1). BYTE-IDENTITY,
+// the served-crop argument restated for the stitch: a crop of a
+// Sources::fetch answer equals the direct fetch of the crop (the property
+// the covered branch serves by), so fetch(new_lo, lo) is fetch(new_lo,
+// new_hi)'s own [0, lo - new_lo) crop and fetch(hi, new_hi) is its
+// [hi - new_lo, new_hi - new_lo) crop; the cached span is byte-equal to
+// fetch(lo, hi) by the maintained invariant (base case: a direct fetch;
+// inductive step: this argument), so the concatenation IS fetch(new_lo,
+// new_hi) byte for byte — the buffer the union-regrowth form held. Every
+// served crop is therefore a slice of the same Sources::fetch answer
+// covering it, and the outputs are invariant; the identity gate re-proves
+// it end-to-end.
+// ---------------------------------------------------------------------------
+struct LaneCache {
+    sources: routes::Sources,
+    lane_lengths: Vec<u64>,
+    whole_lane: bool,
+    seqs: Vec<
+        std::sync::Mutex<
+            Option<(u64, u64, std::sync::Arc<Vec<u8>>)>,
+        >,
+    >,
+    loads: AtomicU64,
+    bytes: AtomicU64,
+    nanos: AtomicU64,
+}
+impl LaneCache {
+    fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let started = Instant::now();
+        let mut slot = self.seqs[source].lock().unwrap();
+        if let Some((_, _, seq)) = slot.as_ref() {
+            return Ok(std::sync::Arc::clone(seq));
+        }
+        let len = self.lane_lengths[source];
+        let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+        self.nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        *slot = Some((0, len, std::sync::Arc::clone(&seq)));
+        Ok(seq)
+    }
+    fn span(
+        &self,
+        source: usize,
+        start: u64,
+        end: u64,
+    ) -> io::Result<(u64, std::sync::Arc<Vec<u8>>)> {
+        // The GLOBAL-frame policy: the cached span grows by union to
+        // cover the requested crop; a covering span serves the crop
+        // as a slice (the same bytes the direct fetch returns). The
+        // span's OWN [lo, hi) bounds are returned WITH it: the span is
+        // span-RELATIVE memory (a span grown from lo > 0 is not
+        // addressable by absolute path coordinates — the fetch below
+        // slices at (start - lo), and a covered crop equals the
+        // direct fetch exactly).
+        let started = Instant::now();
+        let mut slot = self.seqs[source].lock().unwrap();
+        let len = self.lane_lengths[source];
+        if let Some((lo, hi, seq)) = slot.as_ref() {
+            if *lo <= start && end <= *hi {
+                return Ok((*lo, std::sync::Arc::clone(seq)));
+            }
+            let seq = std::sync::Arc::clone(seq);
+            let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
+            // DELTA-EXTEND: fetch only the missing sub-ranges and
+            // stitch them to the cached interior (the module comment's
+            // byte-identity argument). The counters receipt the
+            // delta's own fetch volume — the load count is no longer
+            // the regrowth count.
+            let mut grown: Vec<u8> = Vec::with_capacity((new_hi - new_lo) as usize);
+            if new_lo < *lo {
+                grown.extend_from_slice(&self.sources.fetch(source, new_lo, *lo)?);
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                self.bytes.fetch_add(*lo - new_lo, Ordering::Relaxed);
+            }
+            grown.extend_from_slice(&seq[..]);
+            if new_hi > *hi {
+                grown.extend_from_slice(&self.sources.fetch(source, *hi, new_hi)?);
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                self.bytes.fetch_add(new_hi - *hi, Ordering::Relaxed);
+            }
+            self.nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let grown = std::sync::Arc::new(grown);
+            *slot = Some((new_lo, new_hi, std::sync::Arc::clone(&grown)));
+            return Ok((new_lo, grown));
+        }
+        let seq = std::sync::Arc::new(self.sources.fetch(source, start, end.min(len))?);
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(end.min(len) - start, Ordering::Relaxed);
+        self.nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        *slot = Some((start, end.min(len), std::sync::Arc::clone(&seq)));
+        Ok((start, seq))
+    }
+    fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
+        // The Sources::fetch contract, mirrored exactly.
+        ensure(
+            source < self.lane_lengths.len()
+                && start < end
+                && end <= self.lane_lengths[source],
+            "invalid source crop",
+        )?;
+        if self.whole_lane {
+            let lane = self.lane(source)?;
+            let lo = start as usize;
+            let hi = end as usize;
+            return Ok(lane[lo..hi].to_vec());
+        }
+        let (span_lo, span) = self.span(source, start, end)?;
+        let lo = (start - span_lo) as usize;
+        let hi = (end - span_lo) as usize;
+        Ok(span[lo..hi].to_vec())
+    }
+}
+
 pub fn run(options: Options) -> io::Result<()> {
     let started = Instant::now();
     let rss = RssGuard::new(options.rss_budget_gib);
@@ -3763,105 +3895,6 @@ pub fn run(options: Options) -> io::Result<()> {
     // SPAN per lane — the derived bound is the crops the call
     // itself requests; the committed local frame keeps the
     // whole-lane policy verbatim.)
-    struct LaneCache {
-        sources: routes::Sources,
-        lane_lengths: Vec<u64>,
-        /// The load policy: whole-lane (the committed per-territory
-        /// frame — the lanes are the locus.fa record slices) or
-        /// span-scoped (the GLOBAL frame — the lanes are whole panel
-        /// paths, so the cache holds the touched SPAN per lane, grown
-        /// by union on demand; the derived bound is the crops actually
-        /// requested, never a constant. Byte-identity: every served
-        /// crop is a slice of the same Sources::fetch answer, so a
-        /// crop of a grown span equals the direct fetch — the same
-        /// argument the whole-lane cache makes, at the span scope.)
-        whole_lane: bool,
-        seqs: Vec<
-            std::sync::Mutex<
-                Option<(u64, u64, std::sync::Arc<Vec<u8>>)>,
-            >,
-        >,
-        loads: AtomicU64,
-        bytes: AtomicU64,
-        nanos: AtomicU64,
-    }
-    impl LaneCache {
-        fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
-            let started = Instant::now();
-            let mut slot = self.seqs[source].lock().unwrap();
-            if let Some((_, _, seq)) = slot.as_ref() {
-                return Ok(std::sync::Arc::clone(seq));
-            }
-            let len = self.lane_lengths[source];
-            let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
-            self.loads.fetch_add(1, Ordering::Relaxed);
-            self.bytes.fetch_add(len, Ordering::Relaxed);
-            self.nanos
-                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            *slot = Some((0, len, std::sync::Arc::clone(&seq)));
-            Ok(seq)
-        }
-        fn span(
-            &self,
-            source: usize,
-            start: u64,
-            end: u64,
-        ) -> io::Result<(u64, std::sync::Arc<Vec<u8>>)> {
-            // The GLOBAL-frame policy: the cached span grows by union
-            // to cover the requested crop; a covering span serves the
-            // crop as a slice (the same bytes the direct fetch
-            // returns). One lane's span converges to its touched
-            // envelope in a handful of loads (the growth is monotone
-            // and every crop is served between loads from the span).
-            // The span's OWN [lo, hi) bounds are returned WITH it: the
-            // span is span-RELATIVE memory (a span grown from lo > 0
-            // is not addressable by absolute path coordinates — the
-            // fetch below slices at (start - lo), and a covered crop
-            // equals the direct fetch exactly).
-            let started = Instant::now();
-            let mut slot = self.seqs[source].lock().unwrap();
-            let len = self.lane_lengths[source];
-            if let Some((lo, hi, seq)) = slot.as_ref() {
-                if *lo <= start && end <= *hi {
-                    return Ok((*lo, std::sync::Arc::clone(seq)));
-                }
-                let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
-                let grown = std::sync::Arc::new(self.sources.fetch(source, new_lo, new_hi)?);
-                self.loads.fetch_add(1, Ordering::Relaxed);
-                self.bytes.fetch_add(new_hi - new_lo, Ordering::Relaxed);
-                self.nanos
-                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                *slot = Some((new_lo, new_hi, std::sync::Arc::clone(&grown)));
-                return Ok((new_lo, grown));
-            }
-            let seq = std::sync::Arc::new(self.sources.fetch(source, start, end.min(len))?);
-            self.loads.fetch_add(1, Ordering::Relaxed);
-            self.bytes.fetch_add(end.min(len) - start, Ordering::Relaxed);
-            self.nanos
-                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            *slot = Some((start, end.min(len), std::sync::Arc::clone(&seq)));
-            Ok((start, seq))
-        }
-        fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
-            // The Sources::fetch contract, mirrored exactly.
-            ensure(
-                source < self.lane_lengths.len()
-                    && start < end
-                    && end <= self.lane_lengths[source],
-                "invalid source crop",
-            )?;
-            if self.whole_lane {
-                let lane = self.lane(source)?;
-                let lo = start as usize;
-                let hi = end as usize;
-                return Ok(lane[lo..hi].to_vec());
-            }
-            let (span_lo, span) = self.span(source, start, end)?;
-            let lo = (start - span_lo) as usize;
-            let hi = (end - span_lo) as usize;
-            Ok(span[lo..hi].to_vec())
-        }
-    }
     let lane_cache = LaneCache {
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
         sources,
@@ -9305,6 +9338,103 @@ mod tests {
         // A fold called on both haps of one class appears once.
         assert_eq!(coalesced_called_set(&[(7, 7)]), vec![7]);
         assert!(coalesced_called_set(&[]).is_empty());
+    }
+
+    #[test]
+    fn lane_cache_span_delta_extend_serves_direct_fetch_bytes() {
+        // THE DELTA-EXTEND CONTRACT, unit-proved: every served crop is
+        // byte-equal to the direct Sources::fetch of the crop, through
+        // a union-growth request order that forces the left-extend,
+        // right-extend, and both-side extension paths — and the
+        // counters receipt the DELTA fetch volume (the missing
+        // sub-ranges only), never the regrown span's.
+        let len = 40_000u64;
+        let seq: Vec<u8> = (0..len)
+            .map(|i| b"ACGT"[(i.wrapping_mul(2_654_435_761u64) % 4) as usize])
+            .collect();
+        let dir = std::env::temp_dir().join(format!("impg-lanecache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fa = dir.join("lane.fa");
+        {
+            use std::io::Write;
+            let mut out = std::fs::File::create(&fa).unwrap();
+            writeln!(out, ">lane0").unwrap();
+            for chunk in seq.chunks(60) {
+                out.write_all(chunk).unwrap();
+                out.write_all(b"\n").unwrap();
+            }
+        }
+        let sources = routes::Sources::open(
+            &[fa.display().to_string()],
+            vec![("lane0".into(), len)],
+        )
+        .unwrap();
+        // The served-crop property itself, first: a crop of a fetch
+        // answer equals the direct fetch of the crop (the property the
+        // covered branch and the stitch both ride).
+        let whole = sources.fetch(0, 5_000, 30_000).unwrap();
+        assert_eq!(whole.len(), 25_000);
+        assert_eq!(&whole[..3_000], &sources.fetch(0, 5_000, 8_000).unwrap()[..]);
+        assert_eq!(&whole[20_000..], &sources.fetch(0, 25_000, 30_000).unwrap()[..]);
+        let cache = LaneCache {
+            lane_lengths: vec![len],
+            sources,
+            whole_lane: false,
+            seqs: vec![std::sync::Mutex::new(None)],
+            loads: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+        };
+        // (initial span) right-extend, both-side extend, covered,
+        // right-extend again — every crop >1,024bp (outside the small-
+        // crop fetch memo; the memo path returns the same bytes either
+        // way).
+        for (start, end) in [
+            (1_000u64, 5_000u64),
+            (20_000, 25_000),
+            (500, 30_000),
+            (1_200, 4_800),
+            (30_000, 35_000),
+        ] {
+            let served = cache.fetch(0, start, end).unwrap();
+            assert_eq!(
+                served,
+                cache.sources.fetch(0, start, end).unwrap(),
+                "served crop {start}..{end} differs from the direct fetch"
+            );
+        }
+        // The delta-volume receipt: loads = 1 initial + 1 right-extend
+        // ([5_000, 25_000)) + 2 both-side ([500, 1_000) + [25_000,
+        // 30_000)) + 1 right-extend ([30_000, 35_000)) = 5; bytes = the
+        // missing sub-ranges only = 4_000 + 20_000 + 500 + 5_000 +
+        // 5_000 = 34_500 (the union-regrowth form would have fetched
+        // 4_000 + 24_000 + 29_500 + 0 + 34_500 = 92_000).
+        assert_eq!(cache.loads.load(Ordering::Relaxed), 5);
+        assert_eq!(cache.bytes.load(Ordering::Relaxed), 34_500);
+        // The whole-lane policy stays verbatim: one load, the whole
+        // lane, every crop a slice of it.
+        let whole_cache = LaneCache {
+            lane_lengths: vec![len],
+            sources: routes::Sources::open(
+                &[fa.display().to_string()],
+                vec![("lane0".into(), len)],
+            )
+            .unwrap(),
+            whole_lane: true,
+            seqs: vec![std::sync::Mutex::new(None)],
+            loads: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+        };
+        assert_eq!(
+            whole_cache.fetch(0, 1_234, 4_321).unwrap(),
+            whole_cache.sources.fetch(0, 1_234, 4_321).unwrap()
+        );
+        assert_eq!(whole_cache.loads.load(Ordering::Relaxed), 1);
+        assert_eq!(whole_cache.bytes.load(Ordering::Relaxed), len);
+        let _ = std::fs::remove_file(&fa);
+        let _ = std::fs::remove_file(dir.join("lane.fa.fai"));
+        let _ = std::fs::remove_dir(&dir);
     }
 
 }
