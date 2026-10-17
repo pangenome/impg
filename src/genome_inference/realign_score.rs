@@ -5654,6 +5654,51 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             no_pin_records: u64,
             abstained_hull_bp: u64,
         }
+        // (THE PER-RECORD HOIST — the marathon profile's named
+        // fold-independent redundancy class: the canonical token
+        // decode, the own anchor positions, and the merged
+        // anchor-window hull are PURE functions of the record, but
+        // the committed pair loop recomputed them at every (fold,
+        // unit) pair — up to n_folds times per unit, up to ~2.4e9
+        // recomputes at the receipted marathon worst loci, the
+        // measured no-pin path's whole 0.2-0.3us/pair floor. Computed
+        // ONCE per record here; the pair loop reads the table.
+        // Byte-identity: the hoisted values are the same
+        // pure-function outputs the pair loop computed; the scoring
+        // math, the per-pair counter accumulation
+        // (abstained_hull_bp adds the same hull_covered - backbone_bp
+        // per pair), and every iteration order are unchanged.)
+        struct RecordData {
+            canonical: Vec<(i32, u64)>,
+            own_flat: Vec<u64>,
+            hull_covered: u64,
+        }
+        let mut hoist_max_record = 0usize;
+        for unit in &units {
+            hoist_max_record = hoist_max_record.max(unit.record);
+        }
+        let mut record_data: Vec<Option<RecordData>> =
+            (0..=hoist_max_record).map(|_| None).collect();
+        for unit in &units {
+            let record = unit.record;
+            if record_data[record].is_some() {
+                continue;
+            }
+            let canonical = decode_record_tokens(
+                &key_tokens[census_key[record].unwrap() as usize],
+            )
+            .expect("bound record");
+            let own_flat = own_positions_of(&canonical, false, 0);
+            let hull_windows: Vec<(u64, u64)> =
+                own_flat.iter().map(|&p| (p, p + k)).collect();
+            let hull_covered: u64 =
+                merge_windows(hull_windows).iter().map(|&(lo, hi)| hi - lo).sum();
+            record_data[record] = Some(RecordData {
+                canonical,
+                own_flat,
+                hull_covered,
+            });
+        }
         let scored: Vec<FoldScore> = (0..n_folds)
             .into_par_iter()
             .map(|fold_index| {
@@ -5669,8 +5714,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 let positions_of = |node: u32| fold.positions_of(node);
                 for unit in &units {
                     let record = unit.record;
-                    let canonical = decode_record_tokens(&key_tokens[census_key[record].unwrap() as usize])
-                        .expect("bound record");
+                    let data = record_data[record]
+                        .as_ref()
+                        .expect("bound record (the per-record hoist)");
+                    let canonical = &data.canonical;
                     // (Stage 2: this fold's territory image — the
                     // placement-validity domain and the prior's
                     // support. Under the default convention it is the
@@ -5683,13 +5730,13 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     let mut any_pin = false;
                     for &orientation in &touching[&record].orientations {
                         let (pinned, _ambiguous) =
-                            anchor_correspondence(&canonical, orientation, &positions_of);
+                            anchor_correspondence(canonical, orientation, &positions_of);
                         if pinned.iter().all(|p| p.is_none()) {
                             continue;
                         }
                         // The merged pinned-window backbone (hull
                         // coordinates, mirror-invariant).
-                        let own_flat = own_positions_of(&canonical, false, 0);
+                        let own_flat = &data.own_flat;
                         let windows: Vec<(u64, u64)> = pinned
                             .iter()
                             .enumerate()
@@ -5703,13 +5750,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         });
                         // The abstained hull bp (the named remainder:
                         // read hull bases inside unpinned anchor
-                        // windows).
-                        let hull_windows: Vec<(u64, u64)> =
-                            own_flat.iter().map(|&p| (p, p + k)).collect();
-                        let hull_covered: u64 = merge_windows(hull_windows)
-                            .iter()
-                            .map(|&(lo, hi)| hi - lo)
-                            .sum();
+                        // windows) — the per-record hoisted value (the
+                        // hull is fold-independent).
+                        let hull_covered = data.hull_covered;
                         abstained_hull_bp += hull_covered - backbone_bp;
                         if !windows_inside {
                             continue;
@@ -5741,14 +5784,14 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     let mut pinned_here = false;
                     for pin in pins.iter().flatten() {
                         let Some((m, c)) = placement_score(
-                            unit, &canonical, pin, &fold.seq, fold.len, &reads, k,
+                            unit, canonical, pin, &fold.seq, fold.len, &reads, k,
                             img_lo as i64, img_hi as i64,
                         ) else {
                             edge_discarded += 1;
                             continue;
                         };
                         let (dm, dc) = direct_score(
-                            unit, &canonical, pin, &fold.seq, fold.len, &reads, k,
+                            unit, canonical, pin, &fold.seq, fold.len, &reads, k,
                         )
                         .expect("direct score");
                         factorized_checked += 1;
