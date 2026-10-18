@@ -4401,32 +4401,50 @@ fn fork_cow_print(label: &str, snap: &ForkCowSnapshot) {
 /// in an INHERITED mapping's private pages IS the COW break for that
 /// arena; the growth elsewhere is the child's own working set.
 fn fork_cow_delta_print(label: &str, open: &ForkCowSnapshot, close: &ForkCowSnapshot) {
-    let gb = |kb: u64| kb as f64 / (1 << 20) as f64;
+    // GB at two decimals for the big masses; exact MB below 1GB so a
+    // page-class COW break is receipted as what it is, not rounded to
+    // zero.
+    let fmt_kb = |kb: u64| -> String {
+        if kb >= (1 << 20) {
+            format!("{:.2}GB", kb as f64 / (1 << 20) as f64)
+        } else {
+            format!("{}MB", kb / 1024)
+        }
+    };
+    let fmt_delta = |kb_close: u64, kb_open: u64| -> String {
+        if kb_close >= kb_open {
+            fmt_kb(kb_close - kb_open)
+        } else {
+            format!("-{}", fmt_kb(kb_open - kb_close))
+        }
+    };
+    let d_open = fmt_kb(open.rollup.private_kb());
+    let d_close = fmt_kb(close.rollup.private_kb());
     eprintln!(
-        "[fork-cow] {label} delta: private {:+.2}GB (open {:.2}GB -> close {:.2}GB), pss {:+.2}GB, rss {:+.2}GB",
-        gb(close.rollup.private_kb()) - gb(open.rollup.private_kb()),
-        gb(open.rollup.private_kb()),
-        gb(close.rollup.private_kb()),
-        gb(close.rollup.pss_kb) - gb(open.rollup.pss_kb),
-        gb(close.rollup.rss_kb) - gb(open.rollup.rss_kb),
+        "[fork-cow] {label} delta: private +{} (open {d_open} -> close {d_close}), pss {:+.2}GB, rss {:+.2}GB",
+        fmt_delta(close.rollup.private_kb(), open.rollup.private_kb()),
+        close.rollup.pss_kb as f64 / (1 << 20) as f64
+            - open.rollup.pss_kb as f64 / (1 << 20) as f64,
+        close.rollup.rss_kb as f64 / (1 << 20) as f64
+            - open.rollup.rss_kb as f64 / (1 << 20) as f64,
     );
     for close_m in &close.big {
         if let Some(open_m) = open.big.iter().find(|m| m.header == close_m.header) {
             let grew = close_m.private_kb() > open_m.private_kb();
             eprintln!(
-                "[fork-cow] {label} mapping {} private {:+.2}GB (open {:.2}GB -> close {:.2}GB), shared {:+.2}GB{}",
+                "[fork-cow] {label} mapping {} private +{} (open {} -> close {}), shared {}{}",
                 close_m.header,
-                gb(close_m.private_kb()) - gb(open_m.private_kb()),
-                gb(open_m.private_kb()),
-                gb(close_m.private_kb()),
-                gb(close_m.shared_kb()) - gb(open_m.shared_kb()),
+                fmt_delta(close_m.private_kb(), open_m.private_kb()),
+                fmt_kb(open_m.private_kb()),
+                fmt_kb(close_m.private_kb()),
+                fmt_delta(close_m.shared_kb(), open_m.shared_kb()),
                 if grew { " [COW BREAK]" } else { "" },
             );
         } else {
             eprintln!(
-                "[fork-cow] {label} mapping {} private {:+.2}GB [CHILD-OWN]",
+                "[fork-cow] {label} mapping {} private +{} [CHILD-OWN]",
                 close_m.header,
-                gb(close_m.private_kb()),
+                fmt_kb(close_m.private_kb()),
             );
         }
     }

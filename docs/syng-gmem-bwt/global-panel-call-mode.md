@@ -1735,3 +1735,212 @@ the next campaign window (determinism + wall + candidate C's bound);
 (4) the bind's per-fetch AGC-seek floor (the span-volume collapse
 went 508x; the seek COUNT is the named floor — a bulk-prefetch form
 is the candidate, undesigned).
+
+### 10.6.12 THE FORK-AFTER-LOAD COW PANEL SHARE — LANDED (increment
+4; commit 3e161eb the driver + the COW audit + the gates
+below as run, this commit the receipts and the corrected budget): the §10.6.9 form (a), implemented and gated; the COW
+holds at every measured concurrency; the ceiling CORRECTED from the
+receipts; the budget restated
+
+**THE COW WRITE AUDIT (duty 1, both halves):**
+
+*The code half — every post-load writer into the panel's arenas,
+named:* (1) the GBWT query paths are PURE READERS —
+`syngBWTmatchStart/Next`, `syngBWTpathStartOld/pathNext`,
+`syngBWTincomingRank`, `syngBWTadvanceRank`, `syngBWTlocFind`, and
+the `rsDirRankSyng`/`rsDirSum`/`rsFindSyng` rskip readers never write
+`sb->node/status/path/loc` (all mutable query state — the
+`SyngBWTpath`, the `SeqhashIterator` — is a fresh per-call
+allocation); `startCount(sb,k,false)` is a hashFind, and the lazy
+`startHash` create is the add path only. (2) the KmerHash query path
+(`kmerHashFindThreadSafe`, every bind-phase syncmer lookup) writes
+ONLY the `kh->finds`/`kh->deltas` diagnostic counters — two U64s in
+the small-heap KmerHash *header chunk*, a benign cross-thread race
+since the seam-thread era: the COW cost is ONE page, and it is not in
+either big arena; `kmerHashFind`'s scratch write into `pack[max+1]`
+is the index-build path only. (3) the Seqhash is read-only
+post-create; the iterators are per-query allocations. (4) the
+Rust-side lazy structures do not fire: `locate_checkpoint_index` is
+never built (the panel's `.spos` serves locate), and the C
+diagnostics (`pathCount`) are set once at load — pre-fork.
+
+*THE PREFORK HAZARD THE FIRST PROBE RECEIPTED (the run hung — CPU
+frozen at 05:09:26, all threads S-state, ~20 minutes past the last
+locus-open line):* rayon's GLOBAL registry is set ONCE per process
+(`THE_REGISTRY_SET` — never replaceable in-process), and a registry
+initialized in the PARENT holds worker threads that DO NOT EXIST in
+a forked child; the call's seam threads run inner par_iters that
+install the GLOBAL registry (the committed inner behavior), enqueue
+to dead workers, and hang forever. **THE FIX BY CONSTRUCTION:** the
+parent NEVER touches rayon before the fork — `SyngIndex::load` is
+verified rayon-free (the C reader's own joined pthreads, mmap'd
+sidecars, plain file reads) and the parent builds NO AgcIndex (whose
+build sizes its slots with `rayon::current_num_threads()`); every
+child builds its OWN AGC index (the struct is small — name maps +
+per-thread decompressor slots over the page-cache-shared AGC file;
+the per-child build is <1s, receipted), so the child's global
+registry initializes at the same sequence point as the committed
+fresh process, spawning the child's own 64 threads at the inherited
+`RAYON_NUM_THREADS`. Every par_iter in the child — the main thread,
+the cut, the call's seam threads — joins the child's own LIVE
+registry: the fresh-process trajectory by construction, no
+`install()` indirection. This is the read-length-class lesson in its
+fork form: the audit names every process-global a child inherits
+(driver doc comment, verbatim list), and the one that mattered was
+found by the gate, not assumed away.
+
+**THE DRIVER (`sample_projection fork-cut-call-batch-global`):** the
+parent loads the panel ONCE (the load owner — 197-221s, the co-tenant
+band of the committed 241s panel-load pole) and forks;
+`--rows-per-child` chunks the manifest (1 = one child per territory,
+the maximal-share form; the manifest's own batch width amortizes the
+cut scan within a child — the fleet-shape parameter, never an
+algorithm constant). Each child builds its own AGC, runs its chunk's
+batch cut (the batch-composition-invariance receipt: single ==
+batch member) plus its chunk's calls (the combined process's own
+`run_combined_call_rows`, extracted verbatim), then `_exit`s; the
+parent waits and fails at the first failing chunk in order. The smaps
+receipts print at parent-post-load, child-open, post-cut
+`malloc_trim` (before/after private), and child-close with
+per-mapping deltas and COW-BREAK marking over every >=1GiB mapping.
+
+**THE GATES (all PASS, the two-sided committed bar):**
+
+| form | wall | byte-identity | COW-hold (per child) |
+|---|---:|---|---|
+| N=1 probe (L1, rows-per-child 1) | load 213s + child 496s (cut 354s incl. scan 153s; call 129s) | **PASS** vs committed | open private 0MB shared 32.36GB; close: the 12.87GB GBWT arena **private 0.00GB shared 12.06GB**, the 4.31GB khash arena **private 0.00GB shared 4.31GB**; own private +40.24GB |
+| N=2 probe (L1 x2, 2 concurrent children) | load 198s + children 541s | **PASS** (both children) | private +36.12GB / +37.13GB (own work; arenas shared) |
+| L1-L4 at rows-per-child 1 (4 concurrent children) | load 221s + children 841s (cuts 572-693s, scans contended 378-485s; calls 117-137s) | **PASS** (12 cut + 8 call files + all sidecars vs BOTH baselines; instrument field-identical mod timing) | arenas private 0.00GB shared 12.13/4.31GB (Pss 3.03/1.08GB = the /4 share); per-child private +35.3-38.8GB |
+| L1-L4 in ONE width-4 child (rows-per-child 4 — the combined form minus the load pole) | load 197s + child 666s (cut 415s incl. scan 141s; 4 concurrent calls 190-229s) | **PASS** (the same two-sided bar) | arenas private 0.00GB shared (Pss /2 with the parent); child private peak ~72.3GB, +52.81GB at close |
+
+**THE VERDICT ON THE §10.6.9 NAMED RISK:** the COW holds — over a
+whole cut+call, at every measured concurrency, the panel's arenas
+break ZERO pages (the GBWT and khash arenas read `private 0.00GB,
+shared 12.13/4.31GB` at close; the only private growth on an
+inherited mapping is the `.pstep` mmap's +0.24GB file-backed
+accounting class). The one-page khash-counter break predicted by the
+code audit is under the print precision of the arena lines — the
+design's viability number is the measured per-child private below,
+not COW.
+
+**THE HONEST NEW FINDING (the receipts the §10.6.9 projection
+missed):** the child's own private growth is +35-40GB per territory
+at rows-per-child 1 — NOT COW, and NOT the projected ~13GB: it is the
+CUT SCAN-SIDE working set (the shard decode/remap stream through 64
+rayon-thread arenas — 734M reads scanned per child, WIDTH-INSENSITIVE:
+the width-4 combined form held the same ~42GB class), retained by the
+allocator after the cut phase. The `malloc_trim(0)` hygiene receipt
+measures it honestly: 35.2-38.95GB -> 32.16-32.75GB (returns only
+3.1-6.2GB — the free TAIL; the ~32GB remainder is fragmentation/live
+class, not returnable). The width-4 child amortizes the scan side
+over its 4 territories (private peak ~72.3GB, ~18GB/territory).
+
+**THE BIND-CONTENTION RECEIPT (the §10.6.7 question answered):** at
+the fork form with per-process decompression pools, the contention
+VANISHES — 4 concurrent children (one call each) bind at **46.1-55.6s
+each**, the serial-run class (50-73s), versus the combined process's
+contended **137.2-180.0s** (~3x): the 773.7s summed-thread-time
+contention was the in-process shared-bandwidth class, and per-process
+pools delete it at 4-way process concurrency. (Within ONE width-4
+child the 4 concurrent calls contend as before: binds 116.7-152.0s —
+the in-process class is unchanged, as expected.)
+
+**THE CEILING, CORRECTED FROM THE RECEIPTS (the ~74-slot projection
+corrected):** at the 1TB model with the 900GB guard, the arithmetic is
+parent ~34GB private + per-child private peak: at rows-per-child 1,
+(900-34)/40 -> **~21 territory slots** (WORSE than the combined
+form's 32 — the scan side re-binds per child); at rows-per-child 4,
+(900-34)/72.3 -> **11-12 children x 4 = 44-48 territory slots** — the
+honest receipted ceiling, ~1.4x the combined form's 32, NOT 2.3-2.5x:
+the scan-side working set is the term the §10.6.9 model missed. THE
+CPU CAVEAT the receipts also force: 4 concurrent children x 64
+threads ~ the box's 256 cores — the 4-way scans contended 378-485s vs
+141-153s solo (2.5-3.2x) — so the fleet at >~4 children needs child
+pool sizing (an operational fleet parameter) or the walls inflate;
+the 44-48-slot memory ceiling is not reachable at the committed
+64-thread child shape.
+
+**THE GENOME WALL, RESTATED FROM THE RECEIPTS (the §10.6.10 fleet
+convention — solo walls, memory-capped slots, no term extrapolated
+beyond its receipt):** at rows-per-child 4, 44-48 slots at a 666s
+wave (the receipted width-4 child, load excluded — the parent's
+197-221s load amortizes to ~0 at fleet scale under the same
+convention the 241s pole was charged per process): 5,844 territories /
+44-48 slots x 666s = **~22.5-24.6h**, versus the combined form's
+~45-47h — **~1.9-2.0x**, the load pole deleted and the slot ceiling
+44-48 vs 32. (The parent-level admission control — forking at most
+the ceiling's children per wave and looping the manifest — is the
+named remaining driver increment; the current form's manifest IS the
+wave.) Per-territory marginal at the fork form: 666/4 = **~167s
+ex-load**, unchanged from the combined marginal — the panel share is
+a SLOT and LOAD lever, not a per-territory wall lever, exactly as
+§10.6.9 stated.
+
+**THE MARATHON RE-RECEIPT (duty 6 — the measurable parts receipted,
+the unmeasurable named, no marathon wall number fabricated):** the
+substrates are reaped, so the re-receipt is the retained-shape
+machine: (a) THE MEMORY BOUND re-run, `marathon_worst_locus_shape_
+memory_receipt` — at T03803's profiled shape (532 x 4,438,575 at the
+roster's 2.1% pinned share): compressed live 750MB (0.33 B/pair) vs
+the dense form's 29,275MB (13 B/pair) = **39.0x**, measured RSS delta
+1,333MB — candidate C's committed bound reproduces. (b) THE
+SCAN-WALL CORE, the new `marathon_worst_locus_shape_scan_wall_
+receipt` — the merge's equal-column hash pass (532 rows, 2.36e9
+(fold,unit) hash steps) in 25.4s = **10.75 ns/(fold,unit)**
+single-threaded; the FULL exhaustive class scan at the all-distinct
+worst shape (141,778 fold pairs x 4,438,575 units = 6.29e11
+unit-pairs) in 204.7s at 256 threads = **0.33 ns/unit-pair aggregate
+(~84ns single-thread equivalent)**. NOT MEASURED, because the reaped
+substrates carried them: the pair loop's PINNED alignment class (the
+1.3-2.7us/pair band needs real records/reads), the bind phase, the
+records/census phases — and therefore any whole-locus marathon wall.
+The honest bound the new receipt buys: the class-scan core at the
+no-collapse worst shape is 204.7s at full-box width — and the
+committed single-threaded marathon receipts (T03803's whole locus
+717.4s) imply the real loci's class scans run over far fewer than
+532 unmerged classes (the merge collapses first), so the synthetic
+all-distinct scan is an UPPER-shape bound, never a wall claim.
+
+**THE 20-MINUTE BUDGET, RESTATED AT INCREMENT 4 (supersedes
+§10.6.10's fleet terms):**
+
+- **map ~3 min**; **prep ZERO**; the panel-side routes inventory
+  1,505s once — unchanged.
+- **cuts + calls at the fork form (rows-per-child 4, all gates
+  PASS):** per-territory marginal **~167s ex-load** (the width-4
+  child: cut share ~104s + call phase ~62s at 4-concurrent), the
+  load pole DEAD (197-221s once per parent), the bind at the serial
+  class 46-56s under 4-way process concurrency.
+- **THE FLEET MATH:** 44-48 memory slots at 666s waves = **~22.5-24.6h
+  genome wall** — with the CPU caveat: >~4 concurrent children at
+  the committed 64-thread shape oversubscribe the 256-core box (the
+  4-way scan contention receipt: 2.5-3.2x), so the slot ceiling needs
+  child pool sizing to be USABLE, an operational fleet decision.
+- **THE REMAINING GAP:** 5,844 territories in 1,200s needs 4.87
+  territories/s; the fork form receipts 44-48 slots / 666s = 0.066/s —
+  **a ~73x gap**, every pole named with its receipt: (1) THE LOAD —
+  dead; (2) THE CUT SCAN — the NEW pole (141s scan + ~104s cut share
+  per width-4 child, plus the ~32-40GB scan-side working set that
+  binds the memory ceiling at ~18GB/territory; the same 65GB shard
+  gzip is re-decoded per child — a shared-scan/bulk-prefetch form is
+  the undesigned candidate); (3) THE CALL'S OWN WALL — bind 46-56s
+  (the ~1.4-1.5M per-fetch AGC seeks, the named floor), the LOCI CORE
+  — **candidate B (the always-on exactness assertion) and the
+  census-superset are THE OWNER'S decisions**, the receipts say the
+  path to 20 runs through them; (4) THE MEMORY CEILING — 44-48 slots
+  (corrected from the 74 projection); (5) THE MARATHON TAIL — the
+  kill class collapsed by C (re-receipted 39.0x), the WALL not
+  re-receiptable (substrates reaped; the measurable scan-core rates
+  above); (6) THE CPU SATURATION — the honest new term: the 64-thread
+  child shape saturates at ~4 children.
+
+**THE EXACT RESUME POINT:** the fork-after-load panel share is
+landed, gated, and receipted (this section); the remaining increment
+order: (1) the parent-level wave admission control (fork at most the
+ceiling's children per wave, loop the manifest — the fleet driver's
+last piece) + child pool sizing as the operational fleet decision;
+(2) the cut-scan pole (the shared-scan/bulk-prefetch form,
+undesigned); (3) candidate B + the census-superset (the owner's);
+(4) the bind's per-fetch AGC-seek floor (a bulk-prefetch form,
+undesigned); (5) the marathon re-receipt's full form at the next
+campaign window (determinism + wall, if substrates exist).
