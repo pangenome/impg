@@ -959,3 +959,31 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
 
     Ok(blacklist)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_bp_counts_aligned_bases_at_each_edge() {
+        let piece = |s, e| SampleInterval {
+            query_start: s,
+            query_end: e,
+            target_start: s,
+            target_end: e,
+            target_pieces: vec![(s, e)],
+        };
+        // 10 bp at the left edge, a 50 kb gap, then the rest
+        let mut merged =
+            merge_intervals(vec![piece(1_000, 1_010), piece(51_010, 100_000)], 200_000);
+        assert_eq!(merged.len(), 1);
+        let b = merged.pop().unwrap();
+        assert!(covers_boundaries(&b, 1_000, 100_000, 10));
+        assert!(!covers_boundaries(&b, 1_000, 100_000, 1_000));
+        assert!(!covers_boundaries(&b, 900, 100_000, 0));
+        assert_eq!(
+            covered_bases(&[(0, 600), (500, 1_200), (1_500, 9_000)], 0, 2_000),
+            1_700
+        );
+    }
+}
