@@ -1562,3 +1562,166 @@ overhead included); the pinned-majority control asserts the derived
 choice keeps the committed dense size exactly. Determinism: the L1
 gate's byte-identity at both baselines + the unit proof's
 bit-equality.
+
+### 10.6.9 THE CROSS-PROCESS PANEL SHARE (increment 3, duty 3 — the
+slot-ceiling lever, OPENED: the design + the measurements; the
+implementation is its own increment with full gates, NOT attempted
+this window)
+
+**WHAT IS LOAD-TIME-DERIVED vs INTRINSICALLY-PRIVATE (the receipts):**
+
+| sidecar | on-disk | how it loads | sharing today |
+|---|---:|---|---|
+| `.pstep` | 3.24GB | memmap2 | **already shareable** — page-cache; only touched pages materialize (~0.8GB Pss at the bind plateau) |
+| `.spos` | 5.09GB | memmap2 | **already shareable** — same |
+| `.names` | 2.3MB | mmap | shared |
+| `.1gbwt` | 8.85GB | the C reader (`syngBWTread`) deserializes into a **malloc'd anon arena** (the loader's own print: 272,213,874 vertices / 683,539,246 edges — the 12.13GB anon arena of the §10.5.1 anatomy) | **intrinsically private TODAY** — not because the data is private but because the C reader materializes it in process memory |
+| `.1khash` | 5.07GB | `kmerHashReadOneFile` (ONEcode) into the **4.31GB anon arena** + heap | **intrinsically private TODAY** — same |
+| the AGC | 3.3GB | page cache via per-call `Sources` | shared |
+
+THE LIVE RECEIPT (the serial derive-routes process, PID 2121938,
+holding the whole panel at 43.3GB RSS): **anon private 39.72GB;
+file-backed touched 1.60GB** — the file-backed class is the shareable
+one and it is TINY; the mass is the C-arena class. The bytes of both
+arenas are a PURE FUNCTION of the sidecar files — the privacy is an
+artifact of the loader, not of the data.
+
+**THE THREE SHAREABLE FORMS, and the ceiling each buys (at the ~1TB
+model, arithmetic from the receipts):**
+
+(a) **FORK-AFTER-LOAD COW (the natural Linux form):** the parent
+loads the panel once (the receipted 241s load), children fork per
+batch/territory; the arenas' pages stay shared while unwritten
+(COW). The shared base is the parent's ~45GB (panel + AGC); each
+child's private is its own per-territory work — the receipted
+per-territory call working set (~9GB: the width-4 concurrent peaks
+112.6-118GB over the 76.6GB cut-phase base, /4), the cut territory
+index (1-3GB), and the per-territory inputs (census/cache/reads —
+per-territory data, private under every form). **Ceiling: ~
+(1,007 − 45) / 13 ≈ 74 territory slots ≈ 2.3-2.5x the current
+32-slot ceiling — AND the 241s load pole amortizes to ~0 per
+territory** (the parent's lifetime is the fleet run). THE NAMED RISK
+the implementation gate must measure FIRST: any post-load WRITE
+into the arenas (lazy C-side initialization, in-place counters)
+breaks COW page by page — a forked child's Pss growth over a full
+call is the gate; the seam-thread era already relies on the same
+read-only-post-load claim for thread safety, but fork makes it a
+memory claim. The prefork hygiene is standard: rayon pools and
+thread-locals re-initialize per child (post-fork single-threaded
+start); the C globals are the §10.6.7 audit's own read-only class.
+
+(b) **SHARED-MMAP ARENAS (the sidecar restructure):** convert the
+two C arenas to a fixed-layout mmap-able form (a new sidecar class,
+or an attach entry point that consumes MAP_SHARED memory), so every
+process maps the same pages — the same ceiling as (a) without the
+parent lifecycle. The cost: a C-side attach API (`kmerHashReadOneFile`
+populates malloc'd memory today) or a Rust-side reader
+re-implementing the ONEcode parse into an mmap-backed struct — the
+khash is a whole-structure hash (the §4 named floor: no per-lane
+span loads without an index restructure). Same ~74-slot ceiling
+class.
+
+(c) **A PANEL-SERVER PROCESS — REJECTED by the receipts, honestly:**
+the bind's measured pole is the AGC span loads (per-call LOCAL
+`Sources` — a server does not move them), and the panel queries are
+C calls at the sub-microsecond class; an IPC round trip (1-10us,
+even shared-memory) would INVERT the bind's cost. Only viable if the
+query surface is coarsened — a different machinery, named as the
+fallback if (a) and (b) both fail their gates.
+
+**THE HONEST CEILING STATEMENT:** the panel share is a ~2.3-2.5x
+SLOT lever plus the deletion of the per-process load pole — it does
+NOT touch the per-territory wall (the bind's AGC-seek floor, the
+loci core). The 20-minute line needs BOTH this lever AND the
+per-territory wall down (§10.6.10).
+
+### 10.6.10 THE 20-MINUTE BUDGET, RESTATED AT INCREMENT 3 (duty 4 —
+every number a receipt; the fleet math at the receipted shape)
+
+- **map ~3 min** — unchanged (the 12-lane projection receipt).
+- **prep ZERO per sample**; the panel-side ONE-TIME routes inventory
+  1505s parallel (the serial form still IN FLIGHT at this
+  increment's close — §10.6.11) — unchanged.
+- **cuts + calls, the combined+concurrent+candidate-C form (all
+  gate-PASSed this increment):** the width-4 process runs **891s**
+  (the candidate-C gate run; the duty-1 concurrent run 923s — the
+  co-tenant band) = ONE **~220s load** + cut phase **408-436s** +
+  call phase **260-269s for ALL FOUR calls concurrent** (the
+  per-call walls 201-269s: the binds contend ~3x under 4-way
+  concurrency — §10.6.7's honest contention receipt). Per-territory
+  all-in **~223s**; marginal ex-load **~167s**. Peak **112.6-118.0GB
+  / Pss 111.4-117.2GB** at width 4.
+- **THE FLEET MATH AT THE RECEIPTED CEILING:** 112.6-118GB per
+  width-4 process → **8 concurrent processes (32 territory slots)**
+  at the 1TB model → a 5,844-territory genome is 1,461 processes x
+  891-923s at 8-concurrent waves = **~45-47 hours** — the concurrent
+  calls' wall win (1230 -> 891-923s) is exactly absorbed by the
+  memory ceiling it costs (90.4 -> 112.6-118GB, 11 -> 8 processes):
+  at width 4 the concurrency is a wash at the fleet level (§10.6.7's
+  arithmetic, restated here as the budget's own term).
+- **WITH THE PANEL-SHARE LEVER (the §10.6.9 design, UNGATED — a
+  projection, named as such):** the fork-COW form's ~74 slots at
+  ~290s/territory (cut-share 113s + call 130-150s + inputs 46s, the
+  receipted walls) is **~6-7 hours** genome wall IF the COW sharing
+  holds (the fork-probe gate named in §10.6.9) — the single biggest
+  structural lever now open, and the load pole gone.
+- **THE REMAINING POLES, each named with its receipt:** (1) THE LOAD
+  (220-241s per process — amortizes with width; the structural fix
+  is the cross-process share, §10.6.9); (2) THE CALL'S OWN WALL —
+  bind 50-73s solo / 137-186s under 4-way contention (the ~1.4-1.5M
+  per-fetch AGC seeks are the floor after the §10.6.1 volume
+  collapse; the LaneCache's load-time counter receipted 773.7s of
+  summed thread-time under concurrency — the contention is
+  decompression bandwidth, not volume), loci 16-67s at L1-class
+  (the marathon core's ordinary face; candidate B and the
+  census-superset are the owner's decisions), inputs residual ~46s;
+  (3) THE MEMORY CEILING (112.6-118GB/width-4 — the private C
+  arenas + the concurrent working sets; §10.6.9 is the lever);
+  (4) THE MARATHON TAIL — the WALL bound unchanged (p90 2,912s to
+  11,084s single-threaded, 15-25 members/genome), but the KILL class
+  collapses by candidate C's arithmetic at every roster locus (the
+  worst roster peak ~24GB matrix + streamed receipts + ~6GB base vs
+  the committed 33GB + ~50GB JSON over the 64GiB guard) — the
+  marathon re-receipt at the next campaign window is determinism +
+  wall + the bound.
+- **THE HONEST BOTTOM LINE:** the increment-3 receipts put the
+  per-territory all-in cost at **~223s and the fleet at ~45-47h** at
+  the receipted 32-slot ceiling. The 20-minute line (5,844
+  territories in 1,200s = 4.87 territories/s) needs **~44x the
+  current throughput**: the panel share (a ~2.3-2.5x SLOT lever,
+  designed ungated) AND the per-territory wall down ~an order
+  (the bind's seek floor, the loci core, candidate B — the owner's,
+  the census-superset — the owner's) AND the marathon wall bounded —
+  or slot counts beyond every named form (the line at 290s/territory
+  needs ~1,415 slots). No number above is extrapolated beyond its
+  receipt except the two named projections (the fork-COW sharing,
+  the marathon wall effect), each labeled and gated.
+
+### 10.6.11 THE SERIAL FULL-PANEL CMP + THE EXACT RESUME POINT
+
+The serial whole-panel derive-routes (PID 2121938) is ALIVE at this
+increment's close (9h34m CPU, ~574 min; the watcher PID 2483558
+performs the cmp the moment its graph.json lands and writes
+serial-vs-par.routes-cmp-receipt.txt — never polled in-session). The
+receipt is owed to the next increment's close per the watcher's
+design.
+
+**THE EXACT RESUME POINT (if the budget ends here):** all three
+duties landed and gate-proven (3e9f9b8 the concurrent calls + the
+per-call read length; c4b7e86 candidate C's row-compression +
+streaming); cargo test --release --lib 561/0 (+2: the compression
+value-identity proof, the marathon-shape memory receipt — the
+latter #[ignore]d, run explicitly: 39.0x at T03803's shape); the
+example proof 2/2; tree clean except vendor/syng (uncommitted by
+design); NO PR PUSH. NEXT, in the §10.6.10 pole order: (1) the
+serial-vs-par receipt at the watcher's completion; (2) THE PANEL
+SHARE'S IMPLEMENTATION INCREMENT (the fork-COW probe FIRST — a
+forked child's Pss growth over a full call, the §10.6.9 named risk
+gate — then the prefork batch driver, full byte-identity gates at
+every step); (3) candidate B (the always-on exactness assertion —
+the owner's receipt-shape decision) and the census-superset answer
+(the owner's); (4) the marathon re-receipt at the next campaign
+window (determinism + wall + candidate C's bound); (5) the bind's
+per-fetch AGC-seek floor (the span-volume collapse went 508x; the
+seek COUNT is the named floor — a bulk-prefetch form is the
+candidate, undesigned).
