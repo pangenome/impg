@@ -2188,3 +2188,280 @@ format (an output-format change, the owner's seam); (e) candidate B
 to 20 minutes runs THROUGH the call, which is 75-80% of the honest
 CPU work); (f) the marathon re-receipt's full form at the next
 campaign window.
+
+### 10.6.14 THE CALL-CORE AUTOPSY — the per-class, per-locus CPU-work
+census, measured (the owner's "why is the call core so slow — is it
+just some slow loci?" answered at the arithmetic the receipts force;
+the §10.6.13 WALL-CHARGED call term corrected by direct serial
+measurement)
+
+**THE ANSWER IN THE FIRST PARAGRAPH.** At TRUE CPU — the serial rung
+(RAYON_NUM_THREADS=1, no seam), where every wall second IS a
+core-second — an ordinary L1-class territory's whole call costs
+**~203 core-seconds ex-load, ~8.1 per locus over its 25 loci**, and
+the classes are: **the scoring pair loop 84.3 core-s (42% of the
+call; inside it the ALWAYS-ON EXACTNESS ASSERTION is 32.9 core-s =
+16% of the whole call and 58% of the pinned alignment work — MORE
+than the ~½ receipted in §10.6.3)**, **the exhaustive class scan
+68.4 core-s (34%; folds²/2 × units at a constant ~18
+ns/unit-pair)**, the fold-build/units/qual classes 12.2 (6%), and
+the serial bind+rows+IO classes 37.9 (19%; the bind itself is now
+**6.6s** — the seek fix collapsed the serial bind 1013.8s → 6.6s,
+153x). AND YES, THE TAIL IS THE STORY INSIDE THE LOCI CORE: the
+worst 5% of loci (2 of 25) own **64.9% of L1's loci phase** (65.9%
+at the committed serial receipts, 68.5% at L3, **88.1% at L4**),
+because the fold×units cross product is 100-360x bigger at the two
+or three cross-product-heavy loci than at the median locus. BUT the
+130-175x headline itself was MOSTLY THE WALL-CHARGING CONVENTION:
+the fleet shape's call phase runs at ~1-4 cores of true work
+against 128+ configured threads (the §10.6.13 T-rung table's own
+idle finding), so charging phase walls × configured threads
+overcounted the call's true work ~25-36x. **The honest call-core
+gap to the 20-min line is ~3.9x today, ~2.0x after the owner's
+candidate-B + census-restriction decisions**, and the residual is
+owned by the class scan (OWNER-DECISION: the byte-identity
+accumulation), the pair loop's per-base comparison
+(IRREDUCIBLE-FOR-THE-MODEL at a ~0.2 µs/pair floor vs the 0.69 µs
+measured placement, plus the re-anchorable anchor class), and the
+serial IO/context classes (ENGINEERING).
+
+**THE INSTRUMENT AND ITS GATES (receipt-side, DEFAULT OFF, no
+behavior change).** `IMPG_LOCUS_SCORING_CENSUS=1` wraps the per-locus
+scoring pair loop's four work classes in per-call Instant timers,
+atomically accumulated across the fold par_iter, emitted as a
+`scoring_census` member of the per-locus receipt + a per-locus
+stderr line: the per-orientation ANCHOR/PIN BUILD
+(`anchor_correspondence` + the merged backbone), `placement_score`
+(the pinned pair's own alignment), the ALWAYS-ON `direct_score`
+exactness assertion, and the marginalization + row build. THE RUN
+(work dir `global-call-L1-autopsy`, the exact committed L1-fix
+serial recipe at the current binary): exit 0, wall 476s, and
+`calls.jsonl` + sequences **BYTE-IDENTICAL to the committed L1-fix
+receipt** — the no-behavior-change gate. THE CONTROL (the same
+recipe, env unset: `global-call-L1-autopsy-control`): exit 0, wall
+439s, **byte-identical again** (a free determinism re-gate), loci
+phase 164.8s vs the census run's 182.1s — **the instrument's own
+timer overhead is +17.3s (+10.5%), receipted**; every census class
+below is scaled by 164.8/182.1 = 0.905 to the no-timer walls (the
+per-locus raw census lines stay upper bounds; the receipts are in
+the work dir's `autopsy-census.txt` / `autopsy-final.txt` /
+`autopsy-mining.txt`).
+
+**(1) THE PER-LOCUS CENSUS AT AN ORDINARY LOCALITY (L1, serial =
+true CPU, current binary, timers scaled out).** The call's phase
+summary (the control run): inputs 236.0s (≈ a ~222s panel load +
+~14s residual IO), bind 6.6s, quality 2.7s, variants 0.2s, rows/
+context 14.3s, **loci 164.8s** — the loci phase is now **81% of the
+ex-load call CPU**. The loci phase's anatomy, summed over the 25
+loci and decomposed to the pair loop's own classes:
+
+| class | core-s | share of loci | the measured rate |
+|---|---:|---:|---|
+| scoring pair loop | 84.3 | 51% | see the four rows below |
+| — anchor/pin build | 16.8 | 10% | 54,236,474 calls × **0.31 µs** |
+| — placement_score | 24.0 | 15% | 34,728,402 calls × **0.69 µs** |
+| — the direct_score assertion | 32.9 | 20% | 34,697,264 calls × **0.95 µs** |
+| — marginalization + row build | 3.0 | 2% | over 48.8M pairs × 0.06 µs |
+| — pair-loop residual (per-unit/no-pin pushes) | 7.6 | 5% | |
+| the exhaustive class scan | 68.4 | 41% | 3.711e9 unit-pairs × **~18.4 ns** |
+| fold build + units classification | 8.3 | 5% | |
+| qual | 2.9 | 2% | |
+| exactness (the sampled receipt) | 1.0 | 1% | |
+| (anatomy: env-off, 0.0s at every locus) | 0.0 | — | |
+
+48,833,152 (fold × unit) pairs at L1, 71% pinned (34.7M
+`factorized_checked` — the assertion's own count). THE BIND
+DECOMPOSITION at the current binary: steps 3.4s (3,775 record
+extractions) + verify 3.0s (4.35M probes) + lane loads 2,318 /
+133.5 MB / 2.3s of load time, phase 6.6s — the seek fix's serial
+form; THE FLEET-SHAPE BIND WALLS (36.6-60.8s at the T-rungs) are
+WAITING, not work: 16 seam threads × their own per-thread AGC
+decompressor pools each pay the pool-warm cold-start class (the
+§10.6.13-named candidate, 3-8s each, under the per-lane mutex) —
+the POOL-WARM form deletes them. The rows/context class (14.3s)
+and the inputs residual (~14s warm-cache serial; 41-50s at the
+fork-child rung with cold sidecars) are serial IO classes.
+
+**(2) THE "SOME SLOW LOCI" QUESTION, answered quantitatively (the
+per-locus WALL = serial CPU distribution, all five lanes' committed
+serial receipts + the current binary).** The marathon class is
+15-25 LANES per genome at the roster's worst shapes (§10.6.3's
+committed bound); the WITHIN-territory tail
+is ALSO concentrated — but it is NOT the marathon class: these are
+ordinary-territory loci whose fold×units cross product is large:
+
+| lane | n | median locus | p90 | max | worst-5% share of the loci phase |
+|---|---:|---:|---:|---:|---:|
+| L1 (committed serial receipts) | 25 | 0.60s | 14.54s | 69.83s | **65.9%** (top-1 42.7%) |
+| L1 (current binary, autopsy) | 25 | 0.66s | 16.03s | 76.91s | **64.9%** (top-1 42.2%; = 53% of the ex-load CALL CPU) |
+| L2 | 25 | 0.59s | 6.78s | 9.00s | 35.1% |
+| L3 | 24 | 0.51s | 3.50s | 64.15s | **68.5%** |
+| L4 | 25 | 0.45s | 1.41s | 101.22s | **88.1%** (top-1 85.0%) |
+| pilot | 22 | 14.93s | 37.36s | 187.44s | 48.6% |
+
+So the direct answer: **yes — at an ordinary territory, 2 of 25
+loci own ~2/3 (L1, L3) to ~9/10 (L4) of the loci-phase CPU, and the
+loci phase is 81% of the call's ex-load CPU — the worst-5% loci own
+~53% of L1's whole ex-load call core.** The tail loci are the
+cross-product-heavy ones (L1 locus 18: 111f × 180,179u = 20.0M
+pairs; L4 locus 23: 155f × 191,360u = 29.7M; the median locus is
+157f × 530u = 83,210 pairs — a 240x pair-count spread), NOT the
+marathon class (whose roster shape is 532f × 4.44M u = 2.36e9 pairs,
+~100x L1's worst locus).
+
+**(3) THE MULTIPLIER STACK, each with its receipt.**
+
+**(a) THE ALWAYS-ON EXACTNESS ASSERTION (candidate B's target).**
+Measured directly: **32.9 core-s of L1's 164.8s loci phase = 20% of
+the loci phase, 16% of the ex-load call, and 58% of the pinned
+alignment work (placement 24.0 + assertion 32.9)** — MORE than the
+§10.6.3 "~½" receipt (per-call: 0.95 µs assertion vs 0.69 µs
+placement — `direct_score` re-verifies the backbone base-by-base
+with the per-base cover search while `placement_score` trusts node
+identity). B (assertion as a receipt-only sample) is an OWNER
+receipt-shape decision worth **~33 core-s/territory (−16% of the
+call)** at L1-class, and proportionally more at pinned-heavy loci
+(locus 18: the assertion is 17.8s of the ~69.6s locus, scaled).
+
+**(b) THE CENSUS-SUPERSET 2.8x MASS, reconciled per-locality.** The
+§10.5.4 shadow receipt (1364s vs 1450s, "~6% wall") was measured
+against the OLD 1013.8s serial bind — at the CURRENT bind the same
+shadow arithmetic says the mass is now **a ~1.6x multiplier on the
+call's ex-load CPU at L1** (202.7 → 124.3 core-s, arithmetic below).
+WHERE IT BITES, per-locality (the shadow's per-locus receipts, L1
+serial): the mass bites exactly at the loci where the added reads
+carry NEW routed units — locus 8: units 14,711 vs 1,490 (9.9x) →
+scoring 8.4x; locus 18: 180,179 vs 40,092 (4.5x) → scoring 4.0x;
+locus 11: 6.0x units → 5.4x scoring; locus 13: 8.4x → 2.7x — and
+at the SATURATED loci (units 1.0x: loci 3, 6, 9, 10, 14, 17, 20,
+...) the scoring is 1.0x, exactly the §10.5.4 saturation statement
+at per-locality resolution. The per-class shadow ratios (both
+serial, same binary era): scoring 0.520, class scan 0.496, fold
+residual 0.666, qual 0.909, whole loci phase **0.524** (85.7s vs
+163.5s); the bind/rows/inputs are mass-invariant at saturation.
+
+**(c) THE FOLD×UNITS CROSS-PRODUCT at ordinary vs segdup loci.**
+Ordinary (median) locus: 157f × 530u = 83,210 pairs — the whole
+locus is 0.66s. The cross-product tail loci: 111-231f ×
+14,711-191,360u = 3.4-29.7M pairs. The measured per-pair rates
+(census run, scaled): the pair loop runs **2.06-2.18 µs/pair at the
+pinned-heavy loci (73-105% pinned)** and **0.18 µs/pair at the
+1%-pinned locus 12** — the no-pin floor class, matching the
+marathon band's 0.2-0.3 µs/pair receipt; the class scan is a
+CONSTANT **16.4-20.2 ns/unit-pair** at every locus (3.711e9
+unit-pairs at L1), quadratic in folds (pairs = folds²/2 × units).
+So the cross-product's CPU bites through BOTH terms: the pair loop
+scales with PINNED pairs (units × folds × pin rate), the class scan
+with ALL pairs.
+
+**(d) THE ALIGNMENT CLASS ITSELF and its floor.** Per ordinary
+territory: 54.2M anchor-correspondence calls (1.11 per (unit, fold)
+pair — the per-orientation pin build), 34.7M placement calls, 34.7M
+assertion calls, at 0.31/0.69/0.95 µs. WHAT THE LIKELIHOOD ACTUALLY
+NEEDS: one (matches, mismatches) per (unit, fold, orientation) —
+the read's ~150 bases compared against the fold's own sequence at
+the anchored coordinates. The IRREDUCIBLE-FOR-THE-MODEL floor is
+that per-base comparison: ~150 bases × ~1-2 ns ≈ **0.15-0.3 µs per
+pinned pair** (the no-pin floor's 0.18 µs/pair receipts the
+per-pair loop overhead). The measured placement (0.69 µs) is 2-4x
+over that floor (the `serving_anchor` searches and the per-pair
+skipped-position recomputation — ENGINEERING); the ANCHOR class
+(0.31 µs × every pair) is per-(unit, fold, orientation)
+re-derivation of what the projection's occurrence structure already
+holds — the read's node path is known, the fold's node positions are
+precomputed (`positions_of`), so the correspondence is a COORDINATE
+LOOKUP class, not an alignment (THE RE-ANCHOR PRINCIPLE —
+ENGINEERING); and beyond the per-base floor, the only genuinely
+per-fold work is the comparison of the bases where the fold's
+sequence DIFFERS from its neighbors — the variant-pocket
+delta-comparison form (named here as the candidate mechanism; its
+per-locus savings are UN-RECEIPTED — a fold-sequence divergence
+count is the one instrument this autopsy did not spend).
+
+**(4) THE HONEST FLOOR (the budget table; arithmetic projections
+from the receipts above, every row labeled; NO tuning constants).**
+Per-locus core-seconds at L1-class (25 loci), the call ex-load
+(panel load amortized at the fleet's fork form; the marathon tail
+and the cut are separate terms below):
+
+| row | loci phase | call ex-load | per-locus | gap to the 2.10 line | label |
+|---|---:|---:|---:|---:|---|
+| today (serial true CPU) | 164.8s | 202.7 | 8.11 | **3.9x** | — |
+| under B (assertion receipt-only) | 131.9s | 169.8 | 6.79 | 3.2x | **OWNER-DECISION** |
+| under census-restriction | 86.4s | 124.3 | 4.97 | 2.4x | **OWNER-DECISION** |
+| under both | 69.2s | 107.1 | 4.28 | **2.0x** | (both owner decisions) |
+| the 20-min line (52.6/25) | — | 52.6 | 2.10 | — | — |
+
+(census-restriction = the measured 0.524 loci-phase ratio, applied
+to the classes the shadow receipts as mass-scaling; B = the measured
+32.9 assertion core-s; both are arithmetic projections from THIS
+autopsy's receipts, labeled as such. The 202.7 charges the serial
+warm-cache inputs residual (~14s); the fork-child rung's receipted
+inputs class is 41-50s (cold sidecars), which puts today at ~215-224
+core-s / ~8.6-9.0 per locus — the row is the lower receipt, the
+spread is receipted, and the class is cacheable IO either way.) **THE RESIDUAL'S OWN
+DECOMPOSITION under both** (4.28 core-s/locus, vs the 2.10 line):
+the class scan 33.9 core-s = **1.36/locus — OWNER-DECISION** (the
+exhaustive folds²/2 × units accumulation IS the committed answer
+profile's byte-identity invariant; the algebraic per-fold
+decomposition that would remove it changes the float accumulation
+and is named and refused, §10.6.8); the pair loop 26.7 core-s =
+**1.07/locus — IRREDUCIBLE-FOR-THE-MODEL core ~0.4-0.6** (the
+per-base comparison at the 0.15-0.3 µs/pair floor over the pinned
+pairs) **+ ENGINEERING** (the re-anchorable anchor class 8.7 core-s
+and the 2-4x placement-walk residue over the raw comparison floor);
+the serial bind+rows+IO classes 37.9 core-s = **1.52/locus —
+ENGINEERING** (rows/context 14.3s serial; the inputs residual
+14-50s, cacheable IO; bind 6.6s incl. the seek-floor residue, with
+the fleet's pool-warm waiting deleted by the named candidate); the
+fold-build/qual/exact classes 8.5 core-s = 0.34/locus, mixed.
+
+**THE WALL-CHARGED RECONCILIATION (the correction this autopsy
+forces on §10.6.13's headline).** §10.6.13 charged the call at
+5,000-7,300 core-s/territory (phase wall × configured threads) and
+bracketed "phase-timer CPU ~3,200-4,700 true"; the direct serial
+measurement says the call's true CPU is **~203 core-s/territory
+ex-load at L1-class** — the wall-charged convention overcounted the
+call ~25-36x, exactly the idle-thread class the §10.6.13 T-rung
+table receipted (per-core-second throughput 4.8x better at T8 than
+T64: the fleet's call phases run ~1-4 cores of true work against
+128+ configured threads — the small loci's T16 walls were ~5.6-6.0s
+each vs 0.5-1.6s serial: queue waits, not work). THE HONEST
+GENOME TERMS AT TRUE CPU, each with its receipt and its open term:
+the CALL at L1-class = 5,844 × 202.7 / 256 ≈ **~1.3h** (after B +
+census: 5,844 × 107.1 / 256 ≈ ~0.7h), plus the MARATHON TAIL
+(§10.6.3's committed bound: 15-25 members per genome at the p90
+2,912s to deepest 11,084s serial lane walls ≈ 44k-277k core-s ≈
+~0.05-0.3h of box time at 256 cores — and those walls carry the
+OLD bind era, so the marathon's true-CPU mass is the re-receipt's
+owed number; the kill class is collapsed by C) — and THE CUT, whose TRUE CPU remains the
+honest open term (wall-charged upper 1,936 at width 32; the scan's
+gunzip class ~800-1,500 core-s/wave is real and width-amortized,
+gzip-format-bound per §10.6.13's decode receipt; the remap/emission
+classes' true CPU un-receipted). Whether true CPU converts to wall
+is the fleet-discipline question the T-rung table already governs
+(children × T ≤ 256). **The 130-175x remaining gap of §10.6.13 is
+therefore restated: at TRUE CPU the call-core's own gap is ~3.9x
+today and ~2.0x after the owner's two decisions; the bigger honest
+unknowns are the cut's true CPU and the marathon wall, not the
+call core.**
+
+**THE EXACT RESUME POINT (if the budget ends here):** the census
+instrument is committed (env-gated, default OFF, byte-identity
+gated twice at the committed receipt bar; cargo test --release
+--lib 562/0, 5 ignored); the receipts are in the work dir
+(`global-call-L1-autopsy{,-control}`, `autopsy-*.txt`,
+`run-locus-census-L1*.sh`). THE OWNER'S DECISIONS THE RECEIPTS NOW
+PRICE EXACTLY: (1) candidate B — the always-on assertion, 58% of
+the pinned alignment work, 16% of the call, receipted per-locus;
+(2) the census-superset — a ~1.6x call-core multiplier at
+L1-class, biting per-locality exactly where patterns don't
+saturate (the per-locus table above). THE ENGINEERING ORDER THE
+AUTOPSY NAMES: the pool-warm form (deletes the fleet bind walls),
+the rows/context + inputs serial classes, the re-anchor (coordinate
+lookup for the anchor class), the placement-walk residue over the
+raw comparison floor, the variant-pocket delta comparison (needs
+its own divergence-count receipt). STILL OWED: the cut's true-CPU
+receipt (the last un-receipted term of the genome floor), the
+marathon wall re-receipt at the next window, the W-x-T fleet cell.
+NO PR PUSH (the owner pushes).

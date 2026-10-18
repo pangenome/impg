@@ -4306,6 +4306,23 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // path verbatim — the committed receipts byte-identical.)
     let alignment_connected =
         std::env::var("IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS").is_ok();
+    // (The call-core autopsy instrument, receipt-side, DEFAULT OFF:
+    // IMPG_LOCUS_SCORING_CENSUS=1 wraps the per-locus scoring pair
+    // loop's four CPU-work classes in per-call Instant timers,
+    // atomically accumulated across the fold par_iter and emitted as
+    // a "scoring_census" member of the per-locus receipt: the
+    // per-orientation anchor/pin build (anchor_correspondence + the
+    // merged backbone), placement_score (the pinned pair's own
+    // alignment), the ALWAYS-ON direct_score exactness assertion
+    // (candidate B's target), and the marginalization
+    // (unit_log_likelihood + logsumexp2 + the row build). Default
+    // off: no timing call executes, no receipt byte changes. The
+    // honest rung is the SERIAL call (RAYON_NUM_THREADS=1, no seam),
+    // where every measured second is a CPU second; at the timer's
+    // own overhead (two Instant reads + one atomic add per class
+    // call) the census run's walls are upper bounds, never used as
+    // the committed receipt shape.)
+    let locus_scoring_census = std::env::var("IMPG_LOCUS_SCORING_CENSUS").is_ok();
     // The selection flag pins the convention exactly: Env defers to
     // the committed switches verbatim (the instrument default);
     // Default pins the committed base convention (env ignored);
@@ -6188,6 +6205,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 hull_covered,
             });
         }
+        // (The call-core census accumulators — per LOCUS, shared
+        // atomically across the fold par_iter; only touched when the
+        // env instrument is on, so the default path never pays an
+        // atomic or an Instant.)
+        let census_anchor_ns = AtomicU64::new(0);
+        let census_placement_ns = AtomicU64::new(0);
+        let census_assertion_ns = AtomicU64::new(0);
+        let census_marginal_ns = AtomicU64::new(0);
+        let census_anchor_calls = AtomicU64::new(0);
+        let census_placement_calls = AtomicU64::new(0);
+        let census_assertion_calls = AtomicU64::new(0);
         let scored: Vec<FoldScore> = (0..n_folds)
             .into_par_iter()
             .map(|fold_index| {
@@ -6217,9 +6245,14 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     // convention cannot bias fold comparisons).
                     let mut pins: Vec<Option<Pin>> = vec![None, None];
                     let mut any_pin = false;
+                    let census_anchor_started =
+                        if locus_scoring_census { Some(Instant::now()) } else { None };
                     for &orientation in &touching[&record].orientations {
                         let (pinned, _ambiguous) =
                             anchor_correspondence(canonical, orientation, &positions_of);
+                        if locus_scoring_census {
+                            census_anchor_calls.fetch_add(1, Ordering::Relaxed);
+                        }
                         if pinned.iter().all(|p| p.is_none()) {
                             continue;
                         }
@@ -6255,6 +6288,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                             backbone_bp,
                         });
                     }
+                    if let Some(started) = census_anchor_started {
+                        census_anchor_ns
+                            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                     if !any_pin {
                         // No anchored placement: the ELSEWHERE branch
                         // (the generated-elsewhere marginalization's
@@ -6272,17 +6309,32 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     let mut unit_mismatches = 0u32;
                     let mut pinned_here = false;
                     for pin in pins.iter().flatten() {
-                        let Some((m, c)) = placement_score(
+                        let census_placement_started =
+                            if locus_scoring_census { Some(Instant::now()) } else { None };
+                        let placement = placement_score(
                             unit, canonical, pin, &fold.seq, fold.len, &reads, k,
                             img_lo as i64, img_hi as i64,
-                        ) else {
+                        );
+                        if let Some(started) = census_placement_started {
+                            census_placement_ns
+                                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                            census_placement_calls.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let Some((m, c)) = placement else {
                             edge_discarded += 1;
                             continue;
                         };
+                        let census_assertion_started =
+                            if locus_scoring_census { Some(Instant::now()) } else { None };
                         let (dm, dc) = direct_score(
                             unit, canonical, pin, &fold.seq, fold.len, &reads, k,
                         )
                         .expect("direct score");
+                        if let Some(started) = census_assertion_started {
+                            census_assertion_ns
+                                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                            census_assertion_calls.fetch_add(1, Ordering::Relaxed);
+                        }
                         factorized_checked += 1;
                         if (m, c) == (dm, dc) {
                             factorized_equal += 1;
@@ -6303,14 +6355,28 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     // per-unit orderings the local branch preserves
                     // (a full-match truth placement vs a rival's
                     // worse placement) survive the marginalization.
+                    let census_marginal_started =
+                        if locus_scoring_census { Some(Instant::now()) } else { None };
                     ll.push(logsumexp2(
                         unit_log_likelihood(&scores, img_hi - img_lo, read_length),
                         elsewhere,
                     ));
                     mismatches.push(unit_mismatches);
+                    if let Some(started) = census_marginal_started {
+                        census_marginal_ns
+                            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                }
+                let census_row_started =
+                    if locus_scoring_census { Some(Instant::now()) } else { None };
+                let row =
+                    ScoreRow::from_pair_loop(ll, pinned, mismatches, elsewhere);
+                if let Some(started) = census_row_started {
+                    census_marginal_ns
+                        .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
                 FoldScore {
-                    row: ScoreRow::from_pair_loop(ll, pinned, mismatches, elsewhere),
+                    row,
                     factorized_checked,
                     factorized_equal,
                     edge_discarded,
@@ -7757,6 +7823,51 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             });
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
+        // (The call-core census emission — ONLY under the env
+        // instrument: the four measured work classes beside the
+        // committed walls, so the autopsy's arithmetic is
+        // checker-readable from the receipt itself. The default
+        // receipt schema stays byte-identical — the identity gate.)
+        let census_seconds = |nanos: &AtomicU64| {
+            nanos.load(Ordering::Relaxed) as f64 / 1.0e9
+        };
+        if locus_scoring_census {
+            let anchor_seconds = census_seconds(&census_anchor_ns);
+            let placement_seconds = census_seconds(&census_placement_ns);
+            let assertion_seconds = census_seconds(&census_assertion_ns);
+            let marginal_seconds = census_seconds(&census_marginal_ns);
+            let anchor_calls = census_anchor_calls.load(Ordering::Relaxed);
+            let placement_calls = census_placement_calls.load(Ordering::Relaxed);
+            let assertion_calls = census_assertion_calls.load(Ordering::Relaxed);
+            let mut report_value: serde_json::Value =
+                serde_json::from_slice(&report_buf)?;
+            report_value["scoring_census"] = json!({
+                "note": "the pair loop's four CPU-work classes, measured \n
+                         under the per-call Instant timers (env \n
+                         IMPG_LOCUS_SCORING_CENSUS; the timer's own \n
+                         overhead makes these upper bounds); anchor = the \n
+                         per-orientation pin build (anchor_correspondence + \n
+                         the merged backbone), placement = placement_score, \n
+                         assertion = the always-on direct_score exactness check, \n
+                         marginal = the marginalization + the row build",
+                "anchor_seconds": anchor_seconds,
+                "placement_seconds": placement_seconds,
+                "assertion_seconds": assertion_seconds,
+                "marginal_seconds": marginal_seconds,
+                "anchor_calls": anchor_calls,
+                "placement_calls": placement_calls,
+                "assertion_calls": assertion_calls,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+            eprintln!(
+                "[score] locus {locus} scoring census: anchor {anchor_seconds:.2}s \n
+                 ({anchor_calls} calls), placement {placement_seconds:.2}s \n
+                 ({placement_calls} calls), assertion {assertion_seconds:.2}s \n
+                 ({assertion_calls} calls), marginal {marginal_seconds:.2}s \n
+                 [scoring {scoring_seconds:.2}s]",
+            );
         }
         report_buf.push(b'\n');
         eprintln!(
