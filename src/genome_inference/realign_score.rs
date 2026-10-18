@@ -4122,45 +4122,69 @@ impl LaneCache {
             }
             let seq = std::sync::Arc::clone(seq);
             let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
-            // DELTA-EXTEND: fetch only the missing sub-ranges and
-            // stitch them to the cached interior (the module comment's
-            // byte-identity argument). The counters receipt the
-            // delta's own fetch volume — the load count is no longer
-            // the regrowth count.
-            let mut grown: Vec<u8> = Vec::with_capacity((new_hi - new_lo) as usize);
-            if new_lo < *lo {
+            // SEGMENT-ALIGNED GROWTH (the seek-floor fix, SS10.6.13
+            // duty 2): the AGC's per-fetch cost is a FIXED floor
+            // (~0.4ms per touched segment at the panel AGC — the pack
+            // re-read + whole-pack zstd decompress + LZ reference
+            // prepare get_contig_range pays EVERY fetch, measured by
+            // bind_seek_floor_anatomy_receipt: a 900B fetch costs the
+            // same 0.4ms as a 6KB fetch), so growing the cached span
+            // only to the requested edge re-pays the whole segment's
+            // decompression on the next adjacent request. The fetch
+            // below therefore grows to the touched SEGMENTS' own
+            // boundaries — the archive's layout unit, from its public
+            // descriptors, a derived bound (identity for
+            // non-segment-addressed sources) — and every later
+            // request inside the covered segments is a cache hit.
+            // Byte-identity: the covered span is still a contiguous
+            // [lo, hi) whose buffer is exactly fetch(lo, hi) by the
+            // delta-extend induction (a crop of a fetch answer IS the
+            // fetch of the crop — the Sources contract), and every
+            // served crop is a slice of it; the alignment changes
+            // only WHICH superset range is fetched, never a served
+            // byte. The counters receipt the aligned volume honestly
+            // (bytes rises toward the segment-hull of the touched
+            // set, loads collapse — the fixed-cost floor is what the
+            // load count multiplies).
+            let (alo, ahi) = self.sources.aligned_crop(source, new_lo, new_hi);
+            let mut grown: Vec<u8> = Vec::with_capacity((ahi - alo) as usize);
+            if alo < *lo {
                 let fetch_started = Instant::now();
-                grown.extend_from_slice(&self.sources.fetch(source, new_lo, *lo)?);
+                grown.extend_from_slice(&self.sources.fetch(source, alo, *lo)?);
                 let fetch_nanos = fetch_started.elapsed().as_nanos();
-                self.trace_load(source, new_lo, *lo, "left", fetch_nanos);
+                self.trace_load(source, alo, *lo, "left", fetch_nanos);
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                self.bytes.fetch_add(*lo - new_lo, Ordering::Relaxed);
+                self.bytes.fetch_add(*lo - alo, Ordering::Relaxed);
             }
             grown.extend_from_slice(&seq[..]);
-            if new_hi > *hi {
+            if ahi > *hi {
                 let fetch_started = Instant::now();
-                grown.extend_from_slice(&self.sources.fetch(source, *hi, new_hi)?);
+                grown.extend_from_slice(&self.sources.fetch(source, *hi, ahi)?);
                 let fetch_nanos = fetch_started.elapsed().as_nanos();
-                self.trace_load(source, *hi, new_hi, "right", fetch_nanos);
+                self.trace_load(source, *hi, ahi, "right", fetch_nanos);
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                self.bytes.fetch_add(new_hi - *hi, Ordering::Relaxed);
+                self.bytes.fetch_add(ahi - *hi, Ordering::Relaxed);
             }
             self.nanos
                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
             let grown = std::sync::Arc::new(grown);
-            *slot = Some((new_lo, new_hi, std::sync::Arc::clone(&grown)));
-            return Ok((new_lo, grown));
+            *slot = Some((alo, ahi, std::sync::Arc::clone(&grown)));
+            return Ok((alo, grown));
         }
+        // (The initial fetch takes the same alignment: the first
+        // request in a segment pays the segment's decompression once
+        // and every later request inside it is a slice serve.)
+        let (alo, ahi) = self.sources.aligned_crop(source, start, end.min(len));
         let fetch_started = Instant::now();
-        let seq = std::sync::Arc::new(self.sources.fetch(source, start, end.min(len))?);
+        let seq = std::sync::Arc::new(self.sources.fetch(source, alo, ahi)?);
         let fetch_nanos = fetch_started.elapsed().as_nanos();
-        self.trace_load(source, start, end.min(len), "initial", fetch_nanos);
+        self.trace_load(source, alo, ahi, "initial", fetch_nanos);
         self.loads.fetch_add(1, Ordering::Relaxed);
-        self.bytes.fetch_add(end.min(len) - start, Ordering::Relaxed);
+        self.bytes.fetch_add(ahi - alo, Ordering::Relaxed);
         self.nanos
-            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        *slot = Some((start, end.min(len), std::sync::Arc::clone(&seq)));
-        Ok((start, seq))
+            .fetch_add(fetch_nanos as u64, Ordering::Relaxed);
+        *slot = Some((alo, ahi, std::sync::Arc::clone(&seq)));
+        Ok((alo, seq))
     }
     fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
         // The Sources::fetch contract, mirrored exactly.
