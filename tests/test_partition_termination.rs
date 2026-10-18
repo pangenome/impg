@@ -5,12 +5,9 @@
 //! missing map never changes, and the same windows are re-queried forever —
 //! a silent single-core infinite loop (see docs/bug-infer-partition-hang.md).
 //!
-//! Covered here:
-//! 1. The stall guard force-masks a re-selected zero-progress region so the
-//!    loop always terminates.
-//! 2. syng transitive queries tolerate anchorless paths (sequences shorter
-//!    than the syncmer length w+k) instead of erroring out; the walk returns
-//!    empty, the guard force-masks, and partitioning finishes.
+//! Covered here: `retain_seed_occurrence` always emits the selected window
+//! itself, so a sequence shorter than the syncmer length w+k (no homologs)
+//! becomes its own partition and the loop terminates.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -136,8 +133,10 @@ fn test_partition_syng_terminates_on_anchorless_sequence() {
         Duration::from_secs(120),
     );
     assert!(ok, "partition did not terminate cleanly: {}", stderr);
+    let bed = std::fs::read_to_string(work_dir.join("partitions.bed")).unwrap();
     assert!(
-        stderr.contains("force-masking"),
-        "expected stall guard warning, stderr: {stderr}"
+        bed.lines()
+            .any(|l| l.split('\t').take(3).eq(["sT", "0", "50"])),
+        "anchorless sT:0-50 must be emitted as its own seed partition, bed:\n{bed}"
     );
 }
