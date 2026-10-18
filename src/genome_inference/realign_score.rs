@@ -4045,8 +4045,45 @@ struct LaneCache {
     loads: AtomicU64,
     bytes: AtomicU64,
     nanos: AtomicU64,
+    /// THE PER-LOAD SEEK-PATTERN TRACE (SS10.6.13 duty 2's receipt
+    /// instrument; default OFF — env IMPG_LANE_TRACE=<path> appends
+    /// one JSONL line per REAL sources.fetch (the AGC seek): source,
+    /// the fetched range, the delta kind, and the fetch's own wall.
+    /// The bind seek-floor anatomy's measured half: the offline
+    /// analysis classifies the loads (size histogram, per-lane run
+    /// counts, adjacency) against the ~0.4ms per-fetch fixed floor
+    /// the bind_seek_floor_anatomy_receipt measures at the AGC.
+    lane_trace: std::sync::OnceLock<Option<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
 }
 impl LaneCache {
+    fn trace_load(&self, source: usize, start: u64, end: u64, kind: &str, nanos: u128) {
+        use std::io::Write as _;
+        let trace = self
+            .lane_trace
+            .get_or_init(|| {
+                std::env::var("IMPG_LANE_TRACE")
+                    .ok()
+                    .and_then(|path| {
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .ok()
+                    })
+                    .map(|file| std::sync::Mutex::new(std::io::BufWriter::new(file)))
+            })
+            .as_ref();
+        if let Some(trace) = trace {
+            let line = format!(
+                "{{\"source\":{source},\"start\":{start},\"end\":{end},\
+                 \"bytes\":{},\"kind\":\"{kind}\",\"nanos\":{nanos}}}\n",
+                end.saturating_sub(start),
+            );
+            if let Ok(mut writer) = trace.lock() {
+                let _ = writer.write_all(line.as_bytes());
+            }
+        }
+    }
     fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
         let started = Instant::now();
         let mut slot = self.seqs[source].lock().unwrap();
@@ -4092,13 +4129,19 @@ impl LaneCache {
             // the regrowth count.
             let mut grown: Vec<u8> = Vec::with_capacity((new_hi - new_lo) as usize);
             if new_lo < *lo {
+                let fetch_started = Instant::now();
                 grown.extend_from_slice(&self.sources.fetch(source, new_lo, *lo)?);
+                let fetch_nanos = fetch_started.elapsed().as_nanos();
+                self.trace_load(source, new_lo, *lo, "left", fetch_nanos);
                 self.loads.fetch_add(1, Ordering::Relaxed);
                 self.bytes.fetch_add(*lo - new_lo, Ordering::Relaxed);
             }
             grown.extend_from_slice(&seq[..]);
             if new_hi > *hi {
+                let fetch_started = Instant::now();
                 grown.extend_from_slice(&self.sources.fetch(source, *hi, new_hi)?);
+                let fetch_nanos = fetch_started.elapsed().as_nanos();
+                self.trace_load(source, *hi, new_hi, "right", fetch_nanos);
                 self.loads.fetch_add(1, Ordering::Relaxed);
                 self.bytes.fetch_add(new_hi - *hi, Ordering::Relaxed);
             }
@@ -4108,7 +4151,10 @@ impl LaneCache {
             *slot = Some((new_lo, new_hi, std::sync::Arc::clone(&grown)));
             return Ok((new_lo, grown));
         }
+        let fetch_started = Instant::now();
         let seq = std::sync::Arc::new(self.sources.fetch(source, start, end.min(len))?);
+        let fetch_nanos = fetch_started.elapsed().as_nanos();
+        self.trace_load(source, start, end.min(len), "initial", fetch_nanos);
         self.loads.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(end.min(len) - start, Ordering::Relaxed);
         self.nanos
@@ -4358,6 +4404,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         loads: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         nanos: AtomicU64::new(0),
+        lane_trace: Default::default(),
     };
     let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
         let path_idx = *path_of_name
@@ -10202,6 +10249,7 @@ mod tests {
             loads: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             nanos: AtomicU64::new(0),
+            lane_trace: Default::default(),
         };
         // (initial span) right-extend, both-side extend, covered,
         // right-extend again — every crop >1,024bp (outside the small-
@@ -10243,6 +10291,7 @@ mod tests {
             loads: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             nanos: AtomicU64::new(0),
+            lane_trace: Default::default(),
         };
         assert_eq!(
             whole_cache.fetch(0, 1_234, 4_321).unwrap(),

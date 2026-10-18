@@ -4560,6 +4560,16 @@ fn run_fork_cut_call_batch_global(
             // ================= THE CHILD (never returns) ================
             let exit_code: i32 = 'child: {
                 let name = chunk_specs[0].name.clone();
+                // Per-child lane-trace file (receipt-side; default OFF):
+                // when the parent's environment names a trace path,
+                // each child appends ".{chunk}" so a multi-child wave's
+                // traces stay attributable per child (each child is its
+                // own process; the env rewrite is the child's own).
+                if let Ok(trace) = std::env::var("IMPG_LANE_TRACE") {
+                    if !trace.is_empty() {
+                        std::env::set_var("IMPG_LANE_TRACE", format!("{trace}.{chunk}"));
+                    }
+                }
                 eprintln!(
                     "[fork-cut-call-batch-global] child chunk={chunk} rows={row_lo}-{row_hi} ({name}) pid={} open",
                     std::process::id()

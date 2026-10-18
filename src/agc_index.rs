@@ -5,6 +5,56 @@ use std::fmt;
 use std::io::{self};
 use std::sync::{Arc, Mutex};
 
+// THE AGC'S OWN LAYOUT UNIT (the bind seek-floor anatomy's fix basis):
+// the archive stores each contig as consecutive SEGMENTS (raw_length
+// ~uniform); `get_contig_range` decompresses per overlapping segment
+// (a pack read + a whole-pack zstd decompress + an LZ reference
+// prepare + decode per segment, EVERY fetch — the per-fetch fixed
+// cost the bind's ~6KB mean lane loads pay in full). The cumulative
+// contribution table below reproduces `get_contig_range`'s own
+// position mapping (contribution_i = raw_length_i for i = 0, else
+// raw_length_i - kmer_length) from the archive's public descriptors,
+// so a caller can fetch SEGMENT-ALIGNED crops — the same bytes for
+// any requested sub-crop (a crop of fetch(a, b) IS fetch of the
+// crop), with the per-segment fixed cost amortized over the whole
+// segment.
+pub struct AgcSegmentLayout {
+    /// Cumulative segment start positions in contig coordinates
+    /// (starts[0] = 0; starts[i + 1] = starts[i] + contribution_i).
+    starts: Vec<u64>,
+    /// Cumulative segment end positions (ends[i] = starts[i] +
+    /// contribution_i; ends.last() = the contig's own length).
+    ends: Vec<u64>,
+    kmer_length: u32,
+}
+
+impl AgcSegmentLayout {
+    /// The segment-aligned covering range for [start, end): the
+    /// smallest union of whole segments covering the request. Every
+    /// crop the caller serves out of a fetch of this range equals the
+    /// direct fetch of that crop (the Sources fetch contract), so the
+    /// alignment is a pure layout/prefetch choice — the archived
+    /// segment is the decompression unit, and one aligned fetch
+    /// decompresses each touched segment once instead of once per
+    /// delta-fetch touching it.
+    pub fn aligned_crop(&self, start: u64, end: u64) -> (u64, u64) {
+        let contig_len = self.ends.last().copied().unwrap_or(0);
+        if start >= end || self.starts.is_empty() || start >= contig_len {
+            return (start, end);
+        }
+        // The segment containing `start` (starts is sorted; index of
+        // the last start <= start).
+        let i0 = self.starts.partition_point(|&s| s <= start) - 1;
+        // The segment containing `end - 1`.
+        let i1 = self
+            .starts
+            .partition_point(|&s| s < end)
+            .saturating_sub(1)
+            .min(self.ends.len() - 1);
+        (self.starts[i0], self.ends[i1].max(end).min(*self.ends.last().unwrap()))
+    }
+}
+
 // Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
     /// Per-RAYON-thread decompressor pools. Indexed by
@@ -28,6 +78,9 @@ pub struct AgcIndex {
     sample_contig_to_agc: FxHashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
     contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)>,
+    /// Per-contig cumulative segment boundary tables (the archive's own
+    /// layout unit; built lazily from the public descriptors, cached).
+    segment_layouts: Mutex<FxHashMap<String, Arc<AgcSegmentLayout>>>,
 }
 
 impl fmt::Debug for AgcIndex {
@@ -160,6 +213,7 @@ impl AgcIndex {
             agc_paths: agc_files.to_vec(),
             sample_contig_to_agc,
             contig_to_sample_info,
+            segment_layouts: Mutex::new(FxHashMap::default()),
         })
     }
 
@@ -200,6 +254,69 @@ impl AgcIndex {
         } else {
             (String::new(), seq_name.to_string(), None)
         }
+    }
+
+    /// The contig's cumulative segment layout (the archive's own
+    /// decompression-unit boundaries, from the public descriptors —
+    /// `get_contig_range`'s own position mapping, cached per contig).
+    /// Returns None when the sequence is not in the archive.
+    pub fn segment_layout(&self, seq_name: &str) -> Option<Arc<AgcSegmentLayout>> {
+        if let Some(layout) = self.segment_layouts.lock().unwrap().get(seq_name) {
+            return Some(Arc::clone(layout));
+        }
+        let (sample, contig, agc_idx) = self.parse_query(seq_name);
+        let Some(agc_idx) = agc_idx else {
+            return None;
+        };
+        let layout = match self.my_pool() {
+            PoolRef::Rayon(slot) => {
+                let mut guard = slot.lock().unwrap();
+                let decomps = guard.get_or_insert_with(|| self.open_decompressors());
+                Self::segment_layout_of(&mut decomps[agc_idx], &sample, &contig)
+            }
+            PoolRef::Other(pool) => {
+                let mut guard = pool.lock().unwrap();
+                if guard.is_empty() {
+                    *guard = self.open_decompressors();
+                }
+                Self::segment_layout_of(&mut guard[agc_idx], &sample, &contig)
+            }
+        };
+        let layout = Arc::new(layout?);
+        self.segment_layouts
+            .lock()
+            .unwrap()
+            .insert(seq_name.to_string(), Arc::clone(&layout));
+        Some(layout)
+    }
+    fn segment_layout_of(
+        decompressor: &mut Decompressor,
+        sample: &str,
+        contig: &str,
+    ) -> Option<AgcSegmentLayout> {
+        let segments = decompressor
+            .get_contig_segments_desc(sample, contig)
+            .ok()?;
+        let kmer_length = decompressor.kmer_length;
+        let mut starts = Vec::with_capacity(segments.len());
+        let mut ends = Vec::with_capacity(segments.len());
+        let mut position = 0u64;
+        for (i, segment) in segments.iter().enumerate() {
+            let raw_length = segment.raw_length as u64;
+            let contribution = if i == 0 {
+                raw_length
+            } else {
+                raw_length - kmer_length as u64
+            };
+            starts.push(position);
+            position += contribution;
+            ends.push(position);
+        }
+        Some(AgcSegmentLayout {
+            starts,
+            ends,
+            kmer_length,
+        })
     }
 
     pub fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
@@ -293,6 +410,160 @@ impl AgcIndex {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn agc_segment_layout_aligned_crop_covers_the_request() {
+        // The layout's own unit proof, on a synthetic cumulative table
+        // (the same contribution formula get_contig_range uses): the
+        // aligned crop must cover the request, stay inside the
+        // contig, and widen only to whole segment boundaries.
+        let layout = AgcSegmentLayout {
+            // contributions 100, 90, 90 -> ends 100, 190, 280 (kmer 10)
+            starts: vec![0, 100, 190],
+            ends: vec![100, 190, 280],
+            kmer_length: 10,
+        };
+        // Interior request inside one segment: aligns to that segment.
+        assert_eq!(layout.aligned_crop(10, 20), (0, 100));
+        // Request crossing a boundary: covers both whole segments.
+        assert_eq!(layout.aligned_crop(95, 105), (0, 190));
+        // Request spanning three segments.
+        assert_eq!(layout.aligned_crop(0, 280), (0, 280));
+        // start == a segment start: that segment's own start.
+        assert_eq!(layout.aligned_crop(100, 150), (100, 190));
+        // end == a segment end: that segment's own end.
+        assert_eq!(layout.aligned_crop(150, 190), (100, 190));
+        // Degenerate/empty ranges pass through unchanged (callers
+        // never fetch them).
+        assert_eq!(layout.aligned_crop(20, 20), (20, 20));
+        assert_eq!(layout.aligned_crop(300, 400), (300, 400));
+    }
+
+    /// THE BIND SEEK-FLOOR ANATOMY RECEIPT (SS10.6.13 duty 2, the
+    /// measured half — #[ignore], explicit-run at the campaign's AGC;
+    /// skips with a note when the substrate is absent): the per-fetch
+    /// cost of `fetch_sequence` at the bind's own request geometry.
+    /// The bind's post-delta-extend lane loads average ~6KB (L1's
+    /// receipt: 18,626-107,333 loads over ~111.4MB); the receipt's
+    /// question: is the per-fetch cost ~constant (a fixed-cost floor —
+    /// the per-segment pack read + whole-pack zstd decompress + LZ
+    /// reference prepare + decode `get_contig_range` pays per touched
+    /// segment, EVERY fetch) or ~proportional to bytes? The classes:
+    /// (a) 900B random crops (the delta-extend's mean extend),
+    /// (b) 6KB random crops (the lane-load mean), (c) sequential 64KB
+    /// crops (the segment-aligned fix's own fetch class), (d) one
+    /// 250KB crop (the territory-extent class). Deterministic LCG
+    /// positions, single-threaded, warm page cache.
+    #[test]
+    #[ignore = "the campaign's AGC substrate (IMPG_BIND_ANATOMY_AGC, default the HPRC panel AGC) — explicit-run receipt"]
+    fn bind_seek_floor_anatomy_receipt() {
+        let agc_path = std::env::var("IMPG_BIND_ANATOMY_AGC").unwrap_or_else(|_| {
+            "/home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc".to_string()
+        });
+        let lane =
+            std::env::var("IMPG_BIND_ANATOMY_LANE").unwrap_or_else(|_| "CHM13#0#chr1".into());
+        if !std::path::Path::new(&agc_path).exists() {
+            eprintln!("[bind-anatomy] AGC {agc_path} absent — skipping (explicit-run receipt)");
+            return;
+        }
+        let index = AgcIndex::build_from_files(&[agc_path.clone()]).unwrap();
+        let length = index.get_sequence_length(&lane).unwrap() as u64;
+        let layout = index.segment_layout(&lane).expect("lane layout");
+        eprintln!(
+            "[bind-anatomy] lane {lane}: length {length}, {} segments, first raw {} (contribution {}), kmer {}",
+            layout.starts.len(),
+            layout.ends[0],
+            layout.ends[0],
+            layout.kmer_length,
+        );
+        assert!(layout.ends.last().copied().unwrap() <= length);
+        // A deterministic LCG for reproducible positions.
+        let mut lcg = 0x2545F4914F6CDD1Du64;
+        let mut rand_below = |bound: u64| -> u64 {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (lcg >> 33) % bound.max(1)
+        };
+        let fetch = |start: u64, end: u64| index.fetch_sequence(&lane, start as i32, end as i32).unwrap();
+        let verify = |seq: &[u8], start: u64, end: u64| {
+            assert_eq!(seq.len(), (end - start) as usize, "fetch length at {start}");
+            assert!(seq.iter().all(|&b| b"ACGTN".contains(&b)), "alphabet at {start}");
+        };
+        let receipt = |class: &str, fetches: usize, bytes: u64, nanos: u128| {
+            eprintln!(
+                "[bind-anatomy] {class}: {} fetches, {:.1} MB, {:.1} ms/fetch, {:.2} us/KB, {:.1} MB/s",
+                fetches,
+                bytes as f64 / (1024.0 * 1024.0),
+                nanos as f64 / fetches as f64 / 1e6,
+                nanos as f64 / (bytes / 1024).max(1) as f64 / 1e3,
+                bytes as f64 / (nanos as f64 / 1e9) / (1024.0 * 1024.0),
+            );
+        };
+        // (a) 900B random crops — the delta-extend mean.
+        {
+            let mut bytes = 0u64;
+            let started = Instant::now();
+            for _ in 0..200 {
+                let start = rand_below(length - 10_000);
+                let end = start + 900;
+                let seq = fetch(start, end);
+                verify(&seq, start, end);
+                bytes += seq.len() as u64;
+            }
+            receipt("random 900B crops ", 200, bytes, started.elapsed().as_nanos());
+        }
+        // (b) 6KB random crops — the lane-load mean.
+        {
+            let mut bytes = 0u64;
+            let started = Instant::now();
+            for _ in 0..200 {
+                let start = rand_below(length - 20_000);
+                let end = start + 6_000;
+                let seq = fetch(start, end);
+                verify(&seq, start, end);
+                bytes += seq.len() as u64;
+            }
+            receipt("random 6KB crops  ", 200, bytes, started.elapsed().as_nanos());
+        }
+        // (c) sequential 64KB crops from one random position (the
+        // segment-aligned fetch class: adjacent whole segments).
+        {
+            let mut bytes = 0u64;
+            let started = Instant::now();
+            let base = rand_below(length - 5_000_000);
+            for i in 0..64 {
+                let start = base + i * 65_536;
+                let end = start + 65_536;
+                let seq = fetch(start, end);
+                verify(&seq, start, end);
+                bytes += seq.len() as u64;
+            }
+            receipt("sequential 64KB   ", 64, bytes, started.elapsed().as_nanos());
+        }
+        // (d) one 250KB crop — the territory-extent class.
+        {
+            let started = Instant::now();
+            let start = rand_below(length.saturating_sub(300_000));
+            let end = start + 250_000;
+            let seq = fetch(start, end);
+            verify(&seq, start, end);
+            receipt("one 250KB crop    ", 1, seq.len() as u64, started.elapsed().as_nanos());
+        }
+        // (e) the same 900B crop repeated: the fixed-cost floor is
+        // per-fetch (pack re-read + re-decompress + re-prepare), not
+        // cached by the decompressor — the receipt the fix amortizes.
+        {
+            let started = Instant::now();
+            let start = rand_below(length - 10_000);
+            for _ in 0..50 {
+                let seq = fetch(start, start + 900);
+                verify(&seq, start, start + 900);
+            }
+            receipt("same 900B x50     ", 50, 50 * 900, started.elapsed().as_nanos());
+        }
+    }
+
     #[test]
     fn test_batch_range_calculation() {
         // Test the min-max range calculation logic
