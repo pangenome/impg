@@ -1697,31 +1697,41 @@ every number a receipt; the fleet math at the receipted shape)
   receipt except the two named projections (the fork-COW sharing,
   the marathon wall effect), each labeled and gated.
 
-### 10.6.11 THE SERIAL FULL-PANEL CMP + THE EXACT RESUME POINT
+### 10.6.11 THE SERIAL FULL-PANEL CMP — LANDED AT THIS INCREMENT'S
+CLOSE (duty 5, checked once; the watcher's unattended cmp)
 
-The serial whole-panel derive-routes (PID 2121938) is ALIVE at this
-increment's close (9h34m CPU, ~574 min; the watcher PID 2483558
-performs the cmp the moment its graph.json lands and writes
-serial-vs-par.routes-cmp-receipt.txt — never polled in-session). The
-receipt is owed to the next increment's close per the watcher's
-design.
+The serial whole-panel derive-routes (started 15:46Z Oct 17) COMPLETED
+at 01:42Z Oct 18 (exit 0, wall **35,778s ≈ 9.9h** at the ~55 Mbp/s
+serial lane-hash under the campaign's co-tenancy — the §10.2-measured
+~7.5h class, honestly restated at its actual wall), and the detached
+watcher's unattended cmp wrote the receipt the moment it landed:
 
-**THE EXACT RESUME POINT (if the budget ends here):** all three
-duties landed and gate-proven (3e9f9b8 the concurrent calls + the
-per-call read length; c4b7e86 candidate C's row-compression +
-streaming); cargo test --release --lib 561/0 (+2: the compression
-value-identity proof, the marathon-shape memory receipt — the
-latter #[ignore]d, run explicitly: 39.0x at T03803's shape); the
+- **graph.json: BYTE-IDENTICAL** — the free full-panel byte-identity
+  receipt **PASSES**: the parallel lane-hash contributes ZERO bytes
+  over the whole panel (38,790 lanes / 1.403 Tbp; serial 35,778s vs
+  parallel 1,505s — the ~23.8x panel-side ratio, one-time per panel).
+- registry.jsonl / ports.bin / ownership-input.json / ownership.jsonl
+  identical; source-ports 38,790 = 38,790; native dirs equal.
+- manifest.json DIFFERS — the run-metadata class (the manifest's own
+  timing/argv fields, the §10.2 compiler-identity precedent's
+  neighbor; the artifact's semantic members are the identical ones).
+
+**THE EXACT RESUME POINT (if the budget ends here):** all four duties
+landed and gate-proven (3e9f9b8 the concurrent calls + the per-call
+read length; c4b7e86 candidate C's row-compression + streaming;
+603a226 the panel-share opening + the budget restatement; the serial
+cmp receipt above); cargo test --release --lib 561/0 (+2: the
+compression value-identity proof, the marathon-shape memory receipt —
+the latter #[ignore]d, run explicitly: 39.0x at T03803's shape); the
 example proof 2/2; tree clean except vendor/syng (uncommitted by
-design); NO PR PUSH. NEXT, in the §10.6.10 pole order: (1) the
-serial-vs-par receipt at the watcher's completion; (2) THE PANEL
-SHARE'S IMPLEMENTATION INCREMENT (the fork-COW probe FIRST — a
-forked child's Pss growth over a full call, the §10.6.9 named risk
-gate — then the prefork batch driver, full byte-identity gates at
-every step); (3) candidate B (the always-on exactness assertion —
-the owner's receipt-shape decision) and the census-superset answer
-(the owner's); (4) the marathon re-receipt at the next campaign
-window (determinism + wall + candidate C's bound); (5) the bind's
-per-fetch AGC-seek floor (the span-volume collapse went 508x; the
-seek COUNT is the named floor — a bulk-prefetch form is the
-candidate, undesigned).
+design); NO PR PUSH. NEXT, in the §10.6.10 pole order:
+(1) THE PANEL SHARE'S IMPLEMENTATION INCREMENT (the fork-COW probe
+FIRST — a forked child's Pss growth over a full call, the §10.6.9
+named risk gate — then the prefork batch driver, full byte-identity
+gates at every step); (2) candidate B (the always-on exactness
+assertion — the owner's receipt-shape decision) and the
+census-superset answer (the owner's); (3) the marathon re-receipt at
+the next campaign window (determinism + wall + candidate C's bound);
+(4) the bind's per-fetch AGC-seek floor (the span-volume collapse
+went 508x; the seek COUNT is the named floor — a bulk-prefetch form
+is the candidate, undesigned).
