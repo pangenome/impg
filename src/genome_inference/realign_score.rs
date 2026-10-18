@@ -9540,6 +9540,97 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "the marathon core scan-wall receipt at the profiled worst-locus shape (~1-2 min on a 64-thread pool; run explicitly)"]
+    fn marathon_worst_locus_shape_scan_wall_receipt() {
+        // THE MARATHON RE-RECEIPT'S MEASURABLE PART (SS10.6.3's
+        // profile: the marathon substrates are reaped, so the full
+        // marathon wall is NOT re-receiptable — this receipts what the
+        // profiled worst-locus shape can still exercise, and names
+        // what it cannot): the scoring core's own scan walls at the
+        // T03803 shape (532 folds x 4,438,575 units, the roster's own
+        // ~2.1% pinned share, sparse rows — candidate C's compressed
+        // form), measured on this test's rayon pool:
+        //   (a) the merge's equal-column hash pass (ll_bits_hash over
+        //       every row — the bucketing key of the committed
+        //       merge),
+        //   (b) the exhaustive class scan (every fold pair's
+        //       class_pair_sum — the committed accumulation verbatim),
+        // both as ns per (fold, unit) pair walked. NOT measured here,
+        // because the reaped substrates carried them: the pair loop's
+        // PINNED alignment class (records + reads), the bind phase,
+        // the records/census phases — no marathon wall number is
+        // claimed from this receipt, only the scan-core rates.
+        let (n_folds, n_units, pinned_stride) = (532usize, 4_438_575usize, 48usize);
+        let elsewhere = -14.418156f64;
+        let mut rows = Vec::with_capacity(n_folds);
+        for fold in 0..n_folds {
+            let mut units = Vec::new();
+            let mut lls = Vec::new();
+            let mut mism = Vec::new();
+            let mut unit = fold % pinned_stride;
+            while unit < n_units {
+                units.push(unit as u32);
+                lls.push(elsewhere + (unit % 977) as f64 * 1e-6);
+                mism.push((unit % 7) as u32);
+                unit += pinned_stride;
+            }
+            rows.push(ScoreRow::Sparse(ScoreRowSparse {
+                units,
+                lls,
+                mismatches: mism,
+            }));
+        }
+        let matrix = ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows,
+        };
+        // (a) the merge's hash pass.
+        let hash_started = std::time::Instant::now();
+        let mut hash_sum: u64 = 0;
+        for fold in 0..n_folds {
+            hash_sum ^= matrix.ll_bits_hash(fold);
+        }
+        let hash_seconds = hash_started.elapsed().as_secs_f64();
+        // (b) the exhaustive class scan, the committed shape: every
+        // fold pair, unit counts all 1.0 (the synthetic shape carries
+        // no real read mass; the count is one FMA per unit and does
+        // not change the rate).
+        let unit_counts: Vec<f64> = vec![1.0; n_units];
+        let pair_count = n_folds * (n_folds + 1) / 2;
+        let scan_started = std::time::Instant::now();
+        let class_lls: Vec<f64> = (0..pair_count)
+            .into_par_iter()
+            .map(|flat| {
+                let (first, second) = unrank_pair(flat);
+                matrix.class_pair_sum(first, second, &unit_counts)
+            })
+            .collect();
+        let scan_seconds = scan_started.elapsed().as_secs_f64();
+        let walked = n_folds as u64 * n_units as u64;
+        let scanned_pairs = pair_count as u64 * n_units as u64;
+        let best = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        eprintln!(
+            "marathon shape T03803 scan-wall receipt: merge hash pass \
+             {} rows in {:.1}s = {:.2} ns/(fold,unit); class scan \
+             {} pairs x {} units = {:.3}e12 unit-pairs in {:.1}s \
+             ({} threads) = {:.2} ns/unit-pair; best class ll {:.3}",
+            n_folds,
+            hash_seconds,
+            hash_seconds * 1e9 / walked as f64,
+            pair_count,
+            n_units,
+            scanned_pairs as f64 / 1e12,
+            scan_seconds,
+            rayon::current_num_threads(),
+            scan_seconds * 1e9 / scanned_pairs as f64,
+            best,
+        );
+        assert!(best.is_finite(), "the class scan produced a finite best");
+        let _ = hash_sum;
+    }
+
+    #[test]
     fn the_alignment_connected_merge_folds_indistinguishable_copies() {
         // The axis fold (0) and two near-identical copies (1, 2) share
         // nodes (alignment-connected), carry bit-identical likelihood

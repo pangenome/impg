@@ -315,6 +315,46 @@ enum Mode {
         #[arg(long, default_value_t = 0.0)]
         call_rss_budget_gib: f64,
     },
+    /// THE FORK-AFTER-LOAD COW PANEL SHARE (SS10.6.9's form (a), the
+    /// slot-ceiling lever): the parent loads the panel + AGC ONCE
+    /// and stays the load owner; ONE CHILD PER MANIFEST ROW forks
+    /// and runs its territory's cut + call over the inherited
+    /// COW-shared panel, then exits. Receipts the per-child smaps
+    /// COW arithmetic at open and close (the COW-hold gate).
+    ForkCutCallBatchGlobal {
+        /// The GLOBAL panel syng prefix (the projection's panel).
+        #[arg(long)]
+        global_panel: String,
+        /// The global panel AGC (the committed --sequence-files input).
+        #[arg(long)]
+        agc: PathBuf,
+        /// The projection output directory (the shard files; each
+        /// child scans them for its own territory).
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// JSONL manifest: one territory per row {name, axis,
+        /// bed_directory, component, out_dir, record_origin, call?}
+        /// where call = {reads, partition_graphs, loci, out_dir}.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The whole-panel routes inventory directory (graph.json +
+        /// sources — the call's --routes input, shared by every call
+        /// row).
+        #[arg(long)]
+        routes: PathBuf,
+        /// Per-call resident-set guard in GiB (0 = unguarded — the
+        /// child holds the shared panel by design, the combined
+        /// process's own rule).
+        #[arg(long, default_value_t = 0.0)]
+        call_rss_budget_gib: f64,
+        /// Manifest rows per forked child (1 = one child per
+        /// territory, the maximal-share form; the manifest's own
+        /// batch width amortizes the cut scan's working set within a
+        /// child — the fleet-shape parameter, never an algorithm
+        /// constant).
+        #[arg(long, default_value_t = 1)]
+        rows_per_child: usize,
+    },
     /// THE YIELD-ANOMALY AUTOPSY TRACE (receipt-side diagnostic; no
     /// product machinery): one scan of the projection shards that
     /// classifies, per locality and per read-class (sequence sets
@@ -2649,7 +2689,7 @@ struct CutBatchSpec {
 /// cut lanes): the single global cut's own substrate inputs — no
 /// locality panel, no locus.fa (conversion-not-materialization) — plus
 /// the substrate's stated content origin.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct CutBatchGlobalSpec {
     name: String,
     axis: PathBuf,
@@ -4053,26 +4093,55 @@ fn run_cut_call_batch_global(
         cut_started.elapsed().as_secs(),
         call_rows.len()
     );
-    // THE CONCURRENT CALLS (the SS10.6.4 cheapest-named step, now the
-    // batch's own shape): the batch's K calls run CONCURRENTLY inside
-    // the ONE loaded process — one scoped thread per call row (the
-    // manifest's own width, never tuned) — instead of serially. The
-    // shared state is read-only by construction (the loaded panel,
-    // the routes dir, the per-call options; every mutable thing a
-    // call touches is its own: its out dir, its LaneCache, its
-    // Sources handles, its receipt buffers), and the ONE mutable
-    // process-global the call path held (the read length) is now
-    // PER-CALL state — the concurrent-calls audit's finding, landed
-    // with this change — so each call sees exactly the committed
-    // fresh-process trajectory at any concurrency; the outputs are
-    // the committed machinery's own, byte-identical by the thread-
-    // schedule-invariance every gate has proven so far, and this gate
-    // re-proves it at the new shape. Error discipline: the serial form
-    // failed at the first failing row; the concurrent form returns
-    // the FIRST error in ROW ORDER (no failure is swallowed).
     let calls_started = Instant::now();
     let shared_panel: &SyngIndex = &global;
-    let call_results: Vec<io::Result<()>> = std::thread::scope(|scope| {
+    let call_results = run_combined_call_rows(
+        shared_panel,
+        global_panel_prefix,
+        routes_dir,
+        &call_rows,
+        call_rss_budget_gib,
+        load_seconds,
+        "cut-call-batch-global",
+    );
+    eprintln!(
+        "[cut-call-batch-global] call phase done in {:.0}s ({} concurrent)",
+        calls_started.elapsed().as_secs(),
+        call_rows.len()
+    );
+    for result in call_results {
+        result?;
+    }
+    Ok(())
+}
+
+/// THE COMBINED FORM'S CALL PHASE, shared verbatim by the combined
+/// process and the forked children (the fork-after-load driver runs
+/// the SAME construction over the SAME loaded panel): the batch's K
+/// calls run CONCURRENTLY — one scoped thread per call row (the
+/// manifest's own width, never tuned). The shared state is read-only
+/// by construction (the loaded panel, the routes dir, the per-call
+/// options; every mutable thing a call touches is its own: its out
+/// dir, its LaneCache, its Sources handles, its receipt buffers), and
+/// the ONE mutable process-global the call path held (the read
+/// length) is PER-CALL state — so each call sees exactly the
+/// committed fresh-process trajectory at any concurrency; the
+/// outputs are the committed machinery's own, byte-identical by the
+/// thread-schedule-invariance every gate has proven. Error
+/// discipline: the serial form failed at the first failing row; this
+/// form returns the FIRST error in ROW ORDER (no failure is
+/// swallowed). (THE SS10.6.4 cheapest-named step, landed with the
+/// combined process; extracted verbatim for the fork form.)
+fn run_combined_call_rows(
+    shared_panel: &SyngIndex,
+    global_panel_prefix: &str,
+    routes_dir: &Path,
+    call_rows: &[(String, String, u64, PathBuf, CutBatchGlobalCall)],
+    call_rss_budget_gib: f64,
+    load_seconds: f64,
+    tag: &str,
+) -> Vec<io::Result<()>> {
+    std::thread::scope(|scope| {
         let handles: Vec<_> = call_rows
             .iter()
             .map(|(name, component, record_origin, cut_dir, call)| {
@@ -4128,7 +4197,7 @@ fn run_cut_call_batch_global(
                             }))
                         });
                     eprintln!(
-                        "[cut-call-batch-global] {} called in {:.0}s ({})",
+                        "[{tag}] {} called in {:.0}s ({})",
                         name,
                         call_started.elapsed().as_secs(),
                         if result.is_ok() { "ok" } else { "FAILED" },
@@ -4151,14 +4220,511 @@ fn run_cut_call_batch_global(
                 }
             })
             .collect()
-    });
+    })
+}
+
+// ---------------------------------------------------------------------------
+// THE FORK-AFTER-LOAD COW PANEL SHARE (SS10.6.9's lever): the smaps
+// receipts and the fork driver. The parent is the ONE load owner (the
+// receipted 241s load); every child inherits the loaded panel through
+// copy-on-write and receipts its territory (cut + call) with the
+// panel's pages staying SHARED while unwritten. The COW-hold gate is
+// these smaps numbers: a child's PRIVATE growth over its whole
+// cut+call is exactly the COW-break measure (SS10.6.9's named risk —
+// post-load writes into the arenas break COW page by page).
+// ---------------------------------------------------------------------------
+
+/// One smaps_rollup reading (kB units, /proc's own fields).
+#[derive(Default, Clone, Copy)]
+struct ForkSmapsRollup {
+    rss_kb: u64,
+    pss_kb: u64,
+    private_clean_kb: u64,
+    private_dirty_kb: u64,
+    shared_clean_kb: u64,
+    shared_dirty_kb: u64,
+}
+
+impl ForkSmapsRollup {
+    fn private_kb(&self) -> u64 {
+        self.private_clean_kb + self.private_dirty_kb
+    }
+    fn shared_kb(&self) -> u64 {
+        self.shared_clean_kb + self.shared_dirty_kb
+    }
+}
+
+/// Parse the named kB field out of a /proc smaps* section.
+fn fork_smaps_field(section: &str, name: &str) -> u64 {
+    for line in section.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some(name) {
+            if let Some(kb) = parts.next().and_then(|v| v.parse::<u64>().ok()) {
+                return kb;
+            }
+        }
+    }
+    0
+}
+
+/// One big mapping of /proc/self/smaps (the C arenas and the mmap'd
+/// sidecars), identified by its header line so a child's open and
+/// close snapshots can be diffed mapping-by-mapping.
+#[derive(Clone)]
+struct ForkSmapsMapping {
+    header: String,
+    size_kb: u64,
+    rss_kb: u64,
+    pss_kb: u64,
+    private_clean_kb: u64,
+    private_dirty_kb: u64,
+    shared_clean_kb: u64,
+    shared_dirty_kb: u64,
+    name: String,
+}
+
+impl ForkSmapsMapping {
+    fn private_kb(&self) -> u64 {
+        self.private_clean_kb + self.private_dirty_kb
+    }
+    fn shared_kb(&self) -> u64 {
+        self.shared_clean_kb + self.shared_dirty_kb
+    }
+}
+
+/// A smaps header line "lo-hi perm offset dev inode [path]": the
+/// first token is two hex addresses joined by '-'.
+fn fork_is_smaps_header(line: &str) -> bool {
+    let Some((lo, hi)) = line.split_whitespace().next().unwrap_or("").split_once('-')
+    else {
+        return false;
+    };
+    u64::from_str_radix(lo, 16).is_ok() && u64::from_str_radix(hi, 16).is_ok()
+}
+
+/// Parse /proc/self/smaps into sections; keep every mapping whose
+/// Size >= `min_size_kb` (the 12.13GB GBWT arena, the 4.31GB
+/// KmerHash arena, the mmap'd sidecars — the shareable mass; smaller
+/// mappings are summarized by the rollup alone).
+fn fork_smaps_big_mappings(smaps: &str, min_size_kb: u64) -> Vec<ForkSmapsMapping> {
+    let mut big = Vec::new();
+    let mut header: Option<String> = None;
+    let mut body: Vec<&str> = Vec::new();
+    let mut flush = |header: &mut Option<String>, body: &mut Vec<&str>| {
+        if let Some(header_line) = header.take() {
+            let body_text = body.join("\n");
+            let size_kb = fork_smaps_field(&body_text, "Size:");
+            if size_kb >= min_size_kb {
+                big.push(ForkSmapsMapping {
+                    header: header_line.clone(),
+                    size_kb,
+                    rss_kb: fork_smaps_field(&body_text, "Rss:"),
+                    pss_kb: fork_smaps_field(&body_text, "Pss:"),
+                    private_clean_kb: fork_smaps_field(&body_text, "Private_Clean:"),
+                    private_dirty_kb: fork_smaps_field(&body_text, "Private_Dirty:"),
+                    shared_clean_kb: fork_smaps_field(&body_text, "Shared_Clean:"),
+                    shared_dirty_kb: fork_smaps_field(&body_text, "Shared_Dirty:"),
+                    name: header_line
+                        .split_whitespace()
+                        .nth(5)
+                        .unwrap_or("[anon]")
+                        .to_string(),
+                });
+            }
+        }
+        body.clear();
+    };
+    for line in smaps.lines() {
+        if fork_is_smaps_header(line) {
+            flush(&mut header, &mut body);
+            header = Some(line.to_string());
+        } else if header.is_some() {
+            body.push(line);
+        }
+    }
+    flush(&mut header, &mut body);
+    big
+}
+
+/// THE COW SNAPSHOT: the rollup plus the big mappings, one
+/// /proc/self read at a moment in a process's life.
+struct ForkCowSnapshot {
+    rollup: ForkSmapsRollup,
+    big: Vec<ForkSmapsMapping>,
+}
+
+const FORK_COW_BIG_MAPPING_KB: u64 = 1 << 20; // >= 1 GiB
+
+fn fork_cow_snapshot() -> io::Result<ForkCowSnapshot> {
+    let rollup_text = std::fs::read_to_string("/proc/self/smaps_rollup")?;
+    let rollup = ForkSmapsRollup {
+        rss_kb: fork_smaps_field(&rollup_text, "Rss:"),
+        pss_kb: fork_smaps_field(&rollup_text, "Pss:"),
+        private_clean_kb: fork_smaps_field(&rollup_text, "Private_Clean:"),
+        private_dirty_kb: fork_smaps_field(&rollup_text, "Private_Dirty:"),
+        shared_clean_kb: fork_smaps_field(&rollup_text, "Shared_Clean:"),
+        shared_dirty_kb: fork_smaps_field(&rollup_text, "Shared_Dirty:"),
+    };
+    let smaps = std::fs::read_to_string("/proc/self/smaps")?;
+    Ok(ForkCowSnapshot {
+        rollup,
+        big: fork_smaps_big_mappings(&smaps, FORK_COW_BIG_MAPPING_KB),
+    })
+}
+
+/// Print one snapshot as the [fork-cow] receipt lines.
+fn fork_cow_print(label: &str, snap: &ForkCowSnapshot) {
+    let r = &snap.rollup;
     eprintln!(
-        "[cut-call-batch-global] call phase done in {:.0}s ({} concurrent)",
-        calls_started.elapsed().as_secs(),
-        call_rows.len()
+        "[fork-cow] {label} rollup: Rss={:.2}GB Pss={:.2}GB private={:.2}GB shared={:.2}GB",
+        r.rss_kb as f64 / (1 << 20) as f64,
+        r.pss_kb as f64 / (1 << 20) as f64,
+        r.private_kb() as f64 / (1 << 20) as f64,
+        r.shared_kb() as f64 / (1 << 20) as f64,
     );
-    for result in call_results {
-        result?;
+    for m in &snap.big {
+        eprintln!(
+            "[fork-cow] {label} mapping {} size={:.2}GB rss={:.2}GB pss={:.2}GB private={:.2}GB shared={:.2}GB {}",
+            m.header,
+            m.size_kb as f64 / (1 << 20) as f64,
+            m.rss_kb as f64 / (1 << 20) as f64,
+            m.pss_kb as f64 / (1 << 20) as f64,
+            m.private_kb() as f64 / (1 << 20) as f64,
+            m.shared_kb() as f64 / (1 << 20) as f64,
+            m.name,
+        );
+    }
+}
+
+/// The COW-hold receipt: the per-mapping and rollup PRIVATE growth of
+/// a child's whole life (open snapshot -> close snapshot). The growth
+/// in an INHERITED mapping's private pages IS the COW break for that
+/// arena; the growth elsewhere is the child's own working set.
+fn fork_cow_delta_print(label: &str, open: &ForkCowSnapshot, close: &ForkCowSnapshot) {
+    let gb = |kb: u64| kb as f64 / (1 << 20) as f64;
+    eprintln!(
+        "[fork-cow] {label} delta: private {:+.2}GB (open {:.2}GB -> close {:.2}GB), pss {:+.2}GB, rss {:+.2}GB",
+        gb(close.rollup.private_kb()) - gb(open.rollup.private_kb()),
+        gb(open.rollup.private_kb()),
+        gb(close.rollup.private_kb()),
+        gb(close.rollup.pss_kb) - gb(open.rollup.pss_kb),
+        gb(close.rollup.rss_kb) - gb(open.rollup.rss_kb),
+    );
+    for close_m in &close.big {
+        if let Some(open_m) = open.big.iter().find(|m| m.header == close_m.header) {
+            let grew = close_m.private_kb() > open_m.private_kb();
+            eprintln!(
+                "[fork-cow] {label} mapping {} private {:+.2}GB (open {:.2}GB -> close {:.2}GB), shared {:+.2}GB{}",
+                close_m.header,
+                gb(close_m.private_kb()) - gb(open_m.private_kb()),
+                gb(open_m.private_kb()),
+                gb(close_m.private_kb()),
+                gb(close_m.shared_kb()) - gb(open_m.shared_kb()),
+                if grew { " [COW BREAK]" } else { "" },
+            );
+        } else {
+            eprintln!(
+                "[fork-cow] {label} mapping {} private {:+.2}GB [CHILD-OWN]",
+                close_m.header,
+                gb(close_m.private_kb()),
+            );
+        }
+    }
+}
+
+/// THE FORK-AFTER-LOAD DRIVER (SS10.6.9's designed form (a), the
+/// slot-ceiling lever): the parent loads the panel ONCE and stays the
+/// load owner; then ONE CHILD PER MANIFEST ROW forks and receipts its
+/// territory (the 1-row batch cut — batch composition is the
+/// receipted-invariant cut identity — plus the row's call over the
+/// inherited panel), then exits. Byte-identity is by construction on
+/// both sides: the cut's per-territory isolation is the batch gate's
+/// own receipt (single == batch member), and the call is the combined
+/// form's own construction (run_combined_call_rows) over the SAME
+/// loaded panel.
+///
+/// PREFORK HYGIENE (the read-length-class globals lesson, applied to
+/// fork): a child inherits the parent's whole address space at the
+/// fork instant — every process-global the fresh-process trajectory
+/// would RE-INITIALIZE must either be re-initialized in the child or
+/// provably identical. The audit, every item:
+/// - RAYON'S GLOBAL REGISTRY — THE FORK-DECISIVE ONE: a forked child
+///   keeps only the calling thread, so a registry initialized in the
+///   parent holds worker threads that DO NOT EXIST in the child
+///   (rayon's global registry is set once per process and can never
+///   be replaced); any par_iter that installs it would enqueue to
+///   dead workers and hang — the first probe run receipted exactly
+///   this hang (the call's seam threads' inner par_iters). THE FIX,
+/// BY CONSTRUCTION: the parent NEVER touches rayon before the fork
+/// (SyngIndex::load is rayon-free — the load path is the C reader's
+/// own pthreads, mmap'd sidecars, and plain file reads — and the
+/// parent builds NO AgcIndex, whose build would size its slots with
+/// rayon::current_num_threads()); every child then initializes its
+/// OWN global registry at its first rayon touch, exactly where the
+/// committed fresh process does (the child's own AgcIndex build),
+/// spawning the child's own 64 threads at the inherited
+/// RAYON_NUM_THREADS. Every par_iter in the child — from the main
+/// thread, the cut, the call's seam threads — joins the child's own
+/// live registry: the committed fresh-process trajectory by
+/// construction, no install() indirection.
+/// - THE AGC INDEX: built per child (NOT inherited): the struct is
+///   small (name maps + per-thread decompressor slots over the
+///   page-cache-shared AGC file), the AGC's bulk is the page cache
+///   (shared system-wide under every form), and the per-child build
+///   is the same initialization-order point as the committed
+///   process. The per-child build wall is receipted per child.
+/// - THE READ LENGTH: per-call state (a local in run_injected,
+///   initialized at the fresh-process 150 at every call entry) — the
+///   forked child reproduces the committed fresh-process trajectory
+///   BY CONSTRUCTION, no reset discipline.
+/// - THE C DIAGNOSTIC COUNTERS (pathCount): set once at load
+///   (impg_syng_suppress_debug) — the child inherits the
+///   already-suppressed state, exactly the fresh process's own
+///   post-load state.
+/// - THE LOCATE CHECKPOINT OnceLock: never built (the panel's .spos
+///   is present — SampledCheckpointIndex serves locate); if it were,
+///   a fresh child would build its own from the same .pstep bytes.
+/// - THREAD-LOCALS (aligners, AGC decompressor pools): per-OS-thread;
+///   a child's threads are all fresh, so every thread-local
+///   initializes in the child exactly as in a fresh process.
+/// - MALLOC ARENAS: the child's small allocations are served from the
+///   inherited arena chunks (free-list reuse dirties those pages);
+///   the big C arenas are never written by the query paths (the COW
+///   audit's code half — see SS10.6.12) and the smaps receipts measure
+///   the total honestly.
+fn run_fork_cut_call_batch_global(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    manifest_path: &Path,
+    routes_dir: &Path,
+    call_rss_budget_gib: f64,
+    rows_per_child: usize,
+) -> io::Result<()> {
+    let specs = cut_batch_global_parse_manifest(manifest_path)?;
+    ensure(
+        specs.iter().any(|spec| spec.call.is_some()),
+        "no manifest row carries a call object (cut-batch-global is the cut-only form)",
+    )?;
+    ensure(rows_per_child >= 1, "--rows-per-child must be >= 1")?;
+    eprintln!(
+        "[fork-cut-call-batch-global] loading the global panel once (the parent is the load owner) for {} manifest rows in {} children (rows-per-child {})",
+        specs.len(),
+        specs.len().div_ceil(rows_per_child),
+        rows_per_child
+    );
+    let load_started = Instant::now();
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    let load_seconds = load_started.elapsed().as_secs_f64();
+    let parent_load_snap = fork_cow_snapshot()?;
+    eprintln!(
+        "[fork-cut-call-batch-global] panel loaded in {:.0}s; the children inherit it COW (each child builds its own AGC index, the fresh-process form)",
+        load_seconds
+    );
+    fork_cow_print("parent-post-load", &parent_load_snap);
+
+    // Prefork hygiene: no parent-buffered stdio byte re-emerges in a
+    // child (the child _exits without flushing).
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    let fork_started = Instant::now();
+    let shared_panel: &SyngIndex = &global;
+    let mut child_pids: Vec<(usize, String, libc::pid_t)> = Vec::new();
+    for (chunk, chunk_specs) in specs.chunks(rows_per_child).enumerate() {
+        let row_lo = chunk * rows_per_child;
+        let row_hi = row_lo + chunk_specs.len() - 1;
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if pid == 0 {
+            // ================= THE CHILD (never returns) ================
+            let exit_code: i32 = 'child: {
+                let name = chunk_specs[0].name.clone();
+                eprintln!(
+                    "[fork-cut-call-batch-global] child chunk={chunk} rows={row_lo}-{row_hi} ({name}) pid={} open",
+                    std::process::id()
+                );
+                let open_snap = match fork_cow_snapshot() {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        eprintln!("[fork-cow] child chunk={chunk} open snapshot failed: {e}");
+                        break 'child 1;
+                    }
+                };
+                fork_cow_print(
+                    &format!("child-open chunk={chunk} rows={row_lo}-{row_hi} ({name})"),
+                    &open_snap,
+                );
+                let child_started = Instant::now();
+                let work = || -> io::Result<()> {
+                    // The child's own AGC index: the AgcIndex struct is
+                    // small (name maps + per-thread decompressor
+                    // slots over the page-cache-shared AGC file), so
+                    // inheriting it would buy nothing — and building
+                    // it here means the child's rayon GLOBAL registry
+                    // initializes at the same point in the sequence as
+                    // the committed fresh process (the first rayon
+                    // touch), spawning the child's OWN 64 threads at
+                    // the inherited RAYON_NUM_THREADS.
+                    let agc_started = Instant::now();
+                    let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
+                    let agc_seconds = agc_started.elapsed().as_secs_f64();
+                    eprintln!(
+                        "[fork-cut-call-batch-global] child chunk={chunk} built its own AGC index in {:.0}s",
+                        agc_seconds
+                    );
+                    // THE CUT: the child's own batch over its chunk of
+                    // manifest rows (the batch's per-territory
+                    // isolation gate receipt: the batch composition is
+                    // byte-identity-invariant, single == batch member;
+                    // rows-per-child = 1 is the committed single-cut
+                    // form exactly, and the width-4 chunk is the
+                    // committed batch shape).
+                    let cut_started = Instant::now();
+                    cut_batch_global_with(
+                        shared_panel,
+                        &agc,
+                        shards_dir,
+                        chunk_specs.to_vec(),
+                        load_seconds,
+                    )?;
+                    eprintln!(
+                        "[fork-cut-call-batch-global] child chunk={chunk} cut phase done in {:.0}s",
+                        cut_started.elapsed().as_secs()
+                    );
+                    // MEMORY HYGIENE RECEIPT (the N=1 probe's finding:
+                    // the cut scan's transient working set — the shard
+                    // decode/remap arenas, ~35-40GB, width-insensitive
+                    // — is retained by the allocator after the cut
+                    // phase; this is freed memory, never live data).
+                    // malloc_trim(0) asks glibc to return every
+                    // arena's free tail to the OS: free-list state is
+                    // not program semantics, and the receipt prints
+                    // the before/after private so the effect is
+                    // measured, never assumed.
+                    let pre_trim = fork_cow_snapshot()?;
+                    unsafe { libc::malloc_trim(0) };
+                    let post_trim = fork_cow_snapshot()?;
+                    let gb = |kb: u64| kb as f64 / (1 << 20) as f64;
+                    eprintln!(
+                        "[fork-cow] child chunk={chunk} malloc_trim: private {:.2}GB -> {:.2}GB (returned {:.2}GB)",
+                        gb(pre_trim.rollup.private_kb()),
+                        gb(post_trim.rollup.private_kb()),
+                        gb(pre_trim
+                            .rollup
+                            .private_kb()
+                            .saturating_sub(post_trim.rollup.private_kb())),
+                    );
+                    // THE CALL: the combined form's own construction
+                    // over the inherited panel (the chunk's call rows,
+                    // concurrent — the manifest's own width).
+                    let call_rows: Vec<(String, String, u64, PathBuf, CutBatchGlobalCall)> =
+                        chunk_specs
+                            .iter()
+                            .filter_map(|spec| {
+                                spec.call.as_ref().map(|call| {
+                                    (
+                                        spec.name.clone(),
+                                        spec.component.clone(),
+                                        spec.record_origin,
+                                        spec.out_dir.clone(),
+                                        call.clone(),
+                                    )
+                                })
+                            })
+                            .collect();
+                    if !call_rows.is_empty() {
+                        let results = run_combined_call_rows(
+                            shared_panel,
+                            global_panel_prefix,
+                            routes_dir,
+                            &call_rows,
+                            call_rss_budget_gib,
+                            load_seconds,
+                            "fork-cut-call-batch-global",
+                        );
+                        for result in results {
+                            result?;
+                        }
+                    }
+                    Ok(())
+                };
+                match work() {
+                    Ok(()) => {
+                        match fork_cow_snapshot() {
+                            Ok(close_snap) => {
+                                fork_cow_delta_print(
+                                    &format!("child chunk={chunk} rows={row_lo}-{row_hi} ({name}) open->close"),
+                                    &open_snap,
+                                    &close_snap,
+                                );
+                                fork_cow_print(
+                                    &format!("child-close chunk={chunk} rows={row_lo}-{row_hi} ({name})"),
+                                    &close_snap,
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[fork-cow] child chunk={chunk} close snapshot failed: {e}"
+                                )
+                            }
+                        }
+                        eprintln!(
+                            "[fork-cut-call-batch-global] child chunk={chunk} rows={row_lo}-{row_hi} ({name}) done in {:.0}s",
+                            child_started.elapsed().as_secs()
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[fork-cut-call-batch-global] child chunk={chunk} rows={row_lo}-{row_hi} ({name}) FAILED: {e}"
+                        );
+                        1
+                    }
+                }
+            };
+            unsafe { libc::_exit(exit_code) };
+        }
+        let child_name = chunk_specs[0].name.clone();
+        child_pids.push((chunk, child_name.clone(), pid));
+        eprintln!(
+            "[fork-cut-call-batch-global] forked child chunk={chunk} rows={row_lo}-{row_hi} ({child_name}) pid={pid}"
+        );
+    }
+    // THE PARENT: the load owner and the waiter. Children receipt
+    // their own territories and exit; the parent fails at the FIRST
+    // failing child in CHUNK ORDER (the serial form's first-failure
+    // discipline).
+    let mut first_failure: Option<(usize, String, i32)> = None;
+    for (chunk, name, pid) in &child_pids {
+        let mut status: libc::c_int = 0;
+        if unsafe { libc::waitpid(*pid, &mut status, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        if code != 0 && first_failure.is_none() {
+            first_failure = Some((*chunk, name.clone(), code));
+        }
+    }
+    eprintln!(
+        "[fork-cut-call-batch-global] all {} children exited in {:.0}s (load {:.0}s + children)",
+        child_pids.len(),
+        fork_started.elapsed().as_secs(),
+        load_seconds
+    );
+    if let Some(fork_cow_close) = fork_cow_snapshot().ok() {
+        fork_cow_print("parent-at-close", &fork_cow_close);
+    }
+    if let Some((chunk, name, code)) = first_failure {
+        return Err(io::Error::other(format!(
+            "child chunk={chunk} ({name}) failed with exit code {code}"
+        )));
     }
     Ok(())
 }
@@ -5170,6 +5736,23 @@ fn main() -> io::Result<()> {
             &routes,
             call_rss_budget_gib,
         ),
+        Mode::ForkCutCallBatchGlobal {
+            global_panel,
+            agc,
+            shards_dir,
+            manifest,
+            routes,
+            call_rss_budget_gib,
+            rows_per_child,
+        } => run_fork_cut_call_batch_global(
+            &global_panel,
+            &agc,
+            &shards_dir,
+            &manifest,
+            &routes,
+            call_rss_budget_gib,
+            rows_per_child,
+        ),
         Mode::Trace {
             global_panel,
             agc,
@@ -5506,5 +6089,72 @@ mod global_frame_tests {
             .unwrap();
         assert_eq!(name, record_name);
         assert_eq!((start, end), (250, 350));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE FORK-COW RECEIPTS' OWN PARSER PROOF: the smaps parsing the
+// COW-hold gate reads must be exact on the /proc format (header
+// lines, field sections, the big-mapping filter) — a pure-function
+// test, no /proc read.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod fork_cow_tests {
+    use super::*;
+
+    #[test]
+    fn fork_smaps_parsing_keeps_the_big_mappings_and_their_fields() {
+        let smaps = "\
+7f2a00000000-7f2a30000000 rw-p 00000000 00:00 0                                  \n\
+Size:           1048576 kB\n\
+Rss:            1048576 kB\n\
+Pss:             1048576 kB\n\
+Shared_Clean:         0 kB\n\
+Shared_Dirty:         0 kB\n\
+Private_Clean:        0 kB\n\
+Private_Dirty:  1048576 kB\n\
+7f2b00000000-7f2b01000000 rw-p 00000000 00:00 0                                  \n\
+Size:             65536 kB\n\
+Rss:              65536 kB\n\
+Pss:               32768 kB\n\
+Shared_Clean:     32768 kB\n\
+Shared_Dirty:         0 kB\n\
+Private_Clean:        0 kB\n\
+Private_Dirty:        0 kB\n\
+7f2c00000000-7f2c30000000 r--p 00000000 fd:01 123456  /data/panel.syng.pstep\n\
+Size:           1048577 kB\n\
+Rss:              10000 kB\n\
+Pss:               5000 kB\n\
+Shared_Clean:     10000 kB\n\
+Shared_Dirty:         0 kB\n\
+Private_Clean:        0 kB\n\
+Private_Dirty:        0 kB\n";
+        // The header-line predicate: hex address ranges only.
+        assert!(fork_is_smaps_header(
+            "7f2a00000000-7f2a30000000 rw-p 00000000 00:00 0    "
+        ));
+        assert!(!fork_is_smaps_header("Size:           1048576 kB"));
+        assert!(!fork_is_smaps_header("not-a-range rw-p 00000000 00:00 0"));
+
+        let big = fork_smaps_big_mappings(smaps, 1 << 20);
+        // The 1GiB anon arena and the just-over-1GiB file mapping are
+        // kept; the 64MiB mapping is not.
+        assert_eq!(big.len(), 2);
+        assert_eq!(big[0].size_kb, 1 << 20);
+        assert_eq!(big[0].private_kb(), 1 << 20);
+        assert_eq!(big[0].shared_kb(), 0);
+        assert_eq!(big[0].name, "[anon]");
+        assert_eq!(big[1].size_kb, (1 << 20) + 1);
+        assert_eq!(big[1].rss_kb, 10_000);
+        assert_eq!(big[1].pss_kb, 5_000);
+        assert_eq!(big[1].shared_kb(), 10_000);
+        assert_eq!(big[1].name, "/data/panel.syng.pstep");
+
+        // The field parser matches whole keys only (Shared_* vs
+        // Shared_Clean, "Rss:" vs "Rss_Anon:").
+        let section = "Rss_Anon:         1 kB\nRss:             2 kB\n";
+        assert_eq!(fork_smaps_field(section, "Rss:"), 2);
+        assert_eq!(fork_smaps_field(section, "Rss_Anon:"), 1);
+        assert_eq!(fork_smaps_field(section, "Pss:"), 0);
     }
 }
