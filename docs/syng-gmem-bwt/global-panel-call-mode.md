@@ -1944,3 +1944,247 @@ undesigned); (3) candidate B + the census-superset (the owner's);
 (4) the bind's per-fetch AGC-seek floor (a bulk-prefetch form,
 undesigned); (5) the marathon re-receipt's full form at the next
 campaign window (determinism + wall, if substrates exist).
+
+### 10.6.13 THE UNCLAIMED ENGINEERING LEVERS, MEASURED — THE
+WIDTH-AMORTIZATION CURVE, THE SEGMENT-ALIGNED SEEK FIX (GATE
+PASS), THE THREAD-RUNG TABLE, AND THE CPU-WORK-PER-TERRITORY
+ARITHMETIC THAT CORRECTS THE GENOME WALL (increment 5; commits
+f259c47 the instruments + 511834e the fix; every gate PASS at the
+committed two-sided bar)
+
+**DUTY 1 — THE SCAN-AMORTIZATION CURVE (the biggest unclaimed CPU
+item, measured at widths 8/16/32; gates PASS byte-identity at every
+rung, work dirs forkcutcall-width-W{8,16,32}):** only 4 distinct
+gate territories exist, so the width-W manifest carries W/4 COPIES
+of each (the predecessor's own N=2 COW-probe form, L1x2 —
+the predecessor's own gate-PASS precedent) and only the FIRST L1
+copy carries a call (the cut side is the measurement; the call stays
+the committed 1-call shape). THE HONESTY LABEL the receipts force:
+the copies route every touching read to W/4 copies of its territory,
+so the scan's REMAP term is measured at its per-copy cost (an upper
+bound on the genome-scale marginal for distinct territories — the
+committed receipts already showed 1x→4x flat, and 4x→32x adds only
++28-38s); the DECODE share is measured exactly (it is
+width-insensitive by construction).
+
+| width (rows/child) | scan | cut total | cut/row | child wall | child/row | pre-trim private | post-trim private |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 (committed) | 135-153s | 354s | 354s | 496s | 496s | 35.2-38.95GB | 32.16-32.75GB |
+| 4 (committed) | 141s | 415s | 104s | 666s | 167s | 38.95GB | 32.75GB |
+| 8 | 151s | 519s | 65s | 659s | 82s | 44.98GB | 32.72GB |
+| 16 | 147s | 662s | 41s | 808s | 50.5s | 57.28GB | 32.69GB |
+| 32 | 179s | 968s | 31s | 1116s | 34.9s | 81.75GB | 32.66GB |
+
+THE CURVE: the scan's decode share is WIDTH-INSENSITIVE (141-179s
+across 1x→8x copies — the remap term costs ~4-5s per added copy)
+and the per-territory cut share falls 354s → 104s → 65s → 41s →
+31s; the ~32.7GB post-trim live/fragmentation class is FLAT at
+every width (the scan-side retained set does not grow with rows;
+the PRE-trim peak grows ~+1.5GB/copy — the per-copy cut-state
+arenas — so the child's own memory model at width W is
+~32.7GB live + ~1.5GB/row transient + one call's ~6-10GB). The
+CEILING arithmetic at width 32: (900-34)/~82GB pre-trim ≈ 10
+children x 32 = ~320 territory slots — but the CPU receipt below
+says the box holds 4 children at the committed 64-thread shape,
+so MEMORY IS NO LONGER THE FIRST-BINDING TERM at width >= 8; the
+CPU is.
+
+**THE SCAN-DECODE SERIAL RECEIPT (duty 1's second half, answered by
+measurement):** the scan decodes 19 shard gzip streams, ONE flate2
+reader thread per file (shard_packet_stream's spawned reader), and
+zcat of the biggest shard alone (5.25GB compressed -> 12.9GB) takes
+80s single-streamed (~160MB/s) — the scan wall 141-151s is the
+slowest files' GUNZIP wall, not parallel compute: the decode uses
+at most 19 cores of the 256-core box and IS SERIAL WITHIN EACH
+FILE (the same per-stream decompressor disease as the bind's slot
+class, in its format form). THE FIX CANDIDATE, NAMED, NOT
+IMPLEMENTED: a blocked/frame-indexed shard format (bgzip/zstd
+frames at emit time) would parallelize the decode within a file —
+an OUTPUT-FORMAT change to the projection's own product machinery,
+beyond this increment's seam; the honest receipt is that the scan's
+decode pole is gzip-format-bound at ~80-100s per wave no matter the
+width or the thread shape.
+
+**DUTY 2 — THE BIND SEEK-FLOOR ANATOMY, MEASURED, AND THE FIX
+(GATE PASS, commit 511834e):**
+
+*THE ANATOMY (the f259c47 probe, bind_seek_floor_anatomy_receipt,
+explicit-run at the panel AGC):* lane CHM13#0#chr1 = 248,387,328bp
+over 4,101 segments (~60.6KB mean, kmer 31), and the per-fetch cost
+of fetch_sequence is a FIXED FLOOR, NOT byte-proportional: 200
+random 900B crops = 0.4 ms/fetch (2.3 MB/s), 200 random 6KB crops
+= the SAME 0.4 ms/fetch (15.2 MB/s) — 6.7x the bytes for the same
+wall; 64 sequential 64KB crops = 0.24 ms/fetch (316 MB/s); one
+250KB crop = 1.3 ms. THE MECHANISM, named in ragc-core's own code:
+get_contig_range pays PER OVERLAPPING SEGMENT, EVERY FETCH — a pack
+part re-read + whole-pack zstd re-decompress (get_part_by_id has
+no cache; a delta-stream pack holds 50 LZ-encoded segments) + an
+LZDiff REFERENCE PREPARE (a reference clone + hash-table build) +
+the LZ decode. So the bind's ~6KB-mean lane loads each paid the same
+floor a whole 64KB segment would: the seek floor was the FETCH
+COUNT times ~0.4ms, never the byte volume. THE PRODUCTION RECEIPT
+(the pre-fix IMPG_LANE_TRACE at the T32 rung): p50 per-load = 0.48ms
+(the floor, confirmed in production), 7,688-111,212 bind loads per
+call over exactly 466 lanes (the schedule-dependent union geometry
+the committed receipts already named), sizes mostly <2KB.
+
+*THE FIX — SEGMENT-ALIGNED SPAN GROWTH (a layout change, derived
+from the archive's own decompression unit, never a tuned
+constant):* LaneCache::span now grows the cached span to the
+touched SEGMENTS' own boundaries on every fetch (initial AND both
+delta-extend sides) — the boundaries come from ragc's PUBLIC
+descriptors (get_contig_segments_desc, the same contribution
+formula get_contig_range itself uses) through
+AgcSegmentLayout/Sources::aligned_crop (identity for
+non-segment-addressed FASTA sources, so the committed local frame
+is untouched). BYTE-IDENTITY, the delta-extend argument verbatim:
+the covered span is still a contiguous [lo,hi) whose buffer is
+exactly fetch(lo,hi) by induction (a crop of a fetch answer IS the
+fetch of the crop — the Sources contract), and every served crop is
+a slice of it; the alignment changes only WHICH superset range is
+fetched, never a served byte.
+
+*THE FIX GATE (the committed fork shape, rpc=1, T=64, 4 children;
+work dirs forkcutcall-threads-T64 + forkcutcall-seekfix-T64):* ALL
+4 cut + ALL 4 call receipt files BYTE-IDENTICAL vs BOTH baselines —
+GATE PASS; the served-crop counters identical (1.41-1.48M fetches,
+349.9-358.9MB — the SERVED bytes unchanged, exactly the argument).
+
+*THE FIX RECEIPTS:* the bind-phase lane loads 18,626-107,333 (the
+committed class) → **1,468-2,200 per call — the projected 30-50x
+collapse — AND THE SCHEDULE VARIANCE ITSELF DELETED** (the count is
+now the lane's touched-segment hull, not the thread interleaving:
+loads/lane 3-5, vs the pre-fix 33-225); per-load size 63-95KB (the
+whole-segment class, p50 1.0-1.7ms — the same fixed floor, now
+amortized over the full segment); fetched span volume 111MB →
+133-160MB/call (the segment hull, +20-45% — the memory cost,
+receipted: child rss-at-binding 75.7-78.1GB vs the committed
+77.5-78.3GB class, invisible at scale); binds **36.6-51.2s vs the
+committed 46.1-55.6s band** at the same shape and co-tenancy; the
+load thread-time fell 100-165s → 44-86s summed. THE RESIDUAL,
+NAMED (pre-existing, NOT the fix's — the pre-fix traces carry the
+same class): a handful of multi-second fetches per call (5-21s
+each, ~3-8s of bind wall) — the fresh decompressor pool's FIRST
+fetch pays ragc's whole-archive contig-batch metadata load + cold
+page cache, under the per-lane mutex; the POOL-WARM form at the
+child's own AGC build (one get_contig_range touch per pool, off
+the bind's critical path) is the named next candidate, NOT
+implemented.
+
+**DUTY 3 — THE LOC-PARALLEL THREAD-RUNG TABLE (the per-child thread
+width audit; gates PASS at every rung, work dirs
+forkcutcall-threads-T{32,16,8}; the committed T=64 rung is the
+SS10.6.12 receipt):** the fork form, rpc=1 (4 concurrent children,
+one territory + one call each), re-run at RAYON_NUM_THREADS 32/16/8
+— the audit's question is territory throughput per CORE-SECOND,
+not per-process:
+
+| child threads T | box threads (4xT + 4x16 seam) | 4-way scans | cut phases | children | binds | territories/core-second |
+|---|---|---|---|---|---|---|
+| 64 (committed) | 320 (OVERSUBSCRIBED) | 378-485s | 572-693s | 725-841s | 46.1-55.6s | 4/(841x320) = 1.5e-5 |
+| 32 | 192 | 264-286s | 408-454s | 540-604s | 49.1-59.2s | 4/(611x192) = 3.4e-5 |
+| 16 | 128 | 147-164s | 279-340s | 411-492s | 47.1-60.8s | 4/(498x128) = 6.3e-5 |
+| 8 | 96 | 119-159s | 268-414s | 401-580s | 47.1-61.6s | 4/(585x96) = 7.1e-5 |
+
+THE FINDINGS THE RECEIPTS FORCE: (a) **THE SS10.6.12 SCAN
+CONTENTION (2.5-3.2x AT 4-WAY) WAS OVERSUBSCRIPTION, NOT A
+MEMORY-BANDWIDTH WALL** — at T=16 the same 4-way scans run at the
+SOLO class (147-164s vs 135-153s solo), and even T=8 holds it
+(119-159s): 320 threads on 256 cores was the whole disease; (b)
+the scan is thread-width-INSENSITIVE below 32 (it is gunzip-IO-
+bound, at most 19 streams — the duty-1 decode receipt); (c) the
+bind is SEAM-width-bound (16 scoped threads per call), insensitive
+to the rayon width (47-62s at every T); (d) the per-core-second
+throughput RISES as the width falls (1.5e-5 → 7.1e-5, 4.8x), because
+the oversubscribed rung burns cores waiting. THE DERIVED SHAPE at
+the box: children x T <= 256 with T in the 8-16 band avoid the
+oversubscription class entirely — but the WIDTH receipts above say
+the territory count per child should be wide (the scan share), so
+the honest fleet shape is WIDE children at NARROW threads; the
+W-x-T interaction (e.g. width 16 at T=16) is the named unmeasured
+cell of the matrix.
+
+**DUTY 4 — THE BUDGET, RESTATED AT THE CPU-WORK-PER-TERRITORY
+ARITHMETIC (the correction this increment's receipts force on the
+SS10.6.12 headline):** the box-saturation arithmetic made explicit
+— a fleet cannot beat WORK/CORES, and the SS10.6.12 genome-wall
+number (44-48 slots x 666s waves = ~22.5-24.6h) charged the SOLO
+666s wall to 11-12 CONCURRENT 64-thread children (704-768 threads
+on 256 cores, the receipts' own caveat) — it was a memory-ceiling
+extrapolation, not a CPU-honest one.
+
+*The CPU-work-per-territory table (wall-charged: phase wall x
+threads configured; the cut at 64 rayon, the call at 64 rayon + 16
+seam per concurrent call):*
+
+| form | cut core-s/row | call core-s/call | per-territory (real shape: 1 call each) |
+|---|---:|---:|---:|
+| width 1 (solo) | 354x64 = 22,656 | 129x80 = 10,320 | ~32,976 |
+| width 4 (committed) | 415x64/4 = 6,640 | 229x128/4 = 7,328 | ~13,968 |
+| width 32 (this increment) | 968x64/32 = 1,936 | ~5,000-7,300 (the bracket: phase-timer CPU ~3,200-4,700 true + inputs/context; wall-charged 7,328 at the 4-concurrent packing) | **~6,900-9,200** |
+
+THE HONEST HEADLINE: **the width amortization collapsed the CUT
+(from ~6,640 to ~1,936 core-s/territory — 3.4x) but the CALL never
+amortized, and at wide rows the CALL IS NOW ~75-80% OF THE
+PER-TERRITORY CPU WORK.** The genome-wall floor at the receipts:
+5,844 territories x ~6,900-9,200 core-s / 256 cores = **~44-60h at
+the width-32 shape** (vs the width-4 committed shape's own honest
+floor, 5,844 x ~13,968 / 256 = ~88.6h — the SS10.6.12 headline of
+22.5-24.6h was ~3.7x optimistic, exactly what its own caveat
+said); the wall-charged wave arithmetic agrees (width-32 children:
+cut 968s + a 16-32-call in-child phase, 4 concurrent children,
+~45-60h). NO number in this table is extrapolated beyond its
+receipt except the two labeled terms (the 16-32-call in-child
+concurrency wall, unmeasured — the committed 4-concurrent receipt
+is the rung; and the whole-child 4-way contention at width 32,
+the width-4 receipt's 1.26x class).
+
+*THE 20-MINUTE FLOOR:* 5,844 territories x X core-s / 256 cores =
+1,200s -> **X = 52.6 core-s/territory**. Today's honest
+per-territory work at the best receipted shape is ~6,900-9,200
+core-s — **the remaining gap is ~130-175x**, and the earlier
+scratch-table figure (~2,237 core-s/territory, ~43x) is CORRECTED
+HERE as an artifact: it divided ONE call's cost by 32 rows; every
+territory needs its own call, and the call is the dominant term.
+
+*THE POLES, each labeled with its receipt:*
+
+- **THE CALL (~5,000-7,300 core-s/territory, the dominant term) —
+  split:** the LOCI CORE (loci walls 30-86s at 64 threads ≈
+  2,000-5,500 core-s — **candidate B (the always-on exactness
+  assertion) and the census-superset are THE OWNER'S decisions**,
+  OWNER-DECISION); the BIND (~880-820 core-s of true summed-thread
+  work: steps 246-461s + verify 418-539s at 16 seams — the seek fix
+  landed, the pool-warm residual ~3-8s named, ENGINEERING); the
+  INPUTS phase (41-50s, mostly single-threaded census/maps/AGC
+  loads — an IO class, ENGINEERING); the context/rows assembly
+  (11-19s, serial — ENGINEERING).
+- **THE CUT at width 32 (~1,936 core-s/territory, wall-charged):**
+  the scan decode (~358 core-s — gzip-format-bound, the
+  blocked-shard-format candidate, ENGINEERING), the per-territory
+  setup/emission/cut-state classes (~1,578 — the remap/records
+  classes, ENGINEERING).
+- **THE BOX-LIMIT:** 256 cores — the floor arithmetic's own
+denominator; the oversubscription receipts say the fleet must run
+children x T <= 256 (the T-rung table), and at width >= 8 the
+memory ceiling no longer binds first (pre-trim peaks 45-82GB/child:
+4-10 children fit the 1TB model).
+
+**THE EXACT RESUME POINT (increment 5 closes complete):** the four
+duties landed and gated — (1) the width-amortization curve + the
+scan-decode serial receipt (the blocked-shard format the named
+unimplemented candidate); (2) the seek-floor anatomy + the
+segment-aligned fix (GATE PASS, the load collapse receipted, the
+pool-warm residual named); (3) the thread-rung table (the
+oversubscription finding; wide-children-at-narrow-threads the
+derived shape; the W-x-T cell the named unmeasured term); (4) this
+budget restatement. THE REMAINING ORDER: (a) the W-x-T fleet cell
+(width 16-32 children at T 8-16) — one measured wave closes the
+last labeled extrapolation; (b) the in-child call-phase packing at
+wide rows (16-32 concurrent calls, the committed 4-concurrent
+receipt's rung); (c) the pool-warm form; (d) the blocked-shard
+format (an output-format change, the owner's seam); (e) candidate B
++ the census-superset (the owner's — the receipts now say the path
+to 20 minutes runs THROUGH the call, which is 75-80% of the honest
+CPU work); (f) the marathon re-receipt's full form at the next
+campaign window.
