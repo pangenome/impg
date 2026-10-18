@@ -312,7 +312,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -324,23 +324,25 @@ use std::time::Instant;
 /// uniformly trimmed length). Derived from the derive cache's own
 /// uniform read length at load (the cache is a pure function of the
 /// FASTQ and the panel).
-/// THE FRESH-PROCESS READ LENGTH (the static's committed initial
-/// value): every committed receipt computes the elsewhere branch E
-/// BEFORE the derive cache stores the cache's own declared read
-/// length, so E is measured at THIS value in every standalone run.
-/// The combined cut+call process (multiple calls per process) must
-/// reset the process-global at every call entry or a later call's E
-/// would read the previous call's cache length — the first combined
-/// gate's measured divergence: L2's E at L1's stale 148 vs the
-/// committed 150, a uniform +0.0063 shift at every locus, no fold-
-/// material flips (the reset pins every call to the fresh-process
-/// trajectory, byte-identity by construction).
+/// THE FRESH-PROCESS READ LENGTH (the committed initial value of
+/// the read length in every standalone run): every committed receipt
+/// computes the elsewhere branch E BEFORE the derive cache states the
+/// cache's own declared read length, so E is measured at THIS value
+/// in every standalone run.
+/// THE CONCURRENT-CALLS AMENDMENT: the read length is now PER-CALL
+/// state (a local in `run_injected`), not a process-global — under
+/// the combined process's CONCURRENT calls a process-global would
+/// race across calls (one call's derive-cache store landing before
+/// another call's E read, the exact divergence class the serial
+/// combined process's first gate receipted at the stale 148). The
+/// per-call local reproduces the fresh-process trajectory BY
+/// CONSTRUCTION at any call concurrency: initialized here, read at E
+/// before the derive load stores the declared length, and shared
+/// immutably with the seam threads afterwards.
 const READ_LENGTH_FRESH: usize = 150;
-static READ_LENGTH: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(READ_LENGTH_FRESH);
 #[inline]
 fn read_len() -> usize {
-    READ_LENGTH.load(Ordering::Relaxed)
+    READ_LENGTH_FRESH
 }
 
 // ---------------------------------------------------------------------------
@@ -2132,9 +2134,7 @@ fn shared_node_mass(left: &[(u64, u32)], right: &[(u64, u32)]) -> u64 {
 #[allow(clippy::type_complexity)]
 fn alignment_connected_merge(
     folds: Vec<Fold>,
-    matrix: Vec<Vec<f64>>,
-    pinned: Vec<Vec<bool>>,
-    mismatches: Vec<Vec<u32>>,
+    matrix: ScoreMatrix,
     territory: Vec<(u64, u64)>,
     axis_fold: Option<usize>,
     territory_axis_fold: Option<usize>,
@@ -2142,9 +2142,7 @@ fn alignment_connected_merge(
     observed_edge: &HashMap<u64, f64>,
 ) -> (
     Vec<Fold>,
-    Vec<Vec<f64>>,
-    Vec<Vec<bool>>,
-    Vec<Vec<u32>>,
+    ScoreMatrix,
     Vec<(u64, u64)>,
     Option<usize>,
     Vec<MergeGroupReceipt>,
@@ -2163,8 +2161,6 @@ fn alignment_connected_merge(
         return (
             folds,
             matrix,
-            pinned,
-            mismatches,
             territory,
             territory_axis_fold,
             groups,
@@ -2175,8 +2171,6 @@ fn alignment_connected_merge(
         return (
             folds,
             matrix,
-            pinned,
-            mismatches,
             territory,
             territory_axis_fold,
             groups,
@@ -2204,9 +2198,12 @@ fn alignment_connected_merge(
     let roots: Vec<usize> = (0..n).map(|i| components.find(i)).collect();
     // The equal-column buckets (the safety condition's candidate
     // set: only bit-identical columns can be indistinguishable).
+    // (Candidate C: the hash is the row's canonical VALUE hash — the
+    // committed fnv-over-bits, read through the compressed form — so
+    // two equal columns hash equal whichever encoding each row took.)
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (index, column) in matrix.iter().enumerate() {
-        buckets.entry(column_bits_hash(column)).or_default().push(index);
+    for index in 0..n {
+        buckets.entry(matrix.ll_bits_hash(index)).or_default().push(index);
     }
     let node_mass = |key: u64| observed_node.get(&key).copied().unwrap_or(0.0);
     let edge_mass = |key: u64| observed_edge.get(&key).copied().unwrap_or(0.0);
@@ -2238,11 +2235,7 @@ fn alignment_connected_merge(
                     // (Hash buckets can collide: verify the columns
                     // bit-exactly — the safety condition's exact
                     // predicate, never the hash.)
-                    if !matrix[i]
-                        .iter()
-                        .zip(&matrix[j])
-                        .all(|(x, y)| x.to_bits() == y.to_bits())
-                    {
+                    if !matrix.ll_bits_equal(i, j) {
                         continue;
                     }
                     out.equal_column_pairs += 1;
@@ -2342,10 +2335,7 @@ fn alignment_connected_merge(
                 // (The admitted-pair transitivity proof, asserted: every
                 // member's column is bit-identical to the representative's.)
                 assert!(
-                    matrix[member]
-                        .iter()
-                        .zip(&matrix[old])
-                        .all(|(x, y)| x.to_bits() == y.to_bits()),
+                    matrix.ll_bits_equal(member, old),
                     "merged group with distinguishable members"
                 );
                 let member_fold =
@@ -2400,26 +2390,25 @@ fn alignment_connected_merge(
     // fold's representative (the merged fold carries the
     // representative's column — asserted bit-identical to every
     // member's above).
-    let new_matrix: Vec<Vec<f64>> = new_representatives
+    // The per-fold rows regroup onto each new fold's representative
+    // (the merged fold carries the representative's column — asserted
+    // bit-identical to every member's above), at the row's own
+    // encoding (the committed clone, compressed).
+    let new_rows: Vec<ScoreRow> = new_representatives
         .iter()
-        .map(|&old| matrix[old].clone())
+        .map(|&old| matrix.row_clone(old))
         .collect();
-    let new_pinned: Vec<Vec<bool>> = new_representatives
-        .iter()
-        .map(|&old| pinned[old].clone())
-        .collect();
-    let new_mismatches: Vec<Vec<u32>> = new_representatives
-        .iter()
-        .map(|&old| mismatches[old].clone())
-        .collect();
+    let new_matrix = ScoreMatrix {
+        n_units: matrix.n_units,
+        elsewhere: matrix.elsewhere,
+        rows: new_rows,
+    };
     let new_territory: Vec<(u64, u64)> =
         new_representatives.iter().map(|&old| territory[old]).collect();
     let new_territory_axis_fold = territory_axis_fold.map(|index| remap[index]);
     (
         new_folds,
         new_matrix,
-        new_pinned,
-        new_mismatches,
         new_territory,
         new_territory_axis_fold,
         groups,
@@ -2889,9 +2878,12 @@ impl Scoring {
     /// branch's per-placement terms; as a logsumexp term it
     /// underflows to +0.0 exactly wherever an anchored placement
     /// exists (150 * ln(eps/3) ~ -1546 against placement scores ~ -1).
+    /// (The read length is PER-CALL state now — passed by the caller,
+    /// never a process-global, so concurrent calls in one process
+    /// cannot read each other's length.)
     #[inline]
-    fn floor(&self) -> f64 {
-        read_len() as f64 * self.b
+    fn floor(&self, read_len: usize) -> f64 {
+        read_len as f64 * self.b
     }
 }
 
@@ -3447,14 +3439,425 @@ fn direct_score(
 fn unit_log_likelihood(
     scores: &[f64],
     fold_len: u64,
+    read_len: usize,
 ) -> f64 {
-    if scores.is_empty() || fold_len < read_len() as u64 {
+    if scores.is_empty() || fold_len < read_len as u64 {
         return f64::NEG_INFINITY;
     }
-    let prior = -(2.0 * (fold_len - read_len() as u64 + 1) as f64).ln();
+    let prior = -(2.0 * (fold_len - read_len as u64 + 1) as f64).ln();
     let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let sum: f64 = scores.iter().map(|&s| (s - best).exp()).sum();
     prior + best + sum.ln()
+}
+
+// ---------------------------------------------------------------------------
+// THE ROW-COMPRESSED SCORING MATRIX (candidate C — the marathon
+// profile's dense-matrix memory tail, the guard-kill class's fix).
+//
+// THE MEASURED DISEASE (SS10.6.3's receipts): the per-locus scoring
+// matrix holds a dense (folds x units) ll/pinned/mismatches triple at
+// 13 B/pair — ~33GB at the worst measured marathon locus (T03411:
+// 490 x 5,160,612 = 2.53e9 pairs) — the 64GiB guard-kill class's
+// direct cause (134 kills; completions 54-71GB). At the >=98%-no-pin
+// loci the mass is the CONSTANT no-pin triple (ll = the elsewhere
+// branch, pinned = false, mismatches = 0) for nearly every pair.
+//
+// THE EXACTNESS ARGUMENT (bit-for-bit, NO approximation): the pair
+// loop's pinned path can never produce the no-pin triple — a pinned
+// pair's local branch is finite (scores nonempty), so its
+// marginalization logsumexp2(local, E) is STRICTLY greater than E;
+// and an unpinned pair's mismatches stay 0 (nothing accumulated) with
+// ll exactly E (the empty-scores local branch is NEG_INFINITY and
+// logsumexp2(-inf, E) = E). The triple therefore PARTITIONS: an entry
+// equals the no-pin constant iff the unit is unpinned on that fold —
+// a value-identical compression. Every consumer reads the SAME f64
+// bits, the SAME bool, the SAME u32 it read from the dense form, in
+// the SAME iteration order (the class scan's accumulation order is
+// unit order, unchanged), so every downstream float operation is
+// unchanged: the outputs are byte-identical by construction.
+//
+// THE ROW ENCODING (a DERIVED choice per row, never tuned): a row
+// keeps the committed dense form iff the sparse form would be no
+// smaller — the sparse form costs 16 B/pinned entry (unit + ll +
+// mismatches) against the dense 13 B/unit — so the pinned-majority
+// marathon loci (T03641 at 84% pinned) keep the committed size
+// EXACTLY (never larger), and the no-pin-majority loci (T03803 at 2%
+// pinned) collapse ~39x. The bound is per row: min(13 x n_units,
+// 16 x pinned_in_row) bytes.
+// ---------------------------------------------------------------------------
+
+/// The SPARSE row: the pinned entries only (unit, ll, mismatches),
+/// sorted by unit, structure-of-arrays. An absent unit reads the
+/// no-pin constant (elsewhere, false, 0) — exactly the dense form's
+/// value there, per the exactness argument above. (A pinned=false
+/// entry always equals the constant — proven above — so the sparse
+/// row IS the pinned set.)
+struct ScoreRowSparse {
+    units: Vec<u32>,
+    lls: Vec<f64>,
+    mismatches: Vec<u32>,
+}
+
+/// The DENSE row: the committed layout verbatim (13 B/unit).
+struct ScoreRowDense {
+    ll: Vec<f64>,
+    pinned: Vec<bool>,
+    mismatches: Vec<u32>,
+}
+
+enum ScoreRow {
+    Dense(ScoreRowDense),
+    Sparse(ScoreRowSparse),
+}
+
+impl ScoreRow {
+    /// Build the row from the pair loop's dense accumulators, taking
+    /// the SMALLER of the two encodings (the derived bound, never a
+    /// tuned crossover): dense bytes are 13/unit, sparse bytes are
+    /// 16 per entry that differs from the no-pin constant.
+    fn from_pair_loop(
+        ll: Vec<f64>,
+        pinned: Vec<bool>,
+        mismatches: Vec<u32>,
+        elsewhere: f64,
+    ) -> ScoreRow {
+        let default_bits = elsewhere.to_bits();
+        let sparse_len = ll
+            .iter()
+            .zip(&pinned)
+            .zip(&mismatches)
+            .filter(|((&value, &is_pinned), &m)| {
+                is_pinned || value.to_bits() != default_bits || m != 0
+            })
+            .count();
+        if 16 * sparse_len as u64 >= 13 * ll.len() as u64 {
+            return ScoreRow::Dense(ScoreRowDense {
+                ll,
+                pinned,
+                mismatches,
+            });
+        }
+        let mut units = Vec::with_capacity(sparse_len);
+        let mut lls = Vec::with_capacity(sparse_len);
+        let mut mism = Vec::with_capacity(sparse_len);
+        for (unit, ((&value, &is_pinned), &m)) in
+            ll.iter().zip(&pinned).zip(&mismatches).enumerate()
+        {
+            if is_pinned || value.to_bits() != default_bits || m != 0 {
+                units.push(unit as u32);
+                lls.push(value);
+                mism.push(m);
+            }
+        }
+        ScoreRow::Sparse(ScoreRowSparse {
+            units,
+            lls,
+            mismatches: mism,
+        })
+    }
+
+    /// ll at `unit` (a random-access probe; the monotone-scan form is
+    /// the cursor below). Absent sparse entries read the no-pin
+    /// constant.
+    fn ll_probe(&self, unit: usize, elsewhere: f64) -> f64 {
+        match self {
+            ScoreRow::Dense(dense) => dense.ll[unit],
+            ScoreRow::Sparse(sparse) => match sparse
+                .units
+                .binary_search(&(unit as u32))
+            {
+                Ok(index) => sparse.lls[index],
+                Err(_) => elsewhere,
+            },
+        }
+    }
+
+    /// The pinned flag at `unit`.
+    fn pinned_probe(&self, unit: usize) -> bool {
+        match self {
+            ScoreRow::Dense(dense) => dense.pinned[unit],
+            ScoreRow::Sparse(sparse) => {
+                sparse.units.binary_search(&(unit as u32)).is_ok()
+            }
+        }
+    }
+
+    /// The mismatches at `unit` (the committed u32 value).
+    fn mismatches_probe(&self, unit: usize) -> u32 {
+        match self {
+            ScoreRow::Dense(dense) => dense.mismatches[unit],
+            ScoreRow::Sparse(sparse) => {
+                match sparse.units.binary_search(&(unit as u32)) {
+                    Ok(index) => sparse.mismatches[index],
+                    Err(_) => 0,
+                }
+            }
+        }
+    }
+
+    /// The pinned pairs of this row in UNIT ORDER: (unit,
+    /// mismatches) — the enumeration the exactness sample and the
+    /// named-fold strata walk (the dense form's `(0..n_units)
+    /// .filter(pinned)` in the same order).
+    fn pinned_units(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
+        match self {
+            ScoreRow::Dense(dense) => dense
+                .pinned
+                .iter()
+                .enumerate()
+                .filter(|(_, &is_pinned)| is_pinned)
+                .map(|(unit, _)| (unit, dense.mismatches[unit]))
+                .collect::<Vec<_>>()
+                .into_iter(),
+            ScoreRow::Sparse(sparse) => sparse
+                .units
+                .iter()
+                .zip(&sparse.mismatches)
+                .map(|(&unit, &m)| (unit as usize, m))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    /// Bit-exact equality of the two rows' LL COLUMNS (the merge's
+    /// own safety predicate — the committed comparison was over the
+    /// ll matrix alone, and this one is too). Both rows walk units in
+    /// order, so every compared pair of values is the pair the dense
+    /// comparison compared.
+    fn ll_bits_equal(&self, other: &ScoreRow, n_units: usize, elsewhere: f64) -> bool {
+        let mut a = RowCursor::new(self);
+        let mut b = RowCursor::new(other);
+        for unit in 0..n_units {
+            if a.ll_at(unit, elsewhere).to_bits()
+                != b.ll_at(unit, elsewhere).to_bits()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The canonical LL-column hash (the merge's bucketing): the
+    /// value bits in unit order — variant-independent, so two equal
+    /// rows hash equal whichever encoding each took. (The hash only
+    /// buckets candidates; the exact predicate above decides.)
+    fn ll_bits_hash(&self, n_units: usize, elsewhere: f64) -> u64 {
+        let mut cursor = RowCursor::new(self);
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for unit in 0..n_units {
+            for byte in cursor.ll_at(unit, elsewhere).to_bits().to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// Serialize the row's LL column in the DENSE form's exact bytes
+    /// (serde_json's `Vec<Vec<f64>>` element shape: `[` + the values
+    /// joined by `,` + `]`), reconstructing the dense values from the
+    /// compressed form one at a time — the caller streams this row to
+    /// the ingredients spill, so the dense column never materializes.
+    fn write_ll_row_json(
+        &self,
+        writer: &mut impl std::io::Write,
+        n_units: usize,
+        elsewhere: f64,
+    ) -> std::io::Result<()> {
+        let mut cursor = RowCursor::new(self);
+        writer.write_all(b"[")?;
+        for unit in 0..n_units {
+            if unit > 0 {
+                writer.write_all(b",")?;
+            }
+            serde_json::to_writer(&mut *writer, &cursor.ll_at(unit, elsewhere))?;
+        }
+        writer.write_all(b"]")?;
+        Ok(())
+    }
+
+    /// The row's live bytes (the memory bound's own accounting).
+    fn live_bytes(&self) -> u64 {
+        match self {
+            ScoreRow::Dense(dense) => {
+                13 * dense.ll.len() as u64
+            }
+            ScoreRow::Sparse(sparse) => {
+                16 * sparse.units.len() as u64
+            }
+        }
+    }
+}
+
+/// A monotone cursor over one row (the class scan's per-unit walk):
+/// O(1) amortized per unit, sparse or dense — no binary search on the
+/// scan path.
+struct RowCursor<'a> {
+    row: &'a ScoreRow,
+    index: usize,
+}
+impl<'a> RowCursor<'a> {
+    fn new(row: &'a ScoreRow) -> RowCursor<'a> {
+        RowCursor { row, index: 0 }
+    }
+    /// The ll at `unit`, assuming monotone non-decreasing access.
+    fn ll_at(&mut self, unit: usize, elsewhere: f64) -> f64 {
+        match self.row {
+            ScoreRow::Dense(dense) => dense.ll[unit],
+            ScoreRow::Sparse(sparse) => {
+                while self.index < sparse.units.len()
+                    && (sparse.units[self.index] as usize) < unit
+                {
+                    self.index += 1;
+                }
+                if self.index < sparse.units.len()
+                    && sparse.units[self.index] as usize == unit
+                {
+                    sparse.lls[self.index]
+                } else {
+                    elsewhere
+                }
+            }
+        }
+    }
+}
+
+/// The per-locus scoring matrix: one row per fold, the committed
+/// triple (ll, pinned, mismatches) in the per-row smaller encoding.
+struct ScoreMatrix {
+    n_units: usize,
+    elsewhere: f64,
+    rows: Vec<ScoreRow>,
+}
+
+impl ScoreMatrix {
+    fn n_folds(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// ll at (fold, unit) — the dense form's `matrix[fold][unit]`.
+    fn ll(&self, fold: usize, unit: usize) -> f64 {
+        self.rows[fold].ll_probe(unit, self.elsewhere)
+    }
+
+    /// The pinned flag — the dense form's `pinned[fold][unit]`.
+    fn pinned(&self, fold: usize, unit: usize) -> bool {
+        self.rows[fold].pinned_probe(unit)
+    }
+
+    /// The mismatches — the dense form's `mismatches[fold][unit]`.
+    fn mismatches(&self, fold: usize, unit: usize) -> u32 {
+        self.rows[fold].mismatches_probe(unit)
+    }
+
+    /// The pinned pairs of a fold in unit order.
+    fn pinned_units(&self, fold: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
+        self.rows[fold].pinned_units()
+    }
+
+    /// THE CLASS PAIR SUM — the exhaustive classes' own accumulation,
+    /// verbatim in order and arithmetic: `total += count *
+    /// mix_logsumexp(ll_a[u], ll_b[u])` over units ascending. The
+    /// cursors read the same values the dense rows held (the
+    /// compressed form's absent entries ARE the no-pin constant), so
+    /// the sum is the committed sum bit for bit.
+    fn class_pair_sum(
+        &self,
+        first: usize,
+        second: usize,
+        unit_counts: &[f64],
+    ) -> f64 {
+        let mut a = RowCursor::new(&self.rows[first]);
+        let mut b = RowCursor::new(&self.rows[second]);
+        let mut total = 0.0f64;
+        for (unit, &count) in unit_counts.iter().enumerate() {
+            total += count
+                * mix_logsumexp(
+                    a.ll_at(unit, self.elsewhere),
+                    b.ll_at(unit, self.elsewhere),
+                );
+        }
+        total
+    }
+
+    /// The merge's bit-exact column predicate.
+    fn ll_bits_equal(&self, a: usize, b: usize) -> bool {
+        self.rows[a].ll_bits_equal(&self.rows[b], self.n_units, self.elsewhere)
+    }
+
+    /// The merge's bucketing hash.
+    fn ll_bits_hash(&self, fold: usize) -> u64 {
+        self.rows[fold].ll_bits_hash(self.n_units, self.elsewhere)
+    }
+
+    /// The representative's row for a merged fold (the committed
+    /// clone, at the row's own encoding).
+    fn row_clone(&self, fold: usize) -> ScoreRow {
+        match &self.rows[fold] {
+            ScoreRow::Dense(dense) => ScoreRow::Dense(ScoreRowDense {
+                ll: dense.ll.clone(),
+                pinned: dense.pinned.clone(),
+                mismatches: dense.mismatches.clone(),
+            }),
+            ScoreRow::Sparse(sparse) => ScoreRow::Sparse(ScoreRowSparse {
+                units: sparse.units.clone(),
+                lls: sparse.lls.clone(),
+                mismatches: sparse.mismatches.clone(),
+            }),
+        }
+    }
+
+    /// The matrix's live bytes (the memory bound receipt).
+    fn live_bytes(&self) -> u64 {
+        self.rows.iter().map(|row| row.live_bytes()).sum()
+    }
+
+    /// Serialize the WHOLE ll matrix in the dense form's exact bytes
+    /// (serde_json's `Vec<Vec<f64>>` shape), one row at a time — the
+    /// ingredients receipt's ll_matrix, streamed so the dense
+    /// materialization never exists (candidate C's second pole: the
+    /// committed form buffered the whole matrix as JSON text in RAM,
+    /// ~20 B/pair at the worst marathon loci — a second matrix,
+    /// larger than the first, held while the first was still alive).
+    fn write_ll_matrix_json(
+        &self,
+        writer: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        writer.write_all(b"[")?;
+        for fold in 0..self.rows.len() {
+            if fold > 0 {
+                writer.write_all(b",")?;
+            }
+            self.rows[fold]
+                .write_ll_row_json(&mut *writer, self.n_units, self.elsewhere)?;
+        }
+        writer.write_all(b"]")?;
+        Ok(())
+    }
+
+    /// The committed dense construction (the tests' and the merge
+    /// tests' own shape).
+    fn from_dense(
+        matrix: Vec<Vec<f64>>,
+        pinned: Vec<Vec<bool>>,
+        mismatches: Vec<Vec<u32>>,
+        elsewhere: f64,
+    ) -> ScoreMatrix {
+        let n_units = matrix.first().map(|row| row.len()).unwrap_or(0);
+        let rows = matrix
+            .into_iter()
+            .zip(pinned)
+            .zip(mismatches)
+            .map(|((ll, pinned), mismatches)| {
+                ScoreRow::from_pair_loop(ll, pinned, mismatches, elsewhere)
+            })
+            .collect();
+        ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows,
+        }
+    }
 }
 
 /// The COLLINEARITY verdict of one placement's pins (the slice C
@@ -3560,6 +3963,18 @@ fn single_offset_score(
 // the outputs are interleaving-independent by construction — the
 // byte-identity gate against the serial receipts is the race
 // detector.)
+/// The per-locus ingredients spill path (candidate C's streaming
+/// emission): the receipts phase streams the locus's ingredients
+/// line here, and the ordered emission below copies it into the
+/// ingredients file and removes the spill — same bytes as the
+/// committed buffered form, bounded RAM.
+fn ingredients_spill_path(out: &Path, locus: u32) -> PathBuf {
+    out.with_file_name(format!(
+        "{}.ingredients.spill-{locus}.tmp",
+        out.file_name().and_then(|name| name.to_str()).unwrap_or("")
+    ))
+}
+
 fn seam_map<T: Sync, R: Send>(
     items: &[T],
     width: usize,
@@ -3747,14 +4162,23 @@ pub fn run(options: Options) -> io::Result<()> {
     run_injected(options, None)
 }
 pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io::Result<()> {
-    // (THE COMBINED-PROCESS CALL BOUNDARY: the read length is a
-    // process-global in the committed single-call-per-process shape;
-    // a combined process's Nth call must see the FRESH-PROCESS state
-    // exactly — E is computed before the derive cache stores the
-    // cache's own declared length, so the reset pins every call's E
-    // to the committed fresh-process value, never the previous
-    // call's cache length.)
-    READ_LENGTH.store(READ_LENGTH_FRESH, Ordering::Release);
+    // (THE PER-CALL READ LENGTH — the concurrent-calls audit's
+    // finding, the one mutable process-global the call path held:
+    // every committed receipt's E is computed at the FRESH-PROCESS
+    // value 150 BEFORE the derive cache stores the cache's own
+    // declared length, and every later read (the skipped-positions
+    // sites, the unit likelihood, the scoring receipt) reads the
+    // DECLARED value. The value is therefore PER-CALL state — a
+    // plain local, initialized fresh, stored once at the derive-cache
+    // load — so the combined process's CONCURRENT calls cannot read
+    // each other's length (the serial form's first-gate divergence,
+    // the stale-148 class, is impossible by construction, not by
+    // reset discipline).
+    // (Deferred to the derive-cache load below, where the declared
+    // length is stored — the only assignment; every read after it,
+    // including the seam threads' closures, sees the declared
+    // value.)
+    let read_length;
     let started = Instant::now();
     let rss = RssGuard::new(options.rss_budget_gib);
     // (THE RECORD-ORIGIN GATE: the content-origin parameter belongs to
@@ -4397,7 +4821,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             declared > 0 && seqs.iter().all(|seq| seq.len() == declared),
             "cached reads do not share one length",
         )?;
-        READ_LENGTH.store(declared, Ordering::Release);
+        read_length = declared;
         (tokens, lists, seqs, mults, records)
     };
     let derive_seconds = derive_started.elapsed().as_secs_f64();
@@ -5140,7 +5564,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         skeleton: Vec<u8>,
         exactness: Vec<u8>,
         records: Vec<u8>,
-        ingredients: Vec<u8>,
+        // (Candidate C: the ingredients line is streamed to a
+        // per-locus SPILL file at the receipts phase and copied into
+        // the ordered ingredients file below — the ll_matrix JSON
+        // never materializes in RAM. The final file's bytes are the
+        // committed form's exactly.)
+        ingredients_spill: PathBuf,
         report: Vec<u8>,
         anatomy: Vec<u8>,
         product: Vec<u8>,
@@ -5155,7 +5584,6 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let mut skeleton_buf: Vec<u8> = Vec::new();
         let mut exactness_buf: Vec<u8> = Vec::new();
         let mut records_buf: Vec<u8> = Vec::new();
-        let mut ingredients_buf: Vec<u8> = Vec::new();
         let mut report_buf: Vec<u8> = Vec::new();
         let mut anatomy_buf: Vec<u8> = Vec::new();
         let mut product_buf: Vec<u8> = Vec::new();
@@ -5645,9 +6073,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // ------------------------------- the scoring matrix (parallel folds)
         let scoring_started = Instant::now();
         struct FoldScore {
-            ll: Vec<f64>,
-            pinned: Vec<bool>,
-            mismatches: Vec<u32>,
+            // (Candidate C: the row in its per-row smaller encoding —
+            // the dense triple below is the pair loop's accumulator,
+            // consumed by ScoreRow::from_pair_loop at the row's end.)
+            row: ScoreRow,
             factorized_checked: u64,
             factorized_equal: u64,
             edge_discarded: u64,
@@ -5815,15 +6244,13 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     // (a full-match truth placement vs a rival's
                     // worse placement) survive the marginalization.
                     ll.push(logsumexp2(
-                        unit_log_likelihood(&scores, img_hi - img_lo),
+                        unit_log_likelihood(&scores, img_hi - img_lo, read_length),
                         elsewhere,
                     ));
                     mismatches.push(unit_mismatches);
                 }
                 FoldScore {
-                    ll,
-                    pinned,
-                    mismatches,
+                    row: ScoreRow::from_pair_loop(ll, pinned, mismatches, elsewhere),
                     factorized_checked,
                     factorized_equal,
                     edge_discarded,
@@ -5833,14 +6260,30 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             })
             .collect();
         let scoring_seconds = scoring_started.elapsed().as_secs_f64();
-        let matrix: Vec<Vec<f64>> = scored.iter().map(|s| s.ll.clone()).collect();
-        let pinned: Vec<Vec<bool>> = scored.iter().map(|s| s.pinned.clone()).collect();
-        let mismatches: Vec<Vec<u32>> = scored.iter().map(|s| s.mismatches.clone()).collect();
+        // (Candidate C: the matrix is the per-row smaller encoding —
+        // the committed dense clone-collect (a second 13B/pair copy,
+        // transiently TWO copies of the whole matrix) is gone; the
+        // pinned-majority rows keep the committed 13B/unit size and
+        // the no-pin-majority rows collapse to 16B/pinned entry.)
         let factorized_checked: u64 = scored.iter().map(|s| s.factorized_checked).sum();
         let factorized_equal: u64 = scored.iter().map(|s| s.factorized_equal).sum();
         let edge_discarded: u64 = scored.iter().map(|s| s.edge_discarded).sum();
         let no_pin: u64 = scored.iter().map(|s| s.no_pin_records).sum();
         let abstained_hull_bp: u64 = scored.iter().map(|s| s.abstained_hull_bp).sum();
+        let matrix = ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows: scored.into_iter().map(|s| s.row).collect(),
+        };
+        eprintln!(
+            "[score] locus {locus}: matrix {} folds x {} units = {} pairs, \
+             {} live MB (row-compressed; the dense form is {} MB)",
+            matrix.n_folds(),
+            n_units,
+            matrix.n_folds() as u64 * n_units as u64,
+            matrix.live_bytes() / (1024 * 1024),
+            matrix.n_folds() as u64 * n_units as u64 * 13 / (1024 * 1024),
+        );
         ensure(
             factorized_checked == factorized_equal,
             &format!(
@@ -5903,8 +6346,6 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let (
             folds,
             matrix,
-            pinned,
-            mismatches,
             territory,
             territory_axis_fold,
             merge_groups,
@@ -5913,8 +6354,6 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             alignment_connected_merge(
                 folds,
                 matrix,
-                pinned,
-                mismatches,
                 territory,
                 merge_axis_fold,
                 territory_axis_fold,
@@ -5925,8 +6364,6 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             (
                 folds,
                 matrix,
-                pinned,
-                mismatches,
                 territory,
                 territory_axis_fold,
                 Vec::new(),
@@ -5962,13 +6399,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             .into_par_iter()
             .map(|flat| {
                 let (first, second) = unrank_pair(flat);
-                let ll_a = &matrix[first];
-                let ll_b = &matrix[second];
-                let mut total = 0.0f64;
-                for (u, &count) in unit_counts.iter().enumerate() {
-                    total += count * mix_logsumexp(ll_a[u], ll_b[u]);
-                }
-                total
+                matrix.class_pair_sum(first, second, &unit_counts)
             })
             .collect();
         let class_seconds = class_started.elapsed().as_secs_f64();
@@ -6338,15 +6769,20 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // assertion already covers the WHOLE pilot domain; the sample
         // carries vote-level detail for the independent checker.
         let exactness_started = Instant::now();
-        let valid_pairs: Vec<(usize, usize)> = (0..n_folds)
-            .flat_map(|f| (0..n_units).map(move |u| (f, u)))
-            .filter(|&(f, u)| pinned[f][u])
-            .collect();
-        let mismatch_pairs: Vec<(usize, usize)> = valid_pairs
-            .iter()
-            .copied()
-            .filter(|&(f, u)| mismatches[f][u] > 0)
-            .collect();
+        // (Candidate C: the pinned-pair enumeration walks the rows'
+        // own pinned entries — the same (fold, unit) pairs in the same
+        // order the dense filter produced, with the mismatches read
+        // from the entry itself.)
+        let mut valid_pairs: Vec<(usize, usize)> = Vec::new();
+        let mut mismatch_pairs: Vec<(usize, usize)> = Vec::new();
+        for fold in 0..n_folds {
+            for (unit, mismatches) in matrix.pinned_units(fold) {
+                valid_pairs.push((fold, unit));
+                if mismatches > 0 {
+                    mismatch_pairs.push((fold, unit));
+                }
+            }
+        }
         let stride_of = |len: usize, want: u64| -> usize {
             if len == 0 || want == 0 {
                 usize::MAX
@@ -6394,9 +6830,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             named_folds.push(("identical_pair".to_string(), index));
         }
         for (name, fold_index) in &named_folds {
-            let pairs: Vec<(usize, usize)> = (0..n_units)
-                .filter(|&u| pinned[*fold_index][u])
-                .map(|u| (*fold_index, u))
+            let pairs: Vec<(usize, usize)> = matrix
+                .pinned_units(*fold_index)
+                .map(|(unit, _)| (*fold_index, unit))
                 .collect();
             let stride = stride_of(pairs.len(), 25);
             let mut taken = 0u64;
@@ -6455,7 +6891,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 let forward = physical_forward(orientation, unit.mirror);
                 let own_positions = own_positions_of(&canonical, unit.mirror, unit.w_lo);
                 let own_hull = own_positions_of(&canonical, unit.mirror, 0);
-                let skipped = skipped_positions(&own_positions, k, read_len() as u64);
+                let skipped = skipped_positions(&own_positions, k, read_length as u64);
                 let mut votes: Vec<serde_json::Value> = Vec::new();
                 for &(lo, hi) in &skipped {
                     for i in lo..hi {
@@ -6502,8 +6938,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     "read_fnv": fnv1a64(read),
                     "read": String::from_utf8(read.clone()).unwrap(),
                     "fold": fold_index,
-                    "ll": matrix[fold_index][unit_index],
-                    "ll_local": unit_log_likelihood(&local_scores, img_hi - img_lo),
+                    "ll": matrix.ll(fold_index, unit_index),
+                    "ll_local": unit_log_likelihood(&local_scores, img_hi - img_lo, read_length),
                     "elsewhere": elsewhere,
                     "placements": placements,
                 }),
@@ -6546,10 +6982,11 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             }
             let truth_places_unit = |u: usize| {
                 truth_pair
-                    .map(|(a, b)| pinned[a][u] || pinned[b][u])
+                    .map(|(a, b)| matrix.pinned(a, u) || matrix.pinned(b, u))
                     .unwrap_or(false)
             };
-            let winner_places_unit = |u: usize| pinned[winner_first][u] || pinned[winner_second][u];
+            let winner_places_unit =
+                |u: usize| matrix.pinned(winner_first, u) || matrix.pinned(winner_second, u);
             let is_donor_path = |name: &str| {
                 name.starts_with("S288C#0#") || name.starts_with("SK1#0#")
             };
@@ -6568,7 +7005,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     (false, false) => "neither",
                 };
                 let pinning_folds: Vec<usize> = (0..n_folds)
-                    .filter(|&f| pinned[f][u])
+                    .filter(|&f| matrix.pinned(f, u))
                     .collect();
                 // The donor-path full-read verification: at each
                 // verified occurrence of this record on a donor
@@ -6704,7 +7141,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                             placement_offset(&pin.pinned, &own_hull, forward);
                         let own_positions =
                             own_positions_of(&canonical, unit.mirror, unit.w_lo);
-                        let skipped = skipped_positions(&own_positions, k, read_len() as u64);
+                        let skipped = skipped_positions(&own_positions, k, read_length as u64);
                         let skipped_bp: u64 =
                             skipped.iter().map(|&(lo, hi)| hi - lo).sum();
                         let piecewise = placement_score(
@@ -6854,8 +7291,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         "record": unit.record,
                         "variant": unit.variant,
                         "count": unit.count,
-                        "fold_ll": [matrix[first][u], matrix[second][u]],
-                        "pair_term": mix_logsumexp(matrix[first][u], matrix[second][u]),
+                        "fold_ll": [matrix.ll(first, u), matrix.ll(second, u)],
+                        "pair_term": mix_logsumexp(matrix.ll(first, u), matrix.ll(second, u)),
                     })
                 })
                 .collect();
@@ -6910,20 +7347,31 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 })
             })
             .collect();
-        ingredients_buf.write_all(b"{\"folds\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &folds_json)?;
+        // (Candidate C: the ingredients line — including the full
+        // ll_matrix — streams to a per-locus spill file, the dense
+        // JSON text never held in RAM; the ordered write below copies
+        // the spill into the ingredients file, so the emitted bytes
+        // are the committed form's exactly.)
+        let ingredients_spill_path =
+            ingredients_spill_path(&options.out, locus);
+        let mut ingredients_spill =
+            BufWriter::new(File::create(&ingredients_spill_path)?);
+        ingredients_spill.write_all(b"{\"folds\":")?;
+        serde_json::to_writer(&mut ingredients_spill, &folds_json)?;
         // The per-unit per-fold log-likelihood matrix (folds x units,
         // row-major; entries at E = no valid anchored placement).
-        ingredients_buf.write_all(b",\"ll_matrix\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &matrix)?;
-        ingredients_buf.write_all(b",\"locus\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &locus)?;
-        ingredients_buf.write_all(b",\"partition\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &partition)?;
-        ingredients_buf.write_all(b",\"units\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &units_json)?;
-        ingredients_buf.write_all(b"}")?;
-        ingredients_buf.push(b'\n');
+        ingredients_spill.write_all(b",\"ll_matrix\":")?;
+        matrix.write_ll_matrix_json(&mut ingredients_spill)?;
+        ingredients_spill.write_all(b",\"locus\":")?;
+        serde_json::to_writer(&mut ingredients_spill, &locus)?;
+        ingredients_spill.write_all(b",\"partition\":")?;
+        serde_json::to_writer(&mut ingredients_spill, &partition)?;
+        ingredients_spill.write_all(b",\"units\":")?;
+        serde_json::to_writer(&mut ingredients_spill, &units_json)?;
+        ingredients_spill.write_all(b"}")?;
+        ingredients_spill.write_all(b"\n")?;
+        ingredients_spill.flush()?;
+        drop(ingredients_spill);
         rss.probe(&format!("locus_{locus}_receipts"))?;
 
         // ---------------------------------------------------- the main receipt
@@ -6978,7 +7426,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // neither homolog) versus per-base evidence on the reads both
         // place. The floor's magnitude is the model's derived minimum,
         // not the true unanchored likelihood (named).
-        let pair_places = |i: usize, j: usize, u: usize| pinned[i][u] || pinned[j][u];
+        let pair_places =
+            |i: usize, j: usize, u: usize| matrix.pinned(i, u) || matrix.pinned(j, u);
         let mut truth_unplaced_units = 0u64;
         let mut truth_unplaced_mass = 0.0f64;
         let mut winner_unplaced_units = 0u64;
@@ -6998,8 +7447,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 }
                 if truth_places && winner_places {
                     both_place_gap += unit.count as f64
-                        * (mix_logsumexp(matrix[wi][u], matrix[wj][u])
-                            - mix_logsumexp(matrix[ti][u], matrix[tj][u]));
+                        * (mix_logsumexp(matrix.ll(wi, u), matrix.ll(wj, u))
+                            - mix_logsumexp(matrix.ll(ti, u), matrix.ll(tj, u)));
                 }
             }
         }
@@ -7041,7 +7490,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 "epsilon": epsilon,
                 "match_log_prob": scoring.a,
                 "mismatch_log_prob": scoring.b,
-                "read_length": read_len(),
+                "read_length": read_length,
                 "uniform_qualities": true,
                 "elsewhere_log_prob": elsewhere,
                 "genome_diploid_bp": genome_diploid_bp,
@@ -7709,7 +8158,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             skeleton: skeleton_buf,
             exactness: exactness_buf,
             records: records_buf,
-            ingredients: ingredients_buf,
+            ingredients_spill: ingredients_spill_path,
             report: report_buf,
             anatomy: anatomy_buf,
             product: product_buf,
@@ -7720,13 +8169,24 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             locus_seconds,
         })
     };
-    let outputs: Vec<LocusOutput> = if seam_parallel {
-        seam_map(&loci, seam_width, &|&locus| compute_locus(locus))?
+    let outputs: Vec<LocusOutput> = match if seam_parallel {
+        seam_map(&loci, seam_width, &|&locus| compute_locus(locus))
     } else {
         loci
             .iter()
             .map(|&locus| compute_locus(locus))
-            .collect::<io::Result<Vec<_>>>()?
+            .collect::<io::Result<Vec<_>>>()
+    } {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            // (A failed locus may have left its ingredients spill
+            // behind; the run is failing — remove the spills.)
+            for &locus in &loci {
+                let _ =
+                    std::fs::remove_file(ingredients_spill_path(&options.out, locus));
+            }
+            return Err(error);
+        }
     };
     // The ordered emission: the per-locus buffers are written in LOCUS
     // ORDER — the receipt line order of the committed serial runs.
@@ -7736,7 +8196,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         }
         exactness.write_all(&output.exactness)?;
         records_file.write_all(&output.records)?;
-        ingredients.write_all(&output.ingredients)?;
+        // (Candidate C: stream the locus's ingredients spill into the
+        // ordered file — identical bytes to the committed buffered
+        // write — then remove the spill.)
+        let spill = File::open(&output.ingredients_spill)?;
+        std::io::copy(&mut BufReader::new(spill), &mut ingredients)?;
+        std::fs::remove_file(&output.ingredients_spill)?;
         report.write_all(&output.report)?;
         if let Some(writer) = product_calls.as_mut() {
             writer.write_all(&output.product)?;
@@ -8004,10 +8469,13 @@ mod tests {
         // full extent) — and an image shorter than the read has no
         // support at all.
         let a = 0.0f64;
-        let full = unit_log_likelihood(&[a], 200);
-        let image = unit_log_likelihood(&[a], 150);
+        let full = unit_log_likelihood(&[a], 200, READ_LENGTH_FRESH);
+        let image = unit_log_likelihood(&[a], 150, READ_LENGTH_FRESH);
         assert!(full < image); // the smaller support carries the larger prior
-        assert_eq!(unit_log_likelihood(&[a], 149), f64::NEG_INFINITY);
+        assert_eq!(
+            unit_log_likelihood(&[a], 149, READ_LENGTH_FRESH),
+            f64::NEG_INFINITY,
+        );
     }
 
     #[test]
@@ -8027,16 +8495,22 @@ mod tests {
     #[test]
     fn unit_likelihood_is_prior_plus_logsumexp() {
         // No placements: the anchored floor.
-        assert_eq!(unit_log_likelihood(&[], 200), f64::NEG_INFINITY);
-        assert_eq!(unit_log_likelihood(&[0.0], 100), f64::NEG_INFINITY);
+        assert_eq!(
+            unit_log_likelihood(&[], 200, READ_LENGTH_FRESH),
+            f64::NEG_INFINITY,
+        );
+        assert_eq!(
+            unit_log_likelihood(&[0.0], 100, READ_LENGTH_FRESH),
+            f64::NEG_INFINITY,
+        );
         let a = -3.0f64;
         let b = -5.0f64;
-        let ll = unit_log_likelihood(&[a, b], 200);
+        let ll = unit_log_likelihood(&[a, b], 200, READ_LENGTH_FRESH);
         let expect = -(2.0 * (200 - 149) as f64).ln() + (a.exp() + b.exp()).ln();
         assert!((ll - expect).abs() < 1e-12);
         // Bit-exact when the placements are equal (the identical-fold
         // case): the sum is the placement plus ln 2.
-        let ll = unit_log_likelihood(&[a, a], 200);
+        let ll = unit_log_likelihood(&[a, a], 200, READ_LENGTH_FRESH);
         let expect = -(2.0 * (200 - 149) as f64).ln() + (2.0 * a.exp()).ln();
         assert!((ll - expect).abs() < 1e-12);
     }
@@ -8940,9 +9414,10 @@ mod tests {
         let observed_node: HashMap<u64, f64> =
             [(5u64, 7.5f64)].into_iter().collect();
         let observed_edge: HashMap<u64, f64> = HashMap::new();
-        let (new_folds, new_matrix, _pinned, _mismatches, new_territory, new_axis, groups, counters) =
+        let matrix = ScoreMatrix::from_dense(matrix, pinned, mismatches, -14.0);
+        let (new_folds, new_matrix, new_territory, new_axis, groups, counters) =
             alignment_connected_merge(
-                folds, matrix, pinned, mismatches, territory, Some(0), Some(0),
+                folds, matrix, territory, Some(0), Some(0),
                 &observed_node, &observed_edge,
             );
         // Exactly one merge group: {0, 1, 2} (the axis bubble's
@@ -8961,7 +9436,8 @@ mod tests {
         assert_eq!(new_folds[0].nodes, vec![(1, 1), (2, 1)]);
         assert_eq!(new_folds[0].edges, vec![(100, 1)]);
         // The merged fold's column is the representative's.
-        assert_eq!(new_matrix[0], vec![1.5, -2.0]);
+        assert_eq!(new_matrix.ll(0, 0), 1.5);
+        assert_eq!(new_matrix.ll(0, 1), -2.0);
         assert_eq!(new_territory[0], (0, 4));
         assert_eq!(new_axis, Some(0));
         // The refusal anatomy: fold 3 refused on pocket mass (with the
@@ -8991,10 +9467,11 @@ mod tests {
             vec![1.0f64],
             vec![1.0f64 + f64::EPSILON], // one ULP apart
         ];
-        let (new_folds, _m, _p, _mm, _t, _a, groups, counters) =
+        let matrix =
+            ScoreMatrix::from_dense(matrix, vec![vec![true]; 2], vec![vec![0u32]; 2], -14.0);
+        let (new_folds, _m, _t, _a, groups, counters) =
             alignment_connected_merge(
-                folds, matrix, vec![vec![true]; 2], vec![vec![0u32]; 2],
-                vec![(0, 4); 2], Some(0), Some(0),
+                folds, matrix, vec![(0, 4); 2], Some(0), Some(0),
                 &HashMap::new(), &HashMap::new(),
             );
         assert!(groups.is_empty(), "a ULP distinction refuses the fold");
@@ -9012,9 +9489,10 @@ mod tests {
             alignfold_toy(&[(1, 1)], &[], &["b"]),
         ];
         let matrix = vec![vec![1.0], vec![1.0]];
-        let (new_folds, _m, _p, _mm, _t, _a, groups, _c) = alignment_connected_merge(
-            folds, matrix, vec![vec![true]; 2], vec![vec![0u32]; 2],
-            vec![(0, 4); 2], None, None,
+        let matrix =
+            ScoreMatrix::from_dense(matrix, vec![vec![true]; 2], vec![vec![0u32]; 2], -14.0);
+        let (new_folds, _m, _t, _a, groups, _c) = alignment_connected_merge(
+            folds, matrix, vec![(0, 4); 2], None, None,
             &HashMap::new(), &HashMap::new(),
         );
         assert!(groups.is_empty());

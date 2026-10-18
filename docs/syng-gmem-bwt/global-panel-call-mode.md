@@ -1364,3 +1364,73 @@ cheapest named step, a batch-shape decision needing the owner's nod);
 decision is the owner's; the dense-matrix row-compression/streaming is
 the guard-kill class's fix); (5) the marathon re-receipt at the next
 campaign window (determinism + wall, no committed receipts exist).
+
+### 10.6.7 THE CONCURRENT-IN-PROCESS CALLS (increment 3, duty 1 — the
+§10.6.4 cheapest-named step, LANDED and gate-PASSed)
+
+**THE GLOBALS AUDIT (the boundary lesson applied to every
+process-global the call path can reach, BEFORE any concurrency):**
+the sweep found exactly ONE mutable process-global — the read
+length (the §10.6.2 boundary bug's own static). Everything else the
+call touches is per-call by construction (its own LaneCache, its own
+Sources handles and per-OS-thread AGC decompressor pools, its own
+receipt buffers and out dir) or already seam-thread-shared read-only
+(the loaded panel — `unsafe impl Sync`, read-only C queries,
+gate-proven schedule-invariant at 16 seam threads since §10.5.2; the
+thread-local aligners; the env-derived OnceLocks are read-only after
+init). **THE FIX: the read length is now PER-CALL STATE, not a
+process-global** — a plain local in `run_injected`, initialized at the
+fresh-process 150, stored once at the derive-cache load (the declared
+length), shared immutably with the seam threads afterwards. The
+committed trajectory is reproduced BY CONSTRUCTION at any call
+concurrency: E reads the fresh value before the store (the constant
+`read_len()`), every later site (the skipped-positions paths, the
+unit likelihood, the scoring receipt) reads the declared value —
+no reset discipline to forget, no stale-148 class possible. The free
+functions take the length as a parameter (`unit_log_likelihood`,
+`Scoring::floor`); the static is deleted.
+
+**THE DRIVER:** the combined process's K calls now run CONCURRENTLY
+— one scoped thread per call row (the manifest's own width, never
+tuned) — inside the ONE loaded process envelope. Error discipline:
+the first error in ROW ORDER fails the process (the serial form's
+first-failure semantics preserved).
+
+**THE GATE (the same two-sided bar, the committed receipts):** ALL
+TWELVE cut files + ALL EIGHT call files (calls.jsonl + the sequences
+sidecar at L1-L4) **BYTE-IDENTICAL** — the strongest determinism
+receipt yet: four calls sharing one process, one panel, and one
+rayon pool, byte-identical to the committed serial-per-territory
+receipts (E exact at every territory, the per-call read-length
+boundary included).
+
+**THE MEASUREMENTS (the co-tenant box stated, 256 cores):**
+
+| shape | wall | call phase | peak RSS / Pss |
+|---|---:|---:|---|
+| serial calls (the §10.6.2 receipt) | 1230s | 147/112/126/125s (510s total) | 90.4GB / 89.5GB |
+| **4 concurrent calls (this)** | **923s** | **243/254/269/269s → 269s phase** | 118.0GB / 117.2GB |
+
+The batch wall drops 1230s → 923s (**−25%**); the call PHASE drops
+510s → 269s (**1.9x**). THE HONEST CONTENTION RECEIPT: each
+individual call got SLOWER (243-269s vs 112-147s serial) — the bind
+phase contends ~3x under 4-way concurrency (binding 162-186s per
+call vs 50-73s serial; the seam's 4x16=64 threads and the per-call
+AGC decompression compete for memory bandwidth on the co-tenant
+box), so the concurrency wins the WALL by overlapping the
+contended binds, not by making any call faster. THE MEMORY RECEIPT:
+the peak grows 90.4 → 118.0GB (the four concurrent calls' working
+sets — span caches, decompressors, receipt buffers — ~9GB each
+beside the shared panel).
+
+**THE FLEET-LEVEL HONESTY (the width-4 arithmetic, both terms
+receipted):** the wall win and the memory cost CANCEL at the fleet
+level at this width: serial 1,461 processes × 1230s at an 11-process
+ceiling = **~45.4h**; concurrent 1,461 × 923s at an 8-process ceiling
+(118GB each) = **~46.8h**. The concurrent calls are therefore NOT a
+fleet-throughput lever at width 4 by themselves — they are a wall
+lever that the memory ceiling currently absorbs; converting it into
+fleet throughput is exactly the cross-process panel share's
+territory (§10.6.9). The receipted value stands regardless: the
+per-territory all-in cost at the combined form is now
+923s/4 ≈ **231s**, and the width-4 process envelope is 118GB.

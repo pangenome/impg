@@ -4053,59 +4053,112 @@ fn run_cut_call_batch_global(
         cut_started.elapsed().as_secs(),
         call_rows.len()
     );
-    for (name, component, record_origin, cut_dir, call) in call_rows {
-        let call_started = Instant::now();
-        let out_dir = call.out_dir.clone();
-        impg::genome_inference::with_output_model(&out_dir, realign_score::MODEL, || {
-            let options = realign_score::Options {
-                panel: global_panel_prefix.to_string(),
-                routes: routes_dir.to_path_buf(),
-                partition_graphs: call.partition_graphs.clone(),
-                component: component.clone(),
-                census: cut_dir.join("cut-census.jsonl"),
-                reads: call.reads.clone(),
-                derive_cache: cut_dir.join("cut-cache.bin"),
-                loci: call.loci.clone(),
-                out: out_dir.join("instrument-receipt.jsonl"),
-                exactness_out: out_dir.join("instrument-receipt.exactness.jsonl"),
-                exactness_sample: 100,
-                skeleton_out: Some(out_dir.join("instrument-receipt.skeleton.jsonl")),
-                anatomy_out: None,
-                frame_audit_only: false,
-                rss_budget_gib: call_rss_budget_gib,
-                selection: realign_score::Selection::Locality,
-                product_calls: Some(out_dir.join("calls.jsonl")),
-                truth_qv: Vec::new(),
-                product_sequences: true,
-                exclude_paths: Vec::new(),
-                flank_overlap: None,
-                region: None,
-                global_frame: true,
-                record_origin,
-                qv_biwfa: "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into(),
-            };
-            realign_score::run_injected(options, Some(&global))?;
-            let calls = out_dir.join("calls.jsonl");
-            let sequences = out_dir.join("calls.jsonl.sequences.jsonl");
-            Ok(serde_json::json!({
-                "calls": impg::genome_inference::reconstruction::fingerprint(&calls)?,
-                "calls_bytes": std::fs::metadata(&calls)?.len(),
-                "instrument_receipt": impg::genome_inference::reconstruction::fingerprint(
-                    &out_dir.join("instrument-receipt.jsonl"),
-                )?,
-                "sequences_emission": impg::genome_inference::reconstruction::fingerprint(
-                    &sequences,
-                )?,
-                "selection": "Locality",
-                "scope": "per-locus-diplotype-calls-with-model-internal-qual",
-                "shared_panel_load_seconds": load_seconds,
-            }))
-        })?;
-        eprintln!(
-            "[cut-call-batch-global] {} called in {:.0}s",
-            name,
-            call_started.elapsed().as_secs()
-        );
+    // THE CONCURRENT CALLS (the SS10.6.4 cheapest-named step, now the
+    // batch's own shape): the batch's K calls run CONCURRENTLY inside
+    // the ONE loaded process — one scoped thread per call row (the
+    // manifest's own width, never tuned) — instead of serially. The
+    // shared state is read-only by construction (the loaded panel,
+    // the routes dir, the per-call options; every mutable thing a
+    // call touches is its own: its out dir, its LaneCache, its
+    // Sources handles, its receipt buffers), and the ONE mutable
+    // process-global the call path held (the read length) is now
+    // PER-CALL state — the concurrent-calls audit's finding, landed
+    // with this change — so each call sees exactly the committed
+    // fresh-process trajectory at any concurrency; the outputs are
+    // the committed machinery's own, byte-identical by the thread-
+    // schedule-invariance every gate has proven so far, and this gate
+    // re-proves it at the new shape. Error discipline: the serial form
+    // failed at the first failing row; the concurrent form returns
+    // the FIRST error in ROW ORDER (no failure is swallowed).
+    let calls_started = Instant::now();
+    let shared_panel: &SyngIndex = &global;
+    let call_results: Vec<io::Result<()>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = call_rows
+            .iter()
+            .map(|(name, component, record_origin, cut_dir, call)| {
+                let (name, component, cut_dir, call) =
+                    (name.clone(), component.clone(), cut_dir.clone(), call.clone());
+                let out_dir = call.out_dir.clone();
+                scope.spawn(move || {
+                    let call_started = Instant::now();
+                    let result =
+                        impg::genome_inference::with_output_model(&out_dir, realign_score::MODEL, || {
+                            let options = realign_score::Options {
+                                panel: global_panel_prefix.to_string(),
+                                routes: routes_dir.to_path_buf(),
+                                partition_graphs: call.partition_graphs.clone(),
+                                component: component.clone(),
+                                census: cut_dir.join("cut-census.jsonl"),
+                                reads: call.reads.clone(),
+                                derive_cache: cut_dir.join("cut-cache.bin"),
+                                loci: call.loci.clone(),
+                                out: out_dir.join("instrument-receipt.jsonl"),
+                                exactness_out: out_dir.join("instrument-receipt.exactness.jsonl"),
+                                exactness_sample: 100,
+                                skeleton_out: Some(out_dir.join("instrument-receipt.skeleton.jsonl")),
+                                anatomy_out: None,
+                                frame_audit_only: false,
+                                rss_budget_gib: call_rss_budget_gib,
+                                selection: realign_score::Selection::Locality,
+                                product_calls: Some(out_dir.join("calls.jsonl")),
+                                truth_qv: Vec::new(),
+                                product_sequences: true,
+                                exclude_paths: Vec::new(),
+                                flank_overlap: None,
+                                region: None,
+                                global_frame: true,
+                                record_origin: *record_origin,
+                                qv_biwfa: "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into(),
+                            };
+                            realign_score::run_injected(options, Some(shared_panel))?;
+                            let calls = out_dir.join("calls.jsonl");
+                            let sequences = out_dir.join("calls.jsonl.sequences.jsonl");
+                            Ok(serde_json::json!({
+                                "calls": impg::genome_inference::reconstruction::fingerprint(&calls)?,
+                                "calls_bytes": std::fs::metadata(&calls)?.len(),
+                                "instrument_receipt": impg::genome_inference::reconstruction::fingerprint(
+                                    &out_dir.join("instrument-receipt.jsonl"),
+                                )?,
+                                "sequences_emission": impg::genome_inference::reconstruction::fingerprint(
+                                    &sequences,
+                                )?,
+                                "selection": "Locality",
+                                "scope": "per-locus-diplotype-calls-with-model-internal-qual",
+                                "shared_panel_load_seconds": load_seconds,
+                            }))
+                        });
+                    eprintln!(
+                        "[cut-call-batch-global] {} called in {:.0}s ({})",
+                        name,
+                        call_started.elapsed().as_secs(),
+                        if result.is_ok() { "ok" } else { "FAILED" },
+                    );
+                    result
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(result) => result,
+                Err(panic) => {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "call thread panicked".to_string());
+                    Err(io::Error::other(message))
+                }
+            })
+            .collect()
+    });
+    eprintln!(
+        "[cut-call-batch-global] call phase done in {:.0}s ({} concurrent)",
+        calls_started.elapsed().as_secs(),
+        call_rows.len()
+    );
+    for result in call_results {
+        result?;
     }
     Ok(())
 }
