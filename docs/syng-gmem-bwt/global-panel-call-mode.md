@@ -850,23 +850,23 @@ receipt lands)
    artifacts and writes the receipt to
    `serial-vs-par.routes-cmp-receipt.txt` in the work dir. Never
    polled in-session by design.
-4. THE NEXT INCREMENT'S EXACT RESUME POINT (the 10x path, from the
-   §10.5.5 receipts): (a) THE SHARED-INDEX CUT+CALL SEAM — the
-   per-lane inputs pole is now 244.7s of the 419s seam wall (58%):
-   the call's `Options` accepts panel PATHS, not a loaded index; the
-   seam is an injected-index form (or a combined cut+call process —
-   the memory model allows it: the cut process already holds the
-   panel at 76.3GB peak) so the ONE 345s/36.5GB load serves the
-   batch's cuts AND calls; (b) THE SPAN-CACHE DELTA-EXTEND FIX — the
-   bind's load pole re-decompresses the WHOLE grown span per miss
-   (~482x at L1: 56.7GB fetched for ~117.6MB unique); extend the
-   cached span by the missing sub-ranges instead of regrowing it
-   whole — byte-identity by the served-crop argument (every crop is
-   a slice of a Sources::fetch answer covering it), gate byte-
-   identity vs the serial receipts as always; (c) the census-superset
-   ANSWER question — the owner's, not ours (§10.5.4's shadow: ~6%
-   wall at saturated territories, accuracy-dominated); (d) lever 4's
-   marathon tail (the cross_lcp_merge segdup core) — unchanged, open.
+4. THE NEXT INCREMENT'S EXACT RESUME POINT (SUPERSEDED by §10.6 — kept
+   for the record; the 10x-path increment-2 state): (a) the
+   shared-index cut+call seam LANDED (§10.6.2, commit 2a88482, the
+   combined gate PASS two-sided); (b) the span-cache delta-extend
+   LANDED (§10.6.1, commit 44be7b0, the 508x fetch collapse,
+   byte-identical); (c) the census-superset ANSWER question — the
+   owner's, not ours (§10.5.4's shadow: ~6% wall at saturated
+   territories, accuracy-dominated); (d) lever 4's marathon tail —
+   OPENED (§10.6.3: the profile receipted, candidate A landed
+   byte-identical, candidates B/C named; the marathon substrates are
+   reaped, so the marathon gate form at the next campaign window is
+   determinism + the wall receipt); (e) the exact NEXT poles are
+   §10.6.4's list — the cross-process panel share (the private
+   arenas), the call's own wall (the per-fetch AGC seeks, the loci
+   core's B/C), the memory ceiling, and the marathon tail; the
+   cheapest named step is the concurrent-in-process calls (the
+   arithmetic at §10.6.4's close).
 
 ## 10.5 The 10x-path receipts (the bind-seam profile +
 parallelization, the shared-index cut lanes, the census shadow)
@@ -1147,3 +1147,220 @@ not a performance case.
   extrapolated beyond its receipt; the whole-genome cut/call wall at
   fleet scale is fleet-parallelism-bound (process count × scan CPU ×
   the 1TB memory model), not machinery-bound at the measured margins.
+
+## 10.6 The increment-2 receipts (the two named fixes landed + the
+marathon-tail profile opened + the budget restated; every gate
+byte-identity, every number a receipt)
+
+### 10.6.1 THE SPAN-CACHE DELTA-EXTEND (commit 44be7b0 — the ~482x
+re-decompression, collapsed)
+
+`LaneCache::span` on a miss now fetches ONLY the missing sub-ranges
+([new_lo, lo) and/or [hi, new_hi)) and stitches them to the cached
+interior — the covered interior is never re-decompressed. Byte-identity
+by the served-crop argument restated for the stitch: a crop of a
+Sources::fetch answer equals the direct fetch of the crop, so
+fetch(new_lo, lo) is fetch(new_lo, new_hi)'s own head crop and
+fetch(hi, new_hi) its tail crop, and the cached span is fetch(lo, hi)
+by the maintained invariant — the concatenation IS fetch(new_lo,
+new_hi) byte for byte, the buffer the union-regrowth form held.
+LaneCache moved to module scope and the contract is unit-proved
+(lane_cache_span_delta_extend_serves_direct_fetch_bytes: left/right/
+both-side extension orders, every served crop byte-equal to the direct
+fetch, the counters receipt the DELTA volume — 34,500B vs the regrowth
+form's 92,000B on the same request order).
+
+THE GATES (seam W=16, rayon pool 16, the receipted rung; cmp vs the
+on-disk L1-fix / L2-fix-n4 receipts):
+
+| lane | wall | bind | lane loads (count / bytes) | vs the serial form | calls + sequences |
+|---|---:|---:|---|---:|---|
+| L1 | 390s | 55.8s | 126,966 / 111.6 MB | 277,796 / 56.7 GB = **508x collapse** | BYTE-IDENTICAL |
+| L2 | 345s | 50.9s | 21,288 / 111.4 MB | 47,704 / 10.7 GB = **96x** | BYTE-IDENTICAL |
+
+The fetched volume is now ~1x the unique territory envelope (~117.6MB
+at L1) — the re-decompression disease is gone; the load count is
+schedule-visible (receipted as diagnostics only). Peak Pss 47.1 /
+45.4GB (the seam rung's class, unchanged). THE NEW PER-LANE POLE the
+gate names: the inputs phase (L1: 274.8s of 390s = 70%) — the global
+panel's own load, exactly the shared-index seam's territory.
+
+### 10.6.2 THE SHARED-INDEX CUT+CALL SEAM (commit 2a88482 — the
+inputs pole deleted)
+
+THE INJECTED-INDEX FORM: `realign_score::run` stays the committed path
+verbatim; `run_injected(options, Option<&SyngIndex>)` runs the SAME
+machinery over a caller-held panel. THE COMBINED PROCESS
+(`sample_projection cut-call-batch-global`): manifest rows gain an
+optional `call` object {reads, partition_graphs, loci, out_dir}; ONE
+panel+AGC load, the cut phase = cut-batch-global's own core
+(cut_batch_global_with, now taking the caller-held panel), then each
+call row runs IN-PROCESS over the SAME loaded panel with the committed
+CLI's own options construction (the instrument receipts + the product
+emission + the sequences sidecar under with_output_model; the per-call
+RSS guard defaults 0 = unguarded — the process holds the shared panel
+by design).
+
+THE COMBINED-PROCESS CALL BOUNDARY FIX the first gate forced (the
+named divergence, receipted in the work dir's first-run-divergence.txt):
+READ_LENGTH is a process-global stored from each call's derive cache,
+but E is computed BEFORE that store — every committed receipt's E is
+measured at the fresh-process 150, and in the combined process L2/L3/
+L4's E read L1's stale 148 (a uniform +0.0063 E shift at every locus,
+ZERO fold-material flips, verified numerically to 1e-9: E(148, a_L2,
+501689.5) = −14.287349, exactly the observed delta, at the identical
+mean haploid). `run_injected` now resets the global to the committed
+fresh-process value (READ_LENGTH_FRESH = 150, the static's own initial
+value) at every call entry — each call sees exactly the fresh-process
+trajectory. The honest alternative (E at the cache's declared read
+length) would move EVERY receipt's E — an answer-profile change, the
+owner's alone, never switched silently.
+
+THE GATE (two-sided, byte-identity; the 4-territory L1-L4 batch, one
+process): the CUT side — ALL TWELVE FILES (cut-census/cache/reads at
+L1-L4) byte-identical to the committed single-cut receipts; the CALL
+side — ALL EIGHT FILES (calls.jsonl + the sequences sidecar at every
+territory) byte-identical to the committed-path call receipts
+(global-call-L1-fix, the fix-n4 receipts at L2-L4; E −14.418156 /
+−14.293680 / −14.290571 / −14.413791, the receipts' own values).
+
+THE MEASUREMENTS (the combined batch, 64 threads, the co-tenant box
+stated): wall **1230s for 4 territories** = ONE **241.1s** load
+(receipted in every territory's cut-stats.json) + cut phase 451s (the
+153.7s scan shared by all four) + calls **147 / 112 / 126 / 125s**.
+The per-territory call's inputs residual is **45-47s** (graph.json +
+the AGC Sources open + census + maps) — the 274.8s panel-load pole is
+GONE. Per-territory marginal cut+call at the combined form: **~240s**
+(cut-share ~113s + call ~127s) vs the pre-increment ~481s (62s batch
+cut + 419s call) and the campaign's original ~1,991s (541s single cut
++ 1450s serial call). Peak RSS **90.4GB / Pss 89.5GB at width 4**
+(inside the 1TB model; the cut phase peaked 76.6GB, the call phase's
+working set adds ~14GB at width 4).
+
+### 10.6.3 LEVER 4 OPENED — THE MARATHON-TAIL PROFILE (the receipts
+mined; the roster table in the work dir's marathon-tail-profile.txt)
+
+Method: the marathon substrates were REAPED at campaign close (no
+rerun is possible), so the profile is the campaign's own retained
+per-lane instrumentation (prep/<T>/call.err per-locus [score] lines,
+call.rss, call.wall) mined across the roster, plus the code anatomy.
+THE ALGORITHMIC SHAPE: the marathon wall is the per-locus SCORING
+MATRIX — the dense (folds × units) cross product walked per (fold,
+unit) pair, O(folds × units × per-pair), with per-pair work whose
+FOLD-INDEPENDENT parts were recomputed at every pair. Folds ≈ the
+segdup copy count (the worst loci's member→fold ratios are nearly 1:1:
+509→464, 985→884, 764→532) and units ≈ the routed read mass — so at
+fixed per-copy depth BOTH factors grow with the copy count: **the
+wall is quadratic in the segdup copy count**. Not a merge blowup (the
+fold merge is seconds). THE MEMORY TAIL is the dense 13B/pair
+ll/pinned/mismatches matrix (~33GB at the worst measured locus) — the
+64GiB guard-kill class's direct cause (134 kills; completions 54-71GB).
+THE PER-PAIR RATE BAND (the derived constant): pinned pairs 1.3-2.7
+μs/pair; no-pin pairs 0.2-0.3 μs/pair — measured at the two ≥98%-no-pin
+loci (T03803: 717.4s / 2.36e9 pairs; T03915: 434.8s / 2.07e9), and the
+no-pin floor IS the fold-independent recompute class.
+
+THE NAMED CANDIDATES: **(A) THE PER-RECORD HOIST — LANDED (commit
+b80a687)**: the canonical decode, the own anchor positions, and the
+merged anchor-window hull are pure functions of the RECORD; the
+committed pair loop recomputed them per (fold, unit) pair (up to
+~2.4e9 recomputes at the worst receipted locus). Now computed once per
+record (7,665 decodes at T03641's worst locus, not 1.49e9); the pair
+loop reads the table. GATE: L1 byte-identical (calls + sequences, the
+committed receipt bar); the L1-scale wall effect is inside the
+co-tenant band (the untouched bind phase itself moved 55.8→64.8s
+between runs — the noise ruler) and the marathon effect is the
+arithmetic, honestly a PROJECTION (no marathon rerun possible; the
+marathon gate form at the next campaign window is determinism + the
+wall receipt). **(B) THE ALWAYS-ON EXACTNESS ASSERTION** (direct_score
+beside placement_score on every pinned pair — ~½ the pinned alignment
+work in production; a receipt-shape decision, the owner's). **(C) THE
+DENSE MATRIX** (row-compress the constant elsewhere rows + stream per
+fold — the guard-kill class's fix; not small, named not attempted).
+The irreducible core after A-C: anchor_correspondence per (record,
+orientation, fold) + one alignment per pinned pair. THE HONEST
+MARATHON BOUND stands: p90 2,912s to deepest 11,084s per lane
+single-threaded, 15-25 members per genome — the tail alone can eat
+the budget until B/C land.
+
+### 10.6.4 THE 20-MINUTE BUDGET, RESTATED FROM THE NEW RECEIPTS
+
+- **map ~3 min** — unchanged (the 12-lane projection receipt).
+- **prep ZERO per sample**; the panel-side ONE-TIME routes inventory
+  1505s parallel, once per panel — unchanged.
+- **cuts + calls, THE COMBINED FORM (the receipted shape)**: ONE
+  241.1s load per width-4 process shared by the batch's cuts AND
+  calls; per-territory marginal cut+call **~240s** (cut-share ~113s +
+  call 112-147s), all-in ~307s/territory at width 4. The call's own
+  wall after both fixes: bind 50-73s (seam W=16), loci 19-137s,
+  inputs residual 45-47s, rows 10-18s.
+- **THE FLEET MATH AT THE CORRECTED CEILING (the honest arithmetic,
+  no term extrapolated)**: a width-4 combined process peaks at 90.4GB
+  → ~11 concurrent processes (~44 territories in flight) at the 1TB
+  model → a 5,844-territory genome at the receipted shape is
+  **~45-48 hours of wall** (1,461 processes × 1230s at 11-concurrent
+  waves). The alternative receipted shape — standalone seam+delta-
+  extend lanes at 47.5GB Pss, ~21 concurrent lanes, 390s/call — is
+  **~30 hours** (the calls pole; the cut batches pipeline behind at
+  18.5h). BOTH are far beyond the 20-minute line: 5,844 territories
+  in 1,200s needs ~4.9 territories/s sustained; at the 240s
+  marginal that is ~1,170 concurrent territory slots — **~26x the
+  44-slot ceiling**.
+- **THE REMAINING POLES, each named with its receipt**: (1) THE LOAD
+  (241s per process — the last per-process pole; amortizes with
+  batch width, but the structural fix is the panel shared ACROSS
+  processes: the .1gbwt/.1khash are private in-RAM C-struct arenas,
+  so cross-process sharing needs a shared-memory sidecar form — the
+  named next memory lever); (2) THE CALL'S OWN WALL (112-147s: bind
+  ~50-73s — the ~1.45M per-fetch AGC seeks are the floor after the
+  span-volume collapse; loci ~19-137s — the marathon core's ordinary
+  face, candidates B/C; the inputs residual ~46s — graph.json + AGC
+  open + census, per-process cacheable); (3) THE MEMORY CEILING
+  (90.4GB/width-4 process vs 47.5GB/single-call lane — the private
+  arenas, not the working set); (4) THE MARATHON TAIL (§10.6.3's
+  bound, unchanged until B/C land).
+- **THE CHEAPEST NAMED NEXT STEP (arithmetic, not built)**: the
+  combined process's calls run SEQUENTIALLY — the batch's K calls
+  could run CONCURRENTLY inside the same process envelope (K call
+  working sets ~10GB each + the shared ~40GB panel ≈ the same 90GB
+  at K=4), and the machinery is thread-schedule-invariant
+  (gate-proven at every rung so far), so outputs stay byte-identical;
+  at K=4 that takes the width-4 process from 1230s to ~840s and the
+  genome projection from ~45-48h to ~31h. It is a batch-shape
+  decision beyond this increment's mandated seam — named, not built.
+- **THE HONEST BOTTOM LINE**: the two named fixes landed and are
+  gate-proven byte-identical — the per-territory cut+call marginal is
+  down ~8.3x from the campaign's original ~1,991s to ~240s (the
+  combined form), and the fetch-volume disease is gone (508x). The
+  20-minute line remains BEYOND the current receipts: it needs the
+  per-territory wall down ~10x MORE (240s → ~24s) and/or the memory
+  ceiling up ~26x (the shared-panel lever), with the marathon tail
+  bounded on top (B/C). No number above is extrapolated beyond its
+  receipt; the walls carry the box's stated co-tenancy (±20%).
+
+### 10.6.5 THE SERIAL FULL-PANEL CMP (duty 5, checked once at this
+increment's close): the detached watcher (PID 2483558,
+routes-cmp-watcher.sh) is ALIVE at 4h22m; the serial whole-panel
+derive-routes is still IN FLIGHT (~495 min CPU, the ~55Mbp/s serial
+lane-hash, ETA ~02:00Z) — the receipt file
+(serial-vs-par.routes-cmp-receipt.txt) has NOT landed yet, exactly as
+the watcher's design expects (it cmps the moment the serial graph.json
+lands, unattended; never polled in-session). The receipt is owed to
+the next increment's close.
+
+### 10.6.6 THE EXACT RESUME POINT (if the budget ends here)
+
+All three commits landed and gate-proven (44be7b0 the delta-extend,
+2a88482 the combined cut+call seam + the READ_LENGTH call boundary,
+b80a687 the per-record hoist); cargo test --release --lib 560/0; the
+example proof 2/2; tree clean except vendor/syng (uncommitted by
+design); NO PR PUSH. NEXT, in the §10.6.4 pole order:
+(1) the serial-vs-par receipt at the watcher's completion (§10.6.5);
+(2) the concurrent-in-process calls (the §10.6.4 arithmetic — the
+cheapest named step, a batch-shape decision needing the owner's nod);
+(3) the cross-process panel share (the private .1gbwt/.1khash arenas
+— a shared-memory sidecar form, the memory-ceiling lever);
+(4) lever 4's candidates B/C (the exactness assertion's receipt-shape
+decision is the owner's; the dense-matrix row-compression/streaming is
+the guard-kill class's fix); (5) the marathon re-receipt at the next
+campaign window (determinism + wall, no committed receipts exist).
