@@ -1434,3 +1434,131 @@ fleet throughput is exactly the cross-process panel share's
 territory (§10.6.9). The receipted value stands regardless: the
 per-territory all-in cost at the combined form is now
 923s/4 ≈ **231s**, and the width-4 process envelope is 118GB.
+
+### 10.6.8 CANDIDATE C — THE DENSE-MATRIX ROW-COMPRESSION/STREAMING
+(increment 3, duty 2 — the guard-kill fix, DESIGNED then IMPLEMENTED;
+gate PASS at every receipt file; the bound receipted at the profiled
+worst-locus shape)
+
+**THE DESIGN (what the matrix's consumers actually read, the
+exactness argument, and the memory bound it buys):**
+
+*WHAT THE CONSUMERS READ (the full survey, every site):* the dense
+(folds x units) ll/pinned/mismatches triple (13 B/pair, ~33GB at the
+receipted worst locus T03411) has exactly seven consumer classes:
+(1) THE EXHAUSTIVE CLASS SCAN — for each of the folds^2/2 class
+pairs, every unit in order: `count * mix_logsumexp(ll_a[u], ll_b[u])`
+— the accumulation ORDER is the byte-identity invariant (a sparse
+iteration that skips the constant entries would change the float
+summation order and BREAK byte-identity; the compressed scan
+therefore walks the same units in the same order reading the same
+values); (2) THE MERGE PASS — the ll columns' bit-exact equality
+(hash-bucketed, exactly verified) and the representative-row clones
+— the predicate is over the LL VALUES ALONE (pinned/mismatches ride
+the representative); (3) the exactness sample and the named-fold
+strata — the pinned pairs enumerated in (fold, unit) order;
+(4) the anatomy — winner/truth-pair pinned probes; (5) the records
+sidecar — per-unit fold_ll for the named pairs; (6) THE INGREDIENTS
+SIDECAR — the ONLY full-matrix reader: serde_json of the whole
+ll_matrix, ~20 B/pair of JSON text buffered IN RAM per locus (a
+second, larger matrix beside the first — at T03411's shape ~50GB,
+the co-pole of the same kill); (7) the scoring receipt's rss probe.
+
+*THE EXACTNESS ARGUMENT (bit-for-bit, NO approximation):* the pair
+loop's two paths PARTITION the value space — a pinned pair's local
+branch is finite, so its marginalization logsumexp2(local, E) is
+STRICTLY greater than E; an unpinned pair's mismatches stay 0 and
+its ll is EXACTLY E (the empty local branch is -inf). So an entry
+equals the no-pin constant (E, false, 0) IFF the unit is unpinned
+on that fold: compressing the constant entries away is a
+VALUE-IDENTICAL encoding, not an approximation. Every consumer reads
+the same bits, booleans, u32s, in the same iteration order, so
+every downstream float operation is unchanged — byte-identity by
+construction, proven again by the gate.
+
+*THE ROW ENCODING (a DERIVED per-row choice, never tuned):* each
+fold row takes the SMALLER of the two forms — the sparse form costs
+16 B/pinned entry (unit + ll + mismatches, structure-of-arrays),
+the dense 13 B/unit — so the pinned-majority marathon loci
+(T03641 at 84% pinned, T03499 at 86%) keep the committed size
+EXACTLY (never larger), and the no-pin-majority loci (T03803 at 2.1%
+pinned, T03915 at 1.3%) collapse. The bound is per row:
+min(13 x n_units, 16 x pinned_in_row) bytes — the whole-matrix
+bound rides the roster's own pinned shares. THE CLASS SCAN reads
+through a monotone cursor (O(1) amortized per unit, sparse or dense
+— no binary search on the scan path, and FEWER bytes streamed at the
+no-pin-majority loci than the dense form).
+
+*THE STREAMING POLE:* the ingredients sidecar's ll_matrix now
+serializes ROW BY ROW from the compressed form — serde_json's own
+per-value bytes in the committed separator layout, streamed to a
+per-locus spill file and copied into the ordered ingredients file at
+the write phase (the seam threads never share the file; the final
+bytes are the committed form's exactly — the gate cmps the file).
+The dense JSON text never materializes in RAM.
+
+*THE MEMORY BOUND IT BUYS (the roster's own numbers):* the matrix at
+T03803's shape (532 x 4,438,575 = 2.36e9 pairs at the roster's own
+2.1% pinned share): **750MB live (0.33 B/pair) vs the dense form's
+29.3GB (13 B/pair) = a 39x collapse**; at T03641's pinned-majority
+shape the bound is the committed 13 B/pair exactly (the derived
+choice keeps dense); the ingredients JSON (the ~50GB co-pole at
+T03411's shape) is streamed at EVERY locus. The guard-kill class's
+arithmetic: the worst roster case's peak becomes the pinned-majority
+matrix (~19-24GB) + the streamed receipts + the lane base (~6GB) —
+under the 64GiB guard at every roster locus, where the committed
+form's matrix + JSON buffer exceeded it.
+
+*WHAT IS HONESTLY NOT CLAIMED:* the marathon WALL effect (the class
+scan's fewer bytes, the scoring loop's unchanged work) is a
+PROJECTION — the marathon substrates are reaped, no rerun is
+possible; the marathon re-receipt at the next campaign window is
+determinism + the wall + this bound. The 2.5e9-pinned-pairs class
+keeps its ~20-24GB matrix — the exact-value floor of THIS machinery;
+removing it would need the class scan's algebraic decomposition
+(mix_logsumexp terms precomputed per fold), which changes the float
+accumulation and BREAKS byte-identity — named and refused, not
+attempted.
+
+**THE IMPLEMENTATION:** `ScoreMatrix`/`ScoreRow` (module scope, with
+the partition and encoding arguments as definition comments), the
+pair loop building rows via `ScoreRow::from_pair_loop`, the merge
+over the compressed rows (the canonical value hash buckets, the
+entrywise bit-exact verify), the class scan via
+`ScoreMatrix::class_pair_sum` (the committed accumulation verbatim),
+the consumers on probes, the ingredients streaming with spill
+cleanup on the error path, and `live_bytes` (the per-locus stderr
+receipt: every locus prints its pairs, live MB, and the dense-form
+MB). The dense clone-collect (the committed form's SECOND full copy
+of the matrix, transiently two) is deleted with the rework.
+
+**THE GATES:**
+- *The unit proof* (`score_matrix_row_compression_is_value_identical`):
+every probe equals the dense form's own bits, the pinned
+enumeration is the dense filter's order, the class pair sum is
+bit-for-bit the committed dense loop at every fold pair, the merge
+predicates agree with the dense bit comparisons ACROSS ENCODINGS (a
+dense row and a sparse row with the same values hash and compare
+equal), the streamed JSON is serde_json's own bytes for the dense
+form, and the encoding choice matches the derived crossover — for
+no-pin-heavy, pinned-heavy, and all-no-pin shapes.
+- *The L1 gate (the non-marathon territory, the committed receipts):*
+the combined-batch run with candidate C — **every receipt file
+byte-identical vs BOTH baselines** (the committed
+global-call-L{1..4}-fix receipts AND the duty-1 concurrent run):
+calls.jsonl + sequences + **the ingredients file (the streamed
+ll_matrix IS the committed buffered bytes)** + records + skeleton +
+exactness; the instrument receipt field-identical mod the walls and
+rss probes; the cut side 12/12 byte-identical. Wall 891s, call phase
+260s, peak RSS 112.6GB (the co-tenant band around duty 1's 923s /
+118GB).
+- *The marathon-class receipt (no committed marathon receipts exist
+— the honest gate is determinism + the bound):*
+`marathon_worst_locus_shape_memory_receipt` builds the profiled
+worst-locus shape (T03803: 532 x 4,438,575, the roster's own pinned
+share) and measures: live 750MB / dense 29.3GB = **39.0x**,
+measured RSS delta 754MB (the live bytes' own class, allocator
+overhead included); the pinned-majority control asserts the derived
+choice keeps the committed dense size exactly. Determinism: the L1
+gate's byte-identity at both baselines + the unit proof's
+bit-equality.

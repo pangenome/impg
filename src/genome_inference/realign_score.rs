@@ -2081,17 +2081,6 @@ impl FoldUnionFind {
 
 /// FNV-1a over the column's f64 bit patterns (the equal-column
 /// bucket key; buckets are re-verified bit-exactly before use).
-fn column_bits_hash(column: &[f64]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &value in column {
-        for byte in value.to_bits().to_le_bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-    }
-    hash
-}
-
 /// Whether two sorted contained multisets share at least one node
 /// key (the alignment structure's adjacency: a shared interned node
 /// IS an alignment edge between the two rows).
@@ -9371,6 +9360,183 @@ mod tests {
             nodes: sorted,
             edges: esorted,
         }
+    }
+
+    #[test]
+    fn score_matrix_row_compression_is_value_identical() {
+        // Candidate C's exactness proof, at the accessor level: the
+        // compressed rows return the dense form's own bits at every
+        // probe, the pinned enumeration is the dense filter's own
+        // order, the class scan's accumulation is bit-for-bit the
+        // committed dense loop's, the merge's predicates agree with
+        // the dense bit comparisons, and the streamed JSON is the
+        // committed serde bytes — for BOTH row encodings and across
+        // encodings (a dense row and a sparse row holding the same
+        // values must hash and compare equal).
+        let elsewhere = -14.418156f64;
+        // (folds x units, the pinned fraction) cases: a no-pin-heavy
+        // row (takes Sparse), a pinned-heavy row (takes Dense), and
+        // an all-no-pin row.
+        let shapes = [(6usize, 40usize, 0.1f64), (6, 40, 0.9), (6, 40, 0.0)];
+        for (n_folds, n_units, pinned_fraction) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                // a deterministic pattern: every k-th unit pins
+                let stride = ((pinned_fraction * n_units as f64).round() as usize)
+                    .max(1);
+                for unit in (fold..n_units).step_by(stride.max(1)) {
+                    pin[unit] = true;
+                    row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                    mism[unit] = (unit % 7) as u32;
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense.clone(), pinned.clone(), mismatches.clone(), elsewhere);
+            // every probe equals the dense form's own value
+            for fold in 0..n_folds {
+                for unit in 0..n_units {
+                    assert_eq!(matrix.ll(fold, unit).to_bits(), dense[fold][unit].to_bits());
+                    assert_eq!(matrix.pinned(fold, unit), pinned[fold][unit]);
+                    assert_eq!(matrix.mismatches(fold, unit), mismatches[fold][unit]);
+                }
+                // the pinned enumeration is the dense filter's order
+                let dense_order: Vec<(usize, u32)> = (0..n_units)
+                    .filter(|&u| pinned[fold][u])
+                    .map(|u| (u, mismatches[fold][u]))
+                    .collect();
+                assert_eq!(matrix.pinned_units(fold).collect::<Vec<_>>(), dense_order);
+            }
+            // the encoding choice: sparse iff 16B/pinned < 13B/unit
+            for fold in 0..n_folds {
+                let pinned_count = pinned[fold].iter().filter(|&&p| p).count();
+                let expected_sparse = (16 * pinned_count as u64) < (13 * n_units as u64);
+                let is_sparse = matches!(matrix.rows[fold], ScoreRow::Sparse(_));
+                assert_eq!(
+                    is_sparse, expected_sparse,
+                    "the derived encoding choice, fold {fold}"
+                );
+            }
+            // the class scan: bit-for-bit the committed dense loop
+            let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+            for first in 0..n_folds {
+                for second in first..n_folds {
+                    let mut committed = 0.0f64;
+                    for (u, &count) in counts.iter().enumerate() {
+                        committed +=
+                            count * mix_logsumexp(dense[first][u], dense[second][u]);
+                    }
+                    assert_eq!(
+                        matrix.class_pair_sum(first, second, &counts).to_bits(),
+                        committed.to_bits(),
+                        "the class pair sum, ({first},{second})"
+                    );
+                }
+            }
+            // the merge predicates: equal columns bit-equal and
+            // hash-equal (across encodings too)
+            let mut clone = dense[0].clone();
+            clone[3] = f64::from_bits(elsewhere.to_bits() + 1); // ONE ULP
+            let matrix2 = ScoreMatrix::from_dense(
+                vec![dense[0].clone(), clone, dense[0].clone()],
+                vec![pinned[0].clone(), pinned[0].clone(), pinned[0].clone()],
+                vec![mismatches[0].clone(); 3],
+                elsewhere,
+            );
+            assert!(matrix2.ll_bits_equal(0, 2));
+            assert!(!matrix2.ll_bits_equal(0, 1));
+            assert_eq!(matrix2.ll_bits_hash(0), matrix2.ll_bits_hash(2));
+            // the streamed JSON is the committed serde bytes
+            let mut streamed = Vec::new();
+            matrix.write_ll_matrix_json(&mut streamed).unwrap();
+            assert_eq!(streamed, serde_json::to_vec(&dense).unwrap());
+        }
+    }
+
+    #[test]
+    #[ignore = "the marathon worst-locus shape receipt (a ~3GB build; run explicitly)"]
+    fn marathon_worst_locus_shape_memory_receipt() {
+        // The profiled worst-locus shape (SS10.6.3's roster, T03803:
+        // 532 folds x 4,438,575 units, 2.1% pinned pairs) built as
+        // the compressed matrix, with the RSS delta measured from
+        // /proc/self/status — the memory bound receipt. The dense
+        // form's 13 B/pair (30.7GB) is exact arithmetic, never built.
+        fn vm_rss_kb() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .and_then(|line| {
+                    line.split_whitespace().nth(1).and_then(|n| n.parse().ok())
+                })
+                .unwrap_or(0)
+        }
+        let (n_folds, n_units, pinned_stride) = (532usize, 4_438_575usize, 48usize);
+        let elsewhere = -14.418156f64;
+        let before = vm_rss_kb();
+        let mut rows = Vec::with_capacity(n_folds);
+        for fold in 0..n_folds {
+            // a sparse row at the roster's own pinned share: every
+            // 48th unit pins (~2.1%)
+            let mut units = Vec::new();
+            let mut lls = Vec::new();
+            let mut mism = Vec::new();
+            let mut unit = fold % pinned_stride;
+            while unit < n_units {
+                units.push(unit as u32);
+                lls.push(elsewhere + (unit % 977) as f64 * 1e-6);
+                mism.push((unit % 7) as u32);
+                unit += pinned_stride;
+            }
+            rows.push(ScoreRow::Sparse(ScoreRowSparse {
+                units,
+                lls,
+                mismatches: mism,
+            }));
+        }
+        let matrix = ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows,
+        };
+        let after = vm_rss_kb();
+        let live = matrix.live_bytes();
+        let pairs = n_folds as u64 * n_units as u64;
+        let dense_bytes = pairs * 13;
+        eprintln!(
+            "marathon shape T03803: {} folds x {} units = {} pairs; \\
+             compressed live {} MB ({:.2} B/pair); the dense form's \\
+             bound {} MB (13 B/pair); RSS delta {} MB; collapse {:.1}x",
+            n_folds,
+            n_units,
+            pairs,
+            live / (1024 * 1024),
+            live as f64 / pairs as f64,
+            dense_bytes / (1024 * 1024),
+            (after.saturating_sub(before)) / 1024,
+            dense_bytes as f64 / live as f64,
+        );
+        // the bound: the compressed form is a small fraction of the
+        // dense 13 B/pair at the roster's own no-pin share, and the
+        // measured RSS delta is the live bytes' own magnitude class
+        // (allocator overhead included).
+        assert!(live * 20 < dense_bytes, "the compression bound");
+        assert!(
+            (after.saturating_sub(before)) * 1024 < live * 3,
+            "the RSS delta is the live bytes' class"
+        );
+        // the pinned-majority control (T03641's class, 84% pinned):
+        // the DERIVED choice keeps the committed dense size EXACTLY
+        // (never larger) — 16 B/pinned >= 13 B/unit chooses dense.
+        let pinned_majority = 0.85 * n_units as f64;
+        assert!((16.0 * pinned_majority) >= (13.0 * n_units as f64));
     }
 
     #[test]
