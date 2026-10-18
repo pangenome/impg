@@ -4366,7 +4366,7 @@ fn test_syng_filtered_wrapper_retains_dense_self_and_forward_homologs() {
         .unwrap();
     let mut masks = rustc_hash::FxHashMap::default();
     for id in 0..wrapper.seq_index().len() as u32 {
-        let mut ranges = impg::impg::SortedRanges::new(10_000, 0);
+        let mut ranges = impg::impg::SortedRanges::new();
         ranges.insert((0, 10_000));
         masks.insert(id, ranges);
     }
