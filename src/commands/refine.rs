@@ -64,6 +64,8 @@ struct SampleInterval {
     query_end: i32,
     target_start: i32,
     target_end: i32,
+    /// Target ranges of the alignments merged into this interval
+    target_pieces: Vec<(i32, i32)>,
 }
 
 /// Candidate solution capturing a concrete left/right expansion and its support.
@@ -701,26 +703,18 @@ fn compute_support_sets(
                 query_end: q_end,
                 target_start: t_start,
                 target_end: t_end,
+                target_pieces: vec![(t_start, t_end)],
             });
     }
 
     let effective_span = (region_end - region_start).max(0).min(span_bp.max(0));
-    let left_threshold = region_start + effective_span;
-    let right_threshold = region_end - effective_span;
 
     for (sample_id, intervals) in per_sample {
         let merged = merge_intervals(intervals, merge_distance);
 
         let mut query_range: Option<(i32, i32)> = None;
         for interval in &merged {
-            if covers_boundaries(
-                interval.target_start,
-                interval.target_end,
-                region_start,
-                region_end,
-                left_threshold,
-                right_threshold,
-            ) {
+            if covers_boundaries(interval, region_start, region_end, effective_span) {
                 let q_start = interval.query_start.min(interval.query_end);
                 let q_end = interval.query_start.max(interval.query_end);
                 query_range = Some(match query_range {
@@ -782,18 +776,36 @@ fn compute_support_sets(
     (aggregated, survivors)
 }
 
+/// True if the merged interval spans the region and its alignments cover
+/// at least `span` target bases inside each boundary window.
 fn covers_boundaries(
-    interval_start: i32,
-    interval_end: i32,
+    interval: &SampleInterval,
     region_start: i32,
     region_end: i32,
-    left_threshold: i32,
-    right_threshold: i32,
+    span: i32,
 ) -> bool {
-    interval_start <= region_start
-        && interval_end >= region_end
-        && interval_end >= left_threshold
-        && interval_start <= right_threshold
+    interval.target_start <= region_start
+        && interval.target_end >= region_end
+        && covered_bases(&interval.target_pieces, region_start, region_start + span) >= span
+        && covered_bases(&interval.target_pieces, region_end - span, region_end) >= span
+}
+
+/// Bases of `[start, end)` covered by the union of `pieces`.
+fn covered_bases(pieces: &[(i32, i32)], start: i32, end: i32) -> i32 {
+    let mut clipped: Vec<_> = pieces
+        .iter()
+        .map(|&(s, e)| (s.max(start), e.min(end)))
+        .collect();
+    clipped.sort_unstable();
+    let mut covered_to = start;
+    clipped
+        .into_iter()
+        .map(|(s, e)| {
+            let n = (e - s.max(covered_to)).max(0);
+            covered_to = covered_to.max(e);
+            n
+        })
+        .sum()
 }
 
 fn merge_intervals(mut intervals: Vec<SampleInterval>, merge_distance: i32) -> Vec<SampleInterval> {
@@ -821,6 +833,7 @@ fn merge_intervals(mut intervals: Vec<SampleInterval>, merge_distance: i32) -> V
             current.query_end = current.query_end.max(next.query_end);
             current.target_start = current.target_start.min(next.target_start);
             current.target_end = current.target_end.max(next.target_end);
+            current.target_pieces.extend(next.target_pieces);
         } else {
             merged.push(current);
             current = next;
@@ -945,4 +958,32 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
     }
 
     Ok(blacklist)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_bp_counts_aligned_bases_at_each_edge() {
+        let piece = |s, e| SampleInterval {
+            query_start: s,
+            query_end: e,
+            target_start: s,
+            target_end: e,
+            target_pieces: vec![(s, e)],
+        };
+        // 10 bp at the left edge, a 50 kb gap, then the rest
+        let mut merged =
+            merge_intervals(vec![piece(1_000, 1_010), piece(51_010, 100_000)], 200_000);
+        assert_eq!(merged.len(), 1);
+        let b = merged.pop().unwrap();
+        assert!(covers_boundaries(&b, 1_000, 100_000, 10));
+        assert!(!covers_boundaries(&b, 1_000, 100_000, 1_000));
+        assert!(!covers_boundaries(&b, 900, 100_000, 0));
+        assert_eq!(
+            covered_bases(&[(0, 600), (500, 1_200), (1_500, 9_000)], 0, 2_000),
+            1_700
+        );
+    }
 }
