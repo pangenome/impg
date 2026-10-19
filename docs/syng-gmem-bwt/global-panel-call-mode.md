@@ -2868,3 +2868,155 @@ L2/` (the end-to-end default-form gate), `census-default-budget-L1-
 fast/` (the stacked-rulings budget run), `run-census-default-gates.sh`
 + `run-default-call-L2.sh` + `run-budget-L1-fast.sh` (the recipes).
 NO PR PUSH (the owner pushes).
+
+### 10.6.18 THE FAR-BIN PRUNE, ENFORCED — the owner's routing principle at the call's census view; the anchor-class hoist; the stacked budget at ~1.2x the 2.10 line; the cut's true-CPU census IN FLIGHT (the resume point)
+
+**THE PRUNE, EXECUTED.** The owner's principle — *"if they go into
+different bins unless they're basically adjacent, we don't want to
+be thinking about them"* — is now an enforced call-mode flag:
+`--far-bin-prune` (requires `--global-frame`; the committed local
+frame stays byte-frozen). The rule is pure window geometry, nothing
+tuned: a census record's own routing keeps it at the windows its own
+walk placements touch — ONE window, or TWO ADJACENT windows when
+the anchors straddle a boundary (both by the routing's own interval
+overlap; boundary-straddlers keep BOTH bins). A pattern whose
+placements scatter into NON-ADJACENT windows — the measured far-bin
+class, e.g. L1's one 43,686-multiplicity single-anchor pattern at
+windows [12,16] — is the "different bins, not basically adjacent"
+class: there is NO choice-free home bin to keep it at, so it is
+pruned from the call's census view ENTIRELY (pilot selection, bind,
+variants, and every locus's scoring). The test is the touched-window
+DIAMETER against the census's own pair-bins adjacency constant 1
+(`census_record_far_bin_scattered`; unit-proven). The cut files are
+untouched (the census receipt keeps its honest full routing + dense
+ids); the run labels itself (`-farbin-prune` on the model string)
+and receipts its own mass drop to stderr. Default OFF: the committed
+path byte-identical.
+
+**THE GATES (two-sided, all PASS).** (a) BYTE-IDENTITY at every
+locus the prune does not touch, across the committed gate-file set
+(calls/sequences/exactness/ingredients/records/skeleton + the
+instrument receipt modulo its timing fields): **L2 — 0 records
+pruned — ALL 25 loci byte-identical**; at the other localities every
+locus OUTSIDE the pruned records' own windows is byte-identical (L1
+19/25, L3 20/24, L4 22/25, pilot 14/22), and the changed loci are
+EXACTLY the pruned records' windows: L1 [2,4,11,12,13,16], L3
+[1,13,17,19], L4 [9,17,23], pilot [1,4,7,8,9,10,11,12]. (b) THE
+TRUTH ASSESSMENT at the changed loci (official QV machinery, the
+census-profile-ab form): **ZERO truth losses** — rank-1 rates
+IDENTICAL at L1/L2/L3/L4 (16%/24%/8%/12%), median QVs and >=QV30
+counts identical — and at the PILOT the prune WINS FOUR TRUTH LOCI:
+rank-1 4/22 (18%) -> **8/22 (36%)**, median official QV 36.3 ->
+**45.0**, >=QV30 17 -> 20 (loci 8/9/10/11: the pruned form calls
+the truth pair at QV 50 where the restrict-default called
+non-truth fold material at QV 0.8-27.3; locus 12 equal-class QV
+shift only). The named fold-material changes with NO truth stake
+(neither call matches truth, equal or better QV): L1 loci 4, 11
+(locus 11's QV RISES 30.4 -> 39.6); L3 loci 1, 13, 19. The owner's
+model is not merely cost-free — at the pilot it is accuracy-
+POSITIVE: the far-bin chain records ({8,9,10,11,12}-class repeat
+patterns, 1,167 records, 10.7% of the pilot's census mass) were
+drowning the local evidence at five consecutive windows.
+
+**THE MASS/WALL RECEIPTS.** Census mult pruned per locality (the
+run's own receipt line): **L1 14 records / 43,868 of 141,114
+(31.1%); L2 0; L3 52 / 29,889 of 67,359 (44.4%); L4 3 / 11 of
+18,121 (0.06%); pilot 1,167 / 54,846 of 512,929 (10.7%)**. Loci
+phase (serial recipe, RAYON_NUM_THREADS=1, walls with co-tenancy
+stated — the box carried a load average of ~180 and another
+campaign all evening): L1 75.0s (committed receipt) -> **34.7s**
+at the stacked form, measured as a CLEAN SAME-WAVE PAIR (unpruned
+new binary 74.8s vs pruned new binary 34.7s, the pair's own wave) =
+**−53.6% of the loci core**; the same-wave unpruned references are
+byte-identical to the committed receipts (determinism re-gate
+PASS at L1+L3); pilot 630.9 -> 288.3s (−54%); L3 24.2 -> 15.2s.
+
+**THE RE-ANCHORABLE ANCHOR CLASS — profiled, verdict, implemented.**
+What it computes: per (unit, fold, orientation) the committed form
+rebuilt the pin skeleton — `anchor_correspondence`'s monotone DP
+over the fold's node positions, the merged pinned-window backbone,
+the windows-inside test — which is a PURE function of (record,
+fold, orientation): the canonical walk is record-level state, the
+node positions fold-level, and NO variant input enters it. The
+§10.6.14 receipt: 16.8 core-s at L1 (54.2M calls at 0.31 µs; 26.3M
+calls at the restricted census). THE VERDICT: the projection's
+occurrence structure ALREADY serves this class — the node->position
+lookup IS the k-independent panel coordinate the re-anchor
+principle names (conversion-not-alignment); the waste was the
+per-VARIANT recomputation of a per-RECORD result. Implemented as
+the anchor-class hoist: the pins are built ONCE per (record, fold)
+before the unit loop, every per-unit term (the integer
+abstained-hull accumulation, the no-pin elsewhere branch, the
+per-(unit, pin) placement) kept in the committed unit order with
+the committed values — bit-identical by construction. THE GATE:
+byte-identity PASS at L1 and L2 (the new binary WITHOUT the prune,
+all artifacts, vs the committed receipts). THE RECEIPT (the
+scoring-census instrument, serial, restricted census, both forms
+raw): anchor class **11.63s / 26,330,418 calls -> 1.08s / 626,701
+calls (−90.7%, a 42x call collapse)**; the placement class
+unchanged (13.4-13.9s, identical call counts — the hoist touches
+only the lookup class). The hoist's whole-loci-phase effect at the
+ordinary localities sits inside the evening's contention noise
+(74.8-94.5s across waves vs the receipt's 75.0s); the class census
+is the solid number.
+
+**THE STACKED BUDGET (L1-class, 25 loci, ex-load = the phase
+summary's non-inputs sum, serial recipe, each row's wave stated):**
+
+| row | loci phase | ex-load | per-locus | gap to 2.10 |
+|---|---:|---:|---:|---:|
+| restrict-default (the §10.6.17 receipt, ×10 co-tenant) | 75.0s | 99.0 | 3.96 | 1.9x |
+| + the far-bin prune (pre-hoist binary, exact, ×5 wave) | 39.7s | 66.4 | 2.66 | 1.3x |
+| + prune + the anchor hoist (exact; CLEAN PAIR wave) | 34.7s | 61.1 | **2.44** | **1.16x** |
+| + prune + hoist + the sparse-skip fast scan | 34.4s | 66.2 | ~2.65* | ~1.3x |
+
+(*the budget run's wave was the evening's most contended; its loci
+phase 34.4s is within noise of the exact form's 34.7s CLEAN-PAIR
+34.7s — at the pruned form the sparse-skip buys nothing measurable,
+honestly receipted: the pruned L1 census is pinned-heavy and the
+skip's −5.7% at the unpruned restrict form vanishes under it. The
+mass-invariant serial classes — bind 6.5s + rows/context 17.0s +
+quality 2.8s ≈ 1.06/locus — are unchanged and now own ~44% of the
+budget.) **THE HONEST HEADLINE: the L1-class gap to the 2.10 line
+is now ~1.16x** — the 20-minute line's call pole is, within the
+contention noise of any single wave, essentially AT the line; the
+remaining distance is the mass-invariant serial classes (ENGINEER-
+ING) and the placement/class-scan core (the class scan's exact
+accumulation is an OWNER byte-identity decision, the placement
+class's per-pair comparison is the IRREDUCIBLE floor ~0.4-0.6
+core-s/locus of §10.6.14).
+
+**THE CUT'S TRUE-CPU CENSUS — IN FLIGHT (the owed duty-3 receipt).**
+The serial-census method (the call autopsy's own: RAYON_NUM_THREADS=1,
+walls = true CPU, /usr/bin/time user+sys beside) is running at the
+width-amortization shape: ONE serial width-4 batch cut (one copy of
+each gate territory) and ONE serial width-32 batch cut (8 copies
+each; the genome-scale marginal = the flat decode share + ONE
+copy's remap, the §10.6.13 honesty label), both full-mass scans.
+AT COMMIT TIME both runs are ~45 minutes into the per-territory
+setup phase (the [cut-batch-global] territory/setup lines; the
+scan+emission phases follow). **THE RESUME POINT: (1) let
+`serial-cut-w4` + `serial-cut-w32` finish (work dir
+`run-cut-serial-census.sh`, receipts `serial-cut-{w4,w32}.{log,err,
+wall,exit,time}`), decompose decode-vs-per-territory from the
+phase lines, and state the cut pole's honest per-territory true CPU
+in the 20-min ledger; (2) restate the whole-genome 20-minute
+budget table with every pole receipted (the call pole now ~2.44/
+locus at L1-class; the cut pole pending (1); the load/scan/ memory
+poles unchanged from §10.6.13-14) and each residual labeled
+ENGINEERING / OWNER-DECISION / IRREDUCIBLE; (3) if the owner wants
+the prune as the product DEFAULT (it is gate-clean: zero truth
+loss, four pilot truth gains), flip the flag's default by its own
+gated increment — the flag default OFF keeps the committed
+receipts byte-frozen until then.**
+
+The work-dir receipts: `farbin-A-{L1,L2,L3,L4,pilot}/` (the pruned
+calls), `farbin-ref-A-{L1,L3}/` + `stackref-L1/` (the same-wave
+unpruned references, byte-identical to the committed receipts),
+`hoistgate-{L1,L2}/` (the anchor-hoist byte-identity gates),
+`prehoist-census-L1/` + `hoistgate-census-L1/` (the anchor class's
+A/B census receipts, old form vs hoisted), `farbin-hoist-A-L1/` +
+`farbin-budget-L1-fast/` (the stacked exact + sparse-skip runs),
+`impg-prehoist` (the preserved pre-hoist binary the wave ran),
+`run-farbin-gates.sh` + `farbin-compare.py` + `run-cut-serial-census.sh`
+(the recipes). NO PR PUSH (the owner pushes).

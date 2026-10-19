@@ -183,6 +183,25 @@ pub enum Command {
         /// convention itself, per record, against the AGC).
         #[arg(long, default_value_t = 0, requires = "global_frame")]
         record_origin: u64,
+        /// THE FAR-BIN PRUNE (the owner's own routing principle, the
+        /// §10.6.17-named census lever, enforced at the call's census
+        /// view: "we used to decide where to put each read, so it's
+        /// basically being routed by its best MEMs. If they go into
+        /// different bins unless they're basically adjacent, we
+        /// don't want to be thinking about them."). Census records
+        /// whose placements scatter into NON-ADJACENT windows (the
+        /// measured far-bin repeat class — L1's one 43,686-mult
+        /// single-anchor pattern at windows [12,16], 31.1% of the
+        /// restricted census mass) leave the census view entirely;
+        /// boundary-straddlers keep BOTH adjacent bins (pure interval
+        /// overlap, the routing's own rule). The adjacency test is
+        /// geometry only (the touched-window diameter vs the census's
+        /// own pair-bins constant 1) — no tuned thresholds. Default
+        /// (unset): the committed census view verbatim, byte-identical
+        /// receipts. Requires --global-frame (the committed local
+        /// frame is closed, its receipts byte-frozen).
+        #[arg(long, default_value_t = false, requires = "global_frame")]
+        far_bin_prune: bool,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -914,13 +933,15 @@ pub fn run(command: Command) -> io::Result<()> {
             flank_overlap,
             global_frame,
             record_origin,
+            far_bin_prune,
             out_dir,
         } => {
             // (The output manifest's model label — the class-scan
             // order states itself here too (the owner's Ruling 3):
             // a sparse-skip run's manifest can never be mistaken for
-            // an exact-mode one. Env-unset keeps the committed
-            // string verbatim.)
+            // an exact-mode one. THE FAR-BIN PRUNE likewise labels
+            // its own runs. Env-unset keeps the committed string
+            // verbatim.)
             let model_label: std::borrow::Cow<str> =
                 match std::env::var("IMPG_CLASS_SCAN_ORDER") {
                     Ok(value) if value == "sparse-skip" => {
@@ -931,6 +952,11 @@ pub fn run(command: Command) -> io::Result<()> {
                     }
                     _ => std::borrow::Cow::Borrowed(realign_score::MODEL),
                 };
+            let model_label: std::borrow::Cow<str> = if far_bin_prune {
+                std::borrow::Cow::Owned(format!("{model_label}-farbin-prune"))
+            } else {
+                model_label
+            };
             genome::with_output_model(
             &out_dir,
             &model_label,
@@ -966,6 +992,7 @@ pub fn run(command: Command) -> io::Result<()> {
                     region,
                     global_frame,
                     record_origin,
+                    far_bin_prune,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
                     }),
@@ -1993,6 +2020,11 @@ pub fn run(command: Command) -> io::Result<()> {
                     flank_overlap,
                     global_frame,
                     record_origin,
+                    // The committed batch form keeps the census view
+                    // verbatim (the far-bin prune is the call-diplotypes
+                    // CLI's own flag; carrying it into the batch forms
+                    // is the named follow-up, as with census_profile).
+                    far_bin_prune: false,
                     out_dir: partition_out.clone(),
                 })?;
                 calls_receipts.push(serde_json::json!({

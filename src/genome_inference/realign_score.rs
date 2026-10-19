@@ -522,6 +522,30 @@ pub struct Options {
     /// needed the absolute truth).
     #[arg(long, default_value_t = 0, requires = "global_frame")]
     pub record_origin: u64,
+    /// THE FAR-BIN PRUNE (the owner's own routing principle, the
+    /// §10.6.17-named census lever, enforced at the call's census view:
+    /// "we used to decide where to put each read, so it's basically
+    /// being routed by its best MEMs. If they go into different bins
+    /// unless they're basically adjacent, we don't want to be thinking
+    /// about them."). A census record's own routing keeps it at the
+    /// windows its own walk placements touch — one window, or two
+    /// ADJACENT windows when the anchors straddle a boundary (both by
+    /// pure interval overlap; no tolerance, nothing tuned). A pattern
+    /// whose placements scatter into NON-ADJACENT windows — the
+    /// measured far-bin class, e.g. L1's one 43,686-multiplicity
+    /// single-anchor pattern at windows [12,16] carrying 31.1% of the
+    /// restricted census mass — is the "different bins, not basically
+    /// adjacent" class: there is no choice-free home bin to keep it at,
+    /// so the rule refuses to think about it ANYWHERE and the call
+    /// prunes it from its census view entirely (bind, variants, and
+    /// every locus's scoring). The test is pure window-set geometry
+    /// (the touched-window diameter against the census's own
+    /// pair-bins adjacency constant 1) — never a tuned threshold.
+    /// Default (unset): the committed census view verbatim — the
+    /// committed path byte-for-byte. Requires --global-frame (the
+    /// committed local frame is closed, its receipts byte-frozen).
+    #[arg(long, default_value_t = false, requires = "global_frame")]
+    pub far_bin_prune: bool,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -1018,6 +1042,39 @@ struct CensusRecordLine {
     anchors: u64,
     #[serde(default)]
     occurrences: Vec<CensusOccurrence>,
+}
+
+/// THE OWNER'S FAR-BIN RULE over one census record (the routing
+/// principle the §10.6.17 autopsy named, now the prune's own
+/// geometry): "we used to decide where to put each read, so it's
+/// basically being routed by its best MEMs. If they go into
+/// different bins unless they're basically adjacent, we don't want
+/// to be thinking about them." A record's own routing keeps it at
+/// the windows its own walk placements touch — ONE window, or TWO
+/// ADJACENT windows when the anchors straddle a boundary (both by
+/// pure interval overlap, the routing's `partitions_at` rule: no
+/// tolerance, nothing to tune). A pattern whose placements scatter
+/// into NON-ADJACENT windows — the measured far-bin class, e.g.
+/// L1's one 43,686-multiplicity single-anchor pattern routed to
+/// windows [12,16] — is exactly the owner's "different bins, not
+/// basically adjacent" class: there is no choice-free home bin to
+/// keep it at, so the rule refuses to think about it anywhere. The
+/// test is pure window-set geometry: the record's touched-window
+/// DIAMETER against the adjacency constant 1 (adjacent-or-equal) —
+/// the census's own pair-bins taxonomy constant, never a tuned
+/// threshold. A record touching no window is not scattered (it
+/// votes nowhere by its own routing; the pilot rule already
+/// excludes it).
+fn census_record_far_bin_scattered(line: &CensusRecordLine) -> bool {
+    let mut lo = u32::MAX;
+    let mut hi = u32::MIN;
+    for occ in &line.occurrences {
+        for &window in &occ.partitions {
+            lo = lo.min(window);
+            hi = hi.max(window);
+        }
+    }
+    lo != u32::MAX && hi - lo > 1
 }
 
 /// One member row of a partition graph map (the alignment-induced
@@ -5221,7 +5278,23 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     let mut bind_occurrences = 0u64;
     let mut bind_shaped_keys: BTreeSet<u32> = BTreeSet::new();
     let mut pilot_records: BTreeSet<usize> = BTreeSet::new();
+    // (THE FAR-BIN PRUNE, the owner's routing principle at the call's
+    // census view: the non-adjacent multi-window records leave the
+    // census view ENTIRELY — bind, variants, and every locus's
+    // scoring — receipted here by count and mass. The prune is
+    // per-record and the record ids stay the census's own dense ids,
+    // so every locus the pruned records never touched is byte-
+    // identical to the committed receipts by construction.)
+    let mut far_bin_pruned_records = 0u64;
+    let mut far_bin_pruned_mult = 0u64;
+    let mut census_view_mult = 0u64;
     for (record, line) in census_records.iter().enumerate() {
+        if options.far_bin_prune && census_record_far_bin_scattered(line) {
+            far_bin_pruned_records += 1;
+            far_bin_pruned_mult += line.multiplicity;
+            continue;
+        }
+        census_view_mult += line.multiplicity;
         for occ in &line.occurrences {
             // (Locality mode: a record can vote at a pilot locus only
             // by overlapping a locality fold row, and every fold row
@@ -5243,6 +5316,15 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         }
     }
     eprintln!("[score] pilot records: {}", pilot_records.len());
+    if options.far_bin_prune {
+        let total_mult = census_view_mult + far_bin_pruned_mult;
+        eprintln!(
+            "[score] far-bin prune: {far_bin_pruned_records} records pruned, \
+             census mult {far_bin_pruned_mult} of {total_mult} \
+             ({:.1}%) — the non-adjacent-bin class",
+            100.0 * far_bin_pruned_mult as f64 / total_mult.max(1) as f64,
+        );
+    }
 
     // Bind every pilot record to its derived key (slice A's binding,
     // verbatim, restricted to the pilot set).
@@ -6443,6 +6525,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let census_anchor_calls = AtomicU64::new(0);
         let census_placement_calls = AtomicU64::new(0);
         let census_assertion_calls = AtomicU64::new(0);
+        // (THE ANCHOR-CLASS HOIST's record slot: locus_records-position
+        // per census record id, the O(1) unit→pins index.)
+        let mut slot_of_record = vec![u32::MAX; census_records.len()];
+        for (slot, &record) in locus_records.iter().enumerate() {
+            slot_of_record[record] = slot as u32;
+        }
         let scored: Vec<FoldScore> = (0..n_folds)
             .into_par_iter()
             .map(|fold_index| {
@@ -6456,8 +6544,45 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 let mut no_pin_records = 0u64;
                 let mut abstained_hull_bp = 0u64;
                 let positions_of = |node: u32| fold.positions_of(node);
-                for unit in &units {
-                    let record = unit.record;
+                // (THE ANCHOR-CLASS HOIST — the §10.6.14 autopsy's
+                // re-anchorable COORDINATE-LOOKUP class, implemented as
+                // the pure-function collapse it is: the pin build —
+                // anchor_correspondence's monotone DP over the fold's
+                // own node positions, the merged pinned-window
+                // backbone, the windows-inside test — is a PURE
+                // function of (record, fold, orientation): the
+                // canonical walk, the touching orientations, and the
+                // fold's node positions are all record- or fold-level
+                // state and NO unit (variant) input enters it, so
+                // every variant of one record shares one result per
+                // fold. The committed form rebuilt it at every
+                // (unit, fold, orientation) — 54.2M calls at L1,
+                // 16.8 core-s of pure re-computation at 0.31 µs/call,
+                // against ~150x fewer (record, fold, orientation)
+                // builds. The hoist computes the pins ONCE per
+                // (record, fold) before the unit loop; every per-unit
+                // term — the abstained-hull accumulation (an integer
+                // add, exact in any order), the no-pin elsewhere
+                // branch, the per-(unit, pin) placement — stays in the
+                // committed unit order with the committed values, so
+                // the pair loop's outputs are bit-identical by
+                // construction. The scoring-census instrument's
+                // anchor timer/call counters now wrap the (record,
+                // fold, orientation) builds — the class's true shape.)
+                struct FoldPins {
+                    pins: Vec<Option<Pin>>,
+                    any_pin: bool,
+                    // Per orientation IN THE COMMITTED ITERATION ORDER
+                    // (the touching orientations' BTreeSet order) that
+                    // pinned at all: its merged backbone bp — the
+                    // per-unit abstained-hull term's own input.
+                    abstain_backbone_bp: Vec<u64>,
+                }
+                let census_anchor_started =
+                    if locus_scoring_census { Some(Instant::now()) } else { None };
+                let mut pins_by_record: Vec<FoldPins> =
+                    Vec::with_capacity(locus_records.len());
+                for &record in &locus_records {
                     let data = record_data[record]
                         .as_ref()
                         .expect("bound record (the per-record hoist)");
@@ -6467,13 +6592,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     // support. Under the default convention it is the
                     // fold's full extent.)
                     let (img_lo, img_hi) = territory[fold_index];
-                    // The pins per orientation present among the
-                    // touching occurrences (fold-independent — the
-                    // convention cannot bias fold comparisons).
                     let mut pins: Vec<Option<Pin>> = vec![None, None];
                     let mut any_pin = false;
-                    let census_anchor_started =
-                        if locus_scoring_census { Some(Instant::now()) } else { None };
+                    let mut abstain_backbone_bp: Vec<u64> = Vec::new();
                     for &orientation in &touching[&record].orientations {
                         let (pinned, _ambiguous) =
                             anchor_correspondence(canonical, orientation, &positions_of);
@@ -6501,8 +6622,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         // read hull bases inside unpinned anchor
                         // windows) — the per-record hoisted value (the
                         // hull is fold-independent).
-                        let hull_covered = data.hull_covered;
-                        abstained_hull_bp += hull_covered - backbone_bp;
+                        abstain_backbone_bp.push(backbone_bp);
                         if !windows_inside {
                             continue;
                         }
@@ -6515,11 +6635,40 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                             backbone_bp,
                         });
                     }
-                    if let Some(started) = census_anchor_started {
-                        census_anchor_ns
-                            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    pins_by_record.push(FoldPins {
+                        pins,
+                        any_pin,
+                        abstain_backbone_bp,
+                    });
+                }
+                if let Some(started) = census_anchor_started {
+                    census_anchor_ns
+                        .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                for unit in &units {
+                    let record = unit.record;
+                    let data = record_data[record]
+                        .as_ref()
+                        .expect("bound record (the per-record hoist)");
+                    let canonical = &data.canonical;
+                    // (Stage 2: this fold's territory image — the
+                    // placement-validity domain and the prior's
+                    // support. Under the default convention it is the
+                    // fold's full extent.)
+                    let (img_lo, img_hi) = territory[fold_index];
+                    // The record's memoized pins for THIS fold (the
+                    // anchor-class hoist above): one build per
+                    // (record, fold), shared by every variant.
+                    // (The unit's record is one of the locus's own
+                    // records — the committed code's touching[&record]
+                    // lookup already assumed it; an out-of-set record
+                    // fails loudly at the pins index.)
+                    let slot = slot_of_record[record] as usize;
+                    let built = &pins_by_record[slot];
+                    for &backbone_bp in &built.abstain_backbone_bp {
+                        abstained_hull_bp += data.hull_covered - backbone_bp;
                     }
-                    if !any_pin {
+                    if !built.any_pin {
                         // No anchored placement: the ELSEWHERE branch
                         // (the generated-elsewhere marginalization's
                         // floor; a read a candidate cannot place is
@@ -6535,7 +6684,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     let mut scores: Vec<f64> = Vec::new();
                     let mut unit_mismatches = 0u32;
                     let mut pinned_here = false;
-                    for pin in pins.iter().flatten() {
+                    for pin in built.pins.iter().flatten() {
                         let census_placement_started =
                             if locus_scoring_census { Some(Instant::now()) } else { None };
                         let placement = placement_score(
@@ -10874,6 +11023,67 @@ mod tests {
         let _ = std::fs::remove_file(&fa);
         let _ = std::fs::remove_file(dir.join("lane.fa.fai"));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn far_bin_prune_is_pure_window_geometry() {
+        // THE OWNER'S FAR-BIN RULE, the pure-function proof: a
+        // record's own routing keeps one window, or two ADJACENT
+        // windows when the anchors straddle a boundary (the routing's
+        // own interval-overlap rule); placements scattering into
+        // NON-ADJACENT windows are the "different bins, not basically
+        // adjacent" class — pruned from the census view ENTIRELY
+        // (there is no choice-free home bin). The test is the
+        // touched-window diameter against the census's own pair-bins
+        // adjacency constant 1: no thresholds, nothing tuned.
+        let line = |partitions_per_occ: &[&[u32]]| CensusRecordLine {
+            record: 0,
+            multiplicity: 1,
+            anchors: 1,
+            occurrences: partitions_per_occ
+                .iter()
+                .map(|&partitions| CensusOccurrence {
+                    path: 0,
+                    start: 0,
+                    orientation: 0,
+                    partitions: partitions.to_vec(),
+                    intervals: Vec::new(),
+                })
+                .collect(),
+        };
+        // One window — the read's own bin: kept.
+        assert!(!census_record_far_bin_scattered(&line(&[&[7]])));
+        // No windows at all (votes nowhere by its own routing): not
+        // the far-bin class.
+        assert!(!census_record_far_bin_scattered(&line(&[&[]])));
+        // The boundary-straddler: two ADJACENT bins, kept at BOTH
+        // (the owner's own boundary case, pure interval overlap).
+        assert!(!census_record_far_bin_scattered(&line(&[&[12, 13]])));
+        // Straddling placements at separate bins of one boundary:
+        // still the adjacent class.
+        assert!(!census_record_far_bin_scattered(&line(&[&[12], &[13]])));
+        assert!(!census_record_far_bin_scattered(&line(&[&[13, 14], &[13]])));
+        // THE MEASURED FAR-BIN CLASS: the [12,16] scatter — L1's
+        // 43,686-multiplicity single-anchor pattern's own shape —
+        // pruned (diameter 4).
+        assert!(census_record_far_bin_scattered(&line(&[&[12], &[16]])));
+        // The [4,11] class (L1's second family) and the [2,13] class.
+        assert!(census_record_far_bin_scattered(&line(&[&[4], &[11]])));
+        assert!(census_record_far_bin_scattered(&line(&[&[2], &[13]])));
+        // A mixed shape — an adjacent pair PLUS a far outlier — is
+        // still the scatter class as a whole (the pattern's bins
+        // are not "basically adjacent"); no per-bin surgery, no
+        // choice of a home component.
+        assert!(census_record_far_bin_scattered(&line(&[&[12, 13], &[16]])));
+        // A three-window chain (diameter 2) is NOT basically
+        // adjacent as a set: the far pair 4 and 6 rules it out.
+        assert!(census_record_far_bin_scattered(&line(&[&[4], &[5], &[6]])));
+        // Windows are per-occurrence in the census: the scatter is
+        // visible only across occurrences, never within one
+        // occurrence's own interval-overlap partitions.
+        assert!(census_record_far_bin_scattered(&line(
+            &[&[12, 13], &[15, 16]]
+        )));
     }
 
 }
