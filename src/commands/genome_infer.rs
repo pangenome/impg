@@ -915,9 +915,25 @@ pub fn run(command: Command) -> io::Result<()> {
             global_frame,
             record_origin,
             out_dir,
-        } => genome::with_output_model(
+        } => {
+            // (The output manifest's model label — the class-scan
+            // order states itself here too (the owner's Ruling 3):
+            // a sparse-skip run's manifest can never be mistaken for
+            // an exact-mode one. Env-unset keeps the committed
+            // string verbatim.)
+            let model_label: std::borrow::Cow<str> =
+                match std::env::var("IMPG_CLASS_SCAN_ORDER") {
+                    Ok(value) if value == "sparse-skip" => {
+                        std::borrow::Cow::Owned(format!(
+                            "{}-classscan-sparse",
+                            realign_score::MODEL,
+                        ))
+                    }
+                    _ => std::borrow::Cow::Borrowed(realign_score::MODEL),
+                };
+            genome::with_output_model(
             &out_dir,
-            realign_score::MODEL,
+            &model_label,
             || {
                 let options = realign_score::Options {
                     panel,
@@ -980,7 +996,8 @@ pub fn run(command: Command) -> io::Result<()> {
                     "truth_in_default_output": false,
                 }))
             },
-        ),
+            )
+        },
         Command::ChainMolecules {
             calls,
             panel,

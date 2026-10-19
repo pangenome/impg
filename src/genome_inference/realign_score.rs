@@ -408,8 +408,9 @@ pub struct Options {
     #[arg(long)]
     pub exactness_out: PathBuf,
     /// The evenly-spaced exactness sample count per locus (a stated
-    /// measurement sample; the in-process assertion covers the whole
-    /// pilot domain regardless).
+    /// measurement sample; with IMPG_SCORE_EXACTNESS_ASSERT=1 the
+    /// in-process assertion covers the whole pilot domain as well —
+    /// the receipt/gate form of the removed always-on check).
     #[arg(long, default_value_t = 100)]
     pub exactness_sample: u64,
     /// The pocket-read anatomy sidecar (slice C: per unit, classified
@@ -3849,6 +3850,175 @@ impl ScoreMatrix {
     }
 }
 
+/// The class scan's accumulation-order toggle (the owner's Ruling
+/// 3): Exact = the committed unit-order accumulation (the default,
+/// bit-reproducible); SparseSkip = the fast mode (the constant
+/// entries skipped, the float accumulation regrouped — deltas
+/// measured and named).
+#[derive(Clone, Copy)]
+enum ClassScanOrder {
+    Exact,
+    SparseSkip,
+}
+
+/// The ulp distance between two f64s on the monotone bit axis
+/// (0 for equal bits) — the sparse-skip compare receipt's named
+/// delta unit.
+fn ulp_distance(a: f64, b: f64) -> u64 {
+    let key = |x: f64| {
+        let bits = x.to_bits();
+        if bits >> 63 == 0 {
+            bits | 0x8000_0000_0000_0000
+        } else {
+            !bits
+        }
+    };
+    key(a).abs_diff(key(b))
+}
+
+/// One row of the fast class-scan index: the PINNED units in
+/// ascending order with their ll values (a sparse row's own arrays
+/// borrowed verbatim; a dense row's list built once per locus).
+enum FastRow<'a> {
+    Borrowed { units: &'a [u32], lls: &'a [f64] },
+    Owned { units: Vec<u32>, lls: Vec<f64> },
+}
+
+impl<'a> FastRow<'a> {
+    fn units(&self) -> &[u32] {
+        match self {
+            FastRow::Borrowed { units, .. } => units,
+            FastRow::Owned { units, .. } => units,
+        }
+    }
+    fn lls(&self) -> &[f64] {
+        match self {
+            FastRow::Borrowed { lls, .. } => lls,
+            FastRow::Owned { lls, .. } => lls,
+        }
+    }
+}
+
+/// THE FAST CLASS-SCAN INDEX (the sparse-skip form — the previously
+/// REFUSED accumulation-order change, §10.6.8, now the owner's
+/// Ruling 3 performance path behind IMPG_CLASS_SCAN_ORDER=1). Per
+/// fold: the pinned units ascending with their ll values, plus the
+/// locus's total unit-count mass. A class pair's sum then walks only
+/// the UNION of the two rows' pinned units — every other (fold, unit)
+/// entry is the no-pin constant on BOTH folds (mix_logsumexp(E, E) =
+/// E exactly, proven per the §10.6.8 exactness argument), so its
+/// whole contribution returns as ONE `elsewhere * constant_mass`
+/// term where constant_mass = total_count − (the union's counts).
+/// That regrouping CHANGES the float accumulation order relative to
+/// the committed unit-order walk — the exact mode's byte-identity
+/// invariant — so the fast mode's sums are measured and named
+/// (IMPG_CLASS_SCAN_COMPARE), never hidden, and the model string is
+/// suffixed so no fast-mode output can be mistaken for an exact one.
+struct ClassScanFastIndex<'a> {
+    n_units: usize,
+    elsewhere: f64,
+    total_count: f64,
+    rows: Vec<FastRow<'a>>,
+}
+
+impl<'a> ClassScanFastIndex<'a> {
+    fn build(matrix: &'a ScoreMatrix, unit_counts: &[f64]) -> ClassScanFastIndex<'a> {
+        let mut rows = Vec::with_capacity(matrix.rows.len());
+        for row in &matrix.rows {
+            rows.push(match row {
+                ScoreRow::Sparse(sparse) => FastRow::Borrowed {
+                    units: &sparse.units,
+                    lls: &sparse.lls,
+                },
+                ScoreRow::Dense(dense) => {
+                    let mut units = Vec::new();
+                    let mut lls = Vec::new();
+                    for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
+                        if is_pinned {
+                            units.push(unit as u32);
+                            lls.push(dense.ll[unit]);
+                        }
+                    }
+                    FastRow::Owned { units, lls }
+                }
+            });
+        }
+        ClassScanFastIndex {
+            n_units: matrix.n_units,
+            elsewhere: matrix.elsewhere,
+            total_count: unit_counts.iter().sum(),
+            rows,
+        }
+    }
+
+    /// The sparse-skip class pair sum (the fast mode's accumulation,
+    /// deterministic: the union walk ascending, the constant mass as
+    /// the final term).
+    fn class_pair_sum(&self, first: usize, second: usize, unit_counts: &[f64]) -> f64 {
+        let (a_units, a_lls) = (self.rows[first].units(), self.rows[first].lls());
+        let (b_units, b_lls) = (self.rows[second].units(), self.rows[second].lls());
+        let (mut ai, mut bi) = (0usize, 0usize);
+        let mut total = 0.0f64;
+        let mut union_count = 0.0f64;
+        while ai < a_units.len() || bi < b_units.len() {
+            let unit = if bi >= b_units.len()
+                || (ai < a_units.len() && a_units[ai] <= b_units[bi])
+            {
+                a_units[ai]
+            } else {
+                b_units[bi]
+            };
+            let la = if ai < a_units.len() && a_units[ai] == unit {
+                let value = a_lls[ai];
+                ai += 1;
+                value
+            } else {
+                self.elsewhere
+            };
+            let lb = if bi < b_units.len() && b_units[bi] == unit {
+                let value = b_lls[bi];
+                bi += 1;
+                value
+            } else {
+                self.elsewhere
+            };
+            let count = unit_counts[unit as usize];
+            total += count * mix_logsumexp(la, lb);
+            union_count += count;
+        }
+        let constant_mass = self.total_count - union_count;
+        total + self.elsewhere * constant_mass
+    }
+
+    /// The constant (fold, unit) entries this pair's union walk
+    /// skips — the compare receipt's honest measurement of what the
+    /// sparse-skip form actually skips at this locus.
+    fn constant_units_skipped(&self, first: usize, second: usize) -> u64 {
+        let (a_units, b_units) = (self.rows[first].units(), self.rows[second].units());
+        let (mut ai, mut bi) = (0usize, 0usize);
+        let mut union_len = 0usize;
+        while ai < a_units.len() || bi < b_units.len() {
+            match (ai < a_units.len(), bi < b_units.len()) {
+                (true, false) => ai += 1,
+                (false, true) => bi += 1,
+                (true, true) => {
+                    if a_units[ai] < b_units[bi] {
+                        ai += 1;
+                    } else if b_units[bi] < a_units[ai] {
+                        bi += 1;
+                    } else {
+                        ai += 1;
+                        bi += 1;
+                    }
+                }
+                (false, false) => unreachable!(),
+            }
+            union_len += 1;
+        }
+        (self.n_units - union_len) as u64
+    }
+}
+
 /// The COLLINEARITY verdict of one placement's pins (the slice C
 /// anatomy): the pinned anchors must sit at ONE offset for the
 /// placement to be ONE CONTINUOUS path through the fold's spell (a
@@ -4323,6 +4493,52 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // call) the census run's walls are upper bounds, never used as
     // the committed receipt shape.)
     let locus_scoring_census = std::env::var("IMPG_LOCUS_SCORING_CENSUS").is_ok();
+    // (THE OWNER'S RULING 1 — the exactness assertion OUT of the
+    // production path: the ALWAYS-ON direct_score re-verification
+    // (the §10.6.14 autopsy: 0.95 µs/pair, 32.9 core-s at L1 = 16%
+    // of the ex-load call, 58% of the pinned alignment work) becomes
+    // a receipt/gate/test instrument, env-gated:
+    // IMPG_SCORE_EXACTNESS_ASSERT restores the committed always-on
+    // form VERBATIM (every placement re-verified base-by-base, the
+    // per-locus and whole-run FACTORIZATION gates enforced);
+    // unset — the production default — the pair loop trusts the
+    // factorized (m, c) exactly as the committed receipts'
+    // assertion proved it, and the exactness SAMPLE receipt (the
+    // independent checker's vote-level detail) plus the unit tests
+    // keep proving the machinery. The assertion emits no product
+    // bit: the byte-identity gate against the committed receipts is
+    // the proof of the removal.)
+    let exactness_assert = std::env::var("IMPG_SCORE_EXACTNESS_ASSERT").is_ok();
+    // (THE OWNER'S RULING 3 — the accumulation-order TOGGLE at the
+    // class scan: IMPG_CLASS_SCAN_ORDER=exact (the default, unset)
+    // is the committed deterministic unit-order accumulation,
+    // bit-reproducible — the receipts' form; =sparse-skip is the
+    // fast mode, the previously REFUSED form (§10.6.8) now
+    // sanctioned for the performance path: the constant entries
+    // (units unpinned on BOTH folds of a class pair) leave the
+    // per-unit loop and return as one elsewhere*mass term, changing
+    // the float accumulation — the deltas measured and named, never
+    // hidden, and the model string suffixed so a fast-mode output
+    // can never be mistaken for an exact one. Any other value is a
+    // loud error, never a silent fallback.)
+    let class_scan_order = match std::env::var("IMPG_CLASS_SCAN_ORDER") {
+        Err(_) => ClassScanOrder::Exact,
+        Ok(value) if value == "exact" => ClassScanOrder::Exact,
+        Ok(value) if value == "sparse-skip" => ClassScanOrder::SparseSkip,
+        Ok(other) => {
+            return Err(invalid(&format!(
+                "unknown IMPG_CLASS_SCAN_ORDER {other:?} \
+                 (exact | sparse-skip)"
+            )))
+        }
+    };
+    // (The sparse-skip DELTA RECEIPT, receipt-side, DEFAULT OFF:
+    // IMPG_CLASS_SCAN_COMPARE=1 computes BOTH the exact and the
+    // sparse-skip sum for every class pair, receipts per locus how
+    // many sums differ / the max ulp delta / the constant entries
+    // skipped — and uses the EXACT value downstream, so the
+    // compare form itself changes no output byte.)
+    let class_scan_compare = std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok();
     // The selection flag pins the convention exactly: Env defers to
     // the committed switches verbatim (the instrument default);
     // Default pins the committed base convention (env ignored);
@@ -5618,6 +5834,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     } else {
         std::borrow::Cow::Borrowed(model_name)
     };
+    // (The class-scan order's own label — the fast mode states
+    // itself in every emitted model string (the per-locus receipt,
+    // the product calls, the sequences), so a sparse-skip output can
+    // never be mistaken for an exact-mode one. Env-unset keeps the
+    // committed strings byte-identical.)
+    let model_name: std::borrow::Cow<str> =
+        if matches!(class_scan_order, ClassScanOrder::SparseSkip) {
+            std::borrow::Cow::Owned(format!("{model_name}-classscan-sparse"))
+        } else {
+            model_name
+        };
     // (The truth haplotypes as panel path names: under the global
     // frame a name carrying the territory-local interval form
     // translates with the maps — the committed CLI input shape is
@@ -6324,20 +6551,32 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                             edge_discarded += 1;
                             continue;
                         };
-                        let census_assertion_started =
-                            if locus_scoring_census { Some(Instant::now()) } else { None };
-                        let (dm, dc) = direct_score(
-                            unit, canonical, pin, &fold.seq, fold.len, &reads, k,
-                        )
-                        .expect("direct score");
-                        if let Some(started) = census_assertion_started {
-                            census_assertion_ns
-                                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                            census_assertion_calls.fetch_add(1, Ordering::Relaxed);
-                        }
-                        factorized_checked += 1;
-                        if (m, c) == (dm, dc) {
-                            factorized_equal += 1;
+                        // (THE OWNER'S RULING 1: the direct_score
+                        // exactness assertion is a receipt/gate/test
+                        // instrument — IMPG_SCORE_EXACTNESS_ASSERT
+                        // restores the committed always-on
+                        // re-verification verbatim; the production
+                        // default TRUSTS the factorized (m, c) here.
+                        // No product/output bit ever depended on
+                        // (dm, dc).)
+                        if exactness_assert {
+                            let census_assertion_started =
+                                if locus_scoring_census { Some(Instant::now()) } else { None };
+                            let (dm, dc) = direct_score(
+                                unit, canonical, pin, &fold.seq, fold.len, &reads, k,
+                            )
+                            .expect("direct score");
+                            if let Some(started) = census_assertion_started {
+                                census_assertion_ns.fetch_add(
+                                    started.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                                census_assertion_calls.fetch_add(1, Ordering::Relaxed);
+                            }
+                            factorized_checked += 1;
+                            if (m, c) == (dm, dc) {
+                                factorized_equal += 1;
+                            }
                         }
                         unit_mismatches = unit_mismatches.max(c);
                         pinned_here = true;
@@ -6518,17 +6757,88 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         }
 
         // ------------------------------------------- the exhaustive classes
+        // (THE OWNER'S RULING 3 at the scan itself: EXACT = the
+        // committed unit-order accumulation verbatim — the default,
+        // bit-reproducible; SPARSE-SKIP = the fast mode — the union
+        // of the two rows' pinned units plus one constant-mass term,
+        // the previously refused accumulation-order change now
+        // sanctioned for the performance path. The compare receipt
+        // (IMPG_CLASS_SCAN_COMPARE) sums BOTH ways and uses the
+        // EXACT value downstream, so it changes no output byte.)
         let class_started = Instant::now();
         let pair_count = n_folds * (n_folds + 1) / 2;
         let unit_counts: Vec<f64> = units.iter().map(|u| u.count as f64).collect();
+        let sparse_skip = matches!(class_scan_order, ClassScanOrder::SparseSkip);
+        let scan_fast = if sparse_skip || class_scan_compare {
+            Some(ClassScanFastIndex::build(&matrix, &unit_counts))
+        } else {
+            None
+        };
+        // (The compare receipt's per-locus atomics: class pairs
+        // summed both ways, pairs whose f64 bits differ, the max ulp
+        // delta, and the constant (fold, unit) entries the fast
+        // form skips.)
+        let compare_pairs = AtomicU64::new(0);
+        let compare_diff = AtomicU64::new(0);
+        let compare_max_ulp = AtomicU64::new(0);
+        let compare_skipped = AtomicU64::new(0);
         let class_lls: Vec<f64> = (0..pair_count)
             .into_par_iter()
             .map(|flat| {
                 let (first, second) = unrank_pair(flat);
-                matrix.class_pair_sum(first, second, &unit_counts)
+                match scan_fast.as_ref() {
+                    None => matrix.class_pair_sum(first, second, &unit_counts),
+                    Some(fast) => {
+                        let fast_sum = fast.class_pair_sum(first, second, &unit_counts);
+                        if !class_scan_compare {
+                            return fast_sum;
+                        }
+                        let exact = matrix.class_pair_sum(first, second, &unit_counts);
+                        compare_pairs.fetch_add(1, Ordering::Relaxed);
+                        compare_skipped.fetch_add(
+                            fast.constant_units_skipped(first, second),
+                            Ordering::Relaxed,
+                        );
+                        if exact.to_bits() != fast_sum.to_bits() {
+                            compare_diff.fetch_add(1, Ordering::Relaxed);
+                            let ulp = ulp_distance(exact, fast_sum);
+                            let mut current = compare_max_ulp.load(Ordering::Relaxed);
+                            while ulp > current {
+                                match compare_max_ulp.compare_exchange_weak(
+                                    current,
+                                    ulp,
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                ) {
+                                    Ok(_) => break,
+                                    Err(seen) => current = seen,
+                                }
+                            }
+                        }
+                        if sparse_skip {
+                            fast_sum
+                        } else {
+                            exact
+                        }
+                    }
+                }
             })
             .collect();
         let class_seconds = class_started.elapsed().as_secs_f64();
+        if sparse_skip || class_scan_compare {
+            eprintln!(
+                "[score] locus {locus}: class scan {} pairs in {class_seconds:.1}s \
+                 ({}{}; {} of {} pairs' sums differ bitwise, max {} ulp; \
+                 {} constant unit-pairs skipped)",
+                pair_count,
+                if sparse_skip { "sparse-skip" } else { "exact" },
+                if class_scan_compare { " + compare" } else { "" },
+                compare_diff.load(Ordering::Relaxed),
+                compare_pairs.load(Ordering::Relaxed),
+                compare_max_ulp.load(Ordering::Relaxed),
+                compare_skipped.load(Ordering::Relaxed),
+            );
+        }
         let best_ll = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         ensure(best_ll.is_finite(), "no class has anchored evidence at this locus")?;
         let called: Vec<(usize, usize)> = (0..pair_count)
@@ -7689,6 +7999,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 "examples": locality_examples,
             },
             "validation": {
+                "exactness_assert": exactness_assert,
                 "factorized_checked": factorized_checked,
                 "factorized_equal": factorized_equal,
                 "edge_discarded_placements": edge_discarded,
@@ -7849,7 +8160,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                          overhead makes these upper bounds); anchor = the \n
                          per-orientation pin build (anchor_correspondence + \n
                          the merged backbone), placement = placement_score, \n
-                         assertion = the always-on direct_score exactness check, \n
+                         assertion = the direct_score exactness check (env \n
+                         IMPG_SCORE_EXACTNESS_ASSERT; the production default \n
+                         is OFF — the receipt/gate form re-verifies every \n
+                         placement; 0.0s/0 calls when off), \n
                          marginal = the marginalization + the row build",
                 "anchor_seconds": anchor_seconds,
                 "placement_seconds": placement_seconds,
@@ -7868,6 +8182,29 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                  ({assertion_calls} calls), marginal {marginal_seconds:.2}s \n
                  [scoring {scoring_seconds:.2}s]",
             );
+        }
+        // (The class-scan order's own receipt member — ONLY under the
+        // fast mode or the compare instrument: the accumulation mode
+        // and the measured float deltas, so a fast-mode receipt
+        // states what it is. The default receipt schema stays
+        // byte-identical.)
+        if sparse_skip || class_scan_compare {
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            report_value["class_scan"] = json!({
+                "order": if sparse_skip { "sparse-skip" } else { "exact" },
+                "note": "the accumulation-order toggle (the owner's Ruling 3): \
+                         exact = the committed unit-order accumulation; \
+                         sparse-skip = the constant entries (units unpinned \
+                         on both folds) return as one elsewhere*mass term — \
+                         the float accumulation CHANGES, deltas named here",
+                "compare_pairs": compare_pairs.load(Ordering::Relaxed),
+                "compare_pairs_differing": compare_diff.load(Ordering::Relaxed),
+                "compare_max_ulp": compare_max_ulp.load(Ordering::Relaxed),
+                "constant_unit_pairs_skipped": compare_skipped.load(Ordering::Relaxed),
+                "classes_seconds": class_seconds,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
         }
         report_buf.push(b'\n');
         eprintln!(
@@ -9639,6 +9976,106 @@ mod tests {
             let mut streamed = Vec::new();
             matrix.write_ll_matrix_json(&mut streamed).unwrap();
             assert_eq!(streamed, serde_json::to_vec(&dense).unwrap());
+        }
+    }
+
+    #[test]
+    fn class_scan_sparse_skip_union_walk() {
+        // THE OWNER'S RULING 3's own exactness proof, at the scan
+        // level: the sparse-skip form walks exactly the UNION of
+        // the two rows' pinned units (the skipped count is the
+        // brute-force complement), and its sum is BIT-IDENTICAL to
+        // the committed accumulation whenever the union covers
+        // every unit (the constant-mass term is exactly zero); when
+        // constant entries are skipped, the regrouped accumulation
+        // is allowed its named small ulp delta (never more than a
+        // few ulps at this toy scale) — the delta is the honest
+        // cost of the fast mode, measured not hidden.
+        let elsewhere = -14.418156f64;
+        // ulp_distance's own contract: equal bits are 0, adjacent
+        // floats are 1.
+        assert_eq!(ulp_distance(1.0, 1.0), 0);
+        assert_eq!(
+            ulp_distance(f64::from_bits(1.0f64.to_bits() + 1), 1.0),
+            1
+        );
+        // (folds x units, the pin STRIDE; 0 = no pins) shapes: a
+        // no-pin-heavy row (Sparse encoding), a mid row (Sparse), a
+        // pinned-heavy row (Dense encoding — exercises the built-list
+        // path), and an all-no-pin row.
+        let shapes = [(5usize, 40usize, 8usize), (5, 40, 2), (5, 40, 1), (5, 40, 0)];
+        for (n_folds, n_units, pin_stride) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                if pin_stride > 0 {
+                    for unit in (fold..n_units).step_by(pin_stride) {
+                        pin[unit] = true;
+                        row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                        mism[unit] = (unit % 7) as u32;
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix = ScoreMatrix::from_dense(
+                dense.clone(),
+                pinned.clone(),
+                mismatches.clone(),
+                elsewhere,
+            );
+            let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+            let fast = ClassScanFastIndex::build(&matrix, &counts);
+            for first in 0..n_folds {
+                for second in first..n_folds {
+                    // the skipped count is the brute-force complement
+                    let brute_union = (0..n_units)
+                        .filter(|&u| pinned[first][u] || pinned[second][u])
+                        .count();
+                    assert_eq!(
+                        fast.constant_units_skipped(first, second),
+                        (n_units - brute_union) as u64,
+                        "the union walk's skipped count, ({first},{second})"
+                    );
+                    let exact = matrix.class_pair_sum(first, second, &counts);
+                    let fast_sum = fast.class_pair_sum(first, second, &counts);
+                    if brute_union == n_units {
+                        assert_eq!(
+                            fast_sum.to_bits(),
+                            exact.to_bits(),
+                            "full-union pair bit-identical, ({first},{second})"
+                        );
+                    } else {
+                        assert!(
+                            ulp_distance(exact, fast_sum) <= 64,
+                            "the named delta is small at toy scale: \
+                             ({first},{second}) {} ulps",
+                            ulp_distance(exact, fast_sum)
+                        );
+                        assert!(
+                            (fast_sum - exact).abs() <= 1e-12 * exact.abs().max(1.0),
+                            "the named delta is a rounding-scale effect"
+                        );
+                    }
+                }
+            }
+            // the all-no-pin pair: the fast sum is exactly the one
+            // constant term elsewhere * total_count.
+            if pin_stride == 0 {
+                let total_count: f64 = counts.iter().sum();
+                for first in 0..n_folds {
+                    assert_eq!(
+                        fast.class_pair_sum(first, first, &counts).to_bits(),
+                        (elsewhere * total_count).to_bits(),
+                        "the all-no-pin pair's single-term form"
+                    );
+                }
+            }
         }
     }
 

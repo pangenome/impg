@@ -1518,7 +1518,11 @@ keeps its ~20-24GB matrix — the exact-value floor of THIS machinery;
 removing it would need the class scan's algebraic decomposition
 (mix_logsumexp terms precomputed per fold), which changes the float
 accumulation and BREAKS byte-identity — named and refused, not
-attempted.
+attempted. (SUPERSEDED BY THE OWNER'S RULING 3, §10.6.15: the
+sparse-skip form now exists as the NAMED fast mode behind
+IMPG_CLASS_SCAN_ORDER=sparse-skip — never the default, its float
+deltas measured and labeled in every output; the exact unit-order
+accumulation remains the receipts' bit-reproducible form.)
 
 **THE IMPLEMENTATION:** `ScoreMatrix`/`ScoreRow` (module scope, with
 the partition and encoding arguments as definition comments), the
@@ -2322,6 +2326,9 @@ identity). B (assertion as a receipt-only sample) is an OWNER
 receipt-shape decision worth **~33 core-s/territory (−16% of the
 call)** at L1-class, and proportionally more at pinned-heavy loci
 (locus 18: the assertion is 17.8s of the ~69.6s locus, scaled).
+(EXECUTED — §10.6.15: the owner's Ruling 1 removed it from the
+production path, byte-identity gated at L1-L4, the returned
+per-locus budget measured at 6.66 vs the 6.79 projected here.)
 
 **(b) THE CENSUS-SUPERSET 2.8x MASS, reconciled per-locality.** The
 §10.5.4 shadow receipt (1364s vs 1450s, "~6% wall") was measured
@@ -2465,3 +2472,143 @@ its own divergence-count receipt). STILL OWED: the cut's true-CPU
 receipt (the last un-receipted term of the genome floor), the
 marathon wall re-receipt at the next window, the W-x-T fleet cell.
 NO PR PUSH (the owner pushes).
+
+### 10.6.15 THE OWNER'S RULINGS, EXECUTED — the exactness assertion
+out of the production path (Ruling 1) and the class-scan
+accumulation-order toggle with the sanctioned sparse-skip fast mode
+(Ruling 3); the census-profile A/B measured as the owner's decision
+input (Ruling 2, UNDECIDED — §10.6.16's pointer)
+
+**RULING 1 — THE ALWAYS-ON EXACTNESS ASSERTION IS OUT OF THE
+PRODUCTION PATH (receipt/gate/test verification only).** The
+always-on `direct_score` re-verification (§10.6.14's candidate B:
+0.95 µs/pair, 32.9 core-s at L1 = 16% of the ex-load call, 58% of
+the pinned alignment work) is now env-gated:
+`IMPG_SCORE_EXACTNESS_ASSERT=1` restores the committed always-on
+form VERBATIM (every placement re-verified base-by-base, the
+per-locus and whole-run FACTORIZATION gates enforced); the
+production default (unset) trusts the factorized (m, c) exactly as
+the committed receipts' assertion proved it. THE GATES (the
+committed serial recipe, the committed receipts-of-record, all six
+answer files — calls.jsonl + sequences + exactness + ingredients +
+records + skeleton): **L1-L4 under the production default ALL
+BYTE-IDENTICAL** (work dirs `rulings-L{1..4}-prod` vs
+`global-call-L1-fix` / `global-call-L{2,3,4}-fix-n4`) — the
+assertion emitted no output bit, the gate is the proof of the
+removal; the same gate PASSES for the **census form** (after
+timers, `rulings-L1-census`), the **gate form** (`rulings-L1-assert`:
+IMPG_SCORE_EXACTNESS_ASSERT=1 — the whole-domain proof still
+enforces, 34,697,264/34,697,264 placements exact at L1, the exact
+§10.6.14 count), and the **compare form** (`rulings-L1-compare`,
+Ruling 3's delta receipt — exact downstream, byte-identical). THE
+MEASURED RETURN (serial recipes; the eight gate runs co-tenant ×8,
+walls 324-481s, the per-phase receipts are the honest numbers):
+
+| lane | loci phase before (committed receipt, assertion ON) | after (production, OFF) | returned |
+|---|---:|---:|---:|
+| L1 | 162.3s | 128.0s | **−34.3s (−21%)** |
+| L2 | 47.8s | 39.2s | −8.6s (−18%) |
+| L3 | 150.6s | 115.4s | −35.2s (−23%) |
+| L4 | 119.0s | 96.3s | −22.7s (−19%) |
+
+The per-class census (timer-on walls, before = the §10.6.14 autopsy
+census run, after = `rulings-L1-census`): anchor 18.6→17.5s,
+placement 26.5→22.7s, **assertion 36.4→0.0s (0 calls)**,
+marginal 3.3→3.2s — the assertion's whole measured mass is gone and
+every other class is stable in the co-tenant band. THE RETURNED
+PER-LOCUS BUDGET at L1-class: loci 128.0/25 = **5.12**; the
+ex-load call ≈ 166.4 core-s = **6.66/locus** (the §10.6.14
+projection "under B" was 6.79 — measured slightly better, inside
+the co-tenant band), vs the autopsy's 8.11 today → **the executed
+Ruling 1 alone is −18% of the ex-load call** (the projected −16%,
+receipted).
+
+**RULING 3 — THE ACCUMULATION-ORDER TOGGLE + THE SANCTIONED
+SPARSE-SKIP (the previously REFUSED form, §10.6.8, now the owner's
+performance path).** `IMPG_CLASS_SCAN_ORDER` selects the class
+scan's accumulation: `exact` (the default, unset — the committed
+deterministic unit-order accumulation, bit-reproducible, the
+receipts' form) or `sparse-skip` (the fast mode — the §10.6.8
+"named and refused" form: the constant entries, the (fold, unit)
+pairs where BOTH rows hold the no-pin constant — where
+mix_logsumexp(E, E) = E exactly — leave the per-unit loop and
+return as ONE `elsewhere × constant_mass` term; the float
+accumulation order CHANGES by construction). `IMPG_CLASS_SCAN_COMPARE=1`
+(receipt-side, default OFF) sums BOTH ways per class pair and uses
+the EXACT value downstream — a delta receipt that changes no output
+byte. THE FAST MODE IS LABELED: the model string carries a
+`-classscan-sparse` suffix in every emitted record (calls.jsonl,
+sequences, the per-locus receipts) and in manifest.json — a
+fast-mode output can never be mistaken for an exact-mode one.
+THE GATES: (a) **exact mode byte-identity** — the default IS the
+committed accumulation; the L1-L4 production gate fleet above
+(byte-identical, all six files) and the compare run
+(`rulings-L1-compare`, exact downstream, byte-identical) prove the
+toggle's default side; (b) **the fast-mode float deltas, measured
+and named per locus at L1** (`rulings-L1-compare`'s per-locus
+`class_scan` receipt member): **336,879 of 350,365 class-pair sums
+differ bitwise; the max ulp delta is 20,858** (the constant-mass
+regrouping at the sums' own magnitudes — a ~1e-11 relative class);
+**the ANSWER level: ZERO fold-material flips** (the called diplotype
+is identical at all 25 loci; the sequences' fold records
+identical), `called_classes` identical at every locus, and the
+QUAL-visible deltas are **17/25 loci, max |ΔQUAL| = 2.7e-6** —
+`best_log_likelihood` differs at 23/25 (the sums themselves);
+(c) **the speed receipt at L1** (`rulings-L1-fast` vs
+`rulings-L1-prod`, same co-tenant fleet): the class scan **71.6s →
+53.0s (−26%)**, the whole loci phase 128.0s → 107.9s (−16%). THE
+HONEST CAVEAT: L1 is a pinned-heavy territory (71% of pairs
+pinned), so the constant share the skip removes is 1.098e9 of
+3.711e9 unit-pairs (**29.6%**) and the union walk pays a merge per
+kept entry — the −26% is the real L1-class gain; at the
+marathon-class no-pin-heavy loci (1.3-2.1% pinned) the skippable
+share is ~96-99%, but those substrates are reaped, so no marathon
+speed number is claimed (the receipted rate is the L1-class one,
+and the sparse-skip is exactly the form the compressed rows were
+built for there).
+
+**THE PER-LOCUS BUDGET, RESTATED UNDER THE TWO EXECUTED RULINGS**
+(L1-class, 25 loci, arithmetic from this increment's receipts,
+every row labeled):
+
+| row | loci phase | call ex-load | per-locus | gap to the 2.10 line |
+|---|---:|---:|---:|---:|
+| §10.6.14 today (assertion on, exact scan) | 164.8s | 202.7 | 8.11 | 3.9x |
+| **+ Ruling 1 executed (measured)** | 128.0s | 166.4 | 6.66 | 3.2x |
+| **+ Ruling 1 + the fast scan at L1 (measured)** | 107.9s | ~146.3 | ~5.85 | ~2.8x |
+| + census-restriction (§10.6.14's 0.524 ratio, still OWNER-UNDECIDED) | ~56.5s | ~75 | ~3.0 | ~1.4x |
+
+(the fast-scan row charges the L1-class skip share honestly; the
+census-restriction row remains the §10.6.14 arithmetic projection,
+now on the post-Ruling-1 base, labeled as such — the owner's
+Ruling 2 is NOT decided, and §10.6.16's A/B table is the decision
+input.) THE RESIDUAL after both executed rulings at L1-class: the
+pair loop 42.9 core-s (anchor 17.5 + placement 22.7 + marginal
+3.2, timer-on — the re-anchor and placement-walk ENGINEERING classes
+of §10.6.14(d) unchanged), the class scan 53.0s under the fast mode
+(the exact form's 71.6s remains the default), the serial
+bind+rows+IO classes 37.9 (ENGINEERING, unchanged), the
+fold-build/qual/exact classes ~12. cargo test --release --lib
+**563/0** (5 ignored; the new
+`class_scan_sparse_skip_union_walk` proves the union walk's skipped
+count against the brute-force complement, the full-union pairs'
+bit-identity, and the single-term all-no-pin form). The work-dir
+artifacts: `run-rulings-gates.sh` + `rulings-*` (the eight-run
+gate fleet), `run-rulings-ab.sh` (Ruling 2's A/B, below).
+
+**RULING 2 — THE CENSUS-PROFILE A/B, MEASURED AS THE OWNER'S
+DECISION INPUT (NOT A DECISION).** The two profiles ARE: (A) the
+committed-slice restricted read set — the global cut restricted to
+the committed 1x kept-reads via IMPG_CUT_READSET_FASTA (the §10.5.4
+shadow form; census_mult 141,114 vs 384,056 at L1, and 3.6x/10.6x/
+15.4x at L2/L3/L4 — the pilot's two profiles nearly coincide,
+receipted in the table); (B) the global-native full mass (the
+committed global cut census/cache — the receipts-of-record's own).
+Both assessed with the OFFICIAL QV machinery (--truth-qv,
+IMPG_TRUTH_QV_ALLWAVE=1, the likegt max-qv convention, the QV-50
+cap) over all five localities: **the table is
+`docs/syng-gmem-bwt/census-profile-ab.md` (§10.6.16's form)** — per
+locality, per profile: rank-1 rate, the QV distribution (median,
+≥QV30, at-cap), the call-core cost (the §10.6.14 census-superset
+multiplier), and the NAMED loci where the profiles differ (which
+fold flips, which profile was right per truth). The owner decides.
