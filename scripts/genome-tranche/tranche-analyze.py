@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""THE GENOME TRANCHE - the analysis (the owner's decision-grade receipts):
-  (a) THE WASH VERDICT AT SCALE - per stratum, per profile (A = restrict,
-      B = global-native): rank-1 rate, the official-allwave QV distribution
-      (median / >=QV30 / at-cap, the likegt max-qv convention, cap 50 - the
-      same assessment as every banked receipt), the differing loci named and
-      truth-judged; THE CONSERVED-ELSEWHERE RATE - the L2-17-class losses
-      (B calls the truth pair, A does not) per stratum and per N loci.
-  (b) THE CPU-WORK VARIANCE - per-territory serial (RAYON=1) call phases
-      from the stage logs (the autopsy's serial-census method: inputs =
-      the ex-load panel load, binding/variants/rows/loci/quality the true
-      per-territory CPU), per-locus core-s by stratum, and the honest
-      GENOME-WALL ESTIMATE WITH BOUNDS from the stratified mean/variance
-      (normal-approximation 95% CI on the stratified total; the heavy
-      tail receipted by median/p90/max beside it).
-  (c) THE FAR-BIN MASS SHARE BY STRATUM - from the restricted (A) cut
-      censuses: the records whose placements scatter into NON-ADJACENT
-      windows (the prune's exact class; diameter > 1, the census's own
-      pair-bins adjacency constant), their multiplicity share per
-      territory and stratum - the prune's real genome-scale value.
+"""THE GENOME TRANCHE - the analysis (the owner's decision-grade receipts;
+three census/profile forms per the owner's far-bin ruling, commit 2a3dd46):
+  (a) THE WASH VERDICT AT SCALE - per stratum, per form:
+      A = restricted (the old default), B = global-native (the record
+      form), C = restricted + far-bin-prune (THE NEW PRODUCT DEFAULT).
+      Rank-1 rates, the official-allwave QV distribution (the likegt
+      max-qv convention, cap 50), the differing loci named and
+      truth-judged; THE CONSERVED-ELSEWHERE RATE - the L2-17-class
+      losses (the record form calls the truth pair, the default does
+      not) per stratum, under BOTH defaults (B-vs-A and B-vs-C - does
+      the wash conclusion hold under the new default?).
+  (a') THE PRUNE'S OWN VERDICT AT SCALE (the owner's product question):
+      C-vs-A truth wins/losses (does the five-locality four-truth-win
+      hold at sampled genome scale? the gate bar: zero truth losses),
+      the QV changes, and the per-territory loci-phase wall drop C/A -
+      the far-bin mass share BY STRATUM is the value receipt, tied to
+      form C's own prune receipts (the machinery's pruned-records/mass
+      log lines) and cross-checked against the census-geometry share.
+  (b) THE CPU-WORK VARIANCE - per-territory serial (RAYON=1) call
+      phases from the stage logs (the autopsy's serial-census method),
+      per-locus core-s by stratum, the GENOME-WALL ESTIMATE WITH BOUNDS
+      from the stratified mean/variance - AT THE NEW DEFAULT (form C)
+      beside the old default (form A).
 Every conclusion is labeled with its sample size; nothing extrapolates
 beyond its stratum's own receipts except the labeled stratified totals.
 usage: tranche-analyze.py <WT> [out.txt]
@@ -40,11 +44,15 @@ STRATUM_NAMES = {
     "S_EXP": "EXPANSION-GATE-ADJACENT",
     "S_BIND": "BIND-AMBIGUITY (the ledger-named 7479-class)",
 }
+PROFS = ("A", "B", "C")
+PROF_NAMES = {"A": "A restricted (the old default)",
+              "B": "B global-native (the record form)",
+              "C": "C restricted+far-bin-prune (THE NEW DEFAULT)"}
 # the strata's sizes in the runnable universe (the draw script's own census)
 U_SIZE = {"S_ORD": 1064, "S_SEG": 217, "S_REP": 34, "S_EXP": 4413, "S_BIND": 79}
 UNIVERSE = 5807
-# the committed exclusions (named in the doc; carried separately)
 EXCLUDED = {"marathon_roster": 16, "poison": 5, "cut_exit_terminal": 16}
+PHASES_KEY = {"A": "phA", "C": "phC"}
 
 
 def load_tranche():
@@ -59,8 +67,8 @@ def load_tranche():
 
 
 def load_truth(profile, T):
-    """per-locus records: expressible/rank/qv/called/truth, the A/B's own
-    convention (rulings-ab-analysis.py VERBATIM, transposed to territory)."""
+    """per-locus records: the A/B analysis's own convention
+    (rulings-ab-analysis.py VERBATIM, transposed to territory)."""
     path = f"{WT}/call{profile}/{T}/calls.jsonl.truth-qv.jsonl"
     if not os.path.exists(path):
         return None
@@ -87,10 +95,13 @@ PHASE_RE = re.compile(
     r"elsewhere ([0-9.]+)s, derive cache ([0-9.]+)s, binding ([0-9.]+)s, "
     r"variants ([0-9.]+)s, rows/context assembly ([0-9.]+)s, "
     r"loci \(folds[^)]*\) ([0-9.]+)s")
+LOCUS_DONE_RE = re.compile(r"locus (\d+) done:.*\[([0-9.]+)s\]")
+PRUNE_RE = re.compile(
+    r"far-bin prune: (\d+) records pruned, census mult (\d+) of (\d+) "
+    r"\(([0-9.]+)%\)")
 
 
 def load_phases(profile, T):
-    """the serial call's own phase summary (RAYON=1: walls are true CPU)."""
     path = f"{WT}/logs/call{profile}-{T}.err"
     if not os.path.exists(path):
         return None
@@ -107,9 +118,6 @@ def load_phases(profile, T):
     return None
 
 
-LOCUS_DONE_RE = re.compile(r"locus (\d+) done:.*\[([0-9.]+)s\]")
-
-
 def load_locus_walls(profile, T):
     path = f"{WT}/logs/call{profile}-{T}.err"
     if not os.path.exists(path):
@@ -119,15 +127,22 @@ def load_locus_walls(profile, T):
             if m]
 
 
-def load_fiterm(profile, T):
-    """the truth-QV instrumentation's own allwave seconds, if present."""
-    path = f"{WT}/call{profile}/{T}/instrument-receipt.jsonl"
-    return None  # (the QV walls are inside the phase 'receipts' class)
+def load_prune_receipt(T):
+    """form C's own machinery receipt: the pruned records/mass line."""
+    path = f"{WT}/logs/callC-{T}.err"
+    if not os.path.exists(path):
+        return None
+    for line in open(path, errors="replace"):
+        m = PRUNE_RE.search(line)
+        if m:
+            return {"records": int(m.group(1)), "mult": int(m.group(2)),
+                    "total": int(m.group(3)), "pct": float(m.group(4))}
+    return None
 
 
 def farbin_share(T, cutdir="cutA"):
-    """the far-bin scattered mass share of a territory's census (the
-    prune's own geometry: window diameter > 1 across all occurrences)."""
+    """the census-geometry share (the prune's exact class: records whose
+    placements scatter into NON-ADJACENT windows, diameter > 1)."""
     path = f"{WT}/{cutdir}/{T}/cut-census.jsonl"
     if not os.path.exists(path):
         return None
@@ -180,8 +195,9 @@ def fmt_qv(s):
             f"at-cap {s['at_cap']}/{s['n']}, min {s['min']:.1f}")
 
 
-def stratified_total(samples_by_stratum, key):
-    """the stratified total estimate + normal 95% CI half-width."""
+def stratified_total(samples_by_stratum):
+    """the stratified total estimate + finite-population-corrected
+    normal 95% CI half-width + per-stratum receipts."""
     total = 0.0
     var = 0.0
     per = {}
@@ -197,12 +213,44 @@ def stratified_total(samples_by_stratum, key):
                   "max": max(vals), "min": min(vals)}
         if len(vals) > 1:
             v = statistics.variance(vals)
-            # finite-population-corrected stratum variance of the total
             N = U_SIZE[s]
             var += (N * N) * v / len(vals) * (1 - len(vals) / N)
         total += U_SIZE[s] * mean
     ci = 1.96 * math.sqrt(var) if var else 0.0
     return total, ci, per
+
+
+def pairwise(recs, X, Y, T, out, label):
+    """the differing-loci verdict between two forms at one territory;
+    returns (losses, gains, n_diff, equal_qv) where losses = Y calls the
+    truth pair and X does not (the conserved-elsewhere class for that
+    direction)."""
+    losses, gains, n_diff, n_eq = [], [], 0, 0
+    for locus in sorted(X):
+        if locus not in Y:
+            continue
+        x, y = X[locus], Y[locus]
+        if x["called"] != y["called"]:
+            n_diff += 1
+            x_right = x["called"] == x["truth"]
+            y_right = y["called"] == y["truth"]
+            if y_right and not x_right:
+                losses.append((T, locus))
+                out.append(f"    {T} locus {locus} [{label}]: Y={y['called']} "
+                           f"calls the TRUTH pair; X={x['called']} does not "
+                           f"(X qv {x['qv']}, Y qv {y['qv']})")
+            elif x_right and not y_right:
+                gains.append((T, locus))
+            elif x_right and y_right:
+                pass
+            elif x["qv"] is not None and y["qv"] is not None:
+                if abs(x["qv"] - y["qv"]) > 1e-9:
+                    out.append(f"    {T} locus {locus} [{label}]: neither "
+                               f"matches truth; X qv {x['qv']:.1f} vs "
+                               f"Y qv {y['qv']:.1f}")
+                else:
+                    n_eq += 1
+    return losses, gains, n_diff, n_eq
 
 
 def main():
@@ -215,24 +263,33 @@ def main():
     tranche = load_tranche()
     strata = {s: [r["tid"] for r in tranche if r["stratum"] == s] for s in STRATA}
 
-    # ---------------- (a) the wash verdict --------------------------
+    # cache the per-territory per-form truth records
+    truth = {p: {} for p in PROFS}
+    for p in PROFS:
+        for s in STRATA:
+            for T in strata[s]:
+                r = load_truth(p, T)
+                if r is not None:
+                    truth[p][T] = r
+
+    # ---------------- (a) the wash verdict, three forms ------------------
     w("=" * 78)
-    w("THE WASH VERDICT AT SCALE (per stratum, per profile; the official")
-    w("allwave QV machinery, cap 50 - the same assessment as every banked")
-    w("receipt; every rate carries its own denominator)")
+    w("THE WASH VERDICT AT SCALE - THREE FORMS (the owner's far-bin ruling")
+    w("applied: A restricted [the old default], B global-native [the record")
+    w("form], C restricted+far-bin-prune [THE NEW PRODUCT DEFAULT]; the")
+    w("official allwave QV machinery, cap 50 - the same assessment as every")
+    w("banked receipt; every rate carries its own denominator)")
     w("=" * 78)
-    losses = []      # the L2-17-class losses (B right, A wrong)
-    gains = []       # (A right, B wrong)
     for s in STRATA:
         members = strata[s]
-        w(f"\n--- {s}: {STRATUM_NAMES[s]} (n={len(members)} territories drawn "
-          f"of {U_SIZE[s]} in the runnable universe)")
-        for prof in ("A", "B"):
+        w(f"\n--- {s}: {STRATUM_NAMES[s]} (n={len(members)} territories "
+          f"drawn of {U_SIZE[s]} in the runnable universe)")
+        for p in PROFS:
             n_loci = n_ex = rank1 = 0
             qvs = []
             done = 0
             for T in members:
-                recs = load_truth(prof, T)
+                recs = truth[p].get(T)
                 if recs is None:
                     continue
                 done += 1
@@ -244,130 +301,185 @@ def main():
                     if r["qv"] is not None:
                         qvs.append(r["qv"])
             st = qv_stats(qvs)
-            w(f"  profile {prof}: {done} territories called, {n_loci} loci, "
-              f"truth-expressible {n_ex}, rank-1 {rank1}/{n_ex}"
+            w(f"  form {PROF_NAMES[p]}: {done} territories called, "
+              f"{n_loci} loci, truth-expressible {n_ex}, "
+              f"rank-1 {rank1}/{n_ex}"
               + (f" ({100 * rank1 / n_ex:.0f}%)" if n_ex else "")
               + f", {fmt_qv(st)}")
-        # the differing loci + the conserved-elsewhere class
-        n_diff = n_a_right = n_b_right = n_equal_qv = 0
-        for T in members:
-            A, B = load_truth("A", T), load_truth("B", T)
-            if A is None or B is None:
-                continue
-            for locus in sorted(A):
-                if locus not in B:
-                    continue
-                a, b = A[locus], B[locus]
-                if a["called"] != b["called"]:
-                    n_diff += 1
-                    a_right = a["called"] == a["truth"]
-                    b_right = b["called"] == b["truth"]
-                    if b_right and not a_right:
-                        losses.append((s, T, locus, a["qv"], b["qv"]))
-                        w(f"    {T} locus {locus}: LOSS (B calls the truth "
-                          f"pair, A does not): A qv {a['qv']}, B qv {b['qv']}")
-                    elif a_right and not b_right:
-                        gains.append((s, T, locus, a["qv"], b["qv"]))
-                        w(f"    {T} locus {locus}: GAIN (A right, B wrong): "
-                          f"A qv {a['qv']}, B qv {b['qv']}")
-                    elif a_right and b_right:
-                        n_a_right += 1  # both right, different material
-                    else:
-                        if a["qv"] is not None and b["qv"] is not None:
-                            if abs(a["qv"] - b["qv"]) > 1e-9:
-                                w(f"    {T} locus {locus}: neither matches "
-                                  f"truth; A qv {a['qv']:.1f} vs B qv "
-                                  f"{b['qv']:.1f}")
-                            else:
-                                n_equal_qv += 1
-        w(f"  differing loci: {n_diff} (B-right-A-wrong {len([l for l in losses if l[0]==s])}, "
-          f"A-right-B-wrong {len([g for g in gains if g[0]==s])}, "
-          f"sequence-equivalent/equal-QV {n_equal_qv})")
-    w(f"\nTHE CONSERVED-ELSEWHERE RATE (the L2-17-class: B calls the truth")
-    w(f"pair, A does not): {len(losses)} losses across the tranche")
-    # per stratum, per N loci
+
+    # ---------------- the conserved-elsewhere rate, both directions ------
+    w("")
+    w("=" * 78)
+    w("THE CONSERVED-ELSEWHERE RATE (the L2-17 class: the RECORD form calls")
+    w("the truth pair, the DEFAULT does not) - per stratum, per N loci,")
+    w("under BOTH defaults: B-vs-A (the old default) and B-vs-C (the new)")
+    w("=" * 78)
+    named = []
     for s in STRATA:
         members = strata[s]
-        nloci = 0
+        n_loci = 0
+        bva = []   # B right, A wrong
+        bvc = []   # B right, C wrong
         for T in members:
-            A = load_truth("A", T)
-            if A:
-                nloci += len(A)
-        n = len([l for l in losses if l[0] == s])
-        if nloci:
-            w(f"  {s}: {n} loss{'es' if n != 1 else ''} per {nloci} loci "
-              f"({100 * n / nloci:.2f}% of loci)")
-    n_g = len(gains)
-    w(f"  (the reverse class - A right where B is wrong: {n_g})")
+            A, B, C = (truth["A"].get(T), truth["B"].get(T),
+                       truth["C"].get(T))
+            if A is None:
+                continue
+            n_loci += len(A)
+            if B is not None:
+                l, _, _, _ = pairwise(A, A, B, T, named, "B-vs-A")
+                bva.extend(l)
+            if C is not None and B is not None:
+                # B-vs-C: the wash cost under the NEW default = B right
+                # where C is wrong (X=C, Y=B: losses = B-right-C-wrong)
+                rl, _, _, _ = pairwise(C, C, B, T, named, "B-vs-C")
+                bvc.extend(rl)
+        if n_loci:
+            w(f"  {s}: {n_loci} loci assessed; B-right-A-wrong "
+              f"{len(bva)} ({100*len(bva)/n_loci:.2f}%); B-right-C-wrong "
+              f"{len(bvc)} ({100*len(bvc)/n_loci:.2f}% of loci)")
+    for line in named[:40]:
+        w(line)
+    if len(named) > 40:
+        w(f"    ... ({len(named) - 40} more named differing loci)")
 
-    # ---------------- (b) the CPU-work variance ----------------------
+    # ---------------- (a') the prune's own verdict at scale -------------
+    w("")
+    w("=" * 78)
+    w("THE PRUNE'S OWN VERDICT AT SCALE (the owner's product question: does")
+    w("the five-locality four-truth-win hold at sampled genome scale? the")
+    w("gate bar: ZERO truth losses C-vs-A)")
+    w("=" * 78)
+    c_wins, a_wins, qv_changed = [], [], []
+    n_pairs = 0
+    for s in STRATA:
+        for T in strata[s]:
+            A, C = truth["A"].get(T), truth["C"].get(T)
+            if A is None or C is None:
+                continue
+            for locus in sorted(A):
+                if locus not in C:
+                    continue
+                n_pairs += 1
+                a, c = A[locus], C[locus]
+                a_right = a["called"] == a["truth"]
+                c_right = c["called"] == c["truth"]
+                if c_right and not a_right:
+                    c_wins.append((s, T, locus))
+                    w(f"    {s} {T} locus {locus}: PRUNE TRUTH WIN "
+                      f"(C calls the truth pair, A does not)")
+                elif a_right and not c_right:
+                    a_wins.append((s, T, locus))
+                    w(f"    {s} {T} locus {locus}: PRUNE TRUTH LOSS "
+                      f"(A calls the truth pair, C does not)")
+                if (a["qv"] is not None and c["qv"] is not None
+                        and abs(a["qv"] - c["qv"]) > 1e-9):
+                    qv_changed.append((s, T, locus, a["qv"], c["qv"]))
+    w(f"  C-vs-A across {n_pairs} paired loci: PRUNE WINS "
+      f"{len(c_wins)}, LOSSES {len(a_wins)}"
+      + (" - THE GATE BAR (zero truth losses) HOLDS" if not a_wins
+         else " - THE GATE BAR IS VIOLATED (named above)"))
+    up = sum(1 for *_, qa, qc in qv_changed if qc > qa)
+    w(f"  QV-visible changes at {len(qv_changed)} loci "
+      f"({up} higher under C, {len(qv_changed)-up} higher under A)")
+
+    # ---------------- (b) the CPU-work variance -------------------------
     w("")
     w("=" * 78)
     w("THE CPU-WORK VARIANCE (serial RAYON=1 truth calls: walls are true")
     w("CPU seconds; the ex-load convention: the inputs phase (the panel")
-    w("load) is excluded, the fleet's fork form amortizes it)")
+    w("load) is excluded - the fleet's fork form amortizes it)")
     w("=" * 78)
-    by_stratum_exload = {s: [] for s in STRATA}
-    by_stratum_loci = {s: [] for s in STRATA}
-    per_locus = {s: [] for s in STRATA}
+    by_form = {p: {s: [] for s in STRATA} for p in ("A", "C")}
+    per_locus = {p: {s: [] for s in STRATA} for p in ("A", "C")}
+    for p in ("A", "C"):
+        for s in STRATA:
+            for T in strata[s]:
+                ph = load_phases(p, T)
+                recs = truth[p].get(T)
+                if ph is None or recs is None:
+                    continue
+                ex = ph["binding"] + ph["variants"] + ph["rows"] + \
+                    ph["loci"] + ph["quality"]
+                by_form[p][s].append(ex)
+                if recs:
+                    per_locus[p][s].append(ph["loci"] / len(recs))
+    for p in ("A", "C"):
+        w(f"\nper-territory ex-load call CPU-s, form "
+          f"{PROF_NAMES[p]}:")
+        for s in STRATA:
+            v = by_form[p][s]
+            if v:
+                w(f"  {s}: n={len(v)} median {statistics.median(v):.1f} "
+                  f"mean {statistics.mean(v):.1f} "
+                  f"p90 {sorted(v)[int(0.9*len(v))]:.1f} max {max(v):.1f}")
+    w("\nper-locus core-s (the loci phase / loci), by stratum:")
+    for p in ("A", "C"):
+        for s in STRATA:
+            v = per_locus[p][s]
+            if v:
+                w(f"  form {p} {s}: n={len(v)} median "
+                  f"{statistics.median(v):.2f} mean "
+                  f"{statistics.mean(v):.2f} max {max(v):.2f}")
+    # the prune's loci-phase drop, per territory, tied to the far-bin share
+    drops = []
     for s in STRATA:
         for T in strata[s]:
-            ph = load_phases("A", T)
-            recs = load_truth("A", T)
-            if ph is None or recs is None:
-                continue
-            ex = ph["binding"] + ph["variants"] + ph["rows"] + \
-                ph["loci"] + ph["quality"]
-            n = len(recs)
-            by_stratum_exload[s].append(ex)
-            if n:
-                by_stratum_loci[s].append(ph["loci"] / n)
-            per_locus[s].extend(load_locus_walls("A", T))
-    w("\nper-territory ex-load call CPU-s, by stratum:")
+            pa, pc = load_phases("A", T), load_phases("C", T)
+            fb = farbin_share(T)
+            if pa and pc and fb:
+                drops.append((s, T, pa["loci"], pc["loci"], fb["share"]))
+    if drops:
+        ratios = [c / a if a else 1.0 for _, _, a, c, _ in drops]
+        w("\nTHE PRUNE'S LOCI-PHASE WALL DROP (serial A vs C, same "
+          "census, same territory):")
+        w(f"  n={len(drops)} median C/A {statistics.median(ratios):.2f}x "
+          f"min {min(ratios):.2f}x max {max(ratios):.2f}x")
+        hi = [d for d in drops if d[4] > 0.01]
+        lo = [d for d in drops if d[4] <= 0.0001]
+        if hi:
+            rh = [d[3] / d[2] if d[2] else 1.0 for d in hi]
+            w(f"  at far-bin share > 1% (n={len(hi)}): median C/A "
+              f"{statistics.median(rh):.2f}x")
+        if lo:
+            rl = [d[3] / d[2] if d[2] else 1.0 for d in lo]
+            w(f"  at far-bin share ~0 (n={len(lo)}): median C/A "
+              f"{statistics.median(rl):.2f}x (the no-prune-to-do class)")
+    # the per-locus wall distribution at the new default
+    w("\nthe per-locus wall distribution (serial, form C):")
     for s in STRATA:
-        v = by_stratum_exload[s]
-        if v:
-            w(f"  {s}: n={len(v)} median {statistics.median(v):.1f} "
-              f"mean {statistics.mean(v):.1f} p90 "
-              f"{sorted(v)[int(0.9*len(v))-1 if len(v)>1 else 0]:.1f} "
-              f"max {max(v):.1f}")
-    w("\nper-locus core-s (the loci phase / loci), by stratum:")
-    for s in STRATA:
-        v = by_stratum_loci[s]
-        if v:
-            w(f"  {s}: n={len(v)} median {statistics.median(v):.2f} "
-              f"mean {statistics.mean(v):.2f} max {max(v):.2f}")
-    w("\nthe per-locus wall distribution (serial, profile A):")
-    for s in STRATA:
-        v = per_locus[s]
+        v = []
+        for T in strata[s]:
+            v.extend(load_locus_walls("C", T))
         if v:
             v.sort()
-            top5 = sum(v[int(0.95 * len(v)):]) / max(1, len(v))
+            top5 = sum(v[int(0.95 * len(v)):])
             w(f"  {s}: n={len(v)} median {v[len(v)//2]:.2f}s "
               f"p90 {v[int(0.9*len(v))]:.2f}s max {v[-1]:.2f}s "
-              f"worst-5% share {100*top5/max(1e-9,sum(v)):.1f}%")
-    # the genome-wall estimate with bounds
-    total, ci, per = stratified_total(by_stratum_exload, "exload")
-    w(f"\nTHE GENOME-WALL ESTIMATE (stratified, the 5,807-territory runnable")
-    w(f"universe; every stratum's own receipts; 95% normal CI):")
-    w(f"  ex-load call CPU total: {total/1e6:.2f}e6 core-s "
-      f"(+/- {ci/1e6:.2f}e6, {100*ci/total:.0f}% relative)")
-    w(f"  at 256 cores (the box's own floor arithmetic): "
-      f"{total/256/3600:.1f}h (+/- {ci/256/3600:.1f}h)")
-    w("  EXCLUDED, carried as the committed bound instead: the marathon")
-    w(f"  roster (16 members, the RV-frame p90 2,912s-deepest 11,084s "
-      f"serial lanes), the 5 poison, the 16 cut.exit - their mass is NOT")
-    w("  in the stratified estimate; the tranche's S_SEG receipts bound it.")
-    for s in STRATA:
-        if per.get(s):
-            p = per[s]
-            w(f"  {s}: mean {p['mean']:.1f}s x {U_SIZE[s]} territories "
-              f"(n={p['n']}, median {p['median']:.1f}, p90 {p['p90']:.1f}, "
-              f"max {p['max']:.1f})")
-
+              f"worst-5% share {100*top5/max(1e-9, sum(v)):.1f}%")
+    # the genome-wall estimate with bounds, at BOTH defaults
+    for p in ("C", "A"):
+        total, ci, per = stratified_total(by_form[p])
+        w(f"\nTHE GENOME-WALL ESTIMATE (stratified, the {UNIVERSE}-territory "
+          f"runnable universe, form {PROF_NAMES[p]};")
+        w("  95% normal CI, finite-population-corrected):")
+        w(f"  ex-load call CPU total: {total/1e6:.2f}e6 core-s "
+          f"(+/- {ci/1e6:.2f}e6, {100*ci/max(1e-9,total):.0f}% relative)")
+        w(f"  at 256 cores (the box's own floor arithmetic): "
+          f"{total/256/3600:.1f}h (+/- {ci/256/3600:.1f}h)")
+        w("  EXCLUDED, carried as the committed bound instead: the marathon")
+        w("  roster (16 members, the RV-frame p90 2,912s-deepest 11,084s")
+        w("  serial lanes), the 5 poison, the 16 cut.exit - their mass is")
+        w("  NOT in the stratified estimate; S_SEG's receipts bound it.")
+        for s in STRATA:
+            if per.get(s):
+                q = per[s]
+                w(f"  {s}: mean {q['mean']:.1f}s x {U_SIZE[s]} territories "
+                  f"(n={q['n']}, median {q['median']:.1f}, p90 "
+                  f"{q['p90']:.1f}, max {q['max']:.1f})")
     # the cut side
-    w("\nthe cut side (per-territory cut walls, contended; the census mult")
-    w("ratio B/A per stratum):")
+    w("\nthe cut side (per-territory cut walls, contended; the census")
+    w("mult ratio B/A per stratum):")
     for s in STRATA:
         wa, wb, ratios = [], [], []
         for T in strata[s]:
@@ -383,13 +495,14 @@ def main():
               f"{statistics.median(wa):.0f}s, cutB wall median "
               f"{statistics.median(wb):.0f}s")
 
-    # ---------------- (c) the far-bin mass share ---------------------
+    # ---------------- (c) the far-bin mass share, tied to form C --------
     w("")
     w("=" * 78)
-    w("THE FAR-BIN MASS SHARE BY STRATUM (the prune's exact class: census")
-    w("records whose placements scatter into NON-ADJACENT windows - the")
-    w("owner's routing principle, the --far-bin-prune's own geometry,")
-    w("measured on the restricted (A) censuses - the product census)")
+    w("THE FAR-BIN MASS SHARE BY STRATUM (the prune's own value receipt:")
+    w("the census-geometry share - records whose placements scatter into")
+    w("NON-ADJACENT windows, the pure diameter>1 rule - measured on the")
+    w("restricted (A) censuses, cross-checked against form C's own")
+    w("machinery receipts: the pruned records/mass log lines)")
     w("=" * 78)
     fb = {s: [] for s in STRATA}
     for s in STRATA:
@@ -402,19 +515,32 @@ def main():
         if v:
             v.sort()
             w(f"  {s}: n={len(v)} territories, share median "
-              f"{statistics.median(v)*100:.2f}% p90 {v[int(0.9*len(v))]*100:.2f}% "
-              f"max {v[-1]*100:.2f}% zero-share "
-              f"{sum(1 for x in v if x == 0)}/{len(v)}")
-    total_share, ci_share, per_share = stratified_total(
-        {s: [r["share"] * r["mult_total"] for s, lst in fb.items() for r in lst]
-         for s in []}, "x")  # placeholder: not used; shares are per-territory
-    # the honest aggregate: the mult-weighted share over the tranche
+              f"{statistics.median(v)*100:.2f}% p90 "
+              f"{v[int(0.9*len(v))]*100:.2f}% max {v[-1]*100:.2f}% "
+              f"zero-share {sum(1 for x in v if x == 0)}/{len(v)}")
     tm = sum(r["mult_total"] for lst in fb.values() for r in lst)
     pm = sum(r["mult_pruned"] for lst in fb.values() for r in lst)
     if tm:
         w(f"  TRANSCHE AGGREGATE (mult-weighted): {pm}/{tm} = "
           f"{100*pm/tm:.2f}% of the restricted census mass is far-bin "
-          f"scattered (the mass the prune removes)")
+          f"scattered (the mass the prune removes at every territory)")
+    # the machinery's own form-C receipts, cross-checked
+    agree = disagree = 0
+    for s in STRATA:
+        for T in strata[s]:
+            r = farbin_share(T)
+            m = load_prune_receipt(T)
+            if r and m:
+                if abs(r["share"] * 100 - m["pct"]) < 0.05:
+                    agree += 1
+                else:
+                    disagree += 1
+                    w(f"    CROSS-CHECK DISAGREE {s} {T}: census geometry "
+                      f"{r['share']*100:.3f}% vs form C receipt "
+                      f"{m['pct']:.3f}%")
+    if agree or disagree:
+        w(f"  the form-C machinery receipts vs the census geometry: "
+          f"{agree} agree, {disagree} disagree")
     out.close()
     print(f"\nwrote {OUT}")
 

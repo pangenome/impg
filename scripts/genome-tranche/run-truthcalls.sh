@@ -9,7 +9,12 @@
 # axis row (prep/<T>/axis-path.txt, the committed bridge output), hap2 =
 # the truth2.tsv row (the HG002#2 leg of the same bridge machinery;
 # fail-closed classes named). Lanes run LANES-wide over the tranche.
-# usage: run-truthcalls.sh <A|B>   (env: WT, LANES=6)
+# usage: run-truthcalls.sh <A|B|C>   (env: WT, LANES=6)
+# PROFILE C = THE NEW PRODUCT DEFAULT (the owner's far-bin ruling, commit
+# 2a3dd46): the RESTRICTED census (form A's own cut, reused - the prune is
+# a CALL-side census-view flag, no new cut) + --far-bin-prune - the pure
+# window-geometry rule (touched-window diameter <= 1; boundary-straddlers
+# keep both adjacent bins). Assessed with the same official QV machinery.
 set -uo pipefail
 WT=${WT:-/home/erikg/hprcv2/global-panel-call-mode/genome-tranche1}
 PROFILE=$1     # A (restricted) | B (global-native)
@@ -18,9 +23,10 @@ QVBIWFA=/home/erikg/impg-genome-inference/genome/instrumented/qv-biwfa/target/re
 HPRC=/home/erikg/hprcv2
 ROUTES=/home/erikg/hprcv2/global-panel-call-mode/global-routes-par
 LANES=${LANES:-6}
-CUTDIR=$WT/cut$PROFILE
+CUTDIR=$WT/cutA; EXTRAS=""; CUTMARK=cutA.done
+if [ "$PROFILE" = "C" ]; then EXTRAS="--far-bin-prune"; else CUTDIR=$WT/cut$PROFILE; CUTMARK=cut$PROFILE.done; fi
 mkdir -p "$WT/call$PROFILE" "$WT/logs"
-export WT IMPG QVBIWFA HPRC ROUTES PROFILE CUTDIR LANES
+export WT IMPG QVBIWFA HPRC ROUTES PROFILE CUTDIR CUTMARK EXTRAS LANES
 
 # the work list: territories with both cuts done and an ok truth pair
 grep -v '^#' "$WT/tranche.tsv" | cut -f1 | while read -r T; do
@@ -36,7 +42,7 @@ done | true
 
 run_one() {
   local T=$1
-  [ -f "$WT/prep/$T/cut${PROFILE}.done" ] || return 0
+  [ -f "$WT/prep/$T/$CUTMARK" ] || return 0
   [ -f "$WT/prep/$T/call${PROFILE}.done" ] && return 0
   [ -f "$WT/prep/$T/call${PROFILE}.skipped" ] && return 0
   local TRUTH2 AXIS OUT
@@ -65,7 +71,7 @@ print(','.join(str(j) for j in range(n)))")
     --reads "$WT/reads/$T.fq.gz" \
     --derive-cache "$CUTDIR/$T/cut-cache.bin" \
     --loci "$LOCI" \
-    --truth-qv "$AXIS" "$TRUTH2" \
+    --truth-qv "$AXIS" "$TRUTH2" $EXTRAS \
     --qv-biwfa "$QVBIWFA" \
     --global-frame --record-origin 1 \
     --out-dir "$OUT" \

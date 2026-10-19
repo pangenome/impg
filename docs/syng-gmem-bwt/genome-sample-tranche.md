@@ -88,23 +88,65 @@ axis-row rule. **All 56 tranche members resolved "ok"** (the
 no-bridge / ambiguous / no-row fail-closed classes: zero at this
 sample size).
 
-## 4. THE MACHINERY (the fleet pipeline's first genome-scale use)
+## 4. THE MACHINERY (the fleet pipeline's first genome-scale use) — THREE census/profile forms
+
+**THE OWNER'S MID-TRANCHE STEERING (executed): the far-bin prune is the
+product default** (commit 2a3dd46, `--far-bin-prune` — the pure
+window-geometry rule; the five-locality gates: zero truth losses at
+L1-L4, the pilot WINS FOUR truth loci, L1 loci −53.6%). The tranche
+therefore runs THREE forms per territory, not two:
+
+| form | the census | the call | the role |
+|---|---|---|---|
+| **A** | restricted (the committed kept-read set) | the committed path | the OLD default |
+| **B** | global-native (the full routed mass) | the committed path | the record form |
+| **C** | restricted (form A's own cut, reused — the prune is a CALL-side census-view flag) | `--far-bin-prune` | **THE NEW PRODUCT DEFAULT** |
+
+All three assessed with the official QV machinery. The tranche verdicts
+now answer the owner's actual product questions: **does the prune's
+four-truth-win hold at sampled genome scale** (C-vs-A: wins, and the
+gate bar of zero truth losses), and **does the wash conclusion hold
+under the new default** (B-vs-C beside B-vs-A). The far-bin mass-share
+analysis (§7) IS the prune's genome-scale value receipt, tied to form
+C: the machinery's own pruned-records/mass log lines at every
+territory, cross-checked against the census-geometry share.
 
 Per territory: the prep MIRROR+REGEN (the campaign's own chain, run in
 the tranche's own work dir — the campaign's ledgers never touched);
 the reads fetch (the committed ±50kb rule); the RV local-derive cut
-RE-RUN (the restriction basis — the committed kept-read set — with a
-free determinism gate against the campaign's banked cut-stats receipts);
-the profile-A restricted cut (the single `cut --frame global`, the only
-committed restricted path); the profile-B global-native cuts + the
+RE-RUN (the restriction basis — the committed kept-read set); the
+form-A restricted cut (the single `cut --frame global`, the only
+committed restricted path); the form-B global-native cuts + the
 production calls via `fork-cut-call-batch-global` (the shared panel
 load, width-32 children, the 4-concurrent T16 in-child calls); and the
 official truth assessment (`call-diplotypes --truth-qv`, the likegt
 max-qv cap-50 convention, RAYON=1 serial — the same assessment as every
-banked receipt), both profiles.
+banked receipt), all three forms.
 
-(RESULTS TABLES FOLLOW — filled by `tranche-analyze.py` at the stage
-close; see §5-§7.)
+### 4.1 THE T00041 DETERMINISM-GATE INSPECTION (the era class, receipted)
+
+The stage-K free determinism gate (the regenerated RV cut vs the
+campaign's banked cut-stats) flagged T00041. **NOT a nondeterminism —
+a deterministic, DATED behavior boundary in the campaign's own
+receipts:** every tranche member whose campaign substrate was built
+Oct 16-17 reproduces EXACTLY (13/13 — partition region counts equal,
+cut-stats identical); every member built in the EARLY Oct-15 prep
+waves differs (17/17 — a systematic ~2x region-count change: T00041
+54→25, T00531 340→165, T01091 327→164, T01579 1189→549, same locus.fa
+bp totals). The boundary: the campaign's binary changed mid-day Oct 15
+with the committed Rust source CONSTANT across it (no src commit
+between 231d21a and c78c450) — the **vendor/syng submodule pointer
+drifted 054acfc→68ac197 during Oct 15** (recorded uncommitted-by-design
+in the campaign's own handoff; the current checkout is 68ac197), and
+the partition step's region semantics changed with it. The campaign's
+committed cut receipts are therefore a MIX of two substrate eras; the
+mirror+regen reproduces the LATER era byte-exactly and deterministically
+cannot reproduce the early era. **The tranche's own receipts are
+internally consistent — ONE binary produced every cut and every call of
+all three forms — which is what the A/B/C comparisons require.** The
+class is named (the OCT-15-EARLY-SUBSTRATE ERA class); no redraw, no
+bug (full inspection: `rvcut/determinism-gate-inspection.txt` in the
+work dir).
 
 ## 5. THE WASH VERDICT AT SCALE
 
