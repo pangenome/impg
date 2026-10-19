@@ -22,8 +22,8 @@ RAYON=${RAYON:-24}
 CUTS=$WT/rvcut
 mkdir -p "$CUTS" "$WT/logs"
 
-one_batch() {
-  local B=$1; shift
+one_batch_w() {
+  local B=$1; local w=$2; shift 2
   local TODO=("$@")
   mkdir -p "$B"
   : > "$B/manifest.jsonl"
@@ -75,6 +75,13 @@ EOF
       # and the stats ride forward; the census/cache stay on disk until
       # the batch verifies, then go (the disk floor is tight).
       rm -f "$D/cut-census.jsonl" "$D/cut-cache.bin"
+    elif [ "$st" -eq 137 ]; then
+      # THE GUARD KILL IS A BATCH-PACKAGING EVENT, never a territory
+      # strike - the width HALVES for this batch's territories (the
+      # guard is the only oracle: the census working set is not
+      # predictable pre-batch)
+      echo $(( w > 1 ? w / 2 : 1 )) > "$WT/prep/$T/cut.width"
+      echo "$(date -u +%FT%TZ) $T batch GUARD-KILLED at width $w (packaging - no strike, width -> $(( w > 1 ? w / 2 : 1 )))" >> "$CUTS/campaign.log"
     else
       echo "$T no cut-stats after batch (exit $st)" >> "$CUTS/campaign.log"
     fi
@@ -83,24 +90,53 @@ EOF
 }
 
 BID=0
+W_START=${W_START:-8}
+# THE ADAPTIVE WIDTH (the campaign's own rule, run-cuts.sh VERBATIM in
+# kind): the guard is the ONLY oracle; the territories of a GUARD-KILLED
+# batch (exit 137) retry at HALF the width (prep/<T>/cut.width, min 1) -
+# a guard kill never strikes a territory (the width's own failure).
 while true; do
   mapfile -t PENDING < <(grep -v '^#' "$WT/tranche.tsv" | cut -f1 | while read -r T; do
-      [ -f "$WT/prep/$T/substrate.done" ] || continue
       [ -f "$WT/prep/$T/rvcut.done" ] && continue
+      [ -f "$WT/prep/$T/substrate.done" ] || continue
+      grep -q "^$T\b" "$WT/tranche-failed.tsv" 2>/dev/null && continue
       echo "$T"
     done)
   [ "${#PENDING[@]}" -eq 0 ] && break
-  # pack W pending per batch, run C batches concurrently
+  # the campaign's own composition rule: the pending list is
+  # DETERMINISTICALLY HASH-INTERLEAVED before batch composition, so
+  # genome-adjacent density clumps spread across batches (no
+  # cherry-picking - a pure function of the TID)
+  mapfile -t PENDING < <(printf '%s\n' "${PENDING[@]}" | sort -k1,1)
+  mapfile -t PENDING < <(for T in "${PENDING[@]}"; do echo "$(printf '%s' "$T" | md5sum | cut -c1-12) $T"; done | sort | awk '{print $2}')
+  # pack per width class (the widest first), W_pending per batch, C
+  # concurrent batches
   JOBS=()
-  while [ "${#PENDING[@]}" -gt 0 ] && [ "${#JOBS[@]}" -lt "$C" ]; do
-    B=$CUTS/batch-$BID; BID=$((BID+1))
-    mapfile -t SLICE < <(printf '%s\n' "${PENDING[@]}" | head -"$W")
-    JOBS+=("$B ${SLICE[*]}")
-    PENDING=("${PENDING[@]:$W}")
+  declare -A BYW
+  for T in "${PENDING[@]}"; do
+    w=$(cat "$WT/prep/$T/cut.width" 2>/dev/null || echo $W_START)
+    BYW[$w]="${BYW[$w]:-} $T"
   done
-  for j in "${JOBS[@]}"; do
-    one_batch $j &
+  for w in $(printf '%s\n' "${!BYW[@]}" | sort -rn); do
+    mapfile -t WL < <(printf '%s\n' ${BYW[$w]})
+    while [ "${#WL[@]}" -gt 0 ] && [ "${#JOBS[@]}" -lt "$(( C * 3 ))" ]; do
+      B=$CUTS/batch-$BID; BID=$((BID+1))
+      mapfile -t SLICE < <(printf '%s\n' "${WL[@]}" | head -"$w")
+      JOBS+=("$B $w ${SLICE[*]}")
+      WL=("${WL[@]:$w}")
+    done
+    [ "${#JOBS[@]}" -ge "$C" ] && break
   done
-  wait
+  while [ "${#JOBS[@]}" -gt 0 ]; do
+    for j in "${JOBS[@]:0:$C}"; do
+      one_batch_w $j &
+    done
+    wait
+    JOBS=("${JOBS[@]:$C}")
+  done
+  # no-progress guard: if nothing new completed this round, stop
+  nd1=$(ls $CUTS/*/*/cut-stats.json 2>/dev/null | wc -l)
+  [ "${nd1:-0}" -eq "${ND0:-0}" ] && echo "$(date -u +%FT%TZ) rvcut NO PROGRESS ($nd1 done)" >> "$CUTS/campaign.log" && break
+  ND0=$nd1
 done
 echo "$(date -u +%FT%TZ) rvcut stage complete: $(ls $WT/prep/*/rvcut.done 2>/dev/null | wc -l) territories"
