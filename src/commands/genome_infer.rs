@@ -2021,12 +2021,49 @@ pub fn run(command: Command) -> io::Result<()> {
                     !cut_dir.exists(),
                     format!("the cut directory {} already exists", cut_dir.display()),
                 )?;
+                // THE GLOBAL-FRAME REGISTRY'S OWN MAP CUT (the
+                // panel-prep step's form): the registry carries no
+                // per-territory local syng (prep ZERO deleted it by
+                // design), but the fleet call step's RESTRICTED
+                // census profile demands the territory's kept-read
+                // set — the LOCAL cut's own evidence mass (the
+                // §10.6.17 basis) — so the map step builds the local
+                // syng HERE, into the map's own partition directory
+                // (the PARTITION step's local-form recipe verbatim,
+                // ~3s), and runs the committed LOCAL-frame cut against
+                // it. The committed local-frame registry path is
+                // unchanged (the registry's own syng, byte-for-byte).
+                let frame = manifest["frame"].as_str().unwrap_or("local");
+                let cut_panel: std::borrow::Cow<str> = if frame == "global" {
+                    std::fs::create_dir_all(&cut_dir)?;
+                    let syng = cut_dir.join("locus-pos64.syng");
+                    let sources = manifest["sources"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no sources"))?;
+                    run_self(&[
+                        "syng",
+                        "-f",
+                        sources,
+                        "--syncmer-length",
+                        "63",
+                        "--smer-length",
+                        "8",
+                        "--syncmer-seed",
+                        "7",
+                        "--position-sample-rate",
+                        "64",
+                        "-o",
+                        &syng.display().to_string(),
+                    ])?;
+                    std::borrow::Cow::Owned(syng.display().to_string())
+                } else {
+                    std::borrow::Cow::Borrowed(manifest["syng"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no syng"))?)
+                };
                 let mut command = std::process::Command::new(sample_projection_bin()?);
                 command
                     .arg("cut")
                     .arg("--global-panel").arg(&panel)
-                    .arg("--panel").arg(manifest["syng"].as_str().ok_or_else(
-                        || invalid("the partition manifest carries no syng"))?)
+                    .arg("--panel").arg(cut_panel.as_ref())
                     .arg("--axis").arg(manifest["axis"].as_str().ok_or_else(
                         || invalid("the partition manifest carries no axis"))?)
                     .arg("--bed-directory").arg(manifest["beds"].as_str().ok_or_else(
@@ -2262,12 +2299,19 @@ pub fn run(command: Command) -> io::Result<()> {
                          fork-after-load, width-32 cut, T16 calls)"
                     );
                     let partition_out = out_dir.join(name);
+                    // The fleet row's cut out_dir is a SIBLING of the
+                    // call out_dir (never its parent): the call's own
+                    // with_output_model CREATE_DIR-refuses an existing
+                    // directory, and the cut phase materializes its
+                    // out_dir (and the parent chain) first — <name>-cut
+                    // beside <name>/ keeps both disciplines intact.
+                    let cut_out = out_dir.join(format!("{name}-cut"));
                     specs.push(genome::sample_projection::CutBatchGlobalSpec {
                         name: name.clone(),
                         axis,
                         bed_directory: beds,
                         component,
-                        out_dir: partition_out.join("cut"),
+                        out_dir: cut_out,
                         record_origin,
                         readset: Some(readset),
                         call: Some(genome::sample_projection::CutBatchGlobalCall {
@@ -2330,7 +2374,9 @@ pub fn run(command: Command) -> io::Result<()> {
                             "sequences": genome::reconstruction::fingerprint(
                                 &partition_out.join("calls.jsonl.sequences.jsonl"))?,
                             "cut_census": genome::reconstruction::fingerprint(
-                                &partition_out.join("cut").join("cut-census.jsonl"))?,
+                                &out_dir
+                                    .join(format!("{name}-cut"))
+                                    .join("cut-census.jsonl"))?,
                             "truth_qv_test_mode": serde_json::Value::Null,
                         }));
                     }
