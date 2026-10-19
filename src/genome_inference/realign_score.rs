@@ -541,10 +541,20 @@ pub struct Options {
     /// every locus's scoring). The test is pure window-set geometry
     /// (the touched-window diameter against the census's own
     /// pair-bins adjacency constant 1) — never a tuned threshold.
-    /// Default (unset): the committed census view verbatim — the
-    /// committed path byte-for-byte. Requires --global-frame (the
-    /// committed local frame is closed, its receipts byte-frozen).
-    #[arg(long, default_value_t = false, requires = "global_frame")]
+    /// DEFAULT: ON at the global frame (the owner's ruling on the
+    /// §10.6.18 gate receipts: zero truth losses at L1-L4, the
+    /// pilot's four truth WINS); the opt-out form is
+    /// `--far-bin-prune=false` (the committed unpruned census view,
+    /// byte-identical to the pre-ruling receipts). The LOCAL frame
+    /// is byte-frozen and refuses the prune loudly (fail-closed in
+    /// run_injected, naming the opt-out).
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(bool),
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
     pub far_bin_prune: bool,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
@@ -563,6 +573,20 @@ pub struct Options {
     /// validated QV receipts used).
     #[arg(long, default_value = "genome/instrumented/qv-biwfa/target/release/qv-biwfa")]
     pub qv_biwfa: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// The far-bin prune's frame gate (see run_injected): the LOCAL frame is
+// byte-frozen; the prune (now the product default) never applies there —
+// refuse loudly, naming the opt-out form.
+// ---------------------------------------------------------------------------
+fn far_bin_prune_frame_gate(global_frame: bool, far_bin_prune: bool) -> io::Result<()> {
+    ensure(
+        !far_bin_prune || global_frame,
+        "--far-bin-prune requires --global-frame (the committed local frame \
+         is byte-frozen; state --far-bin-prune=false for the committed local \
+         form)",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4477,6 +4501,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         "--record-origin requires --global-frame (the committed local frame \
          is closed: it never needed the absolute content origin)",
     )?;
+    // (THE FAR-BIN PRUNE'S FRAME GATE: the prune is the global-frame
+    // product default — the working form the §10.6.18 receipts gated
+    // — and the committed LOCAL frame is byte-frozen; a default-on
+    // prune reaching the local frame is refused LOUDLY, naming the
+    // opt-out, never silently applied to the frozen path.)
+    far_bin_prune_frame_gate(options.global_frame, options.far_bin_prune)?;
     // (Phase 3 — the parallelism pilot: THE SEAM SWITCH. The committed
     // default is the serial code path — byte-for-byte the phase-1
     // behavior. With IMPG_REALIGN_PARALLEL_SEAMS set (and the width in
@@ -11084,6 +11114,23 @@ mod tests {
         assert!(census_record_far_bin_scattered(&line(
             &[&[12, 13], &[15, 16]]
         )));
+    }
+
+    #[test]
+    fn far_bin_prune_frame_gate_keeps_the_local_frame_byte_frozen() {
+        // THE PRODUCT DEFAULT'S OWN GATE (the §10.6.19 default flip):
+        // the prune is ON by default at the GLOBAL frame, and the
+        // committed LOCAL frame is byte-frozen — a default-on prune
+        // reaching the local frame is REFUSED LOUDLY (naming the
+        // --far-bin-prune=false opt-out), never silently applied;
+        // the explicit opt-out at the local frame is the committed
+        // local form.
+        assert!(far_bin_prune_frame_gate(true, true).is_ok());
+        assert!(far_bin_prune_frame_gate(true, false).is_ok());
+        assert!(far_bin_prune_frame_gate(false, false).is_ok());
+        let refused = far_bin_prune_frame_gate(false, true).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(refused.to_string().contains("--far-bin-prune=false"));
     }
 
 }

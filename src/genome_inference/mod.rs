@@ -12,6 +12,7 @@ pub mod realign_score;
 pub mod reanchor;
 pub mod reconstruction;
 pub mod sample;
+pub mod sample_projection;
 pub mod sequence_evaluation;
 pub mod territory_frame;
 pub mod threading;

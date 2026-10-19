@@ -43,10 +43,10 @@
 #![recursion_limit = "512"]
 
 use clap::Parser;
-use impg::agc_index::AgcIndex;
-use impg::genome_inference::{mem_records, realign_score, territory_frame};
-use impg::sample_mem_bwt::{canonical, encode_walk};
-use impg::syng::{SyncmerParams, SyngIndex};
+use crate::agc_index::AgcIndex;
+use crate::genome_inference::{mem_records, realign_score, territory_frame};
+use crate::sample_mem_bwt::{canonical, encode_walk};
+use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1323,7 +1323,7 @@ fn build_territory_index(
             let seq_lo = lo.saturating_sub(syncmer_len);
             let seq_hi = hi + syncmer_len;
             let seq: Vec<u8> = fetch_lane(&row.path_name, seq_lo, seq_hi)?;
-            let rc_seq = impg::graph::reverse_complement(&seq);
+            let rc_seq = crate::graph::reverse_complement(&seq);
             let reverse_steps: Vec<(u64, i32)> = mem_records::raw_matched_syncmers(panel, &rc_seq)?
                 .into_iter()
                 .map(|(signed_node, q)| {
@@ -1643,6 +1643,34 @@ enum RemapMode {
     GlobalFrame,
 }
 
+/// THE RESTRICTED CENSUS PROFILE'S BASIS LOADER (the §10.6.17
+/// product default, the one form everywhere a read set restricts a
+/// scan): a FASTA of read sequences -> the set of FNV hashes of the
+/// EXACT read bytes (the committed IMPG_CUT_READSET_FASTA instrument's
+/// own rule; a read is in the basis iff its exact bytes are). The
+/// label names the loading side in the receipt line.
+fn readset_hashes(path: &Path, label: &str) -> io::Result<HashSet<u64>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut set = HashSet::new();
+    let mut seq: Vec<u8> = Vec::new();
+    for line in text.lines() {
+        if let Some(header) = line.strip_prefix('>') {
+            let _ = header;
+            if !seq.is_empty() {
+                set.insert(fnv1a64(&seq));
+            }
+            seq.clear();
+        } else {
+            seq.extend_from_slice(line.trim().as_bytes());
+        }
+    }
+    if !seq.is_empty() {
+        set.insert(fnv1a64(&seq));
+    }
+    eprintln!("{label}: {} reads from {}", set.len(), path.display());
+    Ok(set)
+}
+
 fn scan_shard_file(
     path: &Path,
     node_map: &HashMap<i32, i32>,
@@ -1665,30 +1693,7 @@ fn scan_shard_file(
     )
     .ok()
     .filter(|value| !value.is_empty())
-    .map(|path| -> io::Result<_> {
-        let text = std::fs::read_to_string(&path)?;
-        let mut set = std::collections::HashSet::new();
-        let mut seq: Vec<u8> = Vec::new();
-        for line in text.lines() {
-            if let Some(header) = line.strip_prefix('>') {
-                let _ = header;
-                if !seq.is_empty() {
-                    set.insert(fnv1a64(&seq));
-                }
-                seq.clear();
-            } else {
-                seq.extend_from_slice(line.trim().as_bytes());
-            }
-        }
-        if !seq.is_empty() {
-            set.insert(fnv1a64(&seq));
-        }
-        eprintln!(
-            "[cut] read-set shadow instrument: {} reads from {path}",
-            set.len()
-        );
-        Ok(set)
-    })
+    .map(|path| readset_hashes(Path::new(&path), "[cut] read-set shadow instrument"))
     .transpose()?;
     let readset_ref = readset.as_ref();
     let mut cut = FileCut {
@@ -2794,42 +2799,54 @@ struct CutBatchSpec {
 /// locality panel, no locus.fa (conversion-not-materialization) — plus
 /// the substrate's stated content origin.
 #[derive(serde::Deserialize, Clone)]
-struct CutBatchGlobalSpec {
-    name: String,
-    axis: PathBuf,
-    bed_directory: PathBuf,
-    component: String,
-    out_dir: PathBuf,
+pub struct CutBatchGlobalSpec {
+    pub name: String,
+    pub axis: PathBuf,
+    pub bed_directory: PathBuf,
+    pub component: String,
+    pub out_dir: PathBuf,
     /// The substrate's stated content origin (the single global
     /// cut's --record-origin d; 1 = the L1-L4 one-base-later
     /// convention, 0 = the pilot's exact headers).
     #[serde(default)]
-    record_origin: u64,
+    pub record_origin: u64,
+    /// THE RESTRICTED CENSUS PROFILE'S BASIS (the §10.6.17 product
+    /// default, carried into the batch forms — the named follow-up
+    /// executed): when present, the territory's census is RESTRICTED
+    /// to this kept-read set (a FASTA of read sequences, the cut's
+    /// own cut-reads.fasta basis form — the product call path states
+    /// the MAP step's cut-reads set; a read outside the basis is
+    /// scanned-and-skipped for this territory exactly as the single
+    /// restricted cut's IMPG_CUT_READSET_FASTA form). Absent = the
+    /// global-native full routed mass (the committed batch receipts'
+    /// form, byte-identical).
+    #[serde(default)]
+    pub readset: Option<PathBuf>,
     /// THE COMBINED CUT+CALL ROW (cut-call-batch-global only; ignored
     /// by cut-batch-global): when present, the SAME process calls the
     /// territory after its cut, over the ONE loaded panel — the
     /// shared-index cut+call seam (the call's per-process inputs pole
     /// — the panel's own load — vanishes into the shared load).
     #[serde(default)]
-    call: Option<CutBatchGlobalCall>,
+    pub call: Option<CutBatchGlobalCall>,
 }
 
 /// The per-territory call row of the combined cut+call manifest: the
 /// call-diplotypes CLI's own inputs (the cut's census/cache are the
 /// cut's own outputs, bound by construction).
 #[derive(serde::Deserialize, Clone)]
-struct CutBatchGlobalCall {
+pub struct CutBatchGlobalCall {
     /// The sample FASTQ (read identity + the quality-byte assertion).
-    reads: PathBuf,
+    pub reads: PathBuf,
     /// The territory's locality map directory (window<N>.gfa.map.json
     /// — the committed per-territory substrate).
-    partition_graphs: PathBuf,
+    pub partition_graphs: PathBuf,
     /// The scored loci (window ids of the component, comma-separated,
     /// distinct and sorted — the committed --loci form).
-    loci: String,
+    pub loci: String,
     /// The call's output directory (calls.jsonl + the instrument
     /// receipts; refused if it exists — the CLI's own discipline).
-    out_dir: PathBuf,
+    pub out_dir: PathBuf,
 }
 
 /// One loaded GLOBAL-frame batch territory: the shared panel is held
@@ -2846,6 +2863,15 @@ struct GlobalBatchTerritory {
     node_map: HashMap<i32, i32>,
     node_map_pairs: usize,
     component_contig_source: String,
+    /// THE RESTRICTED CENSUS PROFILE'S BASIS (the §10.6.17 product
+    /// default carried into the batch form): the territory's kept-
+    /// read set as FNV hashes of the exact read bytes — None is the
+    /// global-native full routed mass (the committed batch receipts'
+    /// form).
+    readset: Option<HashSet<u64>>,
+    /// The cut-stats census_profile label this territory's emission
+    /// states ("restricted" | "global-native").
+    census_profile: &'static str,
 }
 
 /// One loaded batch territory: the locality panel, the committed
@@ -3728,9 +3754,18 @@ fn cut_batch_global_parse_manifest(
                 .map_err(|e| invalid(format!("manifest row: {e}")))?,
         );
     }
+    ensure_batch_specs(&specs)?;
+    Ok(specs)
+}
+
+/// THE BATCH FORMS' OWN OUTPUT DISCIPLINE (the parse side and the
+/// in-process specs side share it): non-empty, within the u16
+/// territory index, every out_dir creatable, no existing cut output
+/// (the committed-receipt immutability discipline).
+fn ensure_batch_specs(specs: &[CutBatchGlobalSpec]) -> io::Result<()> {
     ensure(!specs.is_empty(), "empty batch manifest")?;
     ensure(specs.len() <= 65535, "batch wider than the u16 territory index")?;
-    for spec in &specs {
+    for spec in specs {
         std::fs::create_dir_all(&spec.out_dir)?;
         for name in [
             "cut-census.jsonl",
@@ -3747,7 +3782,7 @@ fn cut_batch_global_parse_manifest(
             )?;
         }
     }
-    Ok(specs)
+    Ok(())
 }
 
 fn run_cut_batch_global(
@@ -3814,6 +3849,24 @@ fn cut_batch_global_with(
     let setups: Vec<io::Result<GlobalBatchTerritory>> = specs
         .into_par_iter()
         .map(|spec| {
+            // THE RESTRICTED CENSUS PROFILE'S BASIS (the §10.6.17
+            // product default, carried into the batch form): a stated
+            // readset restricts the territory's census to that kept-
+            // read set (the single restricted cut's own rule, the FNV
+            // hash of the exact read bytes); NO readset is the
+            // global-native full routed mass (the committed batch
+            // receipts' form, byte-identical). The cut-stats label
+            // states the effective profile either way.
+            let (readset, census_profile) = match &spec.readset {
+                Some(path) => (
+                    Some(readset_hashes(
+                        path,
+                        &format!("[cut-batch-global] {} read-set basis", spec.name),
+                    )?),
+                    "restricted",
+                ),
+                None => (None, "global-native"),
+            };
             let axis: AxisFile = serde_json::from_str(&std::fs::read_to_string(&spec.axis)?)
                 .map_err(|e| invalid(format!("axis parse: {e}")))?;
             let universe =
@@ -3917,6 +3970,8 @@ fn cut_batch_global_with(
                 node_map,
                 node_map_pairs: expressibility_pairs,
                 component_contig_source,
+                readset,
+                census_profile,
             })
         })
         .collect();
@@ -3948,6 +4003,34 @@ fn cut_batch_global_with(
         n_terr
     );
 
+    // THE RESTRICTED-BASIS INVERTED INDEX (the §10.6.17 product
+    // default carried into the batch form): read hash -> the
+    // restricted territories whose basis contains it. A restricted
+    // territory's census counts a read iff the read is IN ITS BASIS
+    // (the single restricted cut's own rule — the filter is by basis,
+    // BEFORE routing), so the per-file accounting needs the in-basis
+    // view for every read, routed or not; the inverted index is one
+    // probe per read (the bases are the per-territory kept-read sets,
+    // so the mass is the chunk's own, never the panel's).
+    let mut restricted_routing: HashMap<u64, Vec<u16>> = HashMap::new();
+    let n_restricted = territories
+        .iter()
+        .filter(|t| t.readset.is_some())
+        .count();
+    for (index, t) in territories.iter().enumerate() {
+        if let Some(basis) = &t.readset {
+            for &hash in basis {
+                restricted_routing.entry(hash).or_default().push(index as u16);
+            }
+        }
+    }
+    eprintln!(
+        "[cut-batch-global] restricted census profile: {n_restricted} of {n_terr} territories \
+         ({} basis reads indexed)",
+        restricted_routing.len()
+    );
+    let restricted_ref = &restricted_routing;
+
     // The ONE shard scan (parallel over files; per read, every routed
     // territory's committed identity remap; the per-(file, territory)
     // states accumulate in read order exactly as the single cut's
@@ -3976,6 +4059,10 @@ fn cut_batch_global_with(
             // UNROUTED read is inexpressible for the territory, exactly
             // the single cut's all-or-nothing accounting).
             let mut routed_records: HashMap<u16, u64> = HashMap::new();
+            // Per RESTRICTED territory: the in-basis reads' record total
+            // (the single restricted cut's records_scanned counts ONLY
+            // the basis reads' records).
+            let mut filtered_records: HashMap<u16, u64> = HashMap::new();
             for batch in shard_packet_stream(path, 1024)? {
                 let packets = batch?;
                 file_reads += packets.len() as u64;
@@ -3987,19 +4074,26 @@ fn cut_batch_global_with(
                     .iter()
                     .map(|read| read.records.len() as u64)
                     .sum::<u64>();
-                // Per read: the routed territory set, then every
-                // routed territory's committed identity remap (parallel
-                // over reads).
+                // Per read: the routed territory set, the in-basis set
+                // (the restricted territories whose basis contains the
+                // read — the accounting needs it for every read,
+                // routed or not), then every routed-in-basis
+                // territory's committed identity remap (parallel over
+                // reads).
                 let processed: Vec<
                     io::Result<
                         Option<(
                             Vec<u8>,
+                            usize,
+                            Vec<u16>,
                             Vec<(u16, Vec<Option<(Vec<u64>, OwnWalk, bool)>>)>,
                         )>,
                     >,
                 > = decoded
                     .into_par_iter()
                     .map(|read| {
+                        let seq_hash = fnv1a64(&read.seq);
+                        let n_records = read.records.len();
                         let mut routed: Vec<u16> = Vec::new();
                         for (_, walk) in &read.records {
                             for &(node, _) in walk {
@@ -4010,12 +4104,22 @@ fn cut_batch_global_with(
                         }
                         routed.sort_unstable();
                         routed.dedup();
-                        if routed.is_empty() {
-                            return Ok(None);
-                        }
+                        // THE RESTRICTED CENSUS PROFILE (the single
+                        // restricted cut's own rule at batch scale): a
+                        // restricted territory counts this read iff the
+                        // read is in ITS basis; a native territory
+                        // counts every routed read (the committed
+                        // batch form, byte-identical).
+                        let in_basis: Vec<u16> = restricted_ref
+                            .get(&seq_hash)
+                            .cloned()
+                            .unwrap_or_default();
                         let mut out = Vec::with_capacity(routed.len());
                         for &ti in &routed {
                             let t = &territories_ref[ti as usize];
+                            if t.readset.is_some() && !in_basis.contains(&ti) {
+                                continue;
+                            }
                             let mut records: Vec<Option<(Vec<u64>, OwnWalk, bool)>> =
                                 Vec::with_capacity(read.records.len());
                             cut_records(
@@ -4027,15 +4131,21 @@ fn cut_batch_global_with(
                             )?;
                             out.push((ti, records));
                         }
-                        Ok(Some((read.seq, out)))
+                        Ok(Some((read.seq, n_records, in_basis, out)))
                     })
                     .collect();
                 // Fold in read order (the single cut's per-read
                 // accumulation, per territory).
                 for result in processed {
-                    let Some((seq, per_terr)) = result? else {
+                    let Some((seq, n_records, in_basis, per_terr)) = result? else {
                         continue;
                     };
+                    // The restricted territories' in-basis record count
+                    // (their records_scanned: the single restricted
+                    // cut counts ONLY the basis reads' records).
+                    for &ti in &in_basis {
+                        *filtered_records.entry(ti).or_insert(0) += n_records as u64;
+                    }
                     for (ti, records) in per_terr {
                         let cut = per.entry(ti).or_insert_with(FileCut::empty);
                         *routed_records.entry(ti).or_insert(0) += records.len() as u64;
@@ -4070,14 +4180,23 @@ fn cut_batch_global_with(
             // per-file state; the batch reproduces that per territory,
             // with the unrouted reads' records counted unmappable —
             // every such record is inexpressible, the all-or-nothing
-            // rule's own accounting).
+            // rule's own accounting). A RESTRICTED territory counts
+            // only its basis reads' records (the single restricted
+            // cut's own records_scanned); a native territory counts
+            // every record in the file (the committed batch form).
             for index in 0..n_terr {
                 let ti = index as u16;
+                let restricted = territories_ref[index].readset.is_some();
+                let scanned = if restricted {
+                    filtered_records.get(&ti).copied().unwrap_or(0)
+                } else {
+                    file_records
+                };
                 let cut = per.entry(ti).or_insert_with(FileCut::empty);
                 cut.reads_scanned = file_reads;
-                cut.records_scanned = file_records;
+                cut.records_scanned = scanned;
                 let routed = routed_records.get(&ti).copied().unwrap_or(0);
-                cut.records_unmappable += file_records - routed;
+                cut.records_unmappable += scanned - routed;
             }
             Ok(per)
         })
@@ -4200,6 +4319,9 @@ fn run_cut_call_batch_global(
     );
     let calls_started = Instant::now();
     let shared_panel: &SyngIndex = &global;
+    // The committed combined-process form: the UNPRUNED census view
+    // (its receipts are byte-frozen; the product default is the
+    // product call path's own statement).
     let call_results = run_combined_call_rows(
         shared_panel,
         global_panel_prefix,
@@ -4208,6 +4330,7 @@ fn run_cut_call_batch_global(
         call_rss_budget_gib,
         load_seconds,
         "cut-call-batch-global",
+        false,
     );
     eprintln!(
         "[cut-call-batch-global] call phase done in {:.0}s ({} concurrent)",
@@ -4245,7 +4368,17 @@ fn run_combined_call_rows(
     call_rss_budget_gib: f64,
     load_seconds: f64,
     tag: &str,
+    far_bin_prune: bool,
 ) -> Vec<io::Result<()>> {
+    // THE MODEL LABEL states the effective census view exactly as the
+    // call-diplotypes CLI does (the -farbin-prune suffix the committed
+    // pruned receipts carry); the unpruned fleet receipts keep the
+    // committed plain string.
+    let model_label: std::borrow::Cow<str> = if far_bin_prune {
+        std::borrow::Cow::Owned(format!("{}-farbin-prune", realign_score::MODEL))
+    } else {
+        std::borrow::Cow::Borrowed(realign_score::MODEL)
+    };
     std::thread::scope(|scope| {
         let handles: Vec<_> = call_rows
             .iter()
@@ -4253,10 +4386,11 @@ fn run_combined_call_rows(
                 let (name, component, cut_dir, call) =
                     (name.clone(), component.clone(), cut_dir.clone(), call.clone());
                 let out_dir = call.out_dir.clone();
+                let model_label = model_label.clone();
                 scope.spawn(move || {
                     let call_started = Instant::now();
                     let result =
-                        impg::genome_inference::with_output_model(&out_dir, realign_score::MODEL, || {
+                        crate::genome_inference::with_output_model(&out_dir, &model_label, || {
                             let options = realign_score::Options {
                                 panel: global_panel_prefix.to_string(),
                                 routes: routes_dir.to_path_buf(),
@@ -4282,18 +4416,24 @@ fn run_combined_call_rows(
                                 region: None,
                                 global_frame: true,
                                 record_origin: *record_origin,
+                                // THE FAR-BIN PRUNE (the §10.6.19
+                                // product default at the fleet call
+                                // path): the product wrapper states
+                                // it ON; the example driver keeps the
+                                // committed unpruned fleet receipts.
+                                far_bin_prune,
                                 qv_biwfa: "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into(),
                             };
                             realign_score::run_injected(options, Some(shared_panel))?;
                             let calls = out_dir.join("calls.jsonl");
                             let sequences = out_dir.join("calls.jsonl.sequences.jsonl");
                             Ok(serde_json::json!({
-                                "calls": impg::genome_inference::reconstruction::fingerprint(&calls)?,
+                                "calls": crate::genome_inference::reconstruction::fingerprint(&calls)?,
                                 "calls_bytes": std::fs::metadata(&calls)?.len(),
-                                "instrument_receipt": impg::genome_inference::reconstruction::fingerprint(
+                                "instrument_receipt": crate::genome_inference::reconstruction::fingerprint(
                                     &out_dir.join("instrument-receipt.jsonl"),
                                 )?,
-                                "sequences_emission": impg::genome_inference::reconstruction::fingerprint(
+                                "sequences_emission": crate::genome_inference::reconstruction::fingerprint(
                                     &sequences,
                                 )?,
                                 "selection": "Locality",
@@ -4625,11 +4765,50 @@ fn run_fork_cut_call_batch_global(
     rows_per_child: usize,
 ) -> io::Result<()> {
     let specs = cut_batch_global_parse_manifest(manifest_path)?;
+    // The example driver's committed form: the inherited thread env
+    // (no child override) and the UNPRUNED census view (the committed
+    // fleet receipts are byte-frozen; the product default is stated
+    // by the product call path, which passes its own parameters).
+    fork_cut_call_batch_global_specs(
+        global_panel_prefix,
+        agc_path,
+        shards_dir,
+        specs,
+        routes_dir,
+        call_rss_budget_gib,
+        rows_per_child,
+        None,
+        false,
+    )
+}
+
+/// THE FLEET FORM'S SPECS ENTRY (the product call path's own: the
+/// caller builds the manifest rows IN PROCESS — the three-step CALL
+/// step derives them from the partition registry + the map manifest,
+/// no hand-written manifest file, no manual flags — and states the
+/// fleet shape parameters: `rows_per_child` (the batched cut width;
+/// the product default 32, the §10.6.13 wide-children-at-narrow-
+/// threads shape), `child_threads` (Some(n) pins each child's
+/// RAYON_NUM_THREADS before its first rayon touch — the T16 rung;
+/// None inherits, the committed example form), and `far_bin_prune`
+/// (the §10.6.19 product default at the call's census view).
+pub fn fork_cut_call_batch_global_specs(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    specs: Vec<CutBatchGlobalSpec>,
+    routes_dir: &Path,
+    call_rss_budget_gib: f64,
+    rows_per_child: usize,
+    child_threads: Option<usize>,
+    far_bin_prune: bool,
+) -> io::Result<()> {
     ensure(
         specs.iter().any(|spec| spec.call.is_some()),
         "no manifest row carries a call object (cut-batch-global is the cut-only form)",
     )?;
     ensure(rows_per_child >= 1, "--rows-per-child must be >= 1")?;
+    ensure_batch_specs(&specs)?;
     eprintln!(
         "[fork-cut-call-batch-global] loading the global panel once (the parent is the load owner) for {} manifest rows in {} children (rows-per-child {})",
         specs.len(),
@@ -4673,6 +4852,19 @@ fn run_fork_cut_call_batch_global(
                 if let Ok(trace) = std::env::var("IMPG_LANE_TRACE") {
                     if !trace.is_empty() {
                         std::env::set_var("IMPG_LANE_TRACE", format!("{trace}.{chunk}"));
+                    }
+                }
+                // THE FLEET SHAPE (the product call path's parameter,
+                // the §10.6.13 wide-children-at-narrow-threads rung):
+                // a child's RAYON_NUM_THREADS is pinned HERE, before
+                // the child's first rayon touch (its own AGC build
+                // sizing), so the child's global registry spawns its
+                // own n threads exactly as a fresh process at that
+                // env would; None inherits the parent's env (the
+                // committed example form).
+                if let Some(threads) = child_threads {
+                    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+                        std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
                     }
                 }
                 eprintln!(
@@ -4777,6 +4969,7 @@ fn run_fork_cut_call_batch_global(
                             call_rss_budget_gib,
                             load_seconds,
                             "fork-cut-call-batch-global",
+                            far_bin_prune,
                         );
                         for result in results {
                             result?;
@@ -4881,6 +5074,8 @@ fn batch_global_emit_territory(
         node_map: _,
         node_map_pairs,
         component_contig_source,
+        readset: _,
+        census_profile,
     } = t;
     let out_dir = spec.out_dir.as_path();
     let record_origin = spec.record_origin;
@@ -5121,12 +5316,13 @@ fn batch_global_emit_territory(
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
         frame: "global".into(),
-        // The batch forms' own scan is the full routed mass (the
-        // read-set instrument does not apply on the batch path; the
-        // single cut's --census-profile is the three-step interface's
-        // own switch — the named follow-up carries the profile into
-        // the batch manifests the same way record_origin rides them).
-        census_profile: Some("global-native".into()),
+        // THE CENSUS PROFILE (the §10.6.17 product default, carried
+        // into the batch forms — the named follow-up executed): the
+        // row's own stated basis decides — "restricted" (the basis
+        // read set, the single restricted cut's own rule) or
+        // "global-native" (the full routed mass, the committed batch
+        // receipts' form, byte-identical).
+        census_profile: Some(census_profile.into()),
         record_origin,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
@@ -5797,7 +5993,7 @@ fn merge_hist(dst: &mut Vec<u64>, src: Vec<u64>) {
     }
 }
 
-fn main() -> io::Result<()> {
+pub fn main() -> io::Result<()> {
     let options = Options::parse();
     match options.mode {
         Mode::Project {
@@ -5946,7 +6142,7 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod global_frame_tests {
     use super::*;
-    use impg::syng::SyncmerParams;
+    use crate::syng::SyncmerParams;
 
     /// A deterministic ACGT generator (reproducible, no external deps).
     fn deterministic_sequence(seed: u64, len: usize) -> Vec<u8> {
@@ -6238,7 +6434,7 @@ mod global_frame_tests {
         // keeps the header's own interval (the committed output
         // shape) — the origin cancels exactly.
         let frame =
-            impg::genome_inference::territory_frame::TerritoryFrame::from_local_names(
+            crate::genome_inference::territory_frame::TerritoryFrame::from_local_names(
                 [record_name.as_str()],
                 record_origin,
             )

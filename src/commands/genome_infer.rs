@@ -196,11 +196,23 @@ pub enum Command {
         /// boundary-straddlers keep BOTH adjacent bins (pure interval
         /// overlap, the routing's own rule). The adjacency test is
         /// geometry only (the touched-window diameter vs the census's
-        /// own pair-bins constant 1) — no tuned thresholds. Default
-        /// (unset): the committed census view verbatim, byte-identical
-        /// receipts. Requires --global-frame (the committed local
-        /// frame is closed, its receipts byte-frozen).
-        #[arg(long, default_value_t = false, requires = "global_frame")]
+        /// own pair-bins constant 1) — no tuned thresholds.
+        /// DEFAULT: ON at the global frame (the owner's ruling on the
+        /// §10.6.18 gate receipts: zero truth losses at L1-L4, the
+        /// pilot's FOUR truth WINS — rank-1 4/22 -> 8/22, median QV
+        /// 36.3 -> 45.0 — L1 loci 74.8 -> 34.7s). The opt-out form
+        /// stays for the record: `--far-bin-prune=false` (the
+        /// committed unpruned census view, byte-identical to the
+        /// pre-ruling receipts). The LOCAL frame is byte-frozen and
+        /// refuses the prune loudly — state `--far-bin-prune=false`
+        /// for the committed local form.
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = true,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
         far_bin_prune: bool,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
@@ -688,6 +700,13 @@ pub enum Command {
         /// panel-side) — the call reads only its lane inventory.
         #[arg(long, requires = "global_panel")]
         global_routes: Option<PathBuf>,
+        /// THE GLOBAL PANEL'S AGC (the fleet call path's own input,
+        /// RECORDED in the registry so the three-step CALL step needs
+        /// no manual flag for it: the fleet children build their AGC
+        /// indexes from the panel's own AGC file). Requires
+        /// --global-panel.
+        #[arg(long, requires = "global_panel")]
+        global_agc: Option<PathBuf>,
         /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
         /// content-origin parameter, recorded in the registry so the
         /// CALL step states the same convention): the committed
@@ -700,6 +719,73 @@ pub enum Command {
         /// per record against the AGC and needs no statement.
         /// Default 0. Requires --global-panel.
         #[arg(long, default_value_t = 0, requires = "global_panel")]
+        record_origin: u64,
+        /// The partitions root output directory (partitions.bed + <name>/)
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// THE THREE-STEP UI - PANEL-PREP (the owner's 2-3 step doctrine:
+    /// "make it like 2-3 steps to do whole genome analysis" — STEP 1,
+    /// once per panel, reusable forever): the ONE panel-prep step that
+    /// does BOTH panel-side pieces in sequence — (1) the whole-panel
+    /// routes inventory (derive-routes over the ONE global panel; the
+    /// ~25-min parallel derive, built at the FIRST invocation and
+    /// reused by every later one — an existing inventory is skipped,
+    /// loudly), and (2) the PARTITION step's global-panel form (the
+    /// BED4 row + the window beds + the registry that records the
+    /// global pair, the content origin, and the panel AGC so the
+    /// CALL step needs no manual flags). One invocation per partition
+    /// row (the routes inventory builds once, at the first).
+    PanelPrep {
+        /// The partition name (the BED4 fourth column; keys every panel-side precompute)
+        #[arg(long)]
+        name: String,
+        /// The reference range chromosome (the BED4 first column)
+        #[arg(long)]
+        chrom: String,
+        /// The reference range start, 0-based half-open (the BED4 second column)
+        #[arg(long)]
+        start: u64,
+        /// The reference range end (the BED4 third column)
+        #[arg(long)]
+        end: u64,
+        /// The member-subset fasta for the range (the panel sequences overlapping it)
+        #[arg(long)]
+        sources: PathBuf,
+        /// The component lane - the reference axis path (e.g. HG002#1#chr1:start-end)
+        #[arg(long)]
+        component: String,
+        /// The reference axis JSON (the committed panel-side asset)
+        #[arg(long)]
+        axis: PathBuf,
+        /// The locality map directory (windowN.gfa.map.json - the committed window grid;
+        /// the window beds are regenerated from it verbatim)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The census receipt for the routes cross-check (any sample's census against
+        /// this panel; the routing bind)
+        #[arg(long)]
+        census: PathBuf,
+        /// The read lengths for the routes inventory
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = vec![148u64])]
+        read_lengths: Vec<u64>,
+        /// THE GLOBAL PANEL syng prefix (the ONE panel; the routes
+        /// inventory and the registry both name it)
+        #[arg(long)]
+        global_panel: String,
+        /// THE GLOBAL PANEL'S AGC (derive-routes' --sources input;
+        /// recorded in the registry for the CALL step's fleet children)
+        #[arg(long)]
+        global_agc: PathBuf,
+        /// The whole-panel routes inventory output directory (built at
+        /// the first invocation, reused forever after)
+        #[arg(long)]
+        global_routes: PathBuf,
+        /// THE RECORD-ORIGIN CONVENTION (the content-origin parameter,
+        /// recorded in the registry so the CALL step states the same
+        /// convention; the committed L1-L4 substrates sit at d=1, the
+        /// pilot at d=0). Default 0.
+        #[arg(long, default_value_t = 0)]
         record_origin: u64,
         /// The partitions root output directory (partitions.bed + <name>/)
         #[arg(long)]
@@ -763,6 +849,21 @@ pub enum Command {
         /// covered windows of every overlapping partition)
         #[arg(long)]
         region: Option<String>,
+        /// THE FAR-BIN PRUNE (the product default, the §10.6.18 ruling
+        /// executed at the call-diplotypes engine): applies at the
+        /// global-frame call path (the registry's frame:global
+        /// partitions and the --global-panel form); the committed
+        /// local-frame path is byte-frozen and never prunes. DEFAULT:
+        /// ON at the global frame; the opt-out form stays for the
+        /// record: `--far-bin-prune=false`.
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = true,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
+        far_bin_prune: bool,
         /// THE MASKING OPERATOR (the held-out experiment's stranger filter): candidate
         /// rows whose member path names match any fnmatch-style glob leave the candidate
         /// universe, loudly counted (the axis row never excluded). Default: none.
@@ -1585,6 +1686,7 @@ pub fn run(command: Command) -> io::Result<()> {
             read_lengths,
             global_panel,
             global_routes,
+            global_agc,
             record_origin,
             out_dir,
         } => {
@@ -1755,7 +1857,7 @@ pub fn run(command: Command) -> io::Result<()> {
             // mode the syng/routes entries name the ONE global pair
             // and the frame marker states it; the committed local
             // registry is unchanged otherwise.
-            let manifest = serde_json::json!({
+            let mut manifest = serde_json::json!({
                 "version": 1,
                 "name": name,
                 "chrom": chrom,
@@ -1772,6 +1874,12 @@ pub fn run(command: Command) -> io::Result<()> {
                 "record_origin": record_origin,
                 "windows": windows,
             });
+            // THE FLEET CALL PATH'S OWN REGISTRY ENTRY: the global
+            // panel's AGC is recorded ONLY in the global frame (the
+            // committed local registry's bytes are unchanged).
+            if let Some(agc) = &global_agc {
+                manifest["agc"] = serde_json::json!(agc);
+            }
             genome::write_json(&dir.join("partition.json"), &manifest)?;
             let row = format!("{chrom}\t{start}\t{end}\t{name}\n");
             let mut text = std::fs::read_to_string(&bed).unwrap_or_default();
@@ -1798,6 +1906,85 @@ pub fn run(command: Command) -> io::Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&receipt)?);
             Ok(())
+        }
+        Command::PanelPrep {
+            name,
+            chrom,
+            start,
+            end,
+            sources,
+            component,
+            axis,
+            partition_graphs,
+            census,
+            read_lengths,
+            global_panel,
+            global_agc,
+            global_routes,
+            record_origin,
+            out_dir,
+        } => {
+            // STEP 1's OWN TWO PIECES, IN SEQUENCE (the owner's 2-3
+            // step doctrine: ONE panel-prep step, once per panel,
+            // reusable forever):
+            // (1) THE WHOLE-PANEL ROUTES INVENTORY (derive-routes over
+            // the ONE global panel): built at the FIRST invocation,
+            // REUSED by every later one — an existing inventory is
+            // skipped, loudly (the routes inventory is a panel-side
+            // asset, never rebuilt per partition row).
+            if global_routes.join("manifest.json").is_file() {
+                println!(
+                    "=== panel-prep: the whole-panel routes inventory {} exists — REUSED \
+                     (built once per panel)",
+                    global_routes.display()
+                );
+            } else {
+                println!(
+                    "=== panel-prep: building the whole-panel routes inventory into {} \
+                     (derive-routes over the ONE global panel; the once-per-panel step)",
+                    global_routes.display()
+                );
+                let read_lengths = read_lengths
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                run_self(&[
+                    "genome-infer",
+                    "derive-routes",
+                    "--panel",
+                    &global_panel,
+                    "--census",
+                    &census.display().to_string(),
+                    "--sources",
+                    &global_agc.display().to_string(),
+                    "--read-lengths",
+                    &read_lengths,
+                    "--out-dir",
+                    &global_routes.display().to_string(),
+                ])?;
+            }
+            // (2) THE PARTITION GLOBAL FORM (the BED4 row + the window
+            // beds + the registry): the committed PARTITION step's own
+            // machinery, verbatim, with the global pair + the panel
+            // AGC recorded so the CALL step needs no manual flags.
+            run(Command::Partition {
+                name,
+                chrom,
+                start,
+                end,
+                sources,
+                component,
+                axis,
+                partition_graphs,
+                census,
+                read_lengths,
+                global_panel: Some(global_panel),
+                global_routes: Some(global_routes),
+                global_agc: Some(global_agc),
+                record_origin,
+                out_dir,
+            })
         }
         Command::Map {
             panel,
@@ -1899,6 +2086,7 @@ pub fn run(command: Command) -> io::Result<()> {
             map,
             partitions,
             region,
+            far_bin_prune,
             exclude_paths,
             flank_overlap,
             truth_qv,
@@ -1926,7 +2114,229 @@ pub fn run(command: Command) -> io::Result<()> {
             )?;
             std::fs::create_dir_all(&out_dir)?;
             let mut calls_receipts = Vec::new();
-            for index in &selected {
+            // ------------------------------------------------------------------
+            // THE FLEET FORM (STEP 3's product default, the owner's 2-3
+            // step doctrine): every GLOBAL-frame partition (the
+            // PANEL-PREP registry) is called by the fork-after-load
+            // fleet over the ONE shared panel — the parent loads the
+            // panel once and stays the load owner; width-32 children
+            // (the batched cut amortization) each build their own AGC
+            // index, batch-cut their chunk's territories (the
+            // RESTRICTED census profile, the basis AUTO-DERIVED from
+            // the MAP step's own cut-reads set) and run their chunk's
+            // calls concurrently at the T16 rung with the FAR-BIN
+            // PRUNE default and the record origin AUTO-DERIVED from
+            // the partition registry — no manual flags, no example
+            // binary, no magic constants. The committed serial
+            // per-partition path stays byte-for-byte for the LOCAL
+            // frame. (The fleet forks BEFORE any parent-side rayon
+            // touch — the prefork hygiene the fork driver's own audit
+            // receipts — so the serial local-frame calls run AFTER
+            // the children are reaped.)
+            // ------------------------------------------------------------------
+            let shards_dir: PathBuf = map_manifest["shards_dir"]
+                .as_str()
+                .ok_or_else(|| invalid("the map manifest carries no shards_dir"))?
+                .into();
+            let mut fleet_indexes: Vec<usize> = Vec::new();
+            let mut local_indexes: Vec<usize> = Vec::new();
+            for &index in &selected {
+                let (_, _, _, name) = &bed_rows[index];
+                let manifest: serde_json::Value =
+                    genome::read_json(&partitions.join(name).join("partition.json"))?;
+                if manifest["frame"].as_str() == Some("global") {
+                    fleet_indexes.push(index);
+                } else {
+                    local_indexes.push(index);
+                }
+            }
+            if !fleet_indexes.is_empty() {
+                ensure(
+                    truth_qv.is_none()
+                        && exclude_paths.is_empty()
+                        && flank_overlap.is_none()
+                        && matches!(selection, realign_score::Selection::Locality),
+                    "the fleet call path runs the product defaults (the test-mode and \
+                     masking flags are the committed serial per-partition path's own; \
+                     rerun without them, or call the partitions by the serial form)",
+                )?;
+                let mut specs: Vec<genome::sample_projection::CutBatchGlobalSpec> = Vec::new();
+                let mut fleet_names: Vec<String> = Vec::new();
+                let mut fleet_panel: Option<String> = None;
+                let mut fleet_routes: Option<PathBuf> = None;
+                let mut fleet_agc: Option<PathBuf> = None;
+                for &index in &fleet_indexes {
+                    let (_, _, _, name) = &bed_rows[index];
+                    let manifest: serde_json::Value =
+                        genome::read_json(&partitions.join(name).join("partition.json"))?;
+                    let record_origin: u64 =
+                        manifest["record_origin"].as_u64().unwrap_or(0);
+                    let component = manifest["component"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no component"))?
+                        .to_string();
+                    let graphs: PathBuf = manifest["partition_graphs"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no graphs"))?
+                        .into();
+                    let axis: PathBuf = manifest["axis"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no axis"))?
+                        .into();
+                    let beds: PathBuf = manifest["beds"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no beds"))?
+                        .into();
+                    let panel = manifest["syng"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no syng"))?
+                        .to_string();
+                    let routes: PathBuf = manifest["routes"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no routes"))?
+                        .into();
+                    let agc: PathBuf = manifest["agc"].as_str()
+                        .ok_or_else(|| invalid(
+                            "the partition manifest carries no agc (the PANEL-PREP step \
+                             records the panel AGC for the fleet call path; re-run \
+                             panel-prep for this partition)",
+                        ))?
+                        .into();
+                    match (&fleet_panel, &fleet_routes, &fleet_agc) {
+                        (None, None, None) => {
+                            fleet_panel = Some(panel.clone());
+                            fleet_routes = Some(routes.clone());
+                            fleet_agc = Some(agc.clone());
+                        }
+                        (Some(p), Some(r), Some(a)) => {
+                            ensure(
+                                p == &panel && r == &routes && a == &agc,
+                                format!(
+                                    "the fleet form loads ONE panel (partition {name} \
+                                     names a different global pair than the earlier \
+                                     partitions)",
+                                ),
+                            )?;
+                        }
+                        _ => unreachable!("the global pair is set atomically"),
+                    }
+                    // THE RESTRICTED CENSUS PROFILE'S BASIS, AUTO-DERIVED:
+                    // the MAP step's own kept-read set for the partition
+                    // (the §10.6.17 default demands the evidence-set
+                    // statement; the map's cut IS the product's own).
+                    let readset = map.join(name).join("cut-reads.fasta");
+                    ensure(
+                        readset.is_file(),
+                        format!(
+                            "the map carries no cut-reads.fasta for partition {name} \
+                             (the restricted census profile demands the evidence-set \
+                             statement; re-run the MAP step for this partition)",
+                        ),
+                    )?;
+                    // THE SCORED LOCI: every window, or the --region
+                    // range resolved against the partition's frame.
+                    let axis_rows = realign_score::component_axis_rows(&graphs, &component)?;
+                    let loci: Vec<u32> = match region_filter_range(region.as_deref())? {
+                        Some(range) => {
+                            let resolved = realign_score::resolve_region_loci(
+                                &component,
+                                &axis_rows,
+                                range,
+                            )?;
+                            eprintln!(
+                                "[call] partition {name}: region {range:?} resolved to \
+                                 loci {resolved:?} (frame {component})"
+                            );
+                            resolved
+                        }
+                        None => (0..axis_rows.len() as u32).collect(),
+                    };
+                    if loci.is_empty() {
+                        println!(
+                            "=== call: partition {name} skipped (the region covers no \
+                             window)"
+                        );
+                        continue;
+                    }
+                    let loci = loci
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    println!(
+                        "=== call: partition {name} ({loci} windows, the FLEET form: \
+                         fork-after-load, width-32 cut, T16 calls)"
+                    );
+                    let partition_out = out_dir.join(name);
+                    specs.push(genome::sample_projection::CutBatchGlobalSpec {
+                        name: name.clone(),
+                        axis,
+                        bed_directory: beds,
+                        component,
+                        out_dir: partition_out.join("cut"),
+                        record_origin,
+                        readset: Some(readset),
+                        call: Some(genome::sample_projection::CutBatchGlobalCall {
+                            reads: reads.clone(),
+                            partition_graphs: graphs,
+                            loci,
+                            out_dir: partition_out.clone(),
+                        }),
+                    });
+                    fleet_names.push(name.clone());
+                }
+                if !specs.is_empty() {
+                    let fleet_panel = fleet_panel
+                        .expect("a non-empty fleet row set carries the global pair");
+                    let fleet_routes =
+                        fleet_routes.expect("a non-empty fleet row set carries the routes");
+                    let fleet_agc =
+                        fleet_agc.expect("a non-empty fleet row set carries the agc");
+                    // The explicit --global-panel/--global-routes flags,
+                    // when passed, must name the registry's own pair
+                    // (loud on mismatch; the registry is the record).
+                    if let Some(flag_panel) = &global_panel {
+                        ensure(
+                            flag_panel == &fleet_panel,
+                            format!(
+                                "--global-panel {flag_panel} does not name the registry's \
+                                 own panel {fleet_panel}"
+                            ),
+                        )?;
+                    }
+                    if let Some(flag_routes) = &global_routes {
+                        ensure(
+                            flag_routes == &fleet_routes,
+                            format!(
+                                "--global-routes {} does not name the registry's own \
+                                 routes {}",
+                                flag_routes.display(),
+                                fleet_routes.display()
+                            ),
+                        )?;
+                    }
+                    genome::sample_projection::fork_cut_call_batch_global_specs(
+                        &fleet_panel,
+                        &fleet_agc,
+                        &shards_dir,
+                        specs,
+                        &fleet_routes,
+                        0.0,
+                        32,
+                        Some(16),
+                        far_bin_prune,
+                    )?;
+                    for name in &fleet_names {
+                        let partition_out = out_dir.join(name);
+                        calls_receipts.push(serde_json::json!({
+                            "partition": name,
+                            "form": "fleet",
+                            "calls": genome::reconstruction::fingerprint(
+                                &partition_out.join("calls.jsonl"))?,
+                            "sequences": genome::reconstruction::fingerprint(
+                                &partition_out.join("calls.jsonl.sequences.jsonl"))?,
+                            "cut_census": genome::reconstruction::fingerprint(
+                                &partition_out.join("cut").join("cut-census.jsonl"))?,
+                            "truth_qv_test_mode": serde_json::Value::Null,
+                        }));
+                    }
+                }
+            }
+            for index in &local_indexes {
                 let (_, _, _, name) = &bed_rows[*index];
                 let manifest: serde_json::Value =
                     genome::read_json(&partitions.join(name).join("partition.json"))?;
@@ -2020,11 +2430,14 @@ pub fn run(command: Command) -> io::Result<()> {
                     flank_overlap,
                     global_frame,
                     record_origin,
-                    // The committed batch form keeps the census view
-                    // verbatim (the far-bin prune is the call-diplotypes
-                    // CLI's own flag; carrying it into the batch forms
-                    // is the named follow-up, as with census_profile).
-                    far_bin_prune: false,
+                    // THE PRODUCT DEFAULT (the §10.6.18 ruling
+                    // executed): the global-frame call path prunes
+                    // the far-bin class by default (the opt-out
+                    // --far-bin-prune=false stays); the committed
+                    // LOCAL-frame path is byte-frozen and never
+                    // prunes (the frame gate in run_injected holds
+                    // both forms).
+                    far_bin_prune: global_frame && far_bin_prune,
                     out_dir: partition_out.clone(),
                 })?;
                 calls_receipts.push(serde_json::json!({
@@ -2048,6 +2461,7 @@ pub fn run(command: Command) -> io::Result<()> {
                 "region": region,
                 "exclude_paths": exclude_paths,
                 "flank_overlap": flank_overlap.map(|f| f.setting()),
+                "far_bin_prune": far_bin_prune,
                 "global_panel": global_panel,
                 "global_routes": global_routes,
                 "partitions_called": calls_receipts.len(),
@@ -2194,4 +2608,93 @@ fn sample_projection_bin() -> io::Result<PathBuf> {
         ),
     )?;
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Subcommand as _;
+
+    /// Parse a `genome-infer` subcommand invocation (the CLI surface
+    /// itself, the interface-change tests' own form: the flag defaults
+    /// are product behavior and get their own proof).
+    fn parse_subcommand(args: &[&str]) -> Command {
+        let cmd =
+            Command::augment_subcommands(clap::Command::new("genome-infer"));
+        let matches = cmd
+            .try_get_matches_from(
+                std::iter::once("genome-infer").chain(args.iter().copied()),
+            )
+            .expect("the invocation parses");
+        <Command as clap::FromArgMatches>::from_arg_matches(&matches)
+            .expect("the subcommand is known")
+    }
+
+    /// The call-diplotypes base form (every required input, the
+    /// committed local-frame shape).
+    fn call_diplotypes_args<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
+        let mut args: Vec<&str> = [
+            "call-diplotypes",
+            "--panel", "p",
+            "--routes", "r",
+            "--partition-graphs", "g",
+            "--component", "c",
+            "--census", "n",
+            "--reads", "q",
+            "--derive-cache", "d",
+            "--loci", "1",
+            "--out-dir", "o",
+        ]
+        .to_vec();
+        args.extend_from_slice(extra);
+        args
+    }
+
+    #[test]
+    fn far_bin_prune_defaults_on_and_opts_out_by_explicit_false() {
+        // THE PRODUCT DEFAULT FLIP (the owner's ruling on the §10.6.18
+        // gate receipts): the working form IS the default — the bare
+        // invocation prunes; the opt-out form `--far-bin-prune=false`
+        // stays for the record (the committed unpruned receipts);
+        // the legacy bare `--far-bin-prune` keeps meaning ON.
+        let Command::CallDiplotypes { far_bin_prune, .. } =
+            parse_subcommand(&call_diplotypes_args(&[]))
+        else {
+            panic!("expected call-diplotypes");
+        };
+        assert!(far_bin_prune, "the default is ON");
+        let Command::CallDiplotypes { far_bin_prune, .. } = parse_subcommand(
+            &call_diplotypes_args(&["--far-bin-prune=false"]),
+        )
+        else {
+            panic!("expected call-diplotypes");
+        };
+        assert!(!far_bin_prune, "the explicit opt-out is OFF");
+        let Command::CallDiplotypes { far_bin_prune, .. } = parse_subcommand(
+            &call_diplotypes_args(&["--far-bin-prune"]),
+        )
+        else {
+            panic!("expected call-diplotypes");
+        };
+        assert!(far_bin_prune, "the bare flag stays ON");
+    }
+
+    #[test]
+    fn call_region_far_bin_prune_defaults_on() {
+        // The three-step CALL wrapper carries the same product
+        // default (the frame gate in the engine keeps the committed
+        // local-frame path byte-frozen; the effective value at the
+        // local frame is forced OFF by the wrapper).
+        let args = [
+            "call-region",
+            "--map", "m",
+            "--partitions", "p",
+            "--out-dir", "o",
+        ];
+        let Command::CallRegion { far_bin_prune, .. } = parse_subcommand(&args)
+        else {
+            panic!("expected call-region");
+        };
+        assert!(far_bin_prune, "the default is ON");
+    }
 }
