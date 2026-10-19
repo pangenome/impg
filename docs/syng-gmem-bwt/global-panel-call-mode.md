@@ -2612,3 +2612,37 @@ locality, per profile: rank-1 rate, the QV distribution (median,
 ≥QV30, at-cap), the call-core cost (the §10.6.14 census-superset
 multiplier), and the NAMED loci where the profiles differ (which
 fold flips, which profile was right per truth). The owner decides.
+
+### 10.6.16 THE CENSUS-PROFILE A/B RECEIPT (Ruling 2 — the owner's
+decision INPUT, measured; the decision itself UNMADE)
+
+The five localities (L1-L4 + the pilot) ran under BOTH census
+profiles with the official QV machinery (--truth-qv,
+IMPG_TRUTH_QV_ALLWAVE=1, the likegt max-qv convention, the QV-50
+cap) — profile A the committed-slice restricted read set (the
+IMPG_CUT_READSET_FASTA shadow cuts, census_mult 141,114 / 48,641 /
+67,359 / 18,121 / 512,929 at L1/L2/L3/L4/pilot), profile B the
+global-native full mass (the committed global cuts, 384,056 /
+156,976 / 567,243 / 275,405 / 513,836). THE HEADLINE: **a wash on
+accuracy, not on cost** — rank-1 rates IDENTICAL at L1/L3/L4/pilot
+(16%/8%/12%/18% both profiles) and B buys exactly ONE truth locus
+at L2 (24%→28%, locus 17: B calls the truth pair, A does not, QV
+50 vs 42); the median official QV within 1.5 everywhere (A higher
+at L1 42.6 vs 41.1 and L4 45.0 vs 43.5; equal at L2/L3/pilot); of
+the QV-visible fold flips A is closer to truth at 9 loci and B at
+3; the rest of the 7-9 fold-material differences per locality are
+sequence-equivalent copies (equal QV). THE COST, measured per
+locality as the loci-phase ratio B/A: **1.77x (L1), 2.49x (L2),
+5.02x (L3), 7.68x (L4), 1.008x (pilot)** — the pilot's two profiles
+coincide (0.2% mass apart: identical answers, the A/B's own
+control row), and the whole-call ex-load ratios are 1.57x / 1.75x /
+3.07x / 3.67x / 1.008x — the §10.6.14 "~1.6x at L1" confirmed and
+WORSE away from pattern saturation (the full-mass censuses are
+8.4x/15.2x the slice at L3/L4). **THE FULL TABLE, the named
+differing loci, and the machinery statement are
+`docs/syng-gmem-bwt/census-profile-ab.md` — the owner's decision
+input; this increment does not decide.** The runs: `rulings-ab-
+{A,B}-<L>` (exit 0 ×10, serial recipes, the executed-Ruling-1
+production path, co-tenant ×10), the analysis
+`rulings-ab-analysis.txt`, the shadow cuts `global-cut-
+{L2,L3,L4,pilot}-shadow1x`.
