@@ -3020,3 +3020,212 @@ A/B census receipts, old form vs hoisted), `farbin-hoist-A-L1/` +
 `impg-prehoist` (the preserved pre-hoist binary the wave ran),
 `run-farbin-gates.sh` + `farbin-compare.py` + `run-cut-serial-census.sh`
 (the recipes). NO PR PUSH (the owner pushes).
+
+### 10.6.19 THE OWNER'S PRODUCT ORDERS, EXECUTED — THE DEFAULTS FLIP: THE WORKING FORM IS THE PRODUCT DEFAULT (the §10.6.18 resume point's own item, ordered: "prune as default should be default. make however it's working now default"; the full default stack stated with the receipt that justifies each flip; the flip gates at the byte-identity bar; the re-baseline named honestly)
+
+**THE DEFAULT STACK, AS THE PRODUCT NOW RUNS IT.** Every flip below is
+a default change on a §10.6.17/§10.6.18-gated behavior; the old form
+stays reachable by its explicit opt-out, and the docs state old/new
+with the receipt that justified the flip:
+
+| default | old form | new form (the product default) | the receipt that justified the flip |
+|---|---|---|---|
+| the exactness assertion | env `IMPG_SCORE_EXACTNESS_ASSERT=1` (the receipt/gate form) | OUT of production; the env restore keeps the receipt form | §10.6.17 Ruling 1 executed (the always-on check removed to the receipt path) |
+| the census profile | the batch/single global cut's full routed mass | RESTRICTED (the committed kept-read basis; fail-closed without one) | §10.6.17 Ruling 2: the A/B wash at 4/5 localities vs a 1.77-7.68x loci cost; the one exception (L2-17) autopsied to the conserved-elsewhere class |
+| THE FAR-BIN PRUNE | `--far-bin-prune` (opt-in) | **ON — this increment's flip**; the opt-out `--far-bin-prune=false` stays for the record (the committed unpruned receipts) | §10.6.18: ZERO truth losses at L1-L4, the pilot's FOUR truth WINS (rank-1 4/22→8/22, median QV 36.3→45.0), L1 loci 74.8→34.7s, the anchor hoist −90.7%, the stacked 2.44 core-s/locus |
+| the class-scan order | exact (the sparse-skip env opt-in) | exact stays DEFAULT — the sparse-skip stays env-opt-in | §10.6.18's honest receipt: at the pruned form the sparse-skip buys nothing measurable (34.4s in the most contended wave vs 34.7s clean-pair) |
+
+**THE FLAG FORMS.** `--far-bin-prune` is DEFAULT ON at the
+call-diplotypes and call-region CLIs (the codebase's own bool-flag
+precedent shape: `default_value_t = true`, `default_missing_value =
+"true"`, `num_args = 0..=1`): omitted = ON, the legacy bare
+`--far-bin-prune` = ON, `--far-bin-prune=false` = the committed
+unpruned census view. THE LOCAL FRAME IS BYTE-FROZEN by a loud frame
+gate in `run_injected`: a default-on prune reaching the local frame
+is REFUSED naming the opt-out, never silently applied (unit-proven
+`far_bin_prune_frame_gate_keeps_the_local_frame_byte_frozen`; the CLI
+surface itself parse-proved — default ON, `=false` opt-out, bare-flag
+ON). The model label states the effective census view exactly as
+before: the pruned runs carry `-farbin-prune`, the opt-out the plain
+string — so the receipts' own labels separate the forms with NO new
+vocabulary.
+
+**THE FLIP GATES (all PASS, the committed farbin recipe verbatim,
+serial T1, single wave per locality, three forms side by side).** At
+L1 (the biggest prune effect: 31.1% of census mult pruned, loci
+[2,4,11,12,13,16] changed) and L4 (0.06%, loci [9,17,23]):
+
+- **(a) default ≡ the explicitly-flagged working form**: the DEFAULT
+  invocation (no flag) vs `--far-bin-prune` — calls.jsonl,
+  calls.jsonl.truth-qv.jsonl, the skeleton sidecar, records,
+  ingredients, exactness ALL byte-identical, the instrument receipts
+  field-identical mod their timing walls.
+- **(b) default ≡ the committed pruned receipts**: byte-identical to
+  `farbin-A-{L1,L4}` (the §10.6.18 working form of record), model
+  label `-farbin-prune` both sides.
+- **(c) the opt-out ≡ the committed unpruned receipts**:
+  `--far-bin-prune=false` byte-identical to `rulings-ab-A-{L1,L4}`
+  (the §10.6.17 restrict-default receipts), the plain model label.
+
+Walls (co-tenant box, the tranche worker's cuts/calls live, load
+average ~180 at the wave): L1 379/384/405s, L4 345/349/351s for
+explicit/default/opt-out — the three forms' walls are one wave's
+noise, as the byte-identity demands.
+
+**THE RE-BASELINE, NAMED HONESTLY.** From this commit the product's
+committed answer receipts are the PRUNED set. The changed-loci answers
+vs the OLD (unpruned restrict-default) committed receipts are exactly
+§10.6.18's receipted truth-judged set, restated as the re-baseline:
+the PILOT's four truth WINS (loci 8, 9, 10, 11 call the truth pair at
+QV 50 where the unpruned form called non-truth fold material at QV
+0.8-27.3; locus 12 an equal-class QV shift only), and the no-stake
+fold-material changes L1 loci 4, 11 (locus 11's QV RISES 30.4→39.6)
+and L3 loci 1, 13, 19 — ZERO truth losses anywhere (rank-1 rates
+identical at L1-L4). Every changed locus is a pruned-record window
+(L1 [2,4,11,12,13,16], L3 [1,13,17,19], L4 [9,17,23], pilot
+[1,4,7,8,9,10,11,12]) — the pure-window-geometry receipt.
+
+The work-dir receipts: `prunedefault-{def,explicit,optout}-{L1,L4}/`
+(the three-form waves), `run-prunedefault-gates.sh` (the recipe).
+
+### 10.6.20 THE 2-3 STEP PRODUCT PATH — THE FLEET FORM IS THE PRODUCT CALL STEP (the owner's other order: "make it like 2-3 steps to do whole genome analysis"; the three command lines verbatim; the demo gates at all five localities; the wiring receipts)
+
+**THE INTERFACE, AS THE USER TYPES IT** (the demo's literal commands,
+paths abbreviated; one invocation per partition row for STEP 1, one
+per sample for STEPS 2-3):
+
+```
+# STEP 1 — PANEL-PREP (once per panel; reusable by every sample forever)
+impg genome-infer panel-prep \
+  --name L1 --chrom chr1 --start 4632437 --end 4883593 \
+  --sources <the range's member-subset fasta> \
+  --component HG002#1#chr1:4632437-4883593 \
+  --axis <reference-axis.json> --partition-graphs <locality-graphs> \
+  --census <any census against this panel> --read-lengths 148 \
+  --global-panel <panel.syng> --global-agc <panel.agc> \
+  --global-routes <routes-dir> --record-origin 1 \
+  --out-dir partitions/
+
+# STEP 2 — MAP (per sample; the projection's shards in, the cut out)
+impg genome-infer map \
+  --panel <panel.syng> --agc <panel.agc> \
+  --shards-dir <the sample's projection shards> \
+  --partitions partitions/ --reads <sample FASTQ> \
+  --region L1 --out-dir map-L1/
+
+# STEP 3 — CALL (per sample, on demand; the FLEET form, ALL defaults)
+impg genome-infer call-region \
+  --map map-L1/ --partitions partitions/ --region L1 \
+  --out-dir calls-L1/
+```
+
+**WHAT EACH STEP IS.** STEP 1 (`panel-prep`, NEW) is the ONE panel-side
+step the owner's doctrine names: it runs the whole-panel routes
+inventory (derive-routes over the ONE global panel — the ~25-min
+once-per-panel cost, built at the FIRST invocation and REUSED
+loudly-skipped forever after) and then the PARTITION global form
+verbatim (the BED4 row, the window beds regenerated from the locality
+maps, the registry that records the global syng/routes pair, the
+content origin, AND the panel AGC — so STEP 3 needs no manual flag
+for it; the committed local-frame registry bytes are unchanged).
+STEP 2 (`map`) is unchanged in interface; under a global-frame
+registry it builds the locality syng into its own partition dir (the
+PARTITION local form's recipe verbatim, ~3s — the registry carries
+no local syng by design) and runs the committed LOCAL-frame cut, whose
+kept-read set (cut-reads.fasta) is the territory's evidence basis.
+STEP 3 (`call-region`) is the product call path for every global-frame
+partition: the FLEET form end-to-end with ALL defaults — the parent
+loads the ONE global panel and stays the load owner; children (the
+width-32 batched-cut shape) each build their own AGC index, batch-cut
+their chunk's territories at the RESTRICTED census profile (the basis
+AUTO-DERIVED from the map step's own cut-reads.fasta — no manual
+basis flag), and run their chunk's calls concurrently at the T16 rung
+(the child's RAYON_NUM_THREADS pinned in the child before its first
+rayon touch), with the FAR-BIN PRUNE default ON and the record origin
+AUTO-DERIVED from the partition registry (no manual `--record-origin
+d=1` — the partition records the content origin; the call reads it).
+NO example binary, NO manual flags, NO magic constants: the fleet
+machinery moved into the library
+(`genome_inference::sample_projection`; the example binary is now a
+thin shell over the SAME code — one spelling, one implementation, the
+committed example receipts' entry point unchanged). The committed
+serial per-partition path stays byte-for-byte for LOCAL-frame
+registries; the fleet forks BEFORE any parent-side rayon touch (the
+prefork hygiene the fork driver's own audit receipts).
+
+**THE OUT-DIR LAYOUT (the demo wave's first finding, fixed and
+committed e03f7d5):** the fleet row's cut artifacts land in
+`calls-L1/L1-cut/` (cut-census.jsonl, cut-cache.bin, cut-reads.fasta,
+cut-stats.json) BESIDE the call's own `calls-L1/L1/`
+(calls.jsonl, calls.jsonl.sequences.jsonl, the instrument receipts,
+the output-model manifest). The first wave's receipt: every child's
+cut phase SUCCEEDED and every call phase failed EEXIST — the call's
+own with_output_model CREATE_DIR-refuses an existing directory, and
+the cut had materialized the call's out-dir as a parent first; the
+sibling layout keeps both refusal disciplines intact, and the fix
+changed ONLY the layout (the answers are the gates' own subject
+below).
+
+**THE DEMO GATES (all five localities — L1-L4 + the pilot — the
+literal three commands, single waves, the tranche worker's cuts and
+calls live on the box: load average 267-331, stated on every wall).**
+
+STEP walls: panel-prep ~0-12s per row (the routes inventory REUSED —
+the committed whole-panel artifact, the loudly-skipped form); map
+(T16, five concurrent) L1 688s / L2 605s / L3 605s / L4 645s /
+pilot 242s; call-region (the fleet: one panel load + one child per
+invocation) L1 763s (load 339s + child; the call 97s) / L2 634s
+(273s; 75s) / L3 617s (272s; 82s) / L4 813s (273s; 79s) /
+pilot 726s (282s; 166s). The prune's own receipt line fired at every
+locality with NO flag typed: L1 14 records / 31.4% of census mult,
+L2 0, L3 52 / 44.4%, L4 3 / 0.1%, pilot 2,395 / 17.4%.
+
+- **GATE A — the restricted BATCH cut ≡ the single restricted cut**
+  (the batch-composition invariance carried to the restricted form;
+  L4, the same basis): census/cache/reads byte-identical, cut-stats
+  identical mod timing (+peak_rss_kb); BOTH byte-identical to the
+  committed `census-default-L4` restricted cut.
+- **THE FLEET vs THE COMMITTED WORKING-FORM RECEIPTS (calls.jsonl):
+  L2, L3, L4 byte-IDENTICAL to `farbin-A-{L2,L3,L4}`** — the full
+  product path (panel-prep → map → call-region) reproduces the
+  committed pruned answers exactly (and the fresh map bases at these
+  localities are byte-identical to the committed `cut-L*` bases).
+- **L1 and pilot vs the committed receipts: the fresh-substrate
+  margin, receipted honestly** — the regenerated window beds' kept
+  reads differ from the disk-cleaned committed beds' (the datasheet's
+  own stated margin class: L1 reads_kept 94,242 vs 108,230; census
+  mult 139,798 vs 141,114 at L1, 489,864 vs 512,929 at the pilot),
+  so the committed `farbin-A-{L1,pilot}` answers are not reproducible
+  from the FRESH substrate by ANY form. The margin's own answer
+  receipt: L1 24/25 loci byte-identical (locus 13 differs, in the
+  evidence-mass fields — record_count/unit_count — and the
+  likelihood/qual fields downstream of them); pilot 14/22 identical
+  (8 loci, the same field class).
+- **GATE B — the fleet ≡ the serial working form at the SAME inputs**
+  (the byte-identity bar the margin localities demand): the committed
+  serial call-diplotypes recipe (T1, no prune flag — the new default)
+  over the FLEET's OWN cut at L1 and pilot — calls.jsonl AND
+  calls.jsonl.sequences.jsonl byte-IDENTICAL, the `-farbin-prune`
+  model label both sides; serial walls 469s (L1) / 619s (pilot) vs
+  the fleet's concurrent-call walls 97s / 166s at T16.
+
+**THE PILOT'S SUBSTRATE GAP, NAMED (not fixed).** The pilot locality's
+maps cover window groups 0-21 while its axis names groups 22-23 —
+the committed w10k bed substrate supplied the two missing group beds
+for this demo (copied into the regenerated beds before STEP 2; the
+cut's own NotFound on `partition22.bed` was the loud failure that
+named it). The proper fix — regenerating the pilot's locality maps
+to cover its axis — is a substrate decision beyond this increment;
+NAMED, not done.
+
+**THE RUN ENV, STATED (not product flags).** The demo ran with the
+committed campaign's own env: `IMPG_PANEL_LEGACY_V1_OK=1` (the
+committed HPRC panel is metadata v1 — the substrate acknowledgment,
+not a behavior flag) and `IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1`
+(the committed answer-profile ruling, predating this increment;
+flipping its default is NOT this increment's scope).
+
+The work-dir receipts: `threestep-demo/` (partitions/, map-*/,
+calls-*/, workform-{L1,pilot}/, gateA-single-L4/),
+`run-threestep-demo.sh` (the recipe). cargo test --release --lib
+575/0. NO PR PUSH (the owner pushes).

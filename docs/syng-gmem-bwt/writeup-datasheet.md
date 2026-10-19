@@ -275,6 +275,39 @@ per-locus diplotype calls, the per-locus hap1/hap2 diplotype sequences
 fields. Cost at L1: ~21s (measured; the heavy tail at the pilot-class
 territory is 75-90s).
 
+**THE PRODUCT DEFAULT STACK + THE GLOBAL-PANEL PRODUCT PATH (the
+owner's orders, executed: docs/syng-gmem-bwt/global-panel-call-mode.md
+§10.6.19-§10.6.20, the receipts' own sections).** The committed answer
+profile now runs with these defaults, each flip's receipt named there:
+the exactness assertion OUT of production (the env restore keeps the
+receipt form), the census profile RESTRICTED (the kept-read evidence
+basis, fail-closed without one), **THE FAR-BIN PRUNE ON** (§10.6.18's
+gates: zero truth losses at L1-L4, the pilot's four truth wins —
+the opt-out `--far-bin-prune=false` stays for the record; the local
+frame is byte-frozen and refuses the prune loudly), and the exact
+class scan (the sparse-skip stays env-opt-in — receipted as no
+measurable gain at the pruned form). At the GLOBAL-panel form the
+three steps are: **STEP 1 `impg genome-infer panel-prep`** — the one
+panel-side step (the whole-panel routes inventory built at the first
+invocation and reused loudly-skipped forever + the partition global
+form; the registry records the global pair, the content origin, AND
+the panel AGC so STEP 3 needs no manual flag); **STEP 2 `impg
+genome-infer map`** (unchanged interface; under a global-frame
+registry it builds the locality syng into its own partition dir and
+runs the committed local cut — the kept-read basis); **STEP 3 `impg
+genome-infer call-region`** — the FLEET form end-to-end with ALL
+defaults (fork-after-load shared panel, width-32 batched cuts, T16
+concurrent calls, restricted census with the basis auto-derived from
+the map's cut-reads, far-bin prune on, record origin auto-derived
+from the registry): no example binary, no manual flags. The demo
+gates at all five localities (§10.6.20): the fleet's calls
+byte-identical to the committed working-form receipts at L2/L3/L4,
+byte-identical to the serial working form at the same fresh-basis
+inputs at L1/pilot (calls AND sequences), the restricted batch cut
+byte-identical to the single restricted cut; out-dir layout:
+`calls/<name>/` (the calls + the output-model manifest) BESIDE
+`calls/<name>-cut/` (the fleet's cut artifacts).
+
 **The flags (region-as-interface):** `--region` accepts a comma-list of
 BED partition names or any `chr:start-end` range, resolved against the
 partition's own reference frame to the covered windows — any locus, any
