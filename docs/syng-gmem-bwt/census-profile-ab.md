@@ -1,4 +1,32 @@
-# THE CENSUS-PROFILE A/B — the measured decision input (Ruling 2, UNDECIDED)
+# THE CENSUS-PROFILE A/B — the measured decision input (Ruling 2; **DECIDED — see the header ruling below**)
+
+**THE OWNER'S RULING (executed: global-panel-call-mode.md §10.6.17).**
+**RESTRICT is the product default** — the global-frame cut's default
+census profile is the committed routed read set (the `--census-profile
+restricted` default; the basis stated by the IMPG_CUT_READSET_FASTA
+instrument, fail-closed without it); **the global-native full mass
+stays the record form** behind `--census-profile global-native`.
+The owner's design principle, in their own words: *"we just need to
+just worry about the overlapping ends — the MEM matches at the ends —
+and we used to decide where to put each read, so it's basically being
+routed by its best MEMs. If they go into different bins unless
+they're basically adjacent, we don't want to be thinking about
+them."* The extra 2.8x-15x mass is edge-grazers + repeat-routed
+reads — non-discriminating; it multiplies work without moving the
+argmax. **The ONE exception this table measured (L2 locus 17, the
+single clean B win) was autopsied before finalizing**: the lost read
+is NOT a boundary-straddler and NOT a far-routed repeat read — it is
+the conserved-elsewhere dictionary class (its only anchor resolves in
+the global dictionary but was never selected in the locality's own
+dictionary, so the committed kept-read set — the restriction basis —
+dropped its record), mid-window, single-bin, carrying a 4bp-insertion
+allele. No adjacency rule recovers it; the cost is intrinsic to the
+restriction basis and is receipted as the measured price of restrict
+(exactly this one truth locus). The full autopsy, the routing-model
+verification (the owner's model IS what the machine does — best-MEM
+routing, boundary-straddlers kept at both adjacent bins by pure
+interval overlap), and the restrict-default gates are
+**global-panel-call-mode.md §10.6.17**.
 
 **THE PLAIN-LANGUAGE ANSWER FIRST.** The two profiles are: **(A) the
 committed-slice read set** — the cut restricted to the committed 1x

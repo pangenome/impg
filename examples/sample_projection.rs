@@ -203,6 +203,25 @@ enum Mode {
         /// a conflicting one is a caller error).
         #[arg(long, default_value_t = 0)]
         record_origin: u64,
+        /// THE CENSUS PROFILE (the global frame's product-default
+        /// census, the owner's Ruling 2): restricted (the DEFAULT) =
+        /// the committed routed read set — the scan keeps only the
+        /// reads of the territory's committed kept-read set, stated
+        /// by IMPG_CUT_READSET_FASTA=<fasta> (fail-closed without it:
+        /// the product default demands the evidence-set statement,
+        /// never a silent full-mass fallback); global-native = the
+        /// full routed mass (the record form, byte-identical to the
+        /// committed global-frame cut). The A/B receipt
+        /// (docs/syng-gmem-bwt/census-profile-ab.md): an accuracy wash
+        /// at 4 of 5 localities against a 1.77x-7.68x loci-phase cost,
+        /// with ONE truth locus (L2 17) only the global-native census
+        /// calls — traced to the conserved-elsewhere dictionary class
+        /// of the restriction basis (§10.6.17), not a routing gap.
+        /// The LOCAL frame refuses it (the committed local path is
+        /// byte-for-byte; the read-set instrument still restricts
+        /// there exactly as before).
+        #[arg(long, value_enum, default_value_t = CensusProfile::Restricted)]
+        census_profile: CensusProfile,
         /// The LOCALITY panel syng prefix (the committed substrate;
         /// required in the local frame).
         #[arg(long, required_unless_present = "frame")]
@@ -1417,6 +1436,13 @@ struct CutStatsJson {
     /// node-map conversion) or "global" (the global-panel call mode,
     /// lever 1: the projection's records kept verbatim).
     frame: String,
+    /// THE CENSUS PROFILE (the global frame's product-default census,
+    /// the owner's Ruling 2): "restricted" (the committed routed read
+    /// set) or "global-native" (the full routed mass, the record
+    /// form). Emitted in the GLOBAL frame only — the local frame has
+    /// no profile concept and keeps its committed stats bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    census_profile: Option<String>,
     /// The stated content-origin convention (the --record-origin d:
     /// the substrate's locus.fa content sits at `header_start + d`;
     /// the L1-L4 substrates: 1, the pilot: 0).
@@ -1512,6 +1538,79 @@ impl FileCut {
 enum CutFrame {
     Local,
     Global,
+}
+
+/// THE CENSUS PROFILE (the owner's Ruling 2, executed: the
+/// product-default census of the global-frame call mode). The
+/// restricted profile is the committed routed read set — the scan
+/// keeps only the reads of the territory's committed kept-read set
+/// (the evidence mass the original local-frame receipts banked),
+/// stated by the IMPG_CUT_READSET_FASTA instrument (the restriction
+/// basis, untouched). The global-native profile is the full routed
+/// mass (the receipts-of-record's superset census, kept for the
+/// record). The A/B receipt that decided this
+/// (docs/syng-gmem-bwt/census-profile-ab.md): a wash on accuracy at
+/// 4 of 5 localities against a 1.77x-7.68x loci-phase cost, with
+/// ONE truth locus (L2 17) that only the global-native census calls —
+/// the autopsy (§10.6.17) traced that locus to the conserved-elsewhere
+/// dictionary class, an evidence-set property of the restriction
+/// basis, not a routing gap; no adjacency rule recovers it.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+enum CensusProfile {
+    /// The committed routed read set (the product default; requires
+    /// the IMPG_CUT_READSET_FASTA basis, fail-closed without it).
+    Restricted,
+    /// The full routed mass (the record form; byte-identical to the
+    /// committed global-frame cut when no basis is stated).
+    GlobalNative,
+}
+
+impl CensusProfile {
+    fn label(self) -> &'static str {
+        match self {
+            CensusProfile::Restricted => "restricted",
+            CensusProfile::GlobalNative => "global-native",
+        }
+    }
+
+    /// THE PROFILE RESOLUTION (the three-step interface's own rule,
+    /// fail-closed, no silent defaults): the frame owns the reach —
+    /// the LOCAL frame keeps the committed behavior (the profile
+    /// concept is the global frame's; the read-set instrument still
+    /// restricts there exactly as before); the GLOBAL frame resolves
+    /// the effective profile: a stated basis (IMPG_CUT_READSET_FASTA)
+    /// overrides to the restricted scan in EITHER profile (the
+    /// instrument is the override it always was), the restricted
+    /// profile without a basis is a NAMED caller error (the product
+    /// default demands the evidence-set statement — the committed
+    /// kept-read set — never a silent full-mass fallback), and the
+    /// global-native profile without a basis is the full-mass scan,
+    /// byte-identical to the committed global-frame cut.
+    fn resolve(
+        frame: CutFrame,
+        profile: CensusProfile,
+        readset_basis: Option<&str>,
+    ) -> io::Result<(CensusProfile, bool)> {
+        match frame {
+            CutFrame::Local => Ok((profile, false)),
+            CutFrame::Global => match (profile, readset_basis) {
+                (CensusProfile::Restricted, None) => Err(invalid(
+                    "the restricted census profile (the default) requires the committed \
+                     kept-read set: state it with IMPG_CUT_READSET_FASTA=<fasta>, or select \
+                     --census-profile global-native (the record form, the full routed mass)",
+                )),
+                (CensusProfile::GlobalNative, Some(_)) => {
+                    eprintln!(
+                        "[cut] census profile: the IMPG_CUT_READSET_FASTA basis overrides \
+                         --census-profile global-native — the scan runs RESTRICTED"
+                    );
+                    Ok((CensusProfile::Restricted, true))
+                }
+                (CensusProfile::GlobalNative, None) => Ok((CensusProfile::GlobalNative, false)),
+                (CensusProfile::Restricted, Some(_)) => Ok((CensusProfile::Restricted, false)),
+            },
+        }
+    }
 }
 
 impl CutFrame {
@@ -1905,6 +2004,7 @@ fn run_cut(
     global_panel_prefix: &str,
     frame: CutFrame,
     record_origin: u64,
+    census_profile: CensusProfile,
     panel_prefix: Option<&str>,
     axis_path: &Path,
     bed_directory: &Path,
@@ -2622,6 +2722,10 @@ fn run_cut(
             CutFrame::Local => "local".into(),
             CutFrame::Global => "global".into(),
         },
+        census_profile: match frame {
+            CutFrame::Local => None,
+            CutFrame::Global => Some(census_profile.label().into()),
+        },
         record_origin,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
@@ -3243,6 +3347,7 @@ fn batch_emit_territory(
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
         frame: "local-batch".into(),
+        census_profile: None,
         record_origin: 0,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
@@ -5016,6 +5121,12 @@ fn batch_global_emit_territory(
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
         frame: "global".into(),
+        // The batch forms' own scan is the full routed mass (the
+        // read-set instrument does not apply on the batch path; the
+        // single cut's --census-profile is the three-step interface's
+        // own switch — the named follow-up carries the profile into
+        // the batch manifests the same way record_origin rides them).
+        census_profile: Some("global-native".into()),
         record_origin,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
@@ -5707,6 +5818,7 @@ fn main() -> io::Result<()> {
             global_panel,
             frame,
             record_origin,
+            census_profile,
             panel,
             axis,
             bed_directory,
@@ -5723,10 +5835,31 @@ fn main() -> io::Result<()> {
                 "--record-origin belongs to the global frame (the committed local frame \
                  derives the content convention per record against the AGC, fail-closed)",
             )?;
+            ensure(
+                frame == CutFrame::Global || census_profile == CensusProfile::Restricted,
+                "--census-profile belongs to the global frame (the committed local path \
+                 is byte-for-byte; the read-set instrument still restricts there)",
+            )?;
+            // THE CENSUS PROFILE (the owner's Ruling 2, executed):
+            // resolve BEFORE the panel load — the fail-closed form
+            // must not pay the ~325s global load to learn it.
+            let readset_basis = std::env::var("IMPG_CUT_READSET_FASTA")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let (census_profile, basis_override) =
+                CensusProfile::resolve(frame, census_profile, readset_basis.as_deref())?;
+            if frame == CutFrame::Global {
+                eprintln!(
+                    "[cut] census profile: {}{}",
+                    census_profile.label(),
+                    if basis_override { " (IMPG_CUT_READSET_FASTA override)" } else { "" }
+                );
+            }
             run_cut(
                 &global_panel,
                 frame,
                 record_origin,
+                census_profile,
                 panel.as_deref(),
                 &axis,
                 &bed_directory,
@@ -6184,5 +6317,91 @@ Private_Dirty:        0 kB\n";
         assert_eq!(fork_smaps_field(section, "Rss:"), 2);
         assert_eq!(fork_smaps_field(section, "Rss_Anon:"), 1);
         assert_eq!(fork_smaps_field(section, "Pss:"), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE CENSUS-PROFILE RESOLUTION PROOF (the owner's Ruling 2, executed:
+// the restricted read set is the global-frame call's default census
+// profile; the global-native form is the record opt-out). The
+// resolution is a pure function of (frame, profile, basis) — every
+// reachable state receipted: the local frame untouched, the global
+// default fail-closed without a basis, the basis override, and the
+// global-native record form.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod census_profile_tests {
+    use super::*;
+
+    #[test]
+    fn the_local_frame_is_untouched_in_both_profiles() {
+        // The local frame keeps the committed behavior: the profile is
+        // not consulted (the read-set instrument still restricts there
+        // exactly as before, by its own env).
+        for profile in [CensusProfile::Restricted, CensusProfile::GlobalNative] {
+            for basis in [None, Some("committed.fasta")] {
+                let (effective, over) =
+                    CensusProfile::resolve(CutFrame::Local, profile, basis).unwrap();
+                assert_eq!(effective, profile);
+                assert!(!over);
+            }
+        }
+    }
+
+    #[test]
+    fn the_global_default_requires_the_basis_fail_closed() {
+        let err = CensusProfile::resolve(
+            CutFrame::Global,
+            CensusProfile::Restricted,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("IMPG_CUT_READSET_FASTA"),
+            "the fail-closed error must name the basis instrument: {err}"
+        );
+        assert!(
+            err.to_string().contains("global-native"),
+            "the fail-closed error must name the record opt-out: {err}"
+        );
+    }
+
+    #[test]
+    fn the_global_restricted_profile_runs_restricted_with_a_basis() {
+        let (effective, over) = CensusProfile::resolve(
+            CutFrame::Global,
+            CensusProfile::Restricted,
+            Some("committed.fasta"),
+        )
+        .unwrap();
+        assert_eq!(effective, CensusProfile::Restricted);
+        assert!(!over);
+    }
+
+    #[test]
+    fn the_global_native_record_form_is_the_full_mass() {
+        let (effective, over) = CensusProfile::resolve(
+            CutFrame::Global,
+            CensusProfile::GlobalNative,
+            None,
+        )
+        .unwrap();
+        assert_eq!(effective, CensusProfile::GlobalNative);
+        assert!(!over);
+    }
+
+    #[test]
+    fn the_basis_overrides_the_global_native_profile() {
+        // IMPG_CUT_READSET_FASTA is the restriction basis override it
+        // always was: a stated basis restricts the scan even under the
+        // global-native profile, and the resolution says so.
+        let (effective, over) = CensusProfile::resolve(
+            CutFrame::Global,
+            CensusProfile::GlobalNative,
+            Some("committed.fasta"),
+        )
+        .unwrap();
+        assert_eq!(effective, CensusProfile::Restricted);
+        assert!(over);
     }
 }

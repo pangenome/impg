@@ -2576,7 +2576,7 @@ every row labeled):
 | §10.6.14 today (assertion on, exact scan) | 164.8s | 202.7 | 8.11 | 3.9x |
 | **+ Ruling 1 executed (measured)** | 128.0s | 166.4 | 6.66 | 3.2x |
 | **+ Ruling 1 + the fast scan at L1 (measured)** | 107.9s | ~146.3 | ~5.85 | ~2.8x |
-| + census-restriction (§10.6.14's 0.524 ratio, still OWNER-UNDECIDED) | ~56.5s | ~75 | ~3.0 | ~1.4x |
+| + census-restriction (§10.6.14's 0.524 ratio; SUPERSEDED — Ruling 2 executed, MEASURED at 3.96 exact / 3.95 stacked, §10.6.17) | ~56.5s | ~75 | ~3.0 | ~1.4x |
 
 (the fast-scan row charges the L1-class skip share honestly; the
 census-restriction row remains the §10.6.14 arithmetic projection,
@@ -2614,7 +2614,8 @@ multiplier), and the NAMED loci where the profiles differ (which
 fold flips, which profile was right per truth). The owner decides.
 
 ### 10.6.16 THE CENSUS-PROFILE A/B RECEIPT (Ruling 2 — the owner's
-decision INPUT, measured; the decision itself UNMADE)
+decision INPUT, measured; the decision itself UNMADE at this
+increment — DECIDED AND EXECUTED at §10.6.17)
 
 The five localities (L1-L4 + the pilot) ran under BOTH census
 profiles with the official QV machinery (--truth-qv,
@@ -2646,3 +2647,224 @@ input; this increment does not decide.** The runs: `rulings-ab-
 production path, co-tenant ×10), the analysis
 `rulings-ab-analysis.txt`, the shadow cuts `global-cut-
 {L2,L3,L4,pilot}-shadow1x`.
+
+### 10.6.17 THE OWNER'S RULING 2, EXECUTED — RESTRICT IS THE PRODUCT DEFAULT; the owner's routing model verified against the machinery; the L2-17 exception autopsied (the conserved-elsewhere dictionary class); the gates; the per-locus budget restated under the stacked rulings
+
+**THE RULING + THE DESIGN PRINCIPLE (the owner's own words, now the
+stated principle of the census):** RESTRICT is the product default —
+the global-frame cut's default census profile is the committed routed
+read set (the committed 1x kept-reads, the evidence mass the original
+local-frame receipts banked), NOT the global-native full mass; the
+extra 2.8x-15.2x mass is edge-grazers + repeat-routed reads —
+non-discriminating, it multiplies work without moving the argmax.
+*"we just need to just worry about the overlapping ends — the MEM
+matches at the ends — and we used to decide where to put each read,
+so it's basically being routed by its best MEMs. If they go into
+different bins unless they're basically adjacent, we don't want to be
+thinking about them."* The one exception the A/B measured (L2 locus
+17: the single clean global-native win — B calls the truth pair at
+QV 50, the restricted profile calls [0,0] at 42) was autopsied to the
+READ before finalizing; the verdict is below, and it is NOT the
+owner's boundary case.
+
+**THE ROUTING-MODEL VERIFICATION (the owner's model vs the actual
+machinery, code receipts).** The machine IS the model's boundary half,
+exactly: a read record routes by its BEST MEM — `route_record`
+(examples/sample_projection.rs) seeds placements from the anchor with
+the FEWEST territory-index entries (the most discriminative k-mer),
+extends each placement through the verified walk
+(`occurrences_from_anchor`), and the occurrence's touched bins are
+every window whose interval overlaps any anchor's k-mer
+(`partitions_at`: `bp + k > start && bp < end`) — a
+boundary-straddling read lands in BOTH adjacent windows by pure
+interval overlap: no tolerance, no snapping, nothing to tune (the
+window grid is contiguous — L2's 25 windows have zero gaps, verified).
+The call side keeps the convention (`locality_touch`, realign_score:
+an occurrence votes at a locus iff `occ.partitions.contains(&locus)`,
+the committed partition mode), and the census's own pair-bins taxonomy
+(`same_window`/`adjacent_window`/`same_contig_far`/`other_contig`)
+already names the owner's bins. `SortedRanges::insert_with_boundary_snap`
+(src/impg.rs, consumed by multi_impg) is NOT read routing — it is the
+territory-expansion range union (expansion ranges snap onto adjacent
+ranges within a caller-stated min_distance to absorb alignment
+boundary jitter; user-requested ranges never snap). THE HONEST
+ADDITION: the model's other half — "if they go into different bins
+unless they're basically adjacent, we don't want to be thinking about
+them" — is NOT implemented as a drop: the machine keeps a
+non-adjacent multi-window record at EVERY far bin it touches. The
+measured mass share of that class is real at some territories: L1's
+restricted census carries **31.1% of its mass in 14 non-adjacent
+multi-window records — ONE single-anchor pattern of multiplicity
+43,686 routed to windows [12,16]**; L3 21.7% (56 records); L4 0.02%;
+L2 0.0% (every multi-window record is adjacent-only); the pilot 2.6%
+non-adjacent + 14.0% adjacent. The owner's rule is therefore a REAL,
+un-implemented census lever — NAMED here, not built (the ruled-in
+restrict profile is the committed routed read set, which contains
+these records; an adjacency-filtered profile would be a separate
+owner decision). And the mass the ruling actually removes — the B−A
+difference — is NOT far-routed reads: at L1, 97% of the
+difference mass (274,719 of 283,030) is SINGLE-window single-anchor
+repeat mass, dropped by restrict through the local expressibility
+basis (the autopsy's class, next).
+
+**THE L2-17 AUTOPSY (the one exception, traced to the read — the
+deciding evidence).** The truth variant is one extra (AAAT) unit (a
+4bp insertion) in the array at window-local position ~1307 of window
+17 ([170035,180062) territory-local) of HG002#1#chr13:28850052-29100914
+— MID-window (1.3kb from the left edge, 8.7kb from the right) and
+mid-territory: no boundary is involved. In the full-mass census the
+decisive record is census record 193 of global-cut-L2-d1: a
+SINGLE-anchor pattern (node −6756230, multiplicity 13, 178 panel
+occurrences ALL inside window 17 — a single-locus, per-strain
+orthologous repeat anchor), whose representative read (cutread 43820)
+is an EXACT 148bp match of the truth haplotype HG002#2 across the
+junction; its fold6-vs-fold0 log-likelihood gap is **+4.005 — the
+largest pro-truth term at the locus** (receipt: the
+rulings-ab-B-L2 records receipt; the next three records are
+ANTI-fold6 at ≈−3.95 each). The second truth-allele junction read
+(43853: junction-exact, one sequencing error elsewhere) shares the
+record. THE VERDICT: the lost read is **(c) SOMETHING ELSE — the
+conserved-elsewhere dictionary class** (§6 risk #1's own named second
+sub-class: "a conserved-elsewhere k-mer that the global dictionary
+resolves but the local one lacks"), NEITHER (a) a boundary-straddling
+read (its only MEM routes entirely into ONE window — it is already
+"kept at its bin") NOR (b) a repeat-routed far read (zero occurrences
+outside the locus). The mechanism, receipted end to end: the
+committed LOCAL cut dropped the record because its anchor k-mer was
+never selected within the locality's own content — the locality
+dictionary lacks it while the global dictionary resolves it
+(membership earned by selection elsewhere in the panel); the local
+node map (12,284 pairs vs the global identity map's 12,548) therefore
+lacks the pair, the strict all-or-nothing remap dropped the record,
+and the reads whose ONLY record it was died with it — including both
+truth-allele junction reads. Reads with other records survived (the
+56 array-core reads of the committed set all kept, 55 via their other
+records), which is why the restricted census still scores the locus —
+but with zero insertion-carrying evidence (its own single-anchor
+array record, pattern (192229540,), multiplicity 19, has a
+fold-0-favoring representative: gap −3.953) — and calls [0,0]. THE
+CODE RECEIPT (examples/census_autopsy_probe.rs, outputs in the work
+dir census-autopsy-L2-17/): the canonical anchor walk (the
+expressibility map's own rule) over the window-17 slices against BOTH
+panels — the GLOBAL walk has the anchors the locality walk lacks, at
+the exact positions: 1237 (node −48057385, both haplotype phases) and
+1255 (node −6756230, the truth-allele phase); the locality dictionary
+does not contain either k-mer (its own array members are the
+shifted-phase nodes 11263-11266). **No adjacency rule recovers
+L2-17 under restrict — the cost is intrinsic to the restriction
+basis, and it is the measured price of the ruling: exactly one truth
+locus.** The recovery path, NAMED NOT IMPLEMENTED (a separate gated
+increment if the owner ever orders it): a restricted read set whose
+expressibility basis is the locality map EXTENDED by the global
+dictionary's conserved-elsewhere class — a dictionary-level
+widening, decided by its own accuracy/cost receipts, never by a
+tuned threshold.
+
+**RESTRICT AS DEFAULT (the implementation).** The global-frame cut
+gains the three-step interface's own product flag:
+`--census-profile <restricted|global-native>`, DEFAULT RESTRICTED
+(the codebase's product doctrine: product behavior is a visible CLI
+flag; env vars are test-mode machinery and non-default restores).
+The restricted profile keeps only the reads of the territory's
+committed kept-read set, stated by the IMPG_CUT_READSET_FASTA
+instrument (the restriction basis override, untouched — a stated
+basis restricts in either profile, loudly); the restricted profile
+WITHOUT a basis fails closed before the panel load, naming both
+forms; the global-native profile is the full routed mass,
+byte-identical to the committed global-frame cut (the record form,
+behind the explicit flag). The LOCAL frame is untouched
+byte-for-byte (the flag is refused there; the read-set instrument
+still restricts as before). The manifest names the effective profile:
+cut-stats.json gains `census_profile` (global frame only — the
+local frame keeps its committed stats bytes; the batch forms' stats
+name their actual full-mass profile, and carrying the profile into
+the batch manifests the way record_origin rides them is the named
+follow-up). The resolution is a pure tested function
+(`CensusProfile::resolve`): five states receipted — local untouched,
+global default fail-closed, basis-required restricted, global-native
+record form, basis override.
+
+**THE GATES (all at the byte-identity bar).**
+(a) **The default-restrict cuts, L1-L4 + the pilot: ALL PASS** —
+census/cache/reads BYTE-IDENTICAL to the A/B's profile-A shadow cuts
+(census_mult 141,114 / 48,641 / 67,359 / 18,121 / 512,929 reproduced
+exactly; cut-stats.json equal modulo the new census_profile field and
+the timing walls; walls 623/606/968/960/556s, co-tenant ×2 waves).
+Because the call is a pure function of the census/cache/reads, the
+A/B's profile-A calls are the restrict-default ANSWER receipts.
+(b) **The end-to-end default form at L2: PASS** — the committed
+serial call over the default-restrict L2 cut is byte-identical to
+the A/B profile-A receipt (rulings-ab-A-L2; wall 409s), and **locus
+17 stays [0,0] — the receipted one-locus cost**, per the autopsy: not
+a routing gap, so the fixed form does not and cannot recover it.
+(c) **The record form: PASS** — `--census-profile global-native`
+reproduces the committed global cut byte-identically (L4 vs
+global-cut-L4-d1: census/cache/reads cmp-clean; cut-stats equal
+modulo census_profile + timing; census_mult 275,405 reproduced).
+(d) **The budget run (restrict + Ruling 1 + the sanctioned
+sparse-skip, L1): PASS** — the fast mode over the restricted census:
+loci phase 70.7s, ZERO fold-material flips (25/25 identical called
+folds), identical official QVs, the -classscan-sparse label present
+(wall 415s serial, co-tenant).
+
+**THE PER-LOCUS BUDGET, RESTATED UNDER THE STACKED RULINGS (L1-class,
+25 loci, every row a receipt; the ex-load convention of §10.6.14 —
+the serial panel load excluded):**
+
+| row | loci phase | ex-load call | per-locus | gap to the 2.10 line |
+|---|---:|---:|---:|---:|
+| §10.6.14 today (assertion on, exact scan, full mass) | 164.8s | 202.7 | 8.11 | 3.9x |
+| + Ruling 1 executed (measured) | 128.0s | 166.4 | 6.66 | 3.2x |
+| + Ruling 1 + the fast scan, full mass (measured) | 107.9s | ~146.3 | ~5.85 | ~2.8x |
+| **+ Ruling 2: restrict-default, exact scan (MEASURED, this increment)** | **75.0s** | **99.0** | **3.96** | **1.9x** |
+| **+ all three rulings stacked (restrict + R1 + fast scan; MEASURED)** | **70.7s** | **98.7** | **3.95** | **1.9x** |
+
+The §10.6.15 projection row ("~3.0 under census-restriction") scaled
+the whole ex-load by the 0.524 mass ratio and UNDERSTATED the
+mass-invariant classes: the measured 3.96 shows the bind+rows+IO
+classes (~1.1/locus) do not scale with census mass — exactly the
+§10.5.4 finding, now at the per-locus grain. The sparse-skip's
+honest receipt at the RESTRICT form: loci 75.0 → 70.7s (−5.7%),
+far under the full-mass −16% — the restricted census is pinned-heavier
+(fewer constant-mass pairs to skip); the marathon-class skip share
+remains unmeasured (reaped substrates), nothing claimed there.
+
+The per-locality measured shape at the restrict-default form (exact
+scan, post-Ruling-1 production path, serial co-tenant runs; walls
+include the ~260-290s panel load):
+
+| locality | loci phase | ex-load | per-locus | wall |
+|---|---:|---:|---:|---:|
+| L1 (25 loci) | 75.0s | 99.0 | 3.96 | 393s |
+| L2 (25) | 16.9s | 34.5 | 1.38 | 301s |
+| L3 (24) | 24.2s | 47.0 | 1.96 | 327s |
+| L4 (25) | 13.6s | 34.4 | 1.38 | 306s |
+| pilot (22; the degenerate row — both profiles coincide) | 630.9s | 668.4 | 30.4 | 998s |
+| L1 + the fast scan (the budget run) | 70.7s | 98.7 | 3.95 | 415s |
+
+**THE RESIDUAL POLES at the restrict-default form (L1-class, each
+labeled):** (a) the loci core 2.83/locus — the re-anchorable anchor
+class, the placement walk, and the class scan under the fast mode (the
+§10.6.14(d) ENGINEERING classes, unchanged by the census ruling);
+(b) the mass-invariant serial classes 1.12/locus — bind 7.9s +
+rows/context 16.6s + quality 3.4s (ENGINEERING; the §10.5.4
+mass-invariance finding — the census ruling does NOT shrink these,
+which is why the measured 3.96 sits above the old ~3.0 projection);
+(c) THE FAR-BIN PRUNE LEVER — the owner's own model, UN-IMPLEMENTED:
+31.1% of L1's restricted census mass (the one 43,686-mult pattern at
+windows [12,16]), 21.7% at L3 — an adjacency-filtered census profile
+would remove it and is the owner's call, not built here;
+(d) the cut's true-CPU census — still OWED (the last un-receipted term
+of the genome floor); (e) the whole-call 20-minute line at the
+measured shape: the ex-load gap to the 2.10/locus line is now
+**1.9x at L1-class** — the closest the receipts have ever stood to
+it — with the remaining distance owned by the loci core's
+engineering classes and the far-bin lever, not by the census mass.
+
+The work-dir receipts: `census-autopsy-L2-17/` (the probe outputs,
+both panels × both haplotype phases), `census-default-{L1,L2,L3,L4,
+pilot}/` + `census-native-L4/` (the gate cuts), `census-default-call-
+L2/` (the end-to-end default-form gate), `census-default-budget-L1-
+fast/` (the stacked-rulings budget run), `run-census-default-gates.sh`
++ `run-default-call-L2.sh` + `run-budget-L1-fast.sh` (the recipes).
+NO PR PUSH (the owner pushes).
