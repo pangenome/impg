@@ -544,3 +544,47 @@ land). The marathon roster remains carried as the committed bound
 - NOT touched, by design: the campaign's ledgers under
   wgs35x-fleet/runtime-verification/, the product-defaults worker's
   files, vendor/syng. NO PR PUSH (the owner pushes).
+
+### 9.5 THE CLOSE OF THIS INCREMENT (the 08:30Z snapshot; every n stated; supersedes §9.3's tables where the n grew)
+
+**THE S_EXP RECEIPTS (the universe's 76% stratum — tranche 1's 8 members, all landed in A and C; B still draining with TB):**
+accuracy A 36/140 rank-1 (26%, 8 territories, QV median 44.6) vs C 38/151 (25%, 8, QV 43.5) — the wash holds in the dominant stratum. **THE SURPRISE: S_EXP is the DEEP stratum** — form-A per-territory ex-load mean 1,351s (n=7, median 236s, p90 3,573s) and form-C mean 1,215s (n=8, median 648s, p90 3,610s), both ~1.5-2x the S_ORD means: expansion-gate adjacency costs CPU, not accuracy. Far-bin share median 24.79% (n=8, max 72.84%) — 3x the S_ORD median.
+
+**THE S_BIND RESOLUTION RATE (the 7479-class, tranche 1's 8 members): 8/8 RESOLVED under the global frame — ZERO fail-closed.** Every member of the RV campaign's exit-1 bind-ambiguity ledger that the tranche ran produced a full exit-0 call with complete official truth assessments in BOTH the restricted form (A) and the pruned default (C). Accuracy: A 60/191 rank-1 (31%), C 59/191 (31%), QV median 45.0 both. **The global-frame call mode RESOLVES the bind-ambiguity family the old campaign could not call at all** — a product-accuracy finding, not merely a runtime one. (The class census — tranche 2's 71 remaining members — is cut-side-complete (rvcut 108/108) and awaits its calls.)
+
+**THE CONSERVED-ELSEWHERE BOUND at the new n: 1 loss in 981 loci assessed** (T01654 locus 3 remains the only one; S_EXP 140 loci, S_BIND 196 loci, S_REP 110, S_SEG 158, S_ORD 377 — all zero except S_ORD's one). Rate ≤ ~0.1-0.3% class at this n; the B denominators are still growing (TB mid-drain at the close, 30+/53).
+
+**THE PRUNE'S GENOME-SCALE VERDICT — the zero-loss bar DOES NOT hold at sampled scale: 14 wins, 7 LOSSES in 946 paired C-vs-A loci** (n was 98/0, then 310/0, then 571/2 at the interim). THE LOSS CLASS IS CONCENTRATED AT THE HEAVY-SHARE MEMBERS, exactly where the wins live: T03901 loci 8+12 (86.2% share), **T03226 loci 14+20+22+23 (43.4% share — four losses at one member)**, T02018 locus 14 (52.7%). The wins: T04399, T09631 x2, T09593 x4, T03901 x2, T02854, T01350, T03226 x2 (S_EXP). QV-visible: 50 loci (28 higher C, 22 higher A). **The honest verdict: the far-bin prune at genome scale is a MIXED high-stakes lever at the heavy tail — big wall wins AND truth losses at the same members — and the five-locality zero-loss gate bar must be restated as a rate, not an invariant.**
+
+**THE PRUNE'S WALL VALUE ON THE HEAVY TAIL (the named pairs, loci-phase serial):**
+
+| member | share | A loci | C loci | C/A |
+|---|---:|---:|---:|---:|
+| T03901 | 86.2% | 729.0s | 33.1s | **0.045x** |
+| T00940 | 81.0% | 5,803.0s | 698.3s | **0.120x** |
+| T01350 | 59.0% | 206.7s | 36.9s | 0.179x |
+| T02018 | 52.7% | 151.6s | 26.4s | 0.174x |
+| T03226 | 43.4% | 3,415.3s | 1,486.8s | 0.435x |
+| T05884 | 6.2% | 1,847.3s | 1,187.0s | 0.643x |
+| T04420 | 83.5% | 41.9s | 38.2s | 0.912x |
+
+Six of seven pairs drop 1.6-22x; the share does not strictly predict the effect (T04420 at 83.5% barely moves — the scattered mass's position, not its share, burdens the loci phase). At share > 1% the paired median is **C/A 0.62x (n=28)** vs 1.01x at share ~0 (n=12).
+
+**THE BOUNDED GENOME WALL (all five strata receipted in the call phase for the first time; the marathon stratum still carried as the committed bound):**
+
+| form | stratified total (5,807-territory universe) | at 256 cores | 95% CI |
+|---|---:|---:|---:|
+| **C restricted+prune (the new default)** | **6.38e6 core-s** | **6.9h** | ±4.9h (70%) |
+| A restricted (the old default) | 7.06e6 core-s | 7.7h | ±5.8h (76%) |
+
+Per-stratum means (form C): S_ORD 811s x 1,064 (n=17); S_SEG 556s x 217 (n=9); S_REP 596s x 34 (n=6); **S_EXP 1,215s x 4,413 (n=8)**; S_BIND 203s x 79 (n=8). **THE HONEST READ: the wall is now bounded for the first time — ~6-7e6 core-s, call-phase, ex-load, serial-receipt arithmetic — but the A-vs-C universe means are statistically indistinguishable at this variance (±70-76%), because the distribution is extremely heavy-tailed (worst-5% of loci carry 96.9% of the per-locus wall in S_ORD): the prune's wall value is heavy-tail-LOCAL (receipted pair-by-pair above), not yet resolvable as a universe-mean difference at n=8 S_EXP.** The marathon roster (16) and the two call-side RSS-guard terminals named below stay OUTSIDE the estimate, carried as bounds.
+
+**NEW RECEIPTS OF THIS WINDOW:**
+- **THE C_loci=none QUESTION ANSWERED: measurement gap, not a class.** All 31-then-47-then-48 callC-done members carry the full phase-summary line; at the timeout those members' C calls simply had not run yet. A "prune-emptied census" is structurally impossible (the prune removes only non-adjacent-window records; every member's window-adjacent mass remains — form C's own prune receipt prints the retained mass at every member).
+- **THE CALL-SIDE RSS-GUARD CLASS, named (2 members):** T01091 (locus_10_receipts, 68.3GB, forms A and C) and T05573 (locus_0_receipts, 70.5GB, form A) — honest guard-kills at the call's receipts phase, the machinery's own memory guard working; both stay unassessed unless a retry lands under a quieter box.
+- **THE STALE-NOK MONITOR BUG, found and fixed:** tranche 2's master read `tranche-failed.tsv` before T00762 was named (NF=0 → NOK=109), so when rvcut finished 108/108 it logged "K stopped (108 done, 0 pending)" and exited at 06:11Z WITHOUT marking stage K or running the fleet — 2h of fleet time lost; AND both relaunch monitors shared the bare `pgrep -f "bash run-master.sh"` pattern, so T2's monitor was pacified by T1's live master and never relaunched. The fix (run-monitor.sh, committed): a single parameterized monitor that qualifies the master by its CWD, cap 8 relaunches; T2's master relaunched at 08:18Z, stage K marked, **the fleet is now cutting (cutB wave for 108 members in flight)**.
+
+**THE EXACT RESUME POINT (this close):**
+- TRANCHE 1: master mid-TB (form B, ~30/53 landed; the conserved-elsewhere denominators grow with it), stageTC draining the last C members (T06027/T05603 fail-closed exit-1 in all attempted forms; T01091/T05573 RSS-guard). The cwd-qualified monitor (`run-monitor.sh <WT1> 6`) relaunches the master until TA/TB complete; the honest TB completion receipt is callB.done = 53 with T06027/T05603 named fail-closed (the done-marker cannot fire for 53<55). Final tables: `python3 scripts/genome-tranche/tranche-analyze.py <WT1> <out>` (the close's analysis is `analysis-t2close.txt`).
+- TRANCHE 2 (/mnt/nvme2n1/...): substrate 108/108, rvcut 108/108 (the 16 marathon members ALL guard-killed at W=8 and cut clean at width 4 — the memory tail receipts at the cut stage; 45/51 determinism-gate IDENTICAL, 6 GATE-DIFFERS = the era class), fleet stage F cutting now, then A (cutA pool) → TA → TB per the master; stageTC (LANES=4) armed; the cwd-qualified monitor (`run-monitor.sh <WT2> 8`) owns relaunches. **Tranche 2's accuracy receipts (the S_EXP 22, the S_BIND 71 census, the marathon walls) land AFTER this close — the fleet + cutA + call stages are the multi-day tail; the monitors carry them.**
+- NOT touched, by design: the campaign's ledgers, the product-defaults worker's files, vendor/syng. NO PR PUSH (the owner pushes).
