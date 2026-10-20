@@ -3229,3 +3229,298 @@ The work-dir receipts: `threestep-demo/` (partitions/, map-*/,
 calls-*/, workform-{L1,pilot}/, gateA-single-L4/),
 `run-threestep-demo.sh` (the recipe). cargo test --release --lib
 575/0. NO PR PUSH (the owner pushes).
+
+### 10.6.21 THE 16-CORE TARGET AND THE TWO FRONTIERS — the budget arithmetic, the admissible-bound design priced at the worst shapes (and the byte-bar verdict that confines it to a labeled mode), the receipt-serialization class found and proofed on the way, and the panel-side per-locus precompute design (DESIGN ONLY — not implemented; the next increment's gated work)
+
+**THE OWNER'S NEW TARGET: whole-genome analysis in 20 minutes on 16
+cores.** The arithmetic the target forces: 16 cores x 1,200s =
+**19,200 core-seconds per sample, all-in**; over the 5,807-territory
+runnable universe that is **~3.3 core-s/territory all-in** (map +
+cut-share + call + assessment). The measured state (the tranche's
+bounded receipts, §9.5 of genome-sample-tranche.md): the CALL phase
+alone is **6.38e6 +/- 4.48e6 core-s** (form C, the stratified
+5,807-territory estimate) and the MAP side is **~26k core-s at the
+16-thread plateau** (the demo receipts: map walls 688/605/605/645/242s
+at T16 — a PROJECTION at the universe scale, stated as such). The
+honest gap decomposition, every term labeled:
+
+| pole | today (receipted) | at the 19,200-core-s target | the needed drop | label |
+|---|---:|---:|---:|---|
+| map | ~26k core-s (projection at universe scale) | ~13k core-s (half the budget) | ~2x | ENGINEERING (the map step's own amortization: the shared scan/panel classes) |
+| call | 6.38e6 core-s (measured, bounded) | ~6.2k core-s (the other half) | **~1,030x** | the two frontiers below |
+| call (if the whole budget went to it) | 6.38e6 | 19,200 | **~333x** | the headline the receipts force either way |
+
+**THE GAP LIVES IN TWO FRONTIERS**, both now designed and priced:
+
+- **FRONTIER 1 — the heavy tail (the biggest term).** The worst-5%
+  of loci carry **96.9% of S_ORD's per-locus wall** (the tranche's
+  form-C receipts); at the monster loci the exhaustive CLASS SCAN
+  (folds^2/2 x units, the quadratic-in-segdup term) dominates —
+  e.g. T03226 locus 0: 20,910 class pairs x 2,925,505 units =
+  6.13e10 unit-pairs at the receipted ~18.4 ns = ~1,128 core-s of
+  that locus's 1,486.8s loci phase (76%, ARITHMETIC from the
+  committed receipts). The lever designed and priced below: an
+  ADMISSIBLE branch-and-bound over the class-pair space.
+- **FRONTIER 2 — the median floor (~2.5-3 core-s/territory).** The
+  mass-invariant serial classes (bind + rows/context + IO ~1.1
+  core-s/locus at L1-class, §10.6.18's stacked budget) plus the
+  placement walk's panel-side half — per-sample recomputation of
+  things the panel already knows. The design below (DESIGN ONLY).
+
+---
+
+**FRONTIER 1 — THE ADMISSIBLE BOUND, DESIGNED AND PRICED.**
+
+**THE DESIGN (every quantity derived from the model's own structure,
+no tuned constants).** THE E-DECOMPOSITION: every per-(fold, unit)
+log-likelihood is either exactly the elsewhere constant E (the
+no-pin branch — the committed row-compression exactness argument) or
+E + alpha with alpha > 0 (a pinned branch), so the class pair sum
+decomposes exactly (real arithmetic):
+
+    S(f,g) = sum_u c_u * mix(ll_f[u], ll_g[u])
+           = E*C + sum_u c_u * mix0(alpha_f[u], alpha_g[u])
+
+with mix the committed 1/2-1/2 homolog mixture, mix0(a,b) =
+ln(0.5e^a + 0.5e^b), C = sum_u c_u. THE PER-FOLD EXCESS-MASS BOUND
+(the E-per-component additivity the campaign receipted,
+§10.6.14's log_gap_decomposition): for alpha, beta >= 0,
+mix0(alpha,beta) <= alpha + beta (WLOG alpha >= beta: mix0 = alpha +
+ln(0.5 + 0.5e^{beta-alpha}) <= alpha <= alpha + beta) — therefore
+
+    **S(f,g) <= E*C + A_f + A_g,   A_f = sum_u c_u * alpha_f[u]**
+
+— ONE SCALAR PER FOLD, computable in one walk over the fold's
+pinned entries: the whole bound index costs ONE class-pair-walk
+equivalent per locus (measured: the bound's own walk is 0.01-1.2% of
+the scan it bounds — the `bound_walk_over_scan` receipts). THE
+DERIVED SKIP THRESHOLDS, each from an emitted consumer's own
+arithmetic: (a) the called set / best: skip iff E*C + A_f + A_g <
+best (strict — the pair can neither win nor tie); (b) the QUAL
+posterior terms: exp(ll - best) underflows to exactly +0.0 iff
+ll - best <= the f64 exp-underflow point (DERIVED BY EVALUATION: the
+largest f64 t with exp(t) == +0.0, found by a bit-axis binary
+search between e^-744 and -1075*ln 2 — a unit-proven derivation, not
+a constant); a skipped pair's every QUAL contribution is then
+BIT-IDENTICAL to the exact run's (+0.0 additions are float identity
+on the non-negative running sums — unit-proven); (c) the truth-rank
+counts (the --truth-qv assessment artifact emits 1 + #{classes
+strictly above the truth pair}): skip iff E*C + A_f + A_g <= truth_ll;
+(d) the best-outside fallback (the emitted best divergent rival and
+its tied set): the standard branch-and-bound argmax over the skipped
+non-excluded pairs, walked in bound-descending order until the bound
+falls below the running max. **THE WINNER IS NEVER PRUNNED, BY THE
+BOUND'S OWN ARITHMETIC**: the bound is >= the exact sum, the winner's
+exact sum IS best, and best > best - 745.13, so the winner's bound
+always clears the skip threshold — proven at every probed locus
+below (the kept set contains the winner everywhere).
+
+**THE PRUNING-RECEIPTS AT THE WORST SHAPES** (the prototype probe
+`examples/class_bound_probe.rs`, run OFFLINE over the tranche's
+committed callC receipts — no panel, no re-run; the work dir
+`class-bound-probe/`): the counterfactual kept-count at the derived
+production thresholds, beside the ORACLE window (the count of pairs
+within the exp-underflow distance of best — the floor no sound bound
+can beat):
+
+| locus | class pairs | units | oracle window | bound kept | pruning rate | the shape's read |
+|---|---:|---:|---:|---:|---:|---|
+| T03226 l0 | 20,910 | 2,925,505 | 8 | 110 | **99.47%** | the monster: best - 2nd = 34.1 nats, the whole landscape in a 712k-nat band |
+| T03226 l10 | 16,290 | 122,770 | 5 | 35 | **99.79%** | second gap 285.9 nats |
+| T03901 l10 | 6,105 | 74,086 | 1 | 110 | **98.20%** | the winner fold carries the whole excess (A_max = the winner's excess) |
+| T03901 l13 | 4,560 | 23,511 | 6 | 2,710 | 40.6% | the segdup PLATEAU: excess mass uniform across folds, the bound loose |
+| T00940 l5 | 7,875 | 97,952 | 1 | 6,968 | 11.5% | second gap 999.5 nats but a flat A distribution |
+| T00940 l1 | 101,025 | 171,590 | 31 | 101,017 | 0.01% | the bound's WORST case: 449 folds at one plateau |
+| T00940 l0 | 5,671 | 34,924 | 5,671 | 5,671 | 0% | the flat-landscape control: EVERY pair within 745 of best — nothing is prunable, correctly |
+| T03226 l22 | 28,203 | 7,553 | 28,203 | 28,203 | 0% | the small-units control: same flat class |
+
+**THE HONEST SHAPE READING**: the bound prunes 98-99.8% exactly at
+the loci whose class scans carry the wall (the wall-weighted
+pruning over the eight probed loci: **77.1% of the class-scan
+unit-pair walks**; per member: T03226 99.15%, T03901 87.16%, T00940
+0.49%), and it honestly FAILS where the excess mass is uniformly
+distributed across the fold plateau (T00940 l1 — a segdup family of
+449 near-identical copies, every fold carrying the same evidence).
+The bound's pruning is SHAPE-DEPENDENT, and the shapes where it
+fails are receipted, not hidden. **THE ASSESSMENT-MODE CAVEAT,
+stated**: in --truth-qv mode the truth-rank threshold keeps nearly
+everything (the rank is a COUNT over all classes above the truth
+pair — kept_assessment 17,193 of 20,910 at T03226 l0, 101,025 of
+101,025 at T00940 l1), so the bound is a PRODUCTION-CALL lever, not
+an assessment-call lever.
+
+**THE WALL PROJECTION AT THE HEAVY TAIL (labeled as a projection,
+pending the owner's sanction of the mode)**: at T03226 l0 the class
+scan is ~1,128 core-s of the 1,486.8s loci phase; at a 99.47%
+pruning the scan's walked mass drops to ~2% of itself plus the bound
+index's own ~1-3 core-s — a projected **-70 to -75% of that locus's
+loci phase**; the pair loop (the scoring matrix) is untouched by
+this lever. The projection generalizes only over the receipted
+shapes; no universe-mean wall claim is made at this n.
+
+**THE ADMISSIBILITY VERDICT — ANSWER-PRESERVING PROVEN, THE
+COMMITTED BYTE-BAR CONFLICT CONFINED AND NAMED.** The bound provably
+preserves every ANSWER: the MAP pair and the called set (the
+winner is never pruned, above), the QUAL arithmetic (skipped pairs'
+terms are exactly +0.0 — the derived underflow threshold), the
+truth-rank counts (the truth threshold), and the best-rival fields
+(the fallback). BUT the committed gate set includes the INSTRUMENT
+RECEIPT's exhaustive `class_log_likelihoods` vector (every pair's
+exact bits) and the ingredients' full `ll_matrix` — a pair-excluding
+bound changes those bytes BY CONSTRUCTION, so **at the committed
+byte-identity bar the bound is NOT admissible as an exact-path
+change; its conflict is confined to the exhaustive instrument
+vectors, never to the answers**. The only bar-passing lever of this
+class is the exact-value-preserving MEMOIZATION (bit-equal rows
+share one sum, unit-proven), whose measured rate at these shapes is
+34.4% (T03901 l10) / 37.7% (T03226 l22) / 23.9% (T03226 l10) — real
+but below any headline, and NOT implemented this window (the >90%
+bar is not met by it).
+
+**THE OWNER DECISION THE RECEIPTS NOW PRICE — THE LABELED BOUND
+MODE**, the sparse-skip precedent's own shape: a `-classscan-bounded`
+model-string mode where (a) the ANSWER files stay at the byte gate
+(calls.jsonl, sequences, truth-qv — the bound's answer-preservation
+proof is their gate), and (b) the instrument vectors become the
+bounded form's own LABELED receipts (the kept pairs' exact sums +
+the per-pair bounds + the skip-class certificate), so no bounded
+output can be mistaken for an exact one and the exhaustive receipts
+stay reachable by the exact default. Projected value at the
+receipted worst shapes: the 98-99.8% pruning above; the cost: the
+labeled-receipt re-baseline. NOT implemented — the owner's sanction
+is the gate.
+
+**THE VERIFY-TABLE RESOLUTION — THE RECEIPT-SERIALIZATION CLASS,
+FOUND AND PROOFED ON THE WAY** (the probe's winner-bit verification
+flagged three loci; the diagnosis closed end to end):
+
+| locus | winner pair | recomputation vs receipt | class |
+|---|---|---:|---|
+| T03901 l10 | (74,74) hom | bit-identical | — |
+| T03901 l13 | (19,67) | bit-identical | — |
+| T00940 l0 | (0,8) | bit-identical | — |
+| T00940 l1 | (6,13) | bit-identical | — |
+| T03226 l0 | — | bit-identical | — |
+| T00940 l5 | (6,13) | 1-2 ulps | **receipt-serialization** |
+| T03226 l10 | — | 1-2 ulps | **receipt-serialization** |
+| T03226 l22 | — | 1-2 ulps | **receipt-serialization** |
+
+THE PROOF: (a) the committed binary (the Oct-19 22:10 build,
+unchanged since — all later commits are docs/scripts) REPRODUCES ITS
+OWN RECEIPT BIT-IDENTICALLY in a rerun of T00940 loci 0+5 (same
+inputs, same class_lls, same answers — the receipt
+`class-bound-probe/rerun-committed-binary-T00940-l0l5/`,
+determinism PROVEN); (b) TWO independent offline recomputations (the
+probe's streaming parse and a whole-line JSON parse) AGREE with each
+other and differ from the receipt by 1-2 ulps at the flagged pairs;
+(c) **THE CLASS**: this repo's serde_json carries NO
+`float_roundtrip` feature, and its f64 emission is NON-ROUNDTRIP for
+~31.5% of arbitrary doubles (2M-value sweep: 630,497 emit JSON text
+that parses back ONE ULP OFF — unit-proven
+`receipt_f64_text_is_the_non_roundtrip_serialization_class`, with a
+pinned counterexample). The committed ll_matrix text therefore does
+not always carry the scan's exact in-memory bits, and an offline
+re-accumulation can sit 1-2 ulps from the emitted class sum at pairs
+whose accumulation crosses affected values — the class lives in the
+EMISSION, never in the scan's float path and never in the probe's
+parse; the byte-identity gates compare BYTES and are unaffected. THE
+FIX CANDIDATE, NAMED AS ITS OWN INCREMENT (not done here): enable
+serde_json's `float_roundtrip` feature for future receipts so the
+emitted floats round-trip — a receipt-infrastructure change with its
+own byte-diff re-baseline across every receipt kind, never a silent
+dependency flip. NO locus shows the bound pruning the committed
+winner (proven by the bound's arithmetic above and checked at every
+row: the kept set contains the winner everywhere).
+
+---
+
+**FRONTIER 2 — THE PANEL-SIDE PER-LOCUS PRECOMPUTE (DESIGN ONLY —
+not implemented; the next increment's gated work).**
+
+**THE DOCTRINE** (the routes doctrine's own extension): the panel
+asset already precomputes everything sample-independent once per
+panel — the routes inventory (STEP 1's loudly-skipped reuse), the
+partition registry, the window beds, the axis rows, the AGC. The
+median-locus floor still pays per-sample recomputation of
+panel-knowable structure on every call; the design extends the
+panel-prep asset so the per-sample call approaches LOOKUP +
+ARITHMETIC. **THE COMPONENTS, each with the receipt that says it is
+panel-knowable:**
+
+- **THE FOLD LAYOUTS** (sequences, node positions, walk tables,
+  members, territory images per window): pure functions of the
+  panel + partition — NO sample input enters them (the fold build
+  reads the panel paths' spell; §10.6.14's fold-build class, 8.3
+  core-s at L1-class over 25 loci). Serve from the panel-prep asset
+  by window coordinate; the sequences stay in the AGC (the §10.6.13
+  anatomy's own answer — fetch-by-coordinate is the panel asset's
+  native form), the node-position tables prebuilt beside it.
+- **THE PIN SKELETONS PER (RECORD, FOLD)**: the anchor-hoist receipt
+  (§10.6.18) PROVED this class a PURE function of (record, fold,
+  orientation) — no variant input enters it — and collapsed the
+  per-unit recomputation 42x in-call; the design completes the
+  collapse: cache the skeletons panel-side, keyed by CONTENT (the
+  record's canonical walk hash + the fold id), served by lookup.
+  The per-sample cost of the class drops from one walk per
+  (record, fold) per call to one hash probe.
+- **THE RECORDS' CANONICAL WALKS**: the per-record anchor walk is a
+  pure function of the record's own sequence against the panel
+  dictionary (the census-autopsy probe's own machinery); the walks
+  for panel-recurring record content are cacheable panel-side the
+  same content-keyed way — the bind/rows/context classes (the
+  mass-invariant ~1.06 core-s/locus of §10.6.18) are the
+  beneficiaries.
+- **THE CLASS-SCAN SCAFFOLDING — HONESTLY NOT PRECOMPUTABLE**: the
+  ll matrix and the row classes are SAMPLE EVIDENCE (the L2-17
+  lesson: even the dictionary basis is census-side); the scan's
+  fold-pair enumeration is already free. The scan's lever is
+  Frontier 1's bound, not the precompute.
+
+**THE MEMORY MODEL**: the panel asset grows by the node-position
+tables and the content-keyed skeleton cache (both bounded by the
+panel's own fold/record counts, not by samples — a few GB beside the
+12.87GB GBWT + 4.31GB khash arenas and the ~26GB AGC); every served
+structure is consumed read-only under the fork-after-load COW
+discipline (§10.6.9's audited share). **THE CORRECTNESS BAR**: the
+served structures must reproduce the in-call derivation's BITS — the
+hoist's own argument (a pure-function collapse is bit-identical by
+construction), gated the same way; a precomputed structure that
+cannot pass its byte gate is not served. **THE HONEST RISKS**: (a)
+the version coupling — the asset must key on the panel + partition
++ graph CONTENT (a hash, never a filename — the vendor-pointer-drift
+class the tranche's determinism gate found is the cautionary
+receipt); (b) the census-side boundary — nothing sample-dependent
+can ride the asset without breaking the restricted basis's own
+logic (L2-17 again); (c) the incremental wall win is bounded by the
+measured floor: at L1-class the whole mass-invariant class is
+~1.06 core-s/locus and the fold build ~0.33 — the precompute's
+ceiling is roughly the per-sample floor minus the per-base
+comparison class (~0.4-0.6 core-s/locus, §10.6.14's
+IRREDUCIBLE-FOR-THE-MODEL row) — a PROJECTION, priced only when the
+gated increment runs.
+
+**THE RESTATED 16-CORE BUDGET, every frontier's term labeled:**
+19,200 core-s/sample = map ~13k (PROJECTION: a 2x from the map
+step's amortization classes) + call ~6.2k. The call's ~6.2k, at the
+measured shape, decomposes (all PROJECTIONS from the receipted
+rates): the median-locus floor ~2.5-3 core-s/territory × 5,807
+≈ 15-17k core-s — ALREADY ABOVE the whole budget, so the target
+needs BOTH frontiers: Frontier 2's precompute projects the floor
+toward the per-base arithmetic class (the design's own ceiling
+statement above), and Frontier 1's bound projects the tail's class
+scan away (the 98-99.8% receipted pruning at the monster loci,
+where worst-5% loci carry 96.9% of the per-locus wall). The budget
+is NOT closed by these two projections alone — the pair loop's
+pinned per-base class and the cut side remain — and the arithmetic
+is stated as the gate order: the owner's labeled-bound-mode sanction
+first (the receipts are its decision input), the precompute's gated
+increment second.
+
+**THE WORK-DIR RECEIPTS**: `class-bound-probe/` (the probe's
+per-locus receipts at the eight shapes, the member summaries, the
+rerun determinism receipt `rerun-committed-binary-T00940-l0l5/`).
+The probe: `examples/class_bound_probe.rs` (receipt-side, no
+product behavior change). cargo test --release --lib green with the
+four new tests (the mix0 lemma, the derived underflow point, the
+memoization bit-identity, the receipt-serialization class). NO PR
+PUSH (the owner pushes).
