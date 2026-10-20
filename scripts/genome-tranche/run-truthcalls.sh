@@ -23,8 +23,13 @@ QVBIWFA=/home/erikg/impg-genome-inference/genome/instrumented/qv-biwfa/target/re
 HPRC=/home/erikg/hprcv2
 ROUTES=/home/erikg/hprcv2/global-panel-call-mode/global-routes-par
 LANES=${LANES:-6}
-CUTDIR=$WT/cutA; EXTRAS=""; CUTMARK=cutA.done
-if [ "$PROFILE" = "C" ]; then EXTRAS="--far-bin-prune"; else CUTDIR=$WT/cut$PROFILE; CUTMARK=cut$PROFILE.done; fi
+CUTDIR=$WT/cutA; EXTRAS="--far-bin-prune"; CUTMARK=cutA.done
+# (THE DEFAULTS-FLIP FIX, commit 431d55a: the 22:10 impg defaults the
+# prune ON in call-diplotypes, so every form states its own census view
+# EXPLICITLY: A/B = the pre-ruling committed UNPRUNED view
+# (--far-bin-prune=false), C = the new product default, ON.)
+if [ "$PROFILE" = "A" ]; then EXTRAS="--far-bin-prune=false"; fi
+if [ "$PROFILE" = "B" ]; then EXTRAS="--far-bin-prune=false"; CUTDIR=$WT/cutB; CUTMARK=cutB.done; fi
 mkdir -p "$WT/call$PROFILE" "$WT/logs"
 export WT IMPG QVBIWFA HPRC ROUTES PROFILE CUTDIR CUTMARK EXTRAS LANES
 

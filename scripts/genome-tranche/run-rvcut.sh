@@ -112,6 +112,12 @@ while true; do
   # pack per width class (the widest first), W_pending per batch, C
   # concurrent batches
   JOBS=()
+  # (THE ROUND RESET: declare -A does NOT clear an existing array, so the
+  # width-class table MUST be unset each round - the first tranche rounds
+  # receipted the accumulation bug: stale members from earlier rounds
+  # re-entered slices, packing width-4 members 8-per-batch at width 8 -
+  # guard-kill spirals. A fresh table per round is the fix.)
+  unset BYW || true
   declare -A BYW
   for T in "${PENDING[@]}"; do
     w=$(cat "$WT/prep/$T/cut.width" 2>/dev/null || echo $W_START)
