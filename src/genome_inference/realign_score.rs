@@ -11133,4 +11133,279 @@ mod tests {
         assert!(refused.to_string().contains("--far-bin-prune=false"));
     }
 
+
+    #[test]
+    fn mix0_additive_bound_holds_for_nonnegative_excesses() {
+        // THE ADMISSIBLE BOUND'S OWN LEMMA (the frontier-1 design's
+        // core, SS10.6.21): for alpha, beta >= 0,
+        //   mix0(alpha, beta) = ln(0.5e^alpha + 0.5e^beta) <= alpha + beta
+        // — because WLOG alpha >= beta gives mix0 = alpha +
+        // ln(0.5 + 0.5e^{beta - alpha}) <= alpha <= alpha + beta. This
+        // is the per-unit form of the per-fold excess-mass bound
+        // S(f,g) <= E*C + A_f + A_g: with every ll entry either
+        // exactly E (the no-pin constant) or E + alpha (alpha > 0),
+        // the class pair sum's excess over the E-floor is bounded by
+        // the sum of the two folds' own excess masses. The float-level
+        // check carries a DERIVED slack — the accumulation/rounding
+        // slack of the two sides' own magnitudes (a few ulps), never
+        // a tuned tolerance: the real-arithmetic lemma is exact.
+        let e = -14.418156f64;
+        // A deterministic adversarial grid + LCG sweep of excesses,
+        // including the degenerate corners (0, 0), (0, big), the
+        // near-equal plateau (the segdup-copy class), and the
+        // far-apart class (the winner-vs-rival class).
+        let mut cases: Vec<(f64, f64)> = vec![(0.0, 0.0), (0.0, 40.0), (40.0, 0.0)];
+        let mut alpha = 0.0f64;
+        while alpha <= 40.0 {
+            let mut beta = 0.0f64;
+            while beta <= 40.0 {
+                cases.push((alpha, beta));
+                cases.push((beta, alpha));
+                beta += 0.37;
+            }
+            cases.push((alpha, alpha.max(1e-9)));
+            alpha += 0.61;
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..4096 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let a = (state >> 32) as f64 / u32::MAX as f64 * 44.0;
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let b = (state >> 32) as f64 / u32::MAX as f64 * 44.0;
+            cases.push((a, b));
+        }
+        for (alpha, beta) in cases {
+            let lhs = mix_logsumexp(e + alpha, e + beta) - e;
+            let rhs = alpha + beta;
+            // The real lemma is lhs <= rhs; each side's float
+            // evaluation carries at most a few ulps of its own
+            // magnitude (the mix's ln/exp rounding and the sum's).
+            let slack = 8.0f64
+                * f64::EPSILON
+                * (lhs.abs() + rhs.abs() + e.abs()).max(1.0);
+            assert!(
+                lhs <= rhs + slack,
+                "mix0({alpha},{beta}) = {lhs} exceeds alpha + beta = {rhs}"
+            );
+            // The max form is tighter and also holds (the same
+            // proof): mix0 <= max(alpha, beta) + ln(1) + slack.
+            let tighter = alpha.max(beta) + slack;
+            assert!(
+                lhs <= tighter,
+                "mix0({alpha},{beta}) = {lhs} exceeds max form {tighter}"
+            );
+        }
+    }
+
+    #[test]
+    fn exp_underflow_point_derived_by_evaluation() {
+        // THE DERIVED SKIP THRESHOLD'S CONSTANT (the frontier-1
+        // design): a class pair whose exact sum sits at or below
+        // best + t — t the largest f64 with exp(t) == +0.0 —
+        // contributes EXACTLY +0.0 to every QUAL posterior term the
+        // exact run computes (exp(ll - best) underflows to the exact
+        // +0.0, and adding +0.0 to the non-negative running sums is
+        // float identity), so a skipped pair's QUAL arithmetic is
+        // bit-identical by construction. The constant is DERIVED BY
+        // EVALUATION from the f64 semantics (the subnormal underflow
+        // point of exp, -1075*ln(2) in real arithmetic), never tuned:
+        // walk down by ulps from the real-arithmetic point until the
+        // rounded exponential is exactly zero.
+        // DERIVED BY EVALUATION: the runtime's own exp is monotone,
+        // so the boundary between the nonzero and the underflowed
+        // region is found by a bit-axis binary search between a
+        // known-nonzero point (e^-744 ~ 2^-1073.4, far above the
+        // boundary) and a known-zero point (-1075*ln(2), the
+        // real-arithmetic boundary itself).
+        let mut lo = -744.0f64;
+        let mut hi = -1075.0f64 * 2.0f64.ln();
+        assert!(lo.exp() > 0.0, "the search's low anchor must not underflow");
+        assert_eq!(hi.exp(), 0.0, "the search's high anchor must underflow");
+        while hi.to_bits() - lo.to_bits() > 1 {
+            // the midpoint on the bit axis WITHOUT the u64 sum
+            // overflow (both anchors are negative doubles: their bit
+            // patterns sum past u64::MAX).
+            let mid = f64::from_bits(
+                lo.to_bits() + (hi.to_bits() - lo.to_bits()) / 2,
+            );
+            if mid == lo || mid == hi {
+                break;
+            }
+            if mid.exp() == 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let t = hi;
+        // (a) the constant's own contract: exp(t) is exactly +0.0
+        // and one ulp up the exponential is already nonzero.
+        assert_eq!(t.exp(), 0.0);
+        let up = f64::from_bits(t.to_bits() - 1);
+        assert!(up.exp() > 0.0, "one ulp above the derived point must not underflow");
+        // (b) the constant sits at the real-arithmetic underflow
+        // point -1075*ln(2) (within the runtime exp's own boundary
+        // error — a derived-scale sanity bound, not a tolerance).
+        let real = -1075.0f64 * 2.0f64.ln();
+        assert!(
+            (t - real).abs() <= 1e-9,
+            "derived point {t} vs the real-arithmetic point {real}"
+        );
+        // (c) monotone safety: everything at or below the point
+        // underflows exactly (spot-check a ladder DOWN the bit axis
+        // — for negative doubles, more-negative is the LARGER bit
+        // pattern).
+        let mut probe = t;
+        for _ in 0..4 {
+            probe = f64::from_bits(probe.to_bits() + 1);
+            assert_eq!(probe.exp(), 0.0);
+        }
+        // (d) the QUAL identity the skip rule uses: adding the
+        // underflowed +0.0 to a non-negative running sum is
+        // bit-identity (including at +0.0 itself).
+        let running = 3.7e-300f64;
+        assert_eq!((running + 0.0f64).to_bits(), running.to_bits());
+        assert_eq!((0.0f64 + 0.0f64).to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn bit_equal_rows_share_one_class_sum() {
+        // THE EXACT-PRESERVING MEMOIZATION'S OWN PROOF (the only
+        // frontier-1 lever that can pass the committed byte-identity
+        // bar, SS10.6.21): the class pair sum is a function of the
+        // rows' VALUES in unit order alone — two folds whose ll
+        // columns are bit-equal (whichever encoding each row took)
+        // produce BIT-IDENTICAL sums against every third fold, so
+        // one computed sum per unordered (row-class, row-class) pair
+        // serves every merged-fold pair without changing an output
+        // bit. The construction crosses the ENCODINGS: one twin keeps
+        // pinned=true at units whose value is exactly E (the sparse
+        // form stores those entries), the other holds pinned=false
+        // there (its sparse form drops them — the values are the
+        // constant either way); the columns are bit-equal, the
+        // encodings differ.
+        let elsewhere = -14.418156f64;
+        let n_units = 40usize;
+        let mut dense: Vec<Vec<f64>> = Vec::new();
+        let mut pinned: Vec<Vec<bool>> = Vec::new();
+        let mut mismatches: Vec<Vec<u32>> = Vec::new();
+        // Fold 0: the pinned-heavy row (Dense encoding).
+        let mut row0 = vec![elsewhere; n_units];
+        let mut pin0 = vec![false; n_units];
+        for unit in (0..n_units).step_by(2) {
+            row0[unit] = elsewhere + unit as f64 / 8.0;
+            pin0[unit] = true;
+        }
+        dense.push(row0.clone());
+        pinned.push(pin0);
+        mismatches.push(vec![0; n_units]);
+        // Fold 1: fold 0's VALUES with pinned=false at the constant
+        // units (Sparse encoding, values unchanged).
+        dense.push(row0.clone());
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // Fold 2: an all-no-pin row (Sparse, empty).
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // Fold 3: bit-equal to fold 0's values but pinned=true at a
+        // CONSTANT unit too (the cross-encoding case: the sparse
+        // form stores the E-valued entry, the column is unchanged).
+        let mut pin3 = vec![false; n_units];
+        pin3[1] = true;
+        dense.push(row0.clone());
+        pinned.push(pin3);
+        mismatches.push(vec![0; n_units]);
+        let matrix = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        assert!(
+            matrix.ll_bits_equal(0, 1),
+            "the twins' ll columns are bit-equal"
+        );
+        assert!(
+            matrix.ll_bits_equal(0, 3),
+            "the cross-encoding twin's column is bit-equal"
+        );
+        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+        for other in 0..matrix.n_folds() {
+            assert_eq!(
+                matrix.class_pair_sum(0, other, &counts).to_bits(),
+                matrix.class_pair_sum(1, other, &counts).to_bits(),
+                "twin rows share one sum against fold {other}"
+            );
+            assert_eq!(
+                matrix.class_pair_sum(0, other, &counts).to_bits(),
+                matrix.class_pair_sum(3, other, &counts).to_bits(),
+                "the cross-encoding twin shares one sum against fold {other}"
+            );
+        }
+        // The hom pair too (a twin against itself is trivially equal;
+        // the twin's hom pair is the same accumulation).
+        assert_eq!(
+            matrix.class_pair_sum(0, 0, &counts).to_bits(),
+            matrix.class_pair_sum(1, 1, &counts).to_bits(),
+            "the twins' hom pairs share one sum"
+        );
+    }
+
+
+    #[test]
+    fn receipt_f64_text_is_the_non_roundtrip_serialization_class() {
+        // THE RECEIPT-SERIALIZATION CLASS, NAMED AND PROOFED (the
+        // frontier-1 probe's verify flags resolved to it, SS10.6.21):
+        // this repo's serde_json carries NO float_roundtrip feature,
+        // so a serialized f64 can emit JSON text that parses back to
+        // a DIFFERENT f64 — one ulp off on the monotone bit axis.
+        // The committed receipts' float fields (the instrument
+        // receipt's class_log_likelihoods, the ingredients' ll_matrix)
+        // are that emission: an offline re-accumulation of the
+        // emitted text can sit 1-2 ulps from the emitted class sum at
+        // pairs whose accumulation crosses affected values, while the
+        // emitting BINARY reproduces its own receipt bit-identically
+        // (the rerun receipt: same binary, same inputs, same bytes).
+        // The class therefore lives in the EMISSION, never in the
+        // scan's float path and never in a consumer's parse: the
+        // byte-identity gates compare BYTES (unaffected); only
+        // offline value-level recomputations see the ulps. The
+        // counterexample below is pinned against the repo's locked
+        // serde_json; if a future dependency flip enables
+        // float_roundtrip, this test names exactly what changed.
+        let value = 1.1919406916781266e-278f64;
+        let text = serde_json::to_string(&value).unwrap();
+        let parsed: f64 = serde_json::from_str(&text).unwrap();
+        assert_eq!(text, "1.1919406916781266e-278");
+        assert_ne!(
+            parsed.to_bits(),
+            value.to_bits(),
+            "the emitted text must parse back one ulp off (the class)"
+        );
+        assert_eq!(ulp_distance(parsed, value), 1);
+        // The class is COMMON, not a corner: a deterministic sweep
+        // finds it across the exponent range (receipted ~31.5% of a
+        // random sweep at the probe; here a small pinned sample).
+        let mut bad = 0usize;
+        let mut state = 0x243F_6A88_85A3_08D3u64;
+        for _ in 0..100_000u64 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let v = f64::from_bits(state & !(0xFu64 << 60));
+            if !v.is_finite() {
+                continue;
+            }
+            let t = serde_json::to_string(&v).unwrap();
+            let back: f64 = serde_json::from_str(&t).unwrap();
+            if back.to_bits() != v.to_bits() {
+                bad += 1;
+            }
+        }
+        assert!(
+            bad > 10_000,
+            "the non-roundtrip class is the common case at this              dependency configuration (saw {bad} of 100k)"
+        );
+    }
+
 }
