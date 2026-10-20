@@ -112,7 +112,7 @@ def build_windows(tranche):
 def main():
     tranche = []
     with open(f"{WT}/tranche.tsv") as f:
-        hdr = f.readline().rstrip("\n").split("\t")
+        hdr = f.readline().lstrip("#").rstrip("\n").split("\t")
         for line in f:
             if line.startswith("#"):
                 continue
