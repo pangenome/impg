@@ -4179,6 +4179,25 @@ struct ClassScanBoundIndex {
     /// A_f per fold (sum over the fold's pinned units ascending —
     /// deterministic, one spelling).
     excess: Vec<f64>,
+    /// THE DERIVED ROUNDING-ERROR SLACK's own inputs (SS10.6.22's
+    /// fix: the bound's f64 evaluation can sit strictly BELOW the
+    /// exact unit-order sum — the receipted 12-ulp shortfall at
+    /// T03226 locus 16 — so every skip comparison consumes the
+    /// bound TOGETHER WITH its own forward-error term, derived in
+    /// `pair_slack` below from the two accumulations' op counts and
+    /// magnitudes; no tuned constants anywhere).
+    /// C itself (integer-valued, exact in f64 below 2^53).
+    total_count: f64,
+    /// |E| — the mix evaluation's error is bounded by it (the max
+    /// term m sits in [E, 0]).
+    abs_elsewhere: f64,
+    /// max over every pinned entry of (ll - E) >= 0 — the largest
+    /// spread the mix's exp/ln terms can carry at this locus.
+    max_spread: f64,
+    /// n_units — the exact accumulation's own length.
+    n_units: usize,
+    /// pinned entries per fold (the bound chain's own length).
+    pinned_counts: Vec<usize>,
 }
 
 /// The per-locus bounded-scan state carried between the scan's two
@@ -4192,6 +4211,11 @@ struct BoundedScanState {
     /// E*C + A_f + A_g per flat pair — the skip certificate's own
     /// numbers, emitted in the labeled bounded receipt.
     pair_bounds: Vec<f64>,
+    /// The DERIVED rounding-error slack per flat pair (the bound's
+    /// own forward-error term, `ClassScanBoundIndex::pair_slack` —
+    /// every skip comparison consumes bound + slack; SS10.6.22's
+    /// fix for the bound's inadmissible-by-rounding shapes).
+    pair_slack: Vec<f64>,
     /// The exact sums computed so far (None = skipped so far; filled
     /// by stage two's kept set and the best-outside fallback — all
     /// deterministic).
@@ -4208,27 +4232,56 @@ impl ClassScanBoundIndex {
     fn build(matrix: &ScoreMatrix, unit_counts: &[f64]) -> ClassScanBoundIndex {
         let total_count: f64 = unit_counts.iter().sum();
         let mut excess = Vec::with_capacity(matrix.rows.len());
+        let mut pinned_counts = Vec::with_capacity(matrix.rows.len());
+        let mut max_spread = 0.0f64;
         for row in &matrix.rows {
             let mut a = 0.0f64;
+            let mut pinned = 0usize;
+            let mut spread = 0.0f64;
             match row {
                 ScoreRow::Sparse(sparse) => {
                     for (&unit, &ll) in sparse.units.iter().zip(&sparse.lls) {
                         a += unit_counts[unit as usize] * (ll - matrix.elsewhere);
+                        pinned += 1;
+                        // total_cmp propagates a NaN spread upward
+                        // (the not-finite-E case) — the conservative
+                        // never-skip direction.
+                        if ll.total_cmp(&matrix.elsewhere) == std::cmp::Ordering::Greater
+                            && (ll - matrix.elsewhere).total_cmp(&spread)
+                                == std::cmp::Ordering::Greater
+                        {
+                            spread = ll - matrix.elsewhere;
+                        }
                     }
                 }
                 ScoreRow::Dense(dense) => {
                     for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
                         if is_pinned {
                             a += unit_counts[unit] * (dense.ll[unit] - matrix.elsewhere);
+                            pinned += 1;
+                            if (dense.ll[unit] - matrix.elsewhere).total_cmp(&spread)
+                                == std::cmp::Ordering::Greater
+                            {
+                                spread = dense.ll[unit] - matrix.elsewhere;
+                            }
                         }
                     }
                 }
             }
+            if spread.total_cmp(&max_spread) == std::cmp::Ordering::Greater {
+                max_spread = spread;
+            }
             excess.push(a);
+            pinned_counts.push(pinned);
         }
         ClassScanBoundIndex {
             e_times_c: matrix.elsewhere * total_count,
             excess,
+            total_count,
+            abs_elsewhere: matrix.elsewhere.abs(),
+            max_spread,
+            n_units: unit_counts.len(),
+            pinned_counts,
         }
     }
 
@@ -4236,6 +4289,61 @@ impl ClassScanBoundIndex {
     /// one spelling, the folds' flat indices in order).
     fn pair_bound(&self, first: usize, second: usize) -> f64 {
         self.e_times_c + self.excess[first] + self.excess[second]
+    }
+
+    /// THE DERIVED ROUNDING-ERROR SLACK — a rigorous upper bound, in
+    /// the standard IEEE-754 round-to-nearest model (unit roundoff
+    /// u = 2^-53; gamma(n) = n*u/(1 - n*u); the standard calculus
+    /// gamma(a)*(1 + gamma(b)) <= gamma(a + b)), on
+    /// (exact_f64_sum - bound_f64) for the pair:
+    ///
+    ///     exact  <= real_sum + err_X      (the unit-order accumulation)
+    ///     real_sum <= real_bound          (the mix0 <= alpha+beta lemma)
+    ///     real_bound <= bound + err_B     (the bound chain)
+    ///     =>  exact <= bound + err_X + err_B.
+    ///
+    /// err_X — the exact accumulation's own drift ABOVE the real
+    /// sum: every unit's term is c * mix with mix in [E, 0]
+    /// (logsumexp >= max >= E), so -real_sum <= |E|*C; the n_units
+    /// adds plus the n_units count-products contribute at most
+    /// gamma(2n)*|E*C| (the op headroom is doubled to carry the
+    /// |E*C| magnitude's own read off the rounded e_times_c); mix's
+    /// OWN evaluation (m + ln(0.5*e^{a-m} + 0.5*e^{b-m}): two
+    /// subtractions bounded by the spread, two exps of values in
+    /// (0, 1], one inner sum in [0.5, 1], one ln in [-ln 2, 0], one
+    /// final add of m with |m| <= |E|) drifts by at most
+    /// u*(|E| + 12*spread + 16) per unit, and the count product's
+    /// own rounding one more u*|E| per unit — together
+    /// u*(2|E| + 12*spread + 16)*C summed over the counts.
+    /// err_B — the bound chain's own drift BELOW the real bound:
+    /// the e_times_c product, the two excess accumulations at three
+    /// roundings per pinned entry (the ll-E subtract, the count
+    /// product, the accumulation add), and the two final adds —
+    /// the standard mixed-sign bound gamma(ops)*(sum of term
+    /// magnitudes), with ops = 3*(k_f + k_g) + 3, the term
+    /// magnitudes read off the rounded index values, and the factor
+    /// 2 carrying those reads' own rounding.
+    /// A non-finite result fails every skip comparison exactly the
+    /// way a NaN bound does — the conservative exhaustive fallback,
+    /// never a silent wrong prune.
+    fn pair_slack(&self, first: usize, second: usize) -> f64 {
+        let u = f64::EPSILON / 2.0;
+        let gamma = |ops: f64| {
+            if ops * u < 1.0 {
+                ops * u / (1.0 - ops * u)
+            } else {
+                f64::INFINITY
+            }
+        };
+        let n = self.n_units as f64;
+        let err_x = gamma(4.0 * n + 4.0) * self.e_times_c.abs()
+            + u * (2.0 * self.abs_elsewhere + 12.0 * self.max_spread + 16.0)
+                * self.total_count;
+        let ops_b =
+            3.0 * (self.pinned_counts[first] + self.pinned_counts[second]) as f64 + 3.0;
+        let err_b =
+            gamma(2.0 * ops_b) * (self.e_times_c.abs() + self.excess[first] + self.excess[second]);
+        err_x + err_b
     }
 }
 
@@ -4250,22 +4358,27 @@ impl ClassScanBoundIndex {
 /// the committed unit-order accumulation (bit-identical to the
 /// exhaustive scan's own value for every pair it touches), the
 /// running best is the max over everything computed so far, and
-/// the search stops when every remaining pair's bound is strictly
-/// below the running best — such a pair's exact sum is <= its bound
-/// < best, so it can neither win nor tie the emitted argmax. THE
-/// WINNER IS NEVER SKIPPED, BY THE BOUND'S OWN ARITHMETIC: the
-/// winner's bound >= its exact sum = best >= the running best at
-/// every point, and the skip requires bound < running best.
-/// Returns the per-pair bounds, the computed exact sums (None = not
-/// yet computed — the stage-two kept set fills the QUAL window),
-/// and best (the exhaustive run's own value, bit for bit: the max
-/// over the computed set is the max over all pairs, since every
-/// never-computed pair's exact sum is strictly below the running
-/// best at the stop).
+/// the search stops when every remaining pair's bound PLUS ITS OWN
+/// DERIVED ROUNDING-ERROR SLACK is strictly below the running best
+/// — such a pair's exact sum is <= its bound + slack < best, so it
+/// can neither win nor tie the emitted argmax. THE WINNER IS NEVER
+/// SKIPPED, BY THE SLACK-CORRECTED ARITHMETIC: the winner's bound +
+/// slack >= its exact sum = best >= the running best at every
+/// point, and the skip requires bound + slack < running best.
+/// THE SLACK (SS10.6.22's fix) is the bound's own forward-error
+/// term, DERIVED from the two accumulations' op counts and
+/// magnitudes — the bound's f64 evaluation can otherwise sit
+/// strictly BELOW the exact unit-order sum (the receipted 12-ulp
+/// shortfall at T03226 locus 16), and the stop rule would fire
+/// legitimately between bit-identical ties. best is the exhaustive
+/// best bit for bit; the provisional called set is the computed
+/// ties in flat order (the exhaustive form's own order) — the
+/// emitted set is REBUILT from the final class_lls after stage
+/// two (see `called_set_from_class_lls`).
 fn bounded_stage_one(
     matrix: &ScoreMatrix,
     unit_counts: &[f64],
-) -> (Vec<f64>, Vec<Option<f64>>, f64) {
+) -> (Vec<f64>, Vec<f64>, Vec<Option<f64>>, f64) {
     let pair_count = matrix.rows.len() * (matrix.rows.len() + 1) / 2;
     let index = ClassScanBoundIndex::build(matrix, unit_counts);
     let pair_bounds: Vec<f64> = (0..pair_count)
@@ -4273,6 +4386,15 @@ fn bounded_stage_one(
         .map(|flat| {
             let (first, second) = unrank_pair(flat);
             index.pair_bound(first, second)
+        })
+        .collect();
+    // the derived rounding-error slack per pair (never tuned: the
+    // bound's own forward-error term — see pair_slack)
+    let pair_slack: Vec<f64> = (0..pair_count)
+        .into_par_iter()
+        .map(|flat| {
+            let (first, second) = unrank_pair(flat);
+            index.pair_slack(first, second)
         })
         .collect();
     // the deterministic search plan: bound descending (f64::total_cmp
@@ -4285,6 +4407,24 @@ fn bounded_stage_one(
             .total_cmp(&pair_bounds[a as usize])
             .then(a.cmp(&b))
     });
+    // the stop certificate's suffix max: the largest bound + slack
+    // over every remaining pair of the plan (a per-pair slack does
+    // not preserve the plan's bound order, so the whole remaining
+    // suffix is folded once; NaN and +inf propagate upward through
+    // total_cmp — the conservative never-stop cases).
+    let mut dominated_suffix: Vec<f64> = vec![f64::NEG_INFINITY; order.len() + 1];
+    for position in (0..order.len()).rev() {
+        let flat = order[position] as usize;
+        let dominated = pair_bounds[flat] + pair_slack[flat];
+        dominated_suffix[position] = if dominated
+            .total_cmp(&dominated_suffix[position + 1])
+            == std::cmp::Ordering::Greater
+        {
+            dominated
+        } else {
+            dominated_suffix[position + 1]
+        };
+    }
     let mut computed: Vec<Option<f64>> = vec![None; pair_count];
     let mut running_best = f64::NEG_INFINITY;
     let mut next = 0usize;
@@ -4304,11 +4444,12 @@ fn bounded_stage_one(
                 running_best = sum;
             }
         }
-        // strict stop: every remaining pair's bound (the max is at
-        // order[end], the plan is descending) is below the running
-        // best, so none can win or tie it.
+        // strict stop, slack-corrected: every remaining pair's exact
+        // sum is <= its bound + slack (the slack's own derivation),
+        // so when the largest remaining bound + slack is strictly
+        // below the running best, none can win or tie it.
         if end == order.len()
-            || pair_bounds[order[end] as usize].partial_cmp(&running_best)
+            || dominated_suffix[end].partial_cmp(&running_best)
                 == Some(std::cmp::Ordering::Less)
         {
             break;
@@ -4316,31 +4457,52 @@ fn bounded_stage_one(
         next = end;
         chunk *= 2;
     }
-    (pair_bounds, computed, running_best)
+    (pair_bounds, pair_slack, computed, running_best)
 }
 
 /// THE BOUNDED CLASS SCAN's STAGE-TWO KEEP THRESHOLD, derived from
 /// the emitted consumers' own arithmetic (no tuned constants):
 /// (a) the QUAL posterior terms need every pair whose exp(ll -
 /// best) can be nonzero, i.e. every pair with ll - best above the
-/// exp-underflow point — a pair with bound < best + t has exact <
-/// best + t, so its every QUAL contribution is exactly +0.0 (the
+/// exp-underflow point — a pair with bound + slack < best + t has
+/// exact < best + t, so its every QUAL contribution is exactly +0.0 (the
 /// committed bit-identity argument); (b) the truth fields (the
 /// receipt's truth_rank / truth_tied_classes / truth_log_likelihood)
 /// need every pair that can be strictly above or tied with the
-/// truth pair — a pair with bound < truth_ll has exact < truth_ll,
+/// truth pair — a pair with bound + slack < truth_ll has exact < truth_ll,
 /// so it is neither; where the truth pair sits INSIDE the QUAL
 /// window (the receipted shape: the log gaps are tens-to-hundreds
 /// of nats, under the 745-nat window) the truth threshold adds
-/// nothing. The kept set is therefore {bound >= min(best + t,
-/// truth_ll)} — the minimum, deterministic, sound for every emitted
-/// consumer.
+/// nothing. The kept set is therefore {bound + the derived
+/// rounding-error slack >= min(best + t, truth_ll)} — the minimum,
+/// deterministic, sound for every emitted consumer (the slack is
+/// SS10.6.22's fix: without it a pair with bound < best + t can
+/// still carry exact >= best + t — the bound's f64 evaluation
+/// rounds below the exact unit-order sum at some shapes, the
+/// receipted 12-ulp shortfall at T03226 locus 16).
 fn bounded_keep_threshold(best: f64, truth_ll: Option<f64>) -> f64 {
     let qual = best + exp_underflow_point();
     match truth_ll {
         Some(truth) => qual.min(truth),
         None => qual,
     }
+}
+
+/// THE FINAL-VALUE TIE-SET CONSTRUCTION — best and the called set
+/// as pure functions of the class_lls vector, the exhaustive
+/// form's own definition (every pair at best, in flat order). The
+/// bounded scan emits through this AFTER stage two's kept window
+/// (the T03226 locus-16 fix, SS10.6.22: the emitted set is a
+/// function of the final exact values — which stage two has
+/// already recovered bit-identical — never of the bound's
+/// rounding); the exhaustive branch uses the same one spelling.
+fn called_set_from_class_lls(class_lls: &[f64]) -> (f64, Vec<(usize, usize)>) {
+    let best = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let called = (0..class_lls.len())
+        .filter(|&flat| class_lls[flat] == best)
+        .map(unrank_pair)
+        .collect();
+    (best, called)
 }
 
 /// The COLLINEARITY verdict of one placement's pins (the slice C
@@ -7229,11 +7391,13 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // accumulation, bit for bit — so the ANSWERS (the MAP pair,
         // the called set, the QUAL terms, the truth fields, the
         // best-outside rival) are the exhaustive run's by the
-        // bound's own arithmetic. The skipped pairs' instrument
+        // bound-plus-slack's own arithmetic and the final-value
+        // tie-set rebuild (SS10.6.22). The skipped pairs' instrument
         // entries become the labeled bounded receipt (the null
-        // skip certificate + the per-pair bounds); the compare
-        // receipt has no bounded form (its both-ways sum IS the
-        // bounded scan's own bookkeeping) and is ignored here.)
+        // skip certificate + the per-pair bounds and their derived
+        // slack); the compare receipt has no bounded form (its
+        // both-ways sum IS the bounded scan's own bookkeeping)
+        // and is ignored here.)
         let class_started = Instant::now();
         let pair_count = n_folds * (n_folds + 1) / 2;
         let unit_counts: Vec<f64> = units.iter().map(|u| u.count as f64).collect();
@@ -7251,17 +7415,19 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let compare_skipped = AtomicU64::new(0);
         // The per-locus bounded state, stage one -> stage two.
         let mut bounded_state: Option<BoundedScanState> = None;
-        let (mut class_lls, best_ll, called): (Vec<f64>, f64, Vec<(usize, usize)>) =
+        let (mut class_lls, mut best_ll, mut called): (Vec<f64>, f64, Vec<(usize, usize)>) =
             if class_scan_bounded {
-                let (pair_bounds, computed, best) = bounded_stage_one(&matrix, &unit_counts);
+                let (pair_bounds, pair_slack, computed, best) =
+                    bounded_stage_one(&matrix, &unit_counts);
                 let stage_one_seconds = class_started.elapsed().as_secs_f64();
-                // The called set from the computed values, in flat
-                // order (the exhaustive form's own order): every
-                // pair that can tie best is inside the search's
-                // computed prefix by the stop's own arithmetic (a
-                // tie's bound >= best is never below the running
-                // best), and every never-computed pair's exact sum
-                // is strictly below it.
+                // The PROVISIONAL called set from stage one's computed
+                // prefix, in flat order (the exhaustive form's own
+                // order) — it carries the winner and the scan-site
+                // invariants (best finite, called non-empty) until
+                // stage two's kept window completes the exact values;
+                // the emitted set is REBUILT from the final class_lls
+                // after stage two (the T03226 locus-16 fix — never a
+                // function of the bound's rounding).
                 let called: Vec<(usize, usize)> = computed
                     .iter()
                     .enumerate()
@@ -7276,6 +7442,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     .collect();
                 bounded_state = Some(BoundedScanState {
                     pair_bounds,
+                    pair_slack,
                     computed,
                     best,
                     stage_one_seconds,
@@ -7330,12 +7497,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         }
                     })
                     .collect();
-                let best_ll =
-                    class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let called: Vec<(usize, usize)> = (0..pair_count)
-                    .filter(|&flat| class_lls[flat] == best_ll)
-                    .map(unrank_pair)
-                    .collect();
+                let (best_ll, called) = called_set_from_class_lls(&class_lls);
                 (class_lls, best_ll, called)
             };
         let mut class_seconds = class_started.elapsed().as_secs_f64();
@@ -7354,7 +7516,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             );
         }
         ensure(best_ll.is_finite(), "no class has anchored evidence at this locus")?;
-        let winner_pair = called[0];
+        let mut winner_pair = called[0];
 
         // -------------------------------------------------- the truth folds
         // (Window-aware, the chrIV generalization: the truth FIRST
@@ -7493,15 +7655,16 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let truth_flat = truth_pair.map(|(a, b)| b * (b + 1) / 2 + a);
         // ------------------------- the bounded scan's STAGE TWO (the kept set)
         // (The truth pair is now resolved, so the derived keep
-        // threshold is final: the QUAL window {bound >= best + the
-        // exp-underflow point} extended by the truth window where
-        // the truth pair sits outside it. The truth pair itself is
-        // computed FIRST — it is always kept (its own bound >= its
-        // exact ll) — so the receipt's truth fields read the exact
-        // value. Every pair the stage-two pass computes is summed by
-        // the committed unit-order accumulation, so every value is
-        // the exhaustive scan's own bit for bit; the kept/skipped
-        // sets are deterministic functions of the matrix alone.)
+        // threshold is final: the QUAL window {bound + the derived
+        // rounding-error slack >= best + the exp-underflow point}
+        // extended by the truth window where the truth pair sits
+        // outside it. The truth pair itself is computed FIRST — it
+        // is always kept (its own bound + slack >= its exact ll) —
+        // so the receipt's truth fields read the exact value.
+        // Every pair the stage-two pass computes is summed by the
+        // committed unit-order accumulation, so every value is the
+        // exhaustive scan's own bit for bit; the kept/skipped sets
+        // are deterministic functions of the matrix alone.)
         if let Some(state) = bounded_state.as_mut() {
             let stage_two_started = Instant::now();
             let truth_ll: Option<f64> = match truth_flat {
@@ -7521,7 +7684,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             let kept: Vec<usize> = (0..pair_count)
                 .filter(|&flat| {
                     state.computed[flat].is_none()
-                        && state.pair_bounds[flat] >= keep_threshold
+                        && state.pair_bounds[flat] + state.pair_slack[flat] >= keep_threshold
                 })
                 .collect();
             let sums: Vec<(usize, f64)> = kept
@@ -7535,6 +7698,22 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 state.computed[flat] = Some(sum);
                 class_lls[flat] = sum;
             }
+            // THE TIE-SET REBUILD (the T03226 locus-16 fix,
+            // SS10.6.22): the emitted called set, best, and the
+            // winner they name are REBUILT from the FINAL class_lls
+            // — a pure function of the final exact values, never of
+            // the bound's rounding. Stage two's kept window has
+            // already recovered every tie bit-identical (a tie's
+            // bound + slack sits at best, far above the keep
+            // threshold), so this equals the exhaustive called set;
+            // the best-outside fallback that runs later can only
+            // patch pairs whose exact sums sit below the keep
+            // threshold — far below best — so it can never change
+            // the rebuilt set.
+            let (rebuilt_best, rebuilt_called) = called_set_from_class_lls(&class_lls);
+            best_ll = rebuilt_best;
+            called = rebuilt_called;
+            winner_pair = called[0];
             class_seconds += stage_two_started.elapsed().as_secs_f64();
             let known = state
                 .computed
@@ -7729,20 +7908,23 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         });
         // The best divergent rival outside the excluded band.
         // (THE BOUNDED SCAN'S BEST-OUTSIDE FALLBACK — the receipted
-        // branch-and-bound form, SS10.6.21 (d): the skipped pairs'
-        // exact sums are unknown, but each is bounded above by its
-        // own bound, so the argmax over the SKIPPED non-excluded
-        // pairs is walked in bound-DESCENDING order (ties by flat
-        // index — deterministic) until the next bound falls to the
-        // running max or below: every pair beyond has exact <= bound
-        // <= running max, so the walk's max is the exhaustive run's
+        // branch-and-bound form, SS10.6.21 (d), slack-corrected the
+        // SS10.6.22 way: the skipped pairs' exact sums are unknown,
+        // but each is bounded above by its own bound + the derived
+        // rounding-error slack, so the argmax over the SKIPPED
+        // non-excluded pairs is walked in bound-plus-slack
+        // DESCENDING order (ties by flat index — deterministic)
+        // until the next dominated bound falls to the running max
+        // or below: every pair beyond has exact <= bound + slack <=
+        // running max, so the walk's max is the exhaustive run's
         // own value. A second deterministic sweep then computes the
-        // exact sums of every skipped non-excluded pair whose bound
-        // is at or above the found max — the tied set's own members
-        // (a pair below the max's bound cannot tie it) — and patches
-        // them into class_lls, so the emitted tied classes and the
-        // records' named pairs are the exhaustive run's own. Where
-        // nothing is skipped this is the committed fold verbatim.)
+        // exact sums of every skipped non-excluded pair whose
+        // bound + slack is at or above the found max — the tied
+        // set's own members (a pair below the max's dominated bound
+        // cannot tie it) — and patches them into class_lls, so the
+        // emitted tied classes and the records' named pairs are the
+        // exhaustive run's own. Where nothing is skipped this is the
+        // committed fold verbatim.)
         let best_outside_log_likelihood = cluster.as_ref().map(|state| {
             let kept_max = spectrum
                 .iter()
@@ -7761,8 +7943,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         .filter(|&flat| bounded.computed[flat].is_none())
                         .collect();
                     candidates.sort_by(|&a, &b| {
-                        bounded.pair_bounds[b]
-                            .total_cmp(&bounded.pair_bounds[a])
+                        (bounded.pair_bounds[b] + bounded.pair_slack[b])
+                            .total_cmp(&(bounded.pair_bounds[a] + bounded.pair_slack[a]))
                             .then(a.cmp(&b))
                     });
                     candidates
@@ -7772,9 +7954,14 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             let mut next = 0usize;
             while next < skipped_nonexcluded.len() {
                 let flat = skipped_nonexcluded[next];
+                // the dominated bound: the pair's own bound + its
+                // derived rounding-error slack (the same
+                // slack-corrected dominance premise as stage one's
+                // stop — the walk continues while it is strictly
+                // above the running max)
                 let bound = bounded_state
                     .as_ref()
-                    .map(|bounded| bounded.pair_bounds[flat])
+                    .map(|bounded| bounded.pair_bounds[flat] + bounded.pair_slack[flat])
                     .unwrap_or(f64::NEG_INFINITY);
                 if bound.partial_cmp(&running_max) != Some(std::cmp::Ordering::Greater) {
                     break;
@@ -7798,7 +7985,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     .copied()
                     .filter(|&flat| {
                         bounded.computed[flat].is_none()
-                            && bounded.pair_bounds[flat] >= running_max
+                            && bounded.pair_bounds[flat] + bounded.pair_slack[flat] >= running_max
                     })
                     .collect();
                 for flat in tied {
@@ -8589,9 +8776,11 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             // member) = SKIPPED by the derived bound — the pair's
             // exact sum sits below best + the derived exp-underflow
             // point (its every QUAL contribution is exactly +0.0),
-            // its per-pair bound is emitted in the certificate, and
-            // the answers are the exhaustive run's own by the
-            // bound's arithmetic (SS10.6.21).
+            // its per-pair bound and the bound's derived
+            // rounding-error slack are emitted in the certificate,
+            // and the answers are the exhaustive run's own by the
+            // bound-plus-slack's arithmetic and the final-value
+            // tie-set rebuild (SS10.6.21, SS10.6.22).
             "class_log_likelihoods": class_lls,
             "best_log_likelihood": best_ll,
             "best_fold_indices": [winner_pair.0, winner_pair.1],
@@ -8882,14 +9071,20 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     truth_log_likelihood,
                 ),
                 "pair_bounds": bounded.pair_bounds.clone(),
+                "pair_slack": bounded.pair_slack.clone(),
                 "note": "the labeled bounded class scan (the sanctioned \
                          frontier-1 mode): class_log_likelihoods is the exact \
                          committed sum at kept pairs and null at skipped ones; \
-                         pair_bounds carries E*C + A_f + A_g per pair (the skip \
-                         certificate); every answer (the MAP pair, the called set, \
-                         the QUAL terms, the truth fields, the best-outside rival) \
-                         is the exhaustive run's own by the bound's arithmetic \
-                         (SS10.6.21)",
+                         pair_bounds carries E*C + A_f + A_g per pair and \
+                         pair_slack each bound's own derived rounding-error \
+                         term (every skip comparison consumes bound + slack — \
+                         the bound's f64 evaluation can round below the exact \
+                         unit-order sum, the receipted 12-ulp class at T03226 \
+                         locus 16); the emitted called set is rebuilt from the \
+                         final class_lls (the tie-set fix); every answer (the \
+                         MAP pair, the called set, the QUAL terms, the truth \
+                         fields, the best-outside rival) is the exhaustive \
+                         run's own (SS10.6.21, SS10.6.22)",
             });
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
@@ -11971,6 +12166,22 @@ mod tests {
                         bound >= exact,
                         "bound {bound} below exact {exact} at ({first},{second})"
                     );
+                    // THE SLACK-CORRECTED DOMINANCE (the shape class
+                    // the committed five shapes do NOT include — the
+                    // bound's f64 evaluation can round below the
+                    // exact unit-order sum, SS10.6.22's receipted
+                    // 12-ulp shortfall): exact <= bound + the
+                    // derived forward-error term, at every shape.
+                    let slack = index.pair_slack(first, second);
+                    assert!(
+                        exact <= bound + slack,
+                        "exact {exact} above bound {bound} + derived slack {slack} \
+                         at ({first},{second})"
+                    );
+                    assert!(
+                        slack.is_finite() && slack >= 0.0,
+                        "the derived slack must be a finite nonnegative term"
+                    );
                 }
             }
         }
@@ -12036,9 +12247,12 @@ mod tests {
                 .map(unrank_pair)
                 .collect();
             // stage one, twice (the determinism receipt)
-            let (bounds_a, computed_a, best_a) = bounded_stage_one(&matrix, &counts);
-            let (bounds_b, computed_b, best_b) = bounded_stage_one(&matrix, &counts);
+            let (bounds_a, slacks_a, computed_a, best_a) =
+                bounded_stage_one(&matrix, &counts);
+            let (_bounds_b, slacks_b, computed_b, best_b) =
+                bounded_stage_one(&matrix, &counts);
             assert_eq!(best_a.to_bits(), best_b.to_bits());
+            assert_eq!(slacks_a, slacks_b, "the derived slack is deterministic");
             assert_eq!(best_a.to_bits(), exhaustive_best.to_bits(), "stage one's best");
             assert!(
                 computed_a.len() == computed_b.len()
@@ -12070,7 +12284,7 @@ mod tests {
             );
             let mut known = computed_a.clone();
             for flat in 0..pair_count {
-                if known[flat].is_none() && bounds_a[flat] >= keep_threshold {
+                if known[flat].is_none() && bounds_a[flat] + slacks_a[flat] >= keep_threshold {
                     let (first, second) = unrank_pair(flat);
                     known[flat] = Some(matrix.class_pair_sum(first, second, &counts));
                 }
@@ -12095,8 +12309,8 @@ mod tests {
                         );
                         assert_eq!((exhaustive[flat] - best_a).exp(), 0.0);
                         assert!(
-                            bounds_a[flat] < keep_threshold,
-                            "the skip certificate's own threshold"
+                            bounds_a[flat] + slacks_a[flat] < keep_threshold,
+                            "the skip certificate's own slack-corrected threshold"
                         );
                     }
                 }
@@ -12113,7 +12327,202 @@ mod tests {
             let (winner_first, winner_second) = exhaustive_called[0];
             let winner_flat = winner_second * (winner_second + 1) / 2 + winner_first;
             assert!(computed_a[winner_flat].is_some(), "the winner is kept");
+            // THE FINAL-VALUE TIE-SET REBUILD (the T03226 locus-16
+            // fix's own construction): best and the called set as
+            // pure functions of the stage-two-patched class_lls —
+            // the exhaustive ones, at every shape above.
+            let final_lls: Vec<f64> = known
+                .iter()
+                .map(|value| value.unwrap_or(f64::NEG_INFINITY))
+                .collect();
+            let (rebuilt_best, rebuilt_called) = called_set_from_class_lls(&final_lls);
+            assert_eq!(
+                rebuilt_best.to_bits(),
+                exhaustive_best.to_bits(),
+                "the rebuilt best"
+            );
+            assert_eq!(rebuilt_called, exhaustive_called, "the rebuilt called set");
         }
+    }
+
+    #[test]
+    fn bounded_tie_set_rebuilt_from_the_final_class_lls() {
+        // THE T03226 LOCUS-16 BUG CLASS, SYNTHESIZED AND FIXED: the
+        // bound's f64 evaluation can sit strictly BELOW the exact
+        // unit-order sum (the receipted 12-ulp shortfall — the bound
+        // inadmissible-by-rounding at tie shapes), so stage one's
+        // strict stop could fire legitimately BETWEEN bit-identical
+        // ties and the emitted called set — built from stage one's
+        // computed prefix only — silently lost them. The fix under
+        // test, both halves: (a) THE DERIVED SLACK — every skip
+        // comparison consumes bound + the bound's own
+        // forward-error term, restoring exact <= bound + slack so
+        // the stop can no longer fire between ties; (b) THE
+        // FINAL-VALUE REBUILD — the emitted called set is a pure
+        // function of the final class_lls, never of the bound's
+        // rounding. SYNTHESIZING THE SHAPE CLASS: two BIT-IDENTICAL
+        // folds (a guaranteed three-way tie: pairs (0,0), (0,1),
+        // (1,1) share one accumulation bit for bit) whose pinned
+        // entries sit a FEW ULPs ABOVE E (the committed
+        // row-compression class — a pinned entry's marginalization
+        // rounds to >= E — with the excess mass tiny), so the bound
+        // fl(fl(E*C + A_f) + A_g) carries the big E*C-against-A
+        // cancellation while the exact sums accumulate unit-order:
+        // the bound can round strictly BELOW the exact tie —
+        // precisely the receipted mechanism. The search is
+        // deterministic (a fixed grid, no RNG) and asserts its own
+        // premise found.
+        let ulps_up = |value: f64, k: usize| {
+            let mut bits = value.to_bits();
+            for _ in 0..k {
+                bits += 1; // value < 0: +1 bit pattern is one ulp toward +inf
+            }
+            f64::from_bits(bits)
+        };
+        let shape_rows = |n_units: usize, elsewhere: f64| -> Vec<Vec<f64>> {
+            vec![
+                (0..n_units)
+                    .map(|unit| {
+                        if unit % 5 < 3 {
+                            ulps_up(elsewhere, 1 + unit % 3)
+                        } else {
+                            elsewhere
+                        }
+                    })
+                    .collect(),
+                (0..n_units)
+                    .map(|unit| {
+                        if unit % 5 < 3 {
+                            ulps_up(elsewhere, 1 + unit % 3)
+                        } else {
+                            elsewhere
+                        }
+                    })
+                    .collect(),
+            ]
+        };
+        let shape_matrix = |n_units: usize, elsewhere: f64| -> ScoreMatrix {
+            ScoreMatrix::from_dense(
+                shape_rows(n_units, elsewhere),
+                vec![
+                    (0..n_units).map(|unit| unit % 5 < 3).collect(),
+                    (0..n_units).map(|unit| unit % 5 < 3).collect(),
+                ],
+                vec![vec![0u32; n_units], vec![0u32; n_units]],
+                elsewhere,
+            )
+        };
+        let mut found: Option<(usize, f64, f64, f64)> = None;
+        for n_units in [61usize, 131, 293] {
+            let counts: Vec<f64> =
+                (0..n_units).map(|unit| 1.0 + (unit % 9) as f64).collect();
+            for step in 1..=400i32 {
+                let elsewhere = -(2.0 + step as f64 * 0.0137713137);
+                let matrix = shape_matrix(n_units, elsewhere);
+                let exact0 = matrix.class_pair_sum(0, 0, &counts);
+                let index = ClassScanBoundIndex::build(&matrix, &counts);
+                let bound = index.pair_bound(0, 0);
+                // the rounding class: the exact tie sits strictly
+                // ABOVE the bound (the bound is
+                // inadmissible-by-rounding at this shape), and all
+                // three pairs share the bound (the tie shape)
+                if exact0 > bound
+                    && index.pair_bound(0, 1) == bound
+                    && index.pair_bound(1, 1) == bound
+                {
+                    found = Some((n_units, elsewhere, bound, exact0));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let Some((n_units, elsewhere, bound, exact0)) = found else {
+            panic!(
+                "the search found no inadmissible-by-rounding tie shape — \
+                 the test's premise shape class is gone"
+            );
+        };
+        let counts: Vec<f64> =
+            (0..n_units).map(|unit| 1.0 + (unit % 9) as f64).collect();
+        let matrix = shape_matrix(n_units, elsewhere);
+        let pair_count = 3usize;
+        // all three pairs tie bit-identical at the accumulated sum
+        let exhaustive: Vec<f64> = (0..pair_count)
+            .map(|flat| {
+                let (first, second) = unrank_pair(flat);
+                matrix.class_pair_sum(first, second, &counts)
+            })
+            .collect();
+        assert_eq!(exhaustive[0].to_bits(), exact0.to_bits());
+        assert_eq!(exhaustive[1].to_bits(), exact0.to_bits());
+        assert_eq!(exhaustive[2].to_bits(), exact0.to_bits());
+        let (exhaustive_best, exhaustive_called) = called_set_from_class_lls(&exhaustive);
+        assert_eq!(exhaustive_best.to_bits(), exact0.to_bits());
+        assert_eq!(exhaustive_called, vec![(0, 0), (0, 1), (1, 1)]);
+        // THE RECEIPTED MECHANISM, at this shape: the bound sits
+        // strictly below the exact best (the old stop rule fired on
+        // exactly this comparison after computing (0,0) alone)
+        assert!(
+            bound < exact0,
+            "the premise: bound {bound} must sit below the exact tie {exact0}"
+        );
+        // (a) THE DERIVED SLACK: the bound-plus-slack dominance
+        // holds at exactly the shape where the bare bound fails
+        let index = ClassScanBoundIndex::build(&matrix, &counts);
+        for flat in 0..pair_count {
+            let (first, second) = unrank_pair(flat);
+            let slack = index.pair_slack(first, second);
+            assert!(slack.is_finite() && slack < 1e-6);
+            assert!(
+                exhaustive[flat] <= index.pair_bound(first, second) + slack,
+                "the slack-corrected dominance must hold at pair {flat}"
+            );
+        }
+        // and the slack-corrected stop no longer fires between the
+        // ties: stage one computes the full tie set
+        let (bounds, slacks, computed, best) = bounded_stage_one(&matrix, &counts);
+        assert_eq!(best.to_bits(), exact0.to_bits(), "stage one's best");
+        for flat in 0..pair_count {
+            assert!(
+                computed[flat].is_some(),
+                "the slack-corrected stop must not skip tie pair {flat}"
+            );
+            assert_eq!(
+                computed[flat].unwrap().to_bits(),
+                exact0.to_bits(),
+                "stage one's tie value must be the exhaustive one"
+            );
+        }
+        // (b) THE FINAL-VALUE REBUILD, at the receipted old state:
+        // the OLD code's stage one stopped after (0,0) — the two
+        // other ties uncomputed, their equal bounds strictly below
+        // the exact best — so the old class_lls carried the prefix
+        // only, and the old construction (from the prefix) emitted
+        // the short set: the bug, receipted
+        let old_class_lls = vec![exact0, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let (_, old_called) = called_set_from_class_lls(&old_class_lls);
+        assert_eq!(old_called, vec![(0, 0)], "the old prefix-only emission");
+        // stage two's keep window (the production form: no truth
+        // pair) selects the two skipped ties of the old state —
+        // their bounds + slack sit far above the derived threshold
+        let keep_threshold = bounded_keep_threshold(best, None);
+        let mut patched = old_class_lls;
+        for flat in 0..pair_count {
+            if patched[flat] == f64::NEG_INFINITY
+                && bounds[flat] + slacks[flat] >= keep_threshold
+            {
+                let (first, second) = unrank_pair(flat);
+                patched[flat] = matrix.class_pair_sum(first, second, &counts);
+            }
+        }
+        assert_eq!(patched[1].to_bits(), exact0.to_bits());
+        assert_eq!(patched[2].to_bits(), exact0.to_bits());
+        // and the rebuild from the FINAL values emits the full tie
+        let (rebuilt_best, rebuilt_called) = called_set_from_class_lls(&patched);
+        assert_eq!(rebuilt_best.to_bits(), exact0.to_bits());
+        assert_eq!(rebuilt_called, exhaustive_called);
     }
 
     #[test]
