@@ -215,11 +215,30 @@ candidate scan itself is bounded by CONTENT, not by f² (fit vs
 folds_pre²: R²=0.01 — the typical fold has a handful of equal-column
 neighbors, not f of them).
 
+**THE MERGE'S OWN RECEIPT AT THE FOLD-HEAVY SHAPE (new, this window):**
+T03226 l15 is the fold-heavy/unit-light extreme — 459 members → 247
+pre-merge folds over 36 units = 30,628 class pairs, and the PRE-MERGE
+locus costs **228.4 s serial** (the census instrument decomposes it:
+scoring 0.01 s, receipts/IO 32.7 s — the residual ~195 s is a
+per-class-pair constant of ~6.4 ms, three orders above the 18.4 ns
+unit-pair rate, at a shape where the unit-pair model predicts 0.02 s).
+WITH THE COMMITTED MERGE the same locus is **36 folds / 666 classes /
+0.5 s — a 455x class-pair reduction at exactly the shape where the
+per-pair constant bites** (the single-locus receipts:
+`T03226-w10k-census{,-premerge}/`). The corpus's fold-heavy regime
+(1,328 loci at units<2,000, classes>5,000) fits wall ≈ 0.000431·
+ classes^0.78 (R²=0.66, per-pair median 0.06 ms) — the l15 shape is
+that regime's heavy tail, and the merge is the lever that already
+collapses it. (The per-pair constant's own mechanism at the extreme
+shapes is the one term this window's instruments did not resolve —
+OPEN, named.)
+
 **The principled candidate-count reduction (the evidence model's own
 expressibility — no thresholds):** three of the four are already in
-the product. (1) The (path,start,end) dedup — committed. (2) The
-bit-identical-column merge — committed (the alignment-connected
-relaxation). (3) The bit-equal-ROW memoization across the pair sums —
+the product, and the l15 receipt prices the second one at 455x. (1) The
+(path,start,end) dedup — committed. (2) The bit-identical-column merge
+— committed (the alignment-connected relaxation; 455x at l15, ~10%
+median). (3) The bit-equal-ROW memoization across the pair sums —
 exact-preserving, unit-proven (`bit_equal_rows_share_one_class_sum`),
 measured 23.9-37.7% at the monsters, **NOT implemented** (the named
 Frontier-1 residual; it is the one remaining expressibility reduction
@@ -230,7 +249,7 @@ evidence column, and cutting any of them is a threshold, not a
 reduction** — the owner's own doctrine. The only structural way to
 fewer folds per candidate pair is the ROUTES doctrine (panel-side:
 fewer, coarser distinct paths per window) — which is the grain lever's
-territory (§5), not the call's.
+territory (§5, measured and refused), not the call's.
 
 ---
 
