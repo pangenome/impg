@@ -123,5 +123,20 @@ lost with the reap.
 
 ## THE REAP RECEIPT
 
-(to be appended after the deletion — receipts were committed first,
-deletion second, never the reverse order.)
+Deleted 2026-10-21T21:29Z, AFTER the receipts were committed
+(git 6797a73; mine first, delete after, never the reverse). The entire
+workspace
+`/mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2`
+(1.1T measured: the call dirs' instrumented raw streams ~300M per
+call — the doctrine's banned raw-dump class; the cut dirs' census +
+cache + cut-reads; the prep substrates, syng indexes, export
+graphs/walks, partition beds; the bridge FASTAs; the reads; the rvcut
+restriction bases) plus the now-empty parent dir. Kept outside the
+reap: these receipts (376KB) and the definitional smalls at
+`/home/erikg/hprcv2/panel/tranche2/` (11MB).
+
+| | df /mnt/nvme2n1 (BG) |
+|---|---:|
+| before the reap | used 13,244G, avail 1,063G (93%)
+| after the reap | used 12,118G, avail 2,189G (85%)
+| **freed** | **1,126G (1.10T)** — the owner's "then the 1.1T goes," receipted |

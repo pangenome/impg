@@ -701,9 +701,12 @@ exit 0, wall 13,206s, 108 rows in 4 chunks (cut phases 3,173 / 6,760
 / 12,241 / 4,056s, panel load 190s); 16/16 in-child production calls
 landed with non-empty output; cutA 108/108, cutB 108/108.
 
-**THE REAP:** the 1.1T workspace mass (the call dirs' mass was the
+**THE REAP (receipted):** the workspace mass (the call dirs' mass was the
 instrumented raw streams — ingredients/records/skeleton receipts ~300M
 per call, exactly the doctrine's banned raw dumps; the cut dirs'
 census/cache; the prep substrates; the bridge FASTAs; the reads) was
-deleted AFTER this commit. Freed-space receipt:
-`docs/syng-gmem-bwt/tranche2-mined/README.md` (df before/after).
+deleted AFTER the receipts were committed (git 6797a73; mine first,
+delete after, never the reverse). **FREED: 1,126G (1.10T)** — df
+/mnt/nvme2n1 used 13,244G → 12,118G, avail 1,063G → 2,189G (93% →
+85%). The full reap receipt:
+`docs/syng-gmem-bwt/tranche2-mined/README.md`.
