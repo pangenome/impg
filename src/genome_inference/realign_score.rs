@@ -3938,8 +3938,27 @@ impl ScoreMatrix {
 /// measured and named).
 #[derive(Clone, Copy)]
 enum ClassScanOrder {
+    /// The committed exhaustive unit-order accumulation, bit-
+    /// reproducible — the receipts' form (the toggle-doctrine restore:
+    /// IMPG_CLASS_SCAN_ORDER=exact).
     Exact,
+    /// The legacy sparse-skip accumulation order (IMPG_CLASS_SCAN-
+    /// ORDER=sparse-skip), unchanged.
     SparseSkip,
+    /// THE SANCTIONED BOUNDED CLASS SCAN (the owner's ruling on
+    /// SS10.6.21's frontier-1 design; the PRODUCTION DEFAULT, env
+    /// unset): the per-fold excess-mass bound E*C + A_f + A_g with
+    /// the derived exp-underflow skip threshold — a branch-and-bound
+    /// over the class-pair space whose kept pairs are summed by the
+    /// EXACT committed unit-order accumulation, so every computed
+    /// value is bit-identical to the exhaustive scan's and every
+    /// answer (the MAP pair, the called set, the QUAL terms, the
+    /// truth fields, the best-outside rival) is preserved BY THE
+    /// BOUND'S OWN ARITHMETIC. The skipped pairs' instrument entries
+    /// become the labeled bounded receipt (the null skip
+    /// certificate + the per-pair bounds), so no bounded output can
+    /// be mistaken for an exhaustive one.
+    Bounded,
 }
 
 /// The ulp distance between two f64s on the monotone bit axis
@@ -4097,6 +4116,230 @@ impl<'a> ClassScanFastIndex<'a> {
             union_len += 1;
         }
         (self.n_units - union_len) as u64
+    }
+}
+
+/// The f64 exp underflow point, DERIVED BY EVALUATION (never a tuned
+/// constant): the largest f64 t with exp(t) == +0.0, found by a
+/// bit-axis binary search between a known-nonzero anchor (-744 —
+/// e^-744 ~ 2^-1073.4, far above the boundary) and the
+/// real-arithmetic boundary -1075*ln 2 (known to underflow). Every
+/// x <= t underflows to exactly +0.0, so a class pair whose exact
+/// sum sits at or below best + t contributes EXACTLY +0.0 to every
+/// QUAL posterior term the exhaustive run computes — the derived
+/// skip threshold of the sanctioned bounded class scan (the same
+/// derivation the committed test exp_underflow_point_derived_by_
+/// evaluation proves, and the probe's own constant).
+fn exp_underflow_point() -> f64 {
+    let mut lo = -744.0f64;
+    let mut hi = -1075.0f64 * 2.0f64.ln();
+    assert!(lo.exp() > 0.0);
+    assert_eq!(hi.exp(), 0.0);
+    while hi.to_bits() - lo.to_bits() > 1 {
+        // the midpoint on the bit axis WITHOUT the u64 sum overflow
+        // (both anchors are negative doubles: their bit patterns sum
+        // past u64::MAX).
+        let mid = f64::from_bits(lo.to_bits() + (hi.to_bits() - lo.to_bits()) / 2);
+        if mid == lo || mid == hi {
+            break;
+        }
+        if mid.exp() == 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
+/// THE PER-FOLD EXCESS-MASS BOUND INDEX (the sanctioned frontier-1
+/// design, SS10.6.21 — the owner's "take the better, faster one"):
+/// every per-(fold, unit) log-likelihood is either exactly the
+/// elsewhere constant E (the no-pin branch — the committed
+/// row-compression exactness argument: a pinned pair's local branch
+/// is finite, so its marginalization logsumexp2(local, E) rounds to
+/// >= E, with float equality only by rounding; an unpinned entry is
+/// exactly E) or E + alpha with alpha >= 0, so with C = sum_u c_u
+/// the class pair sum decomposes exactly (real arithmetic) as
+/// S(f,g) = E*C + sum_u c_u * mix0(alpha_f[u], alpha_g[u]) and, since
+/// mix0(a, b) <= a + b for a, b >= 0 (WLOG a >= b: mix0 = a +
+/// ln(0.5 + 0.5e^{b-a}) <= a),
+///
+///     S(f,g) <= E*C + A_f + A_g,   A_f = sum_u c_u * alpha_f[u]
+///
+/// — ONE SCALAR PER FOLD, one walk over the fold's pinned entries:
+/// the whole bound index costs a fraction of ONE class-pair walk per
+/// fold pair (the probe's receipted 0.01-1.2% of the scan it
+/// bounds). If E is not finite the bounds are NaN and NOTHING is
+/// skipped (NaN fails every skip comparison) — the conservative
+/// exhaustive fallback, never a silent wrong prune.
+struct ClassScanBoundIndex {
+    /// E * C (one multiply; C = the locus's total unit-count mass).
+    e_times_c: f64,
+    /// A_f per fold (sum over the fold's pinned units ascending —
+    /// deterministic, one spelling).
+    excess: Vec<f64>,
+}
+
+/// The per-locus bounded-scan state carried between the scan's two
+/// stages: STAGE ONE (the deterministic search for best) at the
+/// class-scan site, STAGE TWO (the derived kept set + the truth
+/// window) once the truth pair is resolved, and the best-outside
+/// fallback afterwards. Every set it carries is a deterministic
+/// function of the matrix alone, so two bounded runs are
+/// byte-identical.
+struct BoundedScanState {
+    /// E*C + A_f + A_g per flat pair — the skip certificate's own
+    /// numbers, emitted in the labeled bounded receipt.
+    pair_bounds: Vec<f64>,
+    /// The exact sums computed so far (None = skipped so far; filled
+    /// by stage two's kept set and the best-outside fallback — all
+    /// deterministic).
+    computed: Vec<Option<f64>>,
+    /// Stage one's running best — the exhaustive run's own value,
+    /// bit for bit.
+    best: f64,
+    /// Stage one's own wall (the bound index + the search),
+    /// receipted separately from stage two's kept-set pass.
+    stage_one_seconds: f64,
+}
+
+impl ClassScanBoundIndex {
+    fn build(matrix: &ScoreMatrix, unit_counts: &[f64]) -> ClassScanBoundIndex {
+        let total_count: f64 = unit_counts.iter().sum();
+        let mut excess = Vec::with_capacity(matrix.rows.len());
+        for row in &matrix.rows {
+            let mut a = 0.0f64;
+            match row {
+                ScoreRow::Sparse(sparse) => {
+                    for (&unit, &ll) in sparse.units.iter().zip(&sparse.lls) {
+                        a += unit_counts[unit as usize] * (ll - matrix.elsewhere);
+                    }
+                }
+                ScoreRow::Dense(dense) => {
+                    for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
+                        if is_pinned {
+                            a += unit_counts[unit] * (dense.ll[unit] - matrix.elsewhere);
+                        }
+                    }
+                }
+            }
+            excess.push(a);
+        }
+        ClassScanBoundIndex {
+            e_times_c: matrix.elsewhere * total_count,
+            excess,
+        }
+    }
+
+    /// The admissible upper bound E*C + A_f + A_g (deterministic:
+    /// one spelling, the folds' flat indices in order).
+    fn pair_bound(&self, first: usize, second: usize) -> f64 {
+        self.e_times_c + self.excess[first] + self.excess[second]
+    }
+}
+
+/// THE BOUNDED CLASS SCAN's STAGE ONE — the deterministic
+/// branch-and-bound search for best (the strict running-best form
+/// the receipts name): pairs are walked in bound-DESCENDING order
+/// (ties by flat index — one spelling, so the plan and every
+/// computed value are functions of the matrix alone, never of the
+/// thread schedule), in rounds of geometrically doubling width (a
+/// derived schedule — 1, 2, 4, ... pairs per round, no tuned
+/// constant); each round's exact sums are computed in parallel by
+/// the committed unit-order accumulation (bit-identical to the
+/// exhaustive scan's own value for every pair it touches), the
+/// running best is the max over everything computed so far, and
+/// the search stops when every remaining pair's bound is strictly
+/// below the running best — such a pair's exact sum is <= its bound
+/// < best, so it can neither win nor tie the emitted argmax. THE
+/// WINNER IS NEVER SKIPPED, BY THE BOUND'S OWN ARITHMETIC: the
+/// winner's bound >= its exact sum = best >= the running best at
+/// every point, and the skip requires bound < running best.
+/// Returns the per-pair bounds, the computed exact sums (None = not
+/// yet computed — the stage-two kept set fills the QUAL window),
+/// and best (the exhaustive run's own value, bit for bit: the max
+/// over the computed set is the max over all pairs, since every
+/// never-computed pair's exact sum is strictly below the running
+/// best at the stop).
+fn bounded_stage_one(
+    matrix: &ScoreMatrix,
+    unit_counts: &[f64],
+) -> (Vec<f64>, Vec<Option<f64>>, f64) {
+    let pair_count = matrix.rows.len() * (matrix.rows.len() + 1) / 2;
+    let index = ClassScanBoundIndex::build(matrix, unit_counts);
+    let pair_bounds: Vec<f64> = (0..pair_count)
+        .into_par_iter()
+        .map(|flat| {
+            let (first, second) = unrank_pair(flat);
+            index.pair_bound(first, second)
+        })
+        .collect();
+    // the deterministic search plan: bound descending (f64::total_cmp
+    // orders NaN above everything, so a NaN bound — the not-finite-E
+    // case — is walked early and never skips anything), ties by flat
+    // index ascending.
+    let mut order: Vec<u32> = (0..pair_count as u32).collect();
+    order.sort_by(|&a, &b| {
+        pair_bounds[b as usize]
+            .total_cmp(&pair_bounds[a as usize])
+            .then(a.cmp(&b))
+    });
+    let mut computed: Vec<Option<f64>> = vec![None; pair_count];
+    let mut running_best = f64::NEG_INFINITY;
+    let mut next = 0usize;
+    let mut chunk = 1usize;
+    while next < order.len() {
+        let end = (next + chunk).min(order.len());
+        let sums: Vec<(u32, f64)> = order[next..end]
+            .par_iter()
+            .map(|&flat| {
+                let (first, second) = unrank_pair(flat as usize);
+                (flat, matrix.class_pair_sum(first, second, unit_counts))
+            })
+            .collect();
+        for (flat, sum) in sums {
+            computed[flat as usize] = Some(sum);
+            if sum > running_best {
+                running_best = sum;
+            }
+        }
+        // strict stop: every remaining pair's bound (the max is at
+        // order[end], the plan is descending) is below the running
+        // best, so none can win or tie it.
+        if end == order.len()
+            || pair_bounds[order[end] as usize].partial_cmp(&running_best)
+                == Some(std::cmp::Ordering::Less)
+        {
+            break;
+        }
+        next = end;
+        chunk *= 2;
+    }
+    (pair_bounds, computed, running_best)
+}
+
+/// THE BOUNDED CLASS SCAN's STAGE-TWO KEEP THRESHOLD, derived from
+/// the emitted consumers' own arithmetic (no tuned constants):
+/// (a) the QUAL posterior terms need every pair whose exp(ll -
+/// best) can be nonzero, i.e. every pair with ll - best above the
+/// exp-underflow point — a pair with bound < best + t has exact <
+/// best + t, so its every QUAL contribution is exactly +0.0 (the
+/// committed bit-identity argument); (b) the truth fields (the
+/// receipt's truth_rank / truth_tied_classes / truth_log_likelihood)
+/// need every pair that can be strictly above or tied with the
+/// truth pair — a pair with bound < truth_ll has exact < truth_ll,
+/// so it is neither; where the truth pair sits INSIDE the QUAL
+/// window (the receipted shape: the log gaps are tens-to-hundreds
+/// of nats, under the 745-nat window) the truth threshold adds
+/// nothing. The kept set is therefore {bound >= min(best + t,
+/// truth_ll)} — the minimum, deterministic, sound for every emitted
+/// consumer.
+fn bounded_keep_threshold(best: f64, truth_ll: Option<f64>) -> f64 {
+    let qual = best + exp_underflow_point();
+    match truth_ll {
+        Some(truth) => qual.min(truth),
+        None => qual,
     }
 }
 
@@ -4597,25 +4840,30 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // the proof of the removal.)
     let exactness_assert = std::env::var("IMPG_SCORE_EXACTNESS_ASSERT").is_ok();
     // (THE OWNER'S RULING 3 — the accumulation-order TOGGLE at the
-    // class scan: IMPG_CLASS_SCAN_ORDER=exact (the default, unset)
-    // is the committed deterministic unit-order accumulation,
-    // bit-reproducible — the receipts' form; =sparse-skip is the
-    // fast mode, the previously REFUSED form (§10.6.8) now
-    // sanctioned for the performance path: the constant entries
-    // (units unpinned on BOTH folds of a class pair) leave the
-    // per-unit loop and return as one elsewhere*mass term, changing
-    // the float accumulation — the deltas measured and named, never
-    // hidden, and the model string suffixed so a fast-mode output
-    // can never be mistaken for an exact one. Any other value is a
-    // loud error, never a silent fallback.)
+    // class scan — extended by the SS10.6.21 sanction: the BOUNDED
+    // scan (the per-fold excess-mass branch-and-bound) is the
+    // PRODUCTION DEFAULT (the owner: "take the better, faster
+    // one"); IMPG_CLASS_SCAN_ORDER=exact restores the committed
+    // exhaustive unit-order accumulation VERBATIM (the receipts'
+    // form, the toggle doctrine); =sparse-skip is the legacy fast
+    // accumulation (unchanged, superseded by the bounded default —
+    // its receipted gain at the pruned form was -5.7%, under the
+    // bounded scan's 98-99.8% at the receipted worst shapes);
+    // =bounded is the explicit default form. Any other value is a
+    // loud error, never a silent fallback. The --truth-qv
+    // assessment mode keeps its EXHAUSTIVE form regardless (the
+    // truth-rank threshold keeps nearly everything at the receipted
+    // shapes, SS10.6.21's own caveat) — resolved at the scan site,
+    // so the assessment receipts stay byte-identical.)
     let class_scan_order = match std::env::var("IMPG_CLASS_SCAN_ORDER") {
-        Err(_) => ClassScanOrder::Exact,
+        Err(_) => ClassScanOrder::Bounded,
         Ok(value) if value == "exact" => ClassScanOrder::Exact,
         Ok(value) if value == "sparse-skip" => ClassScanOrder::SparseSkip,
+        Ok(value) if value == "bounded" => ClassScanOrder::Bounded,
         Ok(other) => {
             return Err(invalid(&format!(
                 "unknown IMPG_CLASS_SCAN_ORDER {other:?} \
-                 (exact | sparse-skip)"
+                 (exact | sparse-skip | bounded)"
             )))
         }
     };
@@ -5957,6 +6205,25 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         } else {
             model_name
         };
+    // (THE SANCTIONED BOUNDED CLASS SCAN's own label, the sparse-skip
+    // precedent's shape (SS10.6.21): the bounded mode states itself
+    // in every emitted model string — the per-locus receipt, the
+    // product calls, the sequences — so a bounded output can never
+    // be mistaken for an exhaustive one. THE PRODUCTION DEFAULT (the
+    // owner: "take the better, faster one"); the --truth-qv
+    // assessment mode keeps its EXHAUSTIVE form (the truth-rank
+    // threshold keeps nearly everything at the receipted shapes), so
+    // the assessment artifacts keep the committed model strings
+    // byte-identical; IMPG_CLASS_SCAN_ORDER=exact restores the
+    // exhaustive form with the committed unlabeled strings — the
+    // toggle doctrine.)
+    let class_scan_bounded =
+        matches!(class_scan_order, ClassScanOrder::Bounded) && !truth_qv_mode;
+    let model_name: std::borrow::Cow<str> = if class_scan_bounded {
+        std::borrow::Cow::Owned(format!("{model_name}-classscan-bounded"))
+    } else {
+        model_name
+    };
     // (The truth haplotypes as panel path names: under the global
     // frame a name carrying the territory-local interval form
     // translates with the maps — the committed CLI input shape is
@@ -6937,74 +7204,142 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
 
         // ------------------------------------------- the exhaustive classes
         // (THE OWNER'S RULING 3 at the scan itself: EXACT = the
-        // committed unit-order accumulation verbatim — the default,
-        // bit-reproducible; SPARSE-SKIP = the fast mode — the union
-        // of the two rows' pinned units plus one constant-mass term,
-        // the previously refused accumulation-order change now
-        // sanctioned for the performance path. The compare receipt
-        // (IMPG_CLASS_SCAN_COMPARE) sums BOTH ways and uses the
-        // EXACT value downstream, so it changes no output byte.)
+        // committed unit-order accumulation verbatim (the toggle
+        // doctrine — IMPG_CLASS_SCAN_ORDER=exact), bit-reproducible;
+        // SPARSE-SKIP = the legacy fast mode — the union of the two
+        // rows' pinned units plus one constant-mass term (superseded
+        // by the bounded default; unchanged). The compare receipt
+        // (IMPG_CLASS_SCAN_COMPARE) sums BOTH ways and uses the EXACT
+        // value downstream, so it changes no output byte.
+        // THE SANCTIONED BOUNDED CLASS SCAN (SS10.6.21, the owner's
+        // "take the better, faster one") runs INSTEAD of the
+        // exhaustive/sparse forms at the production default: STAGE
+        // ONE here — the deterministic branch-and-bound search for
+        // best over the per-fold excess-mass bound, the strict
+        // running-best form (a pair whose bound falls below the
+        // running best can neither win nor tie the emitted argmax);
+        // STAGE TWO below, once the truth pair is resolved — the
+        // kept set {bound >= best + the derived exp-underflow
+        // point} (every skipped pair's QUAL terms are exactly +0.0,
+        // the committed bit-identity argument) extended by the truth
+        // window where the truth pair sits outside it (the receipt's
+        // truth fields need every pair that can be strictly above
+        // or tied with the truth pair). Every computed value is the
+        // exhaustive scan's own — the committed unit-order
+        // accumulation, bit for bit — so the ANSWERS (the MAP pair,
+        // the called set, the QUAL terms, the truth fields, the
+        // best-outside rival) are the exhaustive run's by the
+        // bound's own arithmetic. The skipped pairs' instrument
+        // entries become the labeled bounded receipt (the null
+        // skip certificate + the per-pair bounds); the compare
+        // receipt has no bounded form (its both-ways sum IS the
+        // bounded scan's own bookkeeping) and is ignored here.)
         let class_started = Instant::now();
         let pair_count = n_folds * (n_folds + 1) / 2;
         let unit_counts: Vec<f64> = units.iter().map(|u| u.count as f64).collect();
         let sparse_skip = matches!(class_scan_order, ClassScanOrder::SparseSkip);
-        let scan_fast = if sparse_skip || class_scan_compare {
-            Some(ClassScanFastIndex::build(&matrix, &unit_counts))
-        } else {
-            None
-        };
         // (The compare receipt's per-locus atomics: class pairs
         // summed both ways, pairs whose f64 bits differ, the max ulp
         // delta, and the constant (fold, unit) entries the fast
-        // form skips.)
+        // form skips. Declared at the scan's own scope — the
+        // sparse/compare receipt line below reads them after the
+        // branch; under the bounded mode they stay zero and the
+        // line does not print.)
         let compare_pairs = AtomicU64::new(0);
         let compare_diff = AtomicU64::new(0);
         let compare_max_ulp = AtomicU64::new(0);
         let compare_skipped = AtomicU64::new(0);
-        let class_lls: Vec<f64> = (0..pair_count)
-            .into_par_iter()
-            .map(|flat| {
-                let (first, second) = unrank_pair(flat);
-                match scan_fast.as_ref() {
-                    None => matrix.class_pair_sum(first, second, &unit_counts),
-                    Some(fast) => {
-                        let fast_sum = fast.class_pair_sum(first, second, &unit_counts);
-                        if !class_scan_compare {
-                            return fast_sum;
-                        }
-                        let exact = matrix.class_pair_sum(first, second, &unit_counts);
-                        compare_pairs.fetch_add(1, Ordering::Relaxed);
-                        compare_skipped.fetch_add(
-                            fast.constant_units_skipped(first, second),
-                            Ordering::Relaxed,
-                        );
-                        if exact.to_bits() != fast_sum.to_bits() {
-                            compare_diff.fetch_add(1, Ordering::Relaxed);
-                            let ulp = ulp_distance(exact, fast_sum);
-                            let mut current = compare_max_ulp.load(Ordering::Relaxed);
-                            while ulp > current {
-                                match compare_max_ulp.compare_exchange_weak(
-                                    current,
-                                    ulp,
+        // The per-locus bounded state, stage one -> stage two.
+        let mut bounded_state: Option<BoundedScanState> = None;
+        let (mut class_lls, best_ll, called): (Vec<f64>, f64, Vec<(usize, usize)>) =
+            if class_scan_bounded {
+                let (pair_bounds, computed, best) = bounded_stage_one(&matrix, &unit_counts);
+                let stage_one_seconds = class_started.elapsed().as_secs_f64();
+                // The called set from the computed values, in flat
+                // order (the exhaustive form's own order): every
+                // pair that can tie best is inside the search's
+                // computed prefix by the stop's own arithmetic (a
+                // tie's bound >= best is never below the running
+                // best), and every never-computed pair's exact sum
+                // is strictly below it.
+                let called: Vec<(usize, usize)> = computed
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(flat, value)| {
+                        let sum = (*value)?;
+                        (sum == best).then(|| unrank_pair(flat))
+                    })
+                    .collect();
+                let class_lls: Vec<f64> = computed
+                    .iter()
+                    .map(|value| value.unwrap_or(f64::NEG_INFINITY))
+                    .collect();
+                bounded_state = Some(BoundedScanState {
+                    pair_bounds,
+                    computed,
+                    best,
+                    stage_one_seconds,
+                });
+                (class_lls, best, called)
+            } else {
+                let scan_fast = if sparse_skip || class_scan_compare {
+                    Some(ClassScanFastIndex::build(&matrix, &unit_counts))
+                } else {
+                    None
+                };
+                let class_lls: Vec<f64> = (0..pair_count)
+                    .into_par_iter()
+                    .map(|flat| {
+                        let (first, second) = unrank_pair(flat);
+                        match scan_fast.as_ref() {
+                            None => matrix.class_pair_sum(first, second, &unit_counts),
+                            Some(fast) => {
+                                let fast_sum =
+                                    fast.class_pair_sum(first, second, &unit_counts);
+                                if !class_scan_compare {
+                                    return fast_sum;
+                                }
+                                let exact = matrix.class_pair_sum(first, second, &unit_counts);
+                                compare_pairs.fetch_add(1, Ordering::Relaxed);
+                                compare_skipped.fetch_add(
+                                    fast.constant_units_skipped(first, second),
                                     Ordering::Relaxed,
-                                    Ordering::Relaxed,
-                                ) {
-                                    Ok(_) => break,
-                                    Err(seen) => current = seen,
+                                );
+                                if exact.to_bits() != fast_sum.to_bits() {
+                                    compare_diff.fetch_add(1, Ordering::Relaxed);
+                                    let ulp = ulp_distance(exact, fast_sum);
+                                    let mut current = compare_max_ulp.load(Ordering::Relaxed);
+                                    while ulp > current {
+                                        match compare_max_ulp.compare_exchange_weak(
+                                            current,
+                                            ulp,
+                                            Ordering::Relaxed,
+                                            Ordering::Relaxed,
+                                        ) {
+                                            Ok(_) => break,
+                                            Err(seen) => current = seen,
+                                        }
+                                    }
+                                }
+                                if sparse_skip {
+                                    fast_sum
+                                } else {
+                                    exact
                                 }
                             }
                         }
-                        if sparse_skip {
-                            fast_sum
-                        } else {
-                            exact
-                        }
-                    }
-                }
-            })
-            .collect();
-        let class_seconds = class_started.elapsed().as_secs_f64();
-        if sparse_skip || class_scan_compare {
+                    })
+                    .collect();
+                let best_ll =
+                    class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let called: Vec<(usize, usize)> = (0..pair_count)
+                    .filter(|&flat| class_lls[flat] == best_ll)
+                    .map(unrank_pair)
+                    .collect();
+                (class_lls, best_ll, called)
+            };
+        let mut class_seconds = class_started.elapsed().as_secs_f64();
+        if !class_scan_bounded && (sparse_skip || class_scan_compare) {
             eprintln!(
                 "[score] locus {locus}: class scan {} pairs in {class_seconds:.1}s \
                  ({}{}; {} of {} pairs' sums differ bitwise, max {} ulp; \
@@ -7018,12 +7353,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 compare_skipped.load(Ordering::Relaxed),
             );
         }
-        let best_ll = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         ensure(best_ll.is_finite(), "no class has anchored evidence at this locus")?;
-        let called: Vec<(usize, usize)> = (0..pair_count)
-            .filter(|&flat| class_lls[flat] == best_ll)
-            .map(unrank_pair)
-            .collect();
         let winner_pair = called[0];
 
         // -------------------------------------------------- the truth folds
@@ -7161,6 +7491,66 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             1 + class_lls.iter().filter(|&&ll| ll > value).count()
         });
         let truth_flat = truth_pair.map(|(a, b)| b * (b + 1) / 2 + a);
+        // ------------------------- the bounded scan's STAGE TWO (the kept set)
+        // (The truth pair is now resolved, so the derived keep
+        // threshold is final: the QUAL window {bound >= best + the
+        // exp-underflow point} extended by the truth window where
+        // the truth pair sits outside it. The truth pair itself is
+        // computed FIRST — it is always kept (its own bound >= its
+        // exact ll) — so the receipt's truth fields read the exact
+        // value. Every pair the stage-two pass computes is summed by
+        // the committed unit-order accumulation, so every value is
+        // the exhaustive scan's own bit for bit; the kept/skipped
+        // sets are deterministic functions of the matrix alone.)
+        if let Some(state) = bounded_state.as_mut() {
+            let stage_two_started = Instant::now();
+            let truth_ll: Option<f64> = match truth_flat {
+                Some(flat) => match state.computed[flat] {
+                    Some(value) => Some(value),
+                    None => {
+                        let (first, second) = unrank_pair(flat);
+                        let value = matrix.class_pair_sum(first, second, &unit_counts);
+                        state.computed[flat] = Some(value);
+                        class_lls[flat] = value;
+                        Some(value)
+                    }
+                },
+                None => None,
+            };
+            let keep_threshold = bounded_keep_threshold(state.best, truth_ll);
+            let kept: Vec<usize> = (0..pair_count)
+                .filter(|&flat| {
+                    state.computed[flat].is_none()
+                        && state.pair_bounds[flat] >= keep_threshold
+                })
+                .collect();
+            let sums: Vec<(usize, f64)> = kept
+                .par_iter()
+                .map(|&flat| {
+                    let (first, second) = unrank_pair(flat);
+                    (flat, matrix.class_pair_sum(first, second, &unit_counts))
+                })
+                .collect();
+            for (flat, sum) in sums {
+                state.computed[flat] = Some(sum);
+                class_lls[flat] = sum;
+            }
+            class_seconds += stage_two_started.elapsed().as_secs_f64();
+            let known = state
+                .computed
+                .iter()
+                .filter(|value| value.is_some())
+                .count();
+            let skipped = pair_count - known;
+            eprintln!(
+                "[score] locus {locus}: class scan bounded: {pair_count} pairs in \
+                 {class_seconds:.1}s (stage one {:.1}s; kept {known}, skipped \
+                 {skipped} ({:.2}% pruned); the derived keep threshold and the \
+                 per-pair bounds are the receipt's skip certificate)",
+                state.stage_one_seconds,
+                100.0 * skipped as f64 / pair_count as f64,
+            );
+        }
         let truth_log_likelihood = truth_flat.map(|flat| class_lls[flat]);
         let truth_rank = truth_log_likelihood.map(|value| {
             1 + class_lls
@@ -7338,17 +7728,89 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             called.contains(&(first, second))
         });
         // The best divergent rival outside the excluded band.
-        let best_outside_log_likelihood = cluster
-            .as_ref()
-            .map(|state| {
-                spectrum
+        // (THE BOUNDED SCAN'S BEST-OUTSIDE FALLBACK — the receipted
+        // branch-and-bound form, SS10.6.21 (d): the skipped pairs'
+        // exact sums are unknown, but each is bounded above by its
+        // own bound, so the argmax over the SKIPPED non-excluded
+        // pairs is walked in bound-DESCENDING order (ties by flat
+        // index — deterministic) until the next bound falls to the
+        // running max or below: every pair beyond has exact <= bound
+        // <= running max, so the walk's max is the exhaustive run's
+        // own value. A second deterministic sweep then computes the
+        // exact sums of every skipped non-excluded pair whose bound
+        // is at or above the found max — the tied set's own members
+        // (a pair below the max's bound cannot tie it) — and patches
+        // them into class_lls, so the emitted tied classes and the
+        // records' named pairs are the exhaustive run's own. Where
+        // nothing is skipped this is the committed fold verbatim.)
+        let best_outside_log_likelihood = cluster.as_ref().map(|state| {
+            let kept_max = spectrum
+                .iter()
+                .zip(&state.excluded)
+                .filter(|(_, excluded)| !**excluded)
+                .map(|(entry, _)| class_lls[entry.5])
+                .fold(f64::NEG_INFINITY, f64::max);
+            let skipped_nonexcluded = bounded_state
+                .as_mut()
+                .map(|bounded| {
+                    let mut candidates: Vec<usize> = spectrum
+                        .iter()
+                        .zip(&state.excluded)
+                        .filter(|(_, excluded)| !**excluded)
+                        .map(|(entry, _)| entry.5)
+                        .filter(|&flat| bounded.computed[flat].is_none())
+                        .collect();
+                    candidates.sort_by(|&a, &b| {
+                        bounded.pair_bounds[b]
+                            .total_cmp(&bounded.pair_bounds[a])
+                            .then(a.cmp(&b))
+                    });
+                    candidates
+                })
+                .unwrap_or_default();
+            let mut running_max = kept_max;
+            let mut next = 0usize;
+            while next < skipped_nonexcluded.len() {
+                let flat = skipped_nonexcluded[next];
+                let bound = bounded_state
+                    .as_ref()
+                    .map(|bounded| bounded.pair_bounds[flat])
+                    .unwrap_or(f64::NEG_INFINITY);
+                if bound.partial_cmp(&running_max) != Some(std::cmp::Ordering::Greater) {
+                    break;
+                }
+                let (first, second) = unrank_pair(flat);
+                let sum = matrix.class_pair_sum(first, second, &unit_counts);
+                if let Some(bounded) = bounded_state.as_mut() {
+                    bounded.computed[flat] = Some(sum);
+                }
+                class_lls[flat] = sum;
+                if sum > running_max {
+                    running_max = sum;
+                }
+                next += 1;
+            }
+            // the tied-set sweep: every skipped non-excluded pair at
+            // or above the found max, exact — deterministic.
+            if let Some(bounded) = bounded_state.as_mut() {
+                let tied: Vec<usize> = skipped_nonexcluded
                     .iter()
-                    .zip(&state.excluded)
-                    .filter(|(_, excluded)| !**excluded)
-                    .map(|(entry, _)| class_lls[entry.5])
-                    .fold(f64::NEG_INFINITY, f64::max)
-            })
-            .filter(|value| value.is_finite());
+                    .copied()
+                    .filter(|&flat| {
+                        bounded.computed[flat].is_none()
+                            && bounded.pair_bounds[flat] >= running_max
+                    })
+                    .collect();
+                for flat in tied {
+                    let (first, second) = unrank_pair(flat);
+                    let sum = matrix.class_pair_sum(first, second, &unit_counts);
+                    bounded.computed[flat] = Some(sum);
+                    class_lls[flat] = sum;
+                }
+            }
+            running_max
+        })
+        .filter(|value| value.is_finite());
         let mut qual_alternative_classes: Vec<serde_json::Value> = Vec::new();
         let alternative_log_gap =
             best_outside_log_likelihood.map(|outside| best_ll - outside);
@@ -8119,8 +8581,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             "physical_members": map.members.len(),
             "class_count": pair_count,
             "class_fold_pairs": class_fold_pairs,
-            // null entries = no valid anchored placement for any unit
-            // of the class (the anchored evidence model's floor).
+            // null entries (the exhaustive form) = no valid anchored
+            // placement for any unit of the class (the anchored
+            // evidence model's floor); null entries (the labeled
+            // bounded form, stated by the -classscan-bounded model
+            // string and the gated classscan_bounded certificate
+            // member) = SKIPPED by the derived bound — the pair's
+            // exact sum sits below best + the derived exp-underflow
+            // point (its every QUAL contribution is exactly +0.0),
+            // its per-pair bound is emitted in the certificate, and
+            // the answers are the exhaustive run's own by the
+            // bound's arithmetic (SS10.6.21).
             "class_log_likelihoods": class_lls,
             "best_log_likelihood": best_ll,
             "best_fold_indices": [winner_pair.0, winner_pair.1],
@@ -8381,6 +8852,44 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 "compare_max_ulp": compare_max_ulp.load(Ordering::Relaxed),
                 "constant_unit_pairs_skipped": compare_skipped.load(Ordering::Relaxed),
                 "classes_seconds": class_seconds,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
+        // (THE SANCTIONED BOUNDED CLASS SCAN's own receipt member —
+        // ONLY under the bounded mode (the sparse-skip precedent:
+        // the exhaustive receipt schema stays byte-identical; the
+        // labeled bounded form states its own skip certificate —
+        // the kept/skipped counts, stage one's wall, the derived
+        // threshold, and the per-pair bounds E*C + A_f + A_g, so a
+        // bounded receipt can never be mistaken for an exhaustive
+        // one and every skip is auditable offline.)
+        if let Some(bounded) = bounded_state.as_ref() {
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            let known = bounded
+                .computed
+                .iter()
+                .filter(|value| value.is_some())
+                .count();
+            report_value["classscan_bounded"] = json!({
+                "kept_pairs": known,
+                "skipped_pairs": pair_count - known,
+                "stage_one_seconds": bounded.stage_one_seconds,
+                "stage_one_best": bounded.best,
+                "exp_underflow_point": exp_underflow_point(),
+                "keep_threshold": bounded_keep_threshold(
+                    bounded.best,
+                    truth_log_likelihood,
+                ),
+                "pair_bounds": bounded.pair_bounds.clone(),
+                "note": "the labeled bounded class scan (the sanctioned \
+                         frontier-1 mode): class_log_likelihoods is the exact \
+                         committed sum at kept pairs and null at skipped ones; \
+                         pair_bounds carries E*C + A_f + A_g per pair (the skip \
+                         certificate); every answer (the MAP pair, the called set, \
+                         the QUAL terms, the truth fields, the best-outside rival) \
+                         is the exhaustive run's own by the bound's arithmetic \
+                         (SS10.6.21)",
             });
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
@@ -11406,6 +11915,237 @@ mod tests {
             bad > 10_000,
             "the non-roundtrip class is the common case at this              dependency configuration (saw {bad} of 100k)"
         );
+    }
+
+    #[test]
+    fn excess_mass_bound_dominates_every_class_pair_sum() {
+        // THE PER-FOLD EXCESS-MASS BOUND'S OWN PROOF, at the scan
+        // level: A_f >= 0 (a pinned entry's marginalization rounds to
+        // >= E, never below — the row-compression exactness
+        // argument), and E*C + A_f + A_g >= the exact class pair sum
+        // for EVERY pair (the mix0 <= alpha + beta lemma the
+        // committed design-proof test proves) — the admissibility
+        // contract the bounded scan's every skip rests on.
+        let elsewhere = -14.418156f64;
+        let shapes = [
+            (5usize, 40usize, 8usize),
+            (5, 40, 2),
+            (6, 40, 1),
+            (4, 40, 0),
+            (7, 33, 3),
+        ];
+        for (n_folds, n_units, pin_stride) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                if pin_stride > 0 {
+                    for unit in (fold..n_units).step_by(pin_stride) {
+                        pin[unit] = true;
+                        row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                        mism[unit] = (unit % 7) as u32;
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense, pinned.clone(), mismatches, elsewhere);
+            let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+            let index = ClassScanBoundIndex::build(&matrix, &counts);
+            for &excess in &index.excess {
+                assert!(
+                    excess >= 0.0,
+                    "A_f must be nonnegative (the pinned entries round to >= E)"
+                );
+            }
+            for first in 0..n_folds {
+                for second in first..n_folds {
+                    let bound = index.pair_bound(first, second);
+                    let exact = matrix.class_pair_sum(first, second, &counts);
+                    assert!(
+                        bound >= exact,
+                        "bound {bound} below exact {exact} at ({first},{second})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_class_scan_preserves_the_exhaustive_answers() {
+        // THE SANCTIONED BOUNDED CLASS SCAN'S OWN ANSWER-PRESERVATION
+        // PROOF, at the scan level, over shapes that include a
+        // DEEP landscape (pairs thousands of nats below best — the
+        // pruning regime) and the flat controls (nothing prunable):
+        // (a) stage one's best is the exhaustive best bit for bit;
+        // (b) the called set (the computed ties, flat order) is the
+        // exhaustive called set; (c) every computed exact sum is the
+        // exhaustive scan's own value bit for bit (the committed
+        // unit-order accumulation); (d) every SKIPPED pair's exact
+        // sum sits below best + the derived exp-underflow point, so
+        // its every QUAL posterior term is exactly +0.0 — the bit
+        // identity the answers rest on; (e) the winner is never
+        // skipped (it is in the computed set — the bound's own
+        // arithmetic); (f) stage one is a pure function of the
+        // matrix (two runs bit-identical — the determinism gate).
+        let elsewhere = -14.418156f64;
+        // (fold-giant, sparse, flat, and a DEEP shape: fold 0 pinned
+        // everywhere with a 3-nat excess and heavy counts — the
+        // (0,0) pair sits thousands of nats above the all-elsewhere
+        // pairs, past the 745-nat window, so stage two genuinely
+        // prunes.)
+        let shapes = [(5usize, 40usize, 8usize), (5, 40, 2), (4, 40, 0)];
+        for (n_folds, n_units, pin_stride) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                if pin_stride > 0 {
+                    for unit in (fold..n_units).step_by(pin_stride) {
+                        pin[unit] = true;
+                        row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                        mism[unit] = (unit % 7) as u32;
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+            let counts: Vec<f64> = (0..n_units).map(|u| 25.0 + 5.0 * u as f64).collect();
+            let pair_count = n_folds * (n_folds + 1) / 2;
+            // the exhaustive reference
+            let exhaustive: Vec<f64> = (0..pair_count)
+                .map(|flat| {
+                    let (first, second) = unrank_pair(flat);
+                    matrix.class_pair_sum(first, second, &counts)
+                })
+                .collect();
+            let exhaustive_best = exhaustive.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let exhaustive_called: Vec<(usize, usize)> = (0..pair_count)
+                .filter(|&flat| exhaustive[flat] == exhaustive_best)
+                .map(unrank_pair)
+                .collect();
+            // stage one, twice (the determinism receipt)
+            let (bounds_a, computed_a, best_a) = bounded_stage_one(&matrix, &counts);
+            let (bounds_b, computed_b, best_b) = bounded_stage_one(&matrix, &counts);
+            assert_eq!(best_a.to_bits(), best_b.to_bits());
+            assert_eq!(best_a.to_bits(), exhaustive_best.to_bits(), "stage one's best");
+            assert!(
+                computed_a.len() == computed_b.len()
+                    && computed_a
+                        .iter()
+                        .zip(&computed_b)
+                        .all(|(a, b)| match (a, b) {
+                            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
+                            (None, None) => true,
+                            _ => false,
+                        }),
+                "stage one is a pure function of the matrix"
+            );
+            let called: Vec<(usize, usize)> = computed_a
+                .iter()
+                .enumerate()
+                .filter_map(|(flat, value)| {
+                    let sum = (*value)?;
+                    (sum == best_a).then(|| unrank_pair(flat))
+                })
+                .collect();
+            assert_eq!(called, exhaustive_called, "the bounded called set");
+            // stage two: the derived keep threshold (no truth pair at
+            // this locus — the production call's own form)
+            let keep_threshold = bounded_keep_threshold(best_a, None);
+            assert_eq!(
+                keep_threshold.to_bits(),
+                (best_a + exp_underflow_point()).to_bits()
+            );
+            let mut known = computed_a.clone();
+            for flat in 0..pair_count {
+                if known[flat].is_none() && bounds_a[flat] >= keep_threshold {
+                    let (first, second) = unrank_pair(flat);
+                    known[flat] = Some(matrix.class_pair_sum(first, second, &counts));
+                }
+            }
+            let skipped_any = known.iter().any(|value| value.is_none());
+            for flat in 0..pair_count {
+                match known[flat] {
+                    Some(sum) => {
+                        // every computed value is the exhaustive one
+                        assert_eq!(
+                            sum.to_bits(),
+                            exhaustive[flat].to_bits(),
+                            "kept pair {flat} bit-identical"
+                        );
+                    }
+                    None => {
+                        // every skipped pair is below the QUAL window:
+                        // its exact sum underflows to +0.0 at best
+                        assert!(
+                            exhaustive[flat] < keep_threshold,
+                            "skipped pair {flat} inside the QUAL window"
+                        );
+                        assert_eq!((exhaustive[flat] - best_a).exp(), 0.0);
+                        assert!(
+                            bounds_a[flat] < keep_threshold,
+                            "the skip certificate's own threshold"
+                        );
+                    }
+                }
+            }
+            // the deep shape actually prunes (the regime is reached)
+            if pin_stride == 8 {
+                assert!(
+                    skipped_any,
+                    "the deep shape must prune (the 745-nat window is exceeded)"
+                );
+            }
+            // the winner is never skipped: the exhaustive argmax is
+            // in the computed set
+            let (winner_first, winner_second) = exhaustive_called[0];
+            let winner_flat = winner_second * (winner_second + 1) / 2 + winner_first;
+            assert!(computed_a[winner_flat].is_some(), "the winner is kept");
+        }
+    }
+
+    #[test]
+    fn bounded_keep_threshold_carries_the_truth_window() {
+        // THE TRUTH WINDOW'S OWN SOUNDNESS: where the truth pair sits
+        // BELOW the QUAL window (best + t), the derived keep
+        // threshold drops to the truth pair's own exact ll, so every
+        // pair that can be strictly above or tied with the truth is
+        // kept (a skipped pair's bound < truth_ll forces its exact <
+        // truth_ll — neither above nor tied) and the receipt's truth
+        // fields read the exhaustive values; where the truth pair
+        // sits INSIDE the window the threshold is the QUAL window's
+        // own (the receipted shape — the log gaps are under the
+        // 745-nat window).
+        let best = -1234.5f64;
+        let t = exp_underflow_point();
+        assert_eq!(
+            bounded_keep_threshold(best, None).to_bits(),
+            (best + t).to_bits()
+        );
+        assert_eq!(
+            bounded_keep_threshold(best, Some(best)).to_bits(),
+            (best + t).to_bits(),
+            "the truth pair at best adds nothing"
+        );
+        let deep_truth = best + 2.0 * t; // ~1490 nats below best
+        assert_eq!(
+            bounded_keep_threshold(best, Some(deep_truth)).to_bits(),
+            deep_truth.to_bits(),
+            "a truth pair below the window drops the threshold to itself"
+        );
+        assert!(deep_truth < best + t);
     }
 
 }
