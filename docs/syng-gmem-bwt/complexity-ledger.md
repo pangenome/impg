@@ -347,22 +347,30 @@ rank-neutral at this territory):
 | T03226 grain | prep partitions | cut census records | inputs s | binding s | l0: folds x units (classes) | l0 serial wall | rank-1 |
 |---|---:|---:|---:|---:|---|---:|---|
 | **10 kb** (the committed substrate, rerun at the current binary) | 1,131 | **81,688** (mult 9.377M; prune 43.4%) | 237.0 | 93.4 | 213 x 2,925,505 (22,791) | (loci phase **1,836.4 s**, 24 windows, median 0.75 s) | **7/24 = the committed answer** |
-| **20 kb** | 608 | **81,765** (mult 9.381M; prune 41.3%) | 241.6 | (pending the run's close) | 277 x 3,411,073 (38,503) | **2,631.1 s** (the merged monster window) | (the serial call is mid-flight — see the resume point) |
-| **40 kb** | 332 | (the cut is mid-flight) | | | | | |
+| **20 kb** | 608 | **81,765** (mult 9.381M; prune 41.3%) | 241.6 | (pending the run's close) | l0: 277 x 3,411,073 (38,503); l6: 303 x 11,331 (46,056); l7: 309 x 41 (47,895) | l0 **2,631.1 s** (8/12 loci done at the commit, the receipted walls in `callC.err`) | (the serial call is mid-flight — see the resume point) |
+| **40 kb** | 332 | **81,839 patterns** (mult 9.389M — grain-invariant again; the cut DONE in 801.3 s) | | | l0: the matrix line receipts **1,187,114,076 no-pin pairs** at the factorized stage (the merged monster window) | (l0 mid-scan at the commit — the 40 kb monster window's serial scan projects to HOURS: the coarse-grain explosion receipted in the shape itself) | |
 
 **What the territory receipts already measure:** the per-window content
 at the deep stratum grows HARD — l0's classes 22,791 → 38,503 (1.69x
 for 2x grain; the merged 20 kb window carries the cross-boundary fold
 pairs the two 10 kb windows never enumerated against each other),
-and l0's units 2.93M → 3.41M (+17%: the cross-boundary census records'
+l0's units 2.93M → 3.41M (+17%: the cross-boundary census records'
 units are ~14% of the merged window's mass — NEW interacting mass the
-coarse window creates). The monster locus's serial wall 1,4xx → 2,631 s
-per window: the deep stratum's content classes grow per window much
-faster than the window count shrinks — the same refusal as the
-locality, amplified. The fixed classes again do not amortize: census
-records 81,688 → 81,765 (grain-invariant), inputs 237.0 → 241.6 s
-(flat), and the far-bin prune's share is grain-stable (43.4% → 41.3%
-— the pair-bin adjacency widens with the window, as designed).
+coarse window creates), and at 40 kb the merged l0's matrix alone is
+**1.19 BILLION no-pin pairs** (the factorized-stage receipt) — the
+monster window's serial scan projects to hours, the coarse-grain
+explosion receipted in the shape itself. The monster locus's serial
+wall 1,387 s → 2,631 s per window: the deep stratum's content classes
+grow per window much faster than the window count shrinks — the same
+refusal as the locality, amplified. The fixed classes again do not
+amortize: census records 81,688 → 81,765 → 81,839 patterns
+(grain-invariant), inputs 237.0 → 241.6 s (flat), and the far-bin
+prune's share is grain-stable (43.4% → 41.3% — the pair-bin adjacency
+widens with the window, as designed). The 10 kb BOUNDED production
+form beside the serial assessment: callProd at T16 (load ~110) loci
+phase **155.0 s** with l0's bounded scan at **99.44% pruned in 1.3 s**
+(22,664 of 22,791 pairs skipped — the bound engages at the merged
+shape exactly as at the committed one).
 
 **The accuracy caveat, held:** the 2026-10-09 sweep's verdict
 (NOT SUPPORTED at either depth; the committed 10 kb is the
