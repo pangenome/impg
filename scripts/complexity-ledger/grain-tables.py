@@ -47,7 +47,7 @@ def locus_shapes(d, call="s9-cli-deep"):
                 loci_wall_med=sorted(walls)[len(walls)//2] if walls else None)
 
 def truth_stats(d, call="s9-cli-deep"):
-    base = os.path.join(d, call if call != "callC" else "callC")
+    base = os.path.join(d, "cli-deep" if call == "s9-cli-deep" else "callC")
     side = os.path.join(base, "calls.jsonl.truth-qv.jsonl")
     if not os.path.exists(side):
         return None
