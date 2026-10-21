@@ -1,0 +1,163 @@
+2026-10-20T02:09:25Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-0: 8 territories
+2026-10-20T02:09:25Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-1: 8 territories
+2026-10-20T02:21:05Z T01982 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T01325 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T02472 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T02620 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T02851 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T00768 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T00667 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z T08425 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:05Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-1 done exit=137 wall=700s
+2026-10-20T02:21:34Z T00157 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T01857 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T03397 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T02871 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T00337 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T01258 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T03523 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z T00129 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:21:34Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-0 done exit=137 wall=729s
+2026-10-20T02:21:34Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-2: 8 territories
+2026-10-20T02:21:34Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-3: 8 territories
+2026-10-20T02:32:05Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-3 done exit=0 wall=630s
+2026-10-20T02:34:04Z T03641 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T01876 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T03876 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T01993 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T01010 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T04052 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T01464 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z T01011 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:34:04Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-2 done exit=137 wall=750s
+2026-10-20T02:34:04Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-5: 8 territories
+2026-10-20T02:34:04Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-4: 8 territories
+2026-10-20T02:50:35Z T02624 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T00680 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T01458 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T04063 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T09347 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T03135 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T00335 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z T02067 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:50:35Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-5 done exit=137 wall=991s
+2026-10-20T02:51:15Z T04013 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T00663 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T02597 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T01720 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T03743 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T03900 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T03524 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z T00695 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T02:51:15Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-4 done exit=137 wall=1031s
+2026-10-20T02:51:16Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-7: 8 territories
+2026-10-20T02:51:16Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-6: 8 territories
+2026-10-20T03:07:18Z T07856 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:07:18Z T00822 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:07:18Z T00551 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:07:18Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-7 done exit=137 wall=962s
+2026-10-20T03:08:46Z T03045 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T01835 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T01425 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T03855 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T02816 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T02753 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T01747 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z T01090 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:08:46Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-6 done exit=137 wall=1050s
+2026-10-20T03:08:47Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-8: 8 territories
+2026-10-20T03:08:47Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-9: 8 territories
+2026-10-20T03:23:30Z T01113 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T01013 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T01195 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T00618 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T02595 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T00595 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T04038 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z T04008 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:23:30Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-8 done exit=137 wall=883s
+2026-10-20T03:25:09Z T01915 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T03671 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T04066 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T00971 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T01468 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T00717 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T05920 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z T01909 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:25:09Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-9 done exit=137 wall=982s
+2026-10-20T03:25:09Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-10: 8 territories
+2026-10-20T03:25:09Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-11: 8 territories
+2026-10-20T03:41:31Z T03606 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T03124 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T01895 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T00824 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T01569 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T01366 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T03929 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z T03943 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:31Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-11 done exit=137 wall=982s
+2026-10-20T03:41:51Z T03919 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T09724 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T04059 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T03958 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T03915 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T03204 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T08847 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z T00983 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:41:51Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-10 done exit=137 wall=1002s
+2026-10-20T03:41:52Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-13: 4 territories
+2026-10-20T03:41:52Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-12: 8 territories
+2026-10-20T03:57:08Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-13 done exit=0 wall=916s
+2026-10-20T03:59:02Z T02722 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:59:02Z T03803 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:59:02Z T03411 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:59:02Z T03373 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:59:02Z T02866 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:59:02Z T00343 batch GUARD-KILLED at width 8 (packaging - no strike, width -> 4)
+2026-10-20T03:59:02Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-12 done exit=137 wall=1030s
+2026-10-20T03:59:03Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-14: 4 territories
+2026-10-20T03:59:03Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-15: 4 territories
+2026-10-20T04:17:16Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-14 done exit=0 wall=1093s
+2026-10-20T04:18:46Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-15 done exit=0 wall=1183s
+2026-10-20T04:18:46Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-17: 4 territories
+2026-10-20T04:18:46Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-16: 4 territories
+2026-10-20T04:31:15Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-17 done exit=0 wall=749s
+2026-10-20T04:32:07Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-16 done exit=0 wall=800s
+2026-10-20T04:32:07Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-18: 4 territories
+2026-10-20T04:32:07Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-19: 4 territories
+2026-10-20T04:42:05Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-19 done exit=0 wall=597s
+2026-10-20T04:43:12Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-18 done exit=0 wall=665s
+2026-10-20T04:43:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-21: 4 territories
+2026-10-20T04:43:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-20: 4 territories
+2026-10-20T04:52:18Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-21 done exit=0 wall=545s
+2026-10-20T04:53:23Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-20 done exit=0 wall=609s
+2026-10-20T04:53:23Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-23: 4 territories
+2026-10-20T04:53:23Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-22: 4 territories
+2026-10-20T05:02:15Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-23 done exit=0 wall=532s
+2026-10-20T05:02:26Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-22 done exit=0 wall=543s
+2026-10-20T05:02:26Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-25: 4 territories
+2026-10-20T05:02:26Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-24: 4 territories
+2026-10-20T05:10:49Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-25 done exit=0 wall=503s
+2026-10-20T05:16:14Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-24 done exit=0 wall=827s
+2026-10-20T05:16:14Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-27: 4 territories
+2026-10-20T05:16:14Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-26: 4 territories
+2026-10-20T05:24:40Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-26 done exit=0 wall=505s
+2026-10-20T05:24:45Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-27 done exit=0 wall=511s
+2026-10-20T05:24:46Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-29: 4 territories
+2026-10-20T05:24:46Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-28: 4 territories
+2026-10-20T05:32:37Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-29 done exit=0 wall=471s
+2026-10-20T05:34:40Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-28 done exit=0 wall=594s
+2026-10-20T05:34:40Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-31: 4 territories
+2026-10-20T05:34:41Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-30: 4 territories
+2026-10-20T05:45:02Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-31 done exit=0 wall=622s
+2026-10-20T05:45:38Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-30 done exit=0 wall=656s
+2026-10-20T05:45:38Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-32: 4 territories
+2026-10-20T05:45:38Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-33: 4 territories
+2026-10-20T05:53:08Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-32 done exit=0 wall=450s
+2026-10-20T05:54:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-33 done exit=0 wall=514s
+2026-10-20T05:54:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-34: 4 territories
+2026-10-20T05:54:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-35: 4 territories
+2026-10-20T06:02:58Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-35 done exit=0 wall=524s
+2026-10-20T06:03:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-34 done exit=0 wall=540s
+2026-10-20T06:03:13Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-36: 1 territories
+2026-10-20T06:11:17Z batch /mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2/rvcut/batch-36 done exit=0 wall=484s

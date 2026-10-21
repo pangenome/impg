@@ -1,0 +1,11 @@
+2026-10-20T01:44:27Z TRANCHE-2 OPEN: n=109 (S_EXP 22, S_BIND 71, S_MAR 16); workdir on /mnt/nvme2n1 (erikg-owned, 2.3T free; / was at 15G free earlier this hour - the co-tenant freed ~1T mid-session, receipted); load=277.45 memavail=326GiB
+2026-10-20T01:44:44Z load=281.15 memavail=322GiB df=930G OPEN tranche n=109
+2026-10-20T01:44:54Z load=281.23 memavail=319GiB df=930G STAGE R COMPLETE
+2026-10-20T01:44:54Z load=281.23 memavail=319GiB df=930G CLOSE
+2026-10-20T01:52:43Z load=199.31 memavail=353GiB df=925G OPEN tranche n=109
+2026-10-20T06:11:17Z load=31.00 memavail=651GiB df=578G CLOSE
+2026-10-20T08:18:34Z load=14.62 memavail=647GiB df=458G OPEN tranche n=109
+2026-10-20T08:18:41Z load=14.92 memavail=646GiB df=458G STAGE P COMPLETE
+2026-10-20T08:18:41Z load=14.92 memavail=646GiB df=458G STAGE K COMPLETE
+2026-10-20T11:58:57Z load=11.10 memavail=794GiB df=420G STAGE F COMPLETE
+2026-10-20T17:44:14Z load=137.61 memavail=653GiB df=472G STAGE A COMPLETE

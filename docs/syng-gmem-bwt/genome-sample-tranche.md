@@ -588,3 +588,122 @@ Per-stratum means (form C): S_ORD 811s x 1,064 (n=17); S_SEG 556s x 217 (n=9); S
 - TRANCHE 1: master mid-TB (form B, ~30/53 landed; the conserved-elsewhere denominators grow with it), stageTC draining the last C members (T06027/T05603 fail-closed exit-1 in all attempted forms; T01091/T05573 RSS-guard). The cwd-qualified monitor (`run-monitor.sh <WT1> 6`) relaunches the master until TA/TB complete; the honest TB completion receipt is callB.done = 53 with T06027/T05603 named fail-closed (the done-marker cannot fire for 53<55). Final tables: `python3 scripts/genome-tranche/tranche-analyze.py <WT1> <out>` (the close's analysis is `analysis-t2close.txt`).
 - TRANCHE 2 (/mnt/nvme2n1/...): substrate 108/108, rvcut 108/108 (the 16 marathon members ALL guard-killed at W=8 and cut clean at width 4 — the memory tail receipts at the cut stage; 45/51 determinism-gate IDENTICAL, 6 GATE-DIFFERS = the era class), fleet stage F cutting now, then A (cutA pool) → TA → TB per the master; stageTC (LANES=4) armed; the cwd-qualified monitor (`run-monitor.sh <WT2> 8`) owns relaunches. **Tranche 2's accuracy receipts (the S_EXP 22, the S_BIND 71 census, the marathon walls) land AFTER this close — the fleet + cutA + call stages are the multi-day tail; the monitors carry them.**
 - NOT touched, by design: the campaign's ledgers, the product-defaults worker's files, vendor/syng. NO PR PUSH (the owner pushes).
+
+## 10. TRANCHE 2 — THE CLOSE: THE MINE AND THE REAP (the 2026-10-21/22 increment; the owner's order executed: the answer verdicts extracted into small receipts, the 1.1T workspace reaped; the receipts are the tranche-2 product)
+
+**THE OWNER'S ORDER (verbatim intent):** extract the answer verdicts
+from the completed legs, then the 1.1T goes; "there shouldn't be any
+writing" — the stream doctrine (`stream-discipline.md`, §this commit)
+is now standing law. The workspace
+`/mnt/nvme2n1/erikg/hprcv2/global-panel-call-mode/genome-tranche2`
+was mined with `scripts/genome-tranche/tranche2-mine.py` and reaped
+AFTER the receipts were committed (mine first, delete after, never the
+reverse). The receipts live in `/home/erikg/hprcv2/tranche2-mined/`
+and are committed verbatim under `docs/syng-gmem-bwt/tranche2-mined/`;
+the definitional smalls (11MB: the tranche/truth2/failed ledgers, the
+bridge specs + paf, and every member's axis-path / refined-bed /
+reference-axis / extract-specs / domain-structure) were KEPT at
+`/home/erikg/hprcv2/panel/tranche2/`.
+
+**THE PANEL ASSET: NOT IN THIS WORKSPACE.** The syng panel itself
+lives at `/home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.syng` (outside
+the workspace, untouched); the routes artifact (`global-routes-par`)
+lived in the root-disk `global-panel-call-mode/` copy, which is
+already reaped — that path no longer exists. It is re-derivable
+(routes ~25min once/panel). Nothing panel-definitional was lost.
+
+**THE INVENTORY VERDICT (the surprise: only ONE leg was frozen
+mid-write at the stop).** 109 members drawn (S_EXP 22, S_BIND 71,
+S_MAR 16); 108 runnable (T00762 excluded: extract-length-mismatch).
+Form A: **82 terminal answers + 25 terminal-fails + 1 partial**;
+form C (stage-TC closed): **88 terminal answers + 20 terminal-fails,
+zero partial**; form B: **NEVER STARTED** (the master was stopped
+mid-TA; TB never opened — the S_EXP B-form denominators are ZERO,
+named lost-to-stop, re-runnable). The one partial leg: `callA/T04063`
+— **partial: 0 loci complete of 14** (the stop's external SIGTERM
+mid-run at 89.4GB RSS, 13.5h wall). Every terminal-fail carries a
+named class: 21 A / 15 C rss-guard kills (honest memory-guard kills,
+re-runnable under a quieter box), T00717+T01909 verify-key fail-closed
+(A and C, deterministic), T00157 (+T02597 in C) qv-biwfa-helper
+fail-closed, T04066 overlapping-records fail-closed (A and C — the
+tranche-1 T06027/T05603 family). All failed legs' calls.jsonl are
+EMPTY — zero partial loci counted anywhere.
+
+**THE WASH AT TRANCHE-2 SCALE (rank-1 of truth-expressible, TERMINAL
+legs only, the official allwave QV machinery, cap 50):**
+
+| stratum | form A | form C |
+|---|---|---|
+| S_EXP (20 terr) | 89/391 (23%), QV med 43.5 | 87/391 (22%), QV med 43.5 |
+| S_BIND (61/62 terr) | 275/1251 (22%), QV med 43.5 | 267/1270 (21%), QV med 43.5 |
+| S_MAR (1/6 terr) | 5/20 (25%) | 36/129 (28%) |
+
+The wash holds in the two strata tranche 2 owns (1-2 points across
+forms, per-stratum). **THE CONSERVED-ELSEWHERE RATE IS NOT COMPUTABLE
+HERE (zero B legs)** — tranche 1's 1-in-981 remains the standing
+receipt; tranche 2's B legs are the one thing the stop lost that a
+re-run would restore.
+
+**THE PRUNE'S OWN VERDICT — THE GATE BAR DOES NOT HOLD AT TRANCHE-2
+SCALE, AND THE SIGN FLIPPED: 28 WINS, 41 LOSSES in 1,643 paired C-vs-A
+loci** (both forms terminal at the territory; all 69 named in the
+receipts). Both sides concentrate at the heavy-share members (T01468:
+8 losses + 2 wins; T00335: 5 losses + 3 wins; T08425: 3 losses + 4
+wins), the same mixed-high-stakes shape tranche 1 found at T03901 —
+but in the far-bin-heavy S_EXP/S_BIND strata the losses now OUTNUMBER
+the wins. QV-visible changes: 210 paired loci (76 higher under C, 134
+higher under A). **The honest read: at the strata where the far-bin
+mass is common and heavy, the prune is a genuine wall lever (below)
+whose truth cost is a real RATE, not a rare class — the five-locality
+zero-loss gate bar is dead as an invariant; the product question is a
+rate-vs-wall tradeoff, and the accuracy side of it now reads net
+negative at this n.**
+
+**THE PRUNE'S WALL VALUE (the reason it stays on the table): median
+C/A 0.74x over 81 paired legs (0.63x at share > 1%, n=66; 1.03x at
+share ~0, n=7)**; the heavy tail drops 3-9x (T00824 84.0% share:
+231.9s → 26.5s; T09347 85.4%: 242.7s → 30.5s).
+
+**THE MARATHON ROSTER — THE PRUNE RESOLVES MOST OF THE MEMORY TAIL
+(the increment's product finding):** 6 of 16 marathon members are
+TERMINAL under C where only 1 landed under A — the guard-killed A
+peaks sit at 67-133GB while the surviving C peaks sit at 43-63GB
+(T00129: A peak 129GB guard-kill vs C 63GB terminal, wall 31,310s →
+11,117s; T03803 80GB → 43GB; T03855 91GB → 55GB; T02722 95GB → 56GB).
+The prune removes exactly the scattered mass that was pushing the
+deep-lane members over the guard; the remaining 10 (both-forms
+guard-killed at 68-133GB peaks) are the honest residual tail, carried
+as the committed bound as before.
+
+**THE CENSUS COUNTERS (all 108 runnable members, both cuts terminal):
+census-mult B/A median 1.11x (S_EXP) / 1.12x (S_BIND) / 1.02x (S_MAR);
+far-bin share median S_EXP 30.1% (max 85.4%) / S_BIND 13.7% (max
+88.9%) / S_MAR 23.4%; tranche-2 aggregate 36.17% of the restricted
+census mass far-bin scattered (90.97M of 251.5M mult, n=108); form-C's
+own prune receipts cross-checked against the census geometry: 107
+agree, 0 disagree.**
+
+**THE WALL FRAGMENT tranche 2 alone can state** (S_EXP + S_BIND only;
+tranche 1 owns S_ORD/S_SEG/S_REP and 8 of the 79 S_BIND members):
+form C 3.20e6 core-s (± 3.04e6, 95% CI) = 3.5h ± 3.3h at 256 cores —
+per-stratum means S_EXP 715s (n=20, median 184s, max 7,139s) and
+S_BIND 555s (n=62); form A fragment 4.32e6 core-s (n=81). A FRAGMENT,
+labeled as such — the full-universe estimate remains tranche 1's
+§9.5 receipt until the two tranches are merged. Per-locus form-C
+walls: S_EXP median 0.50s, max 6,950s, worst-5% share 96.0% (n=392);
+S_BIND median 0.50s, max 4,468s, worst-5% 95.7% (n=1,273) — the
+worst-5% concentration class holds at 22-61-territory depth.
+
+**THE OTHER STAGES' RECEIPTS (all terminal, all mined):** rvcut
+108/108 (57 IDENTICAL / 9 GATE-DIFFERS at the determinism gate — the
+era class; 89 width-8 guard-kills retried clean at width 4); fleetB
+exit 0, wall 13,206s, 108 rows in 4 chunks (cut phases 3,173 / 6,760
+/ 12,241 / 4,056s, panel load 190s); 16/16 in-child production calls
+landed with non-empty output; cutA 108/108, cutB 108/108.
+
+**THE REAP:** the 1.1T workspace mass (the call dirs' mass was the
+instrumented raw streams — ingredients/records/skeleton receipts ~300M
+per call, exactly the doctrine's banned raw dumps; the cut dirs'
+census/cache; the prep substrates; the bridge FASTAs; the reads) was
+deleted AFTER this commit. Freed-space receipt:
+`docs/syng-gmem-bwt/tranche2-mined/README.md` (df before/after).

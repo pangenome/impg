@@ -1,0 +1,66 @@
+IDENTICAL T02578 {'reads_kept': 96120, 'census_mult': 129551, 'routed_patterns': 8394}
+IDENTICAL T03655 {'reads_kept': 1612602, 'census_mult': 2559105, 'routed_patterns': 23595}
+IDENTICAL T04070 {'reads_kept': 622290, 'census_mult': 642102, 'routed_patterns': 7232}
+IDENTICAL T04007 {'reads_kept': 171310, 'census_mult': 225671, 'routed_patterns': 9890}
+IDENTICAL T01652 {'reads_kept': 392757, 'census_mult': 470494, 'routed_patterns': 6588}
+IDENTICAL T02873 {'reads_kept': 225928, 'census_mult': 273245, 'routed_patterns': 8455}
+T01859 GATE-DIFFERS
+IDENTICAL T02250 {'reads_kept': 378750, 'census_mult': 443638, 'routed_patterns': 15938}
+IDENTICAL T01857 {'reads_kept': 267140, 'census_mult': 333893, 'routed_patterns': 6952}
+IDENTICAL T03397 {'reads_kept': 4070380, 'census_mult': 6481579, 'routed_patterns': 33022}
+IDENTICAL T02871 {'reads_kept': 555279, 'census_mult': 608422, 'routed_patterns': 8216}
+IDENTICAL T03523 {'reads_kept': 235220, 'census_mult': 309968, 'routed_patterns': 7832}
+IDENTICAL T02851 {'reads_kept': 776239, 'census_mult': 1000993, 'routed_patterns': 7760}
+IDENTICAL T01982 {'reads_kept': 118277, 'census_mult': 177486, 'routed_patterns': 7760}
+IDENTICAL T02472 {'reads_kept': 828084, 'census_mult': 1103378, 'routed_patterns': 25290}
+IDENTICAL T02620 {'reads_kept': 3152888, 'census_mult': 4805873, 'routed_patterns': 15765}
+IDENTICAL T04052 {'reads_kept': 4193883, 'census_mult': 6605333, 'routed_patterns': 20616}
+IDENTICAL T03641 {'reads_kept': 6435875, 'census_mult': 10593629, 'routed_patterns': 84297}
+IDENTICAL T01876 {'reads_kept': 512716, 'census_mult': 576367, 'routed_patterns': 8378}
+IDENTICAL T03876 {'reads_kept': 249775, 'census_mult': 314934, 'routed_patterns': 7798}
+IDENTICAL T01993 {'reads_kept': 1159528, 'census_mult': 1282640, 'routed_patterns': 10059}
+IDENTICAL T03743 {'reads_kept': 4217281, 'census_mult': 6507025, 'routed_patterns': 41734}
+IDENTICAL T03900 {'reads_kept': 3839482, 'census_mult': 5707987, 'routed_patterns': 39809}
+IDENTICAL T03524 {'reads_kept': 1273963, 'census_mult': 1599901, 'routed_patterns': 6939}
+IDENTICAL T04013 {'reads_kept': 4384062, 'census_mult': 6851925, 'routed_patterns': 22566}
+IDENTICAL T02597 {'reads_kept': 5650520, 'census_mult': 8909451, 'routed_patterns': 88667}
+T01720 GATE-DIFFERS
+IDENTICAL T03135 {'reads_kept': 4301104, 'census_mult': 6699080, 'routed_patterns': 62661}
+IDENTICAL T02067 {'reads_kept': 995983, 'census_mult': 1160041, 'routed_patterns': 8143}
+IDENTICAL T02624 {'reads_kept': 922169, 'census_mult': 1193981, 'routed_patterns': 11243}
+IDENTICAL T04063 {'reads_kept': 6532032, 'census_mult': 10806972, 'routed_patterns': 125779}
+IDENTICAL T02816 {'reads_kept': 2540088, 'census_mult': 4111703, 'routed_patterns': 29670}
+IDENTICAL T02753 {'reads_kept': 136545, 'census_mult': 145123, 'routed_patterns': 7460}
+T01747 GATE-DIFFERS
+IDENTICAL T03045 {'reads_kept': 1577478, 'census_mult': 1733198, 'routed_patterns': 7609}
+T01835 GATE-DIFFERS
+IDENTICAL T03855 {'reads_kept': 4815993, 'census_mult': 7740533, 'routed_patterns': 49481}
+IDENTICAL T01195 {'reads_kept': 1429473, 'census_mult': 2109885, 'routed_patterns': 7226}
+T00618 GATE-DIFFERS
+IDENTICAL T02595 {'reads_kept': 4373899, 'census_mult': 6837231, 'routed_patterns': 52902}
+IDENTICAL T03671 {'reads_kept': 1146720, 'census_mult': 1821708, 'routed_patterns': 7056}
+IDENTICAL T04066 {'reads_kept': 3041868, 'census_mult': 4534047, 'routed_patterns': 10989}
+IDENTICAL T04038 {'reads_kept': 3032512, 'census_mult': 4782588, 'routed_patterns': 12778}
+IDENTICAL T04008 {'reads_kept': 1363211, 'census_mult': 2080802, 'routed_patterns': 8611}
+IDENTICAL T01915 {'reads_kept': 5853754, 'census_mult': 9172379, 'routed_patterns': 119785}
+IDENTICAL T04059 {'reads_kept': 3967243, 'census_mult': 6202550, 'routed_patterns': 26633}
+IDENTICAL T03958 {'reads_kept': 334150, 'census_mult': 445254, 'routed_patterns': 9138}
+IDENTICAL T03915 {'reads_kept': 4597070, 'census_mult': 6927043, 'routed_patterns': 46516}
+T00717 GATE-DIFFERS
+IDENTICAL T01909 {'reads_kept': 6270524, 'census_mult': 10186914, 'routed_patterns': 85542}
+IDENTICAL T03919 {'reads_kept': 6411587, 'census_mult': 10690949, 'routed_patterns': 106909}
+IDENTICAL T03204 {'reads_kept': 454790, 'census_mult': 580129, 'routed_patterns': 8187}
+T00983 GATE-DIFFERS
+IDENTICAL T03606 {'reads_kept': 523922, 'census_mult': 625118, 'routed_patterns': 7704}
+IDENTICAL T03124 {'reads_kept': 444612, 'census_mult': 518146, 'routed_patterns': 8648}
+IDENTICAL T01895 {'reads_kept': 5999744, 'census_mult': 9855849, 'routed_patterns': 70749}
+T00824 GATE-DIFFERS
+IDENTICAL T01569 {'reads_kept': 221532, 'census_mult': 258155, 'routed_patterns': 8598}
+IDENTICAL T03803 {'reads_kept': 6907906, 'census_mult': 11491784, 'routed_patterns': 145180}
+IDENTICAL T03411 {'reads_kept': 4409872, 'census_mult': 7108131, 'routed_patterns': 31763}
+IDENTICAL T03373 {'reads_kept': 3306837, 'census_mult': 5088658, 'routed_patterns': 22445}
+IDENTICAL T02866 {'reads_kept': 4065150, 'census_mult': 6176575, 'routed_patterns': 28882}
+IDENTICAL T03929 {'reads_kept': 656860, 'census_mult': 738627, 'routed_patterns': 8293}
+IDENTICAL T03943 {'reads_kept': 1093128, 'census_mult': 1190144, 'routed_patterns': 6964}
+IDENTICAL T02722 {'reads_kept': 6554288, 'census_mult': 10886731, 'routed_patterns': 100748}
+T00343 GATE-DIFFERS

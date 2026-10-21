@@ -1,0 +1,1 @@
+T00762	extract-length-mismatch (refined-bed row end 1bp past the AGC contig: HG01109#1#JAHEPA020000004.1 236596 vs 236595 - the SAME deterministic class as tranche-1's T09025)
