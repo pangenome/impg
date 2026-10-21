@@ -138,8 +138,9 @@ echo "=== $T w$W: $NW windows, loci $LOCI"
 
 # ---- the C-form call (assessment, --truth-qv, far-bin prune, SERIAL = core-s) ----
 if [ ! -f "$OUT/callC.done" ]; then
+  rm -rf "$OUT/callC"   # the call refuses an existing out-dir (retry-clean)
   start=$(date +%s)
-  RAYON_NUM_THREADS=1 nice -n 10 stdbuf -oL -eL "$IMPG" genome-infer call-diplotypes \
+  RAYON_NUM_THREADS=1 IMPG_PANEL_LEGACY_V1_OK=1 nice -n 10 stdbuf -oL -eL "$IMPG" genome-infer call-diplotypes \
     --panel $HPRC/HPRC_r2_assemblies_0.6.1.syng \
     --routes "$ROUTES" \
     --partition-graphs "$LGRAPHS" \
@@ -163,8 +164,9 @@ fi
 
 # ---- the production form (no --truth-qv, T16, the bounded scan engaged) ----
 if [ ! -f "$OUT/callProd.done" ]; then
+  rm -rf "$OUT/callProd"   # the call refuses an existing out-dir (retry-clean)
   start=$(date +%s)
-  RAYON_NUM_THREADS=16 nice -n 10 stdbuf -oL -eL "$IMPG" genome-infer call-diplotypes \
+  RAYON_NUM_THREADS=16 IMPG_PANEL_LEGACY_V1_OK=1 nice -n 10 stdbuf -oL -eL "$IMPG" genome-infer call-diplotypes \
     --panel $HPRC/HPRC_r2_assemblies_0.6.1.syng \
     --routes "$ROUTES" \
     --partition-graphs "$LGRAPHS" \

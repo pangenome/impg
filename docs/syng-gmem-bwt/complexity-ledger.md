@@ -68,15 +68,24 @@ terms (a whole territory: fetches ~1.5M / 139-362 MB, lane loads
 R² = 0.70 — linear in mass, not superlinear). No measured phase
 carries a material n-log-n term.
 
-**THE FIXED CLASSES ARE REAL AND GRAIN-AMORTIZABLE — the owner's
-bigger-loci lever has a confirmed target:** the per-call inputs phase
-(panel load) fits windows^-0.035 with R² = 0.016 — **FLAT** (median
-243.8 s per territory regardless of window count), binding median
-7.2 s, rows/context median 13.4 s, and a per-LOCUS floor of
-**~0.20 s median** (measured at the 194 loci whose matrix is < 2e4
-pairs — fold build + qual + receipts + the scan's floor). At the
-median locus (wall 0.50 s) this floor is 40% of the locus; at the
-p95 locus (28.2 s) it is <1%.
+**THE OWNER'S BIGGER-LOCI LEVER, MEASURED AND REFUSED ON COST:** the
+fixed classes are real (per-call inputs 243.8 s median, FLAT in
+windows — fit exponent −0.035, R² = 0.016; bind 7.2 s; rows 13.4 s;
+per-locus floor ~0.20 s) — but §5's re-measure at the current
+architecture shows they are **mass-bound or call-bound, not
+window-bound**, so they do NOT amortize with grain (binding is
+census-record-bound and the census record count is grain-invariant:
+81,688 records at 10 kb vs 81,765 at 20 kb at the territory), while the
+content classes GROW — per-window units linearly (×1.99 per 2× grain),
+folds sub-linearly (×1.6, clamped at ~443-457), the whole L1 loci
+phase **394.0 → 506.6 → 785.6 → 731.4 core-s from 10→20→40→50 kb**
+(+1.9x at 40 kb) and the monster window at the deep territory l0
+**2,631.1 s at 20 kb vs ~1,4xx s at 10 kb** (the merged window carries
+the cross-boundary fold pairs the fine windows never enumerate).
+Bigger loci buy the ~0.2 s floor's amortization and pay ~2x the
+content — refused at cost, at both a locality and the deep stratum,
+with the accuracy sidecars landing clean at these territories (the
+2026-10-09 sweep's genome-wide accuracy verdict stands untouched).
 
 **THE MEDIAN-vs-DEEP SPREAD is the budget:** per-locus serial wall
 median **0.50 s**, p90 5.9 s, p95 **28.2 s**, max **8,547 s**; the
@@ -258,26 +267,83 @@ loop) should NOT — the fold count per window grows sub-linearly
 window grow ~linearly, so the per-window content work grows and the
 window count halves.
 
-**THE MEASURED CURVE** (serial walls, the wave's co-tenancy stated in
-each `.wall` receipt; the box carried load 106-113 from the tranche
-fleet throughout — every grain ran in the SAME wave):
+**THE MEASURED CURVE** (serial walls = core-seconds; every grain ran
+in the SAME wave at box load 106-113 — the co-tenancy is receipted in
+each `.rss`/`.wall`; the L1 leg is the committed five-locality recipe
+at the current binary, full-mass census, `--far-bin-prune=false` — the
+local frame is byte-frozen against the now-default-on prune):
 
-*(the walls land in the work dir as the lanes complete; the table
-below is filled from the `.wall`/phase-summary receipts at the
-commit — see the resume point for any cell still in flight)*
+| L1 grain | windows | LOCI phase (serial core-s) | per-locus median | folds med/max | units med/max | the scan model's share | rank-1 (accuracy) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| **10 kb** | 19 | **394.0 s** | 6.00 s | 162 / 443 | 12,880 / 107,572 | 66% (261.6 s) | **17/19** |
+| **20 kb** | 10 | **506.6 s** | 24.20 s | 270 / 443 | 25,582 / 107,572 | 75% (379.9 s) | **10/10** |
+| **40 kb** | 6 | **785.6 s** | 115.65 s | 396 / 443 | 51,462 / 107,572 | 66% (518.0 s) | **6/6** |
+| **50 kb** | 4 | **731.4 s** | 141.35 s | 412 / 457 | 67,145 / 157,520 | 76% (552.9 s) | **4/4** |
 
-| grain | L1: substrate chain | census | CLI (serial, core-s) | per-window folds (max) | rank-1 / loci (the accuracy bar) |
-|---|---|---:|---:|---:|---|
-| 10 kb | (s0-s6 walls in `L1-w10k/`) | | | | |
-| 20 kb | | | | | |
-| 40 kb | | | | | |
-| 50 kb | | | | | |
+| the fixed classes (per territory, serial) | 10 kb | 20 kb | 40 kb | 50 kb |
+|---|---:|---:|---:|---:|
+| inputs (panel load) | 2.4 s | 2.6 s | 2.4 s | 2.4 s |
+| binding | 3.8 s | 3.8 s | 3.8 s | 3.8 s |
+| rows/context | 4.3 s | 4.5 s | 4.8 s | 5.0 s |
+| census records (the census construction) | 81,688-class | — | — | — |
 
-| grain | T03226: prep+cutA | callC (serial, core-s) | loci | per-window folds (max) | rank-1 / loci |
-|---|---|---:|---:|---:|---|
-| 10 kb | (the committed substrate; the tranche receipt 2,820.7 s) | | | | |
-| 20 kb | | | | | |
-| 40 kb | | | | | |
+**THE LOCALITY VERDICT, measured:** the owner's bigger-loci lever is
+**REFUSED on the cost side at the current architecture.** The content
+classes GROW as the grain coarsens — the per-window units grow
+**linearly** (medians 12,880 → 25,582 → 51,462 → 67,145 = 1.99x per 2x
+grain), the per-window folds grow only **sub-linearly** (medians 162 →
+270 → 396 → 412, ~1.6x per 2x; the max is CONTENT-CLAMPED at 443-457
+at every grain — the fold diversity saturates), so the scan model per
+territory rises monotonically **261.6 → 379.9 → 518.0 → 552.9 s** and
+the whole loci phase **394.0 → 506.6 → 785.6 → 731.4 s (+1.9x at 40kb)**
+— the units' linear growth beats both the 1/grain window count and the
+sub-linear fold growth. The classes the lever was supposed to amortize
+**do not amortize because they are not window-bound:** binding is
+census-record-bound and the census record count is GRAIN-INVARIANT
+(receipted at the territory leg below: 81,688 records at 10 kb vs
+81,765 at 20 kb, mass 9.377M vs 9.381M — the census construction is
+linear in routed mass, not windows), rows/context is flat-to-up, the
+inputs load is per-call. The one genuinely window-bound term is the
+**per-locus fixed floor** (~0.2 s median at the small loci) — at 4x
+grain it saves ~0.15 s/locus while the content classes add ~10 s/locus
+of new work at this territory. The accuracy at these two territories
+did NOT degrade in this wave (17/19 → 10/10 → 6/6 → 4/4 — the near-twin
+ABSORPTION class dominates at L1's windows here; the denominators are
+small and the window mix changed with the substrate rebuild, so this
+is NOT a retraction of the 2026-10-09 sweep's genome-wide accuracy
+verdict — it is the same-territory receipt the re-measure owed, and it
+says the cost refusal stands on cost alone).
+
+**THE DEEP-STRATUM LEG (T03226, the S_EXP monster, global-frame
+production stack), the receipts that landed in this window** — with one
+form deviation caught at receipt time and stated: the territory leg ran
+WITHOUT `IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1` (the committed
+assessment form sets it; the pre-merge form's l0 carries 213 folds /
+22,791 classes vs the committed post-merge 204 / 20,910 — ~9% more scan
+at l0), so all three territory grains are the PRE-MERGE form,
+**within-wave consistent for the grain ratios**; the 10 kb accuracy
+receipt is rank-identical to the committed one (7/24 — the merge is
+rank-neutral at this territory):
+
+| T03226 grain | prep partitions | cut census records | inputs s | binding s | l0: folds x units (classes) | l0 serial wall | rank-1 |
+|---|---:|---:|---:|---:|---|---:|---|
+| **10 kb** (the committed substrate, rerun at the current binary) | 1,131 | **81,688** (mult 9.377M; prune 43.4%) | 237.0 | 93.4 | 213 x 2,925,505 (22,791) | (loci phase **1,836.4 s**, 24 windows, median 0.75 s) | **7/24 = the committed answer** |
+| **20 kb** | 608 | **81,765** (mult 9.381M; prune 41.3%) | 241.6 | (pending the run's close) | 277 x 3,411,073 (38,503) | **2,631.1 s** (the merged monster window) | (the serial call is mid-flight — see the resume point) |
+| **40 kb** | 332 | (the cut is mid-flight) | | | | | |
+
+**What the territory receipts already measure:** the per-window content
+at the deep stratum grows HARD — l0's classes 22,791 → 38,503 (1.69x
+for 2x grain; the merged 20 kb window carries the cross-boundary fold
+pairs the two 10 kb windows never enumerated against each other),
+and l0's units 2.93M → 3.41M (+17%: the cross-boundary census records'
+units are ~14% of the merged window's mass — NEW interacting mass the
+coarse window creates). The monster locus's serial wall 1,4xx → 2,631 s
+per window: the deep stratum's content classes grow per window much
+faster than the window count shrinks — the same refusal as the
+locality, amplified. The fixed classes again do not amortize: census
+records 81,688 → 81,765 (grain-invariant), inputs 237.0 → 241.6 s
+(flat), and the far-bin prune's share is grain-stable (43.4% → 41.3%
+— the pair-bin adjacency widens with the window, as designed).
 
 **The accuracy caveat, held:** the 2026-10-09 sweep's verdict
 (NOT SUPPORTED at either depth; the committed 10 kb is the
@@ -334,31 +400,33 @@ the universe's ~5,807 territories × ~25 loci ≈ 145k loci → **0.132 ≈
 | term | core-s/locus | path to 0.14 |
 |---|---:|---|
 | inputs/panel load (per-call) | ~9.8 (243.8/25) | **NONE needed per-locus** — the fleet form's fork-after-load COW amortizes it per SAMPLE (the product path's own default); at fleet scale → ~0 |
-| bind + rows/context | ~0.8 | **grain** (halve per window merge; the fit says bind ∝ census-records^0.95, and records merge with windows) + **Frontier 2 precompute** (the panel-side per-locus precompute's own gated increment) |
-| the per-locus fixed floor | ~0.2 at the median | **grain** (amortizes ~1/grain) |
+| bind + rows/context | ~0.8 | **REFUSED as a grain lever (§5's measured verdict: bind is census-record-bound and the census is grain-invariant — 81,688 vs 81,765 records — rows flat-to-up); the path that remains is Frontier 2's panel-side precompute** (the gated increment) |
+| the per-locus fixed floor | ~0.2 at the median | **the only window-bound term** — but §5 measures the trade: 4x grain saves ~0.15 s/locus of floor while the content classes ADD ~2x their work (the units grow linearly per window, the folds sub-linearly, the windows 1/grain) — the lever is refused at cost; the floor's other path is Frontier 2 |
 | the class scan (the f²·U tail) | ~29 (71% of the corpus wall / loci) | **bound (DONE)** where peaked (~half the tail); **memoization** (the plateau's 23.9-37.7%, NOT implemented) for the rest |
 | the scoring pair loop | ~6.6 (16% / loci) | **IRREDUCIBLE core** at the pinned-heavy shapes (~0.4-0.6 core-s/locus of per-base comparison) + ENGINEERING (the placement-walk residue, the 2-4x over the floor) |
 | map + cut | ~0.2+ | ~2x engineering (the standing receipt) |
 
 **The honest verdict on 0.14:** the term with a clean path is the
 **fixed mass (~11 core-s/locus at 10 kb)** — the fleet's COW already
-deletes the load term per-locus, and the grain lever attacks the bind/
-rows/floor classes at ~1/grain (§5's curve measures exactly how much).
-The **scan term** is bounded but its plateau remainder needs the
+deletes the load term per-locus, and the remaining fixed classes
+(bind/rows/floor) are precompute territory (§5's grain experiment
+MEASURED the bigger-loci lever and REFUSED it: the fixed classes are
+mass-bound, not window-bound, and the content classes grow ~1.9x at
+40 kb). The **scan term** is bounded but its plateau remainder needs the
 memoization increment. The **pair-loop term is the floor the model
 itself sets** — no algorithmic lever removes the per-base comparison
-at the pinned-heavy loci; only the CONTENT classes (fewer units:
-deeper restriction, the RV 35x basis) or the routes doctrine (fewer
-folds per window) move it, and both are accuracy-bearing decisions.
-**All-in, the arithmetic that reaches 0.14 is: fleet-amortized load (~0)
-+ grained fixed classes (~11 → ~3-5 at 20-40 kb IF the accuracy holds)
-+ bounded+memoized scan + the pair loop's floor (~0.5-1 at the mean
-after the content classes' levers)** — i.e. the target is reachable
-only as a FLEET+GRAIN+MEMOIZATION stack on the 0.5 s median, with the
-tail's plateau monsters as the gating remainder, and every one of
-those three levers is now measured, designed, or implemented. The
-residual that is NOT reachable by any receipted lever is the pinned
-per-base comparison class at the monsters — the model's own price.
+at the pinned-heavy loci; only the CONTENT classes (deeper restriction,
+the RV 35x basis) or the routes doctrine (fewer folds per window) move
+it, and both are accuracy-bearing decisions. **All-in, the arithmetic
+that reaches 0.14 is: fleet-amortized load (~0) + precomputed fixed
+classes + bounded+memoized scan + the pair loop's floor (~0.5-1 at the
+mean after the content classes' levers)** — i.e. the target is
+reachable only as a FLEET+PRECOMPUTE+MEMOIZATION stack on the 0.5 s
+median, with the tail's plateau monsters as the gating remainder, and
+(grain now measured out) every one of those levers is measured,
+designed, or implemented. The residual that is NOT reachable by any
+receipted lever is the pinned per-base comparison class at the
+monsters — the model's own price.
 
 ---
 
@@ -378,11 +446,23 @@ per-base comparison class at the monsters — the model's own price.
   `.done/.wall/.err/.rss`), `logs/*.nohup`.
 - **The grain lanes are marker-gated and resumable** — the resume point
   is the `.done` markers; any interrupted stage re-runs on relaunch.
-  The T03226-w20k cut completed its scan (90,378 touching patterns,
-  5,646,738 kept reads — the receipts in `T03226-w20k/cutA/`) and the
-  serial callC follows.
+  LANDED: the whole L1 leg (all four grains, serial, with accuracy
+  sidecars — the tables of §5), the T03226 10 kb wave-matched rerun
+  (loci 1,836.4 s serial at load ~110; answers rank-identical to the
+  committed receipt), the T03226 20 kb cut (81,765 census records,
+  grain-invariant) and its l0 receipt (2,631.1 s). IN FLIGHT at the
+  commit: the T03226 20 kb serial callC (locus 0 of 12 done — the
+  merged monster windows are 1.7x classes each; the whole run is
+  hours of serial away) and the T03226 40 kb lane (prep done at 332
+  partitions, the cut mid-scan). BOTH LANES KEEP RUNNING PAST THE
+  COMMIT (nohup, `logs/T03226-w{20,40}k.nohup`); their completion
+  receipts fill §5's territory table — relaunch the same commands if
+  the box reboots. The form note: the territory leg is the PRE-MERGE
+  form (§5); a committed-form rerun is one env away
+  (`IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1` on the callC/callProd
+  invocations) and is the first item of any follow-up.
 - cargo test: NO src changes in this window (instruments + analysis
-  only; the two scripts are new files) — the committed 583/0 green
+  only; the scripts are new files) — the committed 583/0 green
   stands.
 
 NO PR PUSH (the owner pushes).

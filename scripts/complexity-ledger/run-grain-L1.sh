@@ -181,8 +181,9 @@ n=sum(1 for iv in a['intervals'] if iv['component'] == '$AXIS_PATH')
 print(','.join(str(i) for i in range(n)))")
 echo "=== CLI loci: $LOCI"
 if [ ! -f "$P/s9-cli-deep.done" ]; then
+  rm -rf "$P/cli-deep"   # the call refuses an existing out-dir (retry-clean)
   start=$(date +%s)
-  RAYON_NUM_THREADS=1 IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 \
+  RAYON_NUM_THREADS=1 IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1 IMPG_PANEL_LEGACY_V1_OK=1 \
     nice -n 10 stdbuf -oL -eL "$IMPG" genome-infer call-diplotypes \
     --panel "$PANEL" \
     --routes "$ROUTES" \
@@ -193,6 +194,7 @@ if [ ! -f "$P/s9-cli-deep.done" ]; then
     --derive-cache "$DCACHE" \
     --loci "$LOCI" \
     --truth-qv "$AXIS_PATH" "$TRUTH2_PATH" \
+    --far-bin-prune=false \
     --qv-biwfa "$QVBIWFA" \
     --out-dir "$P/cli-deep" \
     > "$P/s9-cli-deep.log" 2> "$P/s9-cli-deep.err" &
