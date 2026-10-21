@@ -3525,193 +3525,222 @@ four new tests (the mix0 lemma, the derived underflow point, the
 memoization bit-identity, the receipt-serialization class). NO PR
 PUSH (the owner pushes).
 
-### 10.6.22 THE BOUNDED CLASS SCAN'S ANSWER GATES + WALL MEASUREMENTS — the two-pass gate fleet at the five localities and the heavy tail, T16, THE BLOCKING BUG FOUND BY THE BYTE BAR AND RECEIPTED EXACTLY (the §10.6.21 gate order's own first increment; the tie-set diff, the 12-ulp bound slack, and the restated 16-core budget with the tail term measured, not projected)
+### 10.6.22 THE BOUNDED CLASS SCAN'S ANSWER GATES COMPLETED + THE TIE-SET FIX — both passes at ALL ELEVEN gate targets, the T03226 locus-16 blocking bug FIXED by the final-value tie-set rebuild and the derived rounding-error slack (both fix candidates taken: the emitted set a pure function of the final exact values, every skip comparison slack-corrected, the slack DERIVED from the bound arithmetic's own op counts — never tuned), the reclaim table complete with the three new members, and the restated 16-core budget now measured at eleven targets (the §10.6.21 gate order's first increment CLOSED; commit 96186e0 the fix, this commit the receipt)
 
 **THE RUN MATRIX** (the owner's ruling (C), two passes per gate target —
-the assessment form and the production form are DIFFERENT gates and both
-were run): (A) `ans-<target>` — the recipe-verbatim assessment form
-(`--truth-qv`, the farbin-A / callC shape) at the bounded default with NO
-env (`IMPG_CLASS_SCAN_ORDER` unset), **T16** (`RAYON_NUM_THREADS=16`):
-the bar is the literal one, byte-identity of `calls.jsonl` AND the
-truth-qv sidecar vs the committed receipt — and it also receipts that the
-bounded default is INERT on the assessment path BY DESIGN
-(`class_scan_bounded = Bounded && !truth_qv_mode`, §10.6.21's own
-commit-message point 5: the assessment mode keeps its exhaustive form),
-so the (A) pass proves the committed default changes no answer at the
-assessment path INCLUDING the thread-schedule independence of everything
-else in the call. (B) `prod-<target>` — the production form (NO
-`--truth-qv`): the bounded scan ENGAGES, and the `-classscan-bounded`
-model-string suffix is its own engagement certificate (checked present
-on every record); the bar is **byte-identity modulo that one sanctioned
-suffix** — every other field of every record bit-identical (the
-sparse-skip precedent's own gate shape, §10.6.18: the label is the
-mode's self-declaration, not a relaxed bar). The cuts: the localities'
-`census-default-L*` (byte-identical to the shadow1x cuts, the §10.6.19
-gate), the members' `cutA/<T>` (the committed callC manifests' own). The
-committed receipts: `farbin-A-L1..L4` + `farbin-A-pilot` (and
-`census-default-call-L2`, byte-identical to `farbin-A-L2` — verified)
-for the localities; `genome-tranche1/callC/<T*>` for the members. The
-`calls.jsonl.sequences.jsonl` half of the cmp is **vacuous on both
-sides, stated not hidden**: every committed manifest carries
-`sequences_emission: null` — the sidecar does not exist in any receipt
-of record, and the recipe-verbatim (A) pass does not emit it either.
+unchanged in shape from the first window, re-run whole after the fix):
+(A) `ans-<target>` — the recipe-verbatim assessment form (`--truth-qv`,
+the farbin-A / callC shape) at the bounded default with NO env
+(`IMPG_CLASS_SCAN_ORDER` unset), **T16** (`RAYON_NUM_THREADS=16`): the
+literal bar, byte-identity of `calls.jsonl` AND the truth-qv sidecar vs
+the committed receipt, AND the `-classscan-bounded` label ABSENT (the
+bounded default is INERT on the assessment path by design). (B)
+`prod-<target>` — the production form (NO `--truth-qv`): the bounded
+scan ENGAGES (the label present on every record, the engagement
+certificate); the bar is byte-identity MODULO that one sanctioned
+suffix. THE BINARY: the tie-set-fix HEAD (96186e0) built into
+`CARGO_TARGET_DIR=target-frontier` with the receipted clean-PATH build
+env (the NFS-wedge fix stands: PATH without `/usr/local/bin`,
+`LIBCLANG_PATH=/usr/lib/llvm-18/lib`); the shared
+`target/release/impg` is the co-tenants' binary and was NOT touched.
+The cuts: the localities' `census-default-L*`/`farbin-A-*`, the
+members' committed `callC` manifests. The `sequences.jsonl` cmp stays
+vacuous on both sides (every committed manifest carries
+`sequences_emission: null`). CO-TENANCY RECEIPTED: this window ran
+three-to-four gate lanes beside the tranche-1/tranche-2 fleet and the
+T2 masters (load 35-47 against the first window's ~34) — the (A) total
+walls inflated accordingly (ans-T03901 2,818s → 3,140s at the same
+work); every LOCI-phase comparison below is at equal threads and the
+same window, never across windows.
 
-**THE BINARY** (its own receipt, a machine-environment class): the
-committed HEAD (6e15f37) built into `CARGO_TARGET_DIR=target-frontier`
-— the shared `target/release/impg` is the co-tenant tranche fleet's
-Oct-19 22:10 pre-bounded binary (no `classscan-bounded` string) invoked
-by absolute path mid-tranche and was NOT touched. The build wedged
-twice, and the wedge is receipted because it will bite again: the
-bindgen variant of `hts-sys` (feature-unified into the bin's graph) runs
-a `which`-style PATH scan that **stats every entry of every PATH
-directory**, and `/usr/local/bin/singularity` is a symlink into the
-`/gnu/store` NFS whose server (`octopus01`) is unreachable — the hard
-mount blocks the statx in D state for hours. THE FIX (applied, nothing
-product-side): the build PATH excludes `/usr/local/bin` entirely
-(`/home/erikg/.cargo/bin:/usr/sbin:/usr/bin:/sbin:/bin`) and
-`LIBCLANG_PATH=/usr/lib/llvm-18/lib` pins bindgen's probe to the local
-LLVM — with that the whole remaining build finished in 61s (the
-compiled deps were cached from the earlier partial runs). The binary
-carries the `classscan-bounded` string (verified); `impg 0.5.0`.
+**THE GATE TABLE — COMPLETED, ALL ELEVEN TARGETS, BOTH PASSES** (T16;
+the `gates` step of `run-bounded-gates.sh`, the byte bars on both
+artifact streams):
 
-**THE GATE TABLE** (T16, co-tenancy receipted — the tranche masters and
-the T2 fleet ran throughout, load ~34/256; the (A) walls carry it):
+| target | (A) calls byte | (A) truth-qv byte | (A) label absent | (B) modulo-label | (A) wall | (B) wall |
+|---|---|---|---|---|---:|---:|
+| L1 | PASS | PASS | PASS | PASS | 275s | 276s |
+| L2 | PASS | PASS | PASS | PASS | 268s | 285s |
+| L3 | PASS | PASS | PASS | PASS | 286s | 294s |
+| L4 | PASS | PASS | PASS | PASS | 272s | 271s |
+| pilot | PASS | PASS | PASS | PASS | 319s | 335s |
+| T03901 | PASS | PASS | PASS | PASS | 3,140s | 284s |
+| T03226 | PASS | PASS | PASS | **PASS — the fix's own gate** | 1,426s | 454s |
+| T00940 | PASS | PASS | PASS | PASS | 309s | 312s |
+| T02018 | PASS | PASS | PASS | PASS | 273s | 275s |
+| T05884 | PASS | PASS | PASS | PASS | 497s | 312s |
+| T04420 | PASS | PASS | PASS | PASS | 273s | 273s |
 
-| target | (A) calls byte | (A) truth-qv byte | (B) modulo-label | loci phase (A)→(B), T16 | committed loci (T1, form C) |
-|---|---|---|---|---:|---:|
-| L1 | PASS | PASS | PASS | 6.0s → 6.1s | 39.7s |
-| L2 | PASS | PASS | PASS | 4.3s → 4.2s | 20.9s |
-| L3 | PASS | PASS | PASS | 3.6s → 3.4s | 15.2s |
-| L4 | PASS | PASS | PASS | 4.1s → 3.7s | 15.7s |
-| pilot | PASS | PASS | PASS | 27.8s → 28.9s | 288.3s |
-| T03901 | PASS | PASS | PASS | 8.1s → 7.8s | 33.1s |
-| T03226 | PASS | PASS | **FAIL — locus 16** | 144.6s → 80.8s | 1,486.8s |
-| T00940 | PASS | PASS | PASS | 40.6s → 41.1s | 698.3s |
-| T02018 / T05884 / T04420 | not run — stopped at the failure (the resume point) | | | | 26.4s / 1,187.0s / 38.2s |
+=== ALL GATES PASS. THE HEADLINE: the (A) answer gate is byte-identical
+at every target — the tie-set fix perturbs NOTHING on the assessment
+path (the exhaustive branch's refactor to the one `called_set_from_
+class_lls` spelling is bit-neutral, receipted by the bar itself); the
+(B) production gate is byte-identical modulo the label at every target
+INCLUDING T03226 — the locus-16 tie fully emitted, the (B) fleet now
+answer-preserving at every measured shape, tie shapes included, BY THE
+SLACK-CORRECTED ARITHMETIC rather than despite it.
 
-THE HEADLINE: **the (A) answer gate passed at every run target** — the
-committed default reproduces every committed assessment receipt
-byte-for-byte at T16 (the answers are thread-schedule-independent, the
-proof's own claim, now receipted at the production thread count). The
-(B) production gate failed at exactly one locus of one member, and the
-failure is the honest one: the byte bar did its job.
+**THE BLOCKING BUG — THE FIX, RECEIPTED** (the first window's (B) byte
+bar caught it; commit 96186e0 fixes it; both named candidates taken,
+the owner's ruling "take the stronger one" on (a) and the conditional
+clause on (b) both executed): at T03226 locus 16 the committed
+exhaustive C-form calls the three-way tie `[0,0],[0,1],[1,1]` at best_ll
+−3025.4005606610563; the pre-fix bounded run emitted `[[0,0]]` only,
+because stage one's strict stop fired legitimately between the
+bit-identical ties — all three pairs' `pair_bounds` are
+−3025.4005606610685, **12 ULPs BELOW their exact sums**: the f64
+evaluation of `E*C + A_f + A_g` rounds below the scan's own unit-order
+sum at that shape, breaking the `bound >= exact` premise the stop
+rule, the winner-never-skipped argument, and the keep windows all rest
+on. NOTHING WAS SKIPPED WRONGLY even then (the skip certificate said
+kept 3, skipped 0; all three exact sums recovered bit-identical) —
+only the emitted construction lagged: `called` was built from stage
+one's computed prefix only. THE FIX, BOTH HALVES: **(a) the
+final-value tie-set rebuild** — `called_set_from_class_lls` (the
+exhaustive form's own definition: best and every pair at best, in flat
+order, ONE SPELLING now used by both scan branches), and the bounded
+scan REBUILDS `best`, `called`, and the winner they name from the
+FINAL `class_lls` after stage two's kept window — the emitted set is a
+pure function of the final exact values, never of the bound's
+rounding; the best-outside fallback that runs later can only patch
+pairs whose exact sums sit below the keep threshold (far below best),
+so it can never change the rebuilt set. **(b) the derived
+rounding-error slack** — `pair_slack`, the bound arithmetic's OWN
+FORWARD-ERROR TERM in the standard IEEE-754 round-to-nearest model
+(u = 2⁻⁵³, gamma(n) = n·u/(1−n·u), the standard calculus
+gamma(a)·(1+gamma(b)) <= gamma(a+b)): `exact <= real_sum + err_X`,
+`real_sum <= real_bound` (the mix0 <= alpha+beta lemma), `real_bound
+<= bound + err_B`, so **exact <= bound + err_X + err_B for every
+pair** — err_X = gamma(4n+4)·|E·C| + u·(2|E| + 12·spread + 16)·C (the
+n_units accumulation's drift — every term is c·mix with mix in [E, 0],
+so −real_sum <= |E|·C — plus mix's own evaluation error, bounded per
+unit through the spread, the two exps in (0,1], the inner sum in
+[0.5,1], the ln in [−ln2, 0], and the m-add with |m| <= |E|); err_B =
+gamma(2·(3(k_f+k_g)+3))·(|E·C| + A_f + A_g) (the bound chain: the
+E·C product, the excess walks at three roundings per pinned entry, the
+two final adds; the factor 2 carries the fl-magnitude reads' own
+rounding). NO TUNED CONSTANTS — every coefficient is an op count. The
+slack is consumed at EVERY dominance site: stage one's stop folds it
+through a suffix max over the remaining plan (a per-pair slack does not
+preserve the bound order; NaN and +inf propagate upward through
+total_cmp — the conservative never-stop), the stage-two keep is
+`{bound + slack >= min(best + t, truth_ll)}`, and the best-outside walk
+sorts and stops on the dominated bound with the tied sweep at
+`bound + slack >= running_max` — the winner-never-skipped, the
+QUAL-window (+0.0 bit-identity), the truth-window, and the
+best-outside arguments all hold again by construction. THE GATE
+RECEIPT at locus 16 (the new run's own certificate): the bounds are
+still −3025.4005606610685 (the inadmissible-by-rounding shape is
+still THERE), the derived slacks are 2.6e-10 / 6.5e-10 / 1.0e-9 —
+three orders above the 12-ulp shortfall, exactly the derived term's
+job — all three exacts land in `class_log_likelihoods`
+bit-identical at −3025.4005606610563, `called` is the full three-way
+tie, `qual` 1.7609125905568117 and `alternative_log_gap` null — the
+committed exhaustive record's own values, and the certificate now
+emits `pair_slack` beside `pair_bounds` so every skip is auditable
+offline. THE TEST (cargo test --release --lib **583/0**, 5 ignored):
+`bounded_tie_set_rebuilt_from_the_final_class_lls` synthesizes the
+bug class deterministically (two bit-identical folds, pinned entries
+a few ulps above E, the E·C-against-A cancellation — the bound rounds
+strictly below a bit-identical three-way tie), receipts the OLD
+prefix-only emission at the old state, and proves both halves (the
+slack-corrected dominance at exactly the shape where the bare bound
+fails; the stop no longer fires between ties; the rebuild emits the
+full tie set == the exhaustive one); the dominance and
+answer-preservation tests extend to the slack-corrected forms. ONE
+MORE HONEST COUNT, receipted: the pre-fix best-outside walk OVER-
+PATCHED (its stop `bound <= running_max` walked past pairs whose
+dominated bound had already fallen to the max, computing pairs no
+emission needed) — the slack-corrected walk stops soundly at the
+dominated bound, so the skip certificates now count honestly:
+T03901 l13 27.4% → 40.57% pruned, now matching the §10.6.21 probe's
+counterfactual 40.6% exactly (the probe never modeled the
+over-patch); no answer moved (the (B) bar passed at T03901 both
+windows), only the certificate's arithmetic.
 
-**THE BLOCKING BUG, RECEIPTED EXACTLY** (the work dir
-`bounded-gate-fail-T03226/`: both files saved, the DIFF-RECEIPT.txt,
-the extraction below): at **T03226 locus 16** the committed exhaustive
-C-form calls a THREE-WAY TIE — `called_classes [0,0],[0,1],[1,1]` at
-best_ll −3025.4005606610563 — and the bounded production run emits
-`[[0,0]]` only. The differing fields: `called_classes`,
-`called_class_count` (3→1), `qual_cluster_k` (3→1), `qual`
-(1.7609→3.0103), `qual_alternative_similarity` (null→1.0),
-`alternative_log_gap` (null→0.0), `qual_alternative_fold_pairs`
-(∅→[[0,1],[1,1]]) — the tie set and everything downstream of it. THE
-MECHANISM (the run's own instrument receipt, `prod-T03226/`): the
-locus's `classscan_bounded` certificate says `kept_pairs 3,
-skipped_pairs 0` — nothing was skipped — and the receipt's
-`class_log_likelihoods` carries all three exact sums BIT-IDENTICAL at
-best: stage two recovered the ties. But the emitted `called` set is
-built from **stage one's computed prefix only** (`realign_score.rs`'s
-bounded branch: `called` is collected from `computed` the moment stage
-one returns, before stage two runs), and stage one never computed
-(0,1) and (1,1) because its stop rule fired — legitimately, by its own
-arithmetic — on **the bound's own receipt**: all three pairs' `pair_bounds`
-are −3025.4005606610685, which is **12 ULPs BELOW the exact sum**
-(−3025.4005606610563). The bound is INADMISSIBLE-BY-ROUNDING at this
-shape: the f64 evaluation of `E*C + A_f + A_g` rounds below the scan's
-own unit-order sum, so "bound >= exact" — the premise of the stop rule,
-of the WINNER-IS-NEVER-SKIPPED argument, and of the commit's own
-"every pair that can tie best is inside the search's computed prefix"
-claim — does not hold at every shape; a tied pair's bound can sit
-strictly below best, stage one stops without it, stage two's keep
-window (best − 745.13) recovers its exact value into `class_lls`, and
-the already-fixed `called` set silently loses a tie. THE VERDICT: the
-sanctioned bounded scan is NOT answer-preserving at tie shapes where
-the bound's accumulation crosses the rounding class; the committed
-`excess_mass_bound_dominates_every_class_pair_sum` test's five shapes
-did not include one. NOT FIXED in this window (the discipline: no src
-changes); THE FIX CANDIDATES, NAMED (the next increment's first item):
-(a) the principled one — rebuild `called` from the FINAL `class_lls`
-after stage two and the best-outside fallback (the exhaustive form's
-own definition: every pair at best, in flat order — the values are
-already there, bit-identical, in the patched `class_lls`); (b) the
-premise-patching one — carry the bound's own ulp slack (the
-receipt-serialization class's own arithmetic, §10.6.21) into the
-stage-one stop comparison. Either way the (B) byte bar is the
-instrument that catches it, and the resume gate re-runs T03226 first.
+**THE WALL RECEIPTS** (T16, this window's co-tenancy; the committed
+walls are serial T1 — both receipted, never mixed; the loci phase per
+the phase summaries):
 
-**THE WALL RECEIPTS** (T16, co-tenant contended; the committed walls are
-serial T1 — both receipted, never mixed):
+| member | committed C loci (T1) | (A) exhaustive T16 | (B) bounded T16 | (B) pair-skip receipt |
+|---|---:|---:|---:|---|
+| T03226 | 1,486.8s | 149.3s | 80.0s (**−46.4%** at equal threads) | 19.11% of pairs (l0 20,783/20,910 = 99.39%; l10 16,255/16,290 = 99.79%) |
+| T05884 | 1,187.0s | 93.0s | 42.6s (**−54.2%** — the second prunable monster) | 50.02% of pairs (l8 101,808/102,831 = 99.01%; l12 96.83%) |
+| T00940 | 698.3s | 42.6s | 42.7s (~0 — the honest worst case) | ~0 (l1 the 101,025-pair segdup plateau: 25.0s in (B), 0 pruned, correctly) |
+| T03901 | 33.1s | 7.6s | 7.2s (−5.3%) | 4.48% (l10 97.92%; l13 40.57% — the honest count, above) |
+| T02018 | 26.4s | 6.2s | 9.2s (+3.0s at a 6-second wall — stage-one overhead at 5.41% prune plus this window's noise; receipted, not smoothed) | 5.41% (l9 98.03%; l19 97.10%) |
+| T04420 | 38.2s | 5.6s | 5.4s (~0) | 0.28% (~0 — the flat control) |
+| five localities | 15.2-288.3s | 3.6-28.6s | 3.6-30.3s (~0; pilot +5.9% at a 29s wall — the deep-locus shape's stage-one overhead, within this window's noise) | 0 pairs pruned at L1-L4 (the flat controls), 0.97% at the pilot |
 
-| member | committed C loci (T1) | (A) exhaustive T16 | (B) bounded T16 | class-scan term (A)→(B), T16 | (B) pair-skip receipt |
-|---|---:|---:|---:|---|---|
-| T03226 | 1,486.8s | 144.6s | 80.8s (**−44.1%** at equal threads) | 74.7s → 1.4s (**−98.1%**; l0: 71.87s → 0.89s, **−98.8%** — the probe's 99.47% projection LANDED) | 19.11% of pairs (l0 20,783/20,910 = 99.4%; l10 16,255/16,290 = 99.8%) |
-| T03901 | 33.1s | 8.1s | 7.8s (−3.7%) | 0.9s → 0.3s (−61%) | 4.14% (l10 97.9% — the probe's 98.20% counterfactual, the derived threshold's own set; l13 the plateau 27.4%; l12/l21 flat, 0) |
-| T00940 | 698.3s | 40.6s | 41.1s (+1.3% — the honest worst case) | 24.5s → 24.8s (+1.3%; l1 the 449-fold segdup plateau: 23.08s → 23.31s, ~0 pruned, correctly) | ~0 at the plateaus |
-| five localities | 15.2-288.3s | 3.6-27.8s | 3.4-28.9s (~0, within co-tenant noise) | — | 0 pairs pruned at L1-L4 (the flat controls), 0.97% at the pilot |
+The bounded (B) class-scan terms: T03226 1.4s, T05884 3.4s, T00940
+24.8s, T03901 0.1s, T02018 0.4s, T04420 0.9s, pilot 8.4s — the slack's
+own cost is INVISIBLE at the monsters (T03226 l0: 20,910 pairs, 1.0s
+whole bounded scan, stage one 1.0s — the suffix-max and the
+slightly-longer prefix bought the answer-preservation for free; the
+window's noise floor is bigger than the term).
 
-**THE HONEST READING**: the bound reclaims the class-scan term almost
-fully exactly where the probe said it would (T03226's scan −98.8% at
-the monster locus), but the loci phase is bigger than its scan: the
-pair loop, the placement walk, the receipts and the mass-invariant
-classes hold the rest — at T03226 the whole loci phase drops 44%
-(144.6→80.8s), and at the plateau/flat shapes the bound buys NOTHING
-(T00940 +1.3%, the localities ~0 — the far-bin prune plus T16 already
-took those). The single biggest measured effect in the table is
-**T16 itself**: the committed serial loci walls dropped 4-17x under
-the thread count alone (T03226 1,486.8→144.6s; T00940 698.3→40.6s;
-pilot 288.3→27.8s) — the class scan parallelizes (the fold par_iter
-and stage one/two's par_iters), and any wall claim that conflates the
-bound's term with the thread count is dishonest.
+**THE HONEST READING, ELEVEN TARGETS NOW**: the bound reclaims the
+class-scan term almost fully exactly where the probe said it would,
+and the two receipted prunable monsters both sit near **−50% of the
+whole loci phase at equal threads** (T03226 −46.4%, T05884 −54.2%) —
+while the plateau/flat shapes buy NOTHING (T00940 ~0 at the
+101,025-pair plateau, the localities ~0, T02018/T04420 ~0, T03901's
+C-form prune had already taken the mass). THE SINGLE BIGGEST MEASURED
+EFFECT IN THE TABLE IS STILL T16 ITSELF (the committed serial loci
+walls dropped 8-23x under the thread count alone: T03226 1,486.8 →
+149.3s; T00940 698.3 → 42.6s; T05884 1,187.0 → 93.0s; pilot 288.3 →
+28.6s) — the class scan parallelizes, and any wall claim that
+conflates the bound's term with the thread count is dishonest; none is
+made. The three new members land exactly where the §10.6.22-first-
+window budget put them: one more prunable monster (T05884), one flat
+member (T04420), one small mixed member (T02018).
 
-**THE PER-LOCUS BUDGET UNDER BOUNDED-DEFAULT** (T16 receipts, the loci
-phase per locus): L1 0.24s, L2 0.17s, L3 0.15s, L4 0.15s, pilot 1.31s
-(the deep-locus shape), T03901 0.31s, T03226 3.37s, T00940 3.16s —
-beside the per-territory mass-invariant terms the loci phase does not
-carry: inputs 210-232s and binding 6-80s and rows/context 10-14s per
-territory at this co-tenancy (the (B) form skips the truth-qv
-assessment phase entirely — the (A) form's total walls are dominated
-by it: ans-T03901 2,818s total against a 250s phase-sum).
+**THE PER-LOCUS BUDGET UNDER BOUNDED-DEFAULT** (T16, the loci phase
+per locus): L1 0.24s, L2 0.17s, L3 0.15s, L4 0.16s, pilot 1.38s,
+T03901 0.30s, T03226 3.33s, T00940 3.28s, T02018 0.38s, T05884 2.66s,
+T04420 0.22s — beside the per-territory mass-invariant terms the loci
+phase does not carry (inputs ~210-232s, binding 6-90s, rows/context
+10-14s at this co-tenancy; the (B) form skips the truth-qv assessment
+phase entirely — the (A) totals are dominated by it: ans-T03901
+3,140s total against a ~250s phase-sum).
 
-**THE RESTATED 16-CORE BUDGET — THE TAIL TERM MEASURED, NOT
-PROJECTED**: 16 cores × 1,200s = 19,200 core-s/sample, ~3.3
-core-s/territory all-in over the 5,807-territory universe. The call's
-committed budget is 6.38e6 ± 4.48e6 core-s (form C, stratified); the
-worst-5% of loci carry 96.9% of the per-locus wall; and the measured
-split of that tail at the receipted monsters is now: the class scan is
-52-60% of a monster's loci phase at T16 (T03226: 74.7s of 144.6s;
-T00940: 24.5s of 40.6s), the bound removes ~99% of the scan term at
-the prunable monsters and ~0% at the plateaus. So the bound's own
-ceiling on the tail is roughly **half the tail term at the shapes
-where it engages** (measured −44% of T03226's whole loci phase) and
-**nothing at the plateau monsters** (T00940-class: the 449-fold
-segdup family — a DIFFERENT lever's territory: the exact-value
-memoization at its measured 23.9-37.7%, or a plateau-aware bound).
-Even a perfect removal of every class scan leaves: the pair loop's
-pinned per-base comparison class (~0.4-0.6 core-s/locus,
-IRREDUCIBLE-FOR-THE-MODEL), the median-locus floor ~2.5-3
-core-s/territory (FRONTIER 2's panel-side precompute — the fold
-layouts, the pin skeletons, the canonical walks; design at §10.6.21,
-priced only when its gated increment runs), the per-call inputs/panel
-load (amortizable per sample — the fleet-call form's fork-after-load
-COW discipline already shares it across a sample's territories), and
-the map side ~26k → ~13k core-s (~2x engineering). **The ~333x gap is
-NOT closed by Frontier 1 alone — the receipts now bound it honestly:
-the bound buys ≲2x of the call budget at the shapes measured, its
-real value is concentrated (−44% at the prunable monsters, ~0
-elsewhere), and the named remainder is the plateau class + the median
-floor + the pair loop + map.** The gate order restated with the bug
-first: (1) fix the tie-set construction (the candidates above) and
-re-run the T03226 (B) gate — the byte bar is the proof instrument and
-it caught a real one; (2) finish the three unrun members; (3) the
+**THE RESTATED 16-CORE BUDGET — ELEVEN MEASURED TARGETS, THE SHAPE
+UNCHANGED, THE TAIL TERM TWICE-CONFIRMED**: 16 cores × 1,200s = 19,200
+core-s/sample, ~3.3 core-s/territory all-in over the 5,807-territory
+universe; the call's committed budget 6.38e6 ± 4.48e6 core-s (form C,
+stratified); the worst-5% of loci carry 96.9% of the per-locus wall.
+The measured split at the monsters, now with TWO prunable monsters
+instead of one: the class scan is 52-60% of a monster's loci phase at
+T16, the bound removes ~99% of the scan term at the prunable monsters
+(T03226 l0 99.39%, T05884 l8 99.01%) and ~0% at the plateaus
+(T00940-class, the 449-fold segdup family — a DIFFERENT lever's
+territory: the exact-value memoization at its measured 23.9-37.7%, or
+a plateau-aware bound). So the bound's own ceiling on the tail stays
+**~half the tail term at the shapes where it engages** (measured −46%
+and −54% of the two monsters' whole loci phases) and **nothing at the
+plateau/flat monsters**. Even a perfect removal of every class scan
+leaves the named remainder: the pair loop's pinned per-base comparison
+class (~0.4-0.6 core-s/locus, IRREDUCIBLE-FOR-THE-MODEL), the
+median-locus floor ~2.5-3 core-s/territory (FRONTIER 2's panel-side
+precompute — design at §10.6.21, priced only when its gated increment
+runs), the per-call inputs/panel load (amortizable per sample — the
+fleet-call form's fork-after-load COW discipline), and the map side
+~26k → ~13k core-s (~2x engineering). **THE ~333x GAP IS NOT CLOSED
+BY FRONTIER 1 ALONE — the eleven-target table now bounds it honestly
+from both sides: the bound buys ≲2x of the call budget (its value
+concentrated at the prunable monsters, ~0 elsewhere), and the named
+remainder is the plateau class + the median floor + the pair loop +
+map.** The gate order's first increment is CLOSED; the next is the
 precompute's gated increment.
 
 **THE WORK-DIR RECEIPTS**: `run-bounded-gates.sh` (the two-pass
-runner: `run [targets...] | gates | walls | spec`), `ans-*/` +
-`prod-*/` (the run artifacts, `.err` phase summaries, `.receipt`
-pointers), `bounded-gate-fail-T03226/` (both files saved +
-DIFF-RECEIPT.txt), `bounded-gates.nohup`. THE RESUME POINT: T02018,
-T05884, T04420 pairs unrun (stopped at the T03226 failure per the
-discipline); the binary `target-frontier/release/impg`; the build env
-(the clean PATH + LIBCLANG_PATH) is REQUIRED for any rebuild on this
-box until the NFS store returns. NO PR PUSH (the owner pushes).
+runner: `run [targets...] | gates | walls | spec`), the second
+window's `bounded-gates2-*.nohup` lane logs (T03226 first — the fix's
+own gate — then the localities lane, the T03901/T00940 lane, the
+three-new-members lane), `ans-*/` + `prod-*/` (the re-run artifacts,
+`.err` phase summaries, `.receipt` pointers), `bounded-gate-fail-
+T03226/` (the first window's failing diff, kept as the bug's own
+receipt). THE RESUME POINT IS CLEARED — no unrun gate targets remain;
+the binary `target-frontier/release/impg` is the fix build; the build
+env (the clean PATH + LIBCLANG_PATH) is REQUIRED for any rebuild on
+this box until the NFS store returns. NO PR PUSH (the owner pushes).
