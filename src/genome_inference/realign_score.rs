@@ -5607,7 +5607,9 @@ fn exp_underflow_point() -> f64 {
 /// mix0(a, b) <= a + b for a, b >= 0 (WLOG a >= b: mix0 = a +
 /// ln(0.5 + 0.5e^{b-a}) <= a),
 ///
+/// ```text
 ///     S(f,g) <= E*C + A_f + A_g,   A_f = sum_u c_u * alpha_f[u]
+/// ```
 ///
 /// — ONE SCALAR PER FOLD, one walk over the fold's pinned entries:
 /// the whole bound index costs a fraction of ONE class-pair walk per
@@ -5749,10 +5751,12 @@ impl ClassScanBoundIndex {
     /// gamma(a)*(1 + gamma(b)) <= gamma(a + b)), on
     /// (exact_f64_sum - bound_f64) for the pair:
     ///
+    /// ```text
     ///     exact  <= real_sum + err_X      (the unit-order accumulation)
     ///     real_sum <= real_bound          (the mix0 <= alpha+beta lemma)
     ///     real_bound <= bound + err_B     (the bound chain)
     ///     =>  exact <= bound + err_X + err_B.
+    /// ```
     ///
     /// err_X — the exact accumulation's own drift ABOVE the real
     /// sum: every unit's term is c * mix with mix in [E, 0]
