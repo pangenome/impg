@@ -1351,8 +1351,8 @@ pub fn build_distance_matrix(
         .map(|(i, label)| (label.clone(), i))
         .collect();
 
-    // Initialize distance matrix
-    let mut distance_matrix = DMatrix::zeros(n, n);
+    // Initialize distance matrix: pairs absent from `similarities` (zero intersection) are maximally distant
+    let mut distance_matrix = DMatrix::from_fn(n, n, |i, j| if i == j { 0.0 } else { 1.0 });
 
     // Fill the distance matrix
     for (label_a, label_b, similarity) in similarities {

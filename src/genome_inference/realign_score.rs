@@ -24,9 +24,11 @@
 //!    computed here, never materialized). A candidate row's
 //!    log-likelihood for one read instance is
 //!
-//!        LL(read | row) = -ln(2 * (len_row - 149))
-//!                         + logsumexp over anchored placements of
-//!                           [ backbone term + skipped-base evidence ]
+//!    ```text
+//!    LL(read | row) = -ln(2 * (len_row - 149))
+//!                     + logsumexp over anchored placements of
+//!                       [ backbone term + skipped-base evidence ]
+//!    ```
 //!
 //!    * THE BACKBONE TERM is the MEM-anchored shared material: the
 //!      merged bp of the PINNED anchor windows (the anchors the row's
@@ -167,8 +169,10 @@
 //!    only as "outside this locale". Each read's likelihood under a
 //!    candidate therefore MARGINALIZES the two generation branches:
 //!
-//!        LL(read | candidate) = logsumexp( local-spell branch ,
-//!                                          E(read) )
+//!    ```text
+//!    LL(read | candidate) = logsumexp( local-spell branch ,
+//!                                      E(read) )
+//!    ```
 //!
 //!    where the local-spell branch is the per-(record, row) likelihood
 //!    of rule 2 (the uniform placement prior + the anchored
