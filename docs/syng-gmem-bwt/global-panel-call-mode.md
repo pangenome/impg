@@ -4124,3 +4124,163 @@ runners' substrate shape verbatim, marker-gated, 150G-guarded,
 receipts-at-write-time, `reap` subcommand); peak scratch 7.3 G + 5.7 G
 of the 150 G budgets, REAPED at the increment's close after the
 receipts were committed. NO PR PUSH (the owner pushes).
+
+### 10.6.25 FRONTIER 2, SLICE 2 CONCRETIZED — THE BIND SCAFFOLDING'S EXACT CONTRACT (the §10.6.23 A4 boundary made implementable BEFORE the code, per the increment's order: the bind phase decomposed into its sample-independent scaffolding and its sample-dependent core from the slice-1 receipts' own anatomy, the asset's bind-scaffolding section format, the coverage rule with every constant derived from the syncmer window's own parameters, the exactness clauses, the gates and the honest ceiling — the implementation's own contract, committed as its own commit ahead of it)
+
+**THE DOCTRINE, RESTATED.** §10.6.23 A4 named the honest boundary: the
+bind phase re-derives each census record's key shape against
+`canonical_steps_near(path, position)` — a pure function of
+(panel, position) — but the POSITION SET IS THE CENSUS'S OWN (sample
+evidence). This section makes the boundary exact: what of the bind is
+panel content, what of it is sample evidence (never precomputable),
+which panel-knowable coordinate set the builder can cover, and how the
+serve reproduces the live derivation's bits at the covered positions
+while the uncovered ones fall back to the live derivation verbatim.
+
+**THE BIND PHASE'S ANATOMY, FROM THE SLICE-1 RECEIPTS** (the two gate
+targets' own phase lines, the honest decomposition's evidence base):
+
+| term | L1 (10,787 records) | T09724 (3,272 records) | the class |
+|---|---:|---:|---|
+| steps (`canonical_steps_near` per record) | 0.2 s | 0.8 s | **panel content — THIS SLICE** |
+| shapes (`key_shape` per candidate) | 0.0 s | 0.0 s | sample (the reads' own walks) |
+| verify (per-occurrence fetch + 3 origin shifts) | 3.3 s (12.4 M probes / 4.1 M fetches, 337.4 MB) | 2.4 s (3.75 M probes / 1.25 M fetches, 116.4 MB) | **sample — NEVER PRECOMPUTABLE** |
+| phase wall | 3.8 s | 3.2 s | the corpus median 7.2 s / 507 s tail |
+
+THE SAMPLE-INDEPENDENT SCAFFOLDING is the canonical-scheme step
+structure itself: the panel's stored walk entry at the position, the
+path bytes, the syncmer dictionary, the canonical orientation rule —
+`canonical_steps_near` reads NOTHING sample-side. THE SAMPLE-DEPENDENT
+CORE, restated from the receipts: the census record set (positions,
+multiplicities, anchors, orientations), the candidate key shapes (the
+derive cache's own read walks), the verify probes (read bytes against
+panel bytes at census positions), the surviving origin shifts. The
+VERIFY TERM IS THE BIND CLASS'S OWN MASS (3.3 s of 3.8 s at L1) and it
+is sample evidence by the receipts' anatomy — this slice does not
+claim it, and the timing receipt below prices exactly what it moves.
+
+**THE LOCALITY LEMMA — the serve's exactness heart, every constant
+derived from the syncmer window's own parameters (never tuned).** With
+`w` the syncmer window's k-mer count (55) and `syncmer_len` = w + smer
+(63, the panel's own k), the canonical-step value at a position P is a
+function of (a) the panel's stored walk entry at P — `walk_path_range`
+returns the path's own steps whose k-mer interval overlaps the query
+range, so the entry at P is INDEPENDENT of the query window for every
+P inside it; (b) the path bytes in the interval
+`[P − (w−1), P + (w−1) + syncmer_len)` clamped to the path — the
+reverse-strand entry at P derives from the reverse-complement k-mer at
+P whose syncmer window spans exactly the k-mers mapping back to that
+forward interval, and the canonical orientation check reads the k-mer
+at P; (c) the panel dictionary (content-keyed). The live center
+derivation at P fetches `[P−150−syncmer_len, P+150+syncmer_len)` —
+which ALWAYS contains the clamped interval — so its value at P is the
+context-complete value (at path edges the clamping is the path's own,
+identical in any derivation whose fetch covers the clamped interval).
+Therefore: **a builder derivation over any range `[lo, hi)` reproduces
+the live center derivation's bits at every position P in its SERVED
+BAND** — P ∈ [lo, hi) (the walk-slice clause) and P + (w−1) <= hi, or
+the path-end form (P + (w−1) + syncmer_len >= path_len and
+path_len <= hi + syncmer_len — the clamped-context clause at the last
+syncmer window of a path). Everything outside a served band is NOT
+served: the bind derives it LIVE, verbatim, and counts the fallback
+loudly — exact by construction (the fallback IS the committed path).
+
+**THE COVERAGE RULE — what the builder can enumerate.** A4's own
+statement: the census positions are sample-side, so the builder covers
+the PANEL-KNOWABLE coordinate set — the territory's own member-row
+extents from the partition maps (the same rows the asset already
+serves, already bound by the maps digest). Per path the extents are
+merged when they sit within the syncmer window's own reach (w−1), and
+each merged extent `[s, e)` is derived over `[s, e + (w−1))` so its
+served band covers the extent exactly. The covered share of a real
+census's first-occurrence positions is an EMPIRICAL property of the
+target (the reads' cross-mapping is the sample's own), receipted at
+the gates as the served/fallback split — stated, never projected.
+
+**THE ASSET FORMAT — the panel asset's new section.**
+`<partition-graphs>/panel-precompute-loci/bind-scaffolding.bin`:
+per path (content-named, sorted), the derivation ranges `[lo, hi)` and
+the canonical-scheme steps `(bp, node)` the derivation returned,
+sorted by bp — exact-width little-endian u64/i32/string,
+length-prefixed, NO FLOATS anywhere (clause (b) unchanged). The
+manifest's format string becomes `impg-panel-precompute-loci/2` and
+gains the section's counters (`bind_paths`, `bind_ranges`,
+`bind_steps`) for serve-time validation; **the content keys are
+UNCHANGED in kind** — the panel identity, the maps digest, the routes
+digest, the component, the frame + record origin, the stored-frame
+convention, k — the scaffolding is a pure function of exactly the
+inputs those keys bind. A format-/1 asset (slice 1's) still serves
+the row context + fold layouts under the default toggle and states on
+stderr that the bind-scaffolding section is absent (the bind derives
+live); `IMPG_PANEL_PRECOMPUTE=on` REQUIRES the /2 form (a /1 asset is
+a loud error naming the missing section — the gate form never serves
+partially silently).
+
+**THE READ-VS-COMPUTE SPLIT at the bind (under serve).** READS: the
+manifest, the bind-scaffolding section — ONE binary search per pilot
+record over the path's recorded steps, inside the served band. LOOKS
+UP NOTHING ELSE: the candidate key sets, the key shapes, the verify
+probes, and the origin shifts stay live verbatim (sample evidence).
+FALLS BACK: any record whose first occurrence lies outside the
+covered bands derives live (counted; exact by construction).
+
+**THE EXACTNESS ARGUMENT, IN FIVE CLAUSES** (§10.6.23's shape,
+extended):
+(a) **THE BUILDER IS THE LIVE DERIVATION**: `canonical_steps_near`'s
+body moves VERBATIM into one extracted range-parameterized function
+(the live center call is that function at `[P−150, P+150)` — code
+motion, the slice-1 precedent; the builder and the serve's fallback
+call the same function); the scaffold builder (extent merge + range
+derivation) is the same shared code the unit fixtures exercise.
+(b) **THE SERIALIZATION IS LOSSLESS**: u64/i32/string only.
+(c) **THE LOCALITY LEMMA** (above): the served value is the live
+center derivation's own bits at every served-band position;
+unit-proven on randomized panels at EVERY position — served and
+fallback, interior and path-edge.
+(d) **THE CONTENT KEYS BIND THE ASSET**: the same manifest keys, the
+same loud live-fallback doctrine on mismatch; the honest residual,
+NAMED: a post-build AGC source-byte drift (stable syng, stable maps,
+stable routes) is caught by the row-sequence FNV keys at the
+representative fetches and by the answer gates, never at the
+scaffold's own bytes (the serve does not fetch them — that is the
+point); the class is bounded exactly as slice 1's non-representative
+residual is.
+(e) **THE PROOF INSTRUMENTS**: the in-process fold-set digests + the
+answer digests (calls.jsonl AND truth-qv sha256), off leg and on leg,
+against the committed receipts — all identical.
+
+**THE ONCE-PER-PANEL PRICE.** The scaffold build is one
+`canonical_steps_over_range` walk per merged extent: the fetch of the
+covered bytes (the row-extent mass, padded by the derivation's own
+reaches), the panel-walk slice, and the reverse-strand syncmer
+extraction over that mass — priced at panel-prep, never per sample,
+and receipted SEPARATELY from the global panel load (the fleet COW's
+own class, unchanged by this slice).
+
+**THE GATES AND THE HONEST CEILING.** Byte gates: calls.jsonl AND
+truth-qv sha256 identical (off leg AND on leg) against the committed
+receipts at L1 (all 19 loci, local frame) and T09724 (all 16 loci,
+global frame); fold-set digests identical per locus; the per-locus
+phase censuses + scoring censuses identical modulo their own timers;
+`IMPG_PANEL_PRECOMPUTE=off` restores the live path (the
+toggle-restore gate). Timing receipts: the bind phase before/after at
+both targets with the served/fallback split; the per-locus median
+before/after (the floor question — slice 1 named the bind class as
+the floor's mass, and this slice moves only the bind's STEP share:
+the verify term is sample evidence, so the honest expectation is the
+per-locus median moves by the amortized steps share only, MEASURED
+never smoothed); the corpus bind-share restated (7.2 s median / 507 s
+tail — the tail is occurrence-bound sample evidence, unmoved by
+construction); the 16-core arithmetic refreshed; the marginal
+once-price receipted beside the asset. SLICE 3 (the pin-skeleton
+content-keyed cache) and the map side's ~2x remain the named
+remainder.
+
+**THE UNIT BARS.** Randomized in-process panels (the committed
+k63/s8/seed7 convention) over randomized extent sets: the serve ==
+live at EVERY position (the locality lemma, served band and fallback,
+path edges included); the asset round trip is lossless; the uncovered
+positions fall back live; the format-/1 asset serves rows/windows and
+states the absent section loudly; the `=on` form requires the /2
+section. cargo test --release --lib green at the committed count +
+the new tests.
