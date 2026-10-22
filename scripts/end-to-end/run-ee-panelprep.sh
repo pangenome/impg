@@ -36,6 +36,27 @@ read -r CHROM START END < <(awk -v t="$T" '$4==t{print $1, $2, $3; exit}' \
 # panelprep.poison, named in the fail-closed census, excluded from
 # its chunk by the chunk-readiness gate, instead of retrying forever)
 PP_PRIOR=0; [ -f "$L/panelprep.exit" ] && PP_PRIOR=1
+# THE CITIZENSHIP GOVERNOR (the window-2 steering): the panel load
+# is a ~34GB-per-lane appetite - hold while the floor is breached
+ee_mem_governor "panelprep $T"
+echo "$(ee_now) $T panelprep START weather=$(ee_weather)" >> "$L/panelprep.weather.txt"
+# THE CASCADE-LEFTOVER ADJUDICATION (window-2 law): a leftover
+# partition dir carrying a COMPLETE registry (partition.json +
+# non-empty beds + the partitions.bed row) is the product's own
+# completed output from a killed-mid-run marker gap (the EEXIST
+# class: the re-run refuses on the name-dup check) - marked done,
+# never re-run; a PARTIAL dir (no registry) is a corpse - removed
+if [ -d "$EE/partitions/$T" ]; then
+  if [ -f "$EE/partitions/$T/partition.json" ] && [ -n "$(ls "$EE/partitions/$T/beds" 2>/dev/null)" ] \
+     && grep -q "	$T$" "$EE/partitions/partitions.bed"; then
+    touch "$L/panelprep.done"
+    rm -f "$P"/locus-pos64.syng* "$P/export-walks.jsonl" "$P/walk-requests.tsv" 2>/dev/null
+    rm -rf "$P/partition-w10k-d1k" "$P/export-graphs" 2>/dev/null
+    echo "$(ee_now) $T panelprep ADJUDICATED-COMPLETE (the cascade-leftover class; the artifact verified) weather=$(ee_weather)" >> "$L/panelprep.weather.txt"
+    exit 0
+  fi
+  rm -rf "$EE/partitions/$T"
+fi
 export RAYON_NUM_THREADS=${PANELPREP_T:-8}
 ee_step_out "$L" panelprep "$L/panelprep.log" \
   env RAYON_NUM_THREADS=$RAYON_NUM_THREADS "$IMPG_NEW" genome-infer panel-prep \
@@ -48,8 +69,24 @@ ee_step_out "$L" panelprep "$L/panelprep.log" \
   --global-panel "$PANEL" --global-agc "$AGC" \
   --global-routes "$EE/global-routes" \
   --record-origin 1 \
-  --out-dir "$EE/partitions" || { [ "$PP_PRIOR" -eq 1 ] && { echo 1 > "$L/panelprep.poison"; echo "$(ee_now) $T PANELPREP-TERMINAL POISON: panelprep failed again (strike 2) - named per the doctrine" >> "$EE/logs/failures.log"; }; exit 1; }
+  --out-dir "$EE/partitions"; pst=$?
+if [ "$pst" -ne 0 ]; then
+  w=$(ee_weather)
+  if [ "$pst" -eq 137 ] || [ "$pst" -eq 9 ]; then
+    # SIGKILL with no guard over this step: the kernel's
+    # memory-pressure killer - KERNEL-WEATHER, never a code failure
+    echo "$(ee_now) $T panelprep KERNEL-WEATHER kill (exit $pst; weather $w) - the box's memory-pressure killer; leg re-queues under the governor, NOT a code failure" >> "$EE/logs/failures.log"
+    echo "$(ee_now) $T panelprep KERNEL-WEATHER exit=$pst weather=$w" >> "$L/panelprep.weather.txt"
+  elif [ "$PP_PRIOR" -eq 1 ]; then
+    echo 1 > "$L/panelprep.poison"
+    echo "$(ee_now) $T PANELPREP-TERMINAL POISON: panelprep failed again (strike 2, exit $pst; weather $w) - named per the doctrine" >> "$EE/logs/failures.log"
+  else
+    echo "$(ee_now) $T panelprep FAILED strike 1 (exit $pst; weather $w)" >> "$EE/logs/failures.log"
+  fi
+  exit 1
+fi
 touch "$L/panelprep.done"
+echo "$(ee_now) $T panelprep END weather=$(ee_weather)" >> "$L/panelprep.weather.txt"
 
 # THE EARLY SUBSTRATE REAP (the budget law's own valve, a window-2
 # runner fix): once the partition step has consumed the substrate,

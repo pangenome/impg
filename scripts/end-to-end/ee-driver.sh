@@ -75,6 +75,10 @@ iter=0
 while true; do
   iter=$((iter+1))
   ee_budget_check || { ee_log "BUDGET STOP at iter $iter"; break; }
+  # THE CITIZENSHIP GOVERNOR (the window-2 steering): hold the whole
+  # iteration while the box's MemAvailable is under the co-tenant
+  # floor - the heavy pools dispatch only in citizen weather
+  ee_mem_governor "driver iter $iter"
   census=$(term_census)
   ee_log "iter $iter: $census df=$(df -h /home/erikg | tail -1 | awk '{print $4}') memavail=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)G"
   set -- $census
@@ -99,6 +103,17 @@ while true; do
     '[ -f "$EE/prep/$t/substrate.done" ] && [ ! -f "$EE/ledger/$t/panelprep.done" ] && [ ! -f "$EE/ledger/$t/panelprep.poison" ]'
   pending_set "$EE/scratch/M.set" $((MAP_W*2)) \
     '[ -f "$EE/ledger/$t/panelprep.done" ] && [ ! -f "$EE/ledger/$t/map.done" ] && [ ! -f "$EE/ledger/$t/map.exit" ]'
+  # THE MONSTER RULE (the window-2 steering): a known 64GiB-guard
+  # census member at the queue head dispatches ALONE - its
+  # memory-tail appetite (67-70GB peaks) never stacks with the
+  # fleet's; at width-1 it runs in the headroom the floor guarantees
+  for t in $(cat "$EE/scratch/M.set" 2>/dev/null); do
+    if grep -qs 'GUARD kill' "$EE/ledger/$t/map.guard.txt" 2>/dev/null; then
+      ee_log "MONSTER RULE: $t (the 64GiB guard census) dispatches ALONE this iteration"
+      echo "$t" > "$EE/scratch/M.set"
+      break
+    fi
+  done
   : > "$EE/scratch/C.set"
   for i in $(seq 0 $((NCHUNKS-1))); do
     [ -f "$EE/ledger/chunk-$i/call.done" ] && continue

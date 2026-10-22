@@ -16,6 +16,15 @@ mkdir -p "$L"
 [ -f "$L/map.done" ] && exit 0
 [ -f "$L/panelprep.done" ] || { echo "$T panel-prep not done" >&2; exit 1; }
 ee_budget_check || exit 1
+# THE CITIZENSHIP GOVERNOR (the window-2 steering): hold this leg
+# while the box's MemAvailable is under the co-tenant floor
+ee_mem_governor "mapcut $T"
+echo "$(ee_now) $T map START weather=$(ee_weather)" >> "$L/map.weather.txt"
+# a partial map root from a killed/failed prior attempt is a corpse
+# (map.done would have short-circuited above) - removed so the retry
+# is clean (the committed-receipt immutability discipline applies to
+# COMPLETED roots, never to corpses)
+rm -rf "$EE/map/$T"
 
 read -r CHROM START END < <(awk -v t="$T" '$4==t{print $1, $2, $3; exit}' \
   "$RV/bed4-genome.tsv")
@@ -38,6 +47,7 @@ fi
 # class, kept only on failure for the fail-closed diagnosis)
 export RAYON_NUM_THREADS=${MAPCUT_T:-32}
 OUT=$EE/map/$T
+GN0=$(grep -c 'GUARD kill' "$L/map.guard.txt" 2>/dev/null || echo 0)
 ( TIMEFORMAT='%U %S'; time ( "$IMPG_NEW" genome-infer map \
     --panel "$PANEL" --agc "$AGC" --shards-dir "$SHARDS" \
     --partitions "$EE/partitions" \
@@ -50,9 +60,35 @@ t0=$(date +%s)
 wait "$mp"; st=$?
 kill "$gpid" "$tpid" 2>/dev/null; wait "$gpid" "$tpid" 2>/dev/null
 echo "$(( $(date +%s) - t0 ))" > "$L/map.wall"
+GN1=$(grep -c 'GUARD kill' "$L/map.guard.txt" 2>/dev/null || echo 0)
 if [ "$st" -ne 0 ]; then
-  echo "$st" > "$L/map.exit"
-  echo "$(ee_now) $T map FAILED exit=$st (guard: $(cat $L/map.guard.txt 2>/dev/null | tail -1); log kept: $L/map.log)" >> "$EE/logs/failures.log"
+  w=$(ee_weather)
+  if [ "$GN1" -gt "$GN0" ]; then
+    # a guard kill: the 64GiB oracle working (the memory-tail class)
+    if [ "$GN0" -gt 0 ]; then
+      # strike 2: a DETERMINISTIC memory-tail monster even at
+      # width-1 - terminal, named, excluded by the chunk gate
+      echo "$st" > "$L/map.exit"
+      echo "$(ee_now) $T MAP-TERMINAL (guard strike 2 at ${GUARD_GIB}GiB, exit $st; weather $w) - the deterministic memory-tail monster class, named per the doctrine" >> "$EE/logs/failures.log"
+    else
+      # strike 1: re-queue (no marker) - the monster rule dispatches
+      # this territory ALONE next iteration
+      echo "$(ee_now) $T map GUARD KILL strike 1 (exit $st; weather $w) - re-queued, will dispatch ALONE (the monster rule)" >> "$EE/logs/failures.log"
+      echo "$(ee_now) $T map GUARD-STRIKE1 weather=$w" >> "$L/map.weather.txt"
+      rm -rf "$EE/map/$T"
+      exit "$st"
+    fi
+  elif [ "$st" -eq 137 ] || [ "$st" -eq 9 ]; then
+    # SIGKILL with NO guard event: the kernel's memory-pressure
+    # killer - KERNEL-WEATHER, never a code failure; re-queue
+    echo "$(ee_now) $T map KERNEL-WEATHER kill (exit $st, no guard event; weather $w) - the box's memory-pressure killer; leg re-queues under the governor, NOT a code failure" >> "$EE/logs/failures.log"
+    echo "$(ee_now) $T map KERNEL-WEATHER exit=$st weather=$w" >> "$L/map.weather.txt"
+    rm -rf "$EE/map/$T"
+    exit "$st"
+  else
+    echo "$st" > "$L/map.exit"
+    echo "$(ee_now) $T map FAILED exit=$st (guard: $(cat $L/map.guard.txt 2>/dev/null | tail -1); weather $w; log kept: $L/map.log)" >> "$EE/logs/failures.log"
+  fi
   exit "$st"
 fi
 touch "$L/map.done"
@@ -63,4 +99,5 @@ rm -f "$L/map.log"
 # multi-region stream), per the stream law, ahead of the chunk's JIT
 # reaper
 rm -f "$P/locus.fa" "$P/locus.fa.fai" "$EE/reads/$T.fq.gz" 2>/dev/null
-echo "$(ee_now) $T map done wall=$(cat $L/map.wall)s"
+echo "$(ee_now) $T map END weather=$(ee_weather)" >> "$L/map.weather.txt"
+echo "$(ee_now) $T map done wall=$(cat $L/map.wall)s weather=$(ee_weather)"

@@ -53,6 +53,30 @@ EE_BUDGET_GB=${EE_BUDGET_GB:-150}
 # guard-as-oracle doctrine; every guard event is a named fail-closed
 # census entry, never a silent loss).
 GUARD_GIB=${GUARD_GIB:-64}
+
+# ---- THE MEMORY GOVERNOR + THE WEATHER RECEIPT (the box's
+# CITIZENSHIP LAW, the window-2 steering): the co-tenant producer
+# class (~70-200GB appetite) must survive this campaign - no heavy
+# leg (map cut / panel-prep / call chunk) is dispatched while
+# MemAvailable is under the floor; every leg receipt states the
+# box's memory weather at start and end; a leg killed by the
+# kernel's memory-pressure killer is receipted KERNEL-WEATHER, never
+# as a code failure, and never counted in a regression verdict
+# without a co-tenancy control (the predecessor-era 'five crashes'
+# class on this box is the cautionary precedent).
+MEM_FLOOR_G=${MEM_FLOOR_G:-250}
+ee_weather() {
+  echo "memavail=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)G memfree=$(awk '/MemFree/{print int($2/1048576)}' /proc/meminfo)G"
+}
+ee_mem_governor() { # <label>: hold (sleep-poll) until the citizenship floor clears
+  local avail held=0
+  while :; do
+    avail=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)
+    [ "${avail:-0}" -ge "$MEM_FLOOR_G" ] && return 0
+    [ "$held" -eq 0 ] && { ee_log "GOVERNOR HOLD ($1): memavail ${avail}G < ${MEM_FLOOR_G}G (the co-tenant citizenship floor) - holding dispatch"; held=1; }
+    sleep 120
+  done
+}
 # the census-producing cut and the routes derive are panel-side
 # one-time steps on the whole panel: wider honest guards, stated on
 # their receipts (the cut path runs unguarded by design in the

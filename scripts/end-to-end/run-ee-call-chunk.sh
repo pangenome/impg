@@ -64,6 +64,12 @@ done
 TS=("${CALLABLE[@]}")
 POISONED=${#POISON[@]}
 
+# THE CITIZENSHIP GOVERNOR (the window-2 steering): the chunk call
+# is a ~52-70GB tree appetite (the COW parent + the width-32 child)
+# - hold while the box's MemAvailable is under the co-tenant floor
+ee_mem_governor "call-chunk $CID"
+echo "$(ee_now) chunk $CID START: ${#TS[@]} callable, ${POISONED} poison excluded, weather=$(ee_weather)" >> "$RCP"
+
 # all-poison chunk: nothing callable - name, reap, mark done
 if [ "${#TS[@]}" -eq 0 ]; then
   for T in "${POISON[@]}"; do
@@ -117,6 +123,7 @@ cpu=$L/call.cpu
 # per-territory markers stay authoritative
 ATT=$(ls -d "$EE/calls"/chunk-$CID.a* 2>/dev/null | wc -l)
 OUT=$EE/calls/chunk-$CID.a$ATT
+CG0=$(grep -c 'GUARD kill' "$RCP" 2>/dev/null || echo 0)
 ( TIMEFORMAT='%U %S'; time (
     "$IMPG_NEW" genome-infer call-region \
       --map "$ROOT" --partitions "$EE/partitions" \
@@ -130,9 +137,19 @@ wait "$cpid"; st=$?
 kill "$gp" "$tp" 2>/dev/null; wait "$gp" "$tp" 2>/dev/null
 wall=$(( $(date +%s) - t0 ))
 echo "$wall" > "$L/call.wall"
-echo "$(ee_now) chunk $CID call-region exit=$st wall=${wall}s cpu='$(cat $cpu 2>/dev/null)'" >> "$RCP"
+echo "$(ee_now) chunk $CID call-region exit=$st wall=${wall}s cpu='$(cat $cpu 2>/dev/null)' weather=$(ee_weather)" >> "$RCP"
 echo "guard events: $(grep -c GUARD "$RCP" || true)" >> "$RCP"
-[ "$st" -ne 0 ] && { echo "$st" > "$L/call.exit"; exit "$st"; }
+[ "$st" -ne 0 ] && {
+  CG1=$(grep -c 'GUARD kill' "$RCP" 2>/dev/null || echo 0)
+  if { [ "$st" -eq 137 ] || [ "$st" -eq 9 ]; } && [ "${CG1:-0}" -le "${CG0:-0}" ]; then
+    echo "$(ee_now) chunk $CID KERNEL-WEATHER kill (exit $st, no guard event) - the box's memory-pressure killer; the chunk re-queues under the governor, NOT a code failure" >> "$RCP"
+    echo "$(ee_now) chunk $CID KERNEL-WEATHER exit=$st weather=$(ee_weather)" >> "$EE/logs/failures.log"
+  else
+    echo "$st" > "$L/call.exit"
+    echo "$(ee_now) chunk $CID call FAILED exit=$st weather=$(ee_weather)" >> "$EE/logs/failures.log"
+  fi
+  exit "$st"
+}
 
 # ---- per-territory markers + receipts at write time ---------------
 OUT_SAVE=$OUT
