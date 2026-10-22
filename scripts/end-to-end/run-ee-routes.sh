@@ -18,7 +18,12 @@ if [ -f "$EE/ledger/routes.done" ]; then echo done; exit 0; fi
 : > "$RCP"
 [ -f "$CENSUS" ] || { echo "$(ee_now) no census at $CENSUS (run run-ee-census-cut.sh first)" >> "$RCP"; exit 1; }
 ee_budget_check || { echo budget >> "$RCP"; exit 1; }
-mkdir -p "$OUT"
+# NOTE: with_output_model CREATE_DIR-refuses an existing out-dir (the
+# committed-receipt immutability discipline) - the runner must NOT
+# pre-create it, and a failed attempt's partial dir is removed before
+# the retry (the manifest.json status:running marker is the attempt's
+# own record; a clean retry is idempotent by the marker file).
+rm -rf "$OUT"
 
 echo "$(ee_now) derive-routes over the ONE global panel (the parallel lane-hash form, the whole box's rayon)" >> "$RCP"
 export RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-192}

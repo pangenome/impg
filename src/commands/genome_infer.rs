@@ -1903,6 +1903,21 @@ pub fn run(command: Command) -> io::Result<()> {
             // from the committed locality maps (the maps are the
             // durable panel-side asset; the member rows per window in
             // the map's own order).
+            //
+            // THE BED FILENAME IS THE AXIS INTERVAL'S OWN GROUP NAME
+            // (the sparse-community fix, found by the whole-genome
+            // run at T00017/T00032/T00000: the export-profile axis
+            // names its windows by the ORIGINAL w10k/d1k community
+            // ids - partition0, partition21, partition22, partition23
+            // - while the locality maps renumber their windows 0..k;
+            // naming the regenerated bed by the map index leaves the
+            // cut's group resolution (axis group -> bed file) with a
+            // NotFound at every sparse territory. The pairing is BY
+            // ORDER with the strongest cross-check: the i-th map
+            // (axis order) must carry the component's own row at the
+            // i-th interval's extent, fail-closed loudly - verified
+            // across BOTH substrate classes (L1's dense 25; T00017's
+            // sparse 4; T00032/T00000 mixed).
             let beds = dir.join("beds");
             std::fs::create_dir_all(&beds)?;
             let mut windows = 0u64;
@@ -1943,12 +1958,52 @@ pub fn run(command: Command) -> io::Result<()> {
                 format!("no locality maps in {}", partition_graphs.display()),
             )?;
             maps.sort_by_key(|(partition, _)| *partition);
-            for (partition, rows) in &maps {
+            // the axis intervals: the authoritative window group names,
+            // in the call's own window order (extent-sorted)
+            let axis_json: serde_json::Value = genome::read_json(&axis)?;
+            let mut intervals: Vec<(u64, u64, String)> = axis_json["intervals"]
+                .as_array()
+                .ok_or_else(|| invalid("the axis carries no intervals array"))?
+                .iter()
+                .map(|interval| {
+                    Ok((
+                        interval["start"].as_u64().unwrap_or(0),
+                        interval["end"].as_u64().unwrap_or(0),
+                        interval["group"]
+                            .as_str()
+                            .ok_or_else(|| invalid("an axis interval carries no group"))?
+                            .to_string(),
+                    ))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            intervals.sort_by_key(|(start, end, _)| (*start, *end));
+            ensure(
+                intervals.len() == maps.len(),
+                format!(
+                    "the axis carries {} intervals but the locality maps carry {} windows \
+                     (the sparse-community pairing is by order; a count mismatch is a \
+                     substrate error, loudly named)",
+                    intervals.len(),
+                    maps.len()
+                ),
+            )?;
+            for ((interval_start, interval_end, group), (_, rows)) in intervals.iter().zip(&maps) {
+                ensure(
+                    rows.iter().any(|(path_name, mstart, mend)| {
+                        path_name == &component && *mstart == *interval_start && *mend == *interval_end
+                    }),
+                    format!(
+                        "the locality map for axis group {group} carries no member row for \
+                         the component {component} at its own extent \
+                         {interval_start}-{interval_end} (the pairing is by order with the \
+                         strongest cross-check; a mismatch is a substrate error, loudly named)"
+                    ),
+                )?;
                 let mut text = String::new();
                 for (path_name, mstart, mend) in rows {
                     text.push_str(&format!("{path_name}\t{mstart}\t{mend}\n"));
                 }
-                std::fs::write(beds.join(format!("partition{partition}.bed")), text)?;
+                std::fs::write(beds.join(format!("{group}.bed")), text)?;
             }
             let beds_seconds = started.elapsed().as_secs_f64();
             // THE REGISTRY (keyed by the partition name): everything

@@ -89,7 +89,7 @@ echo "== (2) per-shard commutative packet-multiset hash (the 100% standard)" >> 
 ls "$FULL"/shard.*.bin.gz "$OUT"/shard.*.bin.gz \
   | xargs -P 24 -n 1 nice -n 19 python3 "$B/shard-hash.py" \
   > "$EE/receipts/map-projection.shard-hashes.txt" 2>&1
-python3 - "$EE/receipts/map-projection.shard-hashes.txt" "$FULL" "$OUT" >> "$RCP" 2>&1 <<'PY'
+python3 - "$EE/receipts/map-projection.shard-hashes.txt" "$OUT" >> "$RCP" 2>&1 <<'PY'
 import re, sys
 from collections import defaultdict
 d = defaultdict(dict)
@@ -97,14 +97,22 @@ for line in open(sys.argv[1]):
     t = line.split()
     m = re.search(r'shard\.(fifo_\d+)\.bin\.gz', t[0])
     side = 'rerun' if t[0].startswith(sys.argv[2]) else 'committed'
-    d[m.group(1)][side] = (int(t[1]), int(t[2]), t[-1])
+    d[m.group(1)][side] = (int(t[2]), int(t[4]), t[6])
 bad = [s for s, v in d.items() if len(v) != 2 or v['committed'] != v['rerun']]
 print(f"   shards {len(d)}: " + ("ALL IDENTICAL (packets + records + 128-bit multiset sum per shard)"
       if not bad and len(d) == 19 else f"MISMATCH {bad}"))
 sys.exit(1 if bad or len(d) != 19 else 0)
 PY
-if [ $? -eq 0 ]; then echo "   FULL-SAMPLE SHARD GATE PASS" >> "$RCP"; else echo "   FULL-SAMPLE SHARD GATE FAIL" >> "$RCP"; fi
-echo "$(ee_now) MAP RECEIPT: projection wall ${proj_wall}s (committed baseline 1247.5s = 20.79min), dedup ${dedup_wall}s, total $((proj_wall+dedup_wall))s" >> "$RCP"
+GATE=$?
+if [ "$GATE" -eq 0 ] && grep -q "occurrences.bin BYTE-IDENTICAL" "$RCP"; then
+  echo "   FULL-SAMPLE GATE PASS (all three levels)" >> "$RCP"
+else
+  echo "   FULL-SAMPLE GATE FAIL - KEEPING the re-run for diagnosis (the mine-before-reap law)" >> "$RCP"
+  touch "$EE/ledger/map-projection.gatefail"
+  exit 1
+fi
+echo "$(ee_now) MAP RECEIPT: projection wall ${proj_wall}s (committed baseline 1247.5s = 20.79min; this run co-tenant with the 711GB-peak routes derive - stated), dedup ${dedup_wall}s, total $((proj_wall+dedup_wall))s" >> "$RCP"
+echo "   projection core-s: sample_projection $(awk '{print $1+$2}' $EE/scratch/$N.cpu 2>/dev/null) (the TIMEFORMAT capture; the 19 samtools stream writers' cpu is beside it, io-bound)" >> "$RCP"
 touch "$EE/ledger/map-projection.done"
 
 # ---- THE REAP (the stream law: the gate is on digests; the committed

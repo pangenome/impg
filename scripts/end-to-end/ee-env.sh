@@ -124,44 +124,66 @@ ee_guard() {
       fi
       sleep 10
     done
-  ) &
+  ) > /dev/null 2>&1 &
   echo $!
 }
 
-# the guard poller over a whole invocation tree (every direct
-# descendant worker over the guard is killed - the per-worker
+# the guard poller over a whole invocation tree (every DESCENDANT
+# worker over the guard is killed, at any depth - the per-worker
 # doctrine at the fleet shape; the parent then fails at its own
 # first-failure discipline and the leg is receipted fail-closed).
+# ONE ps snapshot + an in-awk ancestry closure per cycle (no per-pid
+# forks - the /proc walk was measured at ~30-60s/cycle, too slow for
+# a guard; this form cycles in <1s beside the 10s cadence).
 ee_guard_tree() {
   local root=$1 gib=$2 receipt=$3 label=${4:-fleet}
   local kb=$((gib*1024*1024))
   (
     while kill -0 "$root" 2>/dev/null; do
-      local pid rss
-      for pid in $(ps -eo pid,ppid --no-headers | awk -v r="$root" '$2==r{print $1}'); do
-        rss=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null) || continue
-        if [ "${rss:-0}" -gt "$kb" ]; then
-          echo "$(ee_now) GUARD kill $label pid=$pid rss=${rss}kB > ${gib}GiB" >> "$receipt"
-          kill -9 "$pid" 2>/dev/null
-        fi
-      done
+      ps -eo pid,ppid,rss --no-headers 2>/dev/null | awk -v root="$root" -v kb="$kb" -v gib="$gib" -v label="$label" \
+        '{ ppid[$1]=$2; rss[$1]=$3; seen[$1]=1 }
+         END {
+           desc[root]=1
+           for (iter=0; iter<16; iter++) {
+             n=0
+             for (pid in seen) if (!desc[pid] && desc[ppid[pid]]) { desc[pid]=1; n=1 }
+             if (!n) break
+           }
+           for (pid in desc) if (rss[pid]+0 > kb)
+             printf "%s GUARDKILL %s %d %d %d\n", strftime("%Y-%m-%dT%H:%M:%SZ", systime()), label, pid, rss[pid], gib
+         }' | while IFS= read -r line; do
+          echo "$(echo "$line" | sed 's/GUARDKILL/GUARD kill/')" >> "$receipt"
+          kill -9 "$(echo "$line" | awk '{print $4}')" 2>/dev/null || true
+        done
       sleep 10
     done
-  ) &
+  ) > /dev/null 2>&1 &
   echo $!
 }
 
 # peak-RSS tracker: <pid> <receipt-file> [label] - records the max
+# RSS over the pid's whole process tree (the worker's honest peak),
+# appended each cycle (the last line is the peak; kill-safe)
 ee_rss_track() {
-  local pid=$1 receipt=$2 label=${3:-worker}
+  local root=$1 receipt=$2 label=${3:-worker}
   (
-    local peak=0 rss
-    while kill -0 "$pid" 2>/dev/null; do
-      rss=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null) || { sleep 10; continue; }
-      [ "${rss:-0}" -gt "$peak" ] && peak=$rss
+    while kill -0 "$root" 2>/dev/null; do
+      peak=$(ps -eo pid,ppid,rss --no-headers 2>/dev/null | awk -v root="$root" \
+        '{ ppid[$1]=$2; rss[$1]=$3; seen[$1]=1 }
+         END {
+           isdesc[root]=1
+           for (iter=0; iter<16; iter++) {
+             n=0
+             for (pid in seen) if (!(pid in isdesc) && (ppid[pid] in isdesc)) { isdesc[pid]=1; n=1 }
+             if (!n) break
+           }
+           m=0
+           for (pid in isdesc) if (pid in seen && rss[pid]+0 > m) m=rss[pid]
+           print m
+         }')
+      echo "$(ee_now) RSSPEAK $label root=$root tree-peak=${peak:-0}kB" >> "$receipt"
       sleep 10
     done
-    echo "$(ee_now) RSSPEAK $label pid=$pid peak=${peak}kB" >> "$receipt"
-  ) &
+  ) > /dev/null 2>&1 &
   echo $!
 }

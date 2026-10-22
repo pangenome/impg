@@ -31,7 +31,7 @@ rm -f "$OUT"/cut-census.jsonl "$OUT"/cut-cache.bin "$OUT"/cut-reads.fasta "$OUT"
   --component "$L1_COMPONENT" \
   --shards-dir "$SHARDS" --out-dir "$OUT" &
 cutpid=$!
-gp=$(ee_guard "$cutpid" "$ONCE_GUARD_GIB" "$RCP" census-cut)
+gp=$(ee_guard_tree "$cutpid" "$ONCE_GUARD_GIB" "$RCP" census-cut)
 tp=$(ee_rss_track "$cutpid" "$RCP" census-cut)
 wait "$cutpid"; st=$?
 kill "$gp" "$tp" 2>/dev/null; wait "$gp" "$tp" 2>/dev/null
