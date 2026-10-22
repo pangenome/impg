@@ -1027,18 +1027,24 @@ impl RssGuard {
     }
     fn probe(&self, stage: &str) -> io::Result<u64> {
         let text = std::fs::read_to_string("/proc/self/status")?;
-        let rss_kb = text
-            .lines()
-            .find(|l| l.starts_with("VmRSS:"))
-            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-            .unwrap_or(0);
+        let field_kb = |prefix: &str| -> u64 {
+            text.lines()
+                .find(|l| l.starts_with(prefix))
+                .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
+                .unwrap_or(0)
+        };
+        let rss_kb = field_kb("VmRSS:");
+        // VmHWM is the monotone high-water mark: VmRSS samples instants,
+        // so a short-lived spike inside a phase (the tie certificate's
+        // Value tree is one) can be missed entirely between two probes.
+        let hwm_kb = field_kb("VmHWM:");
         if let Some(budget) = self.budget_bytes {
             ensure(
                 rss_kb * 1024 <= budget,
                 &format!("RSS guard exceeded at {stage}: {rss_kb} kB"),
             )?;
         }
-        eprintln!("[score] rss {stage}: {rss_kb} kB");
+        eprintln!("[score] rss {stage}: {rss_kb} kB peak {hwm_kb} kB");
         Ok(rss_kb)
     }
 }
@@ -9828,6 +9834,16 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 cut,
             );
         }
+        // (THE CERTIFICATE'S OWN RSS PROBE, the receipts-phase memory
+        // audit's blind window: `cut_index_lists` is the ONE structure
+        // here whose cardinality is (|called| - 1) x |spectrum|, and at
+        // the structurally degenerate shape (called.len() == pair_count,
+        // the equality this code already relies on) that is
+        // pair_count x pair_count. Whether it is the reported deep-locus
+        // peak is a measurement, not an argument: the delta against the
+        // `_scored` bookend prices it, and `_tie_emitted` prices the
+        // Value-tree emission downstream.)
+        rss.probe(&format!("locus_{locus}_certificate"))?;
         let tie_certificate = TieCertificate::CutIndices(&cut_index_lists);
         // (The phase census's certificate timer — one path for both
         // shapes now; the before-fix receipts' qual_bands_seconds/
@@ -10698,6 +10714,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         ingredients_spill.write_all(b"\n")?;
         ingredients_spill.flush()?;
         drop(ingredients_spill);
+        // THE INGREDIENT TREES ARE CONSUMED HERE (the receipts-phase
+        // memory audit's Finding 2): `folds_json` (per fold: members,
+        // the whole sequence, a walk/nodes/edges array pair per step) and
+        // `units_json` (per unit: six keys including a heap copy of the
+        // read sequence) exist only for the streaming write above. They
+        // were left live to the end of the function, so they co-resided
+        // with the whole receipt emission - several GB of Value slots at
+        // a deep locus for data nothing reads again. Dropping them frees
+        // no answer and changes no emitted byte.
+        drop(folds_json);
+        drop(units_json);
         rss.probe(&format!("locus_{locus}_receipts"))?;
 
         // ---------------------------------------------------- the main receipt
@@ -10973,6 +11000,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 .collect::<Vec<_>>());
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
+            // (The tie certificate's emission cost - the Value tree plus
+            // the reserialized text - isolated against `_certificate`.)
+            rss.probe(&format!("locus_{locus}_tie_emitted"))?;
         }
         // (The alignment-connected fold relaxation's report field —
         // emitted ONLY under the relaxed rule: the merge anatomy with
