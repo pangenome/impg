@@ -33,13 +33,16 @@ fi
 # root is the call step's own per-territory interface; the chunk roots
 # for the fleet call are assembled from these outputs by the chunk
 # runner - the batch-composition invariance receipt is their warrant)
+# (core-s receipt: TIMEFORMAT written DIRECTLY to map.cpu - no $()
+# pipe-hold; the product's raw stdout/stderr stream is the reaped
+# class, kept only on failure for the fail-closed diagnosis)
 export RAYON_NUM_THREADS=${MAPCUT_T:-32}
 OUT=$EE/map/$T
-( "$IMPG_NEW" genome-infer map \
+( TIMEFORMAT='%U %S'; time ( "$IMPG_NEW" genome-infer map \
     --panel "$PANEL" --agc "$AGC" --shards-dir "$SHARDS" \
     --partitions "$EE/partitions" \
     --reads "$EE/reads/$T.fq.gz" \
-    --region "$T" --out-dir "$OUT" ) &
+    --region "$T" --out-dir "$OUT" > "$L/map.log" 2>&1 ) ) 2> "$L/map.cpu" &
 mp=$!
 gpid=$(ee_guard_tree "$mp" "$GUARD_GIB" "$L/map.guard.txt" mapcut)
 tpid=$(ee_rss_track "$mp" "$L/map.guard.txt" mapcut-parent)
@@ -49,8 +52,15 @@ kill "$gpid" "$tpid" 2>/dev/null; wait "$gpid" "$tpid" 2>/dev/null
 echo "$(( $(date +%s) - t0 ))" > "$L/map.wall"
 if [ "$st" -ne 0 ]; then
   echo "$st" > "$L/map.exit"
-  echo "$(ee_now) $T map FAILED exit=$st (guard: $(cat $L/map.guard.txt 2>/dev/null | tail -1))" >> "$EE/logs/failures.log"
+  echo "$(ee_now) $T map FAILED exit=$st (guard: $(cat $L/map.guard.txt 2>/dev/null | tail -1); log kept: $L/map.log)" >> "$EE/logs/failures.log"
   exit "$st"
 fi
 touch "$L/map.done"
+rm -f "$L/map.log"
+# the map cut was locus.fa's last in-campaign consumer (the call's
+# restricted cut is global-frame: no locus.fa) - reaped here with the
+# territory's own reads fetch (the chunk call fetches its own
+# multi-region stream), per the stream law, ahead of the chunk's JIT
+# reaper
+rm -f "$P/locus.fa" "$P/locus.fa.fai" "$EE/reads/$T.fq.gz" 2>/dev/null
 echo "$(ee_now) $T map done wall=$(cat $L/map.wall)s"

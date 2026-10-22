@@ -26,13 +26,33 @@ done
 [ -f "$P/axis-path.txt" ] || { echo "$T no-axis (not accepted)" > "$P/substrate.skipped"; exit 0; }
 AXIS_PATH=$(cat "$P/axis-path.txt")
 
+# THE 2-STRIKE POISON RULE (the fail-closed doctrine at prep shape,
+# a window-2 runner fix): a step that fails on a RE-RUN (its .exit
+# marker already carried a prior strike) is a DETERMINISTIC
+# prep-terminal - the leg is marked substrate.exit (terminal poison,
+# named in the fail-closed census, excluded from its chunk by the
+# chunk-readiness gate) instead of retrying forever. The committed
+# doctrine's own predicted class (the syng segdup-tail terminals,
+# the extract-assertion tails).
+ee_step_p() { # <dir> <name> <cmd...>: ee_step + the 2-strike rule
+  local dir=$1 name=$2 prior=0
+  [ -f "$dir/$name.exit" ] && prior=1
+  ee_step "$@"
+  local st=$?
+  if [ "$st" -ne 0 ] && [ "$prior" -eq 1 ]; then
+    echo "$st" > "$dir/substrate.exit"
+    echo "$(ee_now) $T SUBSTRATE-TERMINAL POISON: $name failed again (strike 2, exit $st) - named per the doctrine" >> "$EE/logs/failures.log"
+  fi
+  return "$st"
+}
+
 # 1. extract (the AGC getctg chain, one xargs per territory)
 if [ ! -f "$P/extract.done" ]; then
-  ee_step "$P" extract python3 "$RV/rv-extract.py" "$EE" "$T" || exit 1
+  ee_step_p "$P" extract python3 "$RV/rv-extract.py" "$EE" "$T" || exit 1
 fi
 
 # 2. the local syng (k63 s8 seed7 pos64, the committed recipe)
-ee_step "$P" syng "$IMPG_SUB" syng -f "$P/locus.fa" --syncmer-length 63 \
+ee_step_p "$P" syng "$IMPG_SUB" syng -f "$P/locus.fa" --syncmer-length 63 \
   --smer-length 8 --syncmer-seed 7 --position-sample-rate 64 \
   -o "$P/locus-pos64.syng" || exit 1
 
@@ -41,7 +61,7 @@ BEDS="$P/partition-w10k-d1k/results"
 if [ ! -f "$P/beds.done" ]; then
   mkdir -p "$P/partition-w10k-d1k" "$BEDS"
   printf '%s\n' "$AXIS_PATH" > "$P/partition-w10k-d1k/starting-sequences.txt"
-  ee_step "$P" beds nice -n 10 "$IMPG_SUB" partition \
+  ee_step_p "$P" beds nice -n 10 "$IMPG_SUB" partition \
     -a "$P/locus-pos64.syng" -w 10000 -d 1000 \
     --starting-sequences-file "$P/partition-w10k-d1k/starting-sequences.txt" \
     --selection-mode haplotype \
@@ -52,19 +72,19 @@ if [ ! -f "$P/beds.done" ]; then
     -t "$THREADS" || exit 1
 fi
 NP=$(ls "$BEDS" 2>/dev/null | grep -c '\.bed$')
-[ "${NP:-0}" -gt 0 ] || { echo "empty partition at $T" > "$P/beds.empty"; exit 1; }
+[ "${NP:-0}" -gt 0 ] || { echo "empty partition at $T" > "$P/beds.empty"; echo 1 > "$P/substrate.exit"; exit 1; }
 
 # 4. the export graphs (the syng-native range GFAs)
 if [ ! -f "$P/export.done" ]; then
   mkdir -p "$P/export-graphs"
   IDS=$(seq 0 $((NP-1)) | tr '\n' ' ')
-  ee_step "$P" export "$EX_SUB/partition_graph_export" export "$P/locus-pos64.syng" \
+  ee_step_p "$P" export "$EX_SUB/partition_graph_export" export "$P/locus-pos64.syng" \
     "$P/locus.fa" "$BEDS" "$P/export-graphs" $IDS || exit 1
 fi
 
 # 5. the panel walks
 if [ ! -f "$P/walks.done" ]; then
-  ee_step "$P" walkreq python3 "$RV/rv-mk-walk-requests.py" "$BEDS" \
+  ee_step_p "$P" walkreq python3 "$RV/rv-mk-walk-requests.py" "$BEDS" \
     "$P/locus-pos64.syng.names" "$P/walk-requests.tsv" || exit 1
   ee_step_out "$P" walks "$P/export-walks.jsonl" nice -n 10 \
     "$EX_SUB/syng_homology_dump" walks "$P/locus-pos64.syng" \
@@ -74,7 +94,7 @@ fi
 # 6. the export locality maps (the c-rider locality-maps-export at K=63)
 if [ ! -f "$P/maps.done" ]; then
   rm -rf "$P/locality-graphs"
-  ee_step "$P" maps python3 "$CRIDER/locality-maps-export.py" \
+  ee_step_p "$P" maps python3 "$CRIDER/locality-maps-export.py" \
     "$AXIS_PATH" "$BEDS" "$P/export-graphs" "$P/export-walks.jsonl" \
     "$P/locality-graphs" "$P/reference-axis.json" "$P" \
     "$P/locality-domain-structure.txt" 63 || exit 1

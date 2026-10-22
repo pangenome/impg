@@ -39,9 +39,43 @@ done
 TS=("${pending[@]}")
 ee_budget_check || { echo budget >> "$RCP"; exit 1; }
 
+# ---- the chunk-readiness gate (the fail-closed doctrine at chunk
+# shape, a window-2 runner fix): every member must be TERMINAL -
+# map.done (callable) or a NAMED fail-closed poison (map.exit, or a
+# substrate-terminal). The poison members are EXCLUDED from the call
+# and NAMED in the receipt (the batch-composition invariance receipt
+# is the warrant for the callable subset); their transients are
+# reaped at the chunk's close. A member that is neither is still
+# runnable - the chunk is not ready.
+POISON=()
+CALLABLE=()
 for T in "${TS[@]}"; do
-  [ -f "$EE/ledger/$T/map.done" ] || { echo "$T map not done" >> "$RCP"; exit 1; }
+  if [ -f "$EE/ledger/$T/map.done" ]; then CALLABLE+=("$T"); continue; fi
+  if [ -f "$EE/ledger/$T/map.exit" ] || [ -f "$EE/prep/$T/substrate.skipped" ] || \
+     { [ -f "$EE/ledger/$T/panelprep.poison" ] && [ ! -f "$EE/ledger/$T/panelprep.done" ]; } || \
+     { [ -f "$EE/prep/$T/substrate.exit" ] && [ ! -f "$EE/prep/$T/substrate.done" ]; }; then
+    POISON+=("$T")
+    echo "$(ee_now) chunk $CID: $T FAIL-CLOSED POISON (map.exit/substrate-terminal) - excluded from the call, named per the doctrine" >> "$RCP"
+    continue
+  fi
+  echo "$(ee_now) chunk $CID: $T not terminal (map pending) - chunk not ready" >> "$RCP"
+  exit 1
 done
+TS=("${CALLABLE[@]}")
+POISONED=${#POISON[@]}
+
+# all-poison chunk: nothing callable - name, reap, mark done
+if [ "${#TS[@]}" -eq 0 ]; then
+  for T in "${POISON[@]}"; do
+    rm -f "$EE/prep/$T/locus.fa" "$EE/prep/$T/locus.fa.fai" "$EE/prep/$T/extract.raw.fa" \
+          "$EE/prep/$T"/locus-pos64.syng* "$EE/prep/$T/export-walks.jsonl" "$EE/prep/$T/walk-requests.tsv" 2>/dev/null
+    rm -rf "$EE/prep/$T/partition-w10k-d1k" "$EE/prep/$T/export-graphs" \
+           "$EE/prep/$T/locality-graphs" "$EE/map/$T" "$EE/reads/$T.fq.gz" 2>/dev/null
+  done
+  touch "$L/call.done"
+  echo "$(ee_now) chunk $CID COMPLETE: 0 callable, ${POISONED} fail-closed poison members named and reaped" >> "$RCP"
+  exit 0
+fi
 
 # ---- the chunk reads fetch (the committed rule, multi-region, -M) ----
 REGIONS=""
@@ -73,10 +107,9 @@ json.dump({"version": 1,
 PY
 
 # ---- THE CALL (zero product flags; the fleet form's own defaults) --
-: > "$RCP"
-echo "$(ee_now) chunk $CID: ${#TS[@]} territories, the fleet form (COW parent load + width-32 child, T16, restricted, farbin-prune default)" >> "$RCP"
 OUT=$EE/calls/chunk-$CID
 rm -rf "$OUT"
+echo "$(ee_now) chunk $CID: ${#TS[@]} territories (${POISONED} poison excluded), the fleet form (COW parent load + width-32 child, T16, restricted, farbin-prune default)" >> "$RCP"
 t0=$(date +%s)
 cpu=$L/call.cpu
 # resumable attempt naming: the call step's out-dir discipline refuses
@@ -165,6 +198,17 @@ for T in "${TS[@]}"; do
         "$p/walk-requests.tsv" "$p/locality-graphs" 2>/dev/null
   rm -rf "$EE/map/$T" "$EE/reads/$T.fq.gz" "$OUT/$T-cut" 2>/dev/null
 done
+# THE POISON MEMBERS' OWN REAP (the fail-closed doctrine at chunk
+# shape): a named poison member's call will never run - its
+# transients (the substrate smalls' heavy pieces + the precompute
+# asset + any partial map root) are the reaped class here, at the
+# chunk's close; the per-step receipts + ledger markers are kept
+for T in "${POISON[@]}"; do
+  rm -f "$EE/prep/$T/locus.fa" "$EE/prep/$T/locus.fa.fai" "$EE/prep/$T/extract.raw.fa" \
+        "$EE/prep/$T"/locus-pos64.syng* "$EE/prep/$T/export-walks.jsonl" "$EE/prep/$T/walk-requests.tsv" 2>/dev/null
+  rm -rf "$EE/prep/$T/partition-w10k-d1k" "$EE/prep/$T/export-graphs" \
+         "$EE/prep/$T/locality-graphs" "$EE/map/$T" "$EE/reads/$T.fq.gz" 2>/dev/null
+done
 touch "$L/call.done"
-echo "$(ee_now) chunk $CID COMPLETE: ${#TS[@]} territories, wall ${wall}s; reaped ~${freed}G of transients (answers + receipts kept)" >> "$RCP"
+echo "$(ee_now) chunk $CID COMPLETE: ${#TS[@]} territories, wall ${wall}s; reaped ~${freed}G of transients (answers + receipts kept${POISONED:+, ${POISONED} poison members named and reaped})" >> "$RCP"
 echo "chunk $CID done wall=${wall}s"

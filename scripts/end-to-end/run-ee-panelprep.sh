@@ -18,6 +18,7 @@ P=$EE/prep/$T
 L=$EE/ledger/$T
 mkdir -p "$L"
 [ -f "$L/panelprep.done" ] && exit 0
+[ -f "$L/panelprep.poison" ] && exit 0
 [ -f "$P/substrate.done" ] || { echo "$T substrate not done" >&2; exit 1; }
 [ -f "$EE/ledger/routes.done" ] || { echo "routes inventory not done" >&2; exit 1; }
 ee_budget_check || exit 1
@@ -30,6 +31,11 @@ read -r CHROM START END < <(awk -v t="$T" '$4==t{print $1, $2, $3; exit}' \
 
 # the panel-prep invocation pays the global panel load for the
 # precompute asset build (the ~200s class, receipted per territory)
+# (THE 2-STRIKE POISON RULE at panel-prep shape: a panelprep that
+# fails on a RE-RUN is a DETERMINISTIC pp-terminal - marked
+# panelprep.poison, named in the fail-closed census, excluded from
+# its chunk by the chunk-readiness gate, instead of retrying forever)
+PP_PRIOR=0; [ -f "$L/panelprep.exit" ] && PP_PRIOR=1
 export RAYON_NUM_THREADS=${PANELPREP_T:-8}
 ee_step_out "$L" panelprep "$L/panelprep.log" \
   env RAYON_NUM_THREADS=$RAYON_NUM_THREADS "$IMPG_NEW" genome-infer panel-prep \
@@ -42,6 +48,19 @@ ee_step_out "$L" panelprep "$L/panelprep.log" \
   --global-panel "$PANEL" --global-agc "$AGC" \
   --global-routes "$EE/global-routes" \
   --record-origin 1 \
-  --out-dir "$EE/partitions" || exit 1
+  --out-dir "$EE/partitions" || { [ "$PP_PRIOR" -eq 1 ] && { echo 1 > "$L/panelprep.poison"; echo "$(ee_now) $T PANELPREP-TERMINAL POISON: panelprep failed again (strike 2) - named per the doctrine" >> "$EE/logs/failures.log"; }; exit 1; }
 touch "$L/panelprep.done"
+
+# THE EARLY SUBSTRATE REAP (the budget law's own valve, a window-2
+# runner fix): once the partition step has consumed the substrate,
+# the dead-weight heavy pieces are the reaped class. THE TWO KEPT
+# EXCEPTIONS, each named by its consumer: locus.fa (the MAP cut's
+# own --sources input - reaped at the map leg's completion) and
+# locality-graphs (the per-locus precompute asset, the call's serve
+# - reaped by the chunk's own JIT reaper). The reaped pieces are
+# re-derivable from the campaign's surviving smalls (the prep
+# chain's own re-derivation receipt) if a product-side re-run ever
+# demands it.
+rm -f "$P"/locus-pos64.syng* "$P/export-walks.jsonl" "$P/walk-requests.tsv" 2>/dev/null
+rm -rf "$P/partition-w10k-d1k" "$P/export-graphs" 2>/dev/null
 echo "$(ee_now) $T panel-prep done wall=$(cat $L/panelprep.wall)s"

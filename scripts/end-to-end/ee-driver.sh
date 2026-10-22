@@ -61,6 +61,7 @@ term_census() {
     [ -n "$t" ] || continue
     [ -f "$EE/prep/$t/substrate.done" ] && sub=$((sub+1))
     [ -f "$EE/prep/$t/substrate.exit" ] && [ ! -f "$EE/prep/$t/substrate.done" ] && fail=$((fail+1))
+    [ -f "$EE/ledger/$t/panelprep.poison" ] && [ ! -f "$EE/ledger/$t/panelprep.done" ] && fail=$((fail+1))
     [ -f "$EE/ledger/$t/panelprep.done" ] && pp=$((pp+1))
     [ -f "$EE/ledger/$t/map.done" ] && mp=$((mp+1))
     if [ -f "$EE/ledger/$t/call.done" ]; then cl=$((cl+1))
@@ -95,7 +96,7 @@ while true; do
     : > "$EE/scratch/P.set"
   fi
   pending_set "$EE/scratch/PP.set" $((PP_W*2)) \
-    '[ -f "$EE/prep/$t/substrate.done" ] && [ ! -f "$EE/ledger/$t/panelprep.done" ]'
+    '[ -f "$EE/prep/$t/substrate.done" ] && [ ! -f "$EE/ledger/$t/panelprep.done" ] && [ ! -f "$EE/ledger/$t/panelprep.poison" ]'
   pending_set "$EE/scratch/M.set" $((MAP_W*2)) \
     '[ -f "$EE/ledger/$t/panelprep.done" ] && [ ! -f "$EE/ledger/$t/map.done" ] && [ ! -f "$EE/ledger/$t/map.exit" ]'
   : > "$EE/scratch/C.set"
@@ -104,7 +105,17 @@ while true; do
     alldone=1
     while read -r t; do
       [ -n "$t" ] || continue
-      [ -f "$EE/ledger/$t/map.done" ] || { alldone=0; break; }
+      # the chunk-readiness gate (the fail-closed doctrine at chunk
+      # shape): a member is TERMINAL when its map is done OR it is a
+      # named poison (map.exit / substrate-terminal) - the chunk
+      # runner calls the callable subset and names the poison
+      if [ -f "$EE/ledger/$t/map.done" ] || [ -f "$EE/ledger/$t/map.exit" ] \
+         || [ -f "$EE/ledger/$t/panelprep.poison" ] \
+         || [ -f "$EE/prep/$t/substrate.skipped" ] \
+         || { [ -f "$EE/prep/$t/substrate.exit" ] && [ ! -f "$EE/prep/$t/substrate.done" ]; }; then
+        continue
+      fi
+      alldone=0; break
     done < "$EE/chunks/chunk-$i.list"
     [ "$alldone" -eq 1 ] && echo "$i" >> "$EE/scratch/C.set"
     [ "$(wc -l < "$EE/scratch/C.set")" -ge $((CALL_W*2)) ] && break
