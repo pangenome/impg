@@ -309,7 +309,7 @@ use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -3884,6 +3884,59 @@ impl ScoreMatrix {
         self.rows[fold].ll_bits_hash(self.n_units, self.elsewhere)
     }
 
+    /// The row's canonical COLUMN-CONTENT key hash (the bit-equal-row
+    /// memoization's bucketing): the row's pinned entries whose ll
+    /// bits differ from the elsewhere constant's, as (unit, bits)
+    /// pairs in unit order, length-fed first — variant-independent
+    /// and encoding-independent by construction, because the column
+    /// IS its non-E entries (an absent entry reads E, and a pinned
+    /// entry whose value is exactly E reads E too, so both contribute
+    /// nothing to the column; `ll_bits_equal`'s own predicate is
+    /// exactly the equality of these entries' sets). Two bit-equal
+    /// columns therefore hash equal whichever encoding each row
+    /// took; a hash collision is decided by the exact predicate on
+    /// match — the merge's own discipline, never the hash alone.
+    /// The walk is over the row's PINNED entries only (both encodings
+    /// keep them ascending), so the key costs O(pinned), never the
+    /// full O(units) column walk.
+    fn column_key_hash(&self, fold: usize) -> u64 {
+        let elsewhere_bits = self.elsewhere.to_bits();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |hash: &mut u64, bytes: &[u8]| {
+            for &byte in bytes {
+                *hash ^= byte as u64;
+                *hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        };
+        let mut entries: u64 = 0;
+        match &self.rows[fold] {
+            ScoreRow::Sparse(sparse) => {
+                for (&unit, &ll) in sparse.units.iter().zip(&sparse.lls) {
+                    let bits = ll.to_bits();
+                    if bits != elsewhere_bits {
+                        entries += 1;
+                        feed(&mut hash, &unit.to_le_bytes());
+                        feed(&mut hash, &bits.to_le_bytes());
+                    }
+                }
+            }
+            ScoreRow::Dense(dense) => {
+                for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
+                    if is_pinned {
+                        let bits = dense.ll[unit].to_bits();
+                        if bits != elsewhere_bits {
+                            entries += 1;
+                            feed(&mut hash, &(unit as u32).to_le_bytes());
+                            feed(&mut hash, &bits.to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        feed(&mut hash, &entries.to_le_bytes());
+        hash
+    }
+
     /// The representative's row for a merged fold (the committed
     /// clone, at the row's own encoding).
     fn row_clone(&self, fold: usize) -> ScoreRow {
@@ -4249,6 +4302,16 @@ struct BoundedScanState {
     /// Stage one's own wall (the bound index + the search),
     /// receipted separately from stage two's kept-set pass.
     stage_one_seconds: f64,
+    /// THE BIT-EQUAL-ROW MEMOIZATION's per-locus state (the fourth
+    /// reduction): the canonical row classes (with the receipt
+    /// counters) and the persistent memo table shared by stage two
+    /// and the best-outside fallback — None is the direct form
+    /// (IMPG_CLASS_SCAN_MEMO=off).
+    scan_memo: Option<ClassScanMemo>,
+    /// The memo table: one slot per canonical flat (None = not yet
+    /// computed). Sized pair_count (the bounded path's own vectors
+    /// are that size already).
+    memo_values: Vec<Option<f64>>,
 }
 
 impl ClassScanBoundIndex {
@@ -4370,6 +4433,136 @@ impl ClassScanBoundIndex {
     }
 }
 
+/// THE BIT-EQUAL-ROW MEMOIZATION (the fourth expressibility
+/// reduction — the plateau lever, the named Frontier-1 residual,
+/// now implemented): the class scan's per-(class-pair, unit) work is
+/// a PURE FUNCTION of the pair's evidence-row bit patterns — the
+/// committed accumulation `total += count * mix_logsumexp(ll_a[u],
+/// ll_b[u])` reads, at every unit, the two rows' column values and
+/// nothing else — so two folds whose ll columns are bit-equal (the
+/// merge's own `ll_bits_equal` predicate, whichever encoding each
+/// row took) produce BIT-IDENTICAL class pair sums against every
+/// third fold, and their hom pairs are identical too. The scan
+/// therefore computes ONE sum per unordered (row-class, row-class)
+/// pair and shares it with every bit-equal pair: the memo SHARES
+/// VALUES, it never reorders — every pair's own flat slot is
+/// filled with the representative pair's value, so class_lls, best,
+/// the called set, the QUAL terms and every receipt field are the
+/// direct scan's own bits.
+/// THE EXACTNESS PROOF, BY CONSTRUCTION: for folds f, g with
+/// representatives r = canon[f], s = canon[g] (rows bit-equal by
+/// the exact predicate), class_pair_sum(r, s) executes the IDENTICAL
+/// f64 op sequence as class_pair_sum(f, g) — at each unit u the
+/// cursor reads the same bits (column equality is exactly the
+/// `ll_bits_equal` predicate), `count` is per-unit, and the
+/// accumulation walks units ascending in both — and IEEE-754
+/// round-to-nearest is a deterministic function of the input bits
+/// and the op sequence, so the results are equal bit for bit. Proven per-shape by
+/// `bit_equal_rows_share_one_class_sum` and per-fixture by
+/// `memoized_scan_is_bit_identical_to_direct_on_randomized_rows`.
+/// THE KEY DISCIPLINE (the fold-signature doctrine): bucketing by
+/// the canonical column-content hash (`column_key_hash` —
+/// encoding-independent, collision-decided by the exact predicate
+/// `ll_bits_equal` on match, never the hash alone). The build is
+/// O(total pinned entries) — the key walks only the row's pinned
+/// non-E entries — plus the within-bucket exact compares (buckets
+/// are the merge's own: tiny).
+/// THE TOGGLE (the measurement restore path, the bounded scan's own
+/// doctrine): IMPG_CLASS_SCAN_MEMO=off restores the direct
+/// per-pair form verbatim; the default is ON. The memo changes no
+/// emitted byte either way (the values are the direct scan's own),
+/// so no output label is warranted; the phase census (env
+/// IMPG_LOCUS_PHASE_CENSUS) receipts the hit rates per shape.
+struct ClassScanMemo {
+    /// fold -> the representative fold of its bit-equal row class
+    /// (the class's smallest fold index — deterministic; a fold
+    /// whose row is unique represents itself).
+    canon: Vec<usize>,
+    /// the row classes' count (the receipt's "distinct rows").
+    distinct_rows: usize,
+    /// the distinct canonical PAIR sums (over the row classes):
+    /// distinct_rows * (distinct_rows + 1) / 2.
+    canonical_pairs: u64,
+    /// the build's own wall (the overhead receipt; counted always,
+    /// printed under the census).
+    build_seconds: f64,
+    /// the receipt counters (always counted, printed under the
+    /// census): how many canonical sums the scan sites actually
+    /// computed, and how many pair lookups were served from the
+    /// memo (the hit rate's numerator is the pairs not computed).
+    computed_sums: AtomicU64,
+    memo_hits: AtomicU64,
+}
+
+impl ClassScanMemo {
+    fn build(matrix: &ScoreMatrix) -> ClassScanMemo {
+        let started = Instant::now();
+        let n = matrix.rows.len();
+        let mut canon: Vec<usize> = (0..n).collect();
+        // the canonical-content buckets (collision-decided below)
+        let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+        for fold in 0..n {
+            buckets
+                .entry(matrix.column_key_hash(fold))
+                .or_default()
+                .push(fold);
+        }
+        for bucket in buckets.values() {
+            if bucket.len() < 2 {
+                continue;
+            }
+            let mut sorted = bucket.clone();
+            sorted.sort_unstable();
+            // within a bucket, each fold joins the FIRST earlier fold
+            // whose column is bit-equal (the exact predicate decides
+            // every candidate — a hash collision can never merge).
+            // Bit-equality of columns is an equivalence relation
+            // (it IS equality of the column function), so the first
+            // match's canon is already the class's smallest index.
+            for a in 1..sorted.len() {
+                let fold = sorted[a];
+                for b in (0..a).rev() {
+                    let other = sorted[b];
+                    if matrix.ll_bits_equal(fold, other) {
+                        canon[fold] = canon[other];
+                        break;
+                    }
+                }
+            }
+        }
+        let distinct_rows = canon.iter().copied().collect::<HashSet<_>>().len();
+        let canonical_pairs = distinct_rows as u64 * (distinct_rows as u64 + 1) / 2;
+        ClassScanMemo {
+            canon,
+            distinct_rows,
+            canonical_pairs,
+            build_seconds: started.elapsed().as_secs_f64(),
+            computed_sums: AtomicU64::new(0),
+            memo_hits: AtomicU64::new(0),
+        }
+    }
+
+    /// The pair's CANONICAL flat index: the flat index of its
+    /// representatives' pair (canon preserves nothing about ORDER
+    /// between the two folds, so the min/max spelling of `unrank_pair`
+    /// is restated here; the value at that slot is the pair's own).
+    fn canonical_flat(&self, first: usize, second: usize) -> usize {
+        let (a, b) = (self.canon[first], self.canon[second]);
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        hi * (hi + 1) / 2 + lo
+    }
+
+    /// The memo's per-shape receipt numbers (the census line's own
+    /// fields; every counter counted always, printed under the env).
+    fn note_computed(&self, count: u64) {
+        self.computed_sums.fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn note_hits(&self, count: u64) {
+        self.memo_hits.fetch_add(count, Ordering::Relaxed);
+    }
+}
+
 /// THE BOUNDED CLASS SCAN's STAGE ONE — the deterministic
 /// branch-and-bound search for best (the strict running-best form
 /// the receipts name): pairs are walked in bound-DESCENDING order
@@ -4401,7 +4594,8 @@ impl ClassScanBoundIndex {
 fn bounded_stage_one(
     matrix: &ScoreMatrix,
     unit_counts: &[f64],
-) -> (Vec<f64>, Vec<f64>, Vec<Option<f64>>, f64) {
+    memo: Option<&ClassScanMemo>,
+) -> (Vec<f64>, Vec<f64>, Vec<Option<f64>>, f64, Vec<Option<f64>>) {
     let pair_count = matrix.rows.len() * (matrix.rows.len() + 1) / 2;
     let index = ClassScanBoundIndex::build(matrix, unit_counts);
     let pair_bounds: Vec<f64> = (0..pair_count)
@@ -4449,18 +4643,71 @@ fn bounded_stage_one(
         };
     }
     let mut computed: Vec<Option<f64>> = vec![None; pair_count];
+    // THE BIT-EQUAL-ROW MEMO TABLE (the fourth reduction at the
+    // bounded path): one slot per canonical flat, persistent across
+    // the rounds — each distinct row-class pair sum is computed
+    // exactly once (by the committed accumulation on the
+    // representative rows, bit-identical to the direct per-pair
+    // form by construction), and every later pair — in this round or
+    // a later one — reads the shared value. With the memo off the
+    // table stays empty and the rounds take the direct form.
+    let mut memo_values: Vec<Option<f64>> =
+        memo.map(|_| vec![None; pair_count]).unwrap_or_default();
     let mut running_best = f64::NEG_INFINITY;
     let mut next = 0usize;
     let mut chunk = 1usize;
     while next < order.len() {
         let end = (next + chunk).min(order.len());
-        let sums: Vec<(u32, f64)> = order[next..end]
-            .par_iter()
-            .map(|&flat| {
-                let (first, second) = unrank_pair(flat as usize);
-                (flat, matrix.class_pair_sum(first, second, unit_counts))
-            })
-            .collect();
+        let sums: Vec<(u32, f64)> = match memo {
+            None => order[next..end]
+                .par_iter()
+                .map(|&flat| {
+                    let (first, second) = unrank_pair(flat as usize);
+                    (flat, matrix.class_pair_sum(first, second, unit_counts))
+                })
+                .collect(),
+            Some(memo) => {
+                // the round's pairs, keyed by their canonical flats
+                let keyed: Vec<(u32, usize)> = order[next..end]
+                    .iter()
+                    .map(|&flat| {
+                        let (first, second) = unrank_pair(flat as usize);
+                        (flat, memo.canonical_flat(first, second))
+                    })
+                    .collect();
+                // the distinct canonical sums this round still
+                // misses — each computed exactly once, in parallel,
+                // by the committed unit-order accumulation on the
+                // representative rows
+                let mut missing: Vec<usize> =
+                    keyed.iter().map(|&(_, canon)| canon).collect();
+                missing.sort_unstable();
+                missing.dedup();
+                missing.retain(|canon| memo_values[*canon].is_none());
+                let fresh: Vec<(usize, f64)> = missing
+                    .par_iter()
+                    .map(|&canon| {
+                        let (first, second) = unrank_pair(canon);
+                        (canon, matrix.class_pair_sum(first, second, unit_counts))
+                    })
+                    .collect();
+                memo.note_computed(fresh.len() as u64);
+                memo.note_hits(
+                    keyed.len() as u64 - fresh.len() as u64,
+                );
+                for (canon, sum) in fresh {
+                    memo_values[canon] = Some(sum);
+                }
+                // the round's own pairs read the shared values (the
+                // flat slots keep the pair order — values shared,
+                // never reordered)
+                keyed.into_iter()
+                    .map(|(flat, canon)| {
+                        (flat, memo_values[canon].expect("the canonical sum is filled"))
+                    })
+                    .collect()
+            }
+        };
         for (flat, sum) in sums {
             computed[flat as usize] = Some(sum);
             if sum > running_best {
@@ -4480,7 +4727,7 @@ fn bounded_stage_one(
         next = end;
         chunk *= 2;
     }
-    (pair_bounds, pair_slack, computed, running_best)
+    (pair_bounds, pair_slack, computed, running_best, memo_values)
 }
 
 /// THE BOUNDED CLASS SCAN's STAGE-TWO KEEP THRESHOLD, derived from
@@ -5083,6 +5330,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // skipped — and uses the EXACT value downstream, so the
     // compare form itself changes no output byte.)
     let class_scan_compare = std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok();
+    // (THE BIT-EQUAL-ROW MEMOIZATION's toggle — the fourth
+    // expressibility reduction, ON by default at every exact-sum
+    // site of the class scan: IMPG_CLASS_SCAN_MEMO=off restores the
+    // direct per-pair form verbatim (the bounded scan's own toggle
+    // doctrine, the measurement restore path). The memo is
+    // exact-preserving BY CONSTRUCTION — bit-equal rows share one
+    // sum, the flat order and every emitted bit untouched — so no
+    // output label is warranted; the per-shape hit rates are
+    // receipted under IMPG_LOCUS_PHASE_CENSUS.)
+    let scan_memo_enabled =
+        std::env::var("IMPG_CLASS_SCAN_MEMO").map_or(true, |v| v != "off");
     // The selection flag pins the convention exactly: Env defers to
     // the committed switches verbatim (the instrument default);
     // Default pins the committed base convention (env ignored);
@@ -7457,6 +7715,20 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let pair_count = n_folds * (n_folds + 1) / 2;
         let unit_counts: Vec<f64> = units.iter().map(|u| u.count as f64).collect();
         let sparse_skip = matches!(class_scan_order, ClassScanOrder::SparseSkip);
+        // THE BIT-EQUAL-ROW MEMOIZATION (the fourth expressibility
+        // reduction — see `ClassScanMemo`): built once per locus on
+        // the FINAL (post-merge) matrix, before every exact-sum site
+        // — the exhaustive scan, the bounded scan's two stages and
+        // its best-outside fallback all share one memo table per
+        // locus. IMPG_CLASS_SCAN_MEMO=off restores the direct
+        // per-pair form verbatim (the toggle doctrine's measurement
+        // restore path); the memo changes no emitted byte either
+        // way, so no output label is warranted.
+        let mut scan_memo: Option<ClassScanMemo> = if scan_memo_enabled {
+            Some(ClassScanMemo::build(&matrix))
+        } else {
+            None
+        };
         // (The compare receipt's per-locus atomics: class pairs
         // summed both ways, pairs whose f64 bits differ, the max ulp
         // delta, and the constant (fold, unit) entries the fast
@@ -7472,8 +7744,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let mut bounded_state: Option<BoundedScanState> = None;
         let (mut class_lls, mut best_ll, mut called): (Vec<f64>, f64, Vec<(usize, usize)>) =
             if class_scan_bounded {
-                let (pair_bounds, pair_slack, computed, best) =
-                    bounded_stage_one(&matrix, &unit_counts);
+                let (pair_bounds, pair_slack, computed, best, memo_values) =
+                    bounded_stage_one(&matrix, &unit_counts, scan_memo.as_ref());
                 let stage_one_seconds = class_started.elapsed().as_secs_f64();
                 // The PROVISIONAL called set from stage one's computed
                 // prefix, in flat order (the exhaustive form's own
@@ -7501,6 +7773,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     computed,
                     best,
                     stage_one_seconds,
+                    scan_memo: scan_memo.take(),
+                    memo_values,
                 });
                 (class_lls, best, called)
             } else {
@@ -7509,49 +7783,93 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 } else {
                     None
                 };
-                let class_lls: Vec<f64> = (0..pair_count)
-                    .into_par_iter()
-                    .map(|flat| {
-                        let (first, second) = unrank_pair(flat);
-                        match scan_fast.as_ref() {
-                            None => matrix.class_pair_sum(first, second, &unit_counts),
-                            Some(fast) => {
-                                let fast_sum =
-                                    fast.class_pair_sum(first, second, &unit_counts);
-                                if !class_scan_compare {
-                                    return fast_sum;
-                                }
-                                let exact = matrix.class_pair_sum(first, second, &unit_counts);
-                                compare_pairs.fetch_add(1, Ordering::Relaxed);
-                                compare_skipped.fetch_add(
-                                    fast.constant_units_skipped(first, second),
-                                    Ordering::Relaxed,
-                                );
-                                if exact.to_bits() != fast_sum.to_bits() {
-                                    compare_diff.fetch_add(1, Ordering::Relaxed);
-                                    let ulp = ulp_distance(exact, fast_sum);
-                                    let mut current = compare_max_ulp.load(Ordering::Relaxed);
-                                    while ulp > current {
-                                        match compare_max_ulp.compare_exchange_weak(
-                                            current,
-                                            ulp,
+                // THE MEMOIZED EXHAUSTIVE SCAN (the exact arm — the
+                // assessment form's own): phase A computes each
+                // DISTINCT canonical pair sum exactly once, in
+                // parallel, by the committed unit-order accumulation
+                // on the representative rows; phase B fills every
+                // pair's own flat slot from the memo — the values are
+                // the direct scan's own bits (the construction proof
+                // at `ClassScanMemo`), the flat order untouched. The
+                // legacy sparse-skip/compare arms keep the direct
+                // per-pair form (they are measurement forms, off at
+                // the defaults).
+                let class_lls: Vec<f64> =
+                    if let (Some(memo), None) = (scan_memo.as_ref(), scan_fast.as_ref()) {
+                        let distinct: Vec<usize> = (0..pair_count)
+                            .into_par_iter()
+                            .filter(|&flat| {
+                                let (first, second) = unrank_pair(flat);
+                                memo.canonical_flat(first, second) == flat
+                            })
+                            .collect();
+                        memo.note_computed(distinct.len() as u64);
+                        memo.note_hits(pair_count as u64 - distinct.len() as u64);
+                        let sums: Vec<(usize, f64)> = distinct
+                            .into_par_iter()
+                            .map(|flat| {
+                                let (first, second) = unrank_pair(flat);
+                                (flat, matrix.class_pair_sum(first, second, &unit_counts))
+                            })
+                            .collect();
+                        let mut values = vec![f64::NAN; pair_count];
+                        for (flat, sum) in sums {
+                            values[flat] = sum;
+                        }
+                        (0..pair_count)
+                            .into_par_iter()
+                            .map(|flat| {
+                                let (first, second) = unrank_pair(flat);
+                                values[memo.canonical_flat(first, second)]
+                            })
+                            .collect()
+                    } else {
+                        (0..pair_count)
+                            .into_par_iter()
+                            .map(|flat| {
+                                let (first, second) = unrank_pair(flat);
+                                match scan_fast.as_ref() {
+                                    None => matrix.class_pair_sum(first, second, &unit_counts),
+                                    Some(fast) => {
+                                        let fast_sum =
+                                            fast.class_pair_sum(first, second, &unit_counts);
+                                        if !class_scan_compare {
+                                            return fast_sum;
+                                        }
+                                        let exact =
+                                            matrix.class_pair_sum(first, second, &unit_counts);
+                                        compare_pairs.fetch_add(1, Ordering::Relaxed);
+                                        compare_skipped.fetch_add(
+                                            fast.constant_units_skipped(first, second),
                                             Ordering::Relaxed,
-                                            Ordering::Relaxed,
-                                        ) {
-                                            Ok(_) => break,
-                                            Err(seen) => current = seen,
+                                        );
+                                        if exact.to_bits() != fast_sum.to_bits() {
+                                            compare_diff.fetch_add(1, Ordering::Relaxed);
+                                            let ulp = ulp_distance(exact, fast_sum);
+                                            let mut current =
+                                                compare_max_ulp.load(Ordering::Relaxed);
+                                            while ulp > current {
+                                                match compare_max_ulp.compare_exchange_weak(
+                                                    current,
+                                                    ulp,
+                                                    Ordering::Relaxed,
+                                                    Ordering::Relaxed,
+                                                ) {
+                                                    Ok(_) => break,
+                                                    Err(seen) => current = seen,
+                                                }
+                                            }
+                                        }
+                                        if sparse_skip {
+                                            fast_sum
+                                        } else {
+                                            exact
                                         }
                                     }
                                 }
-                                if sparse_skip {
-                                    fast_sum
-                                } else {
-                                    exact
-                                }
-                            }
-                        }
-                    })
-                    .collect();
+                            })
+                            .collect()
+                    };
                 let (best_ll, called) = called_set_from_class_lls(&class_lls);
                 (class_lls, best_ll, called)
             };
@@ -7728,12 +8046,43 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // are deterministic functions of the matrix alone.)
         if let Some(state) = bounded_state.as_mut() {
             let stage_two_started = Instant::now();
+            // THE MEMOIZED EXACT SUM (the fourth reduction at the
+            // bounded path's own sites): the pair's canonical flat's
+            // value — computed on the representative rows if the
+            // slot is still empty, read from the memo otherwise —
+            // bit-identical to the direct per-pair accumulation by
+            // construction (`ClassScanMemo`'s proof).
+            let memoized_sum = |state: &mut BoundedScanState,
+                                first: usize,
+                                second: usize|
+             -> f64 {
+                match state.scan_memo.as_ref() {
+                    None => matrix.class_pair_sum(first, second, &unit_counts),
+                    Some(memo) => {
+                        let canon = memo.canonical_flat(first, second);
+                        match state.memo_values[canon] {
+                            Some(value) => {
+                                memo.note_hits(1);
+                                value
+                            }
+                            None => {
+                                let (r_first, r_second) = unrank_pair(canon);
+                                let value =
+                                    matrix.class_pair_sum(r_first, r_second, &unit_counts);
+                                memo.note_computed(1);
+                                state.memo_values[canon] = Some(value);
+                                value
+                            }
+                        }
+                    }
+                }
+            };
             let truth_ll: Option<f64> = match truth_flat {
                 Some(flat) => match state.computed[flat] {
                     Some(value) => Some(value),
                     None => {
                         let (first, second) = unrank_pair(flat);
-                        let value = matrix.class_pair_sum(first, second, &unit_counts);
+                        let value = memoized_sum(state, first, second);
                         state.computed[flat] = Some(value);
                         class_lls[flat] = value;
                         Some(value)
@@ -7748,13 +8097,59 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         && state.pair_bounds[flat] + state.pair_slack[flat] >= keep_threshold
                 })
                 .collect();
-            let sums: Vec<(usize, f64)> = kept
-                .par_iter()
-                .map(|&flat| {
-                    let (first, second) = unrank_pair(flat);
-                    (flat, matrix.class_pair_sum(first, second, &unit_counts))
-                })
-                .collect();
+            // the kept set's distinct canonical sums first (each
+            // computed exactly once, in parallel), then every kept
+            // pair reads its own flat slot — the values shared,
+            // never reordered
+            let sums: Vec<(usize, f64)> = match state.scan_memo.as_ref() {
+                None => kept
+                    .par_iter()
+                    .map(|&flat| {
+                        let (first, second) = unrank_pair(flat);
+                        (flat, matrix.class_pair_sum(first, second, &unit_counts))
+                    })
+                    .collect(),
+                Some(memo) => {
+                    let keyed: Vec<(usize, usize)> = kept
+                        .iter()
+                        .map(|&flat| {
+                            let (first, second) = unrank_pair(flat);
+                            (flat, memo.canonical_flat(first, second))
+                        })
+                        .collect();
+                    let mut missing: Vec<usize> =
+                        keyed.iter().map(|&(_, canon)| canon).collect();
+                    missing.sort_unstable();
+                    missing.dedup();
+                    let owned: Vec<usize> = missing
+                        .iter()
+                        .copied()
+                        .filter(|&canon| state.memo_values[canon].is_none())
+                        .collect();
+                    memo.note_computed(owned.len() as u64);
+                    memo.note_hits(keyed.len() as u64 - owned.len() as u64);
+                    let fresh: Vec<(usize, f64)> = owned
+                        .par_iter()
+                        .map(|&canon| {
+                            let (first, second) = unrank_pair(canon);
+                            (canon, matrix.class_pair_sum(first, second, &unit_counts))
+                        })
+                        .collect();
+                    for (canon, sum) in fresh {
+                        state.memo_values[canon] = Some(sum);
+                    }
+                    keyed
+                        .into_iter()
+                        .map(|(flat, canon)| {
+                            (
+                                flat,
+                                state.memo_values[canon]
+                                    .expect("the kept set's canonical sum is filled"),
+                            )
+                        })
+                        .collect()
+                }
+            };
             for (flat, sum) in sums {
                 state.computed[flat] = Some(sum);
                 class_lls[flat] = sum;
@@ -8043,7 +8438,35 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     break;
                 }
                 let (first, second) = unrank_pair(flat);
-                let sum = matrix.class_pair_sum(first, second, &unit_counts);
+                // the memoized exact sum (the fourth reduction at the
+                // best-outside walk's own site): the canonical flat's
+                // value, computed on the representative rows on a
+                // miss — bit-identical to the direct form by
+                // construction
+                let sum = if let Some(bounded) = bounded_state.as_mut() {
+                    match bounded.scan_memo.as_ref() {
+                        None => matrix.class_pair_sum(first, second, &unit_counts),
+                        Some(memo) => {
+                            let canon = memo.canonical_flat(first, second);
+                            match bounded.memo_values[canon] {
+                                Some(value) => {
+                                    memo.note_hits(1);
+                                    value
+                                }
+                                None => {
+                                    let (r_first, r_second) = unrank_pair(canon);
+                                    let value =
+                                        matrix.class_pair_sum(r_first, r_second, &unit_counts);
+                                    memo.note_computed(1);
+                                    bounded.memo_values[canon] = Some(value);
+                                    value
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    matrix.class_pair_sum(first, second, &unit_counts)
+                };
                 if let Some(bounded) = bounded_state.as_mut() {
                     bounded.computed[flat] = Some(sum);
                 }
@@ -8066,7 +8489,28 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     .collect();
                 for flat in tied {
                     let (first, second) = unrank_pair(flat);
-                    let sum = matrix.class_pair_sum(first, second, &unit_counts);
+                    // the memoized exact sum — the same canonical-slot
+                    // discipline as the walk above
+                    let sum = match bounded.scan_memo.as_ref() {
+                        None => matrix.class_pair_sum(first, second, &unit_counts),
+                        Some(memo) => {
+                            let canon = memo.canonical_flat(first, second);
+                            match bounded.memo_values[canon] {
+                                Some(value) => {
+                                    memo.note_hits(1);
+                                    value
+                                }
+                                None => {
+                                    let (r_first, r_second) = unrank_pair(canon);
+                                    let value =
+                                        matrix.class_pair_sum(r_first, r_second, &unit_counts);
+                                    memo.note_computed(1);
+                                    bounded.memo_values[canon] = Some(value);
+                                    value
+                                }
+                            }
+                        }
+                    };
                     bounded.computed[flat] = Some(sum);
                     class_lls[flat] = sum;
                 }
@@ -9179,9 +9623,58 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 "degenerate": degenerate,
                 "fold_multiset_entries_total": phase_census_fold_multiset_entries,
                 "fold_multiset_entries_max": phase_census_fold_multiset_max,
+                "scan_memo": bounded_state
+                    .as_ref()
+                    .and_then(|state| state.scan_memo.as_ref())
+                    .or(scan_memo.as_ref())
+                    .map(|memo| {
+                        json!({
+                            "note": "the bit-equal-row memoization (the \
+                                     fourth expressibility reduction; \
+                                     IMPG_CLASS_SCAN_MEMO=off restores \
+                                     the direct per-pair form): folds \
+                                     -> distinct bit-equal row classes; \
+                                     canonical_pairs = the distinct \
+                                     row-class pair sums the scan \
+                                     computes; dedup = pairs served from \
+                                     the memo; build = the canonicalization \
+                                     walk's own wall",
+                            "folds": n_folds,
+                            "distinct_rows": memo.distinct_rows,
+                            "deduplicated_rows": n_folds - memo.distinct_rows,
+                            "canonical_pairs": memo.canonical_pairs,
+                            "pairs": pair_count,
+                            "dedup_pairs": pair_count as u64 - memo.canonical_pairs,
+                            "computed_sums": memo.computed_sums.load(Ordering::Relaxed),
+                            "memo_hits": memo.memo_hits.load(Ordering::Relaxed),
+                            "build_seconds": memo.build_seconds,
+                        })
+                    }),
             });
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
+            let memo_line = bounded_state
+                .as_ref()
+                .and_then(|state| state.scan_memo.as_ref())
+                .or(scan_memo.as_ref())
+                .map(|memo| {
+                    format!(
+                        ", scan memo {}folds -> {} rows ({} dedup), \
+                         {} of {} pairs dedup ({:.1}%), {} sums computed / \
+                         {} memo hits, build {:.2}s",
+                        n_folds,
+                        memo.distinct_rows,
+                        n_folds - memo.distinct_rows,
+                        pair_count as u64 - memo.canonical_pairs,
+                        pair_count,
+                        100.0 * (pair_count as u64 - memo.canonical_pairs) as f64
+                            / pair_count as f64,
+                        memo.computed_sums.load(Ordering::Relaxed),
+                        memo.memo_hits.load(Ordering::Relaxed),
+                        memo.build_seconds,
+                    )
+                })
+                .unwrap_or_default();
             eprintln!(
                 "[score] locus {locus} phase census: merge {merge_seconds:.2}s \
                  ({} eq-col pairs, {} admitted), classes {class_seconds:.2}s \
@@ -9191,7 +9684,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                  {phase_census_tied_list_entries} predicate entries), cluster \
                  {qual_cluster_seconds:.2}s, \
                  best-outside {best_outside_seconds:.2}s, called {}, fold \
-                 multiset entries {} total / {} max",
+                 multiset entries {} total / {} max{memo_line}",
                 merge_counters.equal_column_pairs,
                 merge_counters.merged_pairs,
                 spectrum.len(),
@@ -12443,6 +12936,287 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scan_memo_canonicalizes_only_bit_equal_columns() {
+        // THE BIT-EQUAL-ROW MEMOIZATION'S OWN KEY DISCIPLINE (the
+        // fourth expressibility reduction): the canonical row class
+        // is EXACTLY the ll column (the merge's own predicate) — a
+        // pinned entry whose value is exactly E is INVISIBLE to the
+        // column (it reads E, like an absent entry), so rows that
+        // differ only in such entries share one class and one sum;
+        // a one-ulp difference at any non-E entry is a DIFFERENT
+        // column — a different class, never merged (the exact
+        // predicate decides every bucket candidate, so a hash
+        // collision can never merge either). The representative is
+        // the class's smallest fold index — deterministic.
+        let elsewhere = -12.5f64;
+        let n_units = 10usize;
+        let mut dense: Vec<Vec<f64>> = Vec::new();
+        let mut pinned: Vec<Vec<bool>> = Vec::new();
+        let mut mismatches: Vec<Vec<u32>> = Vec::new();
+        // fold 0: two non-E pinned entries.
+        let mut row0 = vec![elsewhere; n_units];
+        let mut pin0 = vec![false; n_units];
+        row0[2] = elsewhere + 3.25;
+        pin0[2] = true;
+        row0[7] = elsewhere + 0.5;
+        pin0[7] = true;
+        // the working copies the later twins read (the originals move
+        // into the matrix vectors below)
+        let (row1, pin1) = (row0.clone(), pin0.clone());
+        let (row2_src, pin2_src) = (row0.clone(), pin0.clone());
+        let (row3_src, pin3_src) = (row0.clone(), pin0.clone());
+        dense.push(row0);
+        pinned.push(pin0);
+        mismatches.push(vec![0; n_units]);
+        // fold 1: an exact clone.
+        dense.push(row1);
+        pinned.push(pin1);
+        mismatches.push(vec![0; n_units]);
+        // fold 2: the clone with an EXTRA pinned entry at exactly E
+        // (the cross-encoding case: the entry is invisible to the
+        // column).
+        let mut row2 = row2_src;
+        let mut pin2 = pin2_src;
+        row2[4] = elsewhere;
+        pin2[4] = true;
+        dense.push(row2);
+        pinned.push(pin2);
+        mismatches.push(vec![0; n_units]);
+        // fold 3: a NEAR-TWIN — one ulp off at a non-E pinned entry.
+        // A different column: its own class, never merged.
+        let mut row3 = row3_src;
+        let pin3 = pin3_src;
+        row3[2] = f64::from_bits(row3[2].to_bits() + 1);
+        dense.push(row3);
+        pinned.push(pin3);
+        mismatches.push(vec![0; n_units]);
+        // fold 4: the all-E row, unpinned.
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // fold 5: the all-E row PINNED EVERYWHERE at exactly E — the
+        // same column (every pinned entry is invisible).
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![true; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // fold 6: the all-E row again, unpinned (a third member of
+        // the all-E class).
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        let matrix = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        // the canonical key: the pinned-at-E entries are invisible —
+        // folds 0/1/2 share one key, folds 4/5/6 share one, fold 3
+        // is its own.
+        assert_eq!(
+            matrix.column_key_hash(0),
+            matrix.column_key_hash(1),
+            "exact clones share the canonical key"
+        );
+        assert_eq!(
+            matrix.column_key_hash(0),
+            matrix.column_key_hash(2),
+            "an extra pinned-at-E entry is invisible to the key"
+        );
+        assert_ne!(
+            matrix.column_key_hash(0),
+            matrix.column_key_hash(3),
+            "a one-ulp difference is a different key"
+        );
+        assert_eq!(
+            matrix.column_key_hash(4),
+            matrix.column_key_hash(5),
+            "pinned-at-E everywhere is the all-E column"
+        );
+        let memo = ClassScanMemo::build(&matrix);
+        assert_eq!(memo.canon, vec![0, 0, 0, 3, 4, 4, 4]);
+        assert_eq!(memo.distinct_rows, 3);
+        assert_eq!(memo.canonical_pairs, 6);
+        // the memo's flat spelling: bit-equal pairs share one
+        // canonical flat, whatever their own indices.
+        assert_eq!(memo.canonical_flat(0, 3), memo.canonical_flat(2, 3));
+        assert_eq!(memo.canonical_flat(1, 5), memo.canonical_flat(0, 4));
+        assert_eq!(memo.canonical_flat(5, 6), memo.canonical_flat(4, 4));
+        // and the shared VALUE, bit for bit, against a third fold
+        // and as the hom pair.
+        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+        assert_eq!(
+            matrix.class_pair_sum(0, 3, &counts).to_bits(),
+            matrix.class_pair_sum(2, 3, &counts).to_bits(),
+            "the cross-encoding twin shares the sum against fold 3"
+        );
+        assert_eq!(
+            matrix.class_pair_sum(4, 4, &counts).to_bits(),
+            matrix.class_pair_sum(5, 6, &counts).to_bits(),
+            "the all-E class shares one hom sum"
+        );
+        // (The near-twin fold 3 carries a DIFFERENT column — proven
+        // above by canon and the key — but its pair SUMS may still
+        // collide in f64 after accumulation: the class discipline is
+        // the memo's, never a sum-inequality claim.)
+    }
+
+    #[test]
+    fn memoized_scan_is_bit_identical_to_direct_on_randomized_rows() {
+        // THE MEMO'S OWN RANDOMIZED ORACLE (the task's own gate:
+        // memoized == direct on randomized bit-row fixtures): for
+        // every case, the memo's canonical classes are EXACTLY the
+        // brute-force bit-equality classes (the exact predicate,
+        // never the hash), and the memoized two-phase scan — the
+        // scan site's own shape: phase A computes each distinct
+        // canonical pair sum once, phase B fills every pair's own
+        // flat slot — reproduces the direct per-pair accumulation
+        // BIT FOR BIT at every pair, clones and near-twins included.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for case in 0..60u32 {
+            let elsewhere = -10.0 - (next() % 200) as f64 / 7.0;
+            let n_units = 12 + (next() as usize) % 40;
+            let base_folds = 3 + (next() as usize) % 8;
+            let extra_folds = (next() as usize) % 6;
+            let n_folds = base_folds + extra_folds;
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..base_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                for _ in 0..1 + (next() as usize) % 9 {
+                    let unit = (next() as usize) % n_units;
+                    if !pin[unit] {
+                        pin[unit] = true;
+                        mism[unit] = next() % 5;
+                        // every so often a pinned entry carries
+                        // EXACTLY E — invisible to the column
+                        row[unit] = if next() % 7 == 0 {
+                            elsewhere
+                        } else {
+                            elsewhere
+                                + (next() % 97) as f64 / 13.0
+                                + (fold as f64 + 0.5) / 4.0
+                        };
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            for _ in 0..extra_folds {
+                let source = (next() as usize) % base_folds;
+                let mut row = dense[source].clone();
+                let mut pin = pinned[source].clone();
+                match next() % 3 {
+                    // the exact clone (a bit-equal row)
+                    0 => {}
+                    // the cross-encoding twin: an extra pinned entry
+                    // at exactly E — invisible, still bit-equal
+                    1 => {
+                        for unit in 0..n_units {
+                            if !pin[unit] {
+                                pin[unit] = true;
+                                row[unit] = elsewhere;
+                                break;
+                            }
+                        }
+                    }
+                    // the near-twin NEGATIVE CONTROL: one ulp off at
+                    // a pinned non-E entry — a different column
+                    _ => {
+                        let mut moved = false;
+                        for unit in 0..n_units {
+                            if pin[unit] && row[unit].to_bits() != elsewhere.to_bits() {
+                                row[unit] = f64::from_bits(row[unit].to_bits() + 1);
+                                moved = true;
+                                break;
+                            }
+                        }
+                        if !moved {
+                            // no non-E pinned entry to perturb: pin
+                            // one fresh unit one ulp above E instead
+                            for unit in 0..n_units {
+                                if !pin[unit] {
+                                    pin[unit] = true;
+                                    row[unit] =
+                                        f64::from_bits(elsewhere.to_bits() + 1);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(vec![0u32; n_units]);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+            let counts: Vec<f64> = (0..n_units)
+                .map(|unit| 1.0 + (next() % 9) as f64 * (unit as f64 + 1.0))
+                .collect();
+            let pair_count = n_folds * (n_folds + 1) / 2;
+            // the canonical classes are EXACTLY the brute-force
+            // bit-equality classes (the exact predicate decides)
+            let memo = ClassScanMemo::build(&matrix);
+            for a in 0..n_folds {
+                for b in 0..n_folds {
+                    assert_eq!(
+                        matrix.ll_bits_equal(a, b),
+                        memo.canon[a] == memo.canon[b],
+                        "case {case}: the canon classes must be exactly \
+                         the bit-equality classes at ({a}, {b})"
+                    );
+                }
+            }
+            for fold in 0..n_folds {
+                assert!(
+                    memo.canon[fold] <= fold,
+                    "case {case}: the representative is the class's min"
+                );
+            }
+            // the direct reference
+            let direct: Vec<f64> = (0..pair_count)
+                .map(|flat| {
+                    let (first, second) = unrank_pair(flat);
+                    matrix.class_pair_sum(first, second, &counts)
+                })
+                .collect();
+            // the memoized two-phase scan (the scan site's own shape)
+            let mut values = vec![f64::NAN; pair_count];
+            let distinct: Vec<usize> = (0..pair_count)
+                .filter(|&flat| {
+                    let (first, second) = unrank_pair(flat);
+                    memo.canonical_flat(first, second) == flat
+                })
+                .collect();
+            assert_eq!(
+                distinct.len() as u64,
+                memo.canonical_pairs,
+                "case {case}: the canonical pair count"
+            );
+            for flat in &distinct {
+                let (first, second) = unrank_pair(*flat);
+                values[*flat] = matrix.class_pair_sum(first, second, &counts);
+            }
+            for flat in 0..pair_count {
+                let (first, second) = unrank_pair(flat);
+                let memoized = values[memo.canonical_flat(first, second)];
+                assert_eq!(
+                    memoized.to_bits(),
+                    direct[flat].to_bits(),
+                    "case {case}: the memoized pair {flat} must be the \
+                     direct sum bit for bit"
+                );
+            }
+        }
+    }
+
 
     #[test]
     fn receipt_f64_text_is_the_non_roundtrip_serialization_class() {
@@ -12634,14 +13408,40 @@ mod tests {
                 .filter(|&flat| exhaustive[flat] == exhaustive_best)
                 .map(unrank_pair)
                 .collect();
-            // stage one, twice (the determinism receipt)
-            let (bounds_a, slacks_a, computed_a, best_a) =
-                bounded_stage_one(&matrix, &counts);
-            let (_bounds_b, slacks_b, computed_b, best_b) =
-                bounded_stage_one(&matrix, &counts);
+            // stage one, twice (the determinism receipt), once with
+            // the bit-equal-row memo and once without — the memo's
+            // values are the direct form's own bits either way
+            let (bounds_a, slacks_a, computed_a, best_a, _) =
+                bounded_stage_one(&matrix, &counts, None);
+            let (_bounds_b, slacks_b, computed_b, best_b, _) =
+                bounded_stage_one(&matrix, &counts, None);
+            let memo = ClassScanMemo::build(&matrix);
+            let (_bounds_m, _slacks_m, computed_m, best_m, _) =
+                bounded_stage_one(&matrix, &counts, Some(&memo));
             assert_eq!(best_a.to_bits(), best_b.to_bits());
             assert_eq!(slacks_a, slacks_b, "the derived slack is deterministic");
             assert_eq!(best_a.to_bits(), exhaustive_best.to_bits(), "stage one's best");
+            // THE MEMOIZED STAGE ONE's own gate: the memo's kept
+            // values are the direct form's own bits (the fourth
+            // reduction's construction proof, exercised here at the
+            // bounded path's stage one)
+            assert_eq!(
+                best_m.to_bits(),
+                best_a.to_bits(),
+                "the memoized stage one's best"
+            );
+            assert!(
+                computed_a.len() == computed_m.len()
+                    && computed_a
+                        .iter()
+                        .zip(&computed_m)
+                        .all(|(a, b)| match (a, b) {
+                            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
+                            (None, None) => true,
+                            _ => false,
+                        }),
+                "the memoized stage one's kept values are the direct form's own"
+            );
             assert!(
                 computed_a.len() == computed_b.len()
                     && computed_a
@@ -12870,7 +13670,8 @@ mod tests {
         }
         // and the slack-corrected stop no longer fires between the
         // ties: stage one computes the full tie set
-        let (bounds, slacks, computed, best) = bounded_stage_one(&matrix, &counts);
+        let (bounds, slacks, computed, best, _) =
+            bounded_stage_one(&matrix, &counts, None);
         assert_eq!(best.to_bits(), exact0.to_bits(), "stage one's best");
         for flat in 0..pair_count {
             assert!(

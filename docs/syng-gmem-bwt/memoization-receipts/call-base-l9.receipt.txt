@@ -1,0 +1,13 @@
+# call-base-l9 receipt (2026-10-22T04:56:54Z); binary /home/erikg/impg-genome-inference/target-frontier/release/impg-baseline-aaefecc; loci 9
+# wall_s 866 exit 0
+calls_sha256 c32c50e7041c34d1a4df0a07a4263c1c860aa1d04e99621b493cf8ea6bca4bb2 983 bytes
+truthqv_sha256 5302ed6775ecd64d17f3795230e300e810a44f7bd50e4a202d5f9630a3cd378c 1927 bytes
+[score] locus 9: class scan 96580 pairs over 246224 units [438.9s] (phase census)
+[score] locus 9 phase census: merge 1.45s (7 eq-col pairs, 6 admitted), classes 438.88s (96580 pairs x 246224 units), qual spectrum 8.17s (96579 entries), tie certificate 0.03s (0 lists x 0 predicate entries), cluster 0.05s, best-outside 0.00s, called 1, fold multiset entries 1809065 total / 4297 max
+[score] locus 9: alignment-connected folds: 6 merge groups (6 admitted pairs of 7 equal-column candidates; refusals: 0 outside-bubble, 0 unshared, 1 pocket-mass)
+[score] locus 9 scoring census: anchor 0.67s 
+[score] locus 9 done: 439 folds, 246224 units, 96580 classes, truth_rank None, log_gap None, qual None [505.8s]
+[score] phase summary: inputs 203.8s, quality (FASTQ scan) 0.3s, elsewhere 0.000s, derive cache 0.1s, binding 3.1s, variants 0.2s, rows/context assembly 5.7s, loci (folds+units+scoring+classes+qual+exactness+receipts) 505.8s; AGC fetches 1269770 total (340.4 MB)
+fold_set_digest locus 9 folds 439 c8b294e0075bdf74 (in-process)
+phase_census locus 9 best_outside_seconds=0.000484811 called_class_count=1 class_pairs=96580 class_units=246224 classes_seconds=438.87907247 degenerate=False fold_multiset_entries_max=4297 fold_multiset_entries_total=1809065 merge_admitted_pairs=6 merge_equal_column_pairs=7 merge_seconds=1.44671325 qual_certificate_seconds=0.029987713 qual_cluster_seconds=0.046564106 qual_spectrum_entries=96579 qual_spectrum_seconds=8.173541693 qual_tied_list_count=0 qual_tied_list_entries=0
+walls locus 9 anatomy_seconds=0.0 classes_seconds=438.87907247 exactness_seconds=1.142526454 folds_seconds=8.861485377000022 locus_seconds=505.790921268 qual_seconds=8.221993402 scoring_seconds=48.705097153

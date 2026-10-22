@@ -105,8 +105,8 @@ term's predicted share of the locus wall at that shape.
 
 | phase | W = (measured) | median locus | deep locus (T03226 l0) | lever |
 |---|---|---:|---:|---|
-| **the exhaustive class scan** | 18.42 ns · f(f+1)/2 · U (R²=0.9966; exact quadratic receipt at 2822/2822) | 0.09 s (18%) | **1,126.8 s (79%)** | **bound (DONE, default)** — removes ~99% where it engages; plateau remainder → memoization (23.9-37.7%, NOT implemented) |
-| — the same at the plateau monster (T00940 l1) | 449²/2 × 171,590 = 1.73e10 unit-pairs | — | 319.3 s (50% of 641.7 s), **0 pruned by the bound** | memoization / plateau-aware bound (NEW) |
+| **the exhaustive class scan** | 18.42 ns · f(f+1)/2 · U (R²=0.9966; exact quadratic receipt at 2822/2822) | 0.09 s (18%) | **1,126.8 s (79%)** | **bound (DONE, default)** — removes ~99% where it engages; **memoization (DONE, default)** — bit-equal rows share one sum, exact by construction (§2.1) |
+| — the same at the plateau monster (T00940 l1) | 449²/2 × 171,590 = 1.73e10 unit-pairs | — | 319.3 s (50% of 641.7 s), **0 pruned by the bound** | the memoization is implemented; the plateau's re-measurement needs a re-derivable plateau substrate (the tranche-1 strata reaped — §2.1's honest verdict) |
 | **the scoring pair loop** (pinned pairs) | 2.43 µs · pinned_pairs (placement 3.01e-7·scored^1.049, R²=0.988) | 0.18 s (36%) | 136.6 s (10%) | per-base floor IRREDUCIBLE (~0.4-0.6 core-s/locus at pinned-heavy shapes); walk-residue ENGINEERING (SS10.6.14(d)) |
 | **fold enumeration + units classification** | O(members + rows·L log L); fits too small to resolve (best: records^0.34, R²=0.37) | inside the 0.20 s floor | **0.1 s (<0.01%)** | none needed — not a pole |
 | **the alignment-connected merge** (equal-column candidates) | candidates bounded by CONTENT (vs folds_pre²: R²=0.01 — not quadratic in practice); admission 71% | inside the floor | <0.1 s | none needed |
@@ -131,11 +131,10 @@ absorbed in the floor term).
    bounded walk's ~1.2 s + stage-one 1.0 s; T05884 l8: 710.4 s →
    ~3.4 s at T16 measured), **INTACT at the uniform-excess plateaus**
    (T00940 l1: 319.3 s stays; T03901 l13 40.6% pruned is the mixed
-   case). The named residual levers: the exact-preserving bit-equal-row
-   memoization (distinct_rows 187 of 204 folds at T03226 l0 —
-   37.7% of pair sums share one value; unit-proven, NOT implemented)
-   and a plateau-aware bound (the uniform-excess landscape defeats the
-   per-fold excess-mass bound BY CONSTRUCTION).
+   case). THE BIT-EQUAL-ROW MEMOIZATION IS NOW IMPLEMENTED (the
+   fourth reduction, 2026-10-22 — see §2.1); the remaining named
+   lever is a plateau-aware bound (the uniform-excess landscape
+   defeats the per-fold excess-mass bound BY CONSTRUCTION).
 2. **THE PAIR LOOP (pinned pairs = folds × units × pin-rate)** — not
    quadratic in a single variable but a PRODUCT that behaves
    quadratically at windows where both folds and units are large
@@ -154,6 +153,83 @@ absorbed in the floor term).
 4. **NOT quadratic, measured:** fold enumeration (§4), the merge pass
    (content-bounded, R²=0.01 against f²), binding (records^0.947),
    rows/context, inputs (flat).
+
+### 2.1 THE FOURTH REDUCTION, IMPLEMENTED AND MEASURED (the
+### bit-equal-row memoization, 2026-10-22 —
+### `memoization-receipts.txt`)
+
+**THE MECHANISM (no tuning constants, exact by construction):** the
+class scan's per-(class-pair, unit) work is a pure function of the
+pair's evidence-row bit patterns, so two folds whose ll columns are
+bit-equal (`ll_bits_equal`, whichever encoding each row took)
+produce bit-identical class pair sums against every third fold — the
+scan computes ONE sum per unordered (row-class, row-class) pair and
+shares it (`ClassScanMemo`, realign_score.rs: canonical row classes
+bucketed by the encoding-independent column-content hash — the
+row's pinned non-E (unit, bits) entries, O(pinned) per row — with
+every bucket candidate decided by the exact predicate on match, a
+hash collision can never merge; the representative is the class's
+smallest fold index). The exactness proof is BY CONSTRUCTION: the
+representatives' accumulation executes the identical f64 op sequence
+(cursor bits, per-unit count, units ascending), so the shared value
+is the direct form's own bits; the memo shares values, never
+reorders. Sites: the exhaustive scan (the assessment path), the
+bounded scan's stage-one rounds / stage two / best-outside fallback
+— one memo table per locus, built on the final post-merge matrix.
+`IMPG_CLASS_SCAN_MEMO=off` restores the direct form (the toggle
+doctrine); the default is ON, no output label (the memo changes no
+emitted byte — the gates prove it). **Tests: cargo test --release
+--lib 586/0** (584 + the randomized bit-row oracle — 60 cases,
+clones, cross-encoding twins, one-ulp near-twin negative controls,
+canonical classes == the brute-force bit-equality classes, memoized
+scan == direct BIT FOR BIT — and the key-discipline test).
+
+**THE ANSWER GATES:** byte-identical before/after (calls.jsonl AND
+truth-qv sha256) at L1 all 19 loci (base == memo == memo-off == the
+committed mergefix receipts; fold-set digests 19/19 identical), at
+T09724 all 16 loci in BOTH the committed form (base == memo ==
+memo-off == the committed receipts; fold digests 16/16) and the
+pre-merge form (== the committed pre-merge receipts), and at l9
+alone (== the committed l9 answer). The toggle-restore gate: the
+memo binary with the memo OFF is byte-identical everywhere.
+
+**THE HIT-RATES, MEASURED PER SHAPE (the memo census, env
+IMPG_LOCUS_PHASE_CENSUS):** at the COMMITTED stack the memo's
+catchment IS the merge's refusal set, and it is receipted row for
+row: L1 18 of 19 loci at 0%, one locus (l15, 6 refused equal-column
+pairs) at 3.1% (1,022 of 33,153 pairs); T09724 0-3.5% per locus
+(l3 2.4%, l7 3.5%, l14 1.3%), the fold-heavy l9 at 0.5% — its ONE
+pocket-mass-refused pair (439 folds -> 438 rows). At the PRE-MERGE
+anatomy form (the merge off, every bit-equal row rides) the live
+band is **7.7-41.8% per locus — the probe band's 23.9% lower edge
+landing EXACTLY at l0 and its 37.7% upper edge EXCEEDED at l6
+(41.8%)**; the l15-class shape (the fold-heavy/unit-light extreme,
+the 455x receipt's own class) dedups 25.6% of its class pairs.
+
+**THE TIMING RECEIPTS (serial, same wave):** T09724 l9's class scan
+438.9 s -> 437.7 s (the 319.3 s-class target's kept-corpus instance
+— the dedup is 0.5% and the build 0.42 s: an honest net ~0,
+BECAUSE the committed merge already collapsed 6 of the 7
+equal-column candidates there); the whole-territory loci phases
+521.2 -> 519.9 s (T09724) and 406.7 -> 402.4 s (L1). At the
+PRE-MERGE form — the one re-derivable shape where the memo's
+classes ride at scale — the same-wave before/after is MEASURED:
+l9's scan 446.4 s (direct) -> 437.3 s (memo, 3,094 pairs / 3.1%
+dedup, the ~14 s unit-pair model landing at -9.1 s net of the build
+and lookup overheads), the whole pre-merge territory 527.0 -> 517.3 s
+(-1.8%). **THE HONEST
+VERDICT ON THE 37.7% FLOOR:** the probe's band was measured at the
+TRANCHE-1 plateau monsters (T00940-class segdup families where the
+merge refuses wholesale — outside-bubble), whose substrates were
+reaped with the disk crisis; tranche 2 drew NO S_SEG members, so
+the plateau class is NOT re-derivable from the kept corpus and the
+37.7%-class saving cannot be re-measured at a real plateau today.
+The pre-merge form re-measures the band's mechanics live (7.7-41.8%)
+at the one re-derivable shape that exercises it; the committed-stack
+corpus share of the memo is measured 0-3.5% — exact, free
+(O(pinned) builds, sub-second at the 246k-unit monster), and
+structural: every bit-equal row the merge leaves is now shared,
+wherever the next panel era's substrates carry them.
 
 ---
 
@@ -318,9 +394,10 @@ the product, and the l15 receipt prices the second one at 455x. (1) The
 — committed (the alignment-connected relaxation; 455x at l15, ~10%
 median). (3) The bit-equal-ROW memoization across the pair sums —
 exact-preserving, unit-proven (`bit_equal_rows_share_one_class_sum`),
-measured 23.9-37.7% at the monsters, **NOT implemented** (the named
-Frontier-1 residual; it is the one remaining expressibility reduction
-and it is also the plateau lever). (4) The excess-mass bound — the
+measured 23.9-37.7% at the tranche-1 monsters, **IMPLEMENTED
+2026-10-22 at every exact-sum site** (§2.1's receipts; the named
+Frontier-1 residual closed — it is the fourth and last of the
+expressibility reductions). (4) The excess-mass bound — the
 production default. **What remains after (1)-(4) is the genuinely
 expressible hypothesis space: every fold left carries a distinct
 evidence column, and cutting any of them is a threshold, not a
@@ -507,7 +584,7 @@ the universe's ~5,807 territories × ~25 loci ≈ 145k loci → **0.132 ≈
 | inputs/panel load (per-call) | ~9.8 (243.8/25) | **NONE needed per-locus** — the fleet form's fork-after-load COW amortizes it per SAMPLE (the product path's own default); at fleet scale → ~0 |
 | bind + rows/context | ~0.8 | **REFUSED as a grain lever (§5's measured verdict: bind is census-record-bound and the census is grain-invariant — 81,688 vs 81,765 records — rows flat-to-up); the path that remains is Frontier 2's panel-side precompute** (the gated increment) |
 | the per-locus fixed floor | ~0.2 at the median | **the only window-bound term** — but §5 measures the trade: 4x grain saves ~0.15 s/locus of floor while the content classes ADD ~2x their work (the units grow linearly per window, the folds sub-linearly, the windows 1/grain) — the lever is refused at cost; the floor's other path is Frontier 2 |
-| the class scan (the f²·U tail) | ~29 (71% of the corpus wall / loci) | **bound (DONE)** where peaked (~half the tail); **memoization** (the plateau's 23.9-37.7%, NOT implemented) for the rest |
+| the class scan (the f²·U tail) | ~29 (71% of the corpus wall / loci) | **bound (DONE)** where peaked (~half the tail); **memoization (DONE)** where bit-equal rows exist — the committed-stack catchment is the merge's refusals (measured 0-3.5% at the kept corpus's re-derivable shapes; the plateau band 23.9-37.7% needs a re-derivable plateau substrate) |
 | the scoring pair loop | ~6.6 (16% / loci) | **IRREDUCIBLE core** at the pinned-heavy shapes (~0.4-0.6 core-s/locus of per-base comparison) + ENGINEERING (the placement-walk residue, the 2-4x over the floor) |
 | map + cut | ~0.2+ | ~2x engineering (the standing receipt) |
 
@@ -550,6 +627,28 @@ unchanged: fleet COW + precompute + bounded-and-memoized scan + the
 pair loop's floor — with the pre-merge/tie-class pathological
 constant no longer a hidden multiplier on the fold-heavy tail.
 
+**THE 16-CORE ARITHMETIC, REFRESHED AT THE FOURTH REDUCTION
+(2026-10-22, §2.1's receipts):** the memoization moves NO measured
+budget line at the kept corpus — the committed-stack catchment is
+the merge's refusal set (0-3.5% per locus, ~0 wall net at every
+re-derivable territory) — so the ~44 core-s/locus mean
+decomposition stands, now with all four expressibility reductions
+IN THE PRODUCT (dedup, the equal-column merge, the excess-mass
+bound, the bit-equal-row memoization). What the fourth reduction
+closes is the STRUCTURE: the scan is bounded where peaked AND
+memoized where bit-equal rows exist, at every exact-sum site, both
+paths — so the tail's remaining residue is exactly the genuinely
+expressible hypothesis space at the shapes where BOTH levers are
+empty (the T00940-class uniform plateaus). The plateau's own
+37.7%-band collapse is bounded by the memo's construction catchment
+(the merge's refusals — the tranche-1 probe's own measurement) and
+is re-measurable the day a plateau substrate is re-derivable
+again; the pre-merge form already re-measures the band live at
+7.7-41.8% per locus at the fold-heavy member. THE PANEL PRECOMPUTE
+(Frontier 2) IS THE NEXT INCREMENT — the fixed classes' lever
+(bind/rows/floor ~0.8 + the 0.2 s floor), the ledger's own named
+remainder of the chain.
+
 ---
 
 ## 7. THE RECEIPTS AND THE RESUME POINT
@@ -583,14 +682,29 @@ constant no longer a hidden multiplier on the fold-heavy tail.
   form (§5); a committed-form rerun is one env away
   (`IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1` on the callC/callProd
   invocations) and is the first item of any follow-up.
-- cargo test: **the 2026-10-22 window's src change is the tie-certificate
-  fix** (`src/genome_inference/realign_score.rs`: the non-degenerate
-  tie certificate takes the committed degenerate path's cut-index-
-  list form — §4's closed term — plus the env-gated phase-census and
-  fold-set-digest instruments); **cargo test --release --lib 584/0
-  green, 5 ignored** (583 committed + the new 4,000-case
-  non-degenerate-band oracle
-  `the_non_degenerate_tie_certificate_matches_the_naive_band_oracle`).
+- cargo test: **the 2026-10-22 memoization window's src change is the
+  bit-equal-row memoization** (`src/genome_inference/realign_score.rs`:
+  `ClassScanMemo` + the canonical column-content key + the memoized
+  exact-sum sites — §2.1; the window's earlier change was the
+  tie-certificate fix, §4, plus the env-gated phase-census and
+  fold-set-digest instruments); **cargo test --release --lib 586/0
+  green, 5 ignored** (584 committed + the two new memo tests: the
+  randomized bit-row oracle
+  `memoized_scan_is_bit_identical_to_direct_on_randomized_rows` and
+  `scan_memo_canonicalizes_only_bit_equal_columns`).
+- **The memoization increment's own receipts (2026-10-22, the stream
+  discipline's form):**
+  `docs/syng-gmem-bwt/memoization-receipts.txt` (the mechanism +
+  proof, the substrate re-derivation gates, the answer-digest gates
+  at both targets and both forms, the per-locus hit-rate tables, the
+  timing receipts, the honest verdict on the 37.7% floor, the
+  refreshed 16-core arithmetic, the disk receipts) and the runners
+  `scripts/complexity-ledger/run-memo-T09724.sh` +
+  `run-memo-L1.sh` (marker-gated, 150G-budget-guarded,
+  receipts-at-write-time, `reap` subcommand). The workdirs
+  (`/mnt/nvme2n1/erikg/memo-T09724{,-keep}` and `memo-L1{,-keep}`)
+  are reaped at the increment's close after the receipts were
+  committed (mine first, reap after).
 - **The merge-fix anatomy's own receipts (2026-10-22, the stream
   discipline's first full customer):**
   `docs/syng-gmem-bwt/mergefix-tie-certificate-receipts.txt` (the

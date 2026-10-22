@@ -1,0 +1,117 @@
+# call-memo-off-premerge-all receipt (2026-10-22T06:31:01Z); binary /home/erikg/impg-genome-inference/target-frontier/release/impg-memo-wip; loci 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+# wall_s 889 exit 0
+calls_sha256 34e05ac5bdeded875eba37be47e2c757af736c593766f2e6f701c13990a3d364 34319 bytes
+truthqv_sha256 1101b4eb5f8c96ef0447529aa5df90828faf9c8648f942febc10f8df1c1e3ade 34112 bytes
+[score] locus 0: class scan 5995 pairs over 761 units [0.1s] (phase census)
+[score] locus 0 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.08s (5995 pairs x 761 units), qual spectrum 0.04s (5994 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 47399 total / 447 max
+[score] locus 1: class scan 19110 pairs over 357 units [0.1s] (phase census)
+[score] locus 1 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.12s (19110 pairs x 357 units), qual spectrum 0.13s (19109 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 82299 total / 517 max
+[score] locus 2: class scan 31125 pairs over 550 units [0.3s] (phase census)
+[score] locus 2 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.32s (31125 pairs x 550 units), qual spectrum 0.17s (31124 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 100125 total / 416 max
+[score] locus 3: class scan 15225 pairs over 22870 units [5.3s] (phase census)
+[score] locus 3 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 5.31s (15225 pairs x 22870 units), qual spectrum 0.12s (15224 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 89818 total / 601 max
+[score] locus 4: class scan 16653 pairs over 666 units [0.2s] (phase census)
+[score] locus 4 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.19s (16653 pairs x 666 units), qual spectrum 0.09s (16652 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 74988 total / 425 max
+[score] locus 5: class scan 8385 pairs over 471 units [0.1s] (phase census)
+[score] locus 5 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.07s (8385 pairs x 471 units), qual spectrum 0.05s (8384 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 52195 total / 415 max
+[score] locus 6: class scan 5565 pairs over 1105 units [0.1s] (phase census)
+[score] locus 6 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.11s (5565 pairs x 1105 units), qual spectrum 0.03s (5564 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 42129 total / 483 max
+[score] locus 7: class scan 7750 pairs over 877 units [0.1s] (phase census)
+[score] locus 7 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.11s (7750 pairs x 877 units), qual spectrum 0.05s (7749 entries), tie certificate 0.00s (4 lists x 32 predicate entries), cluster 0.00s, best-outside 0.00s, called 5, fold multiset entries 59756 total / 511 max
+[score] locus 8: class scan 46665 pairs over 382 units [0.3s] (phase census)
+[score] locus 8 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.32s (46665 pairs x 382 units), qual spectrum 0.29s (46664 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 135582 total / 472 max
+[score] locus 9: class scan 99235 pairs over 246224 units [446.4s] (phase census)
+[score] locus 9 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 446.43s (99235 pairs x 246224 units), qual spectrum 8.30s (99234 entries), tie certificate 0.03s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 1834020 total / 4297 max
+[score] locus 10: class scan 1326 pairs over 400 units [0.0s] (phase census)
+[score] locus 10 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.01s (1326 pairs x 400 units), qual spectrum 0.01s (1325 entries), tie certificate 0.00s (1 lists x 1274 predicate entries), cluster 0.00s, best-outside 0.00s, called 2, fold multiset entries 8967 total / 209 max
+[score] locus 11: class scan 3003 pairs over 391 units [0.0s] (phase census)
+[score] locus 11 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.02s (3003 pairs x 391 units), qual spectrum 0.01s (3002 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 24019 total / 325 max
+[score] locus 12: class scan 9591 pairs over 32268 units [4.9s] (phase census)
+[score] locus 12 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 4.86s (9591 pairs x 32268 units), qual spectrum 0.08s (9590 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 75166 total / 661 max
+[score] locus 13: class scan 11476 pairs over 508 units [0.1s] (phase census)
+[score] locus 13 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.10s (11476 pairs x 508 units), qual spectrum 0.08s (11475 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 69477 total / 503 max
+[score] locus 14: class scan 14535 pairs over 419 units [0.1s] (phase census)
+[score] locus 14 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.11s (14535 pairs x 419 units), qual spectrum 0.10s (14534 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 79250 total / 497 max
+[score] locus 15: class scan 30628 pairs over 811 units [0.4s] (phase census)
+[score] locus 15 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.42s (30628 pairs x 811 units), qual spectrum 0.33s (30627 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 184407 total / 759 max
+[score] locus 0 scoring census: anchor 0.02s 
+[score] locus 1 scoring census: anchor 0.04s 
+[score] locus 2 scoring census: anchor 0.03s 
+[score] locus 3 scoring census: anchor 0.02s 
+[score] locus 4 scoring census: anchor 0.02s 
+[score] locus 5 scoring census: anchor 0.01s 
+[score] locus 6 scoring census: anchor 0.01s 
+[score] locus 7 scoring census: anchor 0.02s 
+[score] locus 8 scoring census: anchor 0.04s 
+[score] locus 9 scoring census: anchor 0.58s 
+[score] locus 10 scoring census: anchor 0.00s 
+[score] locus 11 scoring census: anchor 0.01s 
+[score] locus 12 scoring census: anchor 0.03s 
+[score] locus 13 scoring census: anchor 0.02s 
+[score] locus 14 scoring census: anchor 0.03s 
+[score] locus 15 scoring census: anchor 0.05s 
+[score] locus 0 done: 109 folds, 761 units, 5995 classes, truth_rank None, log_gap None, qual Some(3.1032060237938204) [0.3s]
+[score] locus 1 done: 195 folds, 357 units, 19110 classes, truth_rank None, log_gap None, qual Some(3.2067179545703794) [0.4s]
+[score] locus 2 done: 249 folds, 550 units, 31125 classes, truth_rank None, log_gap None, qual Some(3.855285156313424) [0.7s]
+[score] locus 3 done: 174 folds, 22870 units, 15225 classes, truth_rank None, log_gap None, qual None [7.9s]
+[score] locus 4 done: 182 folds, 666 units, 16653 classes, truth_rank None, log_gap None, qual Some(9.53531479821028) [0.5s]
+[score] locus 5 done: 129 folds, 471 units, 8385 classes, truth_rank None, log_gap None, qual Some(3.9935431804607213) [0.3s]
+[score] locus 6 done: 105 folds, 1105 units, 5565 classes, truth_rank None, log_gap None, qual Some(10.7322309677148) [0.3s]
+[score] locus 7 done: 124 folds, 877 units, 7750 classes, truth_rank None, log_gap None, qual Some(2.21651572021816) [0.3s]
+[score] locus 8 done: 305 folds, 382 units, 46665 classes, truth_rank None, log_gap None, qual Some(14.170605096138322) [0.9s]
+[score] locus 9 done: 445 folds, 246224 units, 99235 classes, truth_rank None, log_gap None, qual None [507.7s]
+[score] locus 10 done: 51 folds, 400 units, 1326 classes, truth_rank None, log_gap None, qual None [0.1s]
+[score] locus 11 done: 77 folds, 391 units, 3003 classes, truth_rank None, log_gap None, qual Some(4.420541754114015) [0.1s]
+[score] locus 12 done: 138 folds, 32268 units, 9591 classes, truth_rank None, log_gap None, qual None [5.5s]
+[score] locus 13 done: 151 folds, 508 units, 11476 classes, truth_rank None, log_gap None, qual Some(7.636264220731972) [0.4s]
+[score] locus 14 done: 170 folds, 419 units, 14535 classes, truth_rank None, log_gap None, qual Some(19.06241369002803) [0.4s]
+[score] locus 15 done: 247 folds, 811 units, 30628 classes, truth_rank None, log_gap None, qual Some(115.79182236882218) [1.1s]
+[score] phase summary: inputs 200.6s, quality (FASTQ scan) 0.3s, elsewhere 0.000s, derive cache 0.1s, binding 3.2s, variants 0.2s, rows/context assembly 5.7s, loci (folds+units+scoring+classes+qual+exactness+receipts) 527.0s; AGC fetches 1269770 total (340.4 MB)
+fold_set_digest locus 0 folds 109 4ac194d7da1ad85f (in-process)
+phase_census locus 0 best_outside_seconds=2.925e-05 called_class_count=1 class_pairs=5995 class_units=761 classes_seconds=0.080814696 degenerate=False fold_multiset_entries_max=447 fold_multiset_entries_total=47399 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.000967072 qual_cluster_seconds=7.671e-05 qual_spectrum_entries=5994 qual_spectrum_seconds=0.035554011 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 0 anatomy_seconds=0.0 classes_seconds=0.080814696 exactness_seconds=0.00685406 folds_seconds=0.13152416699999997 locus_seconds=0.312470387 qual_seconds=0.035716101 scoring_seconds=0.059608166
+fold_set_digest locus 1 folds 195 b04d3b5bc03d0998 (in-process)
+phase_census locus 1 best_outside_seconds=7.587e-05 called_class_count=1 class_pairs=19110 class_units=357 classes_seconds=0.116734797 degenerate=False fold_multiset_entries_max=517 fold_multiset_entries_total=82299 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.002171563 qual_cluster_seconds=0.00021417 qual_spectrum_entries=19109 qual_spectrum_seconds=0.131776519 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 1 anatomy_seconds=0.0 classes_seconds=0.116734797 exactness_seconds=0.00713838 folds_seconds=0.117215496 locus_seconds=0.448878132 qual_seconds=0.13225689 scoring_seconds=0.079757785
+fold_set_digest locus 2 folds 249 9cfe0913c26ddf44 (in-process)
+phase_census locus 2 best_outside_seconds=0.00011033 called_class_count=1 class_pairs=31125 class_units=550 classes_seconds=0.320109668 degenerate=False fold_multiset_entries_max=416 fold_multiset_entries_total=100125 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.003050194 qual_cluster_seconds=0.000764752 qual_spectrum_entries=31124 qual_spectrum_seconds=0.171438675 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 2 anatomy_seconds=0.0 classes_seconds=0.320109668 exactness_seconds=0.006078419 folds_seconds=0.13117390700000006 locus_seconds=0.715371084 qual_seconds=0.172576537 scoring_seconds=0.091948772
+fold_set_digest locus 3 folds 174 15533a05af763b13 (in-process)
+phase_census locus 3 best_outside_seconds=6.13e-06 called_class_count=1 class_pairs=15225 class_units=22870 classes_seconds=5.312299169 degenerate=False fold_multiset_entries_max=601 fold_multiset_entries_total=89818 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.002038423 qual_cluster_seconds=0.000357091 qual_spectrum_entries=15224 qual_spectrum_seconds=0.121302003 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 3 anatomy_seconds=0.0 classes_seconds=5.312299169 exactness_seconds=0.086893274 folds_seconds=0.38375222899999994 locus_seconds=7.914315472 qual_seconds=0.121791085 scoring_seconds=2.01323382
+fold_set_digest locus 4 folds 182 6aa3278da928d30a (in-process)
+phase_census locus 4 best_outside_seconds=6.1541e-05 called_class_count=1 class_pairs=16653 class_units=666 classes_seconds=0.185626686 degenerate=False fold_multiset_entries_max=425 fold_multiset_entries_total=74988 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.001602202 qual_cluster_seconds=0.00016704 qual_spectrum_entries=16652 qual_spectrum_seconds=0.087399265 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 4 anatomy_seconds=0.0 classes_seconds=0.185626686 exactness_seconds=0.007731621 folds_seconds=0.11710218600000004 locus_seconds=0.487947658 qual_seconds=0.087771216 scoring_seconds=0.091310301
+fold_set_digest locus 5 folds 129 99993eac97e116f6 (in-process)
+phase_census locus 5 best_outside_seconds=3.255e-05 called_class_count=1 class_pairs=8385 class_units=471 classes_seconds=0.066693106 degenerate=False fold_multiset_entries_max=415 fold_multiset_entries_total=52195 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.001082451 qual_cluster_seconds=9.6131e-05 qual_spectrum_entries=8384 qual_spectrum_seconds=0.045810655 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 5 anatomy_seconds=0.0 classes_seconds=0.066693106 exactness_seconds=0.005529848 folds_seconds=0.093669833 locus_seconds=0.257025697 qual_seconds=0.046014306 scoring_seconds=0.046236806
+fold_set_digest locus 6 folds 105 fc5a8c5bbc13ca65 (in-process)
+phase_census locus 6 best_outside_seconds=2.048e-05 called_class_count=1 class_pairs=5565 class_units=1105 classes_seconds=0.110799289 degenerate=False fold_multiset_entries_max=483 fold_multiset_entries_total=42129 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.000904451 qual_cluster_seconds=0.00012548 qual_spectrum_entries=5564 qual_spectrum_seconds=0.02820595 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 6 anatomy_seconds=0.0 classes_seconds=0.110799289 exactness_seconds=0.005647198 folds_seconds=0.091008989 locus_seconds=0.269882866 qual_seconds=0.028415151 scoring_seconds=0.0347786
+fold_set_digest locus 7 folds 124 caf6078cab031bb9 (in-process)
+phase_census locus 7 best_outside_seconds=5.927e-05 called_class_count=5 class_pairs=7750 class_units=877 classes_seconds=0.108987126 degenerate=False fold_multiset_entries_max=511 fold_multiset_entries_total=59756 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.003168645 qual_cluster_seconds=0.00018814 qual_spectrum_entries=7749 qual_spectrum_seconds=0.050926763 qual_tied_list_count=4 qual_tied_list_entries=32 scan_memo=None
+walls locus 7 anatomy_seconds=0.0 classes_seconds=0.108987126 exactness_seconds=0.00675179 folds_seconds=0.10046850300000004 locus_seconds=0.344182112 qual_seconds=0.051302063 scoring_seconds=0.077552761
+fold_set_digest locus 8 folds 305 bdc017f52ad6c678 (in-process)
+phase_census locus 8 best_outside_seconds=0.00017273 called_class_count=1 class_pairs=46665 class_units=382 classes_seconds=0.322556581 degenerate=False fold_multiset_entries_max=472 fold_multiset_entries_total=135582 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.004420277 qual_cluster_seconds=0.00046318 qual_spectrum_entries=46664 qual_spectrum_seconds=0.29309986 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 8 anatomy_seconds=0.0 classes_seconds=0.322556581 exactness_seconds=0.006078469 folds_seconds=0.13821758800000003 locus_seconds=0.860134321 qual_seconds=0.294132341 scoring_seconds=0.102942417
+fold_set_digest locus 9 folds 445 e97436c788ed520d (in-process)
+phase_census locus 9 best_outside_seconds=0.0003701 called_class_count=1 class_pairs=99235 class_units=246224 classes_seconds=446.426797958 degenerate=False fold_multiset_entries_max=4297 fold_multiset_entries_total=1834020 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.030057313 qual_cluster_seconds=0.001079301 qual_spectrum_entries=99234 qual_spectrum_seconds=8.30441435 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 9 anatomy_seconds=0.0 classes_seconds=446.426797958 exactness_seconds=1.226369524 folds_seconds=7.623013044000021 locus_seconds=507.731587804 qual_seconds=8.307410854 scoring_seconds=44.167476052
+fold_set_digest locus 10 folds 51 058215ddbe740ca7 (in-process)
+phase_census locus 10 best_outside_seconds=1.09e-06 called_class_count=2 class_pairs=1326 class_units=400 classes_seconds=0.009009833 degenerate=False fold_multiset_entries_max=209 fold_multiset_entries_total=8967 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.003076795 qual_cluster_seconds=4.636e-05 qual_spectrum_entries=1325 qual_spectrum_seconds=0.00700044 qual_tied_list_count=1 qual_tied_list_entries=1274 scan_memo=None
+walls locus 10 anatomy_seconds=0.0 classes_seconds=0.009009833 exactness_seconds=0.005473278 folds_seconds=0.090293959 locus_seconds=0.122560846 qual_seconds=0.00706982 scoring_seconds=0.011186486
+fold_set_digest locus 11 folds 77 ba4899f585699e31 (in-process)
+phase_census locus 11 best_outside_seconds=1.372e-05 called_class_count=1 class_pairs=3003 class_units=391 classes_seconds=0.019824069 degenerate=False fold_multiset_entries_max=325 fold_multiset_entries_total=24019 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.00056435 qual_cluster_seconds=7.7361e-05 qual_spectrum_entries=3002 qual_spectrum_seconds=0.013614619 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 11 anatomy_seconds=0.0 classes_seconds=0.019824069 exactness_seconds=0.005977078 folds_seconds=0.07099247100000002 locus_seconds=0.134867773 qual_seconds=0.01374011 scoring_seconds=0.025003396
+fold_set_digest locus 12 folds 138 a8692e856d372ac6 (in-process)
+phase_census locus 12 best_outside_seconds=3.542e-05 called_class_count=1 class_pairs=9591 class_units=32268 classes_seconds=4.860068023 degenerate=False fold_multiset_entries_max=661 fold_multiset_entries_total=75166 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.001959633 qual_cluster_seconds=0.00014658 qual_spectrum_entries=9590 qual_spectrum_seconds=0.079972134 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 12 anatomy_seconds=0.0 classes_seconds=4.860068023 exactness_seconds=0.009263993 folds_seconds=0.466126786 locus_seconds=5.537416731 qual_seconds=0.080333515 scoring_seconds=0.123035036
+fold_set_digest locus 13 folds 151 24dba4eb4a3ed100 (in-process)
+phase_census locus 13 best_outside_seconds=4.261e-05 called_class_count=1 class_pairs=11476 class_units=508 classes_seconds=0.099517502 degenerate=False fold_multiset_entries_max=503 fold_multiset_entries_total=69477 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.001790332 qual_cluster_seconds=0.000210501 qual_spectrum_entries=11475 qual_spectrum_seconds=0.082419288 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 13 anatomy_seconds=0.0 classes_seconds=0.099517502 exactness_seconds=0.006323129 folds_seconds=0.12782557400000005 locus_seconds=0.386435103 qual_seconds=0.082776209 scoring_seconds=0.071133041
+fold_set_digest locus 14 folds 170 580393d633b70362 (in-process)
+phase_census locus 14 best_outside_seconds=5.3731e-05 called_class_count=1 class_pairs=14535 class_units=419 classes_seconds=0.106651843 degenerate=False fold_multiset_entries_max=497 fold_multiset_entries_total=79250 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.001919003 qual_cluster_seconds=0.00016849 qual_spectrum_entries=14534 qual_spectrum_seconds=0.099950593 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 14 anatomy_seconds=0.0 classes_seconds=0.106651843 exactness_seconds=0.005843508 folds_seconds=0.107628163 locus_seconds=0.39866553 qual_seconds=0.100301524 scoring_seconds=0.079688544
+fold_set_digest locus 15 folds 247 aea87d4986fc0f29 (in-process)
+phase_census locus 15 best_outside_seconds=0.00011297 called_class_count=1 class_pairs=30628 class_units=811 classes_seconds=0.423391176 degenerate=False fold_multiset_entries_max=759 fold_multiset_entries_total=184407 merge_admitted_pairs=0 merge_equal_column_pairs=0 merge_seconds=0.0 qual_certificate_seconds=0.004110846 qual_cluster_seconds=0.000716221 qual_spectrum_entries=30627 qual_spectrum_seconds=0.325559466 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo=None
+walls locus 15 anatomy_seconds=0.0 classes_seconds=0.423391176 exactness_seconds=0.008042721 folds_seconds=0.181189579 locus_seconds=1.095480807 qual_seconds=0.326659288 scoring_seconds=0.158849237
