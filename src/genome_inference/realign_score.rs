@@ -10119,13 +10119,23 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // own pinned entries — the same (fold, unit) pairs in the same
         // order the dense filter produced, with the mismatches read
         // from the entry itself.)
-        let mut valid_pairs: Vec<(usize, usize)> = Vec::new();
-        let mut mismatch_pairs: Vec<(usize, usize)> = Vec::new();
+        //
+        // THE TWO VECTORS ARE NOT MATERIALIZED (the receipts-phase
+        // memory audit's Finding 3): the pinned-pair list is used for
+        // exactly two things - its LENGTH (to derive each stratum's
+        // stride) and every stride-th entry - so it is walked twice
+        // and never held. At a deep locus it was ~49.6M pairs x 16B =
+        // 794MB (up to ~1.6GB mid-growth, plus the same again for the
+        // mismatch vector), retained past the whole QUAL phase into
+        // the receipt emission. The walk order is identical, so the
+        // sampled set is identical, by construction.
+        let mut valid_len = 0usize;
+        let mut mismatch_len = 0usize;
         for fold in 0..n_folds {
-            for (unit, mismatches) in matrix.pinned_units(fold) {
-                valid_pairs.push((fold, unit));
+            for (_, mismatches) in matrix.pinned_units(fold) {
+                valid_len += 1;
                 if mismatches > 0 {
-                    mismatch_pairs.push((fold, unit));
+                    mismatch_len += 1;
                 }
             }
         }
@@ -10139,23 +10149,31 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let mut sampled: BTreeSet<(usize, usize)> = BTreeSet::new();
         let mut stratum_counts: BTreeMap<String, u64> = BTreeMap::new();
         {
-            let stride = stride_of(valid_pairs.len(), options.exactness_sample);
+            let stride = stride_of(valid_len, options.exactness_sample);
             let mut taken = 0u64;
-            for (index, &pair) in valid_pairs.iter().enumerate() {
-                if index % stride == 0 {
-                    sampled.insert(pair);
-                    taken += 1;
+            let mut index = 0usize;
+            for fold in 0..n_folds {
+                for (unit, _) in matrix.pinned_units(fold) {
+                    if index % stride == 0 {
+                        sampled.insert((fold, unit));
+                        taken += 1;
+                    }
+                    index += 1;
                 }
             }
             stratum_counts.insert("evenly_spaced_valid".to_string(), taken);
         }
         {
-            let stride = stride_of(mismatch_pairs.len(), options.exactness_sample);
+            let stride = stride_of(mismatch_len, options.exactness_sample);
             let mut taken = 0u64;
-            for (index, &pair) in mismatch_pairs.iter().enumerate() {
-                if index % stride == 0 {
-                    if sampled.insert(pair) {
-                        taken += 1;
+            let mut index = 0usize;
+            for fold in 0..n_folds {
+                for (unit, mismatches) in matrix.pinned_units(fold) {
+                    if mismatches > 0 {
+                        if index % stride == 0 && sampled.insert((fold, unit)) {
+                            taken += 1;
+                        }
+                        index += 1;
                     }
                 }
             }
@@ -10297,8 +10315,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             "[score] locus {locus}: exactness sample {} pairs of {} valid \
              ({} with mismatch votes) [{exactness_seconds:.1}s]",
             sampled.len(),
-            valid_pairs.len(),
-            mismatch_pairs.len(),
+            valid_len,
+            mismatch_len,
         );
 
         // -------------------------------------- the pocket-read anatomy
@@ -10938,8 +10956,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 "floor_only_unit_fold": no_pin,
                 "abstained_hull_bp": abstained_hull_bp,
                 "exactness_sample_pairs": sampled.len(),
-                "exactness_valid_pairs": valid_pairs.len(),
-                "exactness_mismatch_pairs": mismatch_pairs.len(),
+                "exactness_valid_pairs": valid_len,
+                "exactness_mismatch_pairs": mismatch_len,
                 "exactness_strata": stratum_counts,
             },
             "walls": {
