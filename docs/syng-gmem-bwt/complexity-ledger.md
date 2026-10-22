@@ -726,3 +726,45 @@ remainder of the chain.
   is a coverage label, never a pass claim.
 
 NO PR PUSH (the owner pushes).
+
+---
+
+### 2.2 THE PANEL-SIDE PER-LOCUS PRECOMPUTE, SLICE 1 IMPLEMENTED AND
+### MEASURED (Frontier 2, 2026-10-22 — the fixed-class budget
+### refreshed with the rows/context class DELETED per sample)
+
+**THE INSTRUMENT (the answer gates + the phase receipts, both standard
+targets, serial, same wave):** the row context (the dedup rows' stored
++ canonical-scheme walks; the sequences stay in the sources, keyed by
+FNV-64 content keys) and the per-window fold groupings are precomputed
+once per panel into `<partition-graphs>/panel-precompute-loci/`
+(SS10.6.23's contract; panel-prep's third piece + the standalone
+`genome-infer precompute-panel-loci` step), and the call serves them
+when every content key matches (`IMPG_PANEL_PRECOMPUTE=off` restores
+the live path verbatim; the gates prove answer-identity at L1 all 19
+loci and T09724 all 16 loci, both legs, against the committed memo
+receipts — calls.jsonl AND truth-qv sha256 byte-identical, fold-set
+digests 19/19 and 16/16 identical, the phase and scoring censuses
+identical modulo their own timers).
+
+**THE FIXED CLASSES, BEFORE/AFTER (the ledger's own rows, refreshed):**
+
+| class | the ledger median (committed) | slice 1 measured | the verdict |
+|---|---:|---|---|
+| **rows/context** | 13.4 s / territory | L1 4.3 → **0.0 s**; T09724 5.8 → **0.0 s** (−100%) | **DELETED per sample** — the build is the panel's own work (6.5-8.0 s ONCE per territory, receipted; under the fleet form the panel load that dominates the once-price is the COW's own class) |
+| **per-locus fold build** | inside the 0.20 s floor | L1 sum 1.10 → 1.10 s (median 0.0 s); T09724 1.0 → 1.0 s | **UNMOVED** — the serve pays the same per-locus derive + representative-sequence fetch it replaces (the sequences stay in the sources by design); the per-locus median is IDENTICAL at both targets (L1 6.2 s, T09724 0.4 s) |
+| **binding** | 7.2 s median / 507 s tail | 3.8 → 3.8 s (L1); 3.2 → 3.3 s (T09724) | **UNCHANGED — slice 2's class** (the content-keyed bind scaffolding, SS10.6.23 A4) |
+| **inputs / panel load** | 243.8 s median, flat in windows | 2.5 s (L1); 203.7 → 218.7 s (T09724, co-tenancy noise) | the FLEET COW's class — untouched by this increment |
+| **the fetch byte mass** | the bind's seek class | T09724 340.4 → 181.9 MB (−46.6%) | the served call fetches only the representative rows' sequences |
+| **per-locus floor (0.20 s median)** | the grain lever's refused target | fold-build share measured ~0.05 s/locus at the gate shapes; medians unchanged | the floor's remaining mass is BIND + IO + the per-base class — the fold build was never its pole |
+
+**THE HONEST ARITHMETIC, REFRESHED:** the per-territory fixed-class
+stack at the corpus median drops from ~264.6 to ~251.2 serial
+core-seconds (rows −13.4 s, the only term this slice moves); the
+per-locus median (0.50 s corpus) is UNCHANGED by slice 1 — the ~20x-
+class hope for the median locus is NOT realized by the fold-layout
+slice, because the floor's mass-invariant mass is the BIND class
+(0.29 s/locus amortized), not the fold build. The 16-core budget's
+named order stands: the tail (Frontier 1's plateaus), BIND (slice 2),
+the COW'd panel load, the pair loop's per-base core, and the map
+side's ~2x.

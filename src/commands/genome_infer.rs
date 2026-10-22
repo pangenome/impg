@@ -69,6 +69,47 @@ pub struct RouteEvidence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// THE PANEL-SIDE PER-LOCUS PRECOMPUTE STEP (SS10.6.23 slice 1, the
+    /// Frontier-2 increment's own STEP: the once-per-panel price, paid at
+    /// panel-prep or standalone, NEVER per sample): precompute the row
+    /// context (the deduplicated member rows' stored + canonical-scheme
+    /// walks, the sequences left in the sources and keyed by their FNV-64
+    /// content keys) and the per-window fold groupings into the panel
+    /// asset's new section — <partition-graphs>/panel-precompute-loci/ by
+    /// the default — keyed on CONTENT (the panel identity, the maps digest,
+    /// the routes graph digest, the component, the frame + record origin,
+    /// the stored-frame convention, k). The call auto-discovers the asset
+    /// beside its --partition-graphs and serves it when every key matches
+    /// (IMPG_PANEL_PRECOMPUTE=off restores the live path verbatim).
+    PrecomputePanelLoci {
+        /// The panel syng prefix (the panel the asset keys on)
+        #[arg(long)]
+        panel: String,
+        /// The route graph directory (graph.json + sources)
+        #[arg(long)]
+        routes: PathBuf,
+        /// The locality map directory (window<N>.gfa.map.json — the asset is
+        /// written beside it, into <dir>/panel-precompute-loci)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The component lane — the axis path whose member rows define the
+        /// window grid
+        #[arg(long)]
+        component: String,
+        /// THE GLOBAL-PANEL FRAME (the committed global-panel call mode's
+        /// frame statement: the maps translate to the global frame at load,
+        /// exactly as the call's --global-frame does)
+        #[arg(long, default_value_t = false)]
+        global_frame: bool,
+        /// THE RECORD-ORIGIN CONVENTION (the global frame's content-origin
+        /// parameter, the call's own --record-origin)
+        #[arg(long, default_value_t = 0, requires = "global_frame")]
+        record_origin: u64,
+        /// The asset output directory (default:
+        /// <partition-graphs>/panel-precompute-loci)
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
     /// THE PRODUCT OBJECTIVE (the owner's product swap): per-locus diplotype calls
     /// with the model-internal quality — the realignment likelihood +
     /// territory-image extents + the alignment-induced locality domains as the
@@ -1015,6 +1056,44 @@ fn route_run(
 }
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::PrecomputePanelLoci {
+            panel,
+            routes,
+            partition_graphs,
+            component,
+            global_frame,
+            record_origin,
+            out_dir,
+        } => {
+            // (SS10.6.23 slice 1 — the once-per-panel precompute step.
+            // An existing asset is REUSED loudly, never rebuilt per
+            // invocation (the routes-inventory precedent: a panel-side
+            // asset is built once; remove it to rebuild.)
+            let out_dir = out_dir
+                .unwrap_or_else(|| partition_graphs.join("panel-precompute-loci"));
+            if out_dir.join("manifest.json").is_file() {
+                println!(
+                    "=== panel-precompute: the per-locus precompute asset {} exists — REUSED \
+                     (built once per panel; remove it to rebuild)",
+                    out_dir.display()
+                );
+                return Ok(());
+            }
+            println!(
+                "=== panel-precompute: building the per-locus precompute asset into {} \
+                 (the row context + the fold layouts; the once-per-panel price)",
+                out_dir.display()
+            );
+            genome::realign_score::precompute_panel_loci(
+                &panel,
+                &routes,
+                &partition_graphs,
+                &component,
+                global_frame,
+                record_origin,
+                &out_dir,
+            )
+        }
         Command::CallDiplotypes {
             panel,
             routes,
@@ -1974,17 +2053,55 @@ pub fn run(command: Command) -> io::Result<()> {
                 start,
                 end,
                 sources,
-                component,
+                component: component.clone(),
                 axis,
-                partition_graphs,
+                partition_graphs: partition_graphs.clone(),
                 census,
                 read_lengths,
-                global_panel: Some(global_panel),
-                global_routes: Some(global_routes),
+                global_panel: Some(global_panel.clone()),
+                global_routes: Some(global_routes.clone()),
                 global_agc: Some(global_agc),
                 record_origin,
                 out_dir,
-            })
+            })?;
+            // (3) THE PANEL-SIDE PER-LOCUS PRECOMPUTE (SS10.6.23 slice
+            // 1, the Frontier-2 increment's own panel-prep piece): the
+            // row context + the per-window fold groupings, keyed on
+            // content into <partition-graphs>/panel-precompute-loci —
+            // the once-per-panel price the CALL step's serve amortizes
+            // to zero per sample. An existing asset is REUSED loudly
+            // (the routes-inventory precedent); the call falls back to
+            // the live path loudly on any content-key mismatch.
+            let precompute_dir = partition_graphs.join("panel-precompute-loci");
+            if precompute_dir.join("manifest.json").is_file() {
+                println!(
+                    "=== panel-prep: the per-locus precompute asset {} exists — REUSED \
+                     (built once per panel)",
+                    precompute_dir.display()
+                );
+            } else {
+                println!(
+                    "=== panel-prep: building the per-locus precompute asset into {} \
+                     (the row context + the fold layouts; the once-per-panel price)",
+                    precompute_dir.display()
+                );
+                run_self(&[
+                    "genome-infer",
+                    "precompute-panel-loci",
+                    "--panel",
+                    &global_panel,
+                    "--routes",
+                    &global_routes.display().to_string(),
+                    "--partition-graphs",
+                    &partition_graphs.display().to_string(),
+                    "--component",
+                    &component,
+                    "--global-frame",
+                    "--record-origin",
+                    &record_origin.to_string(),
+                ])?;
+            }
+            Ok(())
         }
         Command::Map {
             panel,

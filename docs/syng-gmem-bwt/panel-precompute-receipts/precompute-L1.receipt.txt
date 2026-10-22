@@ -1,0 +1,7 @@
+# precompute receipt (2026-10-22T07:38:29Z); binary /home/erikg/impg-genome-inference/target-frontier/release/impg-precompute-wip; component HG002#1#chr1:4632437-4883593
+# wall_s 7 exit 0
+read GBWT with 22517 vertices and 54630 edges from /mnt/nvme2n1/erikg/precompute-L1/locus-pos64.syng.1gbwt
+[precompute] rows: 8854 distinct rows over 19 partitions (19 windows) [6.1s]
+[precompute] windows: 19 windows, 3436 folds [0.4s]
+[precompute] asset: /mnt/nvme2n1/erikg/precompute-L1/locality-graphs/panel-precompute-loci (rows.bin 93134493 bytes, windows.bin 99088 bytes, manifest.json; maps digest 9b22ebca1a398318, routes digest b0ea6ea6c49de5b6) [total 6.9s]
+asset_bytes 93234429

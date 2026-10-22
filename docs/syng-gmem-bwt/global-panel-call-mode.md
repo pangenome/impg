@@ -3968,3 +3968,159 @@ representative-independence clause on randomized groups; the
 sequence-FNV drift detector (a mutated byte is a loud error, never
 a served structure). cargo test --release --lib green at the
 committed count + the new tests.
+
+### 10.6.24 FRONTIER 2, SLICE 1 LANDED — THE PANEL-SIDE PER-LOCUS PRECOMPUTE IMPLEMENTED AND GATED (the §10.6.23 contract executed: the row context + the fold layouts served from the panel asset, answers byte-identical at BOTH standard targets, the toggle restores the live path, the once-per-panel price receipted, and the honest reading: the rows/context class is deleted, the per-locus floor is unmoved by this slice — slice 2's bind class is the named remainder)
+
+**THE IMPLEMENTATION, exactly as the contract specified.** The fold-layout
+derivation is extracted VERBATIM from `compute_locus` into one-spelling
+functions — `contained_relative_walk` / `fold_node_positions` /
+`fold_multisets` (the fold's derived content) and `build_window_folds_live`
+(the per-window grouping) — so the live path, the precompute builder, and
+the serve all run THE SAME code. The asset lives beside the window maps
+(`<partition-graphs>/panel-precompute-loci/`: `manifest.json` — the
+content keys: the `PanelIdentity` object, the FNV-1a maps digest over
+the sorted `*.gfa.map.json` bytes, the routes `graph.json` digest, the
+component, the frame + record origin, the stored-frame convention, k —
+plus `rows.bin`, the deduplicated row table with the sequences replaced
+by their FNV-64 content keys, and `windows.bin`, the per-window fold
+groupings: representative row ids + per-member fold ids). The
+**precompute step** is a new `genome-infer precompute-panel-loci`
+subcommand (the once-per-panel price) AND the third piece of
+**panel-prep** (built after the Partition step, REUSED loudly when it
+exists — the routes-inventory precedent); **call-region reads it with no
+flag** (the engine auto-discovers the asset beside its
+`--partition-graphs`, in both the serial and the fleet forms). The
+**serve** replaces the rows phase (an index walk over the partition
+maps' member rows — the row content is the asset's own) and the
+per-locus fold grouping (the masking commute lemma's regroup: the same
+per-member predicates over the live member list, the grouping from the
+asset's fold ids, the fold content derived through the same helpers from
+the representative row, the representative rows' sequences fetched LIVE
+through the same validated fetch path and FNV-verified against the
+asset's recorded content key — the drift detector that never hashes the
+whole AGC). **The toggle**: `IMPG_PANEL_PRECOMPUTE=off` restores the
+live path verbatim; `=on` requires the serve (a mismatched asset is a
+loud error); unset serves when every content key matches, and a
+mismatched asset under the default is a LOUD LIVE FALLBACK (never a
+stale serve, never a failed call). No model label: the serve changes no
+emitted byte — the gates are the proof.
+
+**THE ANSWER GATES — ALL PASS, BOTH TARGETS, BOTH LEGS** (the
+in-process digest form, the committed memo receipts as the record of
+record; both substrates re-derived transiently from the read-only
+smalls under the stream discipline, the memo runners' own stage shape
+verbatim):
+
+| gate | L1 (19 loci, local frame) | T09724 (16 loci, global frame) |
+|---|---|---|
+| calls.jsonl sha256, off / on == committed | **PASS** (3ca9648c…, both legs) | **PASS** (c852d70f…, both legs) |
+| truth-qv sha256, off / on == committed | **PASS** (1c3dc4e1…, both legs) | **PASS** (c769b772…, both legs) |
+| fold-set digests, off / on == committed | **PASS 19/19**, both legs | **PASS 16/16**, both legs |
+| phase census (merge/class/spectrum counters) | identical modulo timers | identical modulo timers |
+| scoring census (anchor/pin/pair counters) | identical modulo timers | identical modulo timers |
+
+The TOGGLE-RESTORE gate is the off leg itself: the new binary's live
+path reproduces the committed answers byte for byte — the extraction
+was code motion, and the byte bar is its proof.
+
+**THE ONCE-PER-PANEL PRICE, receipted beside the assets it built:**
+L1 — 7 s total (the row-context build 6.1 s over 8,854 distinct rows,
+the fold groupings 0.4 s over 3,436 folds, both against the territory
+panel; the asset 93.2 MB). T09724 at the GLOBAL frame — 208.5 s total,
+of which ~200 s is the global panel load (the COW form's own class; the
+MARGINAL price is the build: rows 7.6 s over 7,465 rows + windows 0.4 s
+over 2,851 folds = **8.0 s once** against 5.8 s per sample; the asset
+90.2 MB). The genome-scale disk projection: ~90-95 MB per territory of
+walks/frames/groupings (no sequences) beside the panel's own assets —
+stated as a projection, measured at two territories. The price is paid
+at panel-prep, never per sample; the gates below receipt that it did
+not migrate back into the call.
+
+**THE FIXED-CLASS TIMING RECEIPTS (serial RAYON=1, same wave, both
+targets; the per-class lines are the receipts' own):**
+
+| class | L1 off → on | T09724 off → on | the ledger's corpus median |
+|---|---:|---:|---:|
+| inputs (panel load + census + maps) | 2.5 → 2.5 s | 203.7 → 218.7 s (co-tenancy noise) | ~244 s (the fleet COW's class) |
+| binding | 3.8 → 3.8 s **(unchanged — slice 2's class)** | 3.2 → 3.3 s | 7.2 s median / 507 s tail |
+| **rows/context** | 4.3 → **0.0 s** | 5.8 → **0.0 s** | 13.4 s |
+| per-locus fold build (sum / median) | 1.10 → 1.10 s / 0.0 s | 1.0 → 1.0 s / 0.0 s | inside the 0.20 s floor |
+| per-locus median wall | 6.2 → 6.2 s | 0.4 → 0.4 s | 0.50 s |
+| AGC fetch mass | 224.2 MB (rows) → 0 (rows) | 340.4 → 181.9 MB total (**−46.6%**: the rep-row-only fetch) | the bind's seek class |
+| whole call wall | 422 → 420 s | 909 → 917 s (l9's 503.5 → 528.8 s monster scan — the receipted co-tenancy band; the memo era wobbled 437-446 s on the same locus) | — |
+
+**THE HONEST READING — THE WIN IS THE CLASS THE CONTRACT NAMED, AND
+NO MORE.** (1) THE ROWS/CONTEXT CLASS IS DELETED per sample: 4.3 s and
+5.8 s → 0.0 s at the two targets, against the ledger's 13.4 s corpus
+median — the row-context build (the per-row AGC fetches, the stored-walk
+extraction, the canonical-scheme skeleton extraction with its per-step
+sequence verification, the dedup grouping) is now the panel's own work,
+paid 6.5-8.0 s once per territory against 4.3-13.4 s per sample
+forever. (2) THE FETCH BYTE MASS DROPS −46.6% at the fold-heavy member
+(the served call fetches only the representative rows' sequences, by
+design — the sequences stay in the sources). (3) THE PER-LOCUS FLOOR IS
+UNMOVED BY THIS SLICE, and the receipts say why: at these shapes the
+live fold build was already ~0.05 s/locus (the grouping of a few
+hundred member rows), and the serve pays the SAME per-locus derive +
+representative-sequence fetch it replaces — sum 1.10 → 1.10 s at L1,
+1.0 → 1.0 s at T09724, per-locus medians identical both targets. **The
+design's ~20x-class hope for the median locus is NOT realized by slice
+1** — the per-locus median is unchanged at both targets, because the
+floor's mass-invariant mass is BIND (0.29 s/locus amortized at the
+ledger median), not the fold build; §10.6.21's own ceiling statement
+("bounded by the measured floor minus the per-base class") priced this
+correctly, and the honest arithmetic is below. (4) The class scan, the
+pair loop, the merge, the census read, and the panel load are untouched
+by construction — their levers are Frontier 1's, the model's, and the
+fleet COW's respectively.
+
+**THE 16-CORE ARITHMETIC, RESTATED WITH SLICE 1 LANDED (every term
+labeled measured / COW / slice-2):** 19,200 core-s/sample = map ~13k
+(PROJECTION, the next increment's 2x) + call ~6.2k. The call's
+per-territory fixed-class stack at the corpus median: inputs ~244 s
+(THE FLEET COW'S CLASS — deleted per-territory by the fork-after-load
+form, not by this increment), bind 7.2 s median / 507 s tail
+(**SLICE 2's CLASS — the content-keyed bind scaffolding, the named
+remainder**), rows/context 13.4 s → **~0 (SLICE 1, MEASURED −100% at
+both gate targets)**, per-locus floor ~0.20 s median (**UNMOVED by
+slice 1, MEASURED** — its remaining levers are the bind-side content
+caches and the irreducible per-base class), the scan and pair-loop
+classes (Frontier 1's territory, unchanged). So the fixed-class stack at
+the median territory drops from ~264.6 s to **~251.2 s serial
+core-seconds** — the rows deletion is real (~13.4 s/territory, ~4x the
+whole 3.3 core-s/territory all-in target), but the 16-core gap is
+still owned by the TAIL (96.9% of the per-locus wall, Frontier 1's
+plateaus) and the BIND class (slice 2) and the panel load (the COW);
+no honest headcount of slice 1 alone closes any multiple of the ~333x
+call gap, and none is claimed.
+
+**THE NAMED REMAINDER (the chain's next increments, in order):**
+(1) SLICE 2 — the content-keyed bind scaffolding (the records'
+canonical walks: `canonical_steps_near` keyed by (path, position)
+panel-side; the bind's 7.2 s median / 507 s tail class; the fleet
+form's cross-territory recurring-content amortization — the design at
+§10.6.23 A4); (2) SLICE 3 — the pin-skeleton content-keyed cache;
+(3) THE MAP SIDE's ~2x (the owner's standing order, priced at ~13k
+core-s of the 19,200 budget).
+
+**THE TESTS (cargo test --release --lib 590/0, 5 ignored — the 586
+committed + the four new):** `panel_precompute_asset_round_trip_is_lossless`
+(the exact-width encoding round-trips every field, randomized
+fixtures); `panel_precompute_serve_equals_live_built_on_randomized_fixtures`
+(THE MASKING COMMUTE LEMMA: serve == live on randomized member lists
+across the unmasked, flank-filtered, masked, and both-filters forms —
+fold order, membership, content, and the excluded counts; the
+coalesced-copy class groups into one fold with representative-
+independent content); `panel_precompute_serve_requires_the_axis_fold_
+under_territory_masks` (the axis row survives every mask, the territory
+machinery's premise); `panel_precompute_sequence_fnv_drift_is_a_loud_
+error` (a drifted source byte is a hard error at serve, naming the
+drift class — never a silently served structure).
+
+**THE WORK-DIR RECEIPTS:** `docs/syng-gmem-bwt/panel-precompute-receipts/`
+(the six verbatim per-leg receipts + the two gate files), the runners
+`scripts/complexity-ledger/run-precompute-{L1,T09724}.sh` (the memo
+runners' substrate shape verbatim, marker-gated, 150G-guarded,
+receipts-at-write-time, `reap` subcommand); peak scratch 7.3 G + 5.7 G
+of the 150 G budgets, REAPED at the increment's close after the
+receipts were committed. NO PR PUSH (the owner pushes).

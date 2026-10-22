@@ -307,13 +307,14 @@ use clap::Args;
 use crate::genome_inference::{panel_routes as routes, read_json, territory_frame, PanelIdentity};
 use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// The reads' exact length: the realignment model's placement
@@ -1103,7 +1104,7 @@ fn census_record_far_bin_scattered(line: &CensusRecordLine) -> bool {
 
 /// One member row of a partition graph map (the alignment-induced
 /// membership; the partition BEDs are source-forward).
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct MemberRow {
     path_name: String,
     start: u64,
@@ -1810,6 +1811,7 @@ fn contained_skeleton_diff(row: &RowFold, k: u64) -> SkeletonDiff {
     }
 }
 
+#[derive(Clone)]
 struct RowFold {
     #[allow(dead_code)]
     path: usize,
@@ -1955,6 +1957,940 @@ impl<'a> RowStore<'a> {
 
 type GraphNode = u32;
 type PackedEdge = u64;
+
+// ---------------------------------------------------------------------------
+// (THE PANEL-SIDE PER-LOCUS PRECOMPUTE, SS10.6.23 slice 1 — the
+// ONE-SPELLING helpers. The fold's derived content, extracted
+// VERBATIM from the live fold build so the live path, the precompute
+// builder, and the serve all derive a fold's walk / node positions /
+// multisets through THIS code — the served structure and the live-built
+// one are the same derivation by construction, never two spellings
+// that could drift.)
+// ---------------------------------------------------------------------------
+
+/// The row's CONTAINED walk steps (windows fully inside the row
+/// extent), relative to the row start — the live fold build's
+/// `relative` (the grouping key's walk half, and the fold's own
+/// pinnable skeleton).
+fn contained_relative_walk(row: &RowFold, k: u64) -> Vec<(u64, i32)> {
+    row.walk
+        .iter()
+        .filter(|&&(bp, _)| bp >= row.start && bp + k <= row.end)
+        .map(|&(bp, node)| (bp - row.start, node))
+        .collect()
+}
+
+/// The fold's node-position table (node abs id -> the relative
+/// (bp, sign) occurrences of the contained steps, in walk order).
+fn fold_node_positions(row: &RowFold, k: u64) -> HashMap<u32, Vec<(u64, i32)>> {
+    let mut node_positions: HashMap<u32, Vec<(u64, i32)>> = HashMap::new();
+    for &(bp, node) in &row.walk {
+        if bp >= row.start && bp + k <= row.end {
+            node_positions
+                .entry(node.unsigned_abs())
+                .or_default()
+                .push((bp - row.start, node.signum()));
+        }
+    }
+    node_positions
+}
+
+/// The fold's node-usage and edge-usage multisets over the contained
+/// relative walk (the QUAL spectrum's material signature), sorted by
+/// key with the counts coalesced.
+fn fold_multisets(contained: &[(u64, i32)]) -> (Vec<(u64, u32)>, Vec<(u64, u32)>) {
+    let mut nodes: Vec<(u64, u32)> = contained
+        .iter()
+        .map(|&(_, node)| (node.unsigned_abs() as u64, 1))
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            b.1 += a.1;
+            true
+        } else {
+            false
+        }
+    });
+    let mut edges: Vec<(u64, u32)> = contained
+        .windows(2)
+        .map(|w| (pack_edge(w[0].1.unsigned_abs(), w[1].1.unsigned_abs()), 1))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            b.1 += a.1;
+            true
+        } else {
+            false
+        }
+    });
+    (nodes, edges)
+}
+
+/// THE LIVE FOLD LAYOUT BUILD (the per-window fold grouping, the
+/// slice-1 pure function extracted from `compute_locus` VERBATIM — the
+/// precompute builder runs THIS function unmasked to record the
+/// grouping; the live call runs it with its masking filters; the serve
+/// reproduces its output from the recorded grouping; the unit tests
+/// prove serve == live on randomized fixtures). Returns the folds in
+/// first-appearance order, the representative ROW id per fold, the
+/// fold id per member (the builder's recorded grouping), and the
+/// filter counts.
+#[allow(clippy::too_many_arguments)]
+fn build_window_folds_live(
+    rows: &[RowFold],
+    dedup: &HashMap<(usize, u64, u64), usize>,
+    members: &[MemberRow],
+    panel_component: &str,
+    axis_start: u64,
+    axis_end: u64,
+    flank_overlap: Option<FlankOverlap>,
+    exclude_paths: &[String],
+    path_of_name: &HashMap<String, usize>,
+    path_len: &dyn Fn(usize) -> u64,
+    k: u64,
+) -> io::Result<(Vec<Fold>, Vec<usize>, Vec<usize>, u64, u64)> {
+    let mut fold_map: BTreeMap<(Vec<u8>, Vec<(u64, i32)>), usize> = BTreeMap::new();
+    let mut folds: Vec<Fold> = Vec::new();
+    let mut fold_rep_rows: Vec<usize> = Vec::new();
+    let mut member_fold: Vec<usize> = Vec::with_capacity(members.len());
+    let mut excluded_rows: u64 = 0;
+    let mut flank_excluded_rows: u64 = 0;
+    for member in members {
+        // THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design):
+        // a member row that does not cover BOTH FLANKS of the
+        // window's axis extent - the first N bp and the last N bp,
+        // in this frame (the partition maps' own coordinates) -
+        // leaves the candidate universe here, at fold construction,
+        // exactly as absent rows would. THE AXIS ROW IS NEVER
+        // EXCLUDED (it is the coordinate frame; the --exclude-paths
+        // precedent). Loudly counted per locus.
+        if let Some(flank) = flank_overlap {
+            if member.path_name != panel_component
+                && !row_covers_flanks(member.start, member.end, axis_start, axis_end, flank)
+            {
+                flank_excluded_rows += 1;
+                member_fold.push(usize::MAX);
+                continue;
+            }
+        }
+        // THE MASKING OPERATOR (the call-locus --exclude-paths
+        // surface): the stranger filter folded onto the call path
+        // - matching rows leave the candidate universe here, at
+        // fold construction, exactly as absent rows would (the
+        // axis row is never excluded: it is the frame). Loudly
+        // counted per locus.
+        if row_is_excluded(&member.path_name, panel_component, exclude_paths) {
+            excluded_rows += 1;
+            member_fold.push(usize::MAX);
+            continue;
+        }
+        let path_idx = *path_of_name
+            .get(&member.path_name)
+            .ok_or_else(|| invalid("member path absent from the syng"))?;
+        let row_index = *dedup
+            .get(&(path_idx, member.start, member.end.min(path_len(path_idx))))
+            .ok_or_else(|| invalid("member row missing from the store"))?;
+        let row = &rows[row_index];
+        // The CONTAINED steps only (windows fully inside the row
+        // extent): an anchor whose window overlaps the row edge
+        // cannot be a pinned backbone anchor (the read must lie
+        // fully inside), and keeping it would place its window
+        // start at a NEGATIVE relative position - the u64
+        // subtraction would wrap and poison the monotone
+        // enumeration. Edge-overlapping anchors abstain (the named
+        // remainder class).
+        let relative = contained_relative_walk(row, k);
+        let key = (row.seq.clone(), relative.clone());
+        let index = *fold_map.entry(key).or_insert_with(|| {
+            let node_positions = fold_node_positions(row, k);
+            let (nodes, edges) = fold_multisets(&relative);
+            folds.push(Fold {
+                seq: row.seq.clone(),
+                len: (row.end - row.start) as u64,
+                walk: relative.clone(),
+                node_positions,
+                members: Vec::new(),
+                nodes,
+                edges,
+            });
+            fold_rep_rows.push(row_index);
+            folds.len() - 1
+        });
+        folds[index].members.push(member.clone());
+        member_fold.push(index);
+    }
+    Ok((
+        folds,
+        fold_rep_rows,
+        member_fold,
+        excluded_rows,
+        flank_excluded_rows,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// (THE PANEL-SIDE PER-LOCUS PRECOMPUTE ASSET — SS10.6.23 slice 1's
+// panel-side artifact: the row context (the RowStore rows, the
+// sequences replaced by their FNV-64 CONTENT KEY) and the per-window
+// fold groupings (representative row ids + per-member fold ids),
+// serialized exact-width little-endian with NO FLOATS anywhere, so
+// the serve reconstructs bit-identical structures by construction.
+// The asset's manifest keys on CONTENT, never filenames: the panel
+// identity object, the FNV digest over the sorted *.gfa.map.json
+// bytes, the routes graph.json digest, the component, the frame +
+// record origin, the stored-frame convention, k.)
+// ---------------------------------------------------------------------------
+
+/// The FNV-1a over the partition-graph maps' CONTENT, in sorted file
+/// name order — the manifest's own drift detector (never a filename
+/// alone; the vendor-pointer-drift class is the cautionary receipt).
+fn partition_maps_digest(dir: &Path) -> io::Result<u64> {
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.ends_with(".gfa.map.json") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let mut digest = fnv1a64(b"");
+    for name in &names {
+        let bytes = std::fs::read(dir.join(name))?;
+        hash_bytes(&mut digest, name.as_bytes());
+        hash_bytes(&mut digest, &[0xFF]);
+        hash_bytes(&mut digest, &bytes);
+    }
+    Ok(digest)
+}
+
+fn routes_graph_digest(path: &Path) -> io::Result<u64> {
+    let bytes = std::fs::read(path)?;
+    Ok(fnv1a64(&bytes))
+}
+
+fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        *hash ^= byte as u64;
+        *hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PanelPrecomputeManifest {
+    format: String,
+    panel: PanelIdentity,
+    k: u64,
+    component: String,
+    frame: String,
+    record_origin: u64,
+    stored_frame: bool,
+    maps_digest: u64,
+    routes_digest: u64,
+    windows: u64,
+    rows: u64,
+    folds: u64,
+}
+
+struct PrecomputeRowAsset {
+    path_name: String,
+    start: u64,
+    end: u64,
+    seq_fnv: u64,
+    stored_walk: Vec<(u64, i32)>,
+    walk: Vec<(u64, i32)>,
+    frames: Vec<u8>,
+    members: Vec<(u32, usize)>,
+}
+
+struct PrecomputeWindowAsset {
+    partition: u32,
+    axis_start: u64,
+    axis_end: u64,
+    fold_rep: Vec<usize>,
+    member_fold: Vec<usize>,
+}
+
+/// The loaded, validated asset beside the call's own partition maps.
+struct PanelPrecomputeAsset {
+    manifest: PanelPrecomputeManifest,
+    rows: Vec<PrecomputeRowAsset>,
+    windows: Vec<PrecomputeWindowAsset>,
+}
+
+// (The exact-width little-endian encoding: length-prefixed vectors,
+// u64 bp / i32 signed node / u8 frame; NO FLOATS anywhere in the
+// asset, so the round trip is lossless by construction.)
+struct AssetWriter {
+    buf: Vec<u8>,
+}
+impl AssetWriter {
+    fn u64(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i32(&mut self, v: i32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u8(&mut self, v: u8) {
+        self.buf.push(v);
+    }
+    fn str(&mut self, v: &str) {
+        self.u64(v.len() as u64);
+        self.buf.extend_from_slice(v.as_bytes());
+    }
+    fn walk(&mut self, v: &[(u64, i32)]) {
+        self.u64(v.len() as u64);
+        for &(bp, node) in v {
+            self.u64(bp);
+            self.i32(node);
+        }
+    }
+    fn bytes(&mut self, v: &[u8]) {
+        self.u64(v.len() as u64);
+        self.buf.extend_from_slice(v);
+    }
+    fn row_members(&mut self, v: &[(u32, usize)]) {
+        self.u64(v.len() as u64);
+        for &(partition, member) in v {
+            self.u64(partition as u64);
+            self.u64(member as u64);
+        }
+    }
+    fn usize_vec(&mut self, v: &[usize]) {
+        self.u64(v.len() as u64);
+        for &value in v {
+            self.u64(value as u64);
+        }
+    }
+}
+
+struct AssetReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+impl<'a> AssetReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        AssetReader { buf, pos: 0 }
+    }
+    fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
+        ensure(
+            self.pos + n <= self.buf.len(),
+            "the panel-precompute asset is truncated",
+        )?;
+        let slice = &self.buf[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(slice)
+    }
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn i32(&mut self) -> io::Result<i32> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn str(&mut self) -> io::Result<String> {
+        let len = self.u64()? as usize;
+        Ok(String::from_utf8(self.take(len)?.to_vec())
+            .map_err(|_| invalid("the panel-precompute asset carries an invalid path name"))?)
+    }
+    fn walk(&mut self) -> io::Result<Vec<(u64, i32)>> {
+        let len = self.u64()? as usize;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            out.push((self.u64()?, self.i32()?));
+        }
+        Ok(out)
+    }
+    fn bytes(&mut self) -> io::Result<Vec<u8>> {
+        let len = self.u64()? as usize;
+        Ok(self.take(len)?.to_vec())
+    }
+    fn row_members(&mut self) -> io::Result<Vec<(u32, usize)>> {
+        let len = self.u64()? as usize;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            let partition = self.u64()? as u32;
+            let member = self.u64()? as usize;
+            out.push((partition, member));
+        }
+        Ok(out)
+    }
+    fn usize_vec(&mut self) -> io::Result<Vec<usize>> {
+        let len = self.u64()? as usize;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            out.push(self.u64()? as usize);
+        }
+        Ok(out)
+    }
+    fn done(&self) -> io::Result<()> {
+        ensure(
+            self.pos == self.buf.len(),
+            "the panel-precompute asset carries trailing bytes",
+        )
+    }
+}
+
+fn encode_rows(rows: &[PrecomputeRowAsset]) -> Vec<u8> {
+    let mut w = AssetWriter { buf: Vec::new() };
+    w.u64(rows.len() as u64);
+    for row in rows {
+        w.str(&row.path_name);
+        w.u64(row.start);
+        w.u64(row.end);
+        w.u64(row.seq_fnv);
+        w.walk(&row.stored_walk);
+        w.walk(&row.walk);
+        w.bytes(&row.frames);
+        w.row_members(&row.members);
+    }
+    w.buf
+}
+
+fn decode_rows(buf: &[u8]) -> io::Result<Vec<PrecomputeRowAsset>> {
+    let mut r = AssetReader::new(buf);
+    let len = r.u64()? as usize;
+    let mut rows = Vec::with_capacity(len);
+    for _ in 0..len {
+        rows.push(PrecomputeRowAsset {
+            path_name: r.str()?,
+            start: r.u64()?,
+            end: r.u64()?,
+            seq_fnv: r.u64()?,
+            stored_walk: r.walk()?,
+            walk: r.walk()?,
+            frames: r.bytes()?,
+            members: r.row_members()?,
+        });
+    }
+    r.done()?;
+    Ok(rows)
+}
+
+fn encode_windows(windows: &[PrecomputeWindowAsset]) -> Vec<u8> {
+    let mut w = AssetWriter { buf: Vec::new() };
+    w.u64(windows.len() as u64);
+    for window in windows {
+        w.u64(window.partition as u64);
+        w.u64(window.axis_start);
+        w.u64(window.axis_end);
+        w.usize_vec(&window.fold_rep);
+        w.usize_vec(&window.member_fold);
+    }
+    w.buf
+}
+
+fn decode_windows(buf: &[u8]) -> io::Result<Vec<PrecomputeWindowAsset>> {
+    let mut r = AssetReader::new(buf);
+    let len = r.u64()? as usize;
+    let mut windows = Vec::with_capacity(len);
+    for _ in 0..len {
+        windows.push(PrecomputeWindowAsset {
+            partition: r.u64()? as u32,
+            axis_start: r.u64()?,
+            axis_end: r.u64()?,
+            fold_rep: r.usize_vec()?,
+            member_fold: r.usize_vec()?,
+        });
+    }
+    r.done()?;
+    Ok(windows)
+}
+
+/// The expected manifest keys, computed by the caller from its OWN
+/// live inputs — the serve compares field by field and names the
+/// mismatching key in its error (never a silent divergence, never a
+/// stale serve).
+struct PanelPrecomputeKeys {
+    panel: PanelIdentity,
+    k: u64,
+    component: String,
+    frame: String,
+    record_origin: u64,
+    stored_frame: bool,
+    maps_digest: u64,
+    routes_digest: u64,
+}
+
+fn load_panel_precompute(
+    dir: &Path,
+    keys: &PanelPrecomputeKeys,
+) -> io::Result<PanelPrecomputeAsset> {
+    let manifest: PanelPrecomputeManifest = read_json(&dir.join("manifest.json"))?;
+    ensure(
+        manifest.format == "impg-panel-precompute-loci/1",
+        &format!(
+            "the panel-precompute asset {} carries an unknown format {:?}",
+            dir.display(),
+            manifest.format
+        ),
+    )?;
+    let named = |field: &str, got: String, want: String| {
+        format!(
+            "the panel-precompute asset {} mismatches the live inputs at {field}: \
+             asset {got:?} vs call {want:?}",
+            dir.display()
+        )
+    };
+    ensure(
+        manifest.panel == keys.panel,
+        &named(
+            "the panel identity",
+            format!("{:?}", manifest.panel),
+            format!("{:?}", keys.panel),
+        ),
+    )?;
+    ensure(
+        manifest.k == keys.k,
+        &named("k", manifest.k.to_string(), keys.k.to_string()),
+    )?;
+    ensure(
+        manifest.component == keys.component,
+        &named("the component", manifest.component.clone(), keys.component.clone()),
+    )?;
+    ensure(
+        manifest.frame == keys.frame,
+        &named("the frame", manifest.frame.clone(), keys.frame.clone()),
+    )?;
+    ensure(
+        manifest.record_origin == keys.record_origin,
+        &named(
+            "the record origin",
+            manifest.record_origin.to_string(),
+            keys.record_origin.to_string(),
+        ),
+    )?;
+    ensure(
+        manifest.stored_frame == keys.stored_frame,
+        &named(
+            "the stored-frame convention",
+            manifest.stored_frame.to_string(),
+            keys.stored_frame.to_string(),
+        ),
+    )?;
+    ensure(
+        manifest.maps_digest == keys.maps_digest,
+        &named(
+            "the partition maps digest",
+            format!("{:016x}", manifest.maps_digest),
+            format!("{:016x}", keys.maps_digest),
+        ),
+    )?;
+    ensure(
+        manifest.routes_digest == keys.routes_digest,
+        &named(
+            "the routes graph digest",
+            format!("{:016x}", manifest.routes_digest),
+            format!("{:016x}", keys.routes_digest),
+        ),
+    )?;
+    let rows = decode_rows(&std::fs::read(dir.join("rows.bin"))?)?;
+    let windows = decode_windows(&std::fs::read(dir.join("windows.bin"))?)?;
+    ensure(
+        rows.len() as u64 == manifest.rows,
+        "the panel-precompute asset's row count disagrees with its manifest",
+    )?;
+    ensure(
+        windows.len() as u64 == manifest.windows,
+        "the panel-precompute asset's window count disagrees with its manifest",
+    )?;
+    Ok(PanelPrecomputeAsset {
+        manifest,
+        rows,
+        windows,
+    })
+}
+
+/// The serve toggle's own modes (the labeled-toggle doctrine's
+/// shape — see the serve block in `run_injected`).
+#[derive(Clone, Copy, PartialEq)]
+enum PanelPrecomputeMode {
+    Auto,
+    Off,
+    On,
+}
+
+/// The serve-side state: the validated window groupings, the rows'
+/// sequence content keys, and the per-row sequence cache (the fetched
+/// representative-row bytes, FNV-verified against the asset's key on
+/// first touch — the drift detector that never hashes the whole AGC).
+struct PrecomputeServe {
+    windows: Vec<PrecomputeWindowAsset>,
+    seq_fnv: Vec<u64>,
+    seqs: Mutex<HashMap<usize, Arc<Vec<u8>>>>,
+}
+
+impl PrecomputeServe {
+    /// The representative row's sequence, fetched LIVE through the
+    /// same validated fetch path (the sequences stay in the sources —
+    /// the design's own fetch-by-coordinate answer) and verified
+    /// against the asset's recorded FNV-64 content key.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_of(
+        &self,
+        row_index: usize,
+        rows: &[RowFold],
+        fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+        path_names: &[String],
+    ) -> io::Result<Arc<Vec<u8>>> {
+        if let Some(seq) = self.seqs.lock().unwrap().get(&row_index) {
+            return Ok(seq.clone());
+        }
+        let row = &rows[row_index];
+        let seq = fetch(&path_names[row.path], row.start, row.end)?;
+        ensure(
+            fnv1a64(&seq) == self.seq_fnv[row_index],
+            &format!(
+                "the panel-precompute asset's sequence content key for row {} mismatches \
+                 the fetched bytes (the sources drifted from the panel the asset was \
+                 built against - loud, never a silent divergence)",
+                row.path
+            ),
+        )?;
+        let seq = Arc::new(seq);
+        self.seqs.lock().unwrap().insert(row_index, seq.clone());
+        Ok(seq)
+    }
+
+    /// THE SERVE (the masking commute lemma in code): iterate the
+    /// window's member list in order, apply the SAME per-member
+    /// predicates the live build applies, and group by the asset's
+    /// recorded fold ids — the served fold order is first-appearance-
+    /// among-SURVIVORS exactly as the live build's is, the fold
+    /// content is derived through the same one-spelling helpers from
+    /// the representative row, and the representative row's sequence
+    /// is fetched live and FNV-verified.
+    #[allow(clippy::too_many_arguments)]
+    fn serve_window_folds(
+        &self,
+        rows: &[RowFold],
+        window: usize,
+        members: &[MemberRow],
+        panel_component: &str,
+        axis_start: u64,
+        axis_end: u64,
+        flank_overlap: Option<FlankOverlap>,
+        exclude_paths: &[String],
+        k: u64,
+        fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+        path_names: &[String],
+    ) -> io::Result<(Vec<Fold>, u64, u64)> {
+        let asset_window = self
+            .windows
+            .get(window)
+            .ok_or_else(|| invalid("the window is outside the panel-precompute asset"))?;
+        ensure(
+            asset_window.member_fold.len() == members.len(),
+            &format!(
+                "the panel-precompute asset's member-fold map for window {window} does \
+                 not match the partition maps (content keys drifted)",
+            ),
+        )?;
+        let mut folds: Vec<Fold> = Vec::new();
+        let mut served_to_live: Vec<Option<usize>> = vec![None; asset_window.fold_rep.len()];
+        let mut excluded_rows: u64 = 0;
+        let mut flank_excluded_rows: u64 = 0;
+        for (member_index, member) in members.iter().enumerate() {
+            if let Some(flank) = flank_overlap {
+                if member.path_name != panel_component
+                    && !row_covers_flanks(member.start, member.end, axis_start, axis_end, flank)
+                {
+                    flank_excluded_rows += 1;
+                    continue;
+                }
+            }
+            if row_is_excluded(&member.path_name, panel_component, exclude_paths) {
+                excluded_rows += 1;
+                continue;
+            }
+            let served_fold = asset_window.member_fold[member_index];
+            ensure(
+                served_fold < asset_window.fold_rep.len(),
+                "the panel-precompute asset carries an out-of-range fold id",
+            )?;
+            let live_index = match served_to_live[served_fold] {
+                Some(index) => index,
+                None => {
+                    let rep_row = asset_window.fold_rep[served_fold];
+                    let row = rows
+                        .get(rep_row)
+                        .ok_or_else(|| invalid("the panel-precompute asset names an absent row"))?;
+                    let seq = self.seq_of(rep_row, rows, fetch, path_names)?;
+                    let relative = contained_relative_walk(row, k);
+                    let node_positions = fold_node_positions(row, k);
+                    let (nodes, edges) = fold_multisets(&relative);
+                    folds.push(Fold {
+                        seq: (*seq).clone(),
+                        len: (row.end - row.start) as u64,
+                        walk: relative,
+                        node_positions,
+                        members: Vec::new(),
+                        nodes,
+                        edges,
+                    });
+                    let index = folds.len() - 1;
+                    served_to_live[served_fold] = Some(index);
+                    index
+                }
+            };
+            folds[live_index].members.push(member.clone());
+        }
+        Ok((folds, excluded_rows, flank_excluded_rows))
+    }
+}
+
+/// THE PRECOMPUTE STEP (SS10.6.23 slice 1 — the once-per-panel price,
+/// paid at panel-prep or by the standalone step, NEVER per sample): run
+/// the SAME row-context build and the SAME unmasked fold-layout
+/// grouping the live call runs (the one-spelling guarantee — this
+/// builder IS the live derivation), serialize them into the panel
+/// asset's new section, and receipt the price honestly (walls and
+/// counts on stderr, beside the asset it builds). The asset keys on
+/// CONTENT, never filenames: the panel identity object, the maps
+/// digest, the routes digest, the component, the frame + origin, the
+/// stored-frame convention, k.
+pub fn precompute_panel_loci(
+    panel_prefix: &str,
+    routes_dir: &Path,
+    partition_graphs: &Path,
+    component: &str,
+    global_frame: bool,
+    record_origin: u64,
+    out_dir: &Path,
+) -> io::Result<()> {
+    let started = Instant::now();
+    ensure(
+        record_origin == 0 || global_frame,
+        "--record-origin requires --global-frame (the committed local frame is closed)",
+    )?;
+    let identity = PanelIdentity::read(panel_prefix)?;
+    let panel = SyngIndex::load(panel_prefix, SyncmerParams::default())?;
+    let k = panel.syncmer_length_bp() as u64;
+    let graph_path = routes_dir.join("graph.json");
+    let graph: routes::Graph = read_json(&graph_path)?;
+    if graph.panel != identity || !graph.generation_complete {
+        return Err(invalid("incompatible route inventory"));
+    }
+    let routes_digest = routes_graph_digest(&graph_path)?;
+    let lanes = graph
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.clone(), lane.length))
+        .collect::<Vec<_>>();
+    let sources = routes::Sources::open(&graph.source_paths, lanes)?;
+    let path_of_name: HashMap<String, usize> = panel
+        .name_map
+        .name_to_path
+        .iter()
+        .map(|(name, &path)| (name.clone(), path as usize))
+        .collect();
+    let source_of_name: HashMap<&str, usize> = graph
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.as_str(), lane.id))
+        .collect();
+    let lane_cache = LaneCache {
+        lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
+        sources,
+        whole_lane: !global_frame,
+        seqs: (0..graph.lanes.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect(),
+        loads: AtomicU64::new(0),
+        bytes: AtomicU64::new(0),
+        nanos: AtomicU64::new(0),
+        lane_trace: Default::default(),
+    };
+    let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+        let path_idx = *path_of_name
+            .get(name)
+            .ok_or_else(|| invalid("panel path absent from the syng name map"))?;
+        let path_len = panel.name_map.path_to_length[path_idx];
+        let hi = hi.min(path_len);
+        let source = *source_of_name
+            .get(name)
+            .ok_or_else(|| invalid("panel path absent from the route sources"))?;
+        if lo >= hi {
+            return Ok(Vec::new());
+        }
+        lane_cache.fetch(source, lo, hi)
+    };
+    // The maps load + the frame translation — the call's own inputs
+    // resolution, mirrored (the DERIVATIONS below are the one-spelling
+    // functions; this resolution is I/O plumbing and states itself).
+    let maps_digest = partition_maps_digest(partition_graphs)?;
+    let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
+    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(partition_graphs)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.ends_with(".gfa.map.json") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    for name in &names {
+        let text = std::fs::read_to_string(partition_graphs.join(name))?;
+        let map: PartitionMap = serde_json::from_str(&text)?;
+        for axis in map
+            .members
+            .iter()
+            .filter(|m| m.path_name == component)
+        {
+            axis_rows.push((map.partition, axis.start, axis.end));
+        }
+        maps.insert(map.partition, map);
+    }
+    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    let panel_component: String = if global_frame {
+        let frame = territory_frame::TerritoryFrame::from_local_names(
+            maps
+                .values()
+                .flat_map(|map| map.members.iter().map(|row| row.path_name.as_str())),
+            record_origin,
+        )?;
+        let panel_component = frame.global_name(component)?;
+        for map in maps.values_mut() {
+            for row in &mut map.members {
+                let translated =
+                    territory_frame::translate_row(&row.path_name, row.start, row.end, record_origin)?;
+                row.path_name = translated.path_name;
+                row.start = translated.start;
+                row.end = translated.end;
+            }
+        }
+        for row in axis_rows.iter_mut() {
+            let translated =
+                territory_frame::translate_row(component, row.1, row.2, record_origin)?;
+            row.1 = translated.start;
+            row.2 = translated.end;
+        }
+        panel_component
+    } else {
+        component.to_string()
+    };
+    let window_partition: Vec<u32> =
+        axis_rows.iter().map(|&(partition, _, _)| partition).collect();
+    let window_axis: Vec<(u64, u64)> =
+        axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
+    // (The stored-frame convention, read the SAME way the call reads
+    // it — the walks the asset serves depend on it.)
+    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
+    let rows_started = Instant::now();
+    for &partition in &window_partition {
+        let map = maps
+            .get(&partition)
+            .ok_or_else(|| invalid("axis partition map missing"))?;
+        store.ensure_partition(&map.members, partition)?;
+    }
+    let rows_seconds = rows_started.elapsed().as_secs_f64();
+    // THE ROW CONTEXT, serialized (the sequences replaced by their
+    // FNV-64 CONTENT KEY — the bytes stay in the sources).
+    let rows: Vec<PrecomputeRowAsset> = store
+        .folds
+        .iter()
+        .map(|row| PrecomputeRowAsset {
+            path_name: panel.name_map.path_to_name[row.path].clone(),
+            start: row.start,
+            end: row.end,
+            seq_fnv: fnv1a64(&row.seq),
+            stored_walk: row.stored_walk.clone(),
+            walk: row.walk.clone(),
+            frames: row.frames.clone(),
+            members: row.members.clone(),
+        })
+        .collect();
+    // THE FOLD LAYOUTS, per window (the live grouping, unmasked — the
+    // masking filters are per-member predicates the serve applies at
+    // its own call time; the grouping is the pure function recorded).
+    let windows_started = Instant::now();
+    let mut windows: Vec<PrecomputeWindowAsset> = Vec::with_capacity(window_partition.len());
+    let mut folds_total: u64 = 0;
+    for (window, &partition) in window_partition.iter().enumerate() {
+        let map = maps
+            .get(&partition)
+            .ok_or_else(|| invalid("axis partition map missing"))?;
+        let (axis_start, axis_end) = window_axis[window];
+        let (_folds, fold_rep, member_fold, _, _) = build_window_folds_live(
+            &store.folds,
+            &store.dedup,
+            &map.members,
+            &panel_component,
+            axis_start,
+            axis_end,
+            None,
+            &[],
+            &path_of_name,
+            &|path_idx| panel.name_map.path_to_length[path_idx],
+            k,
+        )?;
+        folds_total += fold_rep.len() as u64;
+        windows.push(PrecomputeWindowAsset {
+            partition,
+            axis_start,
+            axis_end,
+            fold_rep,
+            member_fold,
+        });
+    }
+    let windows_seconds = windows_started.elapsed().as_secs_f64();
+    let manifest = PanelPrecomputeManifest {
+        format: "impg-panel-precompute-loci/1".to_string(),
+        panel: identity,
+        k,
+        component: panel_component,
+        frame: if global_frame { "global" } else { "local" }.to_string(),
+        record_origin,
+        stored_frame,
+        maps_digest,
+        routes_digest,
+        windows: windows.len() as u64,
+        rows: rows.len() as u64,
+        folds: folds_total,
+    };
+    std::fs::create_dir_all(out_dir)?;
+    let rows_bytes = encode_rows(&rows);
+    let windows_bytes = encode_windows(&windows);
+    crate::genome_inference::atomic_write(&out_dir.join("rows.bin"), &rows_bytes)?;
+    crate::genome_inference::atomic_write(&out_dir.join("windows.bin"), &windows_bytes)?;
+    crate::genome_inference::write_json(&out_dir.join("manifest.json"), &manifest)?;
+    eprintln!(
+        "[precompute] rows: {} distinct rows over {} partitions ({} windows) \
+         [{rows_seconds:.1}s]",
+        rows.len(),
+        maps.len(),
+        window_partition.len(),
+    );
+    eprintln!(
+        "[precompute] windows: {} windows, {folds_total} folds [{windows_seconds:.1}s]",
+        windows.len(),
+    );
+    eprintln!(
+        "[precompute] asset: {} (rows.bin {} bytes, windows.bin {} bytes, \
+         manifest.json; maps digest {:016x}, routes digest {:016x}) [total {:.1}s]",
+        out_dir.display(),
+        rows_bytes.len(),
+        windows_bytes.len(),
+        maps_digest,
+        routes_digest,
+        started.elapsed().as_secs_f64(),
+    );
+    Ok(())
+}
 
 fn pack_edge(left: GraphNode, right: GraphNode) -> PackedEdge {
     (left as u64) << 32 | right as u64
@@ -6589,27 +7525,208 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         .nth(2)
         .ok_or_else(|| invalid("component lacks a contig suffix"))?
         .to_string();
+    // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE SERVE, SS10.6.23 slice 1 —
+    // the labeled-toggle doctrine: IMPG_PANEL_PRECOMPUTE unset serves
+    // when the asset beside the partition maps is present and EVERY
+    // content key matches the live inputs; =off restores the live path
+    // VERBATIM (the IMPG_CLASS_SCAN_MEMO=off precedent); =on REQUIRES the
+    // serve (an absent/mismatched asset is a loud error, the gate
+    // form); any other value is a loud error. A key mismatch under the
+    // default is a LOUD LIVE-PATH FALLBACK (the routes-inventory
+    // precedent: never serve stale structure, never fail a call because
+    // a panel-side asset is stale). The serve changes NO emitted byte
+    // — the answer gates are its proof — so no model label is
+    // warranted; it states itself here and in the phase lines.)
+    let precompute_dir = options.partition_graphs.join("panel-precompute-loci");
+    let precompute_mode = match std::env::var("IMPG_PANEL_PRECOMPUTE") {
+        Err(_) => PanelPrecomputeMode::Auto,
+        Ok(value) if value == "off" => PanelPrecomputeMode::Off,
+        Ok(value) if value == "on" => PanelPrecomputeMode::On,
+        Ok(other) => {
+            return Err(invalid(&format!(
+                "unknown IMPG_PANEL_PRECOMPUTE {other:?} (off | on)"
+            )))
+        }
+    };
+    let mut served: Option<PrecomputeServe> = None;
+    if !matches!(precompute_mode, PanelPrecomputeMode::Off)
+        && precompute_dir.join("manifest.json").is_file()
+    {
+        let maps_digest = partition_maps_digest(&options.partition_graphs)?;
+        let routes_digest = routes_graph_digest(&options.routes.join("graph.json"))?;
+        let attempt = (|| -> io::Result<()> {
+            let keys = PanelPrecomputeKeys {
+                panel: identity.clone(),
+                k,
+                component: panel_component.clone(),
+                frame: if options.global_frame {
+                    "global".to_string()
+                } else {
+                    "local".to_string()
+                },
+                record_origin: options.record_origin,
+                stored_frame,
+                maps_digest,
+                routes_digest,
+            };
+            let asset = load_panel_precompute(&precompute_dir, &keys)?;
+            ensure(
+                asset.windows.len() == window_partition.len(),
+                &format!(
+                    "the panel-precompute asset carries {} windows against the call's {} \
+                     (the window grid drifted)",
+                    asset.windows.len(),
+                    window_partition.len(),
+                ),
+            )?;
+            // The served store, built from the asset rows in the
+            // asset's row order (the builder's own creation order —
+            // window order, member order), with the sequences left
+            // in the sources (fetched live per representative row
+            // at serve time, FNV-verified).
+            for (row_index, row) in asset.rows.iter().enumerate() {
+                let path_idx = *path_of_name
+                    .get(&row.path_name)
+                    .ok_or_else(|| invalid("the asset names a path absent from the syng"))?;
+                ensure(
+                    row.walk.len() == row.frames.len(),
+                    "the asset's walk and frame tags disagree",
+                )?;
+                store.folds.push(RowFold {
+                    path: path_idx,
+                    start: row.start,
+                    end: row.end,
+                    seq: Vec::new(),
+                    walk: row.walk.clone(),
+                    frames: row.frames.clone(),
+                    stored_walk: row.stored_walk.clone(),
+                    members: row.members.clone(),
+                });
+                ensure(
+                    store
+                        .dedup
+                        .insert((path_idx, row.start, row.end), row_index)
+                        .is_none(),
+                    "the asset carries a duplicate row identity",
+                )?;
+            }
+            for (window, asset_window) in asset.windows.iter().enumerate() {
+                ensure(
+                    asset_window.partition == window_partition[window]
+                        && asset_window.axis_start == window_axis[window].0
+                        && asset_window.axis_end == window_axis[window].1,
+                    &format!(
+                        "the panel-precompute asset's window {window} disagrees with the \
+                         live window grid (content keys drifted)",
+                    ),
+                )?;
+                let map = maps
+                    .get(&window_partition[window])
+                    .ok_or_else(|| invalid("axis partition map missing"))?;
+                ensure(
+                    asset_window.member_fold.len() == map.members.len(),
+                    &format!(
+                        "the panel-precompute asset's member-fold map for window {window} \
+                         does not match the partition maps (content keys drifted)",
+                    ),
+                )?;
+            }
+            served = Some(PrecomputeServe {
+                windows: asset.windows,
+                seq_fnv: asset.rows.iter().map(|row| row.seq_fnv).collect(),
+                seqs: Mutex::new(HashMap::new()),
+            });
+            Ok(())
+        })();
+        match attempt {
+            Ok(()) => {
+                eprintln!(
+                    "[score] panel-precompute: SERVING the row context + fold layouts \
+                     from {} ({} rows, {} windows, {} folds; panel identity, maps digest \
+                     {:016x}, routes digest {:016x})",
+                    precompute_dir.display(),
+                    served.as_ref().map(|s| s.seq_fnv.len()).unwrap_or(0),
+                    served.as_ref().map(|s| s.windows.len()).unwrap_or(0),
+                    served
+                        .as_ref()
+                        .map(|s| s.windows.iter().map(|w| w.fold_rep.len()).sum::<usize>())
+                        .unwrap_or(0),
+                    maps_digest,
+                    routes_digest,
+                );
+            }
+            Err(e) if matches!(precompute_mode, PanelPrecomputeMode::On) => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "[score] panel-precompute: NOT SERVED — {e}; the LIVE path runs \
+                     (rebuild the asset or remove it; never a silent stale serve)",
+                );
+                store.folds.clear();
+                store.dedup.clear();
+                served = None;
+            }
+        }
+    }
     // The axis partitions of every window the pilot records touch
     // (the locality classification needs their rows).
     // (Phase instrumentation: this is the CONTEXT ASSEMBLY phase —
     // per-row sequence fetch, stored-walk extraction, and the
     // canonical-scheme skeleton extraction with in-process sequence
-    // verification.)
+    // verification. Under the precompute serve the phase is the
+    // INDEX WALK ONLY: the partition maps' member rows resolve to the
+    // asset's rows (the by-partition and by-partition-path indices,
+    // the live insertion order verbatim), with the row content
+    // already served and the representative rows' sequences fetched
+    // per scored locus at serve time.)
     let rows_started = Instant::now();
     let rows_fetch_calls = fetch_calls.load(Ordering::Relaxed);
     let rows_fetch_bytes = fetch_bytes.load(Ordering::Relaxed);
     let rows_lane_loads = lane_cache.loads.load(Ordering::Relaxed);
     let rows_lane_bytes = lane_cache.bytes.load(Ordering::Relaxed);
-    for &partition in &window_partition {
-        let map = maps
-            .get(&partition)
-            .ok_or_else(|| invalid("axis partition map missing"))?;
-        store.ensure_partition(&map.members, partition)?;
+    if served.is_some() {
+        for &partition in &window_partition {
+            if store.by_partition.contains_key(&partition) {
+                continue;
+            }
+            let map = maps
+                .get(&partition)
+                .ok_or_else(|| invalid("axis partition map missing"))?;
+            let mut indices = Vec::with_capacity(map.members.len());
+            for member in &map.members {
+                let path_idx = *path_of_name
+                    .get(&member.path_name)
+                    .ok_or_else(|| invalid("member path absent from the syng"))?;
+                let row_index = *store
+                    .dedup
+                    .get(&(
+                        path_idx,
+                        member.start,
+                        member.end.min(panel.name_map.path_to_length[path_idx]),
+                    ))
+                    .ok_or_else(|| {
+                        invalid("the precompute asset lacks a member row (content keys drifted)")
+                    })?;
+                store
+                    .by_partition_path
+                    .entry((partition, path_idx))
+                    .or_default()
+                    .push(row_index);
+                indices.push(row_index);
+            }
+            store.by_partition.insert(partition, indices);
+        }
+    } else {
+        for &partition in &window_partition {
+            let map = maps
+                .get(&partition)
+                .ok_or_else(|| invalid("axis partition map missing"))?;
+            store.ensure_partition(&map.members, partition)?;
+        }
     }
     eprintln!(
         "[score] phase rows: {} distinct rows over {} partitions ({} windows), context \
          assembly (canonical-scheme skeletons; fetches {} / {:.1} MB, \
-         lane loads {} / {:.1} MB) [{:.1}s]",
+         lane loads {} / {:.1} MB){} [{:.1}s]",
         store.folds.len(),
         windows_of_partition.len(),
         window_partition.len(),
@@ -6618,6 +7735,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         lane_cache.loads.load(Ordering::Relaxed) - rows_lane_loads,
         (lane_cache.bytes.load(Ordering::Relaxed) - rows_lane_bytes) as f64
             / (1024.0 * 1024.0),
+        if served.is_some() {
+            " — SERVED from the panel-precompute asset (the index walk only; the \
+             row content is the asset's own)"
+        } else {
+            ""
+        },
         rows_started.elapsed().as_secs_f64(),
     );
     let rows_seconds = rows_started.elapsed().as_secs_f64();
@@ -6729,6 +7852,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         factorized_equal: u64,
         locus_seconds: f64,
     }
+    // (The serve reference handed to the per-locus seam: the serve is
+    // read-only shared state (the window groupings, the rows' content
+    // keys, the Mutex-guarded sequence cache), Sync by construction.)
+    let served_precompute = served.as_ref();
     let compute_locus = |locus: u32| -> io::Result<LocusOutput> {
         let locus_started = Instant::now();
         let mut skeleton_buf: Vec<u8> = Vec::new();
@@ -6746,128 +7873,48 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
 
         // ------------------------------------------------------- the folds
         // Fold the partition's member rows by identical sequence AND
-        // walk (coalesced copies are ONE hypothesis).
+        // walk (coalesced copies are ONE hypothesis). Under the
+        // panel-precompute serve (SS10.6.23 slice 1) the grouping is
+        // SERVED from the asset — the masking commute lemma's regroup
+        // over the live member list, the fold content derived through
+        // the same one-spelling helpers, the representative rows'
+        // sequences fetched live and FNV-verified; the live path
+        // (and IMPG_PANEL_PRECOMPUTE=off) runs the extracted
+        // build_window_folds_live VERBATIM — one spelling of the
+        // derivation, two sources of the grouping.
         let fold_started = Instant::now();
-        let mut fold_map: BTreeMap<(Vec<u8>, Vec<(u64, i32)>), usize> = BTreeMap::new();
-        let mut folds: Vec<Fold> = Vec::new();
-        let mut excluded_rows: u64 = 0;
-        let mut flank_excluded_rows: u64 = 0;
-        for member in &map.members {
-            // THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design):
-            // a member row that does not cover BOTH FLANKS of the
-            // window's axis extent - the first N bp and the last N bp,
-            // in this frame (the partition maps' own coordinates) -
-            // leaves the candidate universe here, at fold construction,
-            // exactly as absent rows would. THE AXIS ROW IS NEVER
-            // EXCLUDED (it is the coordinate frame; the --exclude-paths
-            // precedent). Loudly counted per locus.
-            if let Some(flank) = options.flank_overlap {
-                if member.path_name != panel_component
-                    && !row_covers_flanks(
-                        member.start,
-                        member.end,
+        let (folds, excluded_rows, flank_excluded_rows): (Vec<Fold>, u64, u64) =
+            if let Some(serve) = served_precompute {
+                serve.serve_window_folds(
+                    &store.folds,
+                    window,
+                    &map.members,
+                    &panel_component,
+                    axis_start,
+                    axis_end,
+                    options.flank_overlap,
+                    &options.exclude_paths,
+                    k,
+                    &fetch_seq,
+                    &panel.name_map.path_to_name,
+                )?
+            } else {
+                let (folds, _rep_rows, _member_fold, excluded_rows, flank_excluded_rows) =
+                    build_window_folds_live(
+                        &store.folds,
+                        &store.dedup,
+                        &map.members,
+                        &panel_component,
                         axis_start,
                         axis_end,
-                        flank,
-                    )
-                {
-                    flank_excluded_rows += 1;
-                    continue;
-                }
-            }
-            // THE MASKING OPERATOR (the call-locus --exclude-paths
-            // surface): the stranger filter folded onto the call path
-            // - matching rows leave the candidate universe here, at
-            // fold construction, exactly as absent rows would (the
-            // axis row is never excluded: it is the frame). Loudly
-            // counted per locus.
-            if row_is_excluded(
-                &member.path_name,
-                &panel_component,
-                &options.exclude_paths,
-            ) {
-                excluded_rows += 1;
-                continue;
-            }
-            let row_index = *store
-                .dedup
-                .get(&{
-                    let path_idx = path_of_name[&member.path_name];
-                    (path_idx, member.start, member.end.min(panel.name_map.path_to_length[path_idx]))
-                })
-                .ok_or_else(|| invalid("member row missing from the store"))?;
-            let row = &store.folds[row_index];
-            // The CONTAINED steps only (windows fully inside the row
-            // extent): an anchor whose window overlaps the row edge
-            // cannot be a pinned backbone anchor (the read must lie
-            // fully inside), and keeping it would place its window
-            // start at a NEGATIVE relative position — the u64
-            // subtraction would wrap and poison the monotone
-            // enumeration. Edge-overlapping anchors abstain (the named
-            // remainder class).
-            let relative: Vec<(u64, i32)> = row
-                .walk
-                .iter()
-                .filter(|&&(bp, _)| bp >= row.start && bp + k <= row.end)
-                .map(|&(bp, node)| (bp - row.start, node))
-                .collect();
-            let key = (row.seq.clone(), relative.clone());
-            let index = *fold_map.entry(key).or_insert_with(|| {
-                let mut node_positions: HashMap<u32, Vec<(u64, i32)>> = HashMap::new();
-                for &(bp, node) in &row.walk {
-                    if bp >= row.start && bp + k <= row.end {
-                        node_positions
-                            .entry(node.unsigned_abs())
-                            .or_default()
-                            .push((bp - row.start, node.signum()));
-                    }
-                }
-                let contained: Vec<(u64, i32)> = row
-                    .walk
-                    .iter()
-                    .copied()
-                    .filter(|&(bp, _)| bp >= row.start && bp + k <= row.end)
-                    .map(|(bp, node)| (bp - row.start, node))
-                    .collect();
-                let mut nodes: Vec<(u64, u32)> = contained
-                    .iter()
-                    .map(|&(_, node)| (node.unsigned_abs() as u64, 1))
-                    .collect();
-                nodes.sort_unstable();
-                nodes.dedup_by(|a, b| {
-                    if a.0 == b.0 {
-                        b.1 += a.1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                let mut edges: Vec<(u64, u32)> = contained
-                    .windows(2)
-                    .map(|w| (pack_edge(w[0].1.unsigned_abs(), w[1].1.unsigned_abs()), 1))
-                    .collect();
-                edges.sort_unstable();
-                edges.dedup_by(|a, b| {
-                    if a.0 == b.0 {
-                        b.1 += a.1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                folds.push(Fold {
-                    seq: row.seq.clone(),
-                    len: (row.end - row.start) as u64,
-                    walk: relative,
-                    node_positions,
-                    members: Vec::new(),
-                    nodes,
-                    edges,
-                });
-                folds.len() - 1
-            });
-            folds[index].members.push(member.clone());
-        }
+                        options.flank_overlap,
+                        &options.exclude_paths,
+                        &path_of_name,
+                        &|path_idx| panel.name_map.path_to_length[path_idx],
+                        k,
+                    )?;
+                (folds, excluded_rows, flank_excluded_rows)
+            };
         let n_folds = folds.len();
         // ------------------------------------------- the territory images
         // (Stage 2, rule 8: the locus's normalized comparison domain.
@@ -7028,8 +8075,14 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             }
         }
         eprintln!(
-            "[score] locus {locus}: partition {partition}, {} members -> {n_folds} folds [{:.1}s]",
+            "[score] locus {locus}: partition {partition}, {} members -> {n_folds} folds{} \
+             [{:.1}s]",
             map.members.len(),
+            if served_precompute.is_some() {
+                " (SERVED from the panel-precompute asset)"
+            } else {
+                ""
+            },
             fold_started.elapsed().as_secs_f64(),
         );
 
@@ -13744,6 +14797,510 @@ mod tests {
             "a truth pair below the window drops the threshold to itself"
         );
         assert!(deep_truth < best + t);
+    }
+
+    // ---------------------------------------------------------------------
+    // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE, SS10.6.23 slice 1 — the
+    // unit bars the design names: the asset round trip is lossless;
+    // the serve == live-built fold layouts on randomized fixtures
+    // INCLUDING the masked forms (the masking commute lemma); the
+    // representative-independence clause; the sequence-FNV drift
+    // detector is a loud error, never a served structure.)
+    // ---------------------------------------------------------------------
+
+    /// A tiny deterministic LCG (no tuned constants, reproducible).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 11
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn folds_equal(a: &[Fold], b: &[Fold]) {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "fold count differs: live {} vs served {}",
+            a.len(),
+            b.len()
+        );
+        for (index, (live, served)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                live.seq, served.seq,
+                "fold {index}: the sequence differs"
+            );
+            assert_eq!(live.len, served.len, "fold {index}: the length differs");
+            assert_eq!(live.walk, served.walk, "fold {index}: the walk differs");
+            assert_eq!(
+                live.node_positions, served.node_positions,
+                "fold {index}: the node positions differ"
+            );
+            assert_eq!(live.nodes, served.nodes, "fold {index}: the nodes differ");
+            assert_eq!(live.edges, served.edges, "fold {index}: the edges differ");
+            assert_eq!(
+                live.members, served.members,
+                "fold {index}: the members differ"
+            );
+        }
+    }
+
+    /// The randomized-fixture world: a synthetic row set over a few
+    /// paths, with (a) rows sharing their (sequence, relative walk)
+    /// content but not their extents (the coalesced-copy class, the
+    /// representative-independence clause), (b) unique rows, (c) rows
+    /// whose member entries repeat. The fetch closure keys on
+    /// (path name, start, end) exactly as the live fetch does.
+    struct Fixture {
+        names: Vec<String>,
+        path_of_name: HashMap<String, usize>,
+        rows: Vec<RowFold>,
+        dedup: HashMap<(usize, u64, u64), usize>,
+        members: Vec<MemberRow>,
+        axis_start: u64,
+        axis_end: u64,
+        component: String,
+    }
+
+    fn precompute_fixture(seed: u64) -> Fixture {
+        let mut rng = Lcg(seed);
+        let names: Vec<String> = (0..5)
+            .map(|i| format!("DONOR#{i}#chr1"))
+            .chain(std::iter::once("STRANGER#0#chr1".to_string()))
+            .collect();
+        let mut path_of_name = HashMap::new();
+        for (index, name) in names.iter().enumerate() {
+            path_of_name.insert(name.clone(), index);
+        }
+        let component = "AXIS#0#chr1".to_string();
+        let axis_path = names.len();
+        path_of_name.insert(component.clone(), axis_path);
+        let stranger_path = names.len() - 1;
+        let mut rows: Vec<RowFold> = Vec::new();
+        let mut members: Vec<MemberRow> = Vec::new();
+        // The CONTENT-CLONE class: identical sequence bytes and
+        // identical contained relative walks, at different extents and
+        // paths — one fold whichever row represents it.
+        let clone_len = 80u64;
+        let clone_seq: Vec<u8> = (0..clone_len)
+            .map(|i| b"ACGT"[(i * 7 + (i / 13)) as usize % 4])
+            .collect();
+        let clone_walk: Vec<(u64, i32)> = (0..6)
+            .map(|i| (20 + i * 9, if i % 3 == 2 { -(10 + i as i32) } else { 10 + i as i32 }))
+            .collect();
+        for clone in 0..3 {
+            let start = 500 + clone * 137;
+            let end = start + clone_len;
+            let walk = clone_walk
+                .iter()
+                .map(|&(bp, node)| (bp + start, node))
+                .collect::<Vec<_>>();
+            let path = (clone as usize) % stranger_path;
+            rows.push(RowFold {
+                path,
+                start,
+                end,
+                seq: clone_seq.clone(),
+                walk: walk.clone(),
+                frames: walk.iter().map(|&(_, node)| (node < 0) as u8).collect(),
+                stored_walk: walk.clone(),
+                members: Vec::new(),
+            });
+            members.push(MemberRow {
+                path_name: names[path].clone(),
+                start,
+                end,
+            });
+        }
+        // Unique rows with randomized walks.
+        for row_index in 0..12 {
+            let start = 40 + row_index as u64 * 90;
+            let len = 60 + rng.below(60);
+            let end = start + len;
+            let mut walk: Vec<(u64, i32)> = Vec::new();
+            let mut bp = start + rng.below(6);
+            while bp + K <= end {
+                let node = 1 + rng.below(30) as i32;
+                walk.push((bp, if rng.below(2) == 0 { node } else { -node }));
+                bp += 1 + rng.below(9);
+            }
+            walk.sort_unstable_by_key(|&(bp, _)| bp);
+            let path = rng.below(stranger_path as u64) as usize;
+            rows.push(RowFold {
+                path,
+                start,
+                end,
+                seq: (0..len)
+                    .map(|i| b"ACGT"[((i as u64 * 11 + row_index as u64) % 4) as usize])
+                    .collect(),
+                walk: walk.clone(),
+                frames: walk.iter().map(|&(_, node)| (node < 0) as u8).collect(),
+                stored_walk: walk.clone(),
+                members: Vec::new(),
+            });
+            members.push(MemberRow {
+                path_name: names[path].clone(),
+                start,
+                end,
+            });
+            // A repeated member entry over the SAME row identity (the
+            // deduplication class: one row, two member entries).
+            if rng.below(3) == 0 {
+                members.push(MemberRow {
+                    path_name: names[path].clone(),
+                    start,
+                    end,
+                });
+            }
+        }
+        // The axis row itself (never excluded, the coordinate frame).
+        let axis_start = 100u64;
+        let axis_end = 900u64;
+        let axis_walk: Vec<(u64, i32)> = (0..10)
+            .map(|i| (axis_start + i * 80, 100 + i as i32))
+            .collect();
+        rows.push(RowFold {
+            path: axis_path,
+            start: axis_start,
+            end: axis_end,
+            seq: (0..axis_end - axis_start)
+                .map(|i| b"ACGT"[(i % 4) as usize])
+                .collect(),
+            walk: axis_walk.clone(),
+            frames: axis_walk.iter().map(|_| 0u8).collect(),
+            stored_walk: axis_walk,
+            members: Vec::new(),
+        });
+        members.push(MemberRow {
+            path_name: component.clone(),
+            start: axis_start,
+            end: axis_end,
+        });
+        // The stranger member (the masking operator's target — a REAL
+        // panel path masked at call time, so its row identity exists).
+        let stranger_start = 5230u64;
+        let stranger_end = stranger_start + 64;
+        rows.push(RowFold {
+            path: stranger_path,
+            start: stranger_start,
+            end: stranger_end,
+            seq: vec![b'T'; (stranger_end - stranger_start) as usize],
+            walk: vec![(stranger_start + 9, -77)],
+            frames: vec![1],
+            stored_walk: vec![(stranger_start + 9, -77)],
+            members: Vec::new(),
+        });
+        members.push(MemberRow {
+            path_name: names[stranger_path].clone(),
+            start: stranger_start,
+            end: stranger_end,
+        });
+        // The row table: dedup by (path, start, end), the members
+        // attached in member order (the live insertion discipline).
+        let mut dedup: HashMap<(usize, u64, u64), usize> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            dedup.insert((row.path, row.start, row.end), index);
+        }
+        for (member_index, member) in members.iter().enumerate() {
+            let path_idx = path_of_name[&member.path_name];
+            let row_index = dedup[&(path_idx, member.start, member.end)];
+            rows[row_index].members.push((0, member_index));
+        }
+        Fixture {
+            names,
+            path_of_name,
+            rows,
+            dedup,
+            members,
+            axis_start,
+            axis_end,
+            component,
+        }
+    }
+
+
+
+    fn fixture_fetch(fixture: &Fixture) -> impl Fn(&str, u64, u64) -> io::Result<Vec<u8>> + Sync {
+        let rows = fixture.rows.clone();
+        let path_of_name = fixture.path_of_name.clone();
+        move |name: &str, start: u64, end: u64| {
+            let path_idx = path_of_name[name];
+            for row in &rows {
+                if row.path == path_idx && row.start == start && row.end == end {
+                    return Ok(row.seq.clone());
+                }
+            }
+            Err(invalid("the fixture fetch misses a row"))
+        }
+    }
+
+    fn build_serve_state(
+        fixture: &Fixture,
+    ) -> (PrecomputeServe, Vec<RowFold>, Vec<u64>) {
+        // The builder's own path, in miniature: the row context asset
+        // (with the FNV content keys), the unmasked live grouping, the
+        // asset round trip through the REAL encoder/decoder.
+        let rows: Vec<PrecomputeRowAsset> = fixture
+            .rows
+            .iter()
+            .map(|row| PrecomputeRowAsset {
+                path_name: if let Some(name) = fixture.names.get(row.path) {
+                    name.clone()
+                } else {
+                    fixture.component.clone()
+                },
+                start: row.start,
+                end: row.end,
+                seq_fnv: fnv1a64(&row.seq),
+                stored_walk: row.stored_walk.clone(),
+                walk: row.walk.clone(),
+                frames: row.frames.clone(),
+                members: row.members.clone(),
+            })
+            .collect();
+        let encoded = encode_rows(&rows);
+        let decoded = decode_rows(&encoded).expect("the asset round trip decodes");
+        // The served rows, built as run() builds them (sequences
+        // left in the sources).
+        let served_rows: Vec<RowFold> = decoded
+            .iter()
+            .map(|row| RowFold {
+                path: fixture.path_of_name[&row.path_name],
+                start: row.start,
+                end: row.end,
+                seq: Vec::new(),
+                walk: row.walk.clone(),
+                frames: row.frames.clone(),
+                stored_walk: row.stored_walk.clone(),
+                members: row.members.clone(),
+            })
+            .collect();
+        let (_, fold_rep, member_fold, _, _) = build_window_folds_live(
+            &fixture.rows,
+            &fixture.dedup,
+            &fixture.members,
+            &fixture.component,
+            fixture.axis_start,
+            fixture.axis_end,
+            None,
+            &[],
+            &fixture.path_of_name,
+            &|_| u64::MAX / 4,
+            K,
+        )
+        .expect("the unmasked live grouping builds");
+        let windows = vec![PrecomputeWindowAsset {
+            partition: 0,
+            axis_start: fixture.axis_start,
+            axis_end: fixture.axis_end,
+            fold_rep,
+            member_fold,
+        }];
+        let serve = PrecomputeServe {
+            windows,
+            seq_fnv: decoded.iter().map(|row| row.seq_fnv).collect(),
+            seqs: Mutex::new(HashMap::new()),
+        };
+        (serve, served_rows, decoded.iter().map(|row| row.seq_fnv).collect())
+    }
+
+    #[test]
+    fn panel_precompute_asset_round_trip_is_lossless() {
+        for seed in [1u64, 7, 42, 20261023] {
+            let fixture = precompute_fixture(seed);
+            let rows: Vec<PrecomputeRowAsset> = fixture
+                .rows
+                .iter()
+                .map(|row| PrecomputeRowAsset {
+                    path_name: fixture.names[row.path.min(fixture.names.len() - 1)].clone(),
+                    start: row.start,
+                    end: row.end,
+                    seq_fnv: fnv1a64(&row.seq),
+                    stored_walk: row.stored_walk.clone(),
+                    walk: row.walk.clone(),
+                    frames: row.frames.clone(),
+                    members: row.members.clone(),
+                })
+                .collect();
+            let decoded = decode_rows(&encode_rows(&rows)).expect("decode");
+            assert_eq!(decoded.len(), rows.len());
+            for (a, b) in rows.iter().zip(decoded.iter()) {
+                assert_eq!(a.path_name, b.path_name);
+                assert_eq!(a.start, b.start);
+                assert_eq!(a.end, b.end);
+                assert_eq!(a.seq_fnv, b.seq_fnv);
+                assert_eq!(a.stored_walk, b.stored_walk);
+                assert_eq!(a.walk, b.walk);
+                assert_eq!(a.frames, b.frames);
+                assert_eq!(a.members, b.members);
+            }
+        }
+    }
+
+    #[test]
+    fn panel_precompute_serve_equals_live_built_on_randomized_fixtures() {
+        // The masking commute lemma, exercised on every fixture and
+        // every filter combination: unmasked, the flank filter, the
+        // masking operator, and both together.
+        for seed in [1u64, 7, 42, 20261023] {
+            let fixture = precompute_fixture(seed);
+            let (serve, served_rows, _) = build_serve_state(&fixture);
+            let fetch = fixture_fetch(&fixture);
+            let mut path_names = fixture.names.clone();
+            path_names.push(fixture.component.clone());
+            for (flank, exclude) in [
+                (None::<FlankOverlap>, Vec::<String>::new()),
+                (
+                    Some(FlankOverlap::Bp(120)),
+                    Vec::<String>::new(),
+                ),
+                (None::<FlankOverlap>, vec!["STRANGER#*".to_string()]),
+                (
+                    Some(FlankOverlap::Bp(120)),
+                    vec!["STRANGER#*".to_string()],
+                ),
+            ] {
+                let (live_folds, _rep, _member_fold, excluded, flank_excluded) =
+                    build_window_folds_live(
+                        &fixture.rows,
+                        &fixture.dedup,
+                        &fixture.members,
+                        &fixture.component,
+                        fixture.axis_start,
+                        fixture.axis_end,
+                        flank,
+                        &exclude,
+                        &fixture.path_of_name,
+                        &|_| u64::MAX / 4,
+                        K,
+                    )
+                    .expect("the live masked build");
+                let (served_folds, s_excluded, s_flank_excluded) = serve
+                    .serve_window_folds(
+                        &served_rows,
+                        0,
+                        &fixture.members,
+                        &fixture.component,
+                        fixture.axis_start,
+                        fixture.axis_end,
+                        flank,
+                        &exclude,
+                        K,
+                        &fetch,
+                        &path_names,
+                    )
+                    .expect("the serve");
+                assert_eq!(excluded, s_excluded, "the excluded counts differ");
+                assert_eq!(
+                    flank_excluded, s_flank_excluded,
+                    "the flank-excluded counts differ"
+                );
+                folds_equal(&live_folds, &served_folds);
+                // The representative-independence clause, live on the
+                // fixture: the content-clone rows (equal sequence,
+                // equal relative walk, different extents) group into
+                // ONE fold, and whichever row represents it the
+                // served content is identical to the live one —
+                // asserted on the unmasked form (the masked forms may
+                // filter the class away, which is the filters' own
+                // semantics, proved identical above).
+                if flank.is_none() && exclude.is_empty() {
+                    let coalesced = live_folds
+                        .iter()
+                        .any(|fold| fold.seq == fixture.rows[0].seq && fold.members.len() >= 3);
+                    assert!(
+                        coalesced,
+                        "the fixture must exercise the coalesced-copy class \
+                         (seed {seed})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_precompute_serve_requires_the_axis_fold_under_territory_masks() {
+        // The masking filters never exclude the axis row (it is the
+        // coordinate frame), so the territory machinery's axis-fold
+        // discovery holds under the serve exactly as under the live
+        // build — asserted here over the fixtures' masked forms.
+        for seed in [1u64, 7, 42] {
+            let fixture = precompute_fixture(seed);
+            let (serve, served_rows, _) = build_serve_state(&fixture);
+            let fetch = fixture_fetch(&fixture);
+            let mut path_names = fixture.names.clone();
+            path_names.push(fixture.component.clone());
+            let (folds, _, _) = serve
+                .serve_window_folds(
+                    &served_rows,
+                    0,
+                    &fixture.members,
+                    &fixture.component,
+                    fixture.axis_start,
+                    fixture.axis_end,
+                    Some(FlankOverlap::Bp(120)),
+                    &["STRANGER#*".to_string()],
+                    K,
+                    &fetch,
+                    &path_names,
+                )
+                .expect("the masked serve");
+            assert!(folds.iter().any(|fold| {
+                fold.members.iter().any(|m| {
+                    m.path_name == fixture.component
+                        && m.start == fixture.axis_start
+                        && m.end == fixture.axis_end
+                })
+            }));
+        }
+    }
+
+    #[test]
+    fn panel_precompute_sequence_fnv_drift_is_a_loud_error() {
+        // The drift detector: a source whose bytes no longer match the
+        // asset's recorded FNV-64 content key is a HARD ERROR at serve
+        // time — never a silently served structure.
+        let fixture = precompute_fixture(7);
+        let (serve, served_rows, mut seq_fnv) = build_serve_state(&fixture);
+        // Corrupt one representative row's content key.
+        let rep = serve.windows[0].fold_rep[0];
+        seq_fnv[rep] ^= 1;
+        let serve = PrecomputeServe {
+            windows: serve.windows,
+            seq_fnv,
+            seqs: Mutex::new(HashMap::new()),
+        };
+        let fetch = fixture_fetch(&fixture);
+        let mut path_names = fixture.names.clone();
+        path_names.push(fixture.component.clone());
+        let result = serve.serve_window_folds(
+            &served_rows,
+            0,
+            &fixture.members,
+            &fixture.component,
+            fixture.axis_start,
+            fixture.axis_end,
+            None,
+            &[],
+            K,
+            &fetch,
+            &path_names,
+        );
+        assert!(result.is_err(), "a drifted sequence content key must be loud");
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("mismatches the fetched bytes"),
+            "the error must name the drift class"
+        );
     }
 
 }

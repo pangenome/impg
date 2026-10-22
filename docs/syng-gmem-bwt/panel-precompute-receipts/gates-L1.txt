@@ -1,0 +1,8 @@
+=== L1 gates (2026-10-22T08:37:53Z); committed receipt = docs/syng-gmem-bwt/memoization-receipts/call-base.receipt.txt
+GATE calls precompute-off PASS (3ca9648c2211ade176ab0f2ddf394331d1b0559206a6cead315df30bfb013cfa)
+GATE truth-qv precompute-off PASS (1c3dc4e1297194d78293ae0109d8341f30806a522951f16cbc14ec1776a0fcff)
+GATE fold digests precompute-off PASS (19/19 identical)
+GATE calls precompute-on PASS (3ca9648c2211ade176ab0f2ddf394331d1b0559206a6cead315df30bfb013cfa)
+GATE truth-qv precompute-on PASS (1c3dc4e1297194d78293ae0109d8341f30806a522951f16cbc14ec1776a0fcff)
+GATE fold digests precompute-on PASS (19/19 identical)
+=== L1 PRECOMPUTE GATES: ALL PASS

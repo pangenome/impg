@@ -1,0 +1,8 @@
+=== T09724 gates (2026-10-22T08:37:53Z); committed receipt = docs/syng-gmem-bwt/memoization-receipts/call-base-all.receipt.txt
+GATE calls precompute-off-all PASS (c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34)
+GATE truth-qv precompute-off-all PASS (c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1)
+GATE fold digests precompute-off-all PASS (16/16 identical)
+GATE calls precompute-on-all PASS (c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34)
+GATE truth-qv precompute-on-all PASS (c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1)
+GATE fold digests precompute-on-all PASS (16/16 identical)
+=== T09724 PRECOMPUTE GATES: ALL PASS
