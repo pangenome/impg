@@ -35,6 +35,9 @@ IMPG_NEW=/home/erikg/impg-genome-inference/target-frontier/release/impg
 SP_NEW=/home/erikg/impg-genome-inference/target-frontier/release/examples/sample_projection
 IMPG_SUB=/home/erikg/impg-genome-inference/target/release/impg
 EX_SUB=/home/erikg/impg-genome-inference/target/release/examples
+# the committed projection instrument (unchanged since the committed
+# 20.79min receipt; the map step's byte-identity gate demands it)
+SP_COMMITTED=/home/erikg/impg-genome-inference/target/release/examples/sample_projection
 
 PANEL=$HPRC/HPRC_r2_assemblies_0.6.1.syng
 AGC=$HPRC/HPRC_r2_assemblies_0.6.1.agc
