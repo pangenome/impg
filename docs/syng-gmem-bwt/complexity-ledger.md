@@ -215,23 +215,101 @@ candidate scan itself is bounded by CONTENT, not by f² (fit vs
 folds_pre²: R²=0.01 — the typical fold has a handful of equal-column
 neighbors, not f of them).
 
-**THE MERGE'S OWN RECEIPT AT THE FOLD-HEAVY SHAPE (new, this window):**
-T03226 l15 is the fold-heavy/unit-light extreme — 459 members → 247
-pre-merge folds over 36 units = 30,628 class pairs, and the PRE-MERGE
-locus costs **228.4 s serial** (the census instrument decomposes it:
-scoring 0.01 s, receipts/IO 32.7 s — the residual ~195 s is a
+**THE MERGE'S OWN RECEIPT AT THE FOLD-HEAVY SHAPE (the open term, CLOSED
+2026-10-22 with the corrected anatomy):** T03226 l15 is the
+fold-heavy/unit-light extreme — 459 members → 247 pre-merge folds over 36
+units = 30,628 class pairs, and the PRE-MERGE locus costs **228.4 s
+serial** (the census instrument decomposes it: scoring 0.01 s,
+receipts/IO 32.7 s — the residual ~195 s was carried here as a
 per-class-pair constant of ~6.4 ms, three orders above the 18.4 ns
 unit-pair rate, at a shape where the unit-pair model predicts 0.02 s).
 WITH THE COMMITTED MERGE the same locus is **36 folds / 666 classes /
-0.5 s — a 455x class-pair reduction at exactly the shape where the
-per-pair constant bites** (the single-locus receipts:
-`T03226-w10k-census{,-premerge}/`). The corpus's fold-heavy regime
-(1,328 loci at units<2,000, classes>5,000) fits wall ≈ 0.000431·
- classes^0.78 (R²=0.66, per-pair median 0.06 ms) — the l15 shape is
-that regime's heavy tail, and the merge is the lever that already
-collapses it. (The per-pair constant's own mechanism at the extreme
-shapes is the one term this window's instruments did not resolve —
-OPEN, named.)
+0.5 s — a 455x class-pair reduction** (the single-locus receipts:
+`T03226-w10k-census{,-premerge}/`, reaped with the disk crisis). The
+corpus's fold-heavy regime (1,328 loci at units<2,000, classes>5,000)
+fits wall ≈ 0.000431· classes^0.78 (R²=0.66, per-pair median 0.06 ms)
+— the l15 shape is that regime's heavy tail, and the merge is the
+lever that already collapses the class count.
+
+**THE 6.4 ms TERM'S OWN ANATOMY, LOCATED AND FIXED (2026-10-22, the
+stream-discipline re-derivation — `mergefix-tie-certificate-
+receipts.txt`, the runners `scripts/complexity-ledger/
+run-mergefix-anatomy-T09724.sh` + `run-mergefix-L1.sh`):** the T03226
+substrate is unrecoverable (tranche-1's definitional smalls reaped
+with the disk crisis), so the anatomy was re-derived at **T09724** —
+a tranche-2 S_EXP member of the SAME class (far-bin share 43.46% vs
+T03226's 43.4%), rebuilt transiently under the stream law from the
+kept member smalls, reproducing the committed substrate EXACTLY (the
+cutA census mult 776,096 / reads 406,876 IDENTICAL to the committed
+tranche-2 receipt; reference-axis + domain-structure IDENTICAL to
+the kept smalls; l9's committed answer reproduced bit-for-bit).
+**THE MERGE PASS ITSELF WAS ALREADY FIXED** — measured 1.68 s at the
+territory's heaviest locus (439 folds / 246,224 units / 96,580
+classes): it buckets by a per-fold column hash computed once with the
+exact bit-verify only inside buckets (`ll_bits_hash` /
+`ll_bits_equal`), so there is NO per-pair full-column walk left there
+to fix — the 6.4 ms term is NOT the merge's. **The term's home is the
+QUAL cluster's TIE CERTIFICATE**: for every tied called class beyond
+the winner (|called| − 1 bands) the naive path materialized a band
+over the FULL spectrum (|spectrum| entries), EVERY entry a fresh
+pair of merged node/edge multisets (per-pair vector construction)
+plus two observed-mass walks (per-pair full-column walks, ~480-entry
+multisets at the 10 kb windows) — while the cluster machinery
+consumes from each band ONLY its <=cut predicate set
+(`cluster_form_qual`'s own contract). **Measured at two real
+committed-stack instances** (the phase-census instrument,
+`IMPG_LOCUS_PHASE_CENSUS`): T09724 l7 committed form — 2 bands ×
+13,108 entries = 0.08 s ≈ **6.1 µs per band entry**; l7 pre-merge form
+— 4 bands × 30,996 entries = 0.18 s ≈ **5.8 µs per entry**. **The
+l15 residual re-attributed**: 195 s / 6.1 µs ≈ 3.2e7 band entries ≈
+~1,045-band tie set × 30,627 spectrum entries — a called set of
+~1,046 classes (the biggest equal-column group's internal pairs at
+the best LL, consistent with the committed merge collapsing 247→36
+folds there); the "per-class-pair ~6.4 ms" was this certificate's
+cost amortized over the class pairs, and the 455x verdict is
+re-attributed to the PRE-MERGE TIE CLASS the merge collapses.
+
+**THE FIX (committed 2026-10-22, the degenerate precedent extended):
+the cut-index-list certificate at BOTH tie shapes.** The committed
+degenerate-path wall fix (the repeat-domain monsters' 35,510 ×
+35,510 = 1.26e9 distances, 4,802 s serial, the ~6 GB emission that
+breached the 64GiB guard) already computed each band's <=cut
+predicate set from per-fold observed-mass signatures computed ONCE
+per locus, with SOUND two-sided O(1) bounds per (tied class, spectrum
+entry) — D >= |Sm_n(t) − Sm_n(e)| + |Sm_e(t) − Sm_e(e)| and D <=
+Sm_n(t) + Sm_n(e) + Sm_e(t) + Sm_e(e) — and the exact
+`differing_observed_mass` walk ONLY in the undecided middle band;
+the fix routes the NON-degenerate path through the same core
+(`tied_class_cut_lists`; the naive band matrix is gone; no tuning
+constants; fold indices and order untouched). **The gates**: answers
+BYTE-IDENTICAL before/after — calls.jsonl AND truth-qv sha256 — at
+T09724 all 16 loci in BOTH the committed and the pre-merge forms,
+and at L1 (the standard target, 19 loci); fold-set digests identical
+(in-process `IMPG_FOLD_SET_DIGEST` FNV over the final fold space,
+16/16 + 19/19); the 4,000-case randomized non-degenerate oracle unit
+test against a verbatim naive-band oracle (predicate sets and the
+full cluster state identical; cargo test 584/0). **The timing
+receipts**: l7 committed 0.08 s (13,108 exact entries) → 0.00 s (2
+lists × 8 predicate entries); l7 pre-merge 0.18 s (30,996 entries) →
+0.00 s (4 lists × 32 predicate entries) — the certificate's exact
+work reduced ~1000x at the real instances, the rest decided by the
+O(1) bounds. **The l15-class projection (arithmetic, labeled):** at
+3.2e7 entries the naive certificate's ~195 s becomes ~O(3.2e7)
+bound-decisions (ns-class) plus the undecided band's exact entries —
+the pre-merge l15 locus would land ~0.5 s-class (its committed-form
+receipt's own wall), i.e. the pre-merge form no longer pays a
+pathological constant the merge exists to dodge. **The corpus share,
+measured**: at the committed stack the tie-certificate term is ZERO
+at every called=1 locus (T09724: 15 of 16; L1: 19 of 19) and fires
+only at tie-bearing loci (l7-class: 0.08 s of a 0.7 s locus) and in
+the pre-merge/unmerged-tie form (equal columns outside the merge's
+admission) — it is not a corpus pole at the committed defaults; the
+fix removes its pathological class everywhere. **The receipt-schema
+note (sanctioned with the fix, the degenerate precedent's own
+form):** at NON-degenerate tie loci the report member
+`qual_tied_bands` (full band vectors) is replaced by
+`qual_tied_cut_indices` (the compact predicate lists) — answers
+unchanged by construction.
 
 **The principled candidate-count reduction (the evidence model's own
 expressibility — no thresholds):** three of the four are already in
@@ -439,8 +517,8 @@ deletes the load term per-locus, and the remaining fixed classes
 (bind/rows/floor) are precompute territory (§5's grain experiment
 MEASURED the bigger-loci lever and REFUSED it: the fixed classes are
 mass-bound, not window-bound, and the content classes grow ~1.9x at
-40 kb). The **scan term** is bounded but its plateau remainder needs the
-memoization increment. The **pair-loop term is the floor the model
+40 kb). The **scan term** is bounded but its plateau remainder needs
+the memoization increment. The **pair-loop term is the floor the model
 itself sets** — no algorithmic lever removes the per-base comparison
 at the pinned-heavy loci; only the CONTENT classes (deeper restriction,
 the RV 35x basis) or the routes doctrine (fewer folds per window) move
@@ -454,6 +532,23 @@ median, with the tail's plateau monsters as the gating remainder, and
 designed, or implemented. The residual that is NOT reachable by any
 receipted lever is the pinned per-base comparison class at the
 monsters — the model's own price.
+
+**THE 16-CORE ARITHMETIC, REFRESHED AT THE CLOSED TERM (2026-10-22):**
+the tie-certificate fix (§4) moves NO budget line — at the committed
+defaults the term is measured ZERO at every called=1 locus (T09724:
+15 of 16; L1: 19 of 19) and ~0.1 s at the tie-bearing l7-class —
+correctly absent from the decomposition above, which is why the
+"~6.4 ms" never appeared as a corpus pole. What the fix removes is
+the TAIL RISK the ledger's own l15 receipt exposed: a fold-heavy
+window whose equal columns fall outside the merge's admission (the
+pre-merge form, or outside-bubble/pocket-mass refusals) previously
+paid ~6 µs × (tie-set × spectrum) at the certificate — the l15-class
+arithmetic, ~195 s — and now pays O(1) bound decisions per entry
+plus the undecided band's exact walks (measured: 30,996 exact
+entries → 32 at the l7 pre-merge instance). The 0.14 path itself is
+unchanged: fleet COW + precompute + bounded-and-memoized scan + the
+pair loop's floor — with the pre-merge/tie-class pathological
+constant no longer a hidden multiplier on the fold-heavy tail.
 
 ---
 
@@ -488,8 +583,32 @@ monsters — the model's own price.
   form (§5); a committed-form rerun is one env away
   (`IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS=1` on the callC/callProd
   invocations) and is the first item of any follow-up.
-- cargo test: NO src changes in this window (instruments + analysis
-  only; the scripts are new files) — the committed 583/0 green
-  stands.
+- cargo test: **the 2026-10-22 window's src change is the tie-certificate
+  fix** (`src/genome_inference/realign_score.rs`: the non-degenerate
+  tie certificate takes the committed degenerate path's cut-index-
+  list form — §4's closed term — plus the env-gated phase-census and
+  fold-set-digest instruments); **cargo test --release --lib 584/0
+  green, 5 ignored** (583 committed + the new 4,000-case
+  non-degenerate-band oracle
+  `the_non_degenerate_tie_certificate_matches_the_naive_band_oracle`).
+- **The merge-fix anatomy's own receipts (2026-10-22, the stream
+  discipline's first full customer):**
+  `docs/syng-gmem-bwt/mergefix-tie-certificate-receipts.txt` (the
+  substrate-reproduction gates, every phase-census line at both
+  forms, the sha256 answer-digest gates, the fold-set digest gates,
+  the walls) and the runners
+  `scripts/complexity-ledger/run-mergefix-anatomy-T09724.sh` +
+  `run-mergefix-L1.sh` (marker-gated, 150G-budget-guarded,
+  receipts-at-write-time, `reap` subcommand). The workdirs
+  (`/mnt/nvme2n1/erikg/mergefix-T09724{,-keep}` and
+  `mergefix-L1{,-keep}`) were REAPED at the increment's close after
+  the receipts were committed (mine first, reap after); the keep
+  dirs' contents (the receipts + the small answer files) are folded
+  into the receipts file above.
+- **The L2-L4/pilot gate re-derivations were SKIPPED this window**
+  (each is a ~35 min substrate rebuild; L1 + the T03226-class member
+  carry the gate) — honestly labeled: they are re-runnable at any
+  time with `run-mergefix-L1.sh`'s shape at L2/L3/L4/pilot; absence
+  is a coverage label, never a pass claim.
 
 NO PR PUSH (the owner pushes).

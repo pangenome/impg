@@ -1,0 +1,13 @@
+# call-instr-l9 receipt (2026-10-22T00:17:45Z) [regenerated]
+# wall_s  exit 
+calls_sha256 c32c50e7041c34d1a4df0a07a4263c1c860aa1d04e99621b493cf8ea6bca4bb2 983 bytes
+truthqv_sha256 5302ed6775ecd64d17f3795230e300e810a44f7bd50e4a202d5f9630a3cd378c 1927 bytes
+grep: /mnt/nvme2n1/erikg/mergefix-T09724/call-instr-l9.err: No such file or directory
+grep: /mnt/nvme2n1/erikg/mergefix-T09724/call-instr-l9.err: No such file or directory
+grep: /mnt/nvme2n1/erikg/mergefix-T09724/call-instr-l9.err: No such file or directory
+grep: /mnt/nvme2n1/erikg/mergefix-T09724/call-instr-l9.err: No such file or directory
+grep: /mnt/nvme2n1/erikg/mergefix-T09724/call-instr-l9.err: No such file or directory
+grep: /mnt/nvme2n1/erikg/mergefix-T09724/call-instr-l9.err: No such file or directory
+fold_set_digest locus 9 folds 439 c8b294e0075bdf74 (in-process)
+phase_census locus 9 best_outside_seconds=0.00052282 called_class_count=1 class_pairs=96580 class_units=246224 classes_seconds=502.907441873 fold_multiset_entries_max=4297 fold_multiset_entries_total=1809065 merge_admitted_pairs=6 merge_equal_column_pairs=7 merge_seconds=1.680692664 qual_band_count=0 qual_band_entries=0 qual_bands_seconds=2.592e-05 qual_cluster_seconds=0.002447784 qual_degenerate_entries=0 qual_degenerate_seconds=0.0 qual_spectrum_entries=96579 qual_spectrum_seconds=9.715198237
+walls locus 9 anatomy_seconds=0.0 classes_seconds=502.907441873 exactness_seconds=1.544378679 folds_seconds=10.481039734999984 locus_seconds=579.426901046 qual_seconds=9.720581645 scoring_seconds=54.796113156

@@ -1,0 +1,10 @@
+# call-base-l9 receipt (2026-10-22T00:00:31Z); binary /home/erikg/impg-genome-inference/target-frontier/release/impg-baseline-9204f9e; loci 9
+# wall_s 1029 exit 0
+calls_sha256 c32c50e7041c34d1a4df0a07a4263c1c860aa1d04e99621b493cf8ea6bca4bb2 983 bytes
+truthqv_sha256 5302ed6775ecd64d17f3795230e300e810a44f7bd50e4a202d5f9630a3cd378c 1927 bytes
+[score] locus 9: alignment-connected folds: 6 merge groups (6 admitted pairs of 7 equal-column candidates; refusals: 0 outside-bubble, 0 unshared, 1 pocket-mass)
+[score] locus 9 scoring census: anchor 0.73s 
+[score] locus 9 done: 439 folds, 246224 units, 96580 classes, truth_rank None, log_gap None, qual None [606.8s]
+[score] phase summary: inputs 236.1s, quality (FASTQ scan) 0.4s, elsewhere 0.000s, derive cache 0.2s, binding 3.9s, variants 0.3s, rows/context assembly 6.7s, loci (folds+units+scoring+classes+qual+exactness+receipts) 606.8s; AGC fetches 1269770 total (340.4 MB)
+fold_set_digest locus 9 folds 439 c8b294e0075bdf74 (offline-mirror)
+walls locus 9 anatomy_seconds=0.0 classes_seconds=526.85409555 exactness_seconds=1.332087175 folds_seconds=10.427075057000014 locus_seconds=606.787682806 qual_seconds=10.074024601 scoring_seconds=58.122633975

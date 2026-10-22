@@ -1,0 +1,190 @@
+# THE MERGE-FIX TIE-CERTIFICATE RECEIPTS (T09724, the T03226-class re-derivation)
+# generated 2026-10-22T01:57:20Z
+
+## substrate reproduction gates
+- cutA census: mult 776,096 / reads 406,876 - IDENTICAL to the committed tranche-2 census-counters.tsv row for T09724
+- reference-axis.json + locality-domain-structure.txt - IDENTICAL to the kept member smalls (/home/erikg/hprcv2/panel/tranche2/members/T09724/)
+- l9 committed answer reproduced: called [65,65], truth-qv qv 0.4803 (rank1 False)
+- routes: the whole-panel derive-routes re-derivation, 1529s at RAYON=32 (the reap receipt's own ~25min once-per-panel class)
+
+## the phase census (serial RAYON=1; the committed form, all 16 loci)
+[score] locus 0: class scan 4560 pairs over 761 units [0.1s] (phase census)
+[score] locus 0 phase census: merge 0.00s (26 eq-col pairs, 26 admitted), classes 0.07s (4560 pairs x 761 units), qual spectrum 0.03s (4559 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 41269 total / 447 max
+[score] locus 1: class scan 13695 pairs over 357 units [0.1s] (phase census)
+[score] locus 1 phase census: merge 0.00s (40 eq-col pairs, 40 admitted), classes 0.10s (13695 pairs x 357 units), qual spectrum 0.11s (13694 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 69793 total / 517 max
+[score] locus 2: class scan 22155 pairs over 550 units [0.3s] (phase census)
+[score] locus 2 phase census: merge 0.00s (58 eq-col pairs, 58 admitted), classes 0.27s (22155 pairs x 550 units), qual spectrum 0.15s (22154 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 84390 total / 416 max
+[score] locus 3: class scan 13366 pairs over 22870 units [5.5s] (phase census)
+[score] locus 3 phase census: merge 0.07s (13 eq-col pairs, 11 admitted), classes 5.53s (13366 pairs x 22870 units), qual spectrum 0.12s (13365 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 83949 total / 601 max
+[score] locus 4: class scan 12880 pairs over 666 units [0.2s] (phase census)
+[score] locus 4 phase census: merge 0.00s (30 eq-col pairs, 30 admitted), classes 0.17s (12880 pairs x 666 units), qual spectrum 0.08s (12879 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 65932 total / 425 max
+[score] locus 5: class scan 6670 pairs over 471 units [0.1s] (phase census)
+[score] locus 5 phase census: merge 0.00s (18 eq-col pairs, 18 admitted), classes 0.06s (6670 pairs x 471 units), qual spectrum 0.05s (6669 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 46545 total / 415 max
+[score] locus 6: class scan 3240 pairs over 1105 units [0.1s] (phase census)
+[score] locus 6 phase census: merge 0.00s (67 eq-col pairs, 67 admitted), classes 0.07s (3240 pairs x 1105 units), qual spectrum 0.02s (3239 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 32098 total / 483 max
+[score] locus 7: class scan 6555 pairs over 877 units [0.1s] (phase census)
+[score] locus 7 phase census: merge 0.00s (20 eq-col pairs, 13 admitted), classes 0.11s (6555 pairs x 877 units), qual spectrum 0.12s (6554 entries), bands 0.07s (2 bands x 13108 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 3, fold multiset entries 54868 total / 511 max
+[score] locus 8: class scan 43071 pairs over 382 units [0.4s] (phase census)
+[score] locus 8 phase census: merge 0.00s (15 eq-col pairs, 15 admitted), classes 0.36s (43071 pairs x 382 units), qual spectrum 0.33s (43070 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 130203 total / 472 max
+[score] locus 9: class scan 96580 pairs over 246224 units [526.3s] (phase census)
+[score] locus 9 phase census: merge 1.70s (7 eq-col pairs, 6 admitted), classes 526.29s (96580 pairs x 246224 units), qual spectrum 9.64s (96579 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 1809065 total / 4297 max
+[score] locus 10: class scan 946 pairs over 400 units [0.0s] (phase census)
+[score] locus 10 phase census: merge 0.00s (11 eq-col pairs, 11 admitted), classes 0.01s (946 pairs x 400 units), qual spectrum 0.01s (945 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 7541 total / 209 max
+[score] locus 11: class scan 2346 pairs over 391 units [0.0s] (phase census)
+[score] locus 11 phase census: merge 0.00s (24 eq-col pairs, 24 admitted), classes 0.03s (2346 pairs x 391 units), qual spectrum 0.02s (2345 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 21240 total / 325 max
+[score] locus 12: class scan 8911 pairs over 32268 units [6.3s] (phase census)
+[score] locus 12 phase census: merge 0.05s (5 eq-col pairs, 5 admitted), classes 6.29s (8911 pairs x 32268 units), qual spectrum 0.09s (8910 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 72421 total / 661 max
+[score] locus 13: class scan 10296 pairs over 508 units [0.1s] (phase census)
+[score] locus 13 phase census: merge 0.00s (12 eq-col pairs, 12 admitted), classes 0.11s (10296 pairs x 508 units), qual spectrum 0.09s (10295 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 65815 total / 503 max
+[score] locus 14: class scan 12561 pairs over 419 units [0.1s] (phase census)
+[score] locus 14 phase census: merge 0.00s (18 eq-col pairs, 17 admitted), classes 0.11s (12561 pairs x 419 units), qual spectrum 0.10s (12560 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 73774 total / 497 max
+[score] locus 15: class scan 22791 pairs over 811 units [0.4s] (phase census)
+[score] locus 15 phase census: merge 0.01s (165 eq-col pairs, 165 admitted), classes 0.38s (22791 pairs x 811 units), qual spectrum 0.29s (22790 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 159003 total / 759 max
+
+## the phase census (the PRE-MERGE form - no merge env, all 16 loci)
+[score] locus 0: class scan 5995 pairs over 761 units [0.1s] (phase census)
+[score] locus 0 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.10s (5995 pairs x 761 units), qual spectrum 0.04s (5994 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 47399 total / 447 max
+[score] locus 1: class scan 19110 pairs over 357 units [0.2s] (phase census)
+[score] locus 1 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.16s (19110 pairs x 357 units), qual spectrum 0.14s (19109 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 82299 total / 517 max
+[score] locus 2: class scan 31125 pairs over 550 units [0.4s] (phase census)
+[score] locus 2 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.39s (31125 pairs x 550 units), qual spectrum 0.20s (31124 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 100125 total / 416 max
+[score] locus 3: class scan 15225 pairs over 22870 units [6.3s] (phase census)
+[score] locus 3 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 6.32s (15225 pairs x 22870 units), qual spectrum 0.13s (15224 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 89818 total / 601 max
+[score] locus 4: class scan 16653 pairs over 666 units [0.2s] (phase census)
+[score] locus 4 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.22s (16653 pairs x 666 units), qual spectrum 0.10s (16652 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 74988 total / 425 max
+[score] locus 5: class scan 8385 pairs over 471 units [0.1s] (phase census)
+[score] locus 5 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.09s (8385 pairs x 471 units), qual spectrum 0.05s (8384 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 52195 total / 415 max
+[score] locus 6: class scan 5565 pairs over 1105 units [0.1s] (phase census)
+[score] locus 6 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.12s (5565 pairs x 1105 units), qual spectrum 0.03s (5564 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 42129 total / 483 max
+[score] locus 7: class scan 7750 pairs over 877 units [0.1s] (phase census)
+[score] locus 7 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.13s (7750 pairs x 877 units), qual spectrum 0.23s (7749 entries), bands 0.18s (4 bands x 30996 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 5, fold multiset entries 59756 total / 511 max
+[score] locus 8: class scan 46665 pairs over 382 units [0.4s] (phase census)
+[score] locus 8 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.38s (46665 pairs x 382 units), qual spectrum 0.36s (46664 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 135582 total / 472 max
+[score] locus 9: class scan 99235 pairs over 246224 units [534.0s] (phase census)
+[score] locus 9 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 534.03s (99235 pairs x 246224 units), qual spectrum 9.99s (99234 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 1834020 total / 4297 max
+[score] locus 10: class scan 1326 pairs over 400 units [0.0s] (phase census)
+[score] locus 10 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.01s (1326 pairs x 400 units), qual spectrum 0.01s (1325 entries), bands 0.00s (1 bands x 1325 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 2, fold multiset entries 8967 total / 209 max
+[score] locus 11: class scan 3003 pairs over 391 units [0.0s] (phase census)
+[score] locus 11 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.02s (3003 pairs x 391 units), qual spectrum 0.02s (3002 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 24019 total / 325 max
+[score] locus 12: class scan 9591 pairs over 32268 units [5.8s] (phase census)
+[score] locus 12 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 5.82s (9591 pairs x 32268 units), qual spectrum 0.09s (9590 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 75166 total / 661 max
+[score] locus 13: class scan 11476 pairs over 508 units [0.1s] (phase census)
+[score] locus 13 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.12s (11476 pairs x 508 units), qual spectrum 0.10s (11475 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 69477 total / 503 max
+[score] locus 14: class scan 14535 pairs over 419 units [0.1s] (phase census)
+[score] locus 14 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.13s (14535 pairs x 419 units), qual spectrum 0.12s (14534 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 79250 total / 497 max
+[score] locus 15: class scan 30628 pairs over 811 units [0.5s] (phase census)
+[score] locus 15 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.50s (30628 pairs x 811 units), qual spectrum 0.39s (30627 entries), bands 0.00s (0 bands x 0 entries), degenerate 0.00s, cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 184407 total / 759 max
+
+## the fix legs' phase census (committed form)
+[score] locus 0: class scan 4560 pairs over 761 units [0.1s] (phase census)
+[score] locus 0 phase census: merge 0.00s (26 eq-col pairs, 26 admitted), classes 0.07s (4560 pairs x 761 units), qual spectrum 0.03s (4559 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 41269 total / 447 max
+[score] locus 1: class scan 13695 pairs over 357 units [0.1s] (phase census)
+[score] locus 1 phase census: merge 0.00s (40 eq-col pairs, 40 admitted), classes 0.10s (13695 pairs x 357 units), qual spectrum 0.11s (13694 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 69793 total / 517 max
+[score] locus 2: class scan 22155 pairs over 550 units [0.3s] (phase census)
+[score] locus 2 phase census: merge 0.00s (58 eq-col pairs, 58 admitted), classes 0.28s (22155 pairs x 550 units), qual spectrum 0.15s (22154 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 84390 total / 416 max
+[score] locus 3: class scan 13366 pairs over 22870 units [5.5s] (phase census)
+[score] locus 3 phase census: merge 0.07s (13 eq-col pairs, 11 admitted), classes 5.50s (13366 pairs x 22870 units), qual spectrum 0.12s (13365 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 83949 total / 601 max
+[score] locus 4: class scan 12880 pairs over 666 units [0.2s] (phase census)
+[score] locus 4 phase census: merge 0.00s (30 eq-col pairs, 30 admitted), classes 0.17s (12880 pairs x 666 units), qual spectrum 0.08s (12879 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 65932 total / 425 max
+[score] locus 5: class scan 6670 pairs over 471 units [0.1s] (phase census)
+[score] locus 5 phase census: merge 0.00s (18 eq-col pairs, 18 admitted), classes 0.06s (6670 pairs x 471 units), qual spectrum 0.04s (6669 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 46545 total / 415 max
+[score] locus 6: class scan 3240 pairs over 1105 units [0.1s] (phase census)
+[score] locus 6 phase census: merge 0.00s (67 eq-col pairs, 67 admitted), classes 0.06s (3240 pairs x 1105 units), qual spectrum 0.02s (3239 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 32098 total / 483 max
+[score] locus 7: class scan 6555 pairs over 877 units [0.1s] (phase census)
+[score] locus 7 phase census: merge 0.00s (20 eq-col pairs, 13 admitted), classes 0.11s (6555 pairs x 877 units), qual spectrum 0.05s (6554 entries), tie certificate 0.00s (2 lists x 8 predicate entries), cluster 0.00s, best-outside 0.00s, called 3, fold multiset entries 54868 total / 511 max
+[score] locus 8: class scan 43071 pairs over 382 units [0.3s] (phase census)
+[score] locus 8 phase census: merge 0.00s (15 eq-col pairs, 15 admitted), classes 0.35s (43071 pairs x 382 units), qual spectrum 0.33s (43070 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 130203 total / 472 max
+[score] locus 9: class scan 96580 pairs over 246224 units [524.4s] (phase census)
+[score] locus 9 phase census: merge 1.72s (7 eq-col pairs, 6 admitted), classes 524.38s (96580 pairs x 246224 units), qual spectrum 9.71s (96579 entries), tie certificate 0.04s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 1809065 total / 4297 max
+[score] locus 10: class scan 946 pairs over 400 units [0.0s] (phase census)
+[score] locus 10 phase census: merge 0.00s (11 eq-col pairs, 11 admitted), classes 0.01s (946 pairs x 400 units), qual spectrum 0.00s (945 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 7541 total / 209 max
+[score] locus 11: class scan 2346 pairs over 391 units [0.0s] (phase census)
+[score] locus 11 phase census: merge 0.00s (24 eq-col pairs, 24 admitted), classes 0.02s (2346 pairs x 391 units), qual spectrum 0.01s (2345 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 21240 total / 325 max
+[score] locus 12: class scan 8911 pairs over 32268 units [5.4s] (phase census)
+[score] locus 12 phase census: merge 0.05s (5 eq-col pairs, 5 admitted), classes 5.37s (8911 pairs x 32268 units), qual spectrum 0.09s (8910 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 72421 total / 661 max
+[score] locus 13: class scan 10296 pairs over 508 units [0.1s] (phase census)
+[score] locus 13 phase census: merge 0.00s (12 eq-col pairs, 12 admitted), classes 0.11s (10296 pairs x 508 units), qual spectrum 0.09s (10295 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 65815 total / 503 max
+[score] locus 14: class scan 12561 pairs over 419 units [0.1s] (phase census)
+[score] locus 14 phase census: merge 0.00s (18 eq-col pairs, 17 admitted), classes 0.11s (12561 pairs x 419 units), qual spectrum 0.10s (12560 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 73774 total / 497 max
+[score] locus 15: class scan 22791 pairs over 811 units [0.4s] (phase census)
+[score] locus 15 phase census: merge 0.01s (165 eq-col pairs, 165 admitted), classes 0.38s (22791 pairs x 811 units), qual spectrum 0.30s (22790 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 159003 total / 759 max
+
+## the fix legs' phase census (pre-merge form)
+[score] locus 0: class scan 5995 pairs over 761 units [0.1s] (phase census)
+[score] locus 0 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.10s (5995 pairs x 761 units), qual spectrum 0.04s (5994 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 47399 total / 447 max
+[score] locus 1: class scan 19110 pairs over 357 units [0.1s] (phase census)
+[score] locus 1 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.15s (19110 pairs x 357 units), qual spectrum 0.14s (19109 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 82299 total / 517 max
+[score] locus 2: class scan 31125 pairs over 550 units [0.3s] (phase census)
+[score] locus 2 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.32s (31125 pairs x 550 units), qual spectrum 0.20s (31124 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 100125 total / 416 max
+[score] locus 3: class scan 15225 pairs over 22870 units [5.4s] (phase census)
+[score] locus 3 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 5.38s (15225 pairs x 22870 units), qual spectrum 0.11s (15224 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 89818 total / 601 max
+[score] locus 4: class scan 16653 pairs over 666 units [0.2s] (phase census)
+[score] locus 4 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.19s (16653 pairs x 666 units), qual spectrum 0.09s (16652 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 74988 total / 425 max
+[score] locus 5: class scan 8385 pairs over 471 units [0.1s] (phase census)
+[score] locus 5 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.08s (8385 pairs x 471 units), qual spectrum 0.05s (8384 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 52195 total / 415 max
+[score] locus 6: class scan 5565 pairs over 1105 units [0.1s] (phase census)
+[score] locus 6 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.12s (5565 pairs x 1105 units), qual spectrum 0.03s (5564 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 42129 total / 483 max
+[score] locus 7: class scan 7750 pairs over 877 units [0.1s] (phase census)
+[score] locus 7 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.11s (7750 pairs x 877 units), qual spectrum 0.05s (7749 entries), tie certificate 0.00s (4 lists x 32 predicate entries), cluster 0.00s, best-outside 0.00s, called 5, fold multiset entries 59756 total / 511 max
+[score] locus 8: class scan 46665 pairs over 382 units [0.3s] (phase census)
+[score] locus 8 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.32s (46665 pairs x 382 units), qual spectrum 0.29s (46664 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 135582 total / 472 max
+[score] locus 9: class scan 99235 pairs over 246224 units [536.3s] (phase census)
+[score] locus 9 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 536.28s (99235 pairs x 246224 units), qual spectrum 9.76s (99234 entries), tie certificate 0.04s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 1834020 total / 4297 max
+[score] locus 10: class scan 1326 pairs over 400 units [0.0s] (phase census)
+[score] locus 10 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.02s (1326 pairs x 400 units), qual spectrum 0.01s (1325 entries), tie certificate 0.00s (1 lists x 1274 predicate entries), cluster 0.00s, best-outside 0.00s, called 2, fold multiset entries 8967 total / 209 max
+[score] locus 11: class scan 3003 pairs over 391 units [0.0s] (phase census)
+[score] locus 11 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.03s (3003 pairs x 391 units), qual spectrum 0.02s (3002 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 24019 total / 325 max
+[score] locus 12: class scan 9591 pairs over 32268 units [5.9s] (phase census)
+[score] locus 12 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 5.88s (9591 pairs x 32268 units), qual spectrum 0.09s (9590 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 75166 total / 661 max
+[score] locus 13: class scan 11476 pairs over 508 units [0.1s] (phase census)
+[score] locus 13 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.12s (11476 pairs x 508 units), qual spectrum 0.10s (11475 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 69477 total / 503 max
+[score] locus 14: class scan 14535 pairs over 419 units [0.1s] (phase census)
+[score] locus 14 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.13s (14535 pairs x 419 units), qual spectrum 0.12s (14534 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 79250 total / 497 max
+[score] locus 15: class scan 30628 pairs over 811 units [0.5s] (phase census)
+[score] locus 15 phase census: merge 0.00s (0 eq-col pairs, 0 admitted), classes 0.51s (30628 pairs x 811 units), qual spectrum 0.39s (30627 entries), tie certificate 0.00s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 184407 total / 759 max
+
+## the answer-digest gates (sha256, byte-identity)
+- committed form, base vs fix (all 16 loci):
+    calls_sha256 c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34 34860 bytes
+    truthqv_sha256 c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1 35870 bytes
+    calls_sha256 c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34 34860 bytes
+    truthqv_sha256 c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1 35870 bytes
+    -> IDENTICAL (calls + truth-qv)
+- pre-merge form, before vs fix (all 16 loci):
+    calls_sha256 34e05ac5bdeded875eba37be47e2c757af736c593766f2e6f701c13990a3d364 34319 bytes
+    truthqv_sha256 1101b4eb5f8c96ef0447529aa5df90828faf9c8648f942febc10f8df1c1e3ade 34112 bytes
+    calls_sha256 34e05ac5bdeded875eba37be47e2c757af736c593766f2e6f701c13990a3d364 34319 bytes
+    truthqv_sha256 1101b4eb5f8c96ef0447529aa5df90828faf9c8648f942febc10f8df1c1e3ade 34112 bytes
+    -> IDENTICAL (calls + truth-qv)
+- instrumentation neutrality, base vs instr (l9 + all 16): calls_sha256 c32c50e7041c34d1a4df0a07a4263c1c860aa1d04e99621b493cf8ea6bca4bb2 identical; all-16 c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34 identical
+
+## the fold-set digest gates
+- committed form: base (offline-mirror) vs fix (in-process) 16/16 IDENTICAL
+    (no diff lines above = identical)
+- L1 (the standard target): base vs fix 19/19 IDENTICAL (calls 3ca9648c2211ade176ab0f2ddf394331d1b0559206a6cead315df30bfb013cfa; truth-qv 1c3dc4e1297194d78293ae0109d8341f30806a522951f16cbc14ec1776a0fcff; fold digests e.g. locus 0 f8a69b7e3055fd0f / 184 folds)
+
+## the walls
+- base-all: # wall_s 1114 exit 0
+- instr-all: # wall_s 1045 exit 0
+- instr-premerge-all: # wall_s 1050 exit 0
+- fix-all: # wall_s 1044 exit 0
+- fix-premerge-all: # wall_s 1060 exit 0
+- l7 pre-merge locus wall: 0.589s (before) -> 0.343s (after); qual_seconds 0.234 -> 0.052
+
+## THE DISK RECEIPT (the stream doctrine's first full customer)
+- HARD WORKDIR BUDGET 150G per runner, checked before every stage (budget.log, fail-closed): peak scratch
+  T09724 18G + L1 7.2G = 25.2G total (~17% of ONE runner's budget, ~8% of the pair's) - the budget never approached.
+- RECEIPTS AT WRITE TIME: every stage's .wall/.exit/.rss + the calls' phase-census/digest receipt lines computed as
+  they ran; the per-locus phase censuses and fold-set digests embedded above are the receipts; no raw dump was banked
+  (the instrument receipts of each call leg - the report/ingredients streams - died with the scratch at the reap).
+- TRANSIENTS REAPED IN-PASS: extract.raw.fa (the AGC extraction), the rvcut census/cache (the restriction basis),
+  the cut-reads.fasta (reaped the moment cutA - its consumer - completed).
+- NAMED EXCEPTIONS (rule 6): the cutA census/cache + reads + substrate (consumer: the call legs; budget: the 150G
+  guard; reap: the runners' terminal state, executed at this increment's close).
+- THE REAP (mine first - the receipts were committed to the repo BEFORE the deletion): scratch 18G + 7.2G and both
+  keep dirs (116K + 40K, their receipt .txt files folded into docs/syng-gmem-bwt/mergefix-receipts/) deleted;
+  df /mnt/nvme2n1 12T used / 2.1T avail before and after (the 25G is inside the rounding).
+- WHAT RIDES FORWARD: this receipts file + the ten verbatim call receipt .txt files in mergefix-receipts/
+  (~160K) + the two committed runners - everything else is re-derivable by the runners from the surviving
+  panel assets (the global syng/AGC, the HG002 BAM, the projection shards, the kept tranche-2 member smalls,
+  the generic-sampling L1 source).
