@@ -3744,3 +3744,227 @@ receipt). THE RESUME POINT IS CLEARED — no unrun gate targets remain;
 the binary `target-frontier/release/impg` is the fix build; the build
 env (the clean PATH + LIBCLANG_PATH) is REQUIRED for any rebuild on
 this box until the NFS store returns. NO PR PUSH (the owner pushes).
+
+### 10.6.23 FRONTIER 2 CONCRETIZED — THE PANEL-SIDE PER-LOCUS PRECOMPUTE'S EXACT CONTRACT (the §10.6.21 design made implementable BEFORE the code: every sample-independent artifact named with its pure-function receipt, the panel asset's new section format, the per-sample read-vs-compute split, the exactness argument the gates will prove, the slices and their byte bars — the implementation's own contract, committed as its own commit ahead of it)
+
+**THE DOCTRINE, RESTATED AS A CONTRACT.** §10.6.21's Frontier-2 design
+says the panel asset should precompute everything sample-independent
+once per panel so the per-sample call approaches LOOKUP + ARITHMETIC.
+This section makes that exact: what is served, in what format, what a
+per-sample call reads versus computes, why the served structures
+reproduce the live derivation's bits, and which slices the gated
+increment lands in which order. The correctness bar is §10.6.21's
+own: a precomputed structure that cannot pass its byte gate is not
+served; the proof instruments are the in-process `IMPG_FOLD_SET_DIGEST`
+(the fold-set bit-identity gate) and the answer digests
+(calls.jsonl + truth-qv sha256) at the standard targets.
+
+**THE SAMPLE-INDEPENDENCE INVENTORY.** The call's per-territory work
+decomposes into panel-knowable structure (a pure function of the
+panel + the partition maps + the call's panel-side options — NO
+census record, no read, no quality byte enters it) and sample
+evidence (everything the census and the FASTQ feed). The inventory,
+each artifact with the receipt that says it is panel-knowable:
+
+- **A1 THE ROW CONTEXT** (the `RowStore`'s deduplicated rows — the
+  rows/context class, 13.4 s median per call run, a serial
+  mass-invariant class): per distinct member row `(path, start, end)`
+  the stored path walk, the canonical-scheme walk with its frame
+  tags, and the row's members/partition indices. PURE FUNCTION of
+  (panel, routes sources, partition maps, k, the stored-frame
+  convention) — `RowStore::ensure_partition` reads nothing else; the
+  row build's per-step sequence verification is the builder's own
+  exactness discipline. The ROW SEQUENCES are not served (see the
+  format below).
+- **A2 THE FOLD LAYOUTS** (the per-window fold space — the per-locus
+  fixed floor's fold-build share, 8.3 core-s over 25 loci at
+  L1-class, §10.6.18): per window, the ordered fold grouping of the
+  partition's member rows by `(sequence, contained relative walk)`
+  with the representative row per fold. PURE FUNCTION of (A1, the
+  window's member list, the component, the window's axis extents) —
+  the grouping closure inside `compute_locus` reads nothing else; the
+  flank-overlap and masking filters are applied AT FOLD CONSTRUCTION
+  in the live path (the commute argument below is what lets them be
+  serve-time instead).
+- **A3 THE TERRITORY IMAGES + THE AXIS-NODE ATTRIBUTION**: per fold
+  the window's own territory image; the per-window attribution
+  tables (node → (first window's axis row, window count)). PURE
+  FUNCTIONS of (A2, the panel's stored walks over every axis row) —
+  the rule-8/9 machinery reads nothing sample-side. **NOT SERVED**:
+  recomputed by the same extracted function in both paths (the
+  territory build is O(folds × walk) — sub-millisecond at the deep
+  monster; the attribution walk is an inputs-phase panel walk over
+  the component extent, once per call, unchanged in both paths).
+  Serving them would buy nothing and add a second spelling of the
+  rule — the one-spelling doctrine refuses it.
+- **A4 THE BIND SCAFFOLDING + THE RECORDS' CANONICAL WALKS + THE PIN
+  SKELETONS — THE HONEST BOUNDARY, NAMED**: the bind phase (7.2 s
+  median, 507 s tail — census-record-bound, the tranche receipts)
+  re-derives each census record's key shape against
+  `canonical_steps_near(path, position)` — a pure function of
+  (panel, position), but the POSITION SET IS THE CENSUS'S OWN
+  (sample evidence; the L2-17 census-side lesson). The pin skeleton
+  per (record, fold) is likewise record-keyed. These are
+  CONTENT-KEYED CACHE territory (§10.6.21's own statement), valuable
+  in the FLEET form where record content recurs across territories
+  and samples — **SLICE 2, NOT THIS INCREMENT**; this increment's
+  design names them and prices them, never claims them.
+- **WHAT IS HONESTLY NOT PRECOMPUTABLE, RESTATED**: the class-scan
+  scaffolding (the ll matrix and row classes are sample evidence),
+  the alignment-connected merge's safety property (the pocket-mass
+  refusal reads OBSERVED read mass), the units, the scoring, the
+  QUAL, the emission. The panel load itself (244 s median inputs)
+  is the FLEET FORM'S fork-after-load COW class (§10.6.9) — the
+  precompute does not touch it.
+
+**THE ASSET FORMAT — the panel asset's new section.** The asset is a
+directory beside the window maps — `<partition-graphs>/panel-precompute-loci/`
+(one asset per territory's locality-graphs directory, keyed to the
+component by its manifest; auto-discovered by the call at
+`options.partition_graphs`):
+
+- **`manifest.json` — THE CONTENT KEYS, never filenames** (the
+  vendor-pointer-drift class is the cautionary receipt): the panel
+  identity object (`PanelIdentity`, the syng's own content
+  checksums); `maps_digest` — FNV-1a over every `*.gfa.map.json`
+  file's bytes in sorted name order; `routes_digest` — FNV-1a over
+  the routes `graph.json` bytes; the component (the panel-frame
+  name); the frame statement (`local` | `global` + the record
+  origin); the stored-frame convention; k; and the shape counters
+  (windows, rows, folds) for serve-time validation.
+- **`rows.bin` — A1**: the deduplicated row table, exact-width
+  little-endian integers (u64 bp, i32 signed node, u8 frame),
+  length-prefixed vectors, no floats anywhere in the asset (nothing
+  to round): per row the path name, start, end, the row's
+  **sequence FNV-64 content key** (never the sequence bytes), the
+  stored walk, the canonical-scheme walk, the frame tags, and the
+  row's `(partition, member_index)` pairs.
+- **`windows.bin` — A2**: per window (in the axis-row order the call
+  itself derives), the fold grouping: per fold the representative
+  row id, and per member the fold id — the member lists themselves
+  are NOT stored (the call reads the partition maps live; the asset
+  stores the GROUPING, which is the pure function, and the call's
+  own member list supplies the rows).
+
+**THE SEQUENCES STAY IN THE SOURCES — the design's own fetch-by-
+coordinate answer.** The row sequences are fetched LIVE by the
+served call through the same validated `fetch_seq` path (the AGC is
+the panel asset's native form, §10.6.13), only for the scored
+windows' representative rows; the asset carries each row's sequence
+FNV-64, verified against the fetched bytes at serve time. This is
+the drift detector that never hashes the whole AGC: a changed
+source under an unchanged syng is caught at exactly the rows whose
+bytes the call consumes, loudly (a FNV mismatch is a hard error,
+never a silent divergence). The honest residual: a source drift
+that changes only a NON-representative row's bytes could change the
+GROUPING the asset recorded without changing any served sequence —
+that class is bounded by the manifest's panel-identity + maps +
+routes keys (a source drift with a stable syng and stable graph),
+is caught by the fold-set digest instrument at gate time, and is
+named here rather than hidden.
+
+**THE READ-VS-COMPUTE SPLIT (the per-sample call under serve).**
+READS: the manifest (content-key check), the rows table, its scored
+windows' fold groupings; fetches the representative rows' sequences
+live (FNV-verified); DERIVES per fold the contained walk, the
+node-position table, and the node/edge multisets — through the SAME
+extracted helper the live build uses (the one-spelling guarantee;
+O(L) + two O(L log L) sorts per fold, the sub-millisecond class);
+COMPUTES live everything census-side verbatim: the census read, the
+bind, the variants, the territory images (A3, same function), the
+units, the pin skeletons, the scoring, the merge, the class scan, the
+QUAL, the emission. The masking filters (--exclude-paths,
+--flank-overlap) are SERVE-TIME predicates applied over the live
+member list — the commute argument below is why that is exact.
+
+**THE EXACTNESS ARGUMENT, IN FIVE CLAUSES.**
+(a) **THE BUILDER IS THE LIVE DERIVATION**: the precompute step runs
+the same extracted functions the live path runs (`ensure_partition`
+for the row context, the extracted fold-layout grouping for the
+windows) — the asset is their output, serialized; there is no second
+spelling of either derivation anywhere.
+(b) **THE SERIALIZATION IS LOSSLESS**: every asset field is an
+exact-width integer, a byte, or a string; the asset carries no
+float, so serve reconstructs bit-identical structures by
+construction.
+(c) **THE MASKING COMMUTE LEMMA**: the live path applies the
+flank/exclude filters as per-member predicates BEFORE the grouping,
+so its fold order is first-appearance-among-SURVIVORS; the grouping
+key is the content pair (sequence, contained relative walk); a
+fold's content (walk, node positions, multisets, length) is a
+function of that key alone — REPRESENTATIVE-INDEPENDENT (equal
+sequences give equal length; equal relative walks give equal node
+positions and multisets) — so the served call, iterating the live
+member list in order, applying the same predicates, and grouping by
+the asset's fold ids, reproduces the live fold order, membership,
+content, and the excluded/flank counts exactly. Unit-proven on
+randomized fixtures (below).
+(d) **THE CONTENT KEYS BIND THE ASSET TO THE LIVE INPUTS**: panel
+identity, maps digest, routes digest, component, frame, convention
+— any mismatch is a LOUD LIVE-PATH FALLBACK (the routes-inventory
+precedent: skip loudly, never serve stale structure, never fail a
+call because a panel-side asset is stale); the per-row sequence FNV
+catches source drift at the served bytes.
+(e) **THE PROOF INSTRUMENTS**: `IMPG_FOLD_SET_DIGEST` (the
+in-process FNV-1a over the FINAL post-merge fold space's ordered
+identities) and the answer digests — the gates compare precompute-on
+against precompute-off against the committed receipts, all three
+identical.
+
+**THE TOGGLE (the labeled-toggle precedent).** `IMPG_PANEL_PRECOMPUTE`
+— unset: serve when the asset is present and every content key
+matches (the product default; panel-prep builds it, call-region's
+serial and fleet paths read it through the engine's own discovery);
+`off`: the live path VERBATIM (the measurement restore path, the
+`IMPG_CLASS_SCAN_MEMO=off` precedent); `on`: serve REQUIRED — an
+absent or mismatched asset is a LOUD ERROR (the gate form; never a
+silent live fallback); any other value: a loud error. The serve
+changes NO emitted byte (the answer gates are its proof), so no
+model-string label is warranted — the memoization precedent; the
+serve states itself on stderr (the phase lines say what was served
+and what key matched).
+
+**THE ONCE-PER-PANEL PRICE, HONESTLY RECEIPTED.** The precompute
+step costs one row-context build + one fold-grouping walk per
+territory (the same work the live rows phase + fold builds do, minus
+nothing) — a PANEL-SIDE price paid at panel-prep, never per sample;
+the receipt discipline: the step's wall is stated beside the asset
+it builds, and the per-sample gates receipt the SAVED classes, so a
+quiet migration of the price back into the call path would show as
+a rows/context phase that did not shrink. The asset's DISK price is
+receipted at the gate territories (walks and frames only, never
+sequences) and the genome-scale projection is stated as a
+projection.
+
+**THE SLICES AND THEIR GATES.** SLICE 1 (this increment): the row
+context (A1) + the fold layouts (A2) + the territory/attribution
+one-spelling extraction (A3) — the rows/context class and the
+per-locus fold-build share of the floor. GATES: L1 (the five-locality
+chain's committed substrate, all loci, serial, the memo receipts'
+own form) and T09724 (the fold-heavy tranche-2 member, all 16 loci,
+the committed global-frame callC form): calls.jsonl AND truth-qv
+sha256 BYTE-IDENTICAL to the committed receipts; fold-set digests
+identical at every locus; `IMPG_PANEL_PRECOMPUTE=off` reproduces the
+same bytes (the toggle-restore gate); the precompute step's own wall
+receipted at both. TIMING: the fixed classes before/after at both
+targets (binding UNCHANGED — receipted as unchanged, it is slice
+2's class; rows/context before/after; the per-locus fold-build
+before/after; the per-locus median before/after at the 0.50 s-class
+baseline), the 16-core arithmetic restated with the measured (never
+projected) numbers, the corpus budget refreshed. SLICE 2 (the named
+remainder): the content-keyed bind scaffolding (the records'
+canonical walks — the fleet form's cross-territory amortization of
+the bind class). SLICE 3: the pin-skeleton content-keyed cache.
+Slice 1's honest ceiling is §10.6.21's own statement: the floor's
+fold-build + rows/context shares, never the bind, never the census,
+never the scan.
+
+**THE UNIT BARS (the cargo gate).** Randomized fixtures over the
+extracted pure functions: the asset round-trip is lossless (built
+structures == served structures field for field); the serve ==
+live-built fold layouts on randomized member lists INCLUDING the
+masked forms (order, membership, content, counts); the
+representative-independence clause on randomized groups; the
+sequence-FNV drift detector (a mutated byte is a loud error, never
+a served structure). cargo test --release --lib green at the
+committed count + the new tests.
