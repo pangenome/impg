@@ -2131,6 +2131,165 @@ fn build_window_folds_live(
 }
 
 // ---------------------------------------------------------------------------
+// (THE BIND SCAFFOLDING, SS10.6.25 slice 2 — the canonical-scheme step
+// derivation over one panel range, ONE SPELLING: the bind's former
+// `canonical_steps_near` closure extracted VERBATIM with the window
+// bounds as parameters, so the live center call, the precompute
+// builder, and the serve's uncovered-position fallback all run THE
+// SAME code — no second spelling of the derivation exists anywhere.
+// The step value at a position P is a function of the panel's stored
+// walk entry at P, the path bytes in [P-(w-1), P+(w-1)+syncmer_len)
+// clamped to the path (the reverse-strand syncmer window's own k-mer
+// span; the canonical orientation check is local), and the panel
+// dictionary — the LOCALITY LEMMA the serve's served band is derived
+// from, every constant the syncmer window's own parameter, never
+// tuned.)
+// ---------------------------------------------------------------------------
+
+/// The canonical-scheme territory steps over one panel range
+/// `[lo, hi)` — `canonical_steps_near(path, around)` verbatim for
+/// `lo = around-150`, `hi = around+150` (the live bind's own window;
+/// the extraction is code motion and the answer gates are its
+/// proof). The forward map is the panel's own stored walk slice; the
+/// reverse map is the reverse-complement view's matched syncmers,
+/// mapped back to forward positions; each position chooses its frame
+/// by the canonical orientation rule.
+fn canonical_steps_over_range(
+    panel: &SyngIndex,
+    fetch_seq: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    k: u64,
+    path: usize,
+    lo: u64,
+    hi: u64,
+) -> io::Result<Vec<(u64, i32)>> {
+    let forward: Vec<(u64, i32)> = panel
+        .walk_path_range(path, lo, hi)?
+        .into_iter()
+        .map(|(node, bp)| (bp, node))
+        .collect();
+    let seq_lo = lo.saturating_sub(k);
+    let seq_hi = hi + k;
+    let seq = fetch_seq(&panel.name_map.path_to_name[path], seq_lo, seq_hi)?;
+    let rc_seq = revcomp(&seq);
+    let reverse: Vec<(u64, i32)> =
+        crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
+            .into_iter()
+            .map(|(signed, q)| {
+                (
+                    seq_lo + seq.len() as u64 - k - q,
+                    -signed,
+                )
+            })
+            .collect();
+    let forward_map: BTreeMap<u64, i32> = forward.into_iter().collect();
+    let reverse_map: BTreeMap<u64, i32> = reverse.into_iter().collect();
+    let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
+    positions.extend(reverse_map.keys().copied());
+    let mut steps = Vec::with_capacity(positions.len());
+    for bp in positions {
+        let rel = (bp - seq_lo) as usize;
+        let canonical_forward = seq
+            .get(rel..rel + k as usize)
+            .map(|window| {
+                crate::genome_inference::mem_records::window_is_canonical_forward(window)
+            })
+            .unwrap_or(false);
+        let chosen = if canonical_forward {
+            forward_map.get(&bp)
+        } else {
+            reverse_map.get(&bp)
+        };
+        if let Some(&node) = chosen {
+            steps.push((bp, node));
+        }
+    }
+    Ok(steps)
+}
+
+/// THE SERVED BAND of one derivation range `[lo, hi)` (the locality
+/// lemma's own predicate, every constant derived from the syncmer
+/// window's parameters: `reach` = w-1, `syncmer_len` = w+smer): the
+/// position's decision context — the path bytes
+/// `[P-reach, P+reach+syncmer_len)` clamped to the path — must lie
+/// inside the range's fetch `[lo-syncmer_len, hi+syncmer_len)` (the
+/// walk-slice clause `P in [lo,hi)` is checked by the caller), and at
+/// the path's end the clamped context is served when the range's
+/// fetch reaches the path end (the clamped-context clause — the last
+/// syncmer window of a path truncates identically in both
+/// derivations).
+fn bind_range_covers(
+    lo: u64,
+    hi: u64,
+    position: u64,
+    path_len: u64,
+    reach: u64,
+    syncmer_len: u64,
+) -> bool {
+    position >= lo
+        && position < hi
+        && (position + reach <= hi
+            || (position + reach + syncmer_len >= path_len
+                && path_len <= hi + syncmer_len))
+}
+
+/// THE BIND SCAFFOLDING BUILDER (SS10.6.25 slice 2 — the once-per-panel
+/// price): per panel path, the member-row extents (the maps' own rows —
+/// the panel-knowable coordinate set; the census's positions are
+/// sample-side, A4's own statement) merged when they sit within the
+/// syncmer window's own reach, each merged extent `[s,e)` derived over
+/// `[s, e+reach)` so the served band covers the extent exactly —
+/// through the SAME `canonical_steps_over_range` the live bind runs
+/// (the builder IS the live derivation, the one-spelling guarantee).
+#[allow(clippy::too_many_arguments)]
+fn build_bind_scaffold(
+    panel: &SyngIndex,
+    fetch_seq: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    k: u64,
+    member_rows: impl Iterator<Item = (usize, u64, u64)>,
+) -> io::Result<Vec<BindScaffoldPathAsset>> {
+    let reach = panel.params.w as u64 - 1;
+    let mut by_path: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
+    for (path, start, end) in member_rows {
+        let path_len = panel.name_map.path_to_length[path];
+        by_path
+            .entry(path)
+            .or_default()
+            .push((start, end.min(path_len)));
+    }
+    let mut paths: Vec<BindScaffoldPathAsset> = Vec::with_capacity(by_path.len());
+    for (path, mut extents) in by_path {
+        extents.sort_unstable();
+        // Merge the extents the window's own reach apart (contiguous
+        // coverage without gaps), then derive over `[s, e+reach)` so
+        // the served band `[s, e+reach)` with `P+reach <= hi` covers
+        // the extent exactly.
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (start, end) in extents {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 + reach => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        let ranges: Vec<(u64, u64)> = merged
+            .iter()
+            .map(|&(start, end)| (start, end + reach))
+            .collect();
+        let mut steps: Vec<(u64, i32)> = Vec::new();
+        for &(lo, hi) in &ranges {
+            steps.extend(canonical_steps_over_range(
+                panel, fetch_seq, k, path, lo, hi,
+            )?);
+        }
+        steps.sort_unstable_by_key(|&(bp, _)| bp);
+        paths.push(BindScaffoldPathAsset {
+            path_name: panel.name_map.path_to_name[path].clone(),
+            ranges,
+            steps,
+        });
+    }
+    Ok(paths)
+}
+// ---------------------------------------------------------------------------
 // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE ASSET — SS10.6.23 slice 1's
 // panel-side artifact: the row context (the RowStore rows, the
 // sequences replaced by their FNV-64 CONTENT KEY) and the per-window
@@ -2196,6 +2355,35 @@ pub struct PanelPrecomputeManifest {
     windows: u64,
     rows: u64,
     folds: u64,
+    // (SS10.6.25 slice 2 — the bind-scaffolding section's counters,
+    // absent in the slice-1 /1 manifests and defaulted there: the
+    // section is validated against them at load.)
+    #[serde(default)]
+    bind_paths: u64,
+    #[serde(default)]
+    bind_ranges: u64,
+    #[serde(default)]
+    bind_steps: u64,
+}
+
+impl PanelPrecomputeManifest {
+    /// The asset's format string — the reuse check's own key (the
+    /// panel-prep step upgrades a slice-1 /1 asset loudly rather than
+    /// reusing an asset without the bind-scaffolding section).
+    pub fn format_text(&self) -> String {
+        self.format.clone()
+    }
+}
+
+/// One path's bind scaffolding (SS10.6.25 slice 2): the derivation
+/// ranges the builder ran (the served band is derived from them), and
+/// the canonical-scheme steps the derivation returned, sorted by bp —
+/// exact-width integers only, NO FLOATS anywhere.
+#[derive(Clone)]
+struct BindScaffoldPathAsset {
+    path_name: String,
+    ranges: Vec<(u64, u64)>,
+    steps: Vec<(u64, i32)>,
 }
 
 struct PrecomputeRowAsset {
@@ -2222,6 +2410,10 @@ struct PanelPrecomputeAsset {
     manifest: PanelPrecomputeManifest,
     rows: Vec<PrecomputeRowAsset>,
     windows: Vec<PrecomputeWindowAsset>,
+    // (SS10.6.25 slice 2 — None for the slice-1 /1 format: the asset
+    // predates the bind-scaffolding section and the bind derives
+    // live, loudly stated.)
+    bind: Option<Vec<BindScaffoldPathAsset>>,
 }
 
 // (The exact-width little-endian encoding: length-prefixed vectors,
@@ -2405,6 +2597,59 @@ fn decode_windows(buf: &[u8]) -> io::Result<Vec<PrecomputeWindowAsset>> {
     Ok(windows)
 }
 
+// (SS10.6.25 slice 2 — the bind-scaffolding section's exact-width
+// little-endian encoding: length-prefixed vectors, u64 bp / i32
+// signed node / u64 range bounds, NO FLOATS anywhere in the asset,
+// so the round trip is lossless by construction.)
+fn encode_bind_scaffolding(paths: &[BindScaffoldPathAsset]) -> Vec<u8> {
+    let mut w = AssetWriter { buf: Vec::new() };
+    w.u64(paths.len() as u64);
+    for path in paths {
+        w.str(&path.path_name);
+        w.u64(path.ranges.len() as u64);
+        for &(lo, hi) in &path.ranges {
+            w.u64(lo);
+            w.u64(hi);
+        }
+        w.u64(path.steps.len() as u64);
+        for &(bp, node) in &path.steps {
+            w.u64(bp);
+            w.i32(node);
+        }
+    }
+    w.buf
+}
+
+fn decode_bind_scaffolding(buf: &[u8]) -> io::Result<Vec<BindScaffoldPathAsset>> {
+    let mut r = AssetReader::new(buf);
+    let len = r.u64()? as usize;
+    let mut paths = Vec::with_capacity(len);
+    for _ in 0..len {
+        let path_name = r.str()?;
+        let ranges_len = r.u64()? as usize;
+        let mut ranges = Vec::with_capacity(ranges_len);
+        for _ in 0..ranges_len {
+            let lo = r.u64()?;
+            let hi = r.u64()?;
+            ranges.push((lo, hi));
+        }
+        let steps_len = r.u64()? as usize;
+        let mut steps = Vec::with_capacity(steps_len);
+        for _ in 0..steps_len {
+            let bp = r.u64()?;
+            let node = r.i32()?;
+            steps.push((bp, node));
+        }
+        paths.push(BindScaffoldPathAsset {
+            path_name,
+            ranges,
+            steps,
+        });
+    }
+    r.done()?;
+    Ok(paths)
+}
+
 /// The expected manifest keys, computed by the caller from its OWN
 /// live inputs — the serve compares field by field and names the
 /// mismatching key in its error (never a silent divergence, never a
@@ -2425,8 +2670,13 @@ fn load_panel_precompute(
     keys: &PanelPrecomputeKeys,
 ) -> io::Result<PanelPrecomputeAsset> {
     let manifest: PanelPrecomputeManifest = read_json(&dir.join("manifest.json"))?;
+    // (SS10.6.25 slice 2: the slice-1 /1 format still serves the row
+    // context + fold layouts under the default toggle — its bind
+    // derives live, loudly stated; the /2 format adds the
+    // bind-scaffolding section. Any other format string is unknown.)
     ensure(
-        manifest.format == "impg-panel-precompute-loci/1",
+        manifest.format == "impg-panel-precompute-loci/1"
+            || manifest.format == "impg-panel-precompute-loci/2",
         &format!(
             "the panel-precompute asset {} carries an unknown format {:?}",
             dir.display(),
@@ -2502,10 +2752,26 @@ fn load_panel_precompute(
         windows.len() as u64 == manifest.windows,
         "the panel-precompute asset's window count disagrees with its manifest",
     )?;
+    let bind = if manifest.format == "impg-panel-precompute-loci/2" {
+        let bind = decode_bind_scaffolding(&std::fs::read(dir.join("bind-scaffolding.bin"))?)?;
+        let ranges: u64 = bind.iter().map(|path| path.ranges.len() as u64).sum();
+        let steps: u64 = bind.iter().map(|path| path.steps.len() as u64).sum();
+        ensure(
+            bind.len() as u64 == manifest.bind_paths
+                && ranges == manifest.bind_ranges
+                && steps == manifest.bind_steps,
+            "the panel-precompute asset's bind-scaffolding counters disagree \
+             with the section",
+        )?;
+        Some(bind)
+    } else {
+        None
+    };
     Ok(PanelPrecomputeAsset {
         manifest,
         rows,
         windows,
+        bind,
     })
 }
 
@@ -2519,13 +2785,124 @@ enum PanelPrecomputeMode {
 }
 
 /// The serve-side state: the validated window groupings, the rows'
-/// sequence content keys, and the per-row sequence cache (the fetched
+/// sequence content keys, the per-row sequence cache (the fetched
 /// representative-row bytes, FNV-verified against the asset's key on
-/// first touch — the drift detector that never hashes the whole AGC).
+/// first touch — the drift detector that never hashes the whole AGC),
+/// and the bind scaffolding (SS10.6.25 slice 2 — None when the asset
+/// predates the section; the bind then derives live, loudly).
 struct PrecomputeServe {
     windows: Vec<PrecomputeWindowAsset>,
     seq_fnv: Vec<u64>,
     seqs: Mutex<HashMap<usize, Arc<Vec<u8>>>>,
+    bind: Option<BindScaffoldServe>,
+}
+
+/// THE BIND SCAFFOLDING SERVE (SS10.6.25 slice 2): per panel path, the
+/// builder's derivation ranges and the recorded canonical-scheme
+/// steps (sorted by bp), plus the serve's own loud counters — how many
+/// record lookups the asset answered and how many positions fell
+/// back to the live derivation (the census's own positions outside
+/// the panel-knowable coverage; exact by construction — the fallback
+/// IS the committed path). Read-only shared state under the bind's
+/// parallel seam: Sync by construction (immutable maps + atomics).
+struct BindScaffoldServe {
+    by_path: HashMap<usize, BindScaffoldPathServed>,
+    reach: u64,
+    syncmer_len: u64,
+    served: AtomicU64,
+    fallbacks: AtomicU64,
+}
+
+struct BindScaffoldPathServed {
+    ranges: Vec<(u64, u64)>,
+    steps: Vec<(u64, i32)>,
+}
+
+impl BindScaffoldServe {
+    /// Build the serve state from the asset's section: every path name
+    /// resolves against the call's own panel (a name that does not is a
+    /// content-key mismatch, loud); the band constants come from the
+    /// panel's own syncmer parameters (never tuned).
+    fn from_asset(
+        paths: Vec<BindScaffoldPathAsset>,
+        path_of_name: &HashMap<String, usize>,
+        panel: &SyngIndex,
+    ) -> io::Result<Self> {
+        let mut by_path = HashMap::with_capacity(paths.len());
+        for path in paths {
+            let path_idx = *path_of_name
+                .get(&path.path_name)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "the panel-precompute asset's bind scaffolding names a path \
+                         absent from the syng: {:?}",
+                        path.path_name
+                    ))
+                })?;
+            let previous = by_path.insert(
+                path_idx,
+                BindScaffoldPathServed {
+                    ranges: path.ranges,
+                    steps: path.steps,
+                },
+            );
+            ensure(
+                previous.is_none(),
+                "the panel-precompute asset's bind scaffolding names a path twice",
+            )?;
+        }
+        Ok(BindScaffoldServe {
+            by_path,
+            reach: panel.params.w as u64 - 1,
+            syncmer_len: panel.syncmer_length_bp() as u64,
+            served: AtomicU64::new(0),
+            fallbacks: AtomicU64::new(0),
+        })
+    }
+
+    /// The canonical step at (path, position) — `Some(Some(step))`
+    /// when the position lies inside a derivation range's SERVED BAND
+    /// (the recorded step at the position, or its absence — the bind's
+    /// own no-step error fires exactly as the live derivation's
+    /// would); `None` when the position is UNCOVERED (the caller
+    /// derives live, verbatim). The locality lemma is the exactness
+    /// argument: the builder ran the same derivation over a range
+    /// whose fetch contains the position's own decision context, so
+    /// the recorded value is the live center derivation's own bits.
+    fn step_at(&self, path: usize, position: u64, path_len: u64) -> Option<Option<(u64, i32)>> {
+        let served = self
+            .by_path
+            .get(&path)
+            .filter(|served| {
+                served.ranges.iter().any(|&(lo, hi)| {
+                    bind_range_covers(
+                        lo,
+                        hi,
+                        position,
+                        path_len,
+                        self.reach,
+                        self.syncmer_len,
+                    )
+                })
+            })
+            .map(|served| {
+                served
+                    .steps
+                    .binary_search_by_key(&position, |&(bp, _)| bp)
+                    .ok()
+                    .map(|index| served.steps[index])
+            });
+        match served {
+            Some(step) => {
+                self.served.fetch_add(1, Ordering::Relaxed);
+                Some(step)
+            }
+            None => {
+                self.fallbacks.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
 }
 
 impl PrecomputeServe {
@@ -2848,8 +3225,34 @@ pub fn precompute_panel_loci(
         });
     }
     let windows_seconds = windows_started.elapsed().as_secs_f64();
+    // THE BIND SCAFFOLDING (SS10.6.25 slice 2 — the once-per-panel
+    // price's new section): the canonical-scheme steps over the
+    // territory's own member-row extents (the panel-knowable
+    // coordinate set), merged and padded by the syncmer window's own
+    // reach, derived through the SAME `canonical_steps_over_range`
+    // the live bind runs — the builder IS the live derivation.
+    let bind_started = Instant::now();
+    let member_rows: Vec<(usize, u64, u64)> = maps
+        .values()
+        .flat_map(|map| map.members.iter())
+        .map(|row| {
+            let path = *path_of_name
+                .get(&row.path_name)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "the partition maps name a member row absent from the syng: {:?}",
+                        row.path_name
+                    ))
+                })?;
+            Ok((path, row.start, row.end))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let bind_paths = build_bind_scaffold(&panel, &fetch_seq, k, member_rows.into_iter())?;
+    let bind_ranges: u64 = bind_paths.iter().map(|p| p.ranges.len() as u64).sum();
+    let bind_steps: u64 = bind_paths.iter().map(|p| p.steps.len() as u64).sum();
+    let bind_seconds = bind_started.elapsed().as_secs_f64();
     let manifest = PanelPrecomputeManifest {
-        format: "impg-panel-precompute-loci/1".to_string(),
+        format: "impg-panel-precompute-loci/2".to_string(),
         panel: identity,
         k,
         component: panel_component,
@@ -2861,12 +3264,20 @@ pub fn precompute_panel_loci(
         windows: windows.len() as u64,
         rows: rows.len() as u64,
         folds: folds_total,
+        bind_paths: bind_paths.len() as u64,
+        bind_ranges,
+        bind_steps,
     };
     std::fs::create_dir_all(out_dir)?;
     let rows_bytes = encode_rows(&rows);
     let windows_bytes = encode_windows(&windows);
+    let bind_bytes = encode_bind_scaffolding(&bind_paths);
     crate::genome_inference::atomic_write(&out_dir.join("rows.bin"), &rows_bytes)?;
     crate::genome_inference::atomic_write(&out_dir.join("windows.bin"), &windows_bytes)?;
+    crate::genome_inference::atomic_write(
+        &out_dir.join("bind-scaffolding.bin"),
+        &bind_bytes,
+    )?;
     crate::genome_inference::write_json(&out_dir.join("manifest.json"), &manifest)?;
     eprintln!(
         "[precompute] rows: {} distinct rows over {} partitions ({} windows) \
@@ -2880,11 +3291,20 @@ pub fn precompute_panel_loci(
         windows.len(),
     );
     eprintln!(
+        "[precompute] bind scaffolding: {} paths, {} derivation ranges, {} steps \
+         [{bind_seconds:.1}s]",
+        bind_paths.len(),
+        bind_ranges,
+        bind_steps,
+    );
+    eprintln!(
         "[precompute] asset: {} (rows.bin {} bytes, windows.bin {} bytes, \
-         manifest.json; maps digest {:016x}, routes digest {:016x}) [total {:.1}s]",
+         bind-scaffolding.bin {} bytes, manifest.json; maps digest {:016x}, routes digest \
+         {:016x}) [total {:.1}s]",
         out_dir.display(),
         rows_bytes.len(),
         windows_bytes.len(),
+        bind_bytes.len(),
         maps_digest,
         routes_digest,
         started.elapsed().as_secs_f64(),
@@ -6876,56 +7296,213 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         .collect();
     rss.probe("derivation")?;
 
+    // The identity gate (slice D): under IMPG_REALIGN_STORED_WALK_SKELETON
+    // the pin skeleton stays the stored path walk (the slice-B/C
+    // before-record; assessment-side diagnostic for the before/after
+    // pairing). The repair — the canonical-scheme skeleton — is the
+    // default.
+    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
+    let contig = panel_component
+        .splitn(3, '#')
+        .nth(2)
+        .ok_or_else(|| invalid("component lacks a contig suffix"))?
+        .to_string();
+    // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE SERVE, SS10.6.23 slice 1 +
+    // SS10.6.25 slice 2 — the labeled-toggle doctrine:
+    // IMPG_PANEL_PRECOMPUTE unset serves when the asset beside the
+    // partition maps is present and EVERY content key matches the
+    // live inputs; =off restores the live path VERBATIM (the
+    // IMPG_CLASS_SCAN_MEMO=off precedent); =on REQUIRES the serve (an
+    // absent/mismatched asset is a loud error, the gate form —
+    // including the slice-2 bind-scaffolding section: a format-/1
+    // asset predates it and is refused under =on); any other value is
+    // a loud error. A key mismatch under the default is a LOUD
+    // LIVE-PATH FALLBACK (the routes-inventory precedent: never serve
+    // stale structure, never fail a call because a panel-side asset
+    // is stale). The serve changes NO emitted byte — the answer gates
+    // are its proof — so no model label is warranted; it states
+    // itself here and in the phase lines. The discovery sits ABOVE
+    // the bind phase by slice 2's design: the bind scaffolding
+    // serves from this same asset, before the first record binds.)
+    let precompute_dir = options.partition_graphs.join("panel-precompute-loci");
+    let precompute_mode = match std::env::var("IMPG_PANEL_PRECOMPUTE") {
+        Err(_) => PanelPrecomputeMode::Auto,
+        Ok(value) if value == "off" => PanelPrecomputeMode::Off,
+        Ok(value) if value == "on" => PanelPrecomputeMode::On,
+        Ok(other) => {
+            return Err(invalid(&format!(
+                "unknown IMPG_PANEL_PRECOMPUTE {other:?} (off | on)"
+            )))
+        }
+    };
+    let mut served: Option<PrecomputeServe> = None;
+    if !matches!(precompute_mode, PanelPrecomputeMode::Off)
+        && precompute_dir.join("manifest.json").is_file()
+    {
+        let maps_digest = partition_maps_digest(&options.partition_graphs)?;
+        let routes_digest = routes_graph_digest(&options.routes.join("graph.json"))?;
+        let attempt = (|| -> io::Result<()> {
+            let keys = PanelPrecomputeKeys {
+                panel: identity.clone(),
+                k,
+                component: panel_component.clone(),
+                frame: if options.global_frame {
+                    "global".to_string()
+                } else {
+                    "local".to_string()
+                },
+                record_origin: options.record_origin,
+                stored_frame,
+                maps_digest,
+                routes_digest,
+            };
+            let asset = load_panel_precompute(&precompute_dir, &keys)?;
+            ensure(
+                asset.windows.len() == window_partition.len(),
+                &format!(
+                    "the panel-precompute asset carries {} windows against the call's {} \
+                     (the window grid drifted)",
+                    asset.windows.len(),
+                    window_partition.len(),
+                ),
+            )?;
+            // (SS10.6.25 slice 2 — THE BIND SCAFFOLDING SECTION: the
+            // /2 format carries it; a /1 asset serves the row context
+            // + fold layouts only and the bind derives live, loudly.
+            // The =on gate form requires the section — the serve is
+            // never partial without naming it.)
+            let bind = match asset.bind {
+                Some(paths) => {
+                    Some(BindScaffoldServe::from_asset(paths, &path_of_name, panel)?)
+                }
+                None => {
+                    ensure(
+                        !matches!(precompute_mode, PanelPrecomputeMode::On),
+                        "the panel-precompute asset predates the bind-scaffolding section \
+                         (format /1) — rebuild it (IMPG_PANEL_PRECOMPUTE=on requires the \
+                         serve)",
+                    )?;
+                    None
+                }
+            };
+            // The served store, built from the asset rows in the
+            // asset's row order (the builder's own creation order —
+            // window order, member order), with the sequences left
+            // in the sources (fetched live per representative row
+            // at serve time, FNV-verified).
+            for (row_index, row) in asset.rows.iter().enumerate() {
+                let path_idx = *path_of_name
+                    .get(&row.path_name)
+                    .ok_or_else(|| invalid("the asset names a path absent from the syng"))?;
+                ensure(
+                    row.walk.len() == row.frames.len(),
+                    "the asset's walk and frame tags disagree",
+                )?;
+                store.folds.push(RowFold {
+                    path: path_idx,
+                    start: row.start,
+                    end: row.end,
+                    seq: Vec::new(),
+                    walk: row.walk.clone(),
+                    frames: row.frames.clone(),
+                    stored_walk: row.stored_walk.clone(),
+                    members: row.members.clone(),
+                });
+                ensure(
+                    store
+                        .dedup
+                        .insert((path_idx, row.start, row.end), row_index)
+                        .is_none(),
+                    "the asset carries a duplicate row identity",
+                )?;
+            }
+            for (window, asset_window) in asset.windows.iter().enumerate() {
+                ensure(
+                    asset_window.partition == window_partition[window]
+                        && asset_window.axis_start == window_axis[window].0
+                        && asset_window.axis_end == window_axis[window].1,
+                    &format!(
+                        "the panel-precompute asset's window {window} disagrees with the \
+                         live window grid (content keys drifted)",
+                    ),
+                )?;
+                let map = maps
+                    .get(&window_partition[window])
+                    .ok_or_else(|| invalid("axis partition map missing"))?;
+                ensure(
+                    asset_window.member_fold.len() == map.members.len(),
+                    &format!(
+                        "the panel-precompute asset's member-fold map for window {window} \
+                         does not match the partition maps (content keys drifted)",
+                    ),
+                )?;
+            }
+            served = Some(PrecomputeServe {
+                windows: asset.windows,
+                seq_fnv: asset.rows.iter().map(|row| row.seq_fnv).collect(),
+                seqs: Mutex::new(HashMap::new()),
+                bind,
+            });
+            Ok(())
+        })();
+        match attempt {
+            Ok(()) => {
+                let bind_state = match served.as_ref().and_then(|s| s.bind.as_ref()) {
+                    Some(bind) => format!(
+                        "; bind scaffolding: {} paths, {} ranges, {} steps",
+                        bind.by_path.len(),
+                        bind.by_path.values().map(|p| p.ranges.len()).sum::<usize>(),
+                        bind.by_path.values().map(|p| p.steps.len()).sum::<usize>(),
+                    ),
+                    None => "; the bind-scaffolding section is absent — the bind derives \
+                           live"
+                        .to_string(),
+                };
+                eprintln!(
+                    "[score] panel-precompute: SERVING the row context + fold layouts \
+                     from {} ({} rows, {} windows, {} folds; panel identity, maps digest \
+                     {:016x}, routes digest {:016x}){bind_state}",
+                    precompute_dir.display(),
+                    served.as_ref().map(|s| s.seq_fnv.len()).unwrap_or(0),
+                    served.as_ref().map(|s| s.windows.len()).unwrap_or(0),
+                    served
+                        .as_ref()
+                        .map(|s| s.windows.iter().map(|w| w.fold_rep.len()).sum::<usize>())
+                        .unwrap_or(0),
+                    maps_digest,
+                    routes_digest,
+                );
+            }
+            Err(e) if matches!(precompute_mode, PanelPrecomputeMode::On) => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "[score] panel-precompute: NOT SERVED — {e}; the LIVE path runs \
+                     (rebuild the asset or remove it; never a silent stale serve)",
+                );
+                store.folds.clear();
+                store.dedup.clear();
+                served = None;
+            }
+        }
+    }
+
     // The routing's own canonical-scheme territory steps around one
     // panel position (ported from build_territory_index_rows, slice
     // A's binding lesson: the census occurrence starts live in THIS
-    // convention, not the stored path walk's single frame).
-    let canonical_steps_near = |path: usize, around: u64| -> io::Result<Vec<(u64, i32)>> {
-        let lo = around.saturating_sub(150);
-        let hi = around + 150;
-        let forward: Vec<(u64, i32)> = panel
-            .walk_path_range(path, lo, hi)?
-            .into_iter()
-            .map(|(node, bp)| (bp, node))
-            .collect();
-        let seq_lo = lo.saturating_sub(k);
-        let seq_hi = hi + k;
-        let seq = fetch_seq(&panel.name_map.path_to_name[path], seq_lo, seq_hi)?;
-        let rc_seq = revcomp(&seq);
-        let reverse: Vec<(u64, i32)> =
-            crate::genome_inference::mem_records::raw_matched_syncmers(&panel, &rc_seq)?
-                .into_iter()
-                .map(|(signed, q)| {
-                    (
-                        seq_lo + seq.len() as u64 - k - q,
-                        -signed,
-                    )
-                })
-                .collect();
-        let forward_map: BTreeMap<u64, i32> = forward.into_iter().collect();
-        let reverse_map: BTreeMap<u64, i32> = reverse.into_iter().collect();
-        let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
-        positions.extend(reverse_map.keys().copied());
-        let mut steps = Vec::with_capacity(positions.len());
-        for bp in positions {
-            let rel = (bp - seq_lo) as usize;
-            let canonical_forward = seq
-                .get(rel..rel + k as usize)
-                .map(|window| {
-                    crate::genome_inference::mem_records::window_is_canonical_forward(window)
-                })
-                .unwrap_or(false);
-            let chosen = if canonical_forward {
-                forward_map.get(&bp)
-            } else {
-                reverse_map.get(&bp)
-            };
-            if let Some(&node) = chosen {
-                steps.push((bp, node));
-            }
-        }
-        Ok(steps)
-    };
+    // convention, not the stored path walk's single frame) — extracted
+    // VERBATIM into the one-spelling `canonical_steps_over_range`
+    // (SS10.6.25 slice 2), so the live bind, the precompute builder,
+    // and the serve's uncovered-position fallback all run THE SAME
+    // code. THE BIND SCAFFOLDING SERVE: the scaffold (from the panel
+    // asset's bind-scaffolding section, when it is present and keyed)
+    // answers the canonical step at (path, position) from the
+    // builder's recorded derivation when the position lies inside a
+    // served band — the locality lemma's own exactness — and every
+    // uncovered position (the census's own set is sample-side, A4's
+    // own statement) derives LIVE, verbatim, counted loudly.
+    let bind_scaffold: Option<&BindScaffoldServe> =
+        served.as_ref().and_then(|serve| serve.bind.as_ref());
 
     // ------------------------- the pilot record set and the binding
     // The locus's evidence set: records with at least one occurrence
@@ -7112,11 +7689,24 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             .ok_or_else(|| invalid("census record has no occurrences"))?;
         let occurrences = line.occurrences.len() as u64;
         let steps_started = Instant::now();
-        let steps = canonical_steps_near(occ.path, occ.start)?
+        let steps: Vec<i32> = match bind_scaffold.and_then(|scaffold| {
+            scaffold.step_at(occ.path, occ.start, panel.name_map.path_to_length[occ.path])
+        }) {
+            Some(Some((_, node))) => vec![node],
+            Some(None) => Vec::new(),
+            None => canonical_steps_over_range(
+                panel,
+                &fetch_seq,
+                k,
+                occ.path,
+                occ.start.saturating_sub(150),
+                occ.start + 150,
+            )?
             .into_iter()
             .filter(|&(bp, _)| bp == occ.start)
             .map(|(_, node)| node)
-            .collect::<Vec<i32>>();
+            .collect(),
+        };
         let steps_seconds = steps_started.elapsed().as_secs_f64();
         ensure(!steps.is_empty(), "census occurrence start has no panel step")?;
         let mut candidates: BTreeSet<u32> = BTreeSet::new();
@@ -7341,7 +7931,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         "[score] phase binding: {} records / {} occurrences / {} candidate keys \
          ({} distinct shaped) / {} shape derivations / {} verify probes over \
          {} range fetches; steps {:.1}s ({} extractions), shapes {:.1}s, verify \
-         {:.1}s, fetches {} ({:.1} MB), lane loads {} ({:.1} MB), phase {:.1}s",
+         {:.1}s, fetches {} ({:.1} MB), lane loads {} ({:.1} MB), phase {:.1}s; bind \
+         scaffold: {} served / {} live-derived (uncovered)",
         pilot_records.len(),
         bind_occurrences,
         bind_candidates,
@@ -7359,6 +7950,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         (lane_cache.bytes.load(Ordering::Relaxed) - binding_lane_bytes) as f64
             / (1024.0 * 1024.0),
         binding_started.elapsed().as_secs_f64(),
+        bind_scaffold
+            .map(|s| s.served.load(Ordering::Relaxed))
+            .unwrap_or(0),
+        bind_scaffold
+            .map(|s| s.fallbacks.load(Ordering::Relaxed))
+            .unwrap_or(pilot_records.len() as u64),
     );
     let binding_seconds = binding_started.elapsed().as_secs_f64();
     rss.probe("binding")?;
@@ -7513,160 +8110,13 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // the pin skeleton stays the stored path walk (the slice-B/C
     // before-record; assessment-side diagnostic for the before/after
     // pairing). The repair — the canonical-scheme skeleton — is the
-    // default.
-    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    // default. (SS10.6.25 slice 2 moved the stored-frame convention,
+    // the row store, and the serve discovery ABOVE the bind phase —
+    // the bind scaffolding serves from the same discovered asset.)
     let mut skeleton = match &options.skeleton_out {
         Some(path) => Some(BufWriter::new(File::create(path)?)),
         None => None,
     };
-    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
-    let contig = panel_component
-        .splitn(3, '#')
-        .nth(2)
-        .ok_or_else(|| invalid("component lacks a contig suffix"))?
-        .to_string();
-    // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE SERVE, SS10.6.23 slice 1 —
-    // the labeled-toggle doctrine: IMPG_PANEL_PRECOMPUTE unset serves
-    // when the asset beside the partition maps is present and EVERY
-    // content key matches the live inputs; =off restores the live path
-    // VERBATIM (the IMPG_CLASS_SCAN_MEMO=off precedent); =on REQUIRES the
-    // serve (an absent/mismatched asset is a loud error, the gate
-    // form); any other value is a loud error. A key mismatch under the
-    // default is a LOUD LIVE-PATH FALLBACK (the routes-inventory
-    // precedent: never serve stale structure, never fail a call because
-    // a panel-side asset is stale). The serve changes NO emitted byte
-    // — the answer gates are its proof — so no model label is
-    // warranted; it states itself here and in the phase lines.)
-    let precompute_dir = options.partition_graphs.join("panel-precompute-loci");
-    let precompute_mode = match std::env::var("IMPG_PANEL_PRECOMPUTE") {
-        Err(_) => PanelPrecomputeMode::Auto,
-        Ok(value) if value == "off" => PanelPrecomputeMode::Off,
-        Ok(value) if value == "on" => PanelPrecomputeMode::On,
-        Ok(other) => {
-            return Err(invalid(&format!(
-                "unknown IMPG_PANEL_PRECOMPUTE {other:?} (off | on)"
-            )))
-        }
-    };
-    let mut served: Option<PrecomputeServe> = None;
-    if !matches!(precompute_mode, PanelPrecomputeMode::Off)
-        && precompute_dir.join("manifest.json").is_file()
-    {
-        let maps_digest = partition_maps_digest(&options.partition_graphs)?;
-        let routes_digest = routes_graph_digest(&options.routes.join("graph.json"))?;
-        let attempt = (|| -> io::Result<()> {
-            let keys = PanelPrecomputeKeys {
-                panel: identity.clone(),
-                k,
-                component: panel_component.clone(),
-                frame: if options.global_frame {
-                    "global".to_string()
-                } else {
-                    "local".to_string()
-                },
-                record_origin: options.record_origin,
-                stored_frame,
-                maps_digest,
-                routes_digest,
-            };
-            let asset = load_panel_precompute(&precompute_dir, &keys)?;
-            ensure(
-                asset.windows.len() == window_partition.len(),
-                &format!(
-                    "the panel-precompute asset carries {} windows against the call's {} \
-                     (the window grid drifted)",
-                    asset.windows.len(),
-                    window_partition.len(),
-                ),
-            )?;
-            // The served store, built from the asset rows in the
-            // asset's row order (the builder's own creation order —
-            // window order, member order), with the sequences left
-            // in the sources (fetched live per representative row
-            // at serve time, FNV-verified).
-            for (row_index, row) in asset.rows.iter().enumerate() {
-                let path_idx = *path_of_name
-                    .get(&row.path_name)
-                    .ok_or_else(|| invalid("the asset names a path absent from the syng"))?;
-                ensure(
-                    row.walk.len() == row.frames.len(),
-                    "the asset's walk and frame tags disagree",
-                )?;
-                store.folds.push(RowFold {
-                    path: path_idx,
-                    start: row.start,
-                    end: row.end,
-                    seq: Vec::new(),
-                    walk: row.walk.clone(),
-                    frames: row.frames.clone(),
-                    stored_walk: row.stored_walk.clone(),
-                    members: row.members.clone(),
-                });
-                ensure(
-                    store
-                        .dedup
-                        .insert((path_idx, row.start, row.end), row_index)
-                        .is_none(),
-                    "the asset carries a duplicate row identity",
-                )?;
-            }
-            for (window, asset_window) in asset.windows.iter().enumerate() {
-                ensure(
-                    asset_window.partition == window_partition[window]
-                        && asset_window.axis_start == window_axis[window].0
-                        && asset_window.axis_end == window_axis[window].1,
-                    &format!(
-                        "the panel-precompute asset's window {window} disagrees with the \
-                         live window grid (content keys drifted)",
-                    ),
-                )?;
-                let map = maps
-                    .get(&window_partition[window])
-                    .ok_or_else(|| invalid("axis partition map missing"))?;
-                ensure(
-                    asset_window.member_fold.len() == map.members.len(),
-                    &format!(
-                        "the panel-precompute asset's member-fold map for window {window} \
-                         does not match the partition maps (content keys drifted)",
-                    ),
-                )?;
-            }
-            served = Some(PrecomputeServe {
-                windows: asset.windows,
-                seq_fnv: asset.rows.iter().map(|row| row.seq_fnv).collect(),
-                seqs: Mutex::new(HashMap::new()),
-            });
-            Ok(())
-        })();
-        match attempt {
-            Ok(()) => {
-                eprintln!(
-                    "[score] panel-precompute: SERVING the row context + fold layouts \
-                     from {} ({} rows, {} windows, {} folds; panel identity, maps digest \
-                     {:016x}, routes digest {:016x})",
-                    precompute_dir.display(),
-                    served.as_ref().map(|s| s.seq_fnv.len()).unwrap_or(0),
-                    served.as_ref().map(|s| s.windows.len()).unwrap_or(0),
-                    served
-                        .as_ref()
-                        .map(|s| s.windows.iter().map(|w| w.fold_rep.len()).sum::<usize>())
-                        .unwrap_or(0),
-                    maps_digest,
-                    routes_digest,
-                );
-            }
-            Err(e) if matches!(precompute_mode, PanelPrecomputeMode::On) => return Err(e),
-            Err(e) => {
-                eprintln!(
-                    "[score] panel-precompute: NOT SERVED — {e}; the LIVE path runs \
-                     (rebuild the asset or remove it; never a silent stale serve)",
-                );
-                store.folds.clear();
-                store.dedup.clear();
-                served = None;
-            }
-        }
-    }
     // The axis partitions of every window the pilot records touch
     // (the locality classification needs their rows).
     // (Phase instrumentation: this is the CONTEXT ASSEMBLY phase —
@@ -15106,6 +15556,7 @@ mod tests {
             windows,
             seq_fnv: decoded.iter().map(|row| row.seq_fnv).collect(),
             seqs: Mutex::new(HashMap::new()),
+            bind: None,
         };
         (serve, served_rows, decoded.iter().map(|row| row.seq_fnv).collect())
     }
@@ -15275,6 +15726,7 @@ mod tests {
             windows: serve.windows,
             seq_fnv,
             seqs: Mutex::new(HashMap::new()),
+            bind: None,
         };
         let fetch = fixture_fetch(&fixture);
         let mut path_names = fixture.names.clone();
@@ -15301,6 +15753,337 @@ mod tests {
                 .contains("mismatches the fetched bytes"),
             "the error must name the drift class"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // (THE BIND SCAFFOLDING, SS10.6.25 slice 2 — the unit bars the
+    // design names: the asset round trip is lossless; the serve ==
+    // live derivation at EVERY position of randomized in-process
+    // panels (the locality lemma — served band, uncovered fallback,
+    // path edges included); the loader serves the slice-1 /1 format
+    // without the section and validates the /2 section's counters.)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn bind_scaffold_asset_round_trip_is_lossless() {
+        for seed in [1u64, 7, 42, 20261024] {
+            let mut rng = Lcg(seed);
+            let paths: Vec<BindScaffoldPathAsset> = (0..4)
+                .map(|path| {
+                    let ranges: Vec<(u64, u64)> = (0..1 + rng.below(3))
+                        .map(|_| {
+                            let lo = rng.below(2000);
+                            (lo, lo + 1 + rng.below(500))
+                        })
+                        .collect();
+                    let steps: Vec<(u64, i32)> = (0..rng.below(200))
+                        .map(|_| {
+                            let bp = rng.below(2000);
+                            let node = rng.below(1 << 20) as i64;
+                            (
+                                bp,
+                                ((node >> 1) as i64 ^ -(node & 1)) as i32,
+                            )
+                        })
+                        .collect();
+                    BindScaffoldPathAsset {
+                        path_name: format!("PATH#{path}#chrT:0-1"),
+                        ranges,
+                        steps,
+                    }
+                })
+                .collect();
+            let decoded =
+                decode_bind_scaffolding(&encode_bind_scaffolding(&paths)).expect("decode");
+            assert_eq!(decoded.len(), paths.len());
+            for (a, b) in paths.iter().zip(decoded.iter()) {
+                assert_eq!(a.path_name, b.path_name);
+                assert_eq!(a.ranges, b.ranges);
+                assert_eq!(a.steps, b.steps);
+            }
+        }
+    }
+
+    #[test]
+    fn bind_scaffold_serve_equals_live_at_every_position() {
+        // The syng C library's global state serializes against every
+        // other in-process test that touches the FFI (the shared
+        // SYNG_TEST_LOCK — the in-process panels below are real
+        // indexes built through the same C library).
+        let _guard = crate::syng::SYNG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let k = 63u64; // the committed k63/s8 convention's syncmer length
+        for seed in [3u64, 19, 91] {
+            let mut rng = Lcg(seed);
+            // The randomized-panel world: three paths of varied length
+            // (path-edge bands exercised), deterministic ACGT with an
+            // N-run on one path (the invalid-base skip class) and a
+            // shared segment between two paths (the multi-match
+            // dictionary class — the reverse map's node can come from
+            // another path's dictionary entry).
+            let lengths = [1400usize, 1900, 2300];
+            let mut sequences: Vec<Vec<u8>> = lengths
+                .iter()
+                .map(|&len| {
+                    (0..len)
+                        .map(|_| b"ACGT"[rng.below(4) as usize])
+                        .collect()
+                })
+                .collect();
+            for i in 600..640 {
+                sequences[1][i] = b'N';
+            }
+            let shared_segment: Vec<u8> = sequences[0][100..400].to_vec();
+            for (i, &base) in shared_segment.iter().enumerate() {
+                sequences[2][1500 + i] = base;
+            }
+            let names: Vec<String> =
+                (0..3).map(|p| format!("PATH#{p}#chrT:0-{}", lengths[p])).collect();
+            let panel = crate::syng::SyngIndex::build(
+                crate::syng::SyncmerParams::default(),
+                names.iter().cloned().zip(sequences.iter().cloned()),
+            );
+            let path_of_name: HashMap<String, usize> = names
+                .iter()
+                .enumerate()
+                .map(|(path, name)| (name.clone(), path))
+                .collect();
+            // The in-memory sources, fetched with the production
+            // fetch's own semantics (the hi clamp at the path length;
+            // lo >= hi is empty).
+            let fetch = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+                let path = path_of_name[name];
+                let len = lengths[path] as u64;
+                let hi = hi.min(len);
+                if lo >= hi {
+                    return Ok(Vec::new());
+                }
+                Ok(sequences[path][lo as usize..hi as usize].to_vec())
+            };
+            // Randomized member-row extents per path: overlapping,
+            // gapped (a gap wider than the window's reach must exist —
+            // the uncovered fallback class), an extent at the path
+            // start and one at the path end (the clamped-context
+            // clause).
+            let mut member_rows: Vec<(usize, u64, u64)> = Vec::new();
+            for (path, &len) in lengths.iter().enumerate() {
+                member_rows.push((path, 0, 100 + rng.below(150)));
+                member_rows.push((path, len as u64 - 200, len as u64));
+                let mut cursor = 300u64;
+                while cursor + 100 < len as u64 - 400 {
+                    let span = 100 + rng.below(400);
+                    member_rows.push((path, cursor, cursor + span));
+                    // The gap: sometimes within the window's reach
+                    // (merged), sometimes beyond it (uncovered).
+                    cursor += span
+                        + if rng.below(2) == 0 {
+                            rng.below(40)
+                        } else {
+                            100 + rng.below(200)
+                        };
+                }
+            }
+            let assets =
+                build_bind_scaffold(&panel, &fetch, k, member_rows.iter().copied())
+                    .expect("the scaffold builds");
+            let serve = BindScaffoldServe::from_asset(assets.clone(), &path_of_name, &panel)
+                .expect("the serve state builds");
+            let mut served_positions = 0u64;
+            let mut fallback_positions = 0u64;
+            for (path, &len) in lengths.iter().enumerate() {
+                let path_len = len as u64;
+                for position in 0..path_len {
+                    // THE LIVE DERIVATION (the committed bind's own
+                    // spelling, at the record's own window).
+                    let live = canonical_steps_over_range(
+                        &panel,
+                        &fetch,
+                        k,
+                        path,
+                        position.saturating_sub(150),
+                        position + 150,
+                    )
+                    .expect("the live derivation")
+                    .into_iter()
+                    .find(|&(bp, _)| bp == position);
+                    // The band classification must be exactly the
+                    // locality lemma's predicate over the builder's
+                    // own ranges.
+                    let covered = assets
+                        .iter()
+                        .find(|asset| asset.path_name == names[path])
+                        .map(|asset| {
+                            asset.ranges.iter().any(|&(lo, hi)| {
+                                bind_range_covers(
+                                    lo,
+                                    hi,
+                                    position,
+                                    path_len,
+                                    panel.params.w as u64 - 1,
+                                    panel.syncmer_length_bp() as u64,
+                                )
+                            })
+                        })
+                        .unwrap_or(false);
+                    match serve.step_at(path, position, path_len) {
+                        Some(recorded) => {
+                            assert!(covered, "a position outside the served band was served");
+                            assert_eq!(
+                                recorded, live,
+                                "path {path} position {position}: the served step differs \
+                                 from the live derivation"
+                            );
+                            served_positions += 1;
+                        }
+                        None => {
+                            assert!(
+                                !covered,
+                                "path {path} position {position}: a covered position \
+                                 fell back (the serve must answer it)"
+                            );
+                            fallback_positions += 1;
+                        }
+                    }
+                }
+            }
+            // The fixture must exercise BOTH classes at every seed
+            // (the served band and the uncovered fallback).
+            assert!(
+                served_positions > 0 && fallback_positions > 0,
+                "seed {seed}: the fixture must exercise both the served band \
+                 ({served_positions}) and the fallback ({fallback_positions})"
+            );
+            assert_eq!(
+                serve.served.load(Ordering::Relaxed),
+                served_positions,
+                "the served counter must count the lookups"
+            );
+            assert_eq!(
+                serve.fallbacks.load(Ordering::Relaxed),
+                fallback_positions,
+                "the fallback counter must count the uncovered positions"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_scaffold_loader_serves_slice1_format_and_validates_counters() {
+        // The slice-1 /1 manifest (no bind counters, no section file)
+        // loads with `bind: None` — the row context + fold layouts
+        // serve, the bind derives live; the /2 format requires the
+        // section and validates its counters against the manifest.
+        let dir = std::env::temp_dir().join(format!(
+            "impg-bind-scaffold-loader-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let identity = crate::genome_inference::PanelIdentity {
+            checksum_algorithm: "fnv1a64".to_string(),
+            sidecars: Vec::new(),
+        };
+        let keys = PanelPrecomputeKeys {
+            panel: identity.clone(),
+            k: 63,
+            component: "PATH#1#chrT:0-1000".to_string(),
+            frame: "local".to_string(),
+            record_origin: 0,
+            stored_frame: false,
+            maps_digest: 1,
+            routes_digest: 2,
+        };
+        let write_asset = |format: &str, bind: Option<&Vec<BindScaffoldPathAsset>>| {
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let (bind_paths, bind_ranges, bind_steps) = match bind {
+                Some(paths) => (
+                    paths.len() as u64,
+                    paths.iter().map(|p| p.ranges.len() as u64).sum(),
+                    paths.iter().map(|p| p.steps.len() as u64).sum(),
+                ),
+                None => (0, 0, 0),
+            };
+            let manifest = PanelPrecomputeManifest {
+                format: format.to_string(),
+                panel: identity.clone(),
+                k: 63,
+                component: keys.component.clone(),
+                frame: "local".to_string(),
+                record_origin: 0,
+                stored_frame: false,
+                maps_digest: 1,
+                routes_digest: 2,
+                windows: 0,
+                rows: 0,
+                folds: 0,
+                bind_paths,
+                bind_ranges,
+                bind_steps,
+            };
+            crate::genome_inference::atomic_write(
+                &dir.join("rows.bin"),
+                &encode_rows(&[]),
+            )
+            .expect("rows");
+            crate::genome_inference::atomic_write(
+                &dir.join("windows.bin"),
+                &encode_windows(&[]),
+            )
+            .expect("windows");
+            if let Some(paths) = bind {
+                crate::genome_inference::atomic_write(
+                    &dir.join("bind-scaffolding.bin"),
+                    &encode_bind_scaffolding(paths),
+                )
+                .expect("bind");
+            }
+            crate::genome_inference::write_json(&dir.join("manifest.json"), &manifest)
+                .expect("manifest");
+        };
+        // The slice-1 /1 form: no section, `bind: None`.
+        write_asset("impg-panel-precompute-loci/1", None);
+        let asset = load_panel_precompute(&dir, &keys).expect("the /1 asset loads");
+        assert!(asset.bind.is_none(), "the /1 asset carries no bind section");
+        // The /2 form with the section.
+        let paths = vec![BindScaffoldPathAsset {
+            path_name: "PATH#1#chrT:0-1000".to_string(),
+            ranges: vec![(0, 600)],
+            steps: vec![(10, 7), (40, -9)],
+        }];
+        write_asset("impg-panel-precompute-loci/2", Some(&paths));
+        let asset = load_panel_precompute(&dir, &keys).expect("the /2 asset loads");
+        let bind = asset.bind.expect("the /2 asset carries the section");
+        assert_eq!(bind.len(), 1);
+        assert_eq!(bind[0].ranges, paths[0].ranges);
+        assert_eq!(bind[0].steps, paths[0].steps);
+        // A corrupted counter is a loud error, never a served section:
+        // the manifest still carries the good counters while the
+        // section file was replaced underneath it.
+        let mut bad = paths.clone();
+        bad[0].steps.clear();
+        crate::genome_inference::atomic_write(
+            &dir.join("bind-scaffolding.bin"),
+            &encode_bind_scaffolding(&bad),
+        )
+        .expect("bind");
+        let result = load_panel_precompute(&dir, &keys);
+        assert!(result.is_err(), "a mismatched counter must be loud");
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("bind-scaffolding counters disagree"),
+            "the error must name the counter class"
+        );
+        // An unknown format string is refused outright.
+        write_asset("impg-panel-precompute-loci/9", None);
+        let result = load_panel_precompute(&dir, &keys);
+        assert!(result.is_err(), "an unknown format must be loud");
+        assert!(
+            result.err().unwrap().to_string().contains("unknown format"),
+            "the error must name the format class"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }

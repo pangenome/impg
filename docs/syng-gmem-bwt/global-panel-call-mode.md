@@ -4284,3 +4284,164 @@ positions fall back live; the format-/1 asset serves rows/windows and
 states the absent section loudly; the `=on` form requires the /2
 section. cargo test --release --lib green at the committed count +
 the new tests.
+
+### 10.6.26 FRONTIER 2, SLICE 2 LANDED — THE CONTENT-KEYED BIND SCAFFOLDING IMPLEMENTED AND GATED (the §10.6.25 contract executed: the canonical-scheme step structure served from the panel asset's bind-scaffolding section, answers byte-identical at BOTH standard targets with 99.95%/99.4% coverage, the toggle restoring the live path, the once-per-panel marginal price receipted — and the honest reading: the bind phase moves by exactly its STEP share, the per-locus median is UNMOVED at both targets, and the bind class's remaining mass is the verify term, which is sample evidence by the receipts' own anatomy)
+
+**THE IMPLEMENTATION, exactly as the contract specified.** The bind's
+`canonical_steps_near` closure moved VERBATIM into the one-spelling
+`canonical_steps_over_range` (range-parameterized; the live center call
+is that function at the committed `[P-150, P+150)` window — code
+motion, the off leg's byte bar its proof), so the live bind, the
+precompute builder, and the serve's uncovered-position fallback all
+run THE SAME code. The asset gains `bind-scaffolding.bin` — per
+content-named path, the derivation ranges and the recorded
+canonical-scheme steps (exact-width LE, no floats) — and the manifest
+becomes format `/2` with the section's counters; the content keys are
+UNCHANGED in kind. The builder covers, per path, the territory's own
+member-row extents (the panel-knowable coordinate set) merged and
+padded by the syncmer window's own reach, derived through the same
+extracted function. **The serve**: the discovery block moved ABOVE the
+bind phase; `BindScaffoldServe` answers the canonical step at each
+pilot record's first occurrence from the recorded derivation when the
+position lies inside a served band (the locality lemma: the recorded
+value is the live center derivation's own bits — the value at P is a
+function of the stored walk entry at P, the path bytes
+`[P-(w-1), P+(w-1)+syncmer_len)` clamped, and the dictionary), and
+every uncovered position derives LIVE, verbatim, counted loudly in the
+phase-binding line; a format-/1 asset still serves the row context +
+fold layouts and states the absent section; `IMPG_PANEL_PRECOMPUTE=on`
+REQUIRES the /2 form. The candidate sets, key shapes, verify probes,
+and origin shifts stay live verbatim — sample evidence, never
+precomputable.
+
+**THE ANSWER GATES — ALL PASS, BOTH TARGETS, BOTH LEGS** (the
+in-process digest form, the committed memo receipts the record of
+record; both substrates re-derived transiently from the read-only
+smalls under the stream discipline, both runners in ONE wave — the
+co-tenancy receipted, every off/on comparison within the same wave):
+
+| gate | L1 (19 loci, local frame) | T09724 (16 loci, global frame) |
+|---|---|---|
+| calls.jsonl sha256, off / on == committed | **PASS** (3ca9648c…, both legs) | **PASS** (c852d70f…, both legs) |
+| truth-qv sha256, off / on == committed | **PASS** (1c3dc4e1…, both legs) | **PASS** (c769b772…, both legs) |
+| fold-set digests, off / on == committed | **PASS 19/19**, both legs | **PASS 16/16**, both legs |
+| phase census (merge/class/spectrum counters) | identical modulo timers | identical modulo timers |
+| scoring census (anchor/pin/pair counters) | identical modulo timers | identical modulo timers |
+
+The TOGGLE-RESTORE gate is the off leg itself: the extraction and the
+serve-discovery move are code motion, and the byte bar is their proof.
+
+**THE BIND TIMING RECEIPTS (serial RAYON=1, same wave; the phase
+lines' own numbers, with the serve's own coverage split):**
+
+| term | L1 off → on | T09724 off → on |
+|---|---:|---:|
+| binding phase wall | 3.8 → **3.6 s** (−5%) | 3.2 → **2.4 s** (−25%) |
+| the steps term (the scaffold's class) | 0.2 → **0.0 s** | 0.7 → **0.0 s** |
+| the verify term (sample evidence) | 3.4 → 3.4 s **(unchanged, by design)** | 2.4 → 2.3 s **(unchanged)** |
+| bind fetch mass | 337.4 → 333.0 MB (the 10,782 steps fetches, ~430 B each, removed) | 116.4 → 115.1 MB |
+| **scaffold coverage** | **10,782 / 10,787 served (99.95%)**, 5 live-derived | **3,254 / 3,272 served (99.4%)**, 18 live-derived |
+| per-locus median wall | 6.1 → 6.2 s **(UNMOVED)** | 0.4 → 0.4 s **(UNMOVED)** |
+| whole call wall | 421 → 415 s | 874 → 873 s |
+
+**THE COVERAGE RECEIPT** — the design's own empirical question,
+answered: the census's first-occurrence positions live inside the
+territory's member-row extents at both targets (99.95% local frame,
+99.4% global frame — the reads' cross-mapping is the sample's own, and
+the uncovered residue derives live, exactly, loudly). The row-extent
+coverage rule is the right panel-side boundary at these shapes.
+
+**THE PER-LOCUS MEDIAN VERDICT — THE FLOOR QUESTION, ANSWERED
+HONESTLY: UNMOVED AT BOTH TARGETS** (6.1 → 6.2 s at L1, 0.4 → 0.4 s
+at T09724, within the same-wave noise). The bind phase is a per-CALL
+class amortized over the loci: the steps share it loses is 0.2 s /
+0.7 s per call — ~0.01-0.05 s per locus against a 6.2 s / 0.4 s
+median — so the median cannot move by this slice, and the measurement
+says it did not. Slice 1's honest verdict located the floor's
+mass-invariant mass in the BIND class (0.29 s/locus amortized at the
+ledger median); slice 2's receipts refine that verdict: the bind's
+own mass is **the verify term — 87-96% of the phase — which is sample
+evidence** (read bytes against panel bytes at census positions, once
+per occurrence per candidate), never precomputable. The floor's
+remaining levers are the model's per-base scoring class and the
+census/scan classes' own frontiers — not the panel asset's.
+
+**THE CORPUS BIND-SHARE, RESTATED** (the 7.2 s median / 507 s tail
+class): the measured steps share of the bind phase is 5% at the
+local-frame target and **22% at the global-frame target** — and the
+corpus calls are the global-frame class, so the corpus bind median
+moves to the **~5.6 s class where coverage holds** (ARITHMETIC from
+the measured share, honestly labeled — the tranche corpus itself is
+reaped, not re-measurable). The **507 s TAIL IS UNMOVED by
+construction**: the tail is occurrence-bound (the verify probes scale
+with the multiplicity monsters' occurrences), and the steps term —
+one extraction per record — is a linear-per-record class that the
+same monsters amortize to a small share. Slice 2's honest ceiling was
+stated in §10.6.25 and the receipts land exactly on it.
+
+**THE 16-CORE ARITHMETIC, REFRESHED** (every term labeled): 19,200
+core-s/sample = map ~13k (PROJECTION, the next increment's 2x) +
+call ~6.2k. The call's per-territory fixed-class stack at the corpus
+median: inputs ~244 s (THE FLEET COW'S CLASS — untouched by this
+slice), bind 7.2 s median → **~5.6 s class (SLICE 2, the measured
+-22% steps share at the global-frame class, ARITHMETIC)**, rows ~0
+(SLICE 1, measured), per-locus floor ~0.20 s median (**UNMOVED by
+both slices, MEASURED** — its remaining mass is the verify class's
+amortized share and the irreducible per-base scoring class), the
+scan and pair-loop classes (Frontier 1's territory, unchanged). The
+stack: ~251.2 → **~249.6 serial core-seconds** at the median
+territory — real, small, and honestly no multiple of the ~333x call
+gap; the gap is still owned by the TAIL (96.9%, Frontier 1's
+plateaus), the panel load (the COW), the pair loop's per-base core,
+and the map side.
+
+**THE ONCE-PER-PANEL PRICE, receipted beside the assets** (the
+marginal slice-2 build cost, honestly separated from the global panel
+load): L1 — the bind-scaffolding section built in **3.1 s** (466
+paths, 672 derivation ranges, 2,689,426 steps) beside slice 1's
+rows+windows 6.9 s; the asset 93.2 → **125.5 MB** (bind-scaffolding
+.bin 32.3 MB — the panel's own step structure, never sequences).
+T09724 at the global frame — **3.0 s marginal** (467 paths, 585
+ranges, 2,509,938 steps) beside the 8.1 s rows+windows, inside a
+213.9 s step of which ~200 s is the global panel load (THE FLEET
+COW'S OWN CLASS, unchanged by this slice); the asset 90.2 → 120.3 MB.
+Genome-scale disk projection: **~+30 MB per territory** of step
+tables beside the ~90-95 MB slice-1 asset — stated as a projection,
+measured at two territories.
+
+**THE TESTS (cargo test --release --lib 593/0 green, 5 ignored — the
+590 committed + the three new):**
+`bind_scaffold_asset_round_trip_is_lossless` (the exact-width encoding
+round-trips every field, randomized fixtures);
+`bind_scaffold_serve_equals_live_at_every_position` — **THE LOCALITY
+LEMMA, unit-proven on randomized in-process panels** (real syng
+indexes at the committed k63/s8/seed7 convention, randomized
+extent sets with merged and gapped coverage, an N-run and a shared
+segment for the invalid-base and multi-match dictionary classes):
+for EVERY position of every path, the serve's answer equals the live
+center derivation's own bits inside the served band, the band
+classification equals the derived predicate exactly, the uncovered
+positions fall back, and both classes are exercised with the counters
+receipted; `bind_scaffold_loader_serves_slice1_format_and_validates_
+counters` (the /1 asset loads with the section absent, the /2 section
+validates against the manifest's counters, a corrupted counter and an
+unknown format are loud errors). The syng C library's non-thread-safe
+global state is serialized across every in-process test through the
+now-shared `SYNG_TEST_LOCK`.
+
+**THE WORK-DIR RECEIPTS:** the slice-2 legs' verbatim receipts + the
+gate files in `docs/syng-gmem-bwt/panel-precompute-receipts/`
+(`call-slice2-{off,on}[-all].receipt.txt`, `precompute-slice2-{L1,
+T09724}.receipt.txt`, `gates-slice2-{L1,T09724}.txt`); the runners
+`scripts/complexity-ledger/run-slice2-{L1,T09724}.sh` (the slice-1
+runners' substrate shape verbatim, marker-gated, 150G-guarded,
+receipts at write time, `reap` subcommand); peak scratch 7.3 G + 5.8 G
+of the 150 G budgets, REAPED at the increment's close after the
+receipts were committed. The committed target/release/impg untouched
+(the substrate stages pinned to it); vendor/syng untouched.
+
+**THE NAMED REMAINDER (the chain's next increments, in order):**
+(1) SLICE 3 — the pin-skeleton content-keyed cache (per (record,
+fold), the anchor-hoist receipt's own pure-function class); (2) THE
+MAP SIDE's ~2x (the owner's standing order, priced at ~13k core-s of
+the 19,200 budget).

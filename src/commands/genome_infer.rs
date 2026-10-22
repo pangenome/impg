@@ -1065,25 +1065,45 @@ pub fn run(command: Command) -> io::Result<()> {
             record_origin,
             out_dir,
         } => {
-            // (SS10.6.23 slice 1 — the once-per-panel precompute step.
-            // An existing asset is REUSED loudly, never rebuilt per
-            // invocation (the routes-inventory precedent: a panel-side
-            // asset is built once; remove it to rebuild.)
+            // (SS10.6.23 slice 1 + SS10.6.25 slice 2 — the once-per-panel
+            // precompute step. An existing asset of the CURRENT format is
+            // REUSED loudly, never rebuilt per invocation (the
+            // routes-inventory precedent: a panel-side asset is built once;
+            // remove it to rebuild). A format-/1 asset (slice 1's, without
+            // the bind-scaffolding section) is UPGRADED loudly — rebuilt
+            // in place so the bind scaffolding is keyed and served.
             let out_dir = out_dir
                 .unwrap_or_else(|| partition_graphs.join("panel-precompute-loci"));
             if out_dir.join("manifest.json").is_file() {
+                let manifest_format = std::fs::read_to_string(out_dir.join("manifest.json"))
+                    .ok()
+                    .and_then(|text| {
+                        serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
+                            .ok()
+                    })
+                    .map(|manifest| manifest.format_text());
+                if manifest_format.as_deref() == Some("impg-panel-precompute-loci/2") {
+                    println!(
+                        "=== panel-precompute: the per-locus precompute asset {} exists — REUSED \
+                         (built once per panel; remove it to rebuild)",
+                        out_dir.display()
+                    );
+                    return Ok(());
+                }
                 println!(
-                    "=== panel-precompute: the per-locus precompute asset {} exists — REUSED \
-                     (built once per panel; remove it to rebuild)",
+                    "=== panel-precompute: the existing asset {} is format {:?} (slice 1's) — \
+                     REBUILDING with the bind-scaffolding section (the once-per-panel price)",
+                    out_dir.display(),
+                    manifest_format.unwrap_or_else(|| "unreadable".to_string())
+                );
+            } else {
+                println!(
+                    "=== panel-precompute: building the per-locus precompute asset into {} \
+                     (the row context + the fold layouts + the bind scaffolding; the \
+                     once-per-panel price)",
                     out_dir.display()
                 );
-                return Ok(());
             }
-            println!(
-                "=== panel-precompute: building the per-locus precompute asset into {} \
-                 (the row context + the fold layouts; the once-per-panel price)",
-                out_dir.display()
-            );
             genome::realign_score::precompute_panel_loci(
                 &panel,
                 &routes,
@@ -2064,27 +2084,47 @@ pub fn run(command: Command) -> io::Result<()> {
                 record_origin,
                 out_dir,
             })?;
-            // (3) THE PANEL-SIDE PER-LOCUS PRECOMPUTE (SS10.6.23 slice
-            // 1, the Frontier-2 increment's own panel-prep piece): the
-            // row context + the per-window fold groupings, keyed on
-            // content into <partition-graphs>/panel-precompute-loci —
-            // the once-per-panel price the CALL step's serve amortizes
-            // to zero per sample. An existing asset is REUSED loudly
-            // (the routes-inventory precedent); the call falls back to
-            // the live path loudly on any content-key mismatch.
+            // (3) THE PANEL-SIDE PER-LOCUS PRECOMPUTE (SS10.6.23 slice 1
+            // + SS10.6.25 slice 2 — the Frontier-2 increment's own
+            // panel-prep pieces): the row context + the per-window fold
+            // groupings + the bind scaffolding, keyed on content into
+            // <partition-graphs>/panel-precompute-loci — the
+            // once-per-panel price the CALL step's serve amortizes to
+            // zero per sample. An asset of the CURRENT format is REUSED
+            // loudly (the routes-inventory precedent); a slice-1 /1
+            // asset is UPGRADED loudly (rebuilt with the
+            // bind-scaffolding section); the call falls back to the
+            // live path loudly on any content-key mismatch.
             let precompute_dir = partition_graphs.join("panel-precompute-loci");
-            if precompute_dir.join("manifest.json").is_file() {
+            let precompute_format = std::fs::read_to_string(precompute_dir.join("manifest.json"))
+                .ok()
+                .and_then(|text| {
+                    serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
+                        .ok()
+                })
+                .map(|manifest| manifest.format_text());
+            if precompute_format.as_deref() == Some("impg-panel-precompute-loci/2") {
                 println!(
                     "=== panel-prep: the per-locus precompute asset {} exists — REUSED \
                      (built once per panel)",
                     precompute_dir.display()
                 );
             } else {
-                println!(
-                    "=== panel-prep: building the per-locus precompute asset into {} \
-                     (the row context + the fold layouts; the once-per-panel price)",
-                    precompute_dir.display()
-                );
+                if precompute_format.is_some() {
+                    println!(
+                        "=== panel-prep: the existing asset {} is format {:?} (slice 1's) — \
+                         REBUILDING with the bind-scaffolding section",
+                        precompute_dir.display(),
+                        precompute_format.unwrap()
+                    );
+                } else {
+                    println!(
+                        "=== panel-prep: building the per-locus precompute asset into {} \
+                         (the row context + the fold layouts + the bind scaffolding; the \
+                         once-per-panel price)",
+                        precompute_dir.display()
+                    );
+                }
                 run_self(&[
                     "genome-infer",
                     "precompute-panel-loci",
