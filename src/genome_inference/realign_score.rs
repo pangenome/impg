@@ -10682,35 +10682,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // map order, i.e. alphabetical, and every field here
         // serializes through the same writer in that same order. The
         // identity gate proves the sidecar byte-identical.)
-        let folds_json: Vec<serde_json::Value> = folds
-            .iter()
-            .map(|fold| {
-                json!({
-                    "members": fold.members.iter().map(|m| json!({
-                        "path_name": m.path_name, "start": m.start, "end": m.end,
-                    })).collect::<Vec<_>>(),
-                    "length": fold.len,
-                    "sequence": String::from_utf8(fold.seq.clone()).unwrap(),
-                    "walk": fold.walk.iter().map(|&(bp, node)| json!([bp, node]))
-                        .collect::<Vec<_>>(),
-                    "nodes": fold.nodes,
-                    "edges": fold.edges,
-                })
-            })
-            .collect();
-        let units_json: Vec<serde_json::Value> = units
-            .iter()
-            .map(|unit| {
-                json!({
-                    "record": unit.record,
-                    "variant": unit.variant,
-                    "mirror": if unit.mirror { 1 } else { 0 },
-                    "w_lo": unit.w_lo,
-                    "count": unit.count,
-                    "read": String::from_utf8(reads[unit.read].clone()).unwrap(),
-                })
-            })
-            .collect();
+        // (THE INGREDIENT ARRAYS STREAM PER ELEMENT - the receipts-phase
+        // memory audit's Finding 2, the lever-3 form extended from
+        // ll_matrix to its two siblings. Building them as
+        // `Vec<serde_json::Value>` first cost several GB at a deep locus
+        // (per fold: members, the whole sequence, a walk/nodes/edges
+        // array pair per step; per unit: six keys including a heap copy
+        // of the read sequence) and held it through the whole receipt
+        // emission. Each element is now built, serialized and dropped in
+        // turn; the bytes are identical, because a Vec's serialization
+        // IS its elements' serializations joined by ',' inside "[" "]",
+        // and json!'s maps are alphabetical in both forms.)
         // (Candidate C: the ingredients line — including the full
         // ll_matrix — streams to a per-locus spill file, the dense
         // JSON text never held in RAM; the ordered write below copies
@@ -10720,8 +10702,27 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             ingredients_spill_path(&options.out, locus);
         let mut ingredients_spill =
             BufWriter::new(File::create(&ingredients_spill_path)?);
-        ingredients_spill.write_all(b"{\"folds\":")?;
-        serde_json::to_writer(&mut ingredients_spill, &folds_json)?;
+        ingredients_spill.write_all(b"{\"folds\":[")?;
+        for (position, fold) in folds.iter().enumerate() {
+            if position > 0 {
+                ingredients_spill.write_all(b",")?;
+            }
+            serde_json::to_writer(
+                &mut ingredients_spill,
+                &json!({
+                    "members": fold.members.iter().map(|m| json!({
+                        "path_name": m.path_name, "start": m.start, "end": m.end,
+                    })).collect::<Vec<_>>(),
+                    "length": fold.len,
+                    "sequence": String::from_utf8(fold.seq.clone()).unwrap(),
+                    "walk": fold.walk.iter().map(|&(bp, node)| json!([bp, node]))
+                        .collect::<Vec<_>>(),
+                    "nodes": fold.nodes,
+                    "edges": fold.edges,
+                }),
+            )?;
+        }
+        ingredients_spill.write_all(b"]")?;
         // The per-unit per-fold log-likelihood matrix (folds x units,
         // row-major; entries at E = no valid anchored placement).
         ingredients_spill.write_all(b",\"ll_matrix\":")?;
@@ -10730,23 +10731,28 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         serde_json::to_writer(&mut ingredients_spill, &locus)?;
         ingredients_spill.write_all(b",\"partition\":")?;
         serde_json::to_writer(&mut ingredients_spill, &partition)?;
-        ingredients_spill.write_all(b",\"units\":")?;
-        serde_json::to_writer(&mut ingredients_spill, &units_json)?;
+        ingredients_spill.write_all(b",\"units\":[")?;
+        for (position, unit) in units.iter().enumerate() {
+            if position > 0 {
+                ingredients_spill.write_all(b",")?;
+            }
+            serde_json::to_writer(
+                &mut ingredients_spill,
+                &json!({
+                    "record": unit.record,
+                    "variant": unit.variant,
+                    "mirror": if unit.mirror { 1 } else { 0 },
+                    "w_lo": unit.w_lo,
+                    "count": unit.count,
+                    "read": String::from_utf8(reads[unit.read].clone()).unwrap(),
+                }),
+            )?;
+        }
+        ingredients_spill.write_all(b"]")?;
         ingredients_spill.write_all(b"}")?;
         ingredients_spill.write_all(b"\n")?;
         ingredients_spill.flush()?;
         drop(ingredients_spill);
-        // THE INGREDIENT TREES ARE CONSUMED HERE (the receipts-phase
-        // memory audit's Finding 2): `folds_json` (per fold: members,
-        // the whole sequence, a walk/nodes/edges array pair per step) and
-        // `units_json` (per unit: six keys including a heap copy of the
-        // read sequence) exist only for the streaming write above. They
-        // were left live to the end of the function, so they co-resided
-        // with the whole receipt emission - several GB of Value slots at
-        // a deep locus for data nothing reads again. Dropping them frees
-        // no answer and changes no emitted byte.
-        drop(folds_json);
-        drop(units_json);
         rss.probe(&format!("locus_{locus}_receipts"))?;
 
         // ---------------------------------------------------- the main receipt
