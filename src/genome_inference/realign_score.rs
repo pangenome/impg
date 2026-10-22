@@ -1019,8 +1019,7 @@ struct RssGuard {
     budget_bytes: Option<u64>,
 }
 
-impl RssGuard {
-    fn new(budget_gib: f64) -> Self {
+impl RssGuard {    fn new(budget_gib: f64) -> Self {
         RssGuard {
             budget_bytes: (budget_gib > 0.0).then(|| (budget_gib * (1u64 << 30) as f64) as u64),
         }
@@ -1049,10 +1048,66 @@ impl RssGuard {
     }
 }
 
+/// THE RECEIPT WRITER WITH THE TIE CERTIFICATE SPLICED IN.
+///
+/// Byte-identical to `serde_json::to_writer` of the same object with that
+/// member set: serde_json's default map is ORDERED (alphabetical - this
+/// crate does not enable `preserve_order`), so a member's slot is purely
+/// a function of its key, and every other member goes through the very
+/// same writer the whole-object call would use. The difference is
+/// memory: the certificate streams from the typed lists instead of being
+/// materialized as a value tree first.
+fn write_report_with_cut_indices(
+    writer: &mut impl Write,
+    report: &serde_json::Value,
+    cut_indices_key: &str,
+    lists: &[(usize, Vec<usize>)],
+) -> io::Result<()> {
+    let serde_json::Value::Object(map) = report else {
+        // (Not an object: nothing to splice. The plain writer's own
+        // bytes, which is exactly what the caller would have got.)
+        return serde_json::to_writer(writer, report).map_err(io::Error::from);
+    };
+    writer.write_all(b"{")?;
+    let mut position = 0usize;
+    for (key, value) in map {
+        if position > 0 {
+            writer.write_all(b",")?;
+        }
+        position += 1;
+        serde_json::to_writer(&mut *writer, key)?;
+        writer.write_all(b":")?;
+        if key == cut_indices_key {
+            // The `json!([index, list])`-equivalent form
+            // `[[index,[spectrum...]],...]`, written straight from the
+            // typed list (usize's decimal rendering IS serde_json's own
+            // integer form).
+            writer.write_all(b"[")?;
+            for (list_position, (index, list)) in lists.iter().enumerate() {
+                if list_position > 0 {
+                    writer.write_all(b",")?;
+                }
+                write!(writer, "[{},[", index)?;
+                for (entry_position, spectrum_index) in list.iter().enumerate() {
+                    if entry_position > 0 {
+                        writer.write_all(b",")?;
+                    }
+                    write!(writer, "{}", spectrum_index)?;
+                }
+                writer.write_all(b"]]")?;
+            }
+            writer.write_all(b"]")?;
+        } else {
+            serde_json::to_writer(&mut *writer, value)?;
+        }
+    }
+    writer.write_all(b"}")?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Receipt inputs (slice A structures, verbatim).
 // ---------------------------------------------------------------------------
-
 /// One verified occurrence in the committed multi-matching census.
 #[derive(Deserialize)]
 struct CensusOccurrence {
@@ -11022,12 +11077,27 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             // non-degenerate receipts' qual_tied_bands member is
             // replaced by this member — the answers are unchanged
             // BY CONSTRUCTION (the oracle tests).)
-            report_value["qual_tied_cut_indices"] = json!(cut_index_lists
-                .iter()
-                .map(|(index, list)| json!([index, list]))
-                .collect::<Vec<_>>());
+            // (THE CERTIFICATE STREAMS - the receipts-phase memory
+            // audit's Finding 1. This member is the one structure in a
+            // locus whose cardinality is (|called| - 1) x |spectrum|;
+            // at the structurally degenerate shape (called.len() ==
+            // pair_count, the equality this code already relies on for
+            // the certificate's own form) that is pair_count squared.
+            // Materializing it as a serde_json value tree cost ~32 B per
+            // entry ON TOP of the typed list's 8 B and the emitted
+            // text's ~6.5 B - three simultaneous copies, tens of GB at
+            // the pathological shape. The member is now spliced into the
+            // streamed report straight from the typed lists, so the
+            // Value never exists. A Null sentinel keeps the key in the
+            // map, which is what pins its alphabetical emission slot.
+            report_value["qual_tied_cut_indices"] = serde_json::Value::Null;
             report_buf.clear();
-            serde_json::to_writer(&mut report_buf, &report_value)?;
+            write_report_with_cut_indices(
+                &mut report_buf,
+                &report_value,
+                "qual_tied_cut_indices",
+                &cut_index_lists,
+            )?;
             // (The tie certificate's emission cost - the Value tree plus
             // the reserialized text - isolated against `_certificate`.)
             rss.probe(&format!("locus_{locus}_tie_emitted"))?;
@@ -16148,4 +16218,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// THE SPLICED RECEIPT WRITER IS THE VALUE-TREE FORM, BYTE FOR
+    /// BYTE. The certificate streams from its typed lists instead of
+    /// being built as a `serde_json::Value` first (the 32-bytes-per-entry
+    /// copy the receipts-phase audit found); the emission order is
+    /// serde_json's ordered map, so the two forms must agree exactly -
+    /// otherwise the receipts stop being comparable to the committed
+    /// ones, which is the whole point of the doctrine.
+    #[test]
+    fn the_spliced_report_writer_matches_the_value_tree_form_byte_for_byte() {
+        let lists: Vec<(usize, Vec<usize>)> =
+            vec![(0, vec![3, 1, 4]), (7, Vec::new()), (2, vec![9, 0])];
+        // The sentinel keeps the key in the map (its alphabetical slot),
+        // and the reference builds the member the committed way.
+        let report = json!({
+            "alpha": 1,
+            "zeta": "x",
+            "mid": [1.5, 2],
+            "qual_tied_cut_indices": serde_json::Value::Null,
+        });
+        let mut reference_value = report.clone();
+        reference_value["qual_tied_cut_indices"] = json!(lists
+            .iter()
+            .map(|(index, list)| json!([index, list]))
+            .collect::<Vec<_>>());
+        let mut reference = Vec::new();
+        serde_json::to_writer(&mut reference, &reference_value).unwrap();
+
+        let mut spliced = Vec::new();
+        write_report_with_cut_indices(
+            &mut spliced,
+            &report,
+            "qual_tied_cut_indices",
+            &lists,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(spliced).unwrap(),
+            String::from_utf8(reference).unwrap(),
+            "the streamed certificate must emit the value tree's own bytes"
+        );
+    }
 }
