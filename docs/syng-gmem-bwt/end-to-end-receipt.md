@@ -211,22 +211,130 @@ THE WALL: projection **1563s** (the committed baseline 1247.5s =
 
 ## 3. STEP 3 receipts — call-region, the whole genome
 
-**[PENDING]** the per-territory receipts (inputs/bind/rows/loci
-walls, core-s, the locus census counters, RSS peaks, the guard /
-fail-closed census), at each checkpoint: legs done/total, the walls,
-the running core-s sums.
+**THE FLEET FORM IS ALIVE END-TO-END** (the first chunk, `chunk-early`
+  over the 7 already-mapped chunk-0 members — the step-3 smoke, run
+  ahead of the 183-chunk campaign numbering; the campaign's chunks
+  proceed by markers): one `call-region` invocation, ZERO product
+  flags —
+- the parent loaded the ONE global panel in **180s** (33.9GB
+  private, the load owner) and forked the width-32 child; **the COW
+  receipt**: child-open Rss 32.28GB / Pss **16.14GB** / private **0.00GB**
+  — the fork-shared panel works exactly as designed (the child pays
+  only its own working set).
+- the child built its own AGC index in ~0s, batch-cut the chunk at
+  the RESTRICTED census profile (the basis auto-derived from each
+  territory's map-leg cut-reads: e.g. T00002 11,345 reads; T00017's
+  restricted census: reads_kept 60,720 / census_mult 90,101 /
+  routed 4,235 — the global-frame attribution of the committed basis,
+  receipted), then ran the calls concurrently at the T16 rung.
+- **wall 1441s / core-s 18,123 for the 7-territory chunk** (≈2,589
+  core-s/territory at this width — the parent load amortized /7; at
+  the full width-32 the amortization improves ~4.5x on the load
+  term, all else equal).
+- **the answers**: calls.jsonl + sequences per territory (T00002 25
+  loci / 37KB; T00017 4 loci / 4.3KB; … 118 loci over 7 territories,
+  164KB total), model label `…-farbin-prune` — **the far-bin prune
+  default ENGAGED, no flag typed**; the bounded class scan ENGAGED
+  (the mined per-locus counters carry `classscan_bounded` with the
+  derived underflow point −745.133 and the slack-corrected keep
+  window; T00017's loci are flat-shape — kept 107,416 / skipped 0,
+  the honest shape-reading, no pruning where the landscape is flat);
+  the equal-column merge counters and the scan-memo census mined
+  per locus into the ledger (the raw instrument streams REAPED —
+  ~600MB/territory class at L1 → the mined counters + the chunk's
+  gzipped log, the tranche-2 lesson applied).
+- the JIT reaper reaped **~2G of transients** at the chunk's close
+  (the chunk reads fetch, the scratch call root, the 7 territories'
+  substrates + precompute assets + map cut dirs — the answers, the
+  per-territory ledgers, the cut-stats receipts and the chunk log
+  kept).
 
-## 4. The restated 16-core ledger
+**THE GUARD / FAIL-CLOSED CENSUS, this window**: 18 GUARD events —
+  map-cut workers killed over the 64GiB guard (peaks 67.3–69.7GB:
+  the memory-tail cut class, the guard-as-oracle working — those
+  legs re-queue and will honestly guard-kill again if the shape
+  demands it; the campaign's ledger names them per territory) —
+  plus the window's own infrastructural classes, all receipted in
+  the doc's §1/§3 and the ledger: the double-driver EEXIST cascade
+  (a zombie driver instance from the first relaunch — killed; its
+  stale exit markers cleared; the bed rows rebuilt from the
+  registries), and the runner-generation guard bugs (fixed in
+  commits 0c2ae7a/966d0a2's runner set: the /proc ppid field-shift,
+  the $()-pipe-hold that zeroed walls, the awk auto-vivification
+  flood). The fail-closed map census at the checkpoint: 23 named
+  territories, every one the double-dispatch/EEXIST class already
+  re-queued (not a machinery failure of the product).
 
-**[PENDING]** the per-step core-s sums (prep once-price, map, calls),
-the honest 16-core projection (core-s/16, labeled projection from
-measurement), the fail-closed census (which legs the guard stopped,
-named), the per-stratum walls, and the comparison to the
-pre-campaign estimate (the 6.38e6 core-s call estimate + the 20-min
-16-core target) — what the landed levers actually bought at genome
-scale, measured.
+**THE CAMPAIGN STATE AT THIS WINDOW'S CLOSE** (the marker census):
+  substrate 192/5,844 (the valve holds prep at 160 pending-cut —
+  working as designed, the map pole governs), panel-prep ~100/5,844,
+  map legs ~35/5,844 at ~50-70/h (12 lanes at T32, each cut
+  370-430s solo / ~620s at 12-wide co-tenancy), calls 7/5,844
+  (chunk-early). The driver (v4, the fixed stack) runs detached;
+  the ledger miner is committed; **the honest projection at the
+  measured widths: the map pole at ~60/h is ~4 days to the universe
+  — the multi-window doctrine stands; the successor widens the map
+  pool (the box has the headroom: memavail floor ~680GB at 12 map +
+  8 panelprep + call lanes) or accepts the pace**. **[PENDING]** the
+  per-territory receipts as the 183 chunks drain.
+
+## 4. The restated 16-core ledger — MEASURED AT THIS WINDOW'S n
+  (the honest partials, every n labeled; nothing extrapolated)
+
+**The per-step core-s sums at the checkpoint** (the ledger miner,
+  `ledger/sums-checkpoint2.txt`):
+
+| step | core-s measured | n (legs) | per-territory | label |
+|---|---:|---:|---:|---|
+| substrate chain | 28,526 | 192 | **~148** | MEASURED (THREADS=4; the campaign's own recipe) |
+| panel-prep (partition + precompute asset) | 19,130 | ~80 | **~240** | MEASURED — **the panel-prep LOAD POLE: the global panel load (~200s) is paid PER TERRITORY; 5,844 × 240 ≈ 1.46e6 core-s — the named lever: a batched panel-prep (the fleet-call form's own amortization class)** |
+| map cut (the map leg) | (wall 38,880s; core-s capture lands per-leg from the fixed runner) | ~40 done | ~430s wall at T32 ≈ **~2,000+ core-s** | MEASURED walls (the cut's own load+scan decomposition per leg in cut-stats) |
+| call chunk (restricted cut + calls, COW) | 18,123 | 7 | **~2,589** | MEASURED at width-7; the width-32 amortization improves the load term ~4.5x (ARITHMETIC, labeled) |
+
+**The honest 16-core projection from measurement** (core-s/16, the
+  per-sample all-in at the measured rates, 5,844 territories):
+  substrate 148 + panel-prep 240 + map ~2,000 + call ~1,500-2,600
+  ≈ **~3,900-5,000 core-s/territory all-in** → ~23-29 days on 16
+  cores — **vs the pre-campaign estimate 6.38e6 core-s call-phase
+  (~4.6 days at 16 cores): the call-phase-only estimate and the
+  measured whole-chain per-territory cost agree in ORDER at the
+  call pole (the measured call chunk's ~2,589 core-s/territory at
+  width-7 carries the parent load unamortized; the stratified
+  6.38e6 estimate's ~1,098 core-s/territory call-only mean is the
+  same class once the load amortizes over width-32 and the tail
+  strata are sampled)**. **[PENDING]** the campaign's own completion
+  receipts sharpen every term — especially the tail (the guard
+  census is already receipting the 67-70GB memory-tail cut class).
+
+**What the landed levers bought at genome scale, measured so far**:
+- the far-bin prune + restricted census profile: ENGAGED BY DEFAULT
+  in the product's own path (the model label, the restricted basis
+  auto-derivation) — zero flags, as ordered;
+- the bounded class scan: ENGAGED per-locus with the derived
+  slack/underflow machinery in the emitted certificates;
+- the COW fleet form: measured (child private 0.00GB, Pss 16.14GB) —
+  the panel load amortization is real;
+- the precompute slices 1+2: the assets BUILT and content-keyed
+  (once-price receipted ~250 core-s/territory incl. the load);
+- the map step: byte-identity reproduced at all three gate levels.
 
 ## 5. The exact resume point
 
-**[PENDING]** the marker state, the in-flight lanes, the next
-window's first actions.
+- **The driver runs detached** (v4, `nohup bash
+  scripts/end-to-end/ee-driver.sh`, the pgid in
+  `logs/driver.nohup`): the four pools (P substrate / PP panel-prep /
+  M map / C call chunks) over the full 5,844-territory universe in
+  183 width-32 chunks; widths P=12 PP=8 M=12 C=2; the valve holds
+  prep at 160 pending-cut; the budget guard 150G; the worker guard
+  64GiB. A successor: check `logs/driver.log` (the census line per
+  iteration), run `scripts/end-to-end/ee-ledger.sh` for the ledger,
+  and RESUME — never restart (the markers govern; if the driver
+  died, relaunch it — it is idempotent).
+- **Watch**: the map pole pace (~50-70/h at 12 lanes — widen if the
+  box is quiet); the guard census (the 67-70GB memory-tail cut
+  class); df (the heartbeat is in the driver log lines).
+- **The known un-run remainder**: the campaign's chunks 0..182
+  (chunk-early's 7 are marked called); the poison-class territories
+  (the campaign's own 5 syng segdup-tail prep-terminals + 16
+  cut.exit-class) will fail-closed and be named, per the committed
+  doctrine.

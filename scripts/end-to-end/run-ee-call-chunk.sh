@@ -96,6 +96,7 @@ tp=$(ee_rss_track "$cpid" "$RCP" "chunk-$CID-parent")
 wait "$cpid"; st=$?
 kill "$gp" "$tp" 2>/dev/null; wait "$gp" "$tp" 2>/dev/null
 wall=$(( $(date +%s) - t0 ))
+echo "$wall" > "$L/call.wall"
 echo "$(ee_now) chunk $CID call-region exit=$st wall=${wall}s cpu='$(cat $cpu 2>/dev/null)'" >> "$RCP"
 echo "guard events: $(grep -c GUARD "$RCP" || true)" >> "$RCP"
 [ "$st" -ne 0 ] && { echo "$st" > "$L/call.exit"; exit "$st"; }

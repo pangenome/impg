@@ -9,51 +9,48 @@ source /home/erikg/impg-genome-inference/scripts/end-to-end/ee-env.sh
 cs() { awk '{print ($1+$2)}' "$1" 2>/dev/null || echo 0; }
 wl() { cat "$1" 2>/dev/null || echo 0; }
 
-echo -e "territory\tsubstrate_wall_s\tsubstrate_core_s\tpanelprep_wall_s\tpanelprep_core_s\treads_wall_s\tmap_wall_s\tmap_guard_events\tcall_done\tcalls_bytes\tloci\tchunk"
-while read -r t; do
-  [ -n "$t" ] || continue
-  p=$EE/prep/$t; l=$EE/ledger/$t
-  # the per-step sums in awk (the .cpu receipts carry floats)
-  read -r sw sc <<< $(awk -v p="$p" 'BEGIN{w=0;c=0}
-    split("extract syng beds export walkreq walks maps",S," ")
-    for(i=1;i<=7;i++){f=p"/"S[i]".wall"; g=p"/"S[i]".cpu";
-      if((getline line < f)>0){w+=line; close(f)}
-      if((getline line < g)>0){split(line,a," "); c+=a[1]+a[2]; close(g)}}
-    printf "%.1f %.1f", w, c' /dev/null)
-  pw=$(wl "$l/panelprep.wall" 2>/dev/null); pc=$(cs "$l/panelprep.cpu" 2>/dev/null)
-  rw=$(wl "$l/reads.wall" 2>/dev/null)
-  mw=$(wl "$l/map.wall" 2>/dev/null); mc=$(cs "$l/map.cpu" 2>/dev/null)
-  g=$(grep -c "GUARD kill" "$l/map.guard.txt" 2>/dev/null || true)
-  cb=0; nloci=0; chunk="-"
-  if [ -f "$l/leg.json" ]; then
-    cb=$(python3 - "$l/leg.json" <<'PY'
-import json, sys
-n=0
-for line in open(sys.argv[1]):
-    try: n += json.loads(line).get("calls_bytes", 0)
+# the per-leg TSV (one python pass; the .cpu receipts carry floats)
+python3 - "$EE" <<'PYT'
+import glob, json, os, re, sys
+ee = sys.argv[1]
+steps = ("extract","syng","beds","export","walkreq","walks","maps")
+def num(path):
+    # the .cpu receipts may carry the command's stderr before the
+    # TIMEFORMAT line (the time-capture subshell shares stderr); the
+    # LAST two-float line is the core-s receipt
+    try:
+        for line in reversed(open(path).read().splitlines()):
+            a=line.split()
+            if len(a)==2:
+                try: return float(a[0])+float(a[1])
+                except ValueError: continue
+        return 0.0
+    except Exception:
+        return 0.0
+def wall(path):
+    try: return float(open(path).read().strip())
+    except Exception: return 0.0
+print("territory\tsubstrate_wall_s\tsubstrate_core_s\tpanelprep_wall_s\tpanelprep_core_s\treads_wall_s\tmap_wall_s\tmap_guard_events\tcall_done\tcalls_bytes\tloci\tchunk")
+for t in open(f"{ee}/chunks/universe.order"):
+    t=t.strip()
+    if not t: continue
+    p, l = f"{ee}/prep/{t}", f"{ee}/ledger/{t}"
+    sw = sum(wall(f"{p}/{s}.wall") for s in steps)
+    sc = sum(num(f"{p}/{s}.cpu") for s in steps)
+    g = 0
+    try:
+        g = sum(1 for line in open(f"{l}/map.guard.txt") if "GUARD kill" in line)
     except Exception: pass
-print(n)
-PY
-)
-    nloci=$(python3 - "$l/leg.json" <<'PY'
-import json, sys
-n=0
-for line in open(sys.argv[1]):
-    try: n += json.loads(line).get("loci", 0)
+    cb = loci = 0; chunk = "-"
+    try:
+        for line in open(f"{l}/leg.json"):
+            j = json.loads(line)
+            cb += j.get("calls_bytes",0); loci += j.get("loci",0); chunk = j.get("chunk",chunk)
     except Exception: pass
-print(n)
-PY
-)
-    chunk=$(python3 - "$l/leg.json" <<'PY'
-import json, sys
-for line in open(sys.argv[1]):
-    try: print(json.loads(line).get("chunk", "-")); break
-    except Exception: pass
-PY
-)
-  fi
-  echo -e "$t\t$sw\t$sc\t${pw:-0}\t${pc:-0}\t${rw:-0}\t${mw:-0}\t$g\t$([ -f "$l/call.done" ] && echo 1 || echo 0)\t$cb\t$nloci\t$chunk"
-done < "$EE/chunks/universe.order"
+    print(f"{t}\t{sw:.0f}\t{sc:.0f}\t{wall(f'{l}/panelprep.wall'):.0f}\t{num(f'{l}/panelprep.cpu'):.0f}\t"
+          f"{wall(f'{l}/reads.wall'):.0f}\t{wall(f'{l}/map.wall'):.0f}\t{g}\t"
+          f"{1 if os.path.exists(f'{l}/call.done') else 0}\t{cb}\t{loci}\t{chunk}")
+PYT
 
 # ---- the sums (stderr) -----------------------------------------------
 python3 - "$EE" "$RV" 1>&2 <<'PY'
@@ -61,9 +58,16 @@ import glob, json, os, re, sys
 ee, rv = sys.argv[1], sys.argv[2]
 order = [t.strip() for t in open(f"{ee}/chunks/universe.order") if t.strip()]
 def cpu(path):
+    # the .cpu receipts may carry the command's stderr before the
+    # TIMEFORMAT line (the time-capture subshell shares stderr); the
+    # LAST two-float line is the core-s receipt
     try:
-        a = open(path).read().split()
-        return float(a[0]) + float(a[1])
+        for line in reversed(open(path).read().splitlines()):
+            a = line.split()
+            if len(a) == 2:
+                try: return float(a[0]) + float(a[1])
+                except ValueError: continue
+        return 0.0
     except Exception:
         return 0.0
 def wall(path):
