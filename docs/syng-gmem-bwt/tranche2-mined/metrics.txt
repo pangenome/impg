@@ -1,0 +1,227 @@
+==============================================================================
+THE GENOME TRANCHE 2 - THE MINED RECEIPTS (computed at mining time;
+the workspace mass is reaped after this pass; every number below
+carries its own n and its terminal/partial status)
+==============================================================================
+
+THE INVENTORY VERDICT: 109 members drawn (S_EXP 22, S_BIND 71, S_MAR 16); 108 runnable (T00762 excluded: extract-length-mismatch).
+  form A: 82 TERMINAL (answers), 25 TERMINAL-FAIL (named classes), 1 PARTIAL. Stage-TA open (master stopped mid-TA)
+    fail class 'overlapping-records (deterministic fail-closed)': 1 (T04066)
+    fail class 'qv-biwfa-helper fail-closed': 1 (T00157)
+    fail class 'rss-guard-kill': 21 (T00129, T00343, T00551, T00822, T01325, T01425, T01895, T02722, T03373, T03397, T03411, T03641, T03743, T03803, T03855, T03915, T03919, T04013, T04038, T04052, T04059)
+    fail class 'verify-key fail-closed': 2 (T00717, T01909)
+    PARTIAL: callA T04063: partial: 0 loci complete of 14 (stopped mid-write (external SIGTERM)) - lost-to-stop, re-runnable later
+  form C: 88 TERMINAL (answers), 20 TERMINAL-FAIL (named classes), 0 PARTIAL. Stage-TC done
+    fail class 'overlapping-records (deterministic fail-closed)': 1 (T04066)
+    fail class 'qv-biwfa-helper fail-closed': 2 (T00157, T02597)
+    fail class 'rss-guard-kill': 15 (T00343, T00551, T00822, T01325, T01895, T03397, T03411, T03641, T03743, T03919, T04013, T04038, T04052, T04059, T04063)
+    fail class 'verify-key fail-closed': 2 (T00717, T01909)
+  form B: NEVER STARTED (the master was stopped mid-TA; the TB
+    stage never opened) - ZERO B-form denominators in tranche 2;
+    the conserved-elsewhere rate (B-vs-A / B-vs-C) is therefore
+    NOT computable from this workspace; named lost-to-stop.
+  cut/prep legs: substrate 108/108, reads 109/109, rvcut 108/108,
+    cutA 108/108, cutB 108/108 - ALL TERMINAL (stage markers P,R,K,F,A done).
+  fleetB: exit 0, wall 13,206s, 108 rows in 4 chunks (cut phases 3,173s / 6,760s / 12,241s / 4,056s), panel load 190s - TERMINAL.
+  prod: 16/16 in-child production calls landed (first 4 rows of each chunk), all with non-empty calls.jsonl - TERMINAL.
+
+==============================================================================
+THE WASH VERDICT (rank-1 of truth-expressible, the official allwave
+QV machinery, cap 50; TERMINAL legs only; form B: no legs)
+==============================================================================
+
+--- S_EXP: EXPANSION-GATE-ADJACENT (the universe's 76% stratum) (22 drawn of 4413 in the runnable universe)
+  form A [TERMINAL]: 20 territories called, 392 loci, truth-expressible 391, rank-1 89/391 (23%), QV median 43.5, >=QV30 367/391, at-cap 118/391, min 0.1
+  form C [TERMINAL]: 20 territories called, 392 loci, truth-expressible 391, rank-1 87/391 (22%), QV median 43.5, >=QV30 359/391, at-cap 112/391, min 0.1
+
+--- S_BIND: BIND-AMBIGUITY (the 7479-class census) (71 drawn of 79 in the runnable universe)
+  form A [TERMINAL]: 61 territories called, 1254 loci, truth-expressible 1251, rank-1 275/1251 (22%), QV median 43.5, >=QV30 1150/1251, at-cap 332/1251, min 0.1
+  form C [TERMINAL]: 62 territories called, 1273 loci, truth-expressible 1270, rank-1 267/1270 (21%), QV median 43.5, >=QV30 1164/1270, at-cap 321/1270, min 0.1
+
+--- S_MAR: THE MARATHON ROSTER (outside the runnable universe; walls only) (16 drawn, outside the runnable universe)
+  form A [TERMINAL]: 1 territories called, 21 loci, truth-expressible 20, rank-1 5/20 (25%), QV median 44.2, >=QV30 19/20, at-cap 6/20, min 28.5
+  form C [TERMINAL]: 6 territories called, 131 loci, truth-expressible 129, rank-1 36/129 (28%), QV median 43.5, >=QV30 112/129, at-cap 38/129, min 0.1
+
+==============================================================================
+THE PRUNE'S OWN VERDICT AT TRANCHE-2 SCALE (C-vs-A, paired TERMINAL
+loci; the gate bar: zero truth losses)
+==============================================================================
+  across 1643 paired loci: PRUNE WINS 28, LOSSES 41 - THE GATE BAR IS VIOLATED (named below)
+    WIN   S_EXP T08425 locus 6
+    WIN   S_EXP T08425 locus 12
+    WIN   S_EXP T08425 locus 13
+    WIN   S_EXP T08425 locus 14
+    WIN   S_EXP T09347 locus 8
+    WIN   S_EXP T09347 locus 10
+    WIN   S_EXP T09347 locus 11
+    WIN   S_BIND T00335 locus 3
+    WIN   S_BIND T00335 locus 9
+    WIN   S_BIND T00391 locus 3
+    WIN   S_BIND T00391 locus 17
+    WIN   S_BIND T00391 locus 19
+    WIN   S_BIND T00663 locus 20
+    WIN   S_BIND T00824 locus 2
+    WIN   S_BIND T00824 locus 4
+    WIN   S_BIND T00824 locus 17
+    WIN   S_BIND T01468 locus 0
+    WIN   S_BIND T01468 locus 15
+    WIN   S_BIND T01876 locus 22
+    WIN   S_BIND T02472 locus 10
+    WIN   S_BIND T02595 locus 14
+    WIN   S_BIND T02595 locus 17
+    WIN   S_BIND T03045 locus 2
+    WIN   S_BIND T03045 locus 5
+    WIN   S_BIND T03045 locus 6
+    WIN   S_BIND T03124 locus 0
+    WIN   S_BIND T03900 locus 6
+    WIN   S_MAR T02866 locus 18
+    LOSS S_EXP T08425 locus 4
+    LOSS S_EXP T08425 locus 5
+    LOSS S_EXP T08425 locus 7
+    LOSS S_EXP T05784 locus 13
+    LOSS S_EXP T03929 locus 7
+    LOSS S_EXP T03929 locus 13
+    LOSS S_EXP T00618 locus 3
+    LOSS S_EXP T09347 locus 6
+    LOSS S_EXP T07856 locus 13
+    LOSS S_BIND T00335 locus 7
+    LOSS S_BIND T00335 locus 8
+    LOSS S_BIND T00335 locus 10
+    LOSS S_BIND T00335 locus 15
+    LOSS S_BIND T00335 locus 21
+    LOSS S_BIND T00335 locus 22
+    LOSS S_BIND T00663 locus 19
+    LOSS S_BIND T00663 locus 21
+    LOSS S_BIND T01013 locus 20
+    LOSS S_BIND T01090 locus 9
+    LOSS S_BIND T01099 locus 9
+    LOSS S_BIND T01468 locus 1
+    LOSS S_BIND T01468 locus 4
+    LOSS S_BIND T01468 locus 5
+    LOSS S_BIND T01468 locus 10
+    LOSS S_BIND T01468 locus 11
+    LOSS S_BIND T01468 locus 14
+    LOSS S_BIND T01468 locus 16
+    LOSS S_BIND T01468 locus 18
+    LOSS S_BIND T01468 locus 19
+    LOSS S_BIND T02624 locus 14
+    LOSS S_BIND T02816 locus 8
+    LOSS S_BIND T02816 locus 9
+    LOSS S_BIND T02816 locus 12
+    LOSS S_BIND T03135 locus 8
+    LOSS S_BIND T03204 locus 7
+    LOSS S_BIND T03204 locus 14
+    LOSS S_BIND T03655 locus 0
+    LOSS S_BIND T03655 locus 7
+    LOSS S_BIND T03655 locus 12
+    LOSS S_BIND T03655 locus 15
+    LOSS S_BIND T03876 locus 9
+  QV-visible changes at 210 paired loci (76 higher under C, 134 higher under A)
+
+==============================================================================
+THE PHASE WALLS (serial RAYON=1, TERMINAL legs; ex-load = the call
+phases minus the panel-load inputs phase; every row carries its n)
+==============================================================================
+
+per-territory ex-load call CPU-s, form A:
+  S_EXP: n=20 median 353.6 mean 969.0 p90 2979.6 max 7576.4
+  S_BIND: n=61 median 158.2 mean 605.8 p90 1399.0 max 6326.0
+  S_MAR: n=1 median 5080.9 mean 5080.9 p90 5080.9 max 5080.9
+
+per-territory ex-load call CPU-s, form C:
+  S_EXP: n=20 median 183.8 mean 715.4 p90 1426.2 max 7139.2
+  S_BIND: n=62 median 106.8 mean 554.7 p90 1369.3 max 5908.0
+  S_MAR: n=6 median 4796.3 mean 4861.7 p90 9105.3 max 9105.3
+
+per-locus core-s (the loci phase / loci), by stratum:
+  form A S_EXP: n=20 median 19.61 mean 66.67 max 472.01
+  form A S_BIND: n=61 median 7.43 mean 46.05 max 900.24
+  form A S_MAR: n=1 median 240.50 mean 240.50 max 240.50
+  form C S_EXP: n=20 median 8.27 mean 53.65 max 444.56
+  form C S_BIND: n=62 median 3.60 mean 37.30 max 592.79
+  form C S_MAR: n=6 median 188.29 mean 213.24 max 374.20
+
+the per-locus wall distribution (serial, form C):
+  S_EXP: n=392 median 0.50s p90 6.50s max 6950.20s worst-5% share 96.0%
+  S_BIND: n=1273 median 0.50s p90 4.50s max 4468.00s worst-5% share 95.7%
+  S_MAR: n=131 median 0.60s p90 33.80s max 8547.30s worst-5% share 96.3%
+
+THE PRUNE'S LOCI-PHASE WALL DROP (paired TERMINAL legs, same census, same territory):
+  n=81 median C/A 0.74x min 0.11x max 1.35x
+  at far-bin share > 1% (n=66): median C/A 0.63x; named heavy pairs:
+    S_BIND T01468: share 88.9%, A loci 75.6s vs C loci 15.6s (0.206x)
+    S_BIND T00663: share 87.8%, A loci 105.2s vs C loci 16.3s (0.155x)
+    S_EXP T09347: share 85.4%, A loci 242.7s vs C loci 30.5s (0.126x)
+    S_BIND T00824: share 84.0%, A loci 231.9s vs C loci 26.5s (0.114x)
+    S_BIND T03655: share 79.4%, A loci 371.1s vs C loci 63.4s (0.171x)
+    S_EXP T04154: share 78.4%, A loci 706.1s vs C loci 167.4s (0.237x)
+    S_BIND T01113: share 72.2%, A loci 35.0s vs C loci 11.7s (0.334x)
+    S_EXP T01258: share 71.1%, A loci 148.6s vs C loci 49.7s (0.334x)
+    S_BIND T03671: share 69.5%, A loci 196.9s vs C loci 36.9s (0.187x)
+    S_BIND T00335: share 68.9%, A loci 285.9s vs C loci 70.7s (0.247x)
+    S_EXP T08425: share 67.2%, A loci 431.5s vs C loci 162.3s (0.376x)
+    S_BIND T01993: share 60.1%, A loci 1093.8s vs C loci 311.8s (0.285x)
+  at far-bin share ~0 (n=7): median C/A 1.03x (the no-prune-to-do class)
+
+THE UNIVERSE-WALL FRAGMENT tranche 2 can state (its own strata only; S_ORD/S_SEG/S_REP are tranche-1 strata, not re-measured here):
+  form C S_EXP: mean 715.4s x 4413 territories (n=20 terminal, median 183.8, max 7139.2) = 3.16e6 core-s
+  form C S_BIND: mean 554.7s x 79 territories (n=62 terminal, median 106.8, max 5908.0) = 0.04e6 core-s (CI includes tranche-1's 8 own members of the 79)
+  form C two-stratum fragment total: 3.20e6 core-s (+/- 3.04e6, 95% normal CI) = 3.5h (+/- 3.3h) at 256 cores - A FRAGMENT of the universe estimate (tranche 1 owns S_ORD/S_SEG/S_REP and the other 8 S_BIND members); never a full-universe total.
+  form A two-stratum fragment total: 4.32e6 core-s (same shape, form A n=81 terminal legs)
+
+THE MARATHON ROSTER'S OWN RECEIPT (16 members, outside every stratified estimate):
+  T00129: A terminal-fail (wall 31310s, rss peak 128952MB, class rss-guard-kill) | C terminal (wall 11117s, rss peak 63163MB, loci 8981s, class -)
+  T01895: A terminal-fail (wall 1928s, rss peak 74761MB, class rss-guard-kill) | C terminal-fail (wall 1347s, rss peak 69141MB, class rss-guard-kill)
+  T02722: A terminal-fail (wall 15560s, rss peak 95088MB, class rss-guard-kill) | C terminal (wall 5465s, rss peak 56040MB, loci 4541s, class -)
+  T02866: A terminal (wall 6313s, rss peak 65986MB, loci 5050s, class -) | C terminal (wall 3242s, rss peak 49124MB, loci 2019s, class -)
+  T03411: A terminal-fail (wall 11748s, rss peak 104889MB, class rss-guard-kill) | C terminal-fail (wall 11657s, rss peak 105717MB, class rss-guard-kill)
+  T03641: A terminal-fail (wall 892s, rss peak 66970MB, class rss-guard-kill) | C terminal-fail (wall 892s, rss peak 66936MB, class rss-guard-kill)
+  T03803: A terminal-fail (wall 27970s, rss peak 80394MB, class rss-guard-kill) | C terminal (wall 5819s, rss peak 42888MB, loci 2006s, class -)
+  T03855: A terminal-fail (wall 13567s, rss peak 90682MB, class rss-guard-kill) | C terminal (wall 5189s, rss peak 54682MB, loci 4874s, class -)
+  T03915: A terminal-fail (wall 8498s, rss peak 67169MB, class rss-guard-kill) | C terminal (wall 7305s, rss peak 63145MB, loci 5976s, class -)
+  T03919: A terminal-fail (wall 6622s, rss peak 76589MB, class rss-guard-kill) | C terminal-fail (wall 6422s, rss peak 76082MB, class rss-guard-kill)
+  T04013: A terminal-fail (wall 46323s, rss peak 132835MB, class rss-guard-kill) | C terminal-fail (wall 46465s, rss peak 132813MB, class rss-guard-kill)
+  T04038: A terminal-fail (wall 3515s, rss peak 69455MB, class rss-guard-kill) | C terminal-fail (wall 3508s, rss peak 68230MB, class rss-guard-kill)
+  T04052: A terminal-fail (wall 13596s, rss peak 99434MB, class rss-guard-kill) | C terminal-fail (wall 13330s, rss peak 99383MB, class rss-guard-kill)
+  T04059: A terminal-fail (wall 10281s, rss peak 93661MB, class rss-guard-kill) | C terminal-fail (wall 10029s, rss peak 92181MB, class rss-guard-kill)
+  T04063: A partial (wall 48691s, rss peak 87366MB, class stopped mid-write (external SIGTERM)) | C terminal-fail (wall 35228s, rss peak 109177MB, class rss-guard-kill)
+  T04066: A terminal-fail (wall 224s, rss peak 34513MB, class overlapping-records (deterministic fail-closed)) | C terminal-fail (wall 212s, rss peak 31900MB, class overlapping-records (deterministic fail-closed))
+
+==============================================================================
+THE CENSUS COUNTERS (cut-side, all 108 runnable members TERMINAL in both cuts; the B/A mult ratio and the far-bin share by stratum)
+==============================================================================
+  S_EXP: n=21 census-mult B/A median 1.11x (min 1.01x max 1.51x); cutA wall median 466s, cutB wall median 2221s
+  S_EXP: far-bin share n=21 median 30.13% p90 71.06% max 85.40% zero-share 3/21
+  S_BIND: n=71 census-mult B/A median 1.12x (min 1.01x max 2.20x); cutA wall median 552s, cutB wall median 3142s
+  S_BIND: far-bin share n=71 median 13.65% p90 68.92% max 88.89% zero-share 3/71
+  S_MAR: n=16 census-mult B/A median 1.02x (min 1.01x max 1.06x); cutA wall median 806s, cutB wall median 3691s
+  S_MAR: far-bin share n=16 median 23.43% p90 64.63% max 82.44% zero-share 1/16
+  TRANSCHE-2 AGGREGATE (mult-weighted, n=108): 90967697/251531304 = 36.17% of the restricted census mass is far-bin scattered
+  the form-C machinery prune receipts vs census geometry: 107 agree, 0 disagree
+
+==============================================================================
+THE RESTRICTION-BASIS STAGE (rvcut, stage K TERMINAL 108/108) AND
+THE DETERMINISM GATE (the banked-era cross-check; receipts kept verbatim in receipts/)
+==============================================================================
+  determinism gate: 57 IDENTICAL, 9 GATE-DIFFERS (the OCT-15-EARLY-SUBSTRATE era class, named per-member in the receipt)
+  the adaptive width at work: 89 width-8 guard-kills (the census working set is not predictable pre-batch), every retry at width 4 exited 0 - 108/108 terminal
+
+==============================================================================
+THE PRODUCTION CALLS (the fleet's in-child calls, 16 rows of the 108-row manifest; TERMINAL, no truth assessment by design)
+==============================================================================
+  T00595: 20 loci called (40639 bytes)
+  T00663: 24 loci called (42207 bytes)
+  T00667: 25 loci called (45548 bytes)
+  T00680: 24 loci called (30024 bytes)
+  T01993: 10 loci called (21538 bytes)
+  T02067: 10 loci called (23398 bytes)
+  T02250: 25 loci called (49325 bytes)
+  T02472: 12 loci called (31864 bytes)
+  T02866: 21 loci called (41526 bytes)
+  T03411: 3 loci called (3155 bytes)
+  T03641: 7 loci called (20130 bytes)
+  T03803: 17 loci called (48894 bytes)
+  T03929: 25 loci called (64686 bytes)
+  T05784: 24 loci called (32804 bytes)
+  T08425: 21 loci called (81825 bytes)
+  T08847: 25 loci called (57586 bytes)

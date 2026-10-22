@@ -1,0 +1,59 @@
+== A. THE STRUCTURAL QUADRATIC RECEIPT (classes == folds(folds+1)/2?) ==
+  classes == folds*(folds+1)/2 exactly at 2822/2822 loci (max |resid| 0)
+== B. PER-LOCUS SERIAL WHOLE-LOCUS WALL vs the candidate work terms (the tranche corpus, current stack, exhaustive scan) ==
+  whole-locus wall vs (classes x units) [the scan's unit-pair product]: t = 0.000162 * X^0.538   R^2=0.7539  n=2789
+  whole-locus wall vs pinned pairs [the pair loop]: t = 0.000145 * X^0.751   R^2=0.7140  n=2776
+  whole-locus wall vs (folds x units) [the matrix]: t = 0.000111 * X^0.745   R^2=0.8469  n=2789
+  whole-locus wall vs units: t = 0.00342 * X^0.779   R^2=0.7519  n=2779
+  whole-locus wall vs records: t = 0.00171 * X^1.237   R^2=0.4643  n=2766
+  wall vs (classes*units) x (pinned)^q: t = 9.43e-05 * X1^0.485 * X2^0.119   R^2=0.7879  n=2777
+  wall vs fold_pairs^p x units^q: t = 0.000347 * X1^0.352 * X2^0.664   R^2=0.7929  n=2785
+== C. THE FOLD-ENUMERATION CLASS (members -> folds_pre -> folds; the merge pass) ==
+  folds_pre vs members: t = 5.49 * X^0.524   R^2=0.0420  n=2822
+  folds vs members: t = 2.6 * X^0.609   R^2=0.0211  n=2822
+  folds vs records: t = 20.7 * X^0.350   R^2=0.3352  n=2767
+  equal-column candidates vs folds_pre (the pairwise equal-column scan: quadratic?): t = 4.16 * X^0.371   R^2=0.0125  n=2784
+  equal-column candidates vs folds_pre^2: t = 4.16 * X^0.185   R^2=0.0125  n=2784
+  folds_build_s vs members: t = 0.00232 * X^0.639   R^2=0.0647  n=835
+  folds_build_s vs folds_pre: t = 0.00037 * X^1.072   R^2=0.3342  n=835
+  folds_build_s vs records: t = 0.0201 * X^0.336   R^2=0.3747  n=825
+  folds_build_s vs members^p x records^q: t = 0.0321 * X1^-0.041 * X2^0.299   R^2=0.3137  n=829
+  merge-pass admission rate: admitted/candidates = 924330/1300294 = 0.7109 over the corpus
+  fold collapse: median folds_pre/folds = 1.0983;  members->folds_pre median = 0.2790
+== D. THE PER-CLASS AUTOPSY FITS (L1, serial, the SS10.6.14 census timers, scaled 0.905) ==
+  (n=25 L1 loci; timers scaled by 0.9050; the assertion + per-variant anchor classes are the PRE-HOIST era)
+  class-scan timer vs (f(f+1)/2 x units) [the unit-pair walk]: t = 2.86e-08 * X^0.978   R^2=0.9966  n=25
+  scoring timer vs scored/placed pairs: t = 7.15e-06 * X^0.929   R^2=0.9207  n=25
+  scoring timer vs all (fold,unit) pairs: t = 2.74e-05 * X^0.793   R^2=0.8819  n=25
+  anchor timer vs (folds x units) [the pre-hoist per-pair class]: t = 1.12e-05 * X^0.765   R^2=0.9506  n=25
+  placement timer vs scored pairs: t = 3.01e-07 * X^1.049   R^2=0.9881  n=25
+  folds_res timer vs records: t = 0.0225 * X^0.430   R^2=0.0160  n=25
+  folds_res vs folds^p x records^q: t = 0.00208 * X1^0.504 * X2^0.404   R^2=0.0595  n=25
+  rates: scoring 2429.86 ns/pinned-pair; class scan 18.42 ns/unit-pair
+== E. THE PER-RUN FIXED CLASSES (the tranche phase summaries; the grain-lever's amortizable terms) ==
+  inputs wall vs windows [expect ~0: the panel load is per-call]: t = 286 * X^-0.035   R^2=0.0164  n=138
+  binding phase vs census records: t = 0.0026 * X^0.947   R^2=0.7015  n=138
+  bind verify vs occurrences [the seek/probe class]: t = 8.47e-07 * X^1.103   R^2=0.2295  n=138
+  rows/context vs distinct rows: t = 1.18 * X^0.265   R^2=0.2095  n=138
+  loci phase vs census records: t = 0.0173 * X^1.051   R^2=0.2759  n=138
+  loci phase vs windows: t = 9.21e+03 * X^-1.347   R^2=0.1122  n=138
+  inputs_s: median 243.8s  p90 306.5s  max 421.9s  n=138
+  binding_s: median 7.2s  p90 41.1s  max 506.9s  n=138
+  rows_s: median 13.4s  p90 17.7s  max 27.8s  n=138
+  loci_s: median 102.6s  p90 2331.0s  max 8980.9s  n=138
+== F. THE MEDIAN-vs-DEEP LOCI (the tranche corpus shares) ==
+  per-locus serial wall: median 0.50s  p95 28.18s  max 8547.3s  n=2822
+  worst-5% share of the corpus per-locus wall: 96.3%
+  (classes x units) at the median locus: 5.6e+06; at p95: 9.21e+08; max 3.82e+11
+  folds: median 117  p95 293  max 1189
+  units: median 660  p95 57669  max 2925505
+  records: median 150  p95 507  max 40772
+== G. THE PROBE'S EIGHT DEEP SHAPES (the fold anatomy inputs) ==
+  T03226 l22: folds 237 units 7553 pairs 28203 pinned 1.00 distinct_rows 187 scan_unit_pairs 2.13e+08 kept_prod 28203 bound_walk_over_scan 0.0084
+  T03226 l10: folds 180 units 122770 pairs 16290 pinned 1.00 distinct_rows 157 scan_unit_pairs 2e+09 kept_prod 35 bound_walk_over_scan 0.0110
+  T03226 l0: folds 204 units 2925505 pairs 20910 pinned 1.00 distinct_rows 187 scan_unit_pairs 6.12e+10 kept_prod 110 bound_walk_over_scan 0.0098
+  T03901 l10: folds 110 units 74086 pairs 6105 pinned 0.01 distinct_rows 89 scan_unit_pairs 4.52e+08 kept_prod 110 bound_walk_over_scan 0.0001
+  T03901 l13: folds 95 units 23511 pairs 4560 pinned 0.58 distinct_rows 94 scan_unit_pairs 1.07e+08 kept_prod 2710 bound_walk_over_scan 0.0122
+  T00940 l0: folds 106 units 34924 pairs 5671 pinned 0.24 distinct_rows 106 scan_unit_pairs 1.98e+08 kept_prod 5671 bound_walk_over_scan 0.0044
+  T00940 l1: folds 449 units 171590 pairs 101025 pinned 0.33 distinct_rows 448 scan_unit_pairs 1.73e+10 kept_prod 101017 bound_walk_over_scan 0.0015
+  T00940 l5: folds 125 units 97952 pairs 7875 pinned 0.41 distinct_rows 125 scan_unit_pairs 7.71e+08 kept_prod 6968 bound_walk_over_scan 0.0066

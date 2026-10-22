@@ -319,6 +319,33 @@ impl Sources {
             fetch_memo: Mutex::new(FxHashMap::default()),
         })
     }
+    pub fn aligned_crop(&self, source: usize, start: u64, end: u64) -> (u64, u64) {
+        // The archive-layout-aligned covering range for [start, end)
+        // on this source: for AGC sources the range widens to whole
+        // segment boundaries (the decompression unit the fetch pays
+        // per touched segment, EVERY fetch — the bind seek-floor
+        // anatomy's ~0.4ms fixed floor); non-segment-addressed
+        // sources (FASTA) keep their identity. The answer is a PURE
+        // LAYOUT choice: a fetch of the aligned range's crop-every
+        // served crop of it equals the direct fetch of that crop
+        // (the Sources fetch contract), so alignment never changes a
+        // served byte.
+        let (name, len) = &self.lanes[source];
+        let end = end.min(*len);
+        if start >= end {
+            return (start, end);
+        }
+        match &self.indexes[self.chosen[source]] {
+            UnifiedSequenceIndex::Agc(index) => match index.segment_layout(name) {
+                Some(layout) => {
+                    let (lo, hi) = layout.aligned_crop(start, end);
+                    (lo, hi.min(*len))
+                }
+                None => (start, end),
+            },
+            UnifiedSequenceIndex::Fasta(_) => (start, end),
+        }
+    }
     pub fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
         require(
             source < self.lanes.len() && start < end && end <= self.lanes[source].1,

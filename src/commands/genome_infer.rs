@@ -69,6 +69,47 @@ pub struct RouteEvidence {
 }
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// THE PANEL-SIDE PER-LOCUS PRECOMPUTE STEP (SS10.6.23 slice 1, the
+    /// Frontier-2 increment's own STEP: the once-per-panel price, paid at
+    /// panel-prep or standalone, NEVER per sample): precompute the row
+    /// context (the deduplicated member rows' stored + canonical-scheme
+    /// walks, the sequences left in the sources and keyed by their FNV-64
+    /// content keys) and the per-window fold groupings into the panel
+    /// asset's new section — <partition-graphs>/panel-precompute-loci/ by
+    /// the default — keyed on CONTENT (the panel identity, the maps digest,
+    /// the routes graph digest, the component, the frame + record origin,
+    /// the stored-frame convention, k). The call auto-discovers the asset
+    /// beside its --partition-graphs and serves it when every key matches
+    /// (IMPG_PANEL_PRECOMPUTE=off restores the live path verbatim).
+    PrecomputePanelLoci {
+        /// The panel syng prefix (the panel the asset keys on)
+        #[arg(long)]
+        panel: String,
+        /// The route graph directory (graph.json + sources)
+        #[arg(long)]
+        routes: PathBuf,
+        /// The locality map directory (window<N>.gfa.map.json — the asset is
+        /// written beside it, into <dir>/panel-precompute-loci)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The component lane — the axis path whose member rows define the
+        /// window grid
+        #[arg(long)]
+        component: String,
+        /// THE GLOBAL-PANEL FRAME (the committed global-panel call mode's
+        /// frame statement: the maps translate to the global frame at load,
+        /// exactly as the call's --global-frame does)
+        #[arg(long, default_value_t = false)]
+        global_frame: bool,
+        /// THE RECORD-ORIGIN CONVENTION (the global frame's content-origin
+        /// parameter, the call's own --record-origin)
+        #[arg(long, default_value_t = 0, requires = "global_frame")]
+        record_origin: u64,
+        /// The asset output directory (default:
+        /// <partition-graphs>/panel-precompute-loci)
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
     /// THE PRODUCT OBJECTIVE (the owner's product swap): per-locus diplotype calls
     /// with the model-internal quality — the realignment likelihood +
     /// territory-image extents + the alignment-induced locality domains as the
@@ -141,6 +182,79 @@ pub enum Command {
         /// byte-identical to the committed receipts.
         #[arg(long, num_args = 1.., value_delimiter = ',')]
         exclude_paths: Vec<String>,
+        /// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the
+        /// presence semantics): N in bp (e.g. 10000) or a percent of the
+        /// window length (e.g. 10% -> ceil(pct x length)). A member row is
+        /// kept only if it carries aligned material over BOTH FLANK
+        /// intervals of the window's axis extent - the first and last
+        /// N bp, in the focal reference's own frame; a window shorter
+        /// than N degenerates to simple presence; the axis row never
+        /// excluded; the excluded rows loudly counted per locus.
+        /// Default: OFF (the committed candidate universe verbatim -
+        /// the default product path is byte-identical to the committed
+        /// receipts).
+        #[arg(long)]
+        flank_overlap: Option<realign_score::FlankOverlap>,
+        /// THE GLOBAL-PANEL FRAME (the campaign's lever 1, the
+        /// global-panel call mode:
+        /// docs/syng-gmem-bwt/global-panel-call-mode.md). When set,
+        /// --panel names the ONE global panel and --partition-graphs
+        /// the territory-local substrate (member rows "path:start-end",
+        /// slice-relative coordinates): the maps are translated to
+        /// the global frame at load, the machinery runs against the
+        /// global grid, and the product emission is translated back
+        /// to the partition's own frame (the committed
+        /// reference-anchored output shape). Default (unset): the
+        /// per-territory frame verbatim — the committed path
+        /// byte-for-byte.
+        #[arg(long, default_value_t = false)]
+        global_frame: bool,
+        /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
+        /// content-origin parameter): the committed substrate's
+        /// locus.fa content need not sit at its header's own interval
+        /// — the L1-L4 substrates' content sits ONE BASE LATER (d=1,
+        /// the uniform delta=1 AGC-identity receipts), the pilot's at
+        /// the header interval exactly (d=0). The global frame, which
+        /// deletes locus.fa by design, must be TOLD the convention:
+        /// the maps and the component lane translate at the content
+        /// origin start+d, and the emission's back-translation
+        /// cancels it exactly (the product output is
+        /// origin-independent). Default 0. Requires --global-frame
+        /// (the committed local frame is closed — it derives the
+        /// convention itself, per record, against the AGC).
+        #[arg(long, default_value_t = 0, requires = "global_frame")]
+        record_origin: u64,
+        /// THE FAR-BIN PRUNE (the owner's own routing principle, the
+        /// §10.6.17-named census lever, enforced at the call's census
+        /// view: "we used to decide where to put each read, so it's
+        /// basically being routed by its best MEMs. If they go into
+        /// different bins unless they're basically adjacent, we
+        /// don't want to be thinking about them."). Census records
+        /// whose placements scatter into NON-ADJACENT windows (the
+        /// measured far-bin repeat class — L1's one 43,686-mult
+        /// single-anchor pattern at windows [12,16], 31.1% of the
+        /// restricted census mass) leave the census view entirely;
+        /// boundary-straddlers keep BOTH adjacent bins (pure interval
+        /// overlap, the routing's own rule). The adjacency test is
+        /// geometry only (the touched-window diameter vs the census's
+        /// own pair-bins constant 1) — no tuned thresholds.
+        /// DEFAULT: ON at the global frame (the owner's ruling on the
+        /// §10.6.18 gate receipts: zero truth losses at L1-L4, the
+        /// pilot's FOUR truth WINS — rank-1 4/22 -> 8/22, median QV
+        /// 36.3 -> 45.0 — L1 loci 74.8 -> 34.7s). The opt-out form
+        /// stays for the record: `--far-bin-prune=false` (the
+        /// committed unpruned census view, byte-identical to the
+        /// pre-ruling receipts). The LOCAL frame is byte-frozen and
+        /// refuses the prune loudly — state `--far-bin-prune=false`
+        /// for the committed local form.
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = true,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
+        far_bin_prune: bool,
         /// THE TEST MODE (the owner's ruling): the truth haplotypes as panel
         /// path names, exactly two (e.g. S288C#0#chrMT SK1#0#chrMT) —
         /// computes the called-vs-truth sequence QV per locus (the committed
@@ -611,6 +725,109 @@ pub enum Command {
         /// The read lengths for the routes inventory
         #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = vec![148u64])]
         read_lengths: Vec<u64>,
+        /// THE GLOBAL-PANEL CALL MODE (the campaign's lever 1:
+        /// docs/syng-gmem-bwt/global-panel-call-mode.md): the ONE
+        /// global panel syng prefix. When set (with --global-routes),
+        /// the per-territory local syng build and the per-territory
+        /// derive-routes are SKIPPED (the cut and the call bind to
+        /// the global panel; prep's panel-side pole collapses to the
+        /// window-bed regeneration) and the registry records the
+        /// global pair with "frame": "global". Default (unset): the
+        /// committed per-territory precomputes verbatim.
+        #[arg(long, requires = "global_routes")]
+        global_panel: Option<String>,
+        /// The whole-panel routes inventory (derive-routes --panel
+        /// <global syng> --sources <panel AGC>, built once,
+        /// panel-side) — the call reads only its lane inventory.
+        #[arg(long, requires = "global_panel")]
+        global_routes: Option<PathBuf>,
+        /// THE GLOBAL PANEL'S AGC (the fleet call path's own input,
+        /// RECORDED in the registry so the three-step CALL step needs
+        /// no manual flag for it: the fleet children build their AGC
+        /// indexes from the panel's own AGC file). Requires
+        /// --global-panel.
+        #[arg(long, requires = "global_panel")]
+        global_agc: Option<PathBuf>,
+        /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
+        /// content-origin parameter, recorded in the registry so the
+        /// CALL step states the same convention): the committed
+        /// substrate's locus.fa content need not sit at its header's
+        /// own interval — the L1-L4 substrates' content sits ONE BASE
+        /// LATER (d=1, the uniform delta=1 AGC-identity receipts),
+        /// the pilot's at the header interval exactly (d=0). The
+        /// global frame, which deletes locus.fa by design, must be
+        /// TOLD the convention; the committed local frame derives it
+        /// per record against the AGC and needs no statement.
+        /// Default 0. Requires --global-panel.
+        #[arg(long, default_value_t = 0, requires = "global_panel")]
+        record_origin: u64,
+        /// The partitions root output directory (partitions.bed + <name>/)
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+    /// THE THREE-STEP UI - PANEL-PREP (the owner's 2-3 step doctrine:
+    /// "make it like 2-3 steps to do whole genome analysis" — STEP 1,
+    /// once per panel, reusable forever): the ONE panel-prep step that
+    /// does BOTH panel-side pieces in sequence — (1) the whole-panel
+    /// routes inventory (derive-routes over the ONE global panel; the
+    /// ~25-min parallel derive, built at the FIRST invocation and
+    /// reused by every later one — an existing inventory is skipped,
+    /// loudly), and (2) the PARTITION step's global-panel form (the
+    /// BED4 row + the window beds + the registry that records the
+    /// global pair, the content origin, and the panel AGC so the
+    /// CALL step needs no manual flags). One invocation per partition
+    /// row (the routes inventory builds once, at the first).
+    PanelPrep {
+        /// The partition name (the BED4 fourth column; keys every panel-side precompute)
+        #[arg(long)]
+        name: String,
+        /// The reference range chromosome (the BED4 first column)
+        #[arg(long)]
+        chrom: String,
+        /// The reference range start, 0-based half-open (the BED4 second column)
+        #[arg(long)]
+        start: u64,
+        /// The reference range end (the BED4 third column)
+        #[arg(long)]
+        end: u64,
+        /// The member-subset fasta for the range (the panel sequences overlapping it)
+        #[arg(long)]
+        sources: PathBuf,
+        /// The component lane - the reference axis path (e.g. HG002#1#chr1:start-end)
+        #[arg(long)]
+        component: String,
+        /// The reference axis JSON (the committed panel-side asset)
+        #[arg(long)]
+        axis: PathBuf,
+        /// The locality map directory (windowN.gfa.map.json - the committed window grid;
+        /// the window beds are regenerated from it verbatim)
+        #[arg(long)]
+        partition_graphs: PathBuf,
+        /// The census receipt for the routes cross-check (any sample's census against
+        /// this panel; the routing bind)
+        #[arg(long)]
+        census: PathBuf,
+        /// The read lengths for the routes inventory
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = vec![148u64])]
+        read_lengths: Vec<u64>,
+        /// THE GLOBAL PANEL syng prefix (the ONE panel; the routes
+        /// inventory and the registry both name it)
+        #[arg(long)]
+        global_panel: String,
+        /// THE GLOBAL PANEL'S AGC (derive-routes' --sources input;
+        /// recorded in the registry for the CALL step's fleet children)
+        #[arg(long)]
+        global_agc: PathBuf,
+        /// The whole-panel routes inventory output directory (built at
+        /// the first invocation, reused forever after)
+        #[arg(long)]
+        global_routes: PathBuf,
+        /// THE RECORD-ORIGIN CONVENTION (the content-origin parameter,
+        /// recorded in the registry so the CALL step states the same
+        /// convention; the committed L1-L4 substrates sit at d=1, the
+        /// pilot at d=0). Default 0.
+        #[arg(long, default_value_t = 0)]
+        record_origin: u64,
         /// The partitions root output directory (partitions.bed + <name>/)
         #[arg(long)]
         out_dir: PathBuf,
@@ -673,11 +890,36 @@ pub enum Command {
         /// covered windows of every overlapping partition)
         #[arg(long)]
         region: Option<String>,
+        /// THE FAR-BIN PRUNE (the product default, the §10.6.18 ruling
+        /// executed at the call-diplotypes engine): applies at the
+        /// global-frame call path (the registry's frame:global
+        /// partitions and the --global-panel form); the committed
+        /// local-frame path is byte-frozen and never prunes. DEFAULT:
+        /// ON at the global frame; the opt-out form stays for the
+        /// record: `--far-bin-prune=false`.
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = true,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
+        far_bin_prune: bool,
         /// THE MASKING OPERATOR (the held-out experiment's stranger filter): candidate
         /// rows whose member path names match any fnmatch-style glob leave the candidate
         /// universe, loudly counted (the axis row never excluded). Default: none.
         #[arg(long, num_args = 1.., value_delimiter = ',')]
         exclude_paths: Vec<String>,
+        /// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the presence
+        /// semantics): N in bp (e.g. 10000) or a percent of the window length
+        /// (e.g. 10% -> ceil(pct x length)). A member row is kept only if it
+        /// carries aligned material over BOTH FLANK intervals of the window's
+        /// axis extent - the first and last N bp, in the focal reference's own
+        /// frame; a window shorter than N degenerates to simple presence; the
+        /// axis row never excluded; the excluded rows loudly counted per
+        /// partition. Default: OFF (the committed candidate universe verbatim).
+        #[arg(long)]
+        flank_overlap: Option<realign_score::FlankOverlap>,
         /// THE TEST MODE (assessment-side only): the truth haplotypes as panel path
         /// names, exactly two - the called-vs-truth sequence QV into
         /// calls.jsonl.truth-qv.jsonl per partition
@@ -689,6 +931,22 @@ pub enum Command {
         /// The selection convention (default: the alignment-induced locality domain)
         #[arg(long, value_enum, default_value_t = realign_score::Selection::Locality)]
         selection: realign_score::Selection,
+        /// THE GLOBAL-PANEL CALL MODE (the campaign's lever 1:
+        /// docs/syng-gmem-bwt/global-panel-call-mode.md): the ONE
+        /// global panel syng prefix. When set (with --global-routes),
+        /// every selected partition is called against the global
+        /// panel + the ONE whole-panel routes inventory instead of
+        /// the registry's per-territory syng/routes — the maps are
+        /// translated to the global frame at load and the product
+        /// emission back to the partition's own frame. Default
+        /// (unset): the committed per-territory path byte-for-byte.
+        #[arg(long, requires = "global_routes")]
+        global_panel: Option<String>,
+        /// The whole-panel routes inventory (derive-routes --panel
+        /// <global syng> --sources <panel AGC>, built once,
+        /// panel-side) — the call reads only its lane inventory.
+        #[arg(long, requires = "global_panel")]
+        global_routes: Option<PathBuf>,
         /// Resident-set guard in GiB (the 64 GiB discipline; 0 = no guard)
         #[arg(long, default_value_t = 64.0)]
         rss_budget_gib: f64,
@@ -798,6 +1056,64 @@ fn route_run(
 }
 pub fn run(command: Command) -> io::Result<()> {
     match command {
+        Command::PrecomputePanelLoci {
+            panel,
+            routes,
+            partition_graphs,
+            component,
+            global_frame,
+            record_origin,
+            out_dir,
+        } => {
+            // (SS10.6.23 slice 1 + SS10.6.25 slice 2 — the once-per-panel
+            // precompute step. An existing asset of the CURRENT format is
+            // REUSED loudly, never rebuilt per invocation (the
+            // routes-inventory precedent: a panel-side asset is built once;
+            // remove it to rebuild). A format-/1 asset (slice 1's, without
+            // the bind-scaffolding section) is UPGRADED loudly — rebuilt
+            // in place so the bind scaffolding is keyed and served.
+            let out_dir = out_dir
+                .unwrap_or_else(|| partition_graphs.join("panel-precompute-loci"));
+            if out_dir.join("manifest.json").is_file() {
+                let manifest_format = std::fs::read_to_string(out_dir.join("manifest.json"))
+                    .ok()
+                    .and_then(|text| {
+                        serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
+                            .ok()
+                    })
+                    .map(|manifest| manifest.format_text());
+                if manifest_format.as_deref() == Some("impg-panel-precompute-loci/2") {
+                    println!(
+                        "=== panel-precompute: the per-locus precompute asset {} exists — REUSED \
+                         (built once per panel; remove it to rebuild)",
+                        out_dir.display()
+                    );
+                    return Ok(());
+                }
+                println!(
+                    "=== panel-precompute: the existing asset {} is format {:?} (slice 1's) — \
+                     REBUILDING with the bind-scaffolding section (the once-per-panel price)",
+                    out_dir.display(),
+                    manifest_format.unwrap_or_else(|| "unreadable".to_string())
+                );
+            } else {
+                println!(
+                    "=== panel-precompute: building the per-locus precompute asset into {} \
+                     (the row context + the fold layouts + the bind scaffolding; the \
+                     once-per-panel price)",
+                    out_dir.display()
+                );
+            }
+            genome::realign_score::precompute_panel_loci(
+                &panel,
+                &routes,
+                &partition_graphs,
+                &component,
+                global_frame,
+                record_origin,
+                &out_dir,
+            )
+        }
         Command::CallDiplotypes {
             panel,
             routes,
@@ -814,10 +1130,36 @@ pub fn run(command: Command) -> io::Result<()> {
             qv_biwfa,
             emit_sequences,
             exclude_paths,
+            flank_overlap,
+            global_frame,
+            record_origin,
+            far_bin_prune,
             out_dir,
-        } => genome::with_output_model(
+        } => {
+            // (The output manifest's model label — the class-scan
+            // order states itself here too (the owner's Ruling 3):
+            // a sparse-skip run's manifest can never be mistaken for
+            // an exact-mode one. THE FAR-BIN PRUNE likewise labels
+            // its own runs. Env-unset keeps the committed string
+            // verbatim.)
+            let model_label: std::borrow::Cow<str> =
+                match std::env::var("IMPG_CLASS_SCAN_ORDER") {
+                    Ok(value) if value == "sparse-skip" => {
+                        std::borrow::Cow::Owned(format!(
+                            "{}-classscan-sparse",
+                            realign_score::MODEL,
+                        ))
+                    }
+                    _ => std::borrow::Cow::Borrowed(realign_score::MODEL),
+                };
+            let model_label: std::borrow::Cow<str> = if far_bin_prune {
+                std::borrow::Cow::Owned(format!("{model_label}-farbin-prune"))
+            } else {
+                model_label
+            };
+            genome::with_output_model(
             &out_dir,
-            realign_score::MODEL,
+            &model_label,
             || {
                 let options = realign_score::Options {
                     panel,
@@ -846,7 +1188,11 @@ pub fn run(command: Command) -> io::Result<()> {
                     truth_qv: truth_qv.unwrap_or_default(),
                     product_sequences: emit_sequences,
                     exclude_paths,
+                    flank_overlap,
                     region,
+                    global_frame,
+                    record_origin,
+                    far_bin_prune,
                     qv_biwfa: qv_biwfa.unwrap_or_else(|| {
                         "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into()
                     }),
@@ -877,7 +1223,8 @@ pub fn run(command: Command) -> io::Result<()> {
                     "truth_in_default_output": false,
                 }))
             },
-        ),
+            )
+        },
         Command::ChainMolecules {
             calls,
             panel,
@@ -1000,7 +1347,7 @@ pub fn run(command: Command) -> io::Result<()> {
         } => genome::with_output_model(&common.out_dir, panel_routes::MODEL, || {
             let identity = genome::PanelIdentity::read(&common.panel)?;
             let panel = SyngIndex::load(&common.panel, SyncmerParams::default())?;
-            panel_routes::lookup(
+            let mut receipt = panel_routes::lookup(
                 &panel,
                 identity,
                 &census,
@@ -1008,7 +1355,26 @@ pub fn run(command: Command) -> io::Result<()> {
                 read_lengths,
                 &common.out_dir,
                 core_bp,
-            )
+            )?;
+            // THE LEGACY-PANEL OPT-IN RECEIPT (the route graph's own
+            // manifest): the panel's metadata version and the opt-in
+            // state are part of the artifact's provenance — a v1 panel
+            // is admissible ONLY under IMPG_PANEL_LEGACY_V1_OK=1 for
+            // committed-evidence continuity (the graph's identity
+            // checksums bind it to the exact sidecars either way).
+            if let Some(value) = receipt.as_object_mut() {
+                value.insert(
+                    "panel_metadata_version".into(),
+                    serde_json::json!(genome::panel_metadata_version(&common.panel)?),
+                );
+                value.insert(
+                    "panel_legacy_opt_in".into(),
+                    serde_json::json!(
+                        std::env::var("IMPG_PANEL_LEGACY_V1_OK").ok().as_deref() == Some("1")
+                    ),
+                );
+            }
+            Ok(receipt)
         }),
         Command::EvaluatePanelRoutes {
             common,
@@ -1417,6 +1783,10 @@ pub fn run(command: Command) -> io::Result<()> {
             partition_graphs,
             census,
             read_lengths,
+            global_panel,
+            global_routes,
+            global_agc,
+            record_origin,
             out_dir,
         } => {
             ensure(start < end, format!("the partition range is empty: {chrom}:{start}-{end}"))?;
@@ -1454,31 +1824,100 @@ pub fn run(command: Command) -> io::Result<()> {
                 ),
             )?;
             std::fs::create_dir_all(&dir)?;
-            // The panel-side precompute 1: the local syng (the
-            // committed recipe verbatim: k=63, s=8, seed 7, pos64).
-            let syng = dir.join("locus-pos64.syng");
-            let started = std::time::Instant::now();
-            run_self(&[
-                "syng",
-                "-f",
-                &sources.display().to_string(),
-                "--syncmer-length",
-                "63",
-                "--smer-length",
-                "8",
-                "--syncmer-seed",
-                "7",
-                "--position-sample-rate",
-                "64",
-                "-o",
-                &syng.display().to_string(),
-            ])?;
-            let syng_seconds = started.elapsed().as_secs_f64();
+            // THE GLOBAL-PANEL CALL MODE (lever 1): under
+            // --global-panel/--global-routes the per-territory local
+            // syng and per-territory routes inventory are NOT BUILT —
+            // the cut and the call bind to the ONE global panel and
+            // the ONE whole-panel routes inventory (the registry
+            // records them with the frame marker); the window beds
+            // are regenerated verbatim either way (the locality maps
+            // are the durable panel-side asset).
+            let (syng, syng_seconds, routes, routes_seconds, frame) = match (
+                &global_panel,
+                &global_routes,
+            ) {
+                (Some(panel), Some(routes_dir)) => (
+                    panel.clone(),
+                    0.0,
+                    routes_dir.display().to_string(),
+                    0.0,
+                    "global",
+                ),
+                _ => {
+                    // The panel-side precompute 1: the local syng (the
+                    // committed recipe verbatim: k=63, s=8, seed 7, pos64).
+                    let syng = dir.join("locus-pos64.syng");
+                    let started = std::time::Instant::now();
+                    run_self(&[
+                        "syng",
+                        "-f",
+                        &sources.display().to_string(),
+                        "--syncmer-length",
+                        "63",
+                        "--smer-length",
+                        "8",
+                        "--syncmer-seed",
+                        "7",
+                        "--position-sample-rate",
+                        "64",
+                        "-o",
+                        &syng.display().to_string(),
+                    ])?;
+                    let syng_seconds = started.elapsed().as_secs_f64();
+                    // The panel-side precompute 3 (local frame only):
+                    // the call-path routes inventory (the lookup lever;
+                    // the census cross-check).
+                    let routes = dir.join("routes");
+                    let read_lengths = read_lengths
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let started = std::time::Instant::now();
+                    run_self(&[
+                        "genome-infer",
+                        "derive-routes",
+                        "--panel",
+                        &syng.display().to_string(),
+                        "--sources",
+                        &sources.display().to_string(),
+                        "--read-lengths",
+                        &read_lengths,
+                        "--census",
+                        &census.display().to_string(),
+                        "--out-dir",
+                        &routes.display().to_string(),
+                    ])?;
+                    let routes_seconds = started.elapsed().as_secs_f64();
+                    (
+                        syng.display().to_string(),
+                        syng_seconds,
+                        routes.display().to_string(),
+                        routes_seconds,
+                        "local",
+                    )
+                }
+            };
             // The panel-side precompute 2: the window beds - the
             // region grid WITHIN the territory, regenerated verbatim
             // from the committed locality maps (the maps are the
             // durable panel-side asset; the member rows per window in
             // the map's own order).
+            //
+            // THE BED FILENAME IS THE AXIS INTERVAL'S OWN GROUP NAME
+            // (the sparse-community fix, found by the whole-genome
+            // run at T00017/T00032/T00000: the export-profile axis
+            // names its windows by the ORIGINAL w10k/d1k community
+            // ids - partition0, partition21, partition22, partition23
+            // - while the locality maps renumber their windows 0..k;
+            // naming the regenerated bed by the map index leaves the
+            // cut's group resolution (axis group -> bed file) with a
+            // NotFound at every sparse territory. The pairing is BY
+            // ORDER with the strongest cross-check: the i-th map
+            // (axis order) must carry the component's own row at the
+            // i-th interval's extent, fail-closed loudly - verified
+            // across BOTH substrate classes (L1's dense 25; T00017's
+            // sparse 4; T00032/T00000 mixed).
             let beds = dir.join("beds");
             std::fs::create_dir_all(&beds)?;
             let mut windows = 0u64;
@@ -1519,41 +1958,60 @@ pub fn run(command: Command) -> io::Result<()> {
                 format!("no locality maps in {}", partition_graphs.display()),
             )?;
             maps.sort_by_key(|(partition, _)| *partition);
-            for (partition, rows) in &maps {
+            // the axis intervals: the authoritative window group names,
+            // in the call's own window order (extent-sorted)
+            let axis_json: serde_json::Value = genome::read_json(&axis)?;
+            let mut intervals: Vec<(u64, u64, String)> = axis_json["intervals"]
+                .as_array()
+                .ok_or_else(|| invalid("the axis carries no intervals array"))?
+                .iter()
+                .map(|interval| {
+                    Ok((
+                        interval["start"].as_u64().unwrap_or(0),
+                        interval["end"].as_u64().unwrap_or(0),
+                        interval["group"]
+                            .as_str()
+                            .ok_or_else(|| invalid("an axis interval carries no group"))?
+                            .to_string(),
+                    ))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            intervals.sort_by_key(|(start, end, _)| (*start, *end));
+            ensure(
+                intervals.len() == maps.len(),
+                format!(
+                    "the axis carries {} intervals but the locality maps carry {} windows \
+                     (the sparse-community pairing is by order; a count mismatch is a \
+                     substrate error, loudly named)",
+                    intervals.len(),
+                    maps.len()
+                ),
+            )?;
+            for ((interval_start, interval_end, group), (_, rows)) in intervals.iter().zip(&maps) {
+                ensure(
+                    rows.iter().any(|(path_name, mstart, mend)| {
+                        path_name == &component && *mstart == *interval_start && *mend == *interval_end
+                    }),
+                    format!(
+                        "the locality map for axis group {group} carries no member row for \
+                         the component {component} at its own extent \
+                         {interval_start}-{interval_end} (the pairing is by order with the \
+                         strongest cross-check; a mismatch is a substrate error, loudly named)"
+                    ),
+                )?;
                 let mut text = String::new();
                 for (path_name, mstart, mend) in rows {
                     text.push_str(&format!("{path_name}\t{mstart}\t{mend}\n"));
                 }
-                std::fs::write(beds.join(format!("partition{partition}.bed")), text)?;
+                std::fs::write(beds.join(format!("{group}.bed")), text)?;
             }
             let beds_seconds = started.elapsed().as_secs_f64();
-            // The panel-side precompute 3: the call-path routes
-            // inventory (the lookup lever; the census cross-check).
-            let routes = dir.join("routes");
-            let read_lengths = read_lengths
-                .iter()
-                .map(|l| l.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let started = std::time::Instant::now();
-            run_self(&[
-                "genome-infer",
-                "derive-routes",
-                "--panel",
-                &syng.display().to_string(),
-                "--sources",
-                &sources.display().to_string(),
-                "--read-lengths",
-                &read_lengths,
-                "--census",
-                &census.display().to_string(),
-                "--out-dir",
-                &routes.display().to_string(),
-            ])?;
-            let routes_seconds = started.elapsed().as_secs_f64();
             // THE REGISTRY (keyed by the partition name): everything
-            // the MAP and CALL steps consume.
-            let manifest = serde_json::json!({
+            // the MAP and CALL steps consume. Under the global-panel
+            // mode the syng/routes entries name the ONE global pair
+            // and the frame marker states it; the committed local
+            // registry is unchanged otherwise.
+            let mut manifest = serde_json::json!({
                 "version": 1,
                 "name": name,
                 "chrom": chrom,
@@ -1566,29 +2024,178 @@ pub fn run(command: Command) -> io::Result<()> {
                 "beds": beds,
                 "syng": syng,
                 "routes": routes,
+                "frame": frame,
+                "record_origin": record_origin,
                 "windows": windows,
             });
+            // THE FLEET CALL PATH'S OWN REGISTRY ENTRY: the global
+            // panel's AGC is recorded ONLY in the global frame (the
+            // committed local registry's bytes are unchanged).
+            if let Some(agc) = &global_agc {
+                manifest["agc"] = serde_json::json!(agc);
+            }
             genome::write_json(&dir.join("partition.json"), &manifest)?;
             let row = format!("{chrom}\t{start}\t{end}\t{name}\n");
             let mut text = std::fs::read_to_string(&bed).unwrap_or_default();
             text.push_str(&row);
             std::fs::write(&bed, text)?;
             bed_rows.push((chrom.clone(), start, end, name.clone()));
+            let routes_manifest = std::path::Path::new(&routes).join("manifest.json");
             let receipt = serde_json::json!({
                 "partition": name,
                 "bed": bed,
                 "bed4_rows": bed_rows.len(),
                 "windows": windows,
+                "frame": frame,
                 "syng_seconds": syng_seconds,
                 "beds_seconds": beds_seconds,
                 "routes_seconds": routes_seconds,
-                "routes_receipt": genome::reconstruction::fingerprint(
-                    &routes.join("manifest.json"),
-                )?,
+                "routes_receipt": if routes_manifest.is_file() {
+                    genome::reconstruction::fingerprint(&routes_manifest)?
+                } else {
+                    serde_json::Value::Null
+                },
                 "manifest": manifest,
                 "scope": "panel-side-precomputes-keyed-by-partition-name",
             });
             println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
+        Command::PanelPrep {
+            name,
+            chrom,
+            start,
+            end,
+            sources,
+            component,
+            axis,
+            partition_graphs,
+            census,
+            read_lengths,
+            global_panel,
+            global_agc,
+            global_routes,
+            record_origin,
+            out_dir,
+        } => {
+            // STEP 1's OWN TWO PIECES, IN SEQUENCE (the owner's 2-3
+            // step doctrine: ONE panel-prep step, once per panel,
+            // reusable forever):
+            // (1) THE WHOLE-PANEL ROUTES INVENTORY (derive-routes over
+            // the ONE global panel): built at the FIRST invocation,
+            // REUSED by every later one — an existing inventory is
+            // skipped, loudly (the routes inventory is a panel-side
+            // asset, never rebuilt per partition row).
+            if global_routes.join("manifest.json").is_file() {
+                println!(
+                    "=== panel-prep: the whole-panel routes inventory {} exists — REUSED \
+                     (built once per panel)",
+                    global_routes.display()
+                );
+            } else {
+                println!(
+                    "=== panel-prep: building the whole-panel routes inventory into {} \
+                     (derive-routes over the ONE global panel; the once-per-panel step)",
+                    global_routes.display()
+                );
+                let read_lengths = read_lengths
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                run_self(&[
+                    "genome-infer",
+                    "derive-routes",
+                    "--panel",
+                    &global_panel,
+                    "--census",
+                    &census.display().to_string(),
+                    "--sources",
+                    &global_agc.display().to_string(),
+                    "--read-lengths",
+                    &read_lengths,
+                    "--out-dir",
+                    &global_routes.display().to_string(),
+                ])?;
+            }
+            // (2) THE PARTITION GLOBAL FORM (the BED4 row + the window
+            // beds + the registry): the committed PARTITION step's own
+            // machinery, verbatim, with the global pair + the panel
+            // AGC recorded so the CALL step needs no manual flags.
+            run(Command::Partition {
+                name,
+                chrom,
+                start,
+                end,
+                sources,
+                component: component.clone(),
+                axis,
+                partition_graphs: partition_graphs.clone(),
+                census,
+                read_lengths,
+                global_panel: Some(global_panel.clone()),
+                global_routes: Some(global_routes.clone()),
+                global_agc: Some(global_agc),
+                record_origin,
+                out_dir,
+            })?;
+            // (3) THE PANEL-SIDE PER-LOCUS PRECOMPUTE (SS10.6.23 slice 1
+            // + SS10.6.25 slice 2 — the Frontier-2 increment's own
+            // panel-prep pieces): the row context + the per-window fold
+            // groupings + the bind scaffolding, keyed on content into
+            // <partition-graphs>/panel-precompute-loci — the
+            // once-per-panel price the CALL step's serve amortizes to
+            // zero per sample. An asset of the CURRENT format is REUSED
+            // loudly (the routes-inventory precedent); a slice-1 /1
+            // asset is UPGRADED loudly (rebuilt with the
+            // bind-scaffolding section); the call falls back to the
+            // live path loudly on any content-key mismatch.
+            let precompute_dir = partition_graphs.join("panel-precompute-loci");
+            let precompute_format = std::fs::read_to_string(precompute_dir.join("manifest.json"))
+                .ok()
+                .and_then(|text| {
+                    serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
+                        .ok()
+                })
+                .map(|manifest| manifest.format_text());
+            if precompute_format.as_deref() == Some("impg-panel-precompute-loci/2") {
+                println!(
+                    "=== panel-prep: the per-locus precompute asset {} exists — REUSED \
+                     (built once per panel)",
+                    precompute_dir.display()
+                );
+            } else {
+                if precompute_format.is_some() {
+                    println!(
+                        "=== panel-prep: the existing asset {} is format {:?} (slice 1's) — \
+                         REBUILDING with the bind-scaffolding section",
+                        precompute_dir.display(),
+                        precompute_format.unwrap()
+                    );
+                } else {
+                    println!(
+                        "=== panel-prep: building the per-locus precompute asset into {} \
+                         (the row context + the fold layouts + the bind scaffolding; the \
+                         once-per-panel price)",
+                        precompute_dir.display()
+                    );
+                }
+                run_self(&[
+                    "genome-infer",
+                    "precompute-panel-loci",
+                    "--panel",
+                    &global_panel,
+                    "--routes",
+                    &global_routes.display().to_string(),
+                    "--partition-graphs",
+                    &partition_graphs.display().to_string(),
+                    "--component",
+                    &component,
+                    "--global-frame",
+                    "--record-origin",
+                    &record_origin.to_string(),
+                ])?;
+            }
             Ok(())
         }
         Command::Map {
@@ -1626,12 +2233,49 @@ pub fn run(command: Command) -> io::Result<()> {
                     !cut_dir.exists(),
                     format!("the cut directory {} already exists", cut_dir.display()),
                 )?;
+                // THE GLOBAL-FRAME REGISTRY'S OWN MAP CUT (the
+                // panel-prep step's form): the registry carries no
+                // per-territory local syng (prep ZERO deleted it by
+                // design), but the fleet call step's RESTRICTED
+                // census profile demands the territory's kept-read
+                // set — the LOCAL cut's own evidence mass (the
+                // §10.6.17 basis) — so the map step builds the local
+                // syng HERE, into the map's own partition directory
+                // (the PARTITION step's local-form recipe verbatim,
+                // ~3s), and runs the committed LOCAL-frame cut against
+                // it. The committed local-frame registry path is
+                // unchanged (the registry's own syng, byte-for-byte).
+                let frame = manifest["frame"].as_str().unwrap_or("local");
+                let cut_panel: std::borrow::Cow<str> = if frame == "global" {
+                    std::fs::create_dir_all(&cut_dir)?;
+                    let syng = cut_dir.join("locus-pos64.syng");
+                    let sources = manifest["sources"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no sources"))?;
+                    run_self(&[
+                        "syng",
+                        "-f",
+                        sources,
+                        "--syncmer-length",
+                        "63",
+                        "--smer-length",
+                        "8",
+                        "--syncmer-seed",
+                        "7",
+                        "--position-sample-rate",
+                        "64",
+                        "-o",
+                        &syng.display().to_string(),
+                    ])?;
+                    std::borrow::Cow::Owned(syng.display().to_string())
+                } else {
+                    std::borrow::Cow::Borrowed(manifest["syng"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no syng"))?)
+                };
                 let mut command = std::process::Command::new(sample_projection_bin()?);
                 command
                     .arg("cut")
                     .arg("--global-panel").arg(&panel)
-                    .arg("--panel").arg(manifest["syng"].as_str().ok_or_else(
-                        || invalid("the partition manifest carries no syng"))?)
+                    .arg("--panel").arg(cut_panel.as_ref())
                     .arg("--axis").arg(manifest["axis"].as_str().ok_or_else(
                         || invalid("the partition manifest carries no axis"))?)
                     .arg("--bed-directory").arg(manifest["beds"].as_str().ok_or_else(
@@ -1691,10 +2335,14 @@ pub fn run(command: Command) -> io::Result<()> {
             map,
             partitions,
             region,
+            far_bin_prune,
             exclude_paths,
+            flank_overlap,
             truth_qv,
             qv_biwfa,
             selection,
+            global_panel,
+            global_routes,
             rss_budget_gib,
             out_dir,
         } => {
@@ -1715,10 +2363,248 @@ pub fn run(command: Command) -> io::Result<()> {
             )?;
             std::fs::create_dir_all(&out_dir)?;
             let mut calls_receipts = Vec::new();
-            for index in &selected {
+            // ------------------------------------------------------------------
+            // THE FLEET FORM (STEP 3's product default, the owner's 2-3
+            // step doctrine): every GLOBAL-frame partition (the
+            // PANEL-PREP registry) is called by the fork-after-load
+            // fleet over the ONE shared panel — the parent loads the
+            // panel once and stays the load owner; width-32 children
+            // (the batched cut amortization) each build their own AGC
+            // index, batch-cut their chunk's territories (the
+            // RESTRICTED census profile, the basis AUTO-DERIVED from
+            // the MAP step's own cut-reads set) and run their chunk's
+            // calls concurrently at the T16 rung with the FAR-BIN
+            // PRUNE default and the record origin AUTO-DERIVED from
+            // the partition registry — no manual flags, no example
+            // binary, no magic constants. The committed serial
+            // per-partition path stays byte-for-byte for the LOCAL
+            // frame. (The fleet forks BEFORE any parent-side rayon
+            // touch — the prefork hygiene the fork driver's own audit
+            // receipts — so the serial local-frame calls run AFTER
+            // the children are reaped.)
+            // ------------------------------------------------------------------
+            let shards_dir: PathBuf = map_manifest["shards_dir"]
+                .as_str()
+                .ok_or_else(|| invalid("the map manifest carries no shards_dir"))?
+                .into();
+            let mut fleet_indexes: Vec<usize> = Vec::new();
+            let mut local_indexes: Vec<usize> = Vec::new();
+            for &index in &selected {
+                let (_, _, _, name) = &bed_rows[index];
+                let manifest: serde_json::Value =
+                    genome::read_json(&partitions.join(name).join("partition.json"))?;
+                if manifest["frame"].as_str() == Some("global") {
+                    fleet_indexes.push(index);
+                } else {
+                    local_indexes.push(index);
+                }
+            }
+            if !fleet_indexes.is_empty() {
+                ensure(
+                    truth_qv.is_none()
+                        && exclude_paths.is_empty()
+                        && flank_overlap.is_none()
+                        && matches!(selection, realign_score::Selection::Locality),
+                    "the fleet call path runs the product defaults (the test-mode and \
+                     masking flags are the committed serial per-partition path's own; \
+                     rerun without them, or call the partitions by the serial form)",
+                )?;
+                let mut specs: Vec<genome::sample_projection::CutBatchGlobalSpec> = Vec::new();
+                let mut fleet_names: Vec<String> = Vec::new();
+                let mut fleet_panel: Option<String> = None;
+                let mut fleet_routes: Option<PathBuf> = None;
+                let mut fleet_agc: Option<PathBuf> = None;
+                for &index in &fleet_indexes {
+                    let (_, _, _, name) = &bed_rows[index];
+                    let manifest: serde_json::Value =
+                        genome::read_json(&partitions.join(name).join("partition.json"))?;
+                    let record_origin: u64 =
+                        manifest["record_origin"].as_u64().unwrap_or(0);
+                    let component = manifest["component"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no component"))?
+                        .to_string();
+                    let graphs: PathBuf = manifest["partition_graphs"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no graphs"))?
+                        .into();
+                    let axis: PathBuf = manifest["axis"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no axis"))?
+                        .into();
+                    let beds: PathBuf = manifest["beds"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no beds"))?
+                        .into();
+                    let panel = manifest["syng"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no syng"))?
+                        .to_string();
+                    let routes: PathBuf = manifest["routes"].as_str()
+                        .ok_or_else(|| invalid("the partition manifest carries no routes"))?
+                        .into();
+                    let agc: PathBuf = manifest["agc"].as_str()
+                        .ok_or_else(|| invalid(
+                            "the partition manifest carries no agc (the PANEL-PREP step \
+                             records the panel AGC for the fleet call path; re-run \
+                             panel-prep for this partition)",
+                        ))?
+                        .into();
+                    match (&fleet_panel, &fleet_routes, &fleet_agc) {
+                        (None, None, None) => {
+                            fleet_panel = Some(panel.clone());
+                            fleet_routes = Some(routes.clone());
+                            fleet_agc = Some(agc.clone());
+                        }
+                        (Some(p), Some(r), Some(a)) => {
+                            ensure(
+                                p == &panel && r == &routes && a == &agc,
+                                format!(
+                                    "the fleet form loads ONE panel (partition {name} \
+                                     names a different global pair than the earlier \
+                                     partitions)",
+                                ),
+                            )?;
+                        }
+                        _ => unreachable!("the global pair is set atomically"),
+                    }
+                    // THE RESTRICTED CENSUS PROFILE'S BASIS, AUTO-DERIVED:
+                    // the MAP step's own kept-read set for the partition
+                    // (the §10.6.17 default demands the evidence-set
+                    // statement; the map's cut IS the product's own).
+                    let readset = map.join(name).join("cut-reads.fasta");
+                    ensure(
+                        readset.is_file(),
+                        format!(
+                            "the map carries no cut-reads.fasta for partition {name} \
+                             (the restricted census profile demands the evidence-set \
+                             statement; re-run the MAP step for this partition)",
+                        ),
+                    )?;
+                    // THE SCORED LOCI: every window, or the --region
+                    // range resolved against the partition's frame.
+                    let axis_rows = realign_score::component_axis_rows(&graphs, &component)?;
+                    let loci: Vec<u32> = match region_filter_range(region.as_deref())? {
+                        Some(range) => {
+                            let resolved = realign_score::resolve_region_loci(
+                                &component,
+                                &axis_rows,
+                                range,
+                            )?;
+                            eprintln!(
+                                "[call] partition {name}: region {range:?} resolved to \
+                                 loci {resolved:?} (frame {component})"
+                            );
+                            resolved
+                        }
+                        None => (0..axis_rows.len() as u32).collect(),
+                    };
+                    if loci.is_empty() {
+                        println!(
+                            "=== call: partition {name} skipped (the region covers no \
+                             window)"
+                        );
+                        continue;
+                    }
+                    let loci = loci
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    println!(
+                        "=== call: partition {name} ({loci} windows, the FLEET form: \
+                         fork-after-load, width-32 cut, T16 calls)"
+                    );
+                    let partition_out = out_dir.join(name);
+                    // The fleet row's cut out_dir is a SIBLING of the
+                    // call out_dir (never its parent): the call's own
+                    // with_output_model CREATE_DIR-refuses an existing
+                    // directory, and the cut phase materializes its
+                    // out_dir (and the parent chain) first — <name>-cut
+                    // beside <name>/ keeps both disciplines intact.
+                    let cut_out = out_dir.join(format!("{name}-cut"));
+                    specs.push(genome::sample_projection::CutBatchGlobalSpec {
+                        name: name.clone(),
+                        axis,
+                        bed_directory: beds,
+                        component,
+                        out_dir: cut_out,
+                        record_origin,
+                        readset: Some(readset),
+                        call: Some(genome::sample_projection::CutBatchGlobalCall {
+                            reads: reads.clone(),
+                            partition_graphs: graphs,
+                            loci,
+                            out_dir: partition_out.clone(),
+                        }),
+                    });
+                    fleet_names.push(name.clone());
+                }
+                if !specs.is_empty() {
+                    let fleet_panel = fleet_panel
+                        .expect("a non-empty fleet row set carries the global pair");
+                    let fleet_routes =
+                        fleet_routes.expect("a non-empty fleet row set carries the routes");
+                    let fleet_agc =
+                        fleet_agc.expect("a non-empty fleet row set carries the agc");
+                    // The explicit --global-panel/--global-routes flags,
+                    // when passed, must name the registry's own pair
+                    // (loud on mismatch; the registry is the record).
+                    if let Some(flag_panel) = &global_panel {
+                        ensure(
+                            flag_panel == &fleet_panel,
+                            format!(
+                                "--global-panel {flag_panel} does not name the registry's \
+                                 own panel {fleet_panel}"
+                            ),
+                        )?;
+                    }
+                    if let Some(flag_routes) = &global_routes {
+                        ensure(
+                            flag_routes == &fleet_routes,
+                            format!(
+                                "--global-routes {} does not name the registry's own \
+                                 routes {}",
+                                flag_routes.display(),
+                                fleet_routes.display()
+                            ),
+                        )?;
+                    }
+                    genome::sample_projection::fork_cut_call_batch_global_specs(
+                        &fleet_panel,
+                        &fleet_agc,
+                        &shards_dir,
+                        specs,
+                        &fleet_routes,
+                        0.0,
+                        32,
+                        Some(16),
+                        far_bin_prune,
+                    )?;
+                    for name in &fleet_names {
+                        let partition_out = out_dir.join(name);
+                        calls_receipts.push(serde_json::json!({
+                            "partition": name,
+                            "form": "fleet",
+                            "calls": genome::reconstruction::fingerprint(
+                                &partition_out.join("calls.jsonl"))?,
+                            "sequences": genome::reconstruction::fingerprint(
+                                &partition_out.join("calls.jsonl.sequences.jsonl"))?,
+                            "cut_census": genome::reconstruction::fingerprint(
+                                &out_dir
+                                    .join(format!("{name}-cut"))
+                                    .join("cut-census.jsonl"))?,
+                            "truth_qv_test_mode": serde_json::Value::Null,
+                        }));
+                    }
+                }
+            }
+            for index in &local_indexes {
                 let (_, _, _, name) = &bed_rows[*index];
                 let manifest: serde_json::Value =
                     genome::read_json(&partitions.join(name).join("partition.json"))?;
+                // THE RECORD-ORIGIN CONVENTION (the registry's own
+                // statement): the partition step recorded the
+                // substrate's content-origin convention; the call
+                // states the same one (the committed local frame
+                // recorded 0 and never consumes it — the global
+                // frame's maps translate at start+d).
+                let record_origin: u64 = manifest["record_origin"].as_u64().unwrap_or(0);
                 let component = manifest["component"].as_str()
                     .ok_or_else(|| invalid("the partition manifest carries no component"))?
                     .to_string();
@@ -1756,13 +2642,32 @@ pub fn run(command: Command) -> io::Result<()> {
                     "=== call: partition {name} ({loci} windows, frame {component})"
                 );
                 let partition_out = out_dir.join(name);
+                // THE GLOBAL-PANEL CALL MODE (lever 1): the ONE global
+                // panel + the ONE whole-panel routes inventory replace
+                // the registry's per-territory syng/routes; the
+                // engine's --global-frame switch carries the frame
+                // translation (maps on load, product rows on emission).
+                let (panel, routes, global_frame) = match (&global_panel, &global_routes) {
+                    (Some(panel), Some(routes)) => {
+                        println!(
+                            "=== call: partition {name} against the GLOBAL panel {}",
+                            panel
+                        );
+                        (panel.clone(), routes.clone(), true)
+                    }
+                    _ => (
+                        manifest["syng"].as_str()
+                            .ok_or_else(|| invalid("the partition manifest carries no syng"))?
+                            .into(),
+                        manifest["routes"].as_str()
+                            .ok_or_else(|| invalid("the partition manifest carries no routes"))?
+                            .into(),
+                        false,
+                    ),
+                };
                 run(Command::CallDiplotypes {
-                    panel: manifest["syng"].as_str()
-                        .ok_or_else(|| invalid("the partition manifest carries no syng"))?
-                        .into(),
-                    routes: manifest["routes"].as_str()
-                        .ok_or_else(|| invalid("the partition manifest carries no routes"))?
-                        .into(),
+                    panel,
+                    routes,
                     partition_graphs: graphs,
                     component,
                     census: map.join(name).join("cut-census.jsonl"),
@@ -1780,6 +2685,17 @@ pub fn run(command: Command) -> io::Result<()> {
                     // the emission is always on here.
                     emit_sequences: true,
                     exclude_paths: exclude_paths.clone(),
+                    flank_overlap,
+                    global_frame,
+                    record_origin,
+                    // THE PRODUCT DEFAULT (the §10.6.18 ruling
+                    // executed): the global-frame call path prunes
+                    // the far-bin class by default (the opt-out
+                    // --far-bin-prune=false stays); the committed
+                    // LOCAL-frame path is byte-frozen and never
+                    // prunes (the frame gate in run_injected holds
+                    // both forms).
+                    far_bin_prune: global_frame && far_bin_prune,
                     out_dir: partition_out.clone(),
                 })?;
                 calls_receipts.push(serde_json::json!({
@@ -1802,6 +2718,10 @@ pub fn run(command: Command) -> io::Result<()> {
                 "partitions": partitions,
                 "region": region,
                 "exclude_paths": exclude_paths,
+                "flank_overlap": flank_overlap.map(|f| f.setting()),
+                "far_bin_prune": far_bin_prune,
+                "global_panel": global_panel,
+                "global_routes": global_routes,
                 "partitions_called": calls_receipts.len(),
                 "calls": calls_receipts,
                 "scope": "per-partition-diplotype-calls-reference-anchored",
@@ -1946,4 +2866,93 @@ fn sample_projection_bin() -> io::Result<PathBuf> {
         ),
     )?;
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Subcommand as _;
+
+    /// Parse a `genome-infer` subcommand invocation (the CLI surface
+    /// itself, the interface-change tests' own form: the flag defaults
+    /// are product behavior and get their own proof).
+    fn parse_subcommand(args: &[&str]) -> Command {
+        let cmd =
+            Command::augment_subcommands(clap::Command::new("genome-infer"));
+        let matches = cmd
+            .try_get_matches_from(
+                std::iter::once("genome-infer").chain(args.iter().copied()),
+            )
+            .expect("the invocation parses");
+        <Command as clap::FromArgMatches>::from_arg_matches(&matches)
+            .expect("the subcommand is known")
+    }
+
+    /// The call-diplotypes base form (every required input, the
+    /// committed local-frame shape).
+    fn call_diplotypes_args<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
+        let mut args: Vec<&str> = [
+            "call-diplotypes",
+            "--panel", "p",
+            "--routes", "r",
+            "--partition-graphs", "g",
+            "--component", "c",
+            "--census", "n",
+            "--reads", "q",
+            "--derive-cache", "d",
+            "--loci", "1",
+            "--out-dir", "o",
+        ]
+        .to_vec();
+        args.extend_from_slice(extra);
+        args
+    }
+
+    #[test]
+    fn far_bin_prune_defaults_on_and_opts_out_by_explicit_false() {
+        // THE PRODUCT DEFAULT FLIP (the owner's ruling on the §10.6.18
+        // gate receipts): the working form IS the default — the bare
+        // invocation prunes; the opt-out form `--far-bin-prune=false`
+        // stays for the record (the committed unpruned receipts);
+        // the legacy bare `--far-bin-prune` keeps meaning ON.
+        let Command::CallDiplotypes { far_bin_prune, .. } =
+            parse_subcommand(&call_diplotypes_args(&[]))
+        else {
+            panic!("expected call-diplotypes");
+        };
+        assert!(far_bin_prune, "the default is ON");
+        let Command::CallDiplotypes { far_bin_prune, .. } = parse_subcommand(
+            &call_diplotypes_args(&["--far-bin-prune=false"]),
+        )
+        else {
+            panic!("expected call-diplotypes");
+        };
+        assert!(!far_bin_prune, "the explicit opt-out is OFF");
+        let Command::CallDiplotypes { far_bin_prune, .. } = parse_subcommand(
+            &call_diplotypes_args(&["--far-bin-prune"]),
+        )
+        else {
+            panic!("expected call-diplotypes");
+        };
+        assert!(far_bin_prune, "the bare flag stays ON");
+    }
+
+    #[test]
+    fn call_region_far_bin_prune_defaults_on() {
+        // The three-step CALL wrapper carries the same product
+        // default (the frame gate in the engine keeps the committed
+        // local-frame path byte-frozen; the effective value at the
+        // local frame is forced OFF by the wrapper).
+        let args = [
+            "call-region",
+            "--map", "m",
+            "--partitions", "p",
+            "--out-dir", "o",
+        ];
+        let Command::CallRegion { far_bin_prune, .. } = parse_subcommand(&args)
+        else {
+            panic!("expected call-region");
+        };
+        assert!(far_bin_prune, "the default is ON");
+    }
 }

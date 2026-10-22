@@ -1,0 +1,7 @@
+GATE calls slice2-off-all PASS (c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34)
+GATE truth-qv slice2-off-all PASS (c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1)
+GATE calls slice2-on-all PASS (c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34)
+GATE truth-qv slice2-on-all PASS (c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1)
+GATE fold digests slice2-off-all PASS (16/16 identical)
+GATE fold digests slice2-on-all PASS (16/16 identical)
+=== T09724 SLICE2 GATES: ALL PASS

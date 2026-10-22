@@ -23,6 +23,7 @@
 //! calling path's own contract — `graph.panel == identity &&
 //! graph.generation_complete` — is satisfied by construction.
 use super::*;
+use rayon::prelude::*;
 use std::io::BufRead;
 use storage::Seal;
 
@@ -152,53 +153,70 @@ pub fn lookup(
     // THE LANES: the sequence hash recomputed over the same source
     // bytes build hashes (one linear read per lane; no syncmer scan,
     // no MEM event enumeration), honest empty port files sealed.
-    let mut graph_lanes = Vec::with_capacity(lanes.len());
+    // (PARALLEL ACROSS LANES: each lane's hash is a pure function of
+    // its own bytes — the per-lane crop loop is unchanged, the
+    // per-lane files are distinct, and the fetch path is thread-safe
+    // by construction (Sources::fetch is &self; the AGC keeps
+    // per-rayon-thread decompressor pools; core_bp crops exceed the
+    // small-crop fetch memo) — so the lanes hash concurrently with
+    // byte-identical results, and `collect` preserves lane order.
+    // The serial form measured ~55 Mbp/s over the whole 1.403 Tbp /
+    // 38,790-lane committed panel — a ~7.5h panel-side wall; the
+    // parallel form emits the SAME artifact at the fleet's thread
+    // count, and the serial run's graph.json remains the cmp
+    // receipt. Serves the whole-panel routes inventory (lever 1)
+    // and the shared-index cut lanes (lever 2) alike.)
     let mut total_source_bp = 0u64;
-    for &(id, ref name, length) in &lanes {
+    for &(_id, ref _name, length) in &lanes {
         add(&mut total_source_bp, length)?;
-        let path = format!("source-ports/{id}.bin");
-        let mut ports = BufWriter::new(File::create(out.join(&path))?);
-        ports.flush()?;
-        let mut sequence_hash = 0xcbf29ce484222325u64;
-        let mut lo = 0u64;
-        while lo < length {
-            let end = lo.saturating_add(core_bp).min(length);
-            let crop = end.saturating_add(k - 1).min(length);
-            let dna = sources.fetch(id, lo, crop)?;
-            super::super::hash_update(&mut sequence_hash, &dna[..(end - lo) as usize]);
-            lo = end;
-        }
-        let mut profiles = Vec::with_capacity(lengths.len());
-        for &read_length in &lengths {
-            let stem = format!("native/{id}-{read_length}");
-            for suffix in ["events.jsonl", "index", "totals.jsonl"] {
-                let file = format!("{stem}.{suffix}");
-                BufWriter::new(File::create(out.join(&file))?).flush()?;
-            }
-            profiles.push(profiles::NativeIndex {
-                length: read_length,
-                starts: if read_length <= length {
-                    length - read_length + 1
-                } else {
-                    0
-                },
-                runs: 0,
-                events: Seal::create(out, &format!("{stem}.events.jsonl"))?,
-                index: Seal::create(out, &format!("{stem}.index"))?,
-                totals: Seal::create(out, &format!("{stem}.totals.jsonl"))?,
-            });
-        }
-        graph_lanes.push(Lane {
-            id,
-            name: name.clone(),
-            length,
-            sequence_fnv1a64: format!("{sequence_hash:016x}"),
-            family: source_family[id],
-            ports: Seal::create(out, &path)?,
-            port_count: 0,
-            profiles,
-        });
     }
+    let graph_lanes: Vec<Lane> = lanes
+        .par_iter()
+        .map(|&(id, ref name, length)| -> io::Result<Lane> {
+            let path = format!("source-ports/{id}.bin");
+            let mut ports = BufWriter::new(File::create(out.join(&path))?);
+            ports.flush()?;
+            let mut sequence_hash = 0xcbf29ce484222325u64;
+            let mut lo = 0u64;
+            while lo < length {
+                let end = lo.saturating_add(core_bp).min(length);
+                let crop = end.saturating_add(k - 1).min(length);
+                let dna = sources.fetch(id, lo, crop)?;
+                super::super::hash_update(&mut sequence_hash, &dna[..(end - lo) as usize]);
+                lo = end;
+            }
+            let mut profiles = Vec::with_capacity(lengths.len());
+            for &read_length in &lengths {
+                let stem = format!("native/{id}-{read_length}");
+                for suffix in ["events.jsonl", "index", "totals.jsonl"] {
+                    let file = format!("{stem}.{suffix}");
+                    BufWriter::new(File::create(out.join(&file))?).flush()?;
+                }
+                profiles.push(profiles::NativeIndex {
+                    length: read_length,
+                    starts: if read_length <= length {
+                        length - read_length + 1
+                    } else {
+                        0
+                    },
+                    runs: 0,
+                    events: Seal::create(out, &format!("{stem}.events.jsonl"))?,
+                    index: Seal::create(out, &format!("{stem}.index"))?,
+                    totals: Seal::create(out, &format!("{stem}.totals.jsonl"))?,
+                });
+            }
+            Ok(Lane {
+                id,
+                name: name.clone(),
+                length,
+                sequence_fnv1a64: format!("{sequence_hash:016x}"),
+                family: source_family[id],
+                ports: Seal::create(out, &path)?,
+                port_count: 0,
+                profiles,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     // Honest empty native artifacts, sealed and counted.
     BufWriter::new(File::create(out.join("ports.bin"))?).flush()?;
     BufWriter::new(File::create(out.join("ownership.jsonl"))?).flush()?;

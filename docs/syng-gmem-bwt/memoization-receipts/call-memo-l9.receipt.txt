@@ -1,0 +1,13 @@
+# call-memo-l9 receipt (2026-10-22T05:11:13Z); binary /home/erikg/impg-genome-inference/target-frontier/release/impg-memo-wip; loci 9
+# wall_s 858 exit 0
+calls_sha256 c32c50e7041c34d1a4df0a07a4263c1c860aa1d04e99621b493cf8ea6bca4bb2 983 bytes
+truthqv_sha256 5302ed6775ecd64d17f3795230e300e810a44f7bd50e4a202d5f9630a3cd378c 1927 bytes
+[score] locus 9: class scan 96580 pairs over 246224 units [437.7s] (phase census)
+[score] locus 9 phase census: merge 1.44s (7 eq-col pairs, 6 admitted), classes 437.68s (96580 pairs x 246224 units), qual spectrum 8.08s (96579 entries), tie certificate 0.03s (0 lists x 0 predicate entries), cluster 0.00s, best-outside 0.00s, called 1, fold multiset entries 1809065 total / 4297 max, scan memo 439folds -> 438 rows (1 dedup), 439 of 96580 pairs dedup (0.5%), 96141 sums computed / 439 memo hits, build 0.42s
+[score] locus 9: alignment-connected folds: 6 merge groups (6 admitted pairs of 7 equal-column candidates; refusals: 0 outside-bubble, 0 unshared, 1 pocket-mass)
+[score] locus 9 scoring census: anchor 0.64s 
+[score] locus 9 done: 439 folds, 246224 units, 96580 classes, truth_rank None, log_gap None, qual None [500.9s]
+[score] phase summary: inputs 201.5s, quality (FASTQ scan) 0.3s, elsewhere 0.000s, derive cache 0.1s, binding 3.1s, variants 0.2s, rows/context assembly 5.7s, loci (folds+units+scoring+classes+qual+exactness+receipts) 500.9s; AGC fetches 1269770 total (340.4 MB)
+fold_set_digest locus 9 folds 439 c8b294e0075bdf74 (in-process)
+phase_census locus 9 best_outside_seconds=0.000354691 called_class_count=1 class_pairs=96580 class_units=246224 classes_seconds=437.684795282 degenerate=False fold_multiset_entries_max=4297 fold_multiset_entries_total=1809065 merge_admitted_pairs=6 merge_equal_column_pairs=7 merge_seconds=1.439460749 qual_certificate_seconds=0.029492672 qual_cluster_seconds=0.001108882 qual_spectrum_entries=96579 qual_spectrum_seconds=8.081663531 qual_tied_list_count=0 qual_tied_list_entries=0 scan_memo={'build_seconds': 0.415863615, 'canonical_pairs': 96141, 'computed_sums': 96141, 'dedup_pairs': 439, 'deduplicated_rows': 1, 'distinct_rows': 438, 'folds': 439, 'memo_hits': 439, 'note': "the bit-equal-row memoization (the fourth expressibility reduction; IMPG_CLASS_SCAN_MEMO=off restores the direct per-pair form): folds -> distinct bit-equal row classes; canonical_pairs = the distinct row-class pair sums the scan computes; dedup = pairs served from the memo; build = the canonicalization walk's own wall", 'pairs': 96580}
+walls locus 9 anatomy_seconds=0.0 classes_seconds=437.684795282 exactness_seconds=1.142897365 folds_seconds=8.808868001000002 locus_seconds=500.868528297 qual_seconds=8.084430055 scoring_seconds=45.167097662

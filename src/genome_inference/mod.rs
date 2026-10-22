@@ -12,7 +12,9 @@ pub mod realign_score;
 pub mod reanchor;
 pub mod reconstruction;
 pub mod sample;
+pub mod sample_projection;
 pub mod sequence_evaluation;
+pub mod territory_frame;
 pub mod threading;
 
 use crate::sample_mem_bwt::invalid;
@@ -82,19 +84,66 @@ impl PanelIdentity {
         } else {
             format!("{prefix}.syng.meta")
         };
-        if !fs::read_to_string(meta_path)?
+        let meta_text = fs::read_to_string(&meta_path)?;
+        let metadata_version: u32 = meta_text
             .lines()
-            .any(|l| l == "version\t2")
-        {
-            return Err(invalid(
-                "genome-infer requires freshly built metadata-v2 panel",
-            ));
+            .find_map(|l| l.strip_prefix("version\t").and_then(|v| v.parse().ok()))
+            .unwrap_or(0);
+        if metadata_version != 2 {
+            // THE LEGACY-PANEL OPT-IN (the global-panel call mode's
+            // committed-evidence continuity, fail-closed by default):
+            // the v2 gate exists so legacy ambiguity-derived
+            // dictionaries are never used to derive NEW samples'
+            // evidence. The ONE committed global panel (the May
+            // projection build every committed cut/call receipt is
+            // keyed to) is metadata v1 — and byte-identity against
+            // those receipts is unattainable against any OTHER
+            // dictionary (a fresh rebuild renumbers every node id,
+            // and the projection's records ARE this panel's ids). The
+            // opt-in states that continuity EXPLICITLY; it never
+            // becomes the default, and every use receipts itself
+            // loudly. The honest retirement path (a metadata
+            // re-stamp of the SAME dictionary, no id churn) is
+            // named in the design doc.
+            if std::env::var("IMPG_PANEL_LEGACY_V1_OK").ok().as_deref() != Some("1") {
+                return Err(invalid(
+                    "genome-infer requires freshly built metadata-v2 panel \
+                     (this one is metadata v1; set IMPG_PANEL_LEGACY_V1_OK=1 ONLY for \
+                     committed-evidence continuity against this panel's own receipts)",
+                ));
+            }
+            let built = fs::metadata(&meta_path)
+                .and_then(|m| m.modified())
+                .map(|t| format!("{}", t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)))
+                .unwrap_or_else(|_| "<unrecorded>".into());
+            eprintln!(
+                "[panel] LEGACY-PANEL OPT-IN: {prefix} is metadata v{metadata_version} \
+                 (meta dated unix {built}); accepted ONLY for identity-gate continuity against the \
+                 committed evidence base keyed to this panel's own node ids"
+            );
         }
         Ok(Self {
             checksum_algorithm: "fnv1a64-content-v1".into(),
             sidecars,
         })
     }
+}
+
+/// The panel's own metadata version statement (the syng `.meta`
+/// `version` line; 0 when the meta carries none) — a provenance
+/// receipt helper, NOT a gate (the gate lives in
+/// `PanelIdentity::read`, fail-closed by default).
+pub fn panel_metadata_version(prefix: &str) -> io::Result<u32> {
+    let primary_meta = crate::syng::syng_meta_path(prefix);
+    let meta_path = if Path::new(&primary_meta).exists() {
+        primary_meta
+    } else {
+        format!("{prefix}.syng.meta")
+    };
+    Ok(fs::read_to_string(meta_path)?
+        .lines()
+        .find_map(|l| l.strip_prefix("version\t").and_then(|v| v.parse().ok()))
+        .unwrap_or(0))
 }
 
 pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {

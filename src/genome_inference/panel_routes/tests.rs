@@ -837,3 +837,64 @@ fn lookup_derives_the_call_path_lane_inventory_identical_to_the_built_graph() {
     })
     .is_err());
 }
+
+#[test]
+fn lookup_lane_hashes_are_deterministic_and_crop_independent() {
+    // THE PARALLEL LANE-HASH'S OWN GROUND (the serial-vs-parallel cmp
+    // receipt rests on this): each lane's sequence_fnv1a64 is a pure
+    // function of the lane's own bytes — identical across reruns and
+    // across core_bp crop partitionings — so hashing the lanes on
+    // concurrent threads (rayon) emits byte-identical graph rows in
+    // lane order, exactly as the serial form did.
+    let a = dna(400, 77);
+    let sequences = vec![
+        ("A#0#chr".into(), a),
+        ("B#0#other".into(), dna(300, 99)),
+        ("C#0#third".into(), dna(200, 123)),
+    ];
+    let (t, p, g, _s) = setup(sequences, vec![90, 250], 37);
+    let census = t.path().join("census.jsonl");
+    fs::write(
+        &census,
+        "{\"occurrences\":[{\"path\":0,\"partitions\":[0]}]}\n",
+    )
+    .unwrap();
+    let lane_rows = |core_bp: u64, run: u64| -> Vec<String> {
+        let out = t.path().join(format!("routes-lookup-hash-{core_bp}-{run}"));
+        super::super::with_output_model(&out, MODEL, || {
+            lookup(
+                &p,
+                identity(),
+                &census,
+                &g.source_paths,
+                g.read_lengths.clone(),
+                &out,
+                core_bp,
+            )
+        })
+        .unwrap();
+        let graph: Graph =
+            serde_json::from_str(&fs::read_to_string(out.join("graph.json")).unwrap()).unwrap();
+        // Lane order is the graph's own contract: id ascending, the
+        // same order the serial loop produced.
+        assert!(graph.lanes.iter().enumerate().all(|(i, l)| l.id == i));
+        graph
+            .lanes
+            .iter()
+            .map(|l| {
+                format!(
+                    "{} {} {} {} {}",
+                    l.id, l.name, l.length, l.family, l.sequence_fnv1a64
+                )
+            })
+            .collect()
+    };
+    // Same inputs, three crop partitionings (core_bp 37 < 64 < lane
+    // lengths; 65536 spans whole lanes): the lane rows are identical.
+    let rows = [lane_rows(37, 0), lane_rows(64, 0), lane_rows(65536, 0)];
+    assert_eq!(rows[0], rows[1]);
+    assert_eq!(rows[0], rows[2]);
+    // And a rerun at the same core_bp is identical (run-to-run
+    // determinism, the parallel schedule invisible in the artifact).
+    assert_eq!(rows[0], lane_rows(37, 1));
+}

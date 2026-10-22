@@ -275,6 +275,39 @@ per-locus diplotype calls, the per-locus hap1/hap2 diplotype sequences
 fields. Cost at L1: ~21s (measured; the heavy tail at the pilot-class
 territory is 75-90s).
 
+**THE PRODUCT DEFAULT STACK + THE GLOBAL-PANEL PRODUCT PATH (the
+owner's orders, executed: docs/syng-gmem-bwt/global-panel-call-mode.md
+§10.6.19-§10.6.20, the receipts' own sections).** The committed answer
+profile now runs with these defaults, each flip's receipt named there:
+the exactness assertion OUT of production (the env restore keeps the
+receipt form), the census profile RESTRICTED (the kept-read evidence
+basis, fail-closed without one), **THE FAR-BIN PRUNE ON** (§10.6.18's
+gates: zero truth losses at L1-L4, the pilot's four truth wins —
+the opt-out `--far-bin-prune=false` stays for the record; the local
+frame is byte-frozen and refuses the prune loudly), and the exact
+class scan (the sparse-skip stays env-opt-in — receipted as no
+measurable gain at the pruned form). At the GLOBAL-panel form the
+three steps are: **STEP 1 `impg genome-infer panel-prep`** — the one
+panel-side step (the whole-panel routes inventory built at the first
+invocation and reused loudly-skipped forever + the partition global
+form; the registry records the global pair, the content origin, AND
+the panel AGC so STEP 3 needs no manual flag); **STEP 2 `impg
+genome-infer map`** (unchanged interface; under a global-frame
+registry it builds the locality syng into its own partition dir and
+runs the committed local cut — the kept-read basis); **STEP 3 `impg
+genome-infer call-region`** — the FLEET form end-to-end with ALL
+defaults (fork-after-load shared panel, width-32 batched cuts, T16
+concurrent calls, restricted census with the basis auto-derived from
+the map's cut-reads, far-bin prune on, record origin auto-derived
+from the registry): no example binary, no manual flags. The demo
+gates at all five localities (§10.6.20): the fleet's calls
+byte-identical to the committed working-form receipts at L2/L3/L4,
+byte-identical to the serial working form at the same fresh-basis
+inputs at L1/pilot (calls AND sequences), the restricted batch cut
+byte-identical to the single restricted cut; out-dir layout:
+`calls/<name>/` (the calls + the output-model manifest) BESIDE
+`calls/<name>-cut/` (the fleet's cut artifacts).
+
 **The flags (region-as-interface):** `--region` accepts a comma-list of
 BED partition names or any `chr:start-end` range, resolved against the
 partition's own reference frame to the covered windows — any locus, any
@@ -308,3 +341,69 @@ records carry the `excluded_rows` receipt field). The default-path
 regression gates on the same binary: chain-L1 invocation verbatim →
 calls.jsonl byte-identical, biWFA fields 25/25, the emission gate ALL
 CHECKS PASS.
+
+## 10. THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design; OFF BY DEFAULT)
+
+`call-diplotypes`/`call-region --flank-overlap <N>` — a candidate-universe
+filter at the fold-construction site: a member row stays in a window's
+candidate universe only if it carries aligned material over BOTH FLANKS
+of the window's axis extent (the first and last N bp, in the focal
+reference's own coordinate frame; the partition maps' member rows live in
+that frame). Parameter forms: N in bp (`--flank-overlap 10000`) or a
+percent of the window length (`--flank-overlap 10%` → ceil(pct × length)).
+A window shorter than N degenerates to simple presence. The axis row is
+never excluded (the `--exclude-paths` precedent); the excluded rows are
+loudly counted and named per locus in the product record
+(`flank_excluded_rows`, `flank_overlap`). Default (unset): the committed
+candidate universe verbatim — the committed chain-L1 invocation with the
+flag unset reproduces calls.jsonl BYTE-IDENTICALLY (biWFA 25/25, the
+emission gate ALL CHECKS PASS).
+
+THE SEMANTICS (measured, then ruled): the partition maps' member rows are
+alignment-correspondence hulls that structurally stop 0–50bp short of the
+region's edges, so a literal containment reading of "covers the flank"
+would remove 91–100% of every window's universe INCLUDING the truth folds
+at ~every window (~36/466 survivors per window). The ruled semantics is
+PRESENCE (the owner's own degenerate-case wording): the row must OVERLAP
+both flank intervals — reach into both flanks.
+
+THE MEASURED VERDICT (five localities, both depths, both settings; the
+committed receipts as baselines; masked substrates equivalence-proven
+byte-identical before their legs; receipts: hprcv2/flank-overlap/):
+
+* THE CENSUS: the fragmentary class @10% is 1.1% of member rows at the
+  ordinary localities (L1–L4) but 60.4% at the pilot (the fragmentary
+  hotbed — its error windows carry 380–840 fragmentary members each);
+  @10kb it is 0.0% at L1–L4 (the degenerate case) and 32.0% at the pilot.
+  6/40 deep miss windows have fragmentary-BUILT called pairs (0/81
+  rank-1) — the bet holds exactly where the hotbed lives.
+* @10kb ON THE PILOT (deep): the fragmentary-call class IMPROVES — the
+  truth pair's rank improves at 9 of 14 changed windows (e.g. 2146→595,
+  5153→1571, 2315→1276, 78→31), the truth's material enters the called
+  pair at L19 (official QV 25.6→36.0) and L21 (34.5→46.5), rank-1 and
+  PERFECT unchanged 4/4 — at the price of 4 windows where the TRUTH
+  ITSELF is fragmentary (inexpressible; they were deep misses anyway).
+  @10kb on the ordinary localities: zero changed calls.
+* @10% IS REFUTED AS A GENERAL SETTING: it removes the truth rows at
+  scale (L2 at 35x: 13 windows inexpressible, rank-1 6→2; the pilot: 14
+  of 22 windows inexpressible including 3 of the 4 rank-1 PERFECT ones).
+  The truth haplotypes' own hulls genuinely miss flank material at those
+  windows; a 1kb flank demand on a 10kb window exceeds the truth's own
+  coverage. The owner's suspicion that the percent form is the safest
+  general form is REFUTED at the window scope — at these window sizes the
+  bp form is the safer example point (the degenerate case neutralizes it
+  on ordinary windows).
+* THE MASKED/STRANGER LEG (held-out): sequence accuracy vs the held-out
+  truth is UNCHANGED at every L1/L2 locus (the representative strains
+  churn among sequence-identical twins — the strangers map recomposes,
+  the wrong-copy classes do not change); masked L3 GAINS 4 windows to
+  QV50; the masked pilot's worst window improves 9.8→23.8 at both
+  settings, with one real regression (L2: 44.99→37.59 @10%). The masked
+  hotbed's hard tail stays wrong (L8 ~10.6, L9 ~15.9) — the filter does
+  not fix the stranger leg's deep-miss windows.
+
+DEFAULT-PRODUCT DECISION (the receipt informs it): the filter stays OFF
+by default — it is inert on ordinary localities at 10kb, a real lever on
+the pilot-class fragmentary hotbeds at 10kb, and a hazard at 10% (the
+truth-fragmentary inexpressibility class). It is a per-locality tool for
+fragmentary-member territories, not a default.

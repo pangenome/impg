@@ -1,0 +1,9 @@
+# precompute receipt (2026-10-22T09:55:27Z); binary /home/erikg/impg-genome-inference/target-frontier/release/impg-slice2-wip; component HG002#1#chr20:62597981-62847943; frame global origin 1
+# wall_s 224 exit 0
+[panel] LEGACY-PANEL OPT-IN: /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.syng is metadata v1 (meta dated unix 1778706746); accepted ONLY for identity-gate continuity against the committed evidence base keyed to this panel's own node ids
+read GBWT with 272213874 vertices and 683539246 edges from /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.syng.1gbwt
+[precompute] rows: 7465 distinct rows over 16 partitions (16 windows) [7.8s]
+[precompute] windows: 16 windows, 2851 folds [0.3s]
+[precompute] bind scaffolding: 467 paths, 585 derivation ranges, 2509938 steps [3.0s]
+[precompute] asset: /mnt/nvme2n1/erikg/slice2-T09724/prep/locality-graphs/panel-precompute-loci (rows.bin 90100480 bytes, windows.bin 83176 bytes, bind-scaffolding.bin 30149687 bytes, manifest.json; maps digest ab451a7abc359877, routes digest 65f2faa7c66065a5) [total 213.9s]
+asset_bytes 120334261

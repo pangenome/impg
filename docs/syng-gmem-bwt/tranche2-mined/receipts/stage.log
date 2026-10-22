@@ -1,0 +1,325 @@
+2026-10-20T12:06:15Z cutA T08847 wall 438s {'census_profile': 'restricted', 'reads_kept': 152098, 'census_mult': 154057}
+2026-10-20T12:06:24Z cutA T05784 wall 447s {'census_profile': 'restricted', 'reads_kept': 224453, 'census_mult': 285586}
+2026-10-20T12:06:35Z cutA T03929 wall 458s {'census_profile': 'restricted', 'reads_kept': 282292, 'census_mult': 363973}
+2026-10-20T12:06:55Z cutA T08425 wall 478s {'census_profile': 'restricted', 'reads_kept': 179395, 'census_mult': 234359}
+2026-10-20T12:12:44Z callC T08847 OK wall 316s
+2026-10-20T12:12:49Z callC T03929 OK wall 321s
+2026-10-20T12:12:53Z callC T05784 OK wall 325s
+2026-10-20T12:13:49Z cutA T09113 wall 445s {'census_profile': 'restricted', 'reads_kept': 192101, 'census_mult': 207695}
+2026-10-20T12:14:05Z cutA T01195 wall 470s {'census_profile': 'restricted', 'reads_kept': 939268, 'census_mult': 1518689}
+2026-10-20T12:14:29Z cutA T01569 wall 474s {'census_profile': 'restricted', 'reads_kept': 119604, 'census_mult': 164303}
+2026-10-20T12:14:40Z callC T08425 OK wall 432s
+2026-10-20T12:14:58Z cutA T02753 wall 482s {'census_profile': 'restricted', 'reads_kept': 59561, 'census_mult': 65321}
+2026-10-20T12:21:28Z cutA T09347 wall 419s {'census_profile': 'restricted', 'reads_kept': 84911, 'census_mult': 97304}
+2026-10-20T12:21:34Z cutA T05920 wall 449s {'census_profile': 'restricted', 'reads_kept': 46626, 'census_mult': 70284}
+2026-10-20T12:21:37Z callC T02753 OK wall 297s
+2026-10-20T12:21:37Z cutA T00618 wall 468s {'census_profile': 'restricted', 'reads_kept': 2824482, 'census_mult': 4664758}
+2026-10-20T12:21:53Z callC T09113 OK wall 313s
+2026-10-20T12:22:58Z callC T01569 OK wall 378s
+2026-10-20T12:23:38Z cutA T03743 wall 520s {'census_profile': 'restricted', 'reads_kept': 2833267, 'census_mult': 4550270}
+2026-10-20T12:28:32Z callC T09347 OK wall 334s
+2026-10-20T12:29:44Z callC T05920 OK wall 471s
+2026-10-20T12:30:02Z cutA T01258 wall 514s {'census_profile': 'restricted', 'reads_kept': 450269, 'census_mult': 791378}
+2026-10-20T12:30:56Z cutA T04569 wall 562s {'census_profile': 'restricted', 'reads_kept': 1757398, 'census_mult': 2782615}
+2026-10-20T12:32:06Z cutA T01747 wall 508s {'census_profile': 'restricted', 'reads_kept': 576455, 'census_mult': 710383}
+2026-10-20T12:33:24Z cutA T07856 wall 707s {'census_profile': 'restricted', 'reads_kept': 3731389, 'census_mult': 6171579}
+2026-10-20T12:38:32Z cutA T04154 wall 510s {'census_profile': 'restricted', 'reads_kept': 862798, 'census_mult': 1549881}
+2026-10-20T12:39:24Z cutA T09724 wall 507s {'census_profile': 'restricted', 'reads_kept': 406876, 'census_mult': 776096}
+2026-10-20T12:41:30Z cutA T03958 wall 564s {'census_profile': 'restricted', 'reads_kept': 207730, 'census_mult': 306845}
+2026-10-20T12:43:02Z callC T01195 OK wall 1582s
+2026-10-20T12:44:21Z cutA T02851 wall 657s {'census_profile': 'restricted', 'reads_kept': 427747, 'census_mult': 593325}
+2026-10-20T12:50:31Z callC T00618 OK wall 1734s
+2026-10-20T12:54:57Z cutA T00983 wall 985s {'census_profile': 'restricted', 'reads_kept': 328211, 'census_mult': 395247}
+2026-10-20T12:55:30Z cutA T00037 wall 966s {'census_profile': 'restricted', 'reads_kept': 57002, 'census_mult': 70373}
+2026-10-20T12:56:49Z cutA T00100 wall 919s {'census_profile': 'restricted', 'reads_kept': 75746, 'census_mult': 77729}
+2026-10-20T12:58:08Z cutA T00157 wall 827s {'census_profile': 'restricted', 'reads_kept': 1355889, 'census_mult': 1764724}
+2026-10-20T13:07:43Z cutA T00335 wall 733s {'census_profile': 'restricted', 'reads_kept': 569481, 'census_mult': 1038229}
+2026-10-20T13:08:33Z cutA T00167 wall 816s {'census_profile': 'restricted', 'reads_kept': 159038, 'census_mult': 208728}
+2026-10-20T13:09:35Z cutA T00337 wall 766s {'census_profile': 'restricted', 'reads_kept': 97161, 'census_mult': 110366}
+2026-10-20T13:11:24Z cutA T00343 wall 796s {'census_profile': 'restricted', 'reads_kept': 3158014, 'census_mult': 5306718}
+2026-10-20T13:17:20Z cutA T00391 wall 577s {'census_profile': 'restricted', 'reads_kept': 2920382, 'census_mult': 4791230}
+2026-10-20T13:18:35Z cutA T00490 wall 602s {'census_profile': 'restricted', 'reads_kept': 380290, 'census_mult': 473362}
+2026-10-20T13:20:47Z cutA T00595 wall 563s {'census_profile': 'restricted', 'reads_kept': 157214, 'census_mult': 225622}
+2026-10-20T13:21:21Z cutA T00551 wall 706s {'census_profile': 'restricted', 'reads_kept': 5175584, 'census_mult': 8785871}
+2026-10-20T13:27:22Z cutA T00663 wall 602s {'census_profile': 'restricted', 'reads_kept': 338190, 'census_mult': 397059}
+2026-10-20T13:28:06Z cutA T00667 wall 571s {'census_profile': 'restricted', 'reads_kept': 228500, 'census_mult': 257031}
+2026-10-20T13:31:57Z cutA T00680 wall 670s {'census_profile': 'restricted', 'reads_kept': 47151, 'census_mult': 56876}
+2026-10-20T13:31:58Z cutA T00695 wall 637s {'census_profile': 'restricted', 'reads_kept': 40546, 'census_mult': 63496}
+2026-10-20T13:37:20Z cutA T00768 wall 554s {'census_profile': 'restricted', 'reads_kept': 180088, 'census_mult': 244597}
+2026-10-20T13:41:21Z cutA T00717 wall 839s {'census_profile': 'restricted', 'reads_kept': 4563593, 'census_mult': 7636484}
+2026-10-20T13:43:22Z cutA T00824 wall 684s {'census_profile': 'restricted', 'reads_kept': 152755, 'census_mult': 179039}
+2026-10-20T13:46:58Z cutA T00937 wall 578s {'census_profile': 'restricted', 'reads_kept': 54427, 'census_mult': 77944}
+2026-10-20T13:51:18Z cutA T00971 wall 597s {'census_profile': 'restricted', 'reads_kept': 348436, 'census_mult': 447478}
+2026-10-20T13:53:11Z cutA T01010 wall 589s {'census_profile': 'restricted', 'reads_kept': 48462, 'census_mult': 60642}
+2026-10-20T14:01:08Z cutA T01013 wall 590s {'census_profile': 'restricted', 'reads_kept': 164267, 'census_mult': 187499}
+2026-10-20T14:02:41Z cutA T00822 wall 1844s {'census_profile': 'restricted', 'reads_kept': 4278064, 'census_mult': 7018189}
+2026-10-20T14:02:44Z cutA T01090 wall 573s {'census_profile': 'restricted', 'reads_kept': 861517, 'census_mult': 1666595}
+2026-10-20T14:07:29Z cutA T01011 wall 1231s {'census_profile': 'restricted', 'reads_kept': 3498664, 'census_mult': 5584588}
+2026-10-20T14:10:38Z cutA T01099 wall 570s {'census_profile': 'restricted', 'reads_kept': 95119, 'census_mult': 117379}
+2026-10-20T14:11:07Z cutA T01113 wall 506s {'census_profile': 'restricted', 'reads_kept': 131880, 'census_mult': 189450}
+2026-10-20T14:12:39Z cutA T01325 wall 595s {'census_profile': 'restricted', 'reads_kept': 4220694, 'census_mult': 6889525}
+2026-10-20T14:16:26Z cutA T01366 wall 537s {'census_profile': 'restricted', 'reads_kept': 272042, 'census_mult': 342030}
+2026-10-20T14:20:04Z cutA T01458 wall 537s {'census_profile': 'restricted', 'reads_kept': 95945, 'census_mult': 100616}
+2026-10-20T14:21:09Z cutA T01464 wall 510s {'census_profile': 'restricted', 'reads_kept': 200474, 'census_mult': 251606}
+2026-10-20T14:26:12Z cutA T01468 wall 586s {'census_profile': 'restricted', 'reads_kept': 209493, 'census_mult': 303338}
+2026-10-20T14:29:46Z cutA T01652 wall 582s {'census_profile': 'restricted', 'reads_kept': 295970, 'census_mult': 414894}
+2026-10-20T14:30:58Z cutA T01720 wall 589s {'census_profile': 'restricted', 'reads_kept': 502528, 'census_mult': 609812}
+2026-10-20T14:35:54Z cutA T01835 wall 582s {'census_profile': 'restricted', 'reads_kept': 482527, 'census_mult': 630018}
+2026-10-20T14:39:10Z cutA T01857 wall 564s {'census_profile': 'restricted', 'reads_kept': 200800, 'census_mult': 270363}
+2026-10-20T14:40:06Z cutA T01859 wall 548s {'census_profile': 'restricted', 'reads_kept': 76225, 'census_mult': 108893}
+2026-10-20T14:44:47Z cutA T01876 wall 533s {'census_profile': 'restricted', 'reads_kept': 216169, 'census_mult': 237533}
+2026-10-20T14:52:19Z cutA T01915 wall 733s {'census_profile': 'restricted', 'reads_kept': 4246284, 'census_mult': 6801657}
+2026-10-20T14:53:36Z cutA T01982 wall 529s {'census_profile': 'restricted', 'reads_kept': 46083, 'census_mult': 56297}
+2026-10-20T14:55:42Z cutA T01425 wall 2704s {'census_profile': 'restricted', 'reads_kept': 5068739, 'census_mult': 8143749}
+2026-10-20T15:00:05Z cutA T01909 wall 1255s {'census_profile': 'restricted', 'reads_kept': 4588115, 'census_mult': 7605322}
+2026-10-20T15:00:14Z cutA T01993 wall 475s {'census_profile': 'restricted', 'reads_kept': 537387, 'census_mult': 630332}
+2026-10-20T15:02:14Z cutA T02067 wall 518s {'census_profile': 'restricted', 'reads_kept': 641459, 'census_mult': 814698}
+2026-10-20T15:03:59Z cutA T02250 wall 497s {'census_profile': 'restricted', 'reads_kept': 201126, 'census_mult': 253935}
+2026-10-20T15:08:32Z cutA T02472 wall 507s {'census_profile': 'restricted', 'reads_kept': 496913, 'census_mult': 687809}
+2026-10-20T15:08:49Z cutA T02578 wall 515s {'census_profile': 'restricted', 'reads_kept': 37938, 'census_mult': 47777}
+2026-10-20T15:12:18Z cutA T02595 wall 604s {'census_profile': 'restricted', 'reads_kept': 3232572, 'census_mult': 5242563}
+2026-10-20T15:15:03Z cutA T02597 wall 663s {'census_profile': 'restricted', 'reads_kept': 3934070, 'census_mult': 6431996}
+2026-10-20T15:17:45Z cutA T02620 wall 553s {'census_profile': 'restricted', 'reads_kept': 2179792, 'census_mult': 3360046}
+2026-10-20T15:18:37Z cutA T02624 wall 588s {'census_profile': 'restricted', 'reads_kept': 545947, 'census_mult': 776103}
+2026-10-20T15:21:39Z cutA T02816 wall 561s {'census_profile': 'restricted', 'reads_kept': 1713980, 'census_mult': 2820532}
+2026-10-20T15:23:30Z cutA T02871 wall 507s {'census_profile': 'restricted', 'reads_kept': 302021, 'census_mult': 386646}
+2026-10-20T15:26:18Z cutA T02873 wall 513s {'census_profile': 'restricted', 'reads_kept': 71844, 'census_mult': 91506}
+2026-10-20T15:27:45Z cutA T03045 wall 548s {'census_profile': 'restricted', 'reads_kept': 743182, 'census_mult': 915837}
+2026-10-20T15:30:19Z cutA T03124 wall 520s {'census_profile': 'restricted', 'reads_kept': 278858, 'census_mult': 360313}
+2026-10-20T15:32:41Z cutA T03135 wall 551s {'census_profile': 'restricted', 'reads_kept': 3152680, 'census_mult': 5154575}
+2026-10-20T15:34:26Z cutA T03204 wall 488s {'census_profile': 'restricted', 'reads_kept': 232362, 'census_mult': 294702}
+2026-10-20T15:38:12Z cutA T03373 wall 627s {'census_profile': 'restricted', 'reads_kept': 2220210, 'census_mult': 3695146}
+2026-10-20T15:40:53Z cutA T03397 wall 634s {'census_profile': 'restricted', 'reads_kept': 2940806, 'census_mult': 4761029}
+2026-10-20T15:41:39Z cutA T03523 wall 538s {'census_profile': 'restricted', 'reads_kept': 77988, 'census_mult': 102659}
+2026-10-20T15:42:37Z callC T03743 FAILED exit 1: [2026-10-20T15:42:33Z ERROR impg] RSS guard exceeded at locus_6_receipts: 68447664 kB
+2026-10-20T15:43:43Z cutA T03524 wall 557s {'census_profile': 'restricted', 'reads_kept': 704493, 'census_mult': 891108}
+2026-10-20T15:46:38Z cutA T03606 wall 506s {'census_profile': 'restricted', 'reads_kept': 299117, 'census_mult': 374800}
+2026-10-20T15:50:21Z callC T01258 OK wall 344s
+2026-10-20T15:50:25Z cutA T03655 wall 572s {'census_profile': 'restricted', 'reads_kept': 1030996, 'census_mult': 1837667}
+2026-10-20T15:50:37Z cutA T03671 wall 538s {'census_profile': 'restricted', 'reads_kept': 729926, 'census_mult': 1253071}
+2026-10-20T15:52:34Z cutA T03876 wall 531s {'census_profile': 'restricted', 'reads_kept': 122904, 'census_mult': 168879}
+2026-10-20T15:56:27Z cutA T03900 wall 589s {'census_profile': 'restricted', 'reads_kept': 2563337, 'census_mult': 4034275}
+2026-10-20T15:57:14Z callC T07856 OK wall 757s
+2026-10-20T15:59:20Z cutA T04007 wall 523s {'census_profile': 'restricted', 'reads_kept': 45600, 'census_mult': 48624}
+2026-10-20T15:59:21Z cutA T03943 wall 536s {'census_profile': 'restricted', 'reads_kept': 626348, 'census_mult': 786319}
+2026-10-20T16:01:13Z cutA T04008 wall 519s {'census_profile': 'restricted', 'reads_kept': 871213, 'census_mult': 1419667}
+2026-10-20T16:05:00Z cutA T04070 wall 513s {'census_profile': 'restricted', 'reads_kept': 239517, 'census_mult': 303682}
+2026-10-20T16:05:07Z callC T04154 OK wall 473s
+2026-10-20T16:06:48Z callC T01747 OK wall 987s
+2026-10-20T16:13:12Z cutA T00129 wall 832s {'census_profile': 'restricted', 'reads_kept': 4456701, 'census_mult': 7346989}
+2026-10-20T16:13:26Z callC T03958 OK wall 398s
+2026-10-20T16:15:42Z cutA T02866 wall 642s {'census_profile': 'restricted', 'reads_kept': 2838012, 'census_mult': 4628400}
+2026-10-20T16:20:34Z cutA T02722 wall 1161s {'census_profile': 'restricted', 'reads_kept': 4886849, 'census_mult': 8197484}
+2026-10-20T16:22:00Z cutA T03411 wall 528s {'census_profile': 'restricted', 'reads_kept': 3155053, 'census_mult': 5270409}
+2026-10-20T16:25:11Z callC T02851 OK wall 705s
+2026-10-20T16:28:58Z callC T09724 OK wall 1431s
+2026-10-20T16:35:59Z cutA T03855 wall 839s {'census_profile': 'restricted', 'reads_kept': 3476166, 'census_mult': 5762884}
+2026-10-20T16:37:33Z cutA T03803 wall 1018s {'census_profile': 'restricted', 'reads_kept': 5128222, 'census_mult': 8718738}
+2026-10-20T16:38:30Z callC T00037 OK wall 572s
+2026-10-20T16:44:02Z callC T00100 OK wall 332s
+2026-10-20T16:46:35Z cutA T03641 wall 1853s {'census_profile': 'restricted', 'reads_kept': 4942827, 'census_mult': 8426534}
+2026-10-20T16:50:30Z cutA T03919 wall 777s {'census_profile': 'restricted', 'reads_kept': 4742344, 'census_mult': 8024397}
+2026-10-20T17:03:07Z cutA T04013 wall 992s {'census_profile': 'restricted', 'reads_kept': 3047539, 'census_mult': 5028489}
+2026-10-20T17:04:23Z cutA T04038 wall 833s {'census_profile': 'restricted', 'reads_kept': 2002461, 'census_mult': 3406540}
+2026-10-20T17:11:05Z cutA T03915 wall 2106s {'census_profile': 'restricted', 'reads_kept': 3478074, 'census_mult': 5424268}
+2026-10-20T17:12:19Z cutA T04052 wall 552s {'census_profile': 'restricted', 'reads_kept': 2980494, 'census_mult': 4943701}
+2026-10-20T17:12:38Z callC T00983 OK wall 2847s
+2026-10-20T17:13:38Z cutA T04059 wall 555s {'census_profile': 'restricted', 'reads_kept': 2772574, 'census_mult': 4548936}
+2026-10-20T17:20:22Z callC T00167 OK wall 464s
+2026-10-20T17:21:42Z cutA T04066 wall 563s {'census_profile': 'restricted', 'reads_kept': 1294089, 'census_mult': 2146777}
+2026-10-20T17:21:53Z cutA T04063 wall 648s {'census_profile': 'restricted', 'reads_kept': 4796177, 'census_mult': 8107934}
+2026-10-20T17:26:46Z callC T00335 OK wall 384s
+2026-10-20T17:32:04Z callC T00157 FAILED exit 1: [WFA::BacktraceBuffer] Reached maximum addressable index[2026-10-20T17:32:01Z ERROR impg] malformed qv-biwfa helper response
+2026-10-20T17:32:17Z callC T00337 OK wall 331s
+2026-10-20T17:44:14Z cutA T01895 wall 6293s {'census_profile': 'restricted', 'reads_kept': 4364824, 'census_mult': 7345629}
+2026-10-20T17:49:30Z callA T09113 OK wall 315s
+2026-10-20T17:49:46Z callA T03929 OK wall 331s
+2026-10-20T17:50:17Z callA T08847 OK wall 362s
+2026-10-20T17:51:42Z callA T05784 OK wall 447s
+2026-10-20T17:54:12Z callC T00391 OK wall 1315s
+2026-10-20T17:54:30Z callA T02753 OK wall 284s
+2026-10-20T17:55:50Z callA T01569 OK wall 380s
+2026-10-20T17:56:23Z callA T08425 OK wall 728s
+2026-10-20T17:58:32Z callA T05920 OK wall 410s
+2026-10-20T18:03:23Z callA T09347 OK wall 533s
+2026-10-20T18:03:41Z callC T04569 OK wall 8344s
+2026-10-20T18:03:42Z callA T01258 OK wall 438s
+2026-10-20T18:16:50Z callC T00490 OK wall 1358s
+2026-10-20T18:18:59Z callA T07856 OK wall 936s
+2026-10-20T18:19:09Z callA T01747 OK wall 927s
+2026-10-20T18:22:40Z callC T00595 OK wall 350s
+2026-10-20T18:27:30Z callC T00663 OK wall 290s
+2026-10-20T18:29:52Z callA T00618 OK wall 2375s
+2026-10-20T18:33:02Z callC T00667 OK wall 332s
+2026-10-20T18:33:37Z callC T03743 FAILED exit 1: [2026-10-20T18:33:34Z ERROR impg] RSS guard exceeded at locus_6_receipts: 69069636 kB
+2026-10-20T18:35:04Z callA T03958 OK wall 312s
+2026-10-20T18:35:48Z callA T04154 OK wall 1009s
+2026-10-20T18:37:58Z callC T00680 OK wall 296s
+2026-10-20T18:38:25Z callC T00695 OK wall 288s
+2026-10-20T18:38:30Z callA T01195 OK wall 3255s
+2026-10-20T18:42:26Z callC T00717 FAILED exit 1: [2026-10-20T18:42:24Z ERROR impg] census record has no unique verifying key (census record 3781; 2 surviving of 3 candidates)
+2026-10-20T18:45:48Z callC T00768 OK wall 443s
+2026-10-20T18:45:51Z callA T00037 OK wall 441s
+2026-10-20T18:50:19Z callA T09724 OK wall 1870s
+2026-10-20T18:50:41Z callA T00100 OK wall 290s
+2026-10-20T18:51:22Z callC T00824 OK wall 334s
+2026-10-20T18:56:58Z callA T02851 OK wall 1314s
+2026-10-20T18:57:14Z callA T00167 OK wall 393s
+2026-10-20T18:58:48Z callC T00937 OK wall 446s
+2026-10-20T19:02:52Z callA T00337 OK wall 338s
+2026-10-20T19:06:21Z callA T00335 OK wall 563s
+2026-10-20T19:12:12Z callA T00983 OK wall 2183s
+2026-10-20T19:14:21Z callC T00971 OK wall 933s
+2026-10-20T19:20:06Z callC T01010 OK wall 345s
+2026-10-20T19:29:38Z callA T00157 FAILED exit 1: [WFA::BacktraceBuffer] Reached maximum addressable index[2026-10-20T19:29:35Z ERROR impg] malformed qv-biwfa helper response
+2026-10-20T19:34:21Z callA T00490 OK wall 1329s
+2026-10-20T19:38:37Z callC T01011 OK wall 1111s
+2026-10-20T19:40:28Z callA T00595 OK wall 367s
+2026-10-20T19:43:05Z callA T00391 OK wall 2204s
+2026-10-20T19:43:56Z callC T01013 OK wall 319s
+2026-10-20T19:46:47Z callA T00663 OK wall 379s
+2026-10-20T19:48:30Z callA T00667 OK wall 325s
+2026-10-20T19:51:44Z callA T00680 OK wall 297s
+2026-10-20T19:53:21Z callA T00695 OK wall 291s
+2026-10-20T19:56:14Z callA T00717 FAILED exit 1: [2026-10-20T19:56:13Z ERROR impg] census record has no unique verifying key (census record 3781; 2 surviving of 3 candidates)
+2026-10-20T20:03:02Z callA T00768 OK wall 581s
+2026-10-20T20:12:14Z callA T00551 FAILED exit 1: [2026-10-20T20:12:09Z ERROR impg] RSS guard exceeded at locus_3_scored: 67760776 kB
+2026-10-20T20:18:08Z callA T00824 OK wall 906s
+2026-10-20T20:19:52Z callA T00937 OK wall 458s
+2026-10-20T20:23:12Z callA T04569 OK wall 8680s
+2026-10-20T20:24:04Z callA T00822 FAILED exit 1: [2026-10-20T20:24:02Z ERROR impg] RSS guard exceeded at locus_15_receipts: 72053072 kB
+2026-10-20T20:26:20Z callA T01010 OK wall 388s
+2026-10-20T20:29:26Z callA T01013 OK wall 322s
+2026-10-20T20:31:59Z callC T01090 OK wall 2883s
+2026-10-20T20:33:53Z callC T00822 FAILED exit 1: [2026-10-20T20:33:49Z ERROR impg] RSS guard exceeded at locus_19_receipts: 75430084 kB
+2026-10-20T20:33:55Z callA T00971 OK wall 947s
+2026-10-20T20:35:48Z callA T01099 OK wall 382s
+2026-10-20T20:37:40Z callC T01099 OK wall 341s
+2026-10-20T20:38:40Z callC T01113 OK wall 287s
+2026-10-20T20:39:19Z callA T01113 OK wall 324s
+2026-10-20T20:44:43Z callC T01366 OK wall 363s
+2026-10-20T20:45:33Z callA T01366 OK wall 374s
+2026-10-20T20:47:54Z callA T01011 OK wall 1482s
+2026-10-20T20:49:11Z callA T03743 FAILED exit 1: [2026-10-20T20:49:06Z ERROR impg] RSS guard exceeded at locus_6_receipts: 72982428 kB
+2026-10-20T20:54:48Z callA T01464 OK wall 337s
+2026-10-20T20:54:54Z callA T01458 OK wall 420s
+2026-10-20T21:00:42Z callA T01468 OK wall 354s
+2026-10-20T21:01:19Z callA T01652 OK wall 385s
+2026-10-20T21:09:00Z callA T01835 OK wall 461s
+2026-10-20T21:14:06Z callA T01857 OK wall 306s
+2026-10-20T21:17:01Z callA T01090 OK wall 3041s
+2026-10-20T21:23:04Z callC T00343 FAILED exit 1: [2026-10-20T21:22:57Z ERROR impg] RSS guard exceeded at locus_2_receipts: 100383172 kB
+2026-10-20T21:23:26Z callA T01876 OK wall 385s
+2026-10-20T21:24:16Z callA T01859 OK wall 610s
+2026-10-20T21:27:51Z callA T01720 OK wall 1629s
+2026-10-20T21:27:57Z callC T01458 OK wall 293s
+2026-10-20T21:30:17Z callA T01909 FAILED exit 1: [2026-10-20T21:30:15Z ERROR impg] census record has no unique verifying key (census record 5064; 2 surviving of 2 candidates)
+2026-10-20T21:32:54Z callA T01982 OK wall 303s
+2026-10-20T21:33:20Z callC T01464 OK wall 323s
+2026-10-20T21:38:20Z callC T01468 OK wall 300s
+2026-10-20T21:38:33Z callA T01915 OK wall 857s
+2026-10-20T21:43:42Z callA T02250 OK wall 308s
+2026-10-20T21:43:55Z callC T01652 OK wall 335s
+2026-10-20T21:53:01Z callA T01993 OK wall 1364s
+2026-10-20T21:58:11Z callA T02578 OK wall 310s
+2026-10-20T22:04:57Z callA T02067 OK wall 1923s
+2026-10-20T22:10:40Z callC T01720 OK wall 1605s
+2026-10-20T22:13:03Z callA T02595 OK wall 892s
+2026-10-20T22:17:39Z callC T01835 OK wall 419s
+2026-10-20T22:20:05Z callA T02472 OK wall 2183s
+2026-10-20T22:22:42Z callC T01857 OK wall 303s
+2026-10-20T22:28:26Z callA T02624 OK wall 501s
+2026-10-20T22:32:47Z callC T01859 OK wall 605s
+2026-10-20T22:38:58Z callC T01876 OK wall 371s
+2026-10-20T22:45:44Z callC T01909 FAILED exit 1: [2026-10-20T22:45:42Z ERROR impg] census record has no unique verifying key (census record 5064; 2 surviving of 2 candidates)
+2026-10-20T22:53:10Z callA T00343 FAILED exit 1: [2026-10-20T22:52:58Z ERROR impg] RSS guard exceeded at locus_2_receipts: 100206568 kB
+2026-10-20T22:59:07Z callA T02871 OK wall 357s
+2026-10-20T22:59:26Z callA T02597 OK wall 3269s
+2026-10-20T23:00:24Z callC T01915 OK wall 880s
+2026-10-20T23:04:26Z callA T02873 OK wall 318s
+2026-10-20T23:05:23Z callC T01982 OK wall 299s
+2026-10-20T23:07:29Z callA T03045 OK wall 483s
+2026-10-20T23:11:10Z callA T02816 OK wall 2564s
+2026-10-20T23:16:32Z callC T01993 OK wall 669s
+2026-10-20T23:18:11Z callA T03204 OK wall 421s
+2026-10-20T23:19:41Z callA T03124 OK wall 915s
+2026-10-20T23:22:01Z callC T01425 OK wall 9438s
+2026-10-20T23:27:12Z callC T02250 OK wall 311s
+2026-10-20T23:39:56Z callA T03135 OK wall 1947s
+2026-10-20T23:44:52Z callA T03523 OK wall 296s
+2026-10-20T23:48:42Z callC T02067 OK wall 1929s
+2026-10-20T23:53:39Z callA T03524 OK wall 527s
+2026-10-20T23:54:00Z callC T02578 OK wall 318s
+2026-10-21T00:00:04Z callC T02472 OK wall 1972s
+2026-10-21T00:02:12Z callC T02595 OK wall 492s
+2026-10-21T00:03:00Z callA T02620 OK wall 6597s
+2026-10-21T00:03:20Z callA T03606 OK wall 581s
+2026-10-21T00:11:22Z callA T03671 OK wall 482s
+2026-10-21T00:16:54Z callA T03876 OK wall 332s
+2026-10-21T00:21:12Z callC T00551 FAILED exit 1: [2026-10-21T00:21:07Z ERROR impg] RSS guard exceeded at locus_3_receipts: 83374764 kB
+2026-10-21T00:27:28Z callA T03655 OK wall 1468s
+2026-10-21T00:27:28Z callC T02624 OK wall 376s
+2026-10-21T00:28:52Z callA T01325 FAILED exit 1: [2026-10-21T00:28:44Z ERROR impg] RSS guard exceeded at locus_4_receipts: 113664852 kB
+2026-10-21T00:33:43Z callC T01325 FAILED exit 1: [2026-10-21T00:33:36Z ERROR impg] RSS guard exceeded at locus_4_receipts: 111581276 kB
+2026-10-21T00:33:47Z callA T04007 OK wall 293s
+2026-10-21T00:38:33Z callA T03943 OK wall 665s
+2026-10-21T00:38:55Z callC T02871 OK wall 312s
+2026-10-21T00:42:15Z callC T02597 FAILED exit 1: [WFA::BacktraceBuffer] Reached maximum addressable index[2026-10-21T00:42:12Z ERROR impg] malformed qv-biwfa helper response
+2026-10-21T00:44:27Z callC T02873 OK wall 332s
+2026-10-21T00:44:29Z callA T04070 OK wall 356s
+2026-10-21T00:48:22Z callC T03045 OK wall 367s
+2026-10-21T00:55:55Z callA T04008 OK wall 1328s
+2026-10-21T00:59:40Z callC T03124 OK wall 913s
+2026-10-21T01:05:30Z callC T03204 OK wall 350s
+2026-10-21T01:10:37Z callC T02816 OK wall 2588s
+2026-10-21T01:16:13Z callC T02620 OK wall 4440s
+2026-10-21T01:20:25Z callC T03135 OK wall 1922s
+2026-10-21T01:21:29Z callC T03523 OK wall 316s
+2026-10-21T01:26:37Z callC T03524 OK wall 371s
+2026-10-21T01:28:04Z callA T01895 FAILED exit 1: [2026-10-21T01:28:00Z ERROR impg] RSS guard exceeded at locus_2_scored: 76567644 kB
+2026-10-21T01:28:58Z callC T03606 OK wall 449s
+2026-10-21T01:34:33Z callC T03671 OK wall 335s
+2026-10-21T01:39:21Z callC T03876 OK wall 288s
+2026-10-21T01:46:42Z callC T03655 OK wall 1205s
+2026-10-21T01:57:41Z callC T03943 OK wall 659s
+2026-10-21T02:02:42Z callC T04007 OK wall 301s
+2026-10-21T02:02:47Z callA T03900 OK wall 6353s
+2026-10-21T02:24:14Z callC T04008 OK wall 1292s
+2026-10-21T02:28:02Z callC T03373 OK wall 4952s
+2026-10-21T02:30:23Z callC T04070 OK wall 369s
+2026-10-21T02:37:32Z callC T03900 OK wall 3491s
+2026-10-21T02:38:06Z callA T03397 FAILED exit 1: [2026-10-21T02:38:00Z ERROR impg] RSS guard exceeded at locus_3_receipts: 85518044 kB
+2026-10-21T02:52:50Z callC T01895 FAILED exit 1: [2026-10-21T02:52:47Z ERROR impg] RSS guard exceeded at locus_2_scored: 70907020 kB
+2026-10-21T03:27:09Z callA T03373 FAILED exit 1: [2026-10-21T03:27:03Z ERROR impg] RSS guard exceeded at locus_12_receipts: 86291168 kB
+2026-10-21T03:41:10Z callA T01425 FAILED exit 1: [2026-10-21T03:41:05Z ERROR impg] RSS guard exceeded at locus_20_receipts: 67937260 kB
+2026-10-21T03:42:01Z callA T03641 FAILED exit 1: [2026-10-21T03:41:59Z ERROR impg] RSS guard exceeded at binding: 68594204 kB
+2026-10-21T03:46:52Z callC T02866 OK wall 3242s
+2026-10-21T03:48:00Z callA T02866 OK wall 6313s
+2026-10-21T04:02:56Z callC T03397 FAILED exit 1: [2026-10-21T04:02:51Z ERROR impg] RSS guard exceeded at locus_3_receipts: 83829424 kB
+2026-10-21T04:08:37Z callC T02722 OK wall 5465s
+2026-10-21T04:17:48Z callC T03641 FAILED exit 1: [2026-10-21T04:17:46Z ERROR impg] RSS guard exceeded at binding: 68548636 kB
+2026-10-21T05:33:19Z callC T00129 OK wall 11117s
+2026-10-21T05:44:17Z callC T03855 OK wall 5189s
+2026-10-21T05:45:36Z callC T03803 OK wall 5819s
+2026-10-21T05:47:24Z callA T02722 FAILED exit 1: [2026-10-21T05:47:19Z ERROR impg] RSS guard exceeded at locus_16_receipts: 94194828 kB
+2026-10-21T05:53:54Z callA T03411 FAILED exit 1: [2026-10-21T05:53:48Z ERROR impg] RSS guard exceeded at locus_1_receipts: 106362548 kB
+2026-10-21T06:09:38Z callA T03915 FAILED exit 1: [2026-10-21T06:09:34Z ERROR impg] RSS guard exceeded at locus_12_receipts: 67199968 kB
+2026-10-21T07:01:09Z callC T03411 FAILED exit 1: [2026-10-21T07:01:03Z ERROR impg] RSS guard exceeded at locus_1_receipts: 106223860 kB
+2026-10-21T07:08:13Z callA T04038 FAILED exit 1: [2026-10-21T07:08:09Z ERROR impg] RSS guard exceeded at locus_9_receipts: 69848828 kB
+2026-10-21T07:28:08Z callA T03855 FAILED exit 1: [2026-10-21T07:28:03Z ERROR impg] RSS guard exceeded at locus_10_receipts: 92858708 kB
+2026-10-21T07:31:19Z callC T03919 FAILED exit 1: [2026-10-21T07:31:14Z ERROR impg] RSS guard exceeded at locus_0_receipts: 77908836 kB
+2026-10-21T07:35:04Z callC T03915 OK wall 7305s
+2026-10-21T07:37:46Z callA T03919 FAILED exit 1: [2026-10-21T07:37:41Z ERROR impg] RSS guard exceeded at locus_0_receipts: 78427348 kB
+2026-10-21T07:59:38Z callC T04038 FAILED exit 1: [2026-10-21T07:59:34Z ERROR impg] RSS guard exceeded at locus_9_receipts: 69867556 kB
+2026-10-21T09:26:19Z callA T00129 FAILED exit 1: [2026-10-21T09:26:10Z ERROR impg] RSS guard exceeded at locus_11_receipts: 130164732 kB
+2026-10-21T09:30:03Z callA T04066 FAILED exit 1: [2026-10-21T09:30:02Z ERROR impg] the territory carries overlapping records of one path: "CHM13#0#chr6:52588790-52878238"
+2026-10-21T10:19:29Z callA T04059 FAILED exit 1: [2026-10-21T10:19:24Z ERROR impg] RSS guard exceeded at locus_3_receipts: 95703644 kB
+2026-10-21T10:22:14Z callC T04059 FAILED exit 1: [2026-10-21T10:22:09Z ERROR impg] RSS guard exceeded at locus_3_receipts: 94393528 kB
+2026-10-21T10:25:46Z callC T04066 FAILED exit 1: [2026-10-21T10:25:45Z ERROR impg] the territory carries overlapping records of one path: "CHM13#0#chr6:52588790-52878238"
+2026-10-21T10:54:49Z callA T04052 FAILED exit 1: [2026-10-21T10:54:43Z ERROR impg] RSS guard exceeded at locus_2_receipts: 101820812 kB
+2026-10-21T11:13:29Z callC T04052 FAILED exit 1: [2026-10-21T11:13:24Z ERROR impg] RSS guard exceeded at locus_2_receipts: 101768588 kB
+2026-10-21T11:27:20Z callA T03803 FAILED exit 1: [2026-10-21T11:27:15Z ERROR impg] RSS guard exceeded at locus_7_receipts: 82323724 kB
+2026-10-21T17:46:46Z callC T04063 FAILED exit 1: [2026-10-21T17:46:39Z ERROR impg] RSS guard exceeded at locus_9_receipts: 110757772 kB
+2026-10-21T18:40:01Z callC T04013 FAILED exit 1: [2026-10-21T18:39:52Z ERROR impg] RSS guard exceeded at locus_3_receipts: 136000508 kB
+2026-10-21T18:45:57Z callA T04013 FAILED exit 1: [2026-10-21T18:45:49Z ERROR impg] RSS guard exceeded at locus_3_receipts: 136023404 kB
+2026-10-21T21:09:17Z callA T04063 FAILED exit 143: [score] locus 9: alignment-connected folds: 2 merge groups (2 admitted pairs of 23 equal-column candidates; refusals: 11 outside-bubble, 10 unshared, 0 pocket-mass)

@@ -5738,17 +5738,28 @@ impl Drop for SyngMatcherWorker<'_> {
     }
 }
 
+/// Test-only serialization for the syng C library's non-thread-safe
+/// global state (pathCount, array tracking counters, etc.) — shared
+/// by EVERY in-process test that touches the C FFI (syng's own tests
+/// and the genome_inference precompute/serve fixtures, which build
+/// in-process panels through the same C library).
+#[cfg(test)]
+pub(crate) static SYNG_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // The syng C library has non-thread-safe global state (pathCount, array
     // tracking counters, etc.), so all tests that touch the C FFI must be
-    // serialized.
-    static SYNG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+    // serialized — through the crate-shared `SYNG_TEST_LOCK` (the
+    // genome_inference serve fixtures build in-process panels through
+    // the same C library and take the same lock).
     fn lock_syng() -> std::sync::MutexGuard<'static, ()> {
-        SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::SYNG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     // Unfiltered C sampler reference: preserve selection/RC policy, then compare

@@ -308,16 +308,17 @@
 //!    is unchanged.
 
 use clap::Args;
-use crate::genome_inference::{panel_routes as routes, read_json, PanelIdentity};
+use crate::genome_inference::{panel_routes as routes, read_json, territory_frame, PanelIdentity};
 use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// The reads' exact length: the realignment model's placement
@@ -328,11 +329,25 @@ use std::time::Instant;
 /// uniformly trimmed length). Derived from the derive cache's own
 /// uniform read length at load (the cache is a pure function of the
 /// FASTQ and the panel).
-static READ_LENGTH: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(150);
+/// THE FRESH-PROCESS READ LENGTH (the committed initial value of
+/// the read length in every standalone run): every committed receipt
+/// computes the elsewhere branch E BEFORE the derive cache states the
+/// cache's own declared read length, so E is measured at THIS value
+/// in every standalone run.
+/// THE CONCURRENT-CALLS AMENDMENT: the read length is now PER-CALL
+/// state (a local in `run_injected`), not a process-global — under
+/// the combined process's CONCURRENT calls a process-global would
+/// race across calls (one call's derive-cache store landing before
+/// another call's E read, the exact divergence class the serial
+/// combined process's first gate receipted at the stale 148). The
+/// per-call local reproduces the fresh-process trajectory BY
+/// CONSTRUCTION at any call concurrency: initialized here, read at E
+/// before the derive load stores the declared length, and shared
+/// immutably with the seam threads afterwards.
+const READ_LENGTH_FRESH: usize = 150;
 #[inline]
 fn read_len() -> usize {
-    READ_LENGTH.load(Ordering::Relaxed)
+    READ_LENGTH_FRESH
 }
 
 // ---------------------------------------------------------------------------
@@ -398,8 +413,9 @@ pub struct Options {
     #[arg(long)]
     pub exactness_out: PathBuf,
     /// The evenly-spaced exactness sample count per locus (a stated
-    /// measurement sample; the in-process assertion covers the whole
-    /// pilot domain regardless).
+    /// measurement sample; with IMPG_SCORE_EXACTNESS_ASSERT=1 the
+    /// in-process assertion covers the whole pilot domain as well —
+    /// the receipt/gate form of the removed always-on check).
     #[arg(long, default_value_t = 100)]
     pub exactness_sample: u64,
     /// The pocket-read anatomy sidecar (slice C: per unit, classified
@@ -467,6 +483,84 @@ pub struct Options {
     /// --loci. Conflicts with --loci.
     #[arg(long, conflicts_with = "loci")]
     pub region: Option<String>,
+    /// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the
+    /// presence semantics ruled at the measured fork): N in
+    /// bp (`--flank-overlap 10000`) or a percent of the window length
+    /// (`--flank-overlap 10%` -> ceil(pct x length)). A member row is
+    /// KEPT in a window's candidate universe only if it carries
+    /// aligned material over BOTH FLANK intervals of the window's
+    /// axis extent - the first N bp and the last N bp, in the focal
+    /// reference's own coordinate frame; a window shorter than N
+    /// degenerates to simple presence. The axis row is never
+    /// excluded (the --exclude-paths precedent).
+    /// Default (unset): no row is excluded - the committed candidate
+    /// universe verbatim, the committed receipts byte-identical.
+    #[arg(long)]
+    pub flank_overlap: Option<FlankOverlap>,
+    /// THE GLOBAL-PANEL FRAME (the campaign's lever 1, the
+    /// global-panel call mode: docs/syng-gmem-bwt/global-panel-call-mode.md):
+    /// --panel names the ONE global panel and --partition-graphs the
+    /// territory-local substrate (member rows "path:start-end",
+    /// slice-relative coordinates — the committed locality maps).
+    /// When set, the maps' member rows and the component lane are
+    /// translated to the global frame at load (the record header IS
+    /// the frame statement — the re-anchor principle), the machinery
+    /// runs against the global grid, and the product emission is
+    /// translated back to the partition's own frame (the committed
+    /// reference-anchored output shape). Default (unset): the
+    /// per-territory frame verbatim — the committed path byte-for-byte.
+    #[arg(long, default_value_t = false)]
+    pub global_frame: bool,
+    /// THE RECORD-ORIGIN CONVENTION (the global-panel call mode's
+    /// content-origin parameter): the committed substrate's locus.fa
+    /// content need not sit at its header's own interval — the L1-L4
+    /// substrates' content sits ONE BASE LATER (d=1, the uniform
+    /// delta=1 AGC-identity receipts), the pilot's at the header
+    /// interval exactly (d=0). The global frame, which deletes
+    /// locus.fa by design, must be TOLD the convention: the maps'
+    /// member rows and the component lane translate at the content
+    /// origin `start + d` (the frame table likewise), and the
+    /// emission's back-translation cancels d exactly (the product
+    /// output is origin-independent). Default 0 = the header's own
+    /// interval. Fail-closed: a nonzero origin WITHOUT --global-frame
+    /// is refused (the committed local frame is closed — it never
+    /// needed the absolute truth).
+    #[arg(long, default_value_t = 0, requires = "global_frame")]
+    pub record_origin: u64,
+    /// THE FAR-BIN PRUNE (the owner's own routing principle, the
+    /// §10.6.17-named census lever, enforced at the call's census view:
+    /// "we used to decide where to put each read, so it's basically
+    /// being routed by its best MEMs. If they go into different bins
+    /// unless they're basically adjacent, we don't want to be thinking
+    /// about them."). A census record's own routing keeps it at the
+    /// windows its own walk placements touch — one window, or two
+    /// ADJACENT windows when the anchors straddle a boundary (both by
+    /// pure interval overlap; no tolerance, nothing tuned). A pattern
+    /// whose placements scatter into NON-ADJACENT windows — the
+    /// measured far-bin class, e.g. L1's one 43,686-multiplicity
+    /// single-anchor pattern at windows [12,16] carrying 31.1% of the
+    /// restricted census mass — is the "different bins, not basically
+    /// adjacent" class: there is no choice-free home bin to keep it at,
+    /// so the rule refuses to think about it ANYWHERE and the call
+    /// prunes it from its census view entirely (bind, variants, and
+    /// every locus's scoring). The test is pure window-set geometry
+    /// (the touched-window diameter against the census's own
+    /// pair-bins adjacency constant 1) — never a tuned threshold.
+    /// DEFAULT: ON at the global frame (the owner's ruling on the
+    /// §10.6.18 gate receipts: zero truth losses at L1-L4, the
+    /// pilot's four truth WINS); the opt-out form is
+    /// `--far-bin-prune=false` (the committed unpruned census view,
+    /// byte-identical to the pre-ruling receipts). The LOCAL frame
+    /// is byte-frozen and refuses the prune loudly (fail-closed in
+    /// run_injected, naming the opt-out).
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(bool),
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub far_bin_prune: bool,
     /// THE TEST-MODE FLAG (the owner's ruling, locked in: the
     /// called-vs-truth sequence QV is a VERY SPECIAL TESTING THING
     /// and lives ONLY here): the truth haplotypes as panel path
@@ -484,6 +578,20 @@ pub struct Options {
     /// validated QV receipts used).
     #[arg(long, default_value = "genome/instrumented/qv-biwfa/target/release/qv-biwfa")]
     pub qv_biwfa: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// The far-bin prune's frame gate (see run_injected): the LOCAL frame is
+// byte-frozen; the prune (now the product default) never applies there —
+// refuse loudly, naming the opt-out form.
+// ---------------------------------------------------------------------------
+fn far_bin_prune_frame_gate(global_frame: bool, far_bin_prune: bool) -> io::Result<()> {
+    ensure(
+        !far_bin_prune || global_frame,
+        "--far-bin-prune requires --global-frame (the committed local frame \
+         is byte-frozen; state --far-bin-prune=false for the committed local \
+         form)",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -911,34 +1019,95 @@ struct RssGuard {
     budget_bytes: Option<u64>,
 }
 
-impl RssGuard {
-    fn new(budget_gib: f64) -> Self {
+impl RssGuard {    fn new(budget_gib: f64) -> Self {
         RssGuard {
             budget_bytes: (budget_gib > 0.0).then(|| (budget_gib * (1u64 << 30) as f64) as u64),
         }
     }
     fn probe(&self, stage: &str) -> io::Result<u64> {
         let text = std::fs::read_to_string("/proc/self/status")?;
-        let rss_kb = text
-            .lines()
-            .find(|l| l.starts_with("VmRSS:"))
-            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-            .unwrap_or(0);
+        let field_kb = |prefix: &str| -> u64 {
+            text.lines()
+                .find(|l| l.starts_with(prefix))
+                .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
+                .unwrap_or(0)
+        };
+        let rss_kb = field_kb("VmRSS:");
+        // VmHWM is the monotone high-water mark: VmRSS samples instants,
+        // so a short-lived spike inside a phase (the tie certificate's
+        // Value tree is one) can be missed entirely between two probes.
+        let hwm_kb = field_kb("VmHWM:");
         if let Some(budget) = self.budget_bytes {
             ensure(
                 rss_kb * 1024 <= budget,
                 &format!("RSS guard exceeded at {stage}: {rss_kb} kB"),
             )?;
         }
-        eprintln!("[score] rss {stage}: {rss_kb} kB");
+        eprintln!("[score] rss {stage}: {rss_kb} kB peak {hwm_kb} kB");
         Ok(rss_kb)
     }
+}
+
+/// THE RECEIPT WRITER WITH THE TIE CERTIFICATE SPLICED IN.
+///
+/// Byte-identical to `serde_json::to_writer` of the same object with that
+/// member set: serde_json's default map is ORDERED (alphabetical - this
+/// crate does not enable `preserve_order`), so a member's slot is purely
+/// a function of its key, and every other member goes through the very
+/// same writer the whole-object call would use. The difference is
+/// memory: the certificate streams from the typed lists instead of being
+/// materialized as a value tree first.
+fn write_report_with_cut_indices(
+    writer: &mut impl Write,
+    report: &serde_json::Value,
+    cut_indices_key: &str,
+    lists: &[(usize, Vec<usize>)],
+) -> io::Result<()> {
+    let serde_json::Value::Object(map) = report else {
+        // (Not an object: nothing to splice. The plain writer's own
+        // bytes, which is exactly what the caller would have got.)
+        return serde_json::to_writer(writer, report).map_err(io::Error::from);
+    };
+    writer.write_all(b"{")?;
+    let mut position = 0usize;
+    for (key, value) in map {
+        if position > 0 {
+            writer.write_all(b",")?;
+        }
+        position += 1;
+        serde_json::to_writer(&mut *writer, key)?;
+        writer.write_all(b":")?;
+        if key == cut_indices_key {
+            // The `json!([index, list])`-equivalent form
+            // `[[index,[spectrum...]],...]`, written straight from the
+            // typed list (usize's decimal rendering IS serde_json's own
+            // integer form).
+            writer.write_all(b"[")?;
+            for (list_position, (index, list)) in lists.iter().enumerate() {
+                if list_position > 0 {
+                    writer.write_all(b",")?;
+                }
+                write!(writer, "[{},[", index)?;
+                for (entry_position, spectrum_index) in list.iter().enumerate() {
+                    if entry_position > 0 {
+                        writer.write_all(b",")?;
+                    }
+                    write!(writer, "{}", spectrum_index)?;
+                }
+                writer.write_all(b"]]")?;
+            }
+            writer.write_all(b"]")?;
+        } else {
+            serde_json::to_writer(&mut *writer, value)?;
+        }
+    }
+    writer.write_all(b"}")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Receipt inputs (slice A structures, verbatim).
 // ---------------------------------------------------------------------------
-
 /// One verified occurrence in the committed multi-matching census.
 #[derive(Deserialize)]
 struct CensusOccurrence {
@@ -965,9 +1134,42 @@ struct CensusRecordLine {
     occurrences: Vec<CensusOccurrence>,
 }
 
+/// THE OWNER'S FAR-BIN RULE over one census record (the routing
+/// principle the §10.6.17 autopsy named, now the prune's own
+/// geometry): "we used to decide where to put each read, so it's
+/// basically being routed by its best MEMs. If they go into
+/// different bins unless they're basically adjacent, we don't want
+/// to be thinking about them." A record's own routing keeps it at
+/// the windows its own walk placements touch — ONE window, or TWO
+/// ADJACENT windows when the anchors straddle a boundary (both by
+/// pure interval overlap, the routing's `partitions_at` rule: no
+/// tolerance, nothing to tune). A pattern whose placements scatter
+/// into NON-ADJACENT windows — the measured far-bin class, e.g.
+/// L1's one 43,686-multiplicity single-anchor pattern routed to
+/// windows [12,16] — is exactly the owner's "different bins, not
+/// basically adjacent" class: there is no choice-free home bin to
+/// keep it at, so the rule refuses to think about it anywhere. The
+/// test is pure window-set geometry: the record's touched-window
+/// DIAMETER against the adjacency constant 1 (adjacent-or-equal) —
+/// the census's own pair-bins taxonomy constant, never a tuned
+/// threshold. A record touching no window is not scattered (it
+/// votes nowhere by its own routing; the pilot rule already
+/// excludes it).
+fn census_record_far_bin_scattered(line: &CensusRecordLine) -> bool {
+    let mut lo = u32::MAX;
+    let mut hi = u32::MIN;
+    for occ in &line.occurrences {
+        for &window in &occ.partitions {
+            lo = lo.min(window);
+            hi = hi.max(window);
+        }
+    }
+    lo != u32::MAX && hi - lo > 1
+}
+
 /// One member row of a partition graph map (the alignment-induced
 /// membership; the partition BEDs are source-forward).
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct MemberRow {
     path_name: String,
     start: u64,
@@ -1674,6 +1876,7 @@ fn contained_skeleton_diff(row: &RowFold, k: u64) -> SkeletonDiff {
     }
 }
 
+#[derive(Clone)]
 struct RowFold {
     #[allow(dead_code)]
     path: usize,
@@ -1819,6 +2022,1360 @@ impl<'a> RowStore<'a> {
 
 type GraphNode = u32;
 type PackedEdge = u64;
+
+// ---------------------------------------------------------------------------
+// (THE PANEL-SIDE PER-LOCUS PRECOMPUTE, SS10.6.23 slice 1 — the
+// ONE-SPELLING helpers. The fold's derived content, extracted
+// VERBATIM from the live fold build so the live path, the precompute
+// builder, and the serve all derive a fold's walk / node positions /
+// multisets through THIS code — the served structure and the live-built
+// one are the same derivation by construction, never two spellings
+// that could drift.)
+// ---------------------------------------------------------------------------
+
+/// The row's CONTAINED walk steps (windows fully inside the row
+/// extent), relative to the row start — the live fold build's
+/// `relative` (the grouping key's walk half, and the fold's own
+/// pinnable skeleton).
+fn contained_relative_walk(row: &RowFold, k: u64) -> Vec<(u64, i32)> {
+    row.walk
+        .iter()
+        .filter(|&&(bp, _)| bp >= row.start && bp + k <= row.end)
+        .map(|&(bp, node)| (bp - row.start, node))
+        .collect()
+}
+
+/// The fold's node-position table (node abs id -> the relative
+/// (bp, sign) occurrences of the contained steps, in walk order).
+fn fold_node_positions(row: &RowFold, k: u64) -> HashMap<u32, Vec<(u64, i32)>> {
+    let mut node_positions: HashMap<u32, Vec<(u64, i32)>> = HashMap::new();
+    for &(bp, node) in &row.walk {
+        if bp >= row.start && bp + k <= row.end {
+            node_positions
+                .entry(node.unsigned_abs())
+                .or_default()
+                .push((bp - row.start, node.signum()));
+        }
+    }
+    node_positions
+}
+
+/// The fold's node-usage and edge-usage multisets over the contained
+/// relative walk (the QUAL spectrum's material signature), sorted by
+/// key with the counts coalesced.
+fn fold_multisets(contained: &[(u64, i32)]) -> (Vec<(u64, u32)>, Vec<(u64, u32)>) {
+    let mut nodes: Vec<(u64, u32)> = contained
+        .iter()
+        .map(|&(_, node)| (node.unsigned_abs() as u64, 1))
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            b.1 += a.1;
+            true
+        } else {
+            false
+        }
+    });
+    let mut edges: Vec<(u64, u32)> = contained
+        .windows(2)
+        .map(|w| (pack_edge(w[0].1.unsigned_abs(), w[1].1.unsigned_abs()), 1))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            b.1 += a.1;
+            true
+        } else {
+            false
+        }
+    });
+    (nodes, edges)
+}
+
+/// THE LIVE FOLD LAYOUT BUILD (the per-window fold grouping, the
+/// slice-1 pure function extracted from `compute_locus` VERBATIM — the
+/// precompute builder runs THIS function unmasked to record the
+/// grouping; the live call runs it with its masking filters; the serve
+/// reproduces its output from the recorded grouping; the unit tests
+/// prove serve == live on randomized fixtures). Returns the folds in
+/// first-appearance order, the representative ROW id per fold, the
+/// fold id per member (the builder's recorded grouping), and the
+/// filter counts.
+#[allow(clippy::too_many_arguments)]
+fn build_window_folds_live(
+    rows: &[RowFold],
+    dedup: &HashMap<(usize, u64, u64), usize>,
+    members: &[MemberRow],
+    panel_component: &str,
+    axis_start: u64,
+    axis_end: u64,
+    flank_overlap: Option<FlankOverlap>,
+    exclude_paths: &[String],
+    path_of_name: &HashMap<String, usize>,
+    path_len: &dyn Fn(usize) -> u64,
+    k: u64,
+) -> io::Result<(Vec<Fold>, Vec<usize>, Vec<usize>, u64, u64)> {
+    let mut fold_map: BTreeMap<(Vec<u8>, Vec<(u64, i32)>), usize> = BTreeMap::new();
+    let mut folds: Vec<Fold> = Vec::new();
+    let mut fold_rep_rows: Vec<usize> = Vec::new();
+    let mut member_fold: Vec<usize> = Vec::with_capacity(members.len());
+    let mut excluded_rows: u64 = 0;
+    let mut flank_excluded_rows: u64 = 0;
+    for member in members {
+        // THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design):
+        // a member row that does not cover BOTH FLANKS of the
+        // window's axis extent - the first N bp and the last N bp,
+        // in this frame (the partition maps' own coordinates) -
+        // leaves the candidate universe here, at fold construction,
+        // exactly as absent rows would. THE AXIS ROW IS NEVER
+        // EXCLUDED (it is the coordinate frame; the --exclude-paths
+        // precedent). Loudly counted per locus.
+        if let Some(flank) = flank_overlap {
+            if member.path_name != panel_component
+                && !row_covers_flanks(member.start, member.end, axis_start, axis_end, flank)
+            {
+                flank_excluded_rows += 1;
+                member_fold.push(usize::MAX);
+                continue;
+            }
+        }
+        // THE MASKING OPERATOR (the call-locus --exclude-paths
+        // surface): the stranger filter folded onto the call path
+        // - matching rows leave the candidate universe here, at
+        // fold construction, exactly as absent rows would (the
+        // axis row is never excluded: it is the frame). Loudly
+        // counted per locus.
+        if row_is_excluded(&member.path_name, panel_component, exclude_paths) {
+            excluded_rows += 1;
+            member_fold.push(usize::MAX);
+            continue;
+        }
+        let path_idx = *path_of_name
+            .get(&member.path_name)
+            .ok_or_else(|| invalid("member path absent from the syng"))?;
+        let row_index = *dedup
+            .get(&(path_idx, member.start, member.end.min(path_len(path_idx))))
+            .ok_or_else(|| invalid("member row missing from the store"))?;
+        let row = &rows[row_index];
+        // The CONTAINED steps only (windows fully inside the row
+        // extent): an anchor whose window overlaps the row edge
+        // cannot be a pinned backbone anchor (the read must lie
+        // fully inside), and keeping it would place its window
+        // start at a NEGATIVE relative position - the u64
+        // subtraction would wrap and poison the monotone
+        // enumeration. Edge-overlapping anchors abstain (the named
+        // remainder class).
+        let relative = contained_relative_walk(row, k);
+        let key = (row.seq.clone(), relative.clone());
+        let index = *fold_map.entry(key).or_insert_with(|| {
+            let node_positions = fold_node_positions(row, k);
+            let (nodes, edges) = fold_multisets(&relative);
+            folds.push(Fold {
+                seq: row.seq.clone(),
+                len: (row.end - row.start) as u64,
+                walk: relative.clone(),
+                node_positions,
+                members: Vec::new(),
+                nodes,
+                edges,
+            });
+            fold_rep_rows.push(row_index);
+            folds.len() - 1
+        });
+        folds[index].members.push(member.clone());
+        member_fold.push(index);
+    }
+    Ok((
+        folds,
+        fold_rep_rows,
+        member_fold,
+        excluded_rows,
+        flank_excluded_rows,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// (THE BIND SCAFFOLDING, SS10.6.25 slice 2 — the canonical-scheme step
+// derivation over one panel range, ONE SPELLING: the bind's former
+// `canonical_steps_near` closure extracted VERBATIM with the window
+// bounds as parameters, so the live center call, the precompute
+// builder, and the serve's uncovered-position fallback all run THE
+// SAME code — no second spelling of the derivation exists anywhere.
+// The step value at a position P is a function of the panel's stored
+// walk entry at P, the path bytes in [P-(w-1), P+(w-1)+syncmer_len)
+// clamped to the path (the reverse-strand syncmer window's own k-mer
+// span; the canonical orientation check is local), and the panel
+// dictionary — the LOCALITY LEMMA the serve's served band is derived
+// from, every constant the syncmer window's own parameter, never
+// tuned.)
+// ---------------------------------------------------------------------------
+
+/// The canonical-scheme territory steps over one panel range
+/// `[lo, hi)` — `canonical_steps_near(path, around)` verbatim for
+/// `lo = around-150`, `hi = around+150` (the live bind's own window;
+/// the extraction is code motion and the answer gates are its
+/// proof). The forward map is the panel's own stored walk slice; the
+/// reverse map is the reverse-complement view's matched syncmers,
+/// mapped back to forward positions; each position chooses its frame
+/// by the canonical orientation rule.
+fn canonical_steps_over_range(
+    panel: &SyngIndex,
+    fetch_seq: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    k: u64,
+    path: usize,
+    lo: u64,
+    hi: u64,
+) -> io::Result<Vec<(u64, i32)>> {
+    let forward: Vec<(u64, i32)> = panel
+        .walk_path_range(path, lo, hi)?
+        .into_iter()
+        .map(|(node, bp)| (bp, node))
+        .collect();
+    let seq_lo = lo.saturating_sub(k);
+    let seq_hi = hi + k;
+    let seq = fetch_seq(&panel.name_map.path_to_name[path], seq_lo, seq_hi)?;
+    let rc_seq = revcomp(&seq);
+    let reverse: Vec<(u64, i32)> =
+        crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
+            .into_iter()
+            .map(|(signed, q)| {
+                (
+                    seq_lo + seq.len() as u64 - k - q,
+                    -signed,
+                )
+            })
+            .collect();
+    let forward_map: BTreeMap<u64, i32> = forward.into_iter().collect();
+    let reverse_map: BTreeMap<u64, i32> = reverse.into_iter().collect();
+    let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
+    positions.extend(reverse_map.keys().copied());
+    let mut steps = Vec::with_capacity(positions.len());
+    for bp in positions {
+        let rel = (bp - seq_lo) as usize;
+        let canonical_forward = seq
+            .get(rel..rel + k as usize)
+            .map(|window| {
+                crate::genome_inference::mem_records::window_is_canonical_forward(window)
+            })
+            .unwrap_or(false);
+        let chosen = if canonical_forward {
+            forward_map.get(&bp)
+        } else {
+            reverse_map.get(&bp)
+        };
+        if let Some(&node) = chosen {
+            steps.push((bp, node));
+        }
+    }
+    Ok(steps)
+}
+
+/// THE SERVED BAND of one derivation range `[lo, hi)` (the locality
+/// lemma's own predicate, every constant derived from the syncmer
+/// window's parameters: `reach` = w-1, `syncmer_len` = w+smer): the
+/// position's decision context — the path bytes
+/// `[P-reach, P+reach+syncmer_len)` clamped to the path — must lie
+/// inside the range's fetch `[lo-syncmer_len, hi+syncmer_len)` (the
+/// walk-slice clause `P in [lo,hi)` is checked by the caller), and at
+/// the path's end the clamped context is served when the range's
+/// fetch reaches the path end (the clamped-context clause — the last
+/// syncmer window of a path truncates identically in both
+/// derivations).
+fn bind_range_covers(
+    lo: u64,
+    hi: u64,
+    position: u64,
+    path_len: u64,
+    reach: u64,
+    syncmer_len: u64,
+) -> bool {
+    position >= lo
+        && position < hi
+        && (position + reach <= hi
+            || (position + reach + syncmer_len >= path_len
+                && path_len <= hi + syncmer_len))
+}
+
+/// THE BIND SCAFFOLDING BUILDER (SS10.6.25 slice 2 — the once-per-panel
+/// price): per panel path, the member-row extents (the maps' own rows —
+/// the panel-knowable coordinate set; the census's positions are
+/// sample-side, A4's own statement) merged when they sit within the
+/// syncmer window's own reach, each merged extent `[s,e)` derived over
+/// `[s, e+reach)` so the served band covers the extent exactly —
+/// through the SAME `canonical_steps_over_range` the live bind runs
+/// (the builder IS the live derivation, the one-spelling guarantee).
+#[allow(clippy::too_many_arguments)]
+fn build_bind_scaffold(
+    panel: &SyngIndex,
+    fetch_seq: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+    k: u64,
+    member_rows: impl Iterator<Item = (usize, u64, u64)>,
+) -> io::Result<Vec<BindScaffoldPathAsset>> {
+    let reach = panel.params.w as u64 - 1;
+    let mut by_path: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
+    for (path, start, end) in member_rows {
+        let path_len = panel.name_map.path_to_length[path];
+        by_path
+            .entry(path)
+            .or_default()
+            .push((start, end.min(path_len)));
+    }
+    let mut paths: Vec<BindScaffoldPathAsset> = Vec::with_capacity(by_path.len());
+    for (path, mut extents) in by_path {
+        extents.sort_unstable();
+        // Merge the extents the window's own reach apart (contiguous
+        // coverage without gaps), then derive over `[s, e+reach)` so
+        // the served band `[s, e+reach)` with `P+reach <= hi` covers
+        // the extent exactly.
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (start, end) in extents {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 + reach => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        let ranges: Vec<(u64, u64)> = merged
+            .iter()
+            .map(|&(start, end)| (start, end + reach))
+            .collect();
+        let mut steps: Vec<(u64, i32)> = Vec::new();
+        for &(lo, hi) in &ranges {
+            steps.extend(canonical_steps_over_range(
+                panel, fetch_seq, k, path, lo, hi,
+            )?);
+        }
+        steps.sort_unstable_by_key(|&(bp, _)| bp);
+        paths.push(BindScaffoldPathAsset {
+            path_name: panel.name_map.path_to_name[path].clone(),
+            ranges,
+            steps,
+        });
+    }
+    Ok(paths)
+}
+// ---------------------------------------------------------------------------
+// (THE PANEL-SIDE PER-LOCUS PRECOMPUTE ASSET — SS10.6.23 slice 1's
+// panel-side artifact: the row context (the RowStore rows, the
+// sequences replaced by their FNV-64 CONTENT KEY) and the per-window
+// fold groupings (representative row ids + per-member fold ids),
+// serialized exact-width little-endian with NO FLOATS anywhere, so
+// the serve reconstructs bit-identical structures by construction.
+// The asset's manifest keys on CONTENT, never filenames: the panel
+// identity object, the FNV digest over the sorted *.gfa.map.json
+// bytes, the routes graph.json digest, the component, the frame +
+// record origin, the stored-frame convention, k.)
+// ---------------------------------------------------------------------------
+
+/// The FNV-1a over the partition-graph maps' CONTENT, in sorted file
+/// name order — the manifest's own drift detector (never a filename
+/// alone; the vendor-pointer-drift class is the cautionary receipt).
+fn partition_maps_digest(dir: &Path) -> io::Result<u64> {
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.ends_with(".gfa.map.json") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let mut digest = fnv1a64(b"");
+    for name in &names {
+        let bytes = std::fs::read(dir.join(name))?;
+        hash_bytes(&mut digest, name.as_bytes());
+        hash_bytes(&mut digest, &[0xFF]);
+        hash_bytes(&mut digest, &bytes);
+    }
+    Ok(digest)
+}
+
+fn routes_graph_digest(path: &Path) -> io::Result<u64> {
+    let bytes = std::fs::read(path)?;
+    Ok(fnv1a64(&bytes))
+}
+
+fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        *hash ^= byte as u64;
+        *hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PanelPrecomputeManifest {
+    format: String,
+    panel: PanelIdentity,
+    k: u64,
+    component: String,
+    frame: String,
+    record_origin: u64,
+    stored_frame: bool,
+    maps_digest: u64,
+    routes_digest: u64,
+    windows: u64,
+    rows: u64,
+    folds: u64,
+    // (SS10.6.25 slice 2 — the bind-scaffolding section's counters,
+    // absent in the slice-1 /1 manifests and defaulted there: the
+    // section is validated against them at load.)
+    #[serde(default)]
+    bind_paths: u64,
+    #[serde(default)]
+    bind_ranges: u64,
+    #[serde(default)]
+    bind_steps: u64,
+}
+
+impl PanelPrecomputeManifest {
+    /// The asset's format string — the reuse check's own key (the
+    /// panel-prep step upgrades a slice-1 /1 asset loudly rather than
+    /// reusing an asset without the bind-scaffolding section).
+    pub fn format_text(&self) -> String {
+        self.format.clone()
+    }
+}
+
+/// One path's bind scaffolding (SS10.6.25 slice 2): the derivation
+/// ranges the builder ran (the served band is derived from them), and
+/// the canonical-scheme steps the derivation returned, sorted by bp —
+/// exact-width integers only, NO FLOATS anywhere.
+#[derive(Clone)]
+struct BindScaffoldPathAsset {
+    path_name: String,
+    ranges: Vec<(u64, u64)>,
+    steps: Vec<(u64, i32)>,
+}
+
+struct PrecomputeRowAsset {
+    path_name: String,
+    start: u64,
+    end: u64,
+    seq_fnv: u64,
+    stored_walk: Vec<(u64, i32)>,
+    walk: Vec<(u64, i32)>,
+    frames: Vec<u8>,
+    members: Vec<(u32, usize)>,
+}
+
+struct PrecomputeWindowAsset {
+    partition: u32,
+    axis_start: u64,
+    axis_end: u64,
+    fold_rep: Vec<usize>,
+    member_fold: Vec<usize>,
+}
+
+/// The loaded, validated asset beside the call's own partition maps.
+struct PanelPrecomputeAsset {
+    manifest: PanelPrecomputeManifest,
+    rows: Vec<PrecomputeRowAsset>,
+    windows: Vec<PrecomputeWindowAsset>,
+    // (SS10.6.25 slice 2 — None for the slice-1 /1 format: the asset
+    // predates the bind-scaffolding section and the bind derives
+    // live, loudly stated.)
+    bind: Option<Vec<BindScaffoldPathAsset>>,
+}
+
+// (The exact-width little-endian encoding: length-prefixed vectors,
+// u64 bp / i32 signed node / u8 frame; NO FLOATS anywhere in the
+// asset, so the round trip is lossless by construction.)
+struct AssetWriter {
+    buf: Vec<u8>,
+}
+impl AssetWriter {
+    fn u64(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i32(&mut self, v: i32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u8(&mut self, v: u8) {
+        self.buf.push(v);
+    }
+    fn str(&mut self, v: &str) {
+        self.u64(v.len() as u64);
+        self.buf.extend_from_slice(v.as_bytes());
+    }
+    fn walk(&mut self, v: &[(u64, i32)]) {
+        self.u64(v.len() as u64);
+        for &(bp, node) in v {
+            self.u64(bp);
+            self.i32(node);
+        }
+    }
+    fn bytes(&mut self, v: &[u8]) {
+        self.u64(v.len() as u64);
+        self.buf.extend_from_slice(v);
+    }
+    fn row_members(&mut self, v: &[(u32, usize)]) {
+        self.u64(v.len() as u64);
+        for &(partition, member) in v {
+            self.u64(partition as u64);
+            self.u64(member as u64);
+        }
+    }
+    fn usize_vec(&mut self, v: &[usize]) {
+        self.u64(v.len() as u64);
+        for &value in v {
+            self.u64(value as u64);
+        }
+    }
+}
+
+struct AssetReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+impl<'a> AssetReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        AssetReader { buf, pos: 0 }
+    }
+    fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
+        ensure(
+            self.pos + n <= self.buf.len(),
+            "the panel-precompute asset is truncated",
+        )?;
+        let slice = &self.buf[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(slice)
+    }
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn i32(&mut self) -> io::Result<i32> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn str(&mut self) -> io::Result<String> {
+        let len = self.u64()? as usize;
+        Ok(String::from_utf8(self.take(len)?.to_vec())
+            .map_err(|_| invalid("the panel-precompute asset carries an invalid path name"))?)
+    }
+    fn walk(&mut self) -> io::Result<Vec<(u64, i32)>> {
+        let len = self.u64()? as usize;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            out.push((self.u64()?, self.i32()?));
+        }
+        Ok(out)
+    }
+    fn bytes(&mut self) -> io::Result<Vec<u8>> {
+        let len = self.u64()? as usize;
+        Ok(self.take(len)?.to_vec())
+    }
+    fn row_members(&mut self) -> io::Result<Vec<(u32, usize)>> {
+        let len = self.u64()? as usize;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            let partition = self.u64()? as u32;
+            let member = self.u64()? as usize;
+            out.push((partition, member));
+        }
+        Ok(out)
+    }
+    fn usize_vec(&mut self) -> io::Result<Vec<usize>> {
+        let len = self.u64()? as usize;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            out.push(self.u64()? as usize);
+        }
+        Ok(out)
+    }
+    fn done(&self) -> io::Result<()> {
+        ensure(
+            self.pos == self.buf.len(),
+            "the panel-precompute asset carries trailing bytes",
+        )
+    }
+}
+
+fn encode_rows(rows: &[PrecomputeRowAsset]) -> Vec<u8> {
+    let mut w = AssetWriter { buf: Vec::new() };
+    w.u64(rows.len() as u64);
+    for row in rows {
+        w.str(&row.path_name);
+        w.u64(row.start);
+        w.u64(row.end);
+        w.u64(row.seq_fnv);
+        w.walk(&row.stored_walk);
+        w.walk(&row.walk);
+        w.bytes(&row.frames);
+        w.row_members(&row.members);
+    }
+    w.buf
+}
+
+fn decode_rows(buf: &[u8]) -> io::Result<Vec<PrecomputeRowAsset>> {
+    let mut r = AssetReader::new(buf);
+    let len = r.u64()? as usize;
+    let mut rows = Vec::with_capacity(len);
+    for _ in 0..len {
+        rows.push(PrecomputeRowAsset {
+            path_name: r.str()?,
+            start: r.u64()?,
+            end: r.u64()?,
+            seq_fnv: r.u64()?,
+            stored_walk: r.walk()?,
+            walk: r.walk()?,
+            frames: r.bytes()?,
+            members: r.row_members()?,
+        });
+    }
+    r.done()?;
+    Ok(rows)
+}
+
+fn encode_windows(windows: &[PrecomputeWindowAsset]) -> Vec<u8> {
+    let mut w = AssetWriter { buf: Vec::new() };
+    w.u64(windows.len() as u64);
+    for window in windows {
+        w.u64(window.partition as u64);
+        w.u64(window.axis_start);
+        w.u64(window.axis_end);
+        w.usize_vec(&window.fold_rep);
+        w.usize_vec(&window.member_fold);
+    }
+    w.buf
+}
+
+fn decode_windows(buf: &[u8]) -> io::Result<Vec<PrecomputeWindowAsset>> {
+    let mut r = AssetReader::new(buf);
+    let len = r.u64()? as usize;
+    let mut windows = Vec::with_capacity(len);
+    for _ in 0..len {
+        windows.push(PrecomputeWindowAsset {
+            partition: r.u64()? as u32,
+            axis_start: r.u64()?,
+            axis_end: r.u64()?,
+            fold_rep: r.usize_vec()?,
+            member_fold: r.usize_vec()?,
+        });
+    }
+    r.done()?;
+    Ok(windows)
+}
+
+// (SS10.6.25 slice 2 — the bind-scaffolding section's exact-width
+// little-endian encoding: length-prefixed vectors, u64 bp / i32
+// signed node / u64 range bounds, NO FLOATS anywhere in the asset,
+// so the round trip is lossless by construction.)
+fn encode_bind_scaffolding(paths: &[BindScaffoldPathAsset]) -> Vec<u8> {
+    let mut w = AssetWriter { buf: Vec::new() };
+    w.u64(paths.len() as u64);
+    for path in paths {
+        w.str(&path.path_name);
+        w.u64(path.ranges.len() as u64);
+        for &(lo, hi) in &path.ranges {
+            w.u64(lo);
+            w.u64(hi);
+        }
+        w.u64(path.steps.len() as u64);
+        for &(bp, node) in &path.steps {
+            w.u64(bp);
+            w.i32(node);
+        }
+    }
+    w.buf
+}
+
+fn decode_bind_scaffolding(buf: &[u8]) -> io::Result<Vec<BindScaffoldPathAsset>> {
+    let mut r = AssetReader::new(buf);
+    let len = r.u64()? as usize;
+    let mut paths = Vec::with_capacity(len);
+    for _ in 0..len {
+        let path_name = r.str()?;
+        let ranges_len = r.u64()? as usize;
+        let mut ranges = Vec::with_capacity(ranges_len);
+        for _ in 0..ranges_len {
+            let lo = r.u64()?;
+            let hi = r.u64()?;
+            ranges.push((lo, hi));
+        }
+        let steps_len = r.u64()? as usize;
+        let mut steps = Vec::with_capacity(steps_len);
+        for _ in 0..steps_len {
+            let bp = r.u64()?;
+            let node = r.i32()?;
+            steps.push((bp, node));
+        }
+        paths.push(BindScaffoldPathAsset {
+            path_name,
+            ranges,
+            steps,
+        });
+    }
+    r.done()?;
+    Ok(paths)
+}
+
+/// The expected manifest keys, computed by the caller from its OWN
+/// live inputs — the serve compares field by field and names the
+/// mismatching key in its error (never a silent divergence, never a
+/// stale serve).
+struct PanelPrecomputeKeys {
+    panel: PanelIdentity,
+    k: u64,
+    component: String,
+    frame: String,
+    record_origin: u64,
+    stored_frame: bool,
+    maps_digest: u64,
+    routes_digest: u64,
+}
+
+fn load_panel_precompute(
+    dir: &Path,
+    keys: &PanelPrecomputeKeys,
+) -> io::Result<PanelPrecomputeAsset> {
+    let manifest: PanelPrecomputeManifest = read_json(&dir.join("manifest.json"))?;
+    // (SS10.6.25 slice 2: the slice-1 /1 format still serves the row
+    // context + fold layouts under the default toggle — its bind
+    // derives live, loudly stated; the /2 format adds the
+    // bind-scaffolding section. Any other format string is unknown.)
+    ensure(
+        manifest.format == "impg-panel-precompute-loci/1"
+            || manifest.format == "impg-panel-precompute-loci/2",
+        &format!(
+            "the panel-precompute asset {} carries an unknown format {:?}",
+            dir.display(),
+            manifest.format
+        ),
+    )?;
+    let named = |field: &str, got: String, want: String| {
+        format!(
+            "the panel-precompute asset {} mismatches the live inputs at {field}: \
+             asset {got:?} vs call {want:?}",
+            dir.display()
+        )
+    };
+    ensure(
+        manifest.panel == keys.panel,
+        &named(
+            "the panel identity",
+            format!("{:?}", manifest.panel),
+            format!("{:?}", keys.panel),
+        ),
+    )?;
+    ensure(
+        manifest.k == keys.k,
+        &named("k", manifest.k.to_string(), keys.k.to_string()),
+    )?;
+    ensure(
+        manifest.component == keys.component,
+        &named("the component", manifest.component.clone(), keys.component.clone()),
+    )?;
+    ensure(
+        manifest.frame == keys.frame,
+        &named("the frame", manifest.frame.clone(), keys.frame.clone()),
+    )?;
+    ensure(
+        manifest.record_origin == keys.record_origin,
+        &named(
+            "the record origin",
+            manifest.record_origin.to_string(),
+            keys.record_origin.to_string(),
+        ),
+    )?;
+    ensure(
+        manifest.stored_frame == keys.stored_frame,
+        &named(
+            "the stored-frame convention",
+            manifest.stored_frame.to_string(),
+            keys.stored_frame.to_string(),
+        ),
+    )?;
+    ensure(
+        manifest.maps_digest == keys.maps_digest,
+        &named(
+            "the partition maps digest",
+            format!("{:016x}", manifest.maps_digest),
+            format!("{:016x}", keys.maps_digest),
+        ),
+    )?;
+    ensure(
+        manifest.routes_digest == keys.routes_digest,
+        &named(
+            "the routes graph digest",
+            format!("{:016x}", manifest.routes_digest),
+            format!("{:016x}", keys.routes_digest),
+        ),
+    )?;
+    let rows = decode_rows(&std::fs::read(dir.join("rows.bin"))?)?;
+    let windows = decode_windows(&std::fs::read(dir.join("windows.bin"))?)?;
+    ensure(
+        rows.len() as u64 == manifest.rows,
+        "the panel-precompute asset's row count disagrees with its manifest",
+    )?;
+    ensure(
+        windows.len() as u64 == manifest.windows,
+        "the panel-precompute asset's window count disagrees with its manifest",
+    )?;
+    let bind = if manifest.format == "impg-panel-precompute-loci/2" {
+        let bind = decode_bind_scaffolding(&std::fs::read(dir.join("bind-scaffolding.bin"))?)?;
+        let ranges: u64 = bind.iter().map(|path| path.ranges.len() as u64).sum();
+        let steps: u64 = bind.iter().map(|path| path.steps.len() as u64).sum();
+        ensure(
+            bind.len() as u64 == manifest.bind_paths
+                && ranges == manifest.bind_ranges
+                && steps == manifest.bind_steps,
+            "the panel-precompute asset's bind-scaffolding counters disagree \
+             with the section",
+        )?;
+        Some(bind)
+    } else {
+        None
+    };
+    Ok(PanelPrecomputeAsset {
+        manifest,
+        rows,
+        windows,
+        bind,
+    })
+}
+
+/// The serve toggle's own modes (the labeled-toggle doctrine's
+/// shape — see the serve block in `run_injected`).
+#[derive(Clone, Copy, PartialEq)]
+enum PanelPrecomputeMode {
+    Auto,
+    Off,
+    On,
+}
+
+/// The serve-side state: the validated window groupings, the rows'
+/// sequence content keys, the per-row sequence cache (the fetched
+/// representative-row bytes, FNV-verified against the asset's key on
+/// first touch — the drift detector that never hashes the whole AGC),
+/// and the bind scaffolding (SS10.6.25 slice 2 — None when the asset
+/// predates the section; the bind then derives live, loudly).
+struct PrecomputeServe {
+    windows: Vec<PrecomputeWindowAsset>,
+    seq_fnv: Vec<u64>,
+    seqs: Mutex<HashMap<usize, Arc<Vec<u8>>>>,
+    bind: Option<BindScaffoldServe>,
+}
+
+/// THE BIND SCAFFOLDING SERVE (SS10.6.25 slice 2): per panel path, the
+/// builder's derivation ranges and the recorded canonical-scheme
+/// steps (sorted by bp), plus the serve's own loud counters — how many
+/// record lookups the asset answered and how many positions fell
+/// back to the live derivation (the census's own positions outside
+/// the panel-knowable coverage; exact by construction — the fallback
+/// IS the committed path). Read-only shared state under the bind's
+/// parallel seam: Sync by construction (immutable maps + atomics).
+struct BindScaffoldServe {
+    by_path: HashMap<usize, BindScaffoldPathServed>,
+    reach: u64,
+    syncmer_len: u64,
+    served: AtomicU64,
+    fallbacks: AtomicU64,
+}
+
+struct BindScaffoldPathServed {
+    ranges: Vec<(u64, u64)>,
+    steps: Vec<(u64, i32)>,
+}
+
+impl BindScaffoldServe {
+    /// Build the serve state from the asset's section: every path name
+    /// resolves against the call's own panel (a name that does not is a
+    /// content-key mismatch, loud); the band constants come from the
+    /// panel's own syncmer parameters (never tuned).
+    fn from_asset(
+        paths: Vec<BindScaffoldPathAsset>,
+        path_of_name: &HashMap<String, usize>,
+        panel: &SyngIndex,
+    ) -> io::Result<Self> {
+        let mut by_path = HashMap::with_capacity(paths.len());
+        for path in paths {
+            let path_idx = *path_of_name
+                .get(&path.path_name)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "the panel-precompute asset's bind scaffolding names a path \
+                         absent from the syng: {:?}",
+                        path.path_name
+                    ))
+                })?;
+            let previous = by_path.insert(
+                path_idx,
+                BindScaffoldPathServed {
+                    ranges: path.ranges,
+                    steps: path.steps,
+                },
+            );
+            ensure(
+                previous.is_none(),
+                "the panel-precompute asset's bind scaffolding names a path twice",
+            )?;
+        }
+        Ok(BindScaffoldServe {
+            by_path,
+            reach: panel.params.w as u64 - 1,
+            syncmer_len: panel.syncmer_length_bp() as u64,
+            served: AtomicU64::new(0),
+            fallbacks: AtomicU64::new(0),
+        })
+    }
+
+    /// The canonical step at (path, position) — `Some(Some(step))`
+    /// when the position lies inside a derivation range's SERVED BAND
+    /// (the recorded step at the position, or its absence — the bind's
+    /// own no-step error fires exactly as the live derivation's
+    /// would); `None` when the position is UNCOVERED (the caller
+    /// derives live, verbatim). The locality lemma is the exactness
+    /// argument: the builder ran the same derivation over a range
+    /// whose fetch contains the position's own decision context, so
+    /// the recorded value is the live center derivation's own bits.
+    fn step_at(&self, path: usize, position: u64, path_len: u64) -> Option<Option<(u64, i32)>> {
+        let served = self
+            .by_path
+            .get(&path)
+            .filter(|served| {
+                served.ranges.iter().any(|&(lo, hi)| {
+                    bind_range_covers(
+                        lo,
+                        hi,
+                        position,
+                        path_len,
+                        self.reach,
+                        self.syncmer_len,
+                    )
+                })
+            })
+            .map(|served| {
+                served
+                    .steps
+                    .binary_search_by_key(&position, |&(bp, _)| bp)
+                    .ok()
+                    .map(|index| served.steps[index])
+            });
+        match served {
+            Some(step) => {
+                self.served.fetch_add(1, Ordering::Relaxed);
+                Some(step)
+            }
+            None => {
+                self.fallbacks.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+}
+
+impl PrecomputeServe {
+    /// The representative row's sequence, fetched LIVE through the
+    /// same validated fetch path (the sequences stay in the sources —
+    /// the design's own fetch-by-coordinate answer) and verified
+    /// against the asset's recorded FNV-64 content key.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_of(
+        &self,
+        row_index: usize,
+        rows: &[RowFold],
+        fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+        path_names: &[String],
+    ) -> io::Result<Arc<Vec<u8>>> {
+        if let Some(seq) = self.seqs.lock().unwrap().get(&row_index) {
+            return Ok(seq.clone());
+        }
+        let row = &rows[row_index];
+        let seq = fetch(&path_names[row.path], row.start, row.end)?;
+        ensure(
+            fnv1a64(&seq) == self.seq_fnv[row_index],
+            &format!(
+                "the panel-precompute asset's sequence content key for row {} mismatches \
+                 the fetched bytes (the sources drifted from the panel the asset was \
+                 built against - loud, never a silent divergence)",
+                row.path
+            ),
+        )?;
+        let seq = Arc::new(seq);
+        self.seqs.lock().unwrap().insert(row_index, seq.clone());
+        Ok(seq)
+    }
+
+    /// THE SERVE (the masking commute lemma in code): iterate the
+    /// window's member list in order, apply the SAME per-member
+    /// predicates the live build applies, and group by the asset's
+    /// recorded fold ids — the served fold order is first-appearance-
+    /// among-SURVIVORS exactly as the live build's is, the fold
+    /// content is derived through the same one-spelling helpers from
+    /// the representative row, and the representative row's sequence
+    /// is fetched live and FNV-verified.
+    #[allow(clippy::too_many_arguments)]
+    fn serve_window_folds(
+        &self,
+        rows: &[RowFold],
+        window: usize,
+        members: &[MemberRow],
+        panel_component: &str,
+        axis_start: u64,
+        axis_end: u64,
+        flank_overlap: Option<FlankOverlap>,
+        exclude_paths: &[String],
+        k: u64,
+        fetch: &dyn Fn(&str, u64, u64) -> io::Result<Vec<u8>>,
+        path_names: &[String],
+    ) -> io::Result<(Vec<Fold>, u64, u64)> {
+        let asset_window = self
+            .windows
+            .get(window)
+            .ok_or_else(|| invalid("the window is outside the panel-precompute asset"))?;
+        ensure(
+            asset_window.member_fold.len() == members.len(),
+            &format!(
+                "the panel-precompute asset's member-fold map for window {window} does \
+                 not match the partition maps (content keys drifted)",
+            ),
+        )?;
+        let mut folds: Vec<Fold> = Vec::new();
+        let mut served_to_live: Vec<Option<usize>> = vec![None; asset_window.fold_rep.len()];
+        let mut excluded_rows: u64 = 0;
+        let mut flank_excluded_rows: u64 = 0;
+        for (member_index, member) in members.iter().enumerate() {
+            if let Some(flank) = flank_overlap {
+                if member.path_name != panel_component
+                    && !row_covers_flanks(member.start, member.end, axis_start, axis_end, flank)
+                {
+                    flank_excluded_rows += 1;
+                    continue;
+                }
+            }
+            if row_is_excluded(&member.path_name, panel_component, exclude_paths) {
+                excluded_rows += 1;
+                continue;
+            }
+            let served_fold = asset_window.member_fold[member_index];
+            ensure(
+                served_fold < asset_window.fold_rep.len(),
+                "the panel-precompute asset carries an out-of-range fold id",
+            )?;
+            let live_index = match served_to_live[served_fold] {
+                Some(index) => index,
+                None => {
+                    let rep_row = asset_window.fold_rep[served_fold];
+                    let row = rows
+                        .get(rep_row)
+                        .ok_or_else(|| invalid("the panel-precompute asset names an absent row"))?;
+                    let seq = self.seq_of(rep_row, rows, fetch, path_names)?;
+                    let relative = contained_relative_walk(row, k);
+                    let node_positions = fold_node_positions(row, k);
+                    let (nodes, edges) = fold_multisets(&relative);
+                    folds.push(Fold {
+                        seq: (*seq).clone(),
+                        len: (row.end - row.start) as u64,
+                        walk: relative,
+                        node_positions,
+                        members: Vec::new(),
+                        nodes,
+                        edges,
+                    });
+                    let index = folds.len() - 1;
+                    served_to_live[served_fold] = Some(index);
+                    index
+                }
+            };
+            folds[live_index].members.push(member.clone());
+        }
+        Ok((folds, excluded_rows, flank_excluded_rows))
+    }
+}
+
+/// THE PRECOMPUTE STEP (SS10.6.23 slice 1 — the once-per-panel price,
+/// paid at panel-prep or by the standalone step, NEVER per sample): run
+/// the SAME row-context build and the SAME unmasked fold-layout
+/// grouping the live call runs (the one-spelling guarantee — this
+/// builder IS the live derivation), serialize them into the panel
+/// asset's new section, and receipt the price honestly (walls and
+/// counts on stderr, beside the asset it builds). The asset keys on
+/// CONTENT, never filenames: the panel identity object, the maps
+/// digest, the routes digest, the component, the frame + origin, the
+/// stored-frame convention, k.
+pub fn precompute_panel_loci(
+    panel_prefix: &str,
+    routes_dir: &Path,
+    partition_graphs: &Path,
+    component: &str,
+    global_frame: bool,
+    record_origin: u64,
+    out_dir: &Path,
+) -> io::Result<()> {
+    let started = Instant::now();
+    ensure(
+        record_origin == 0 || global_frame,
+        "--record-origin requires --global-frame (the committed local frame is closed)",
+    )?;
+    let identity = PanelIdentity::read(panel_prefix)?;
+    let panel = SyngIndex::load(panel_prefix, SyncmerParams::default())?;
+    let k = panel.syncmer_length_bp() as u64;
+    let graph_path = routes_dir.join("graph.json");
+    let graph: routes::Graph = read_json(&graph_path)?;
+    if graph.panel != identity || !graph.generation_complete {
+        return Err(invalid("incompatible route inventory"));
+    }
+    let routes_digest = routes_graph_digest(&graph_path)?;
+    let lanes = graph
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.clone(), lane.length))
+        .collect::<Vec<_>>();
+    let sources = routes::Sources::open(&graph.source_paths, lanes)?;
+    let path_of_name: HashMap<String, usize> = panel
+        .name_map
+        .name_to_path
+        .iter()
+        .map(|(name, &path)| (name.clone(), path as usize))
+        .collect();
+    let source_of_name: HashMap<&str, usize> = graph
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.as_str(), lane.id))
+        .collect();
+    let lane_cache = LaneCache {
+        lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
+        sources,
+        whole_lane: !global_frame,
+        seqs: (0..graph.lanes.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect(),
+        loads: AtomicU64::new(0),
+        bytes: AtomicU64::new(0),
+        nanos: AtomicU64::new(0),
+        lane_trace: Default::default(),
+    };
+    let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+        let path_idx = *path_of_name
+            .get(name)
+            .ok_or_else(|| invalid("panel path absent from the syng name map"))?;
+        let path_len = panel.name_map.path_to_length[path_idx];
+        let hi = hi.min(path_len);
+        let source = *source_of_name
+            .get(name)
+            .ok_or_else(|| invalid("panel path absent from the route sources"))?;
+        if lo >= hi {
+            return Ok(Vec::new());
+        }
+        lane_cache.fetch(source, lo, hi)
+    };
+    // The maps load + the frame translation — the call's own inputs
+    // resolution, mirrored (the DERIVATIONS below are the one-spelling
+    // functions; this resolution is I/O plumbing and states itself).
+    let maps_digest = partition_maps_digest(partition_graphs)?;
+    let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
+    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(partition_graphs)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.ends_with(".gfa.map.json") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    for name in &names {
+        let text = std::fs::read_to_string(partition_graphs.join(name))?;
+        let map: PartitionMap = serde_json::from_str(&text)?;
+        for axis in map
+            .members
+            .iter()
+            .filter(|m| m.path_name == component)
+        {
+            axis_rows.push((map.partition, axis.start, axis.end));
+        }
+        maps.insert(map.partition, map);
+    }
+    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    let panel_component: String = if global_frame {
+        let frame = territory_frame::TerritoryFrame::from_local_names(
+            maps
+                .values()
+                .flat_map(|map| map.members.iter().map(|row| row.path_name.as_str())),
+            record_origin,
+        )?;
+        let panel_component = frame.global_name(component)?;
+        for map in maps.values_mut() {
+            for row in &mut map.members {
+                let translated =
+                    territory_frame::translate_row(&row.path_name, row.start, row.end, record_origin)?;
+                row.path_name = translated.path_name;
+                row.start = translated.start;
+                row.end = translated.end;
+            }
+        }
+        for row in axis_rows.iter_mut() {
+            let translated =
+                territory_frame::translate_row(component, row.1, row.2, record_origin)?;
+            row.1 = translated.start;
+            row.2 = translated.end;
+        }
+        panel_component
+    } else {
+        component.to_string()
+    };
+    let window_partition: Vec<u32> =
+        axis_rows.iter().map(|&(partition, _, _)| partition).collect();
+    let window_axis: Vec<(u64, u64)> =
+        axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
+    // (The stored-frame convention, read the SAME way the call reads
+    // it — the walks the asset serves depend on it.)
+    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
+    let rows_started = Instant::now();
+    for &partition in &window_partition {
+        let map = maps
+            .get(&partition)
+            .ok_or_else(|| invalid("axis partition map missing"))?;
+        store.ensure_partition(&map.members, partition)?;
+    }
+    let rows_seconds = rows_started.elapsed().as_secs_f64();
+    // THE ROW CONTEXT, serialized (the sequences replaced by their
+    // FNV-64 CONTENT KEY — the bytes stay in the sources).
+    let rows: Vec<PrecomputeRowAsset> = store
+        .folds
+        .iter()
+        .map(|row| PrecomputeRowAsset {
+            path_name: panel.name_map.path_to_name[row.path].clone(),
+            start: row.start,
+            end: row.end,
+            seq_fnv: fnv1a64(&row.seq),
+            stored_walk: row.stored_walk.clone(),
+            walk: row.walk.clone(),
+            frames: row.frames.clone(),
+            members: row.members.clone(),
+        })
+        .collect();
+    // THE FOLD LAYOUTS, per window (the live grouping, unmasked — the
+    // masking filters are per-member predicates the serve applies at
+    // its own call time; the grouping is the pure function recorded).
+    let windows_started = Instant::now();
+    let mut windows: Vec<PrecomputeWindowAsset> = Vec::with_capacity(window_partition.len());
+    let mut folds_total: u64 = 0;
+    for (window, &partition) in window_partition.iter().enumerate() {
+        let map = maps
+            .get(&partition)
+            .ok_or_else(|| invalid("axis partition map missing"))?;
+        let (axis_start, axis_end) = window_axis[window];
+        let (_folds, fold_rep, member_fold, _, _) = build_window_folds_live(
+            &store.folds,
+            &store.dedup,
+            &map.members,
+            &panel_component,
+            axis_start,
+            axis_end,
+            None,
+            &[],
+            &path_of_name,
+            &|path_idx| panel.name_map.path_to_length[path_idx],
+            k,
+        )?;
+        folds_total += fold_rep.len() as u64;
+        windows.push(PrecomputeWindowAsset {
+            partition,
+            axis_start,
+            axis_end,
+            fold_rep,
+            member_fold,
+        });
+    }
+    let windows_seconds = windows_started.elapsed().as_secs_f64();
+    // THE BIND SCAFFOLDING (SS10.6.25 slice 2 — the once-per-panel
+    // price's new section): the canonical-scheme steps over the
+    // territory's own member-row extents (the panel-knowable
+    // coordinate set), merged and padded by the syncmer window's own
+    // reach, derived through the SAME `canonical_steps_over_range`
+    // the live bind runs — the builder IS the live derivation.
+    let bind_started = Instant::now();
+    let member_rows: Vec<(usize, u64, u64)> = maps
+        .values()
+        .flat_map(|map| map.members.iter())
+        .map(|row| {
+            let path = *path_of_name
+                .get(&row.path_name)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "the partition maps name a member row absent from the syng: {:?}",
+                        row.path_name
+                    ))
+                })?;
+            Ok((path, row.start, row.end))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let bind_paths = build_bind_scaffold(&panel, &fetch_seq, k, member_rows.into_iter())?;
+    let bind_ranges: u64 = bind_paths.iter().map(|p| p.ranges.len() as u64).sum();
+    let bind_steps: u64 = bind_paths.iter().map(|p| p.steps.len() as u64).sum();
+    let bind_seconds = bind_started.elapsed().as_secs_f64();
+    let manifest = PanelPrecomputeManifest {
+        format: "impg-panel-precompute-loci/2".to_string(),
+        panel: identity,
+        k,
+        component: panel_component,
+        frame: if global_frame { "global" } else { "local" }.to_string(),
+        record_origin,
+        stored_frame,
+        maps_digest,
+        routes_digest,
+        windows: windows.len() as u64,
+        rows: rows.len() as u64,
+        folds: folds_total,
+        bind_paths: bind_paths.len() as u64,
+        bind_ranges,
+        bind_steps,
+    };
+    std::fs::create_dir_all(out_dir)?;
+    let rows_bytes = encode_rows(&rows);
+    let windows_bytes = encode_windows(&windows);
+    let bind_bytes = encode_bind_scaffolding(&bind_paths);
+    crate::genome_inference::atomic_write(&out_dir.join("rows.bin"), &rows_bytes)?;
+    crate::genome_inference::atomic_write(&out_dir.join("windows.bin"), &windows_bytes)?;
+    crate::genome_inference::atomic_write(
+        &out_dir.join("bind-scaffolding.bin"),
+        &bind_bytes,
+    )?;
+    crate::genome_inference::write_json(&out_dir.join("manifest.json"), &manifest)?;
+    eprintln!(
+        "[precompute] rows: {} distinct rows over {} partitions ({} windows) \
+         [{rows_seconds:.1}s]",
+        rows.len(),
+        maps.len(),
+        window_partition.len(),
+    );
+    eprintln!(
+        "[precompute] windows: {} windows, {folds_total} folds [{windows_seconds:.1}s]",
+        windows.len(),
+    );
+    eprintln!(
+        "[precompute] bind scaffolding: {} paths, {} derivation ranges, {} steps \
+         [{bind_seconds:.1}s]",
+        bind_paths.len(),
+        bind_ranges,
+        bind_steps,
+    );
+    eprintln!(
+        "[precompute] asset: {} (rows.bin {} bytes, windows.bin {} bytes, \
+         bind-scaffolding.bin {} bytes, manifest.json; maps digest {:016x}, routes digest \
+         {:016x}) [total {:.1}s]",
+        out_dir.display(),
+        rows_bytes.len(),
+        windows_bytes.len(),
+        bind_bytes.len(),
+        maps_digest,
+        routes_digest,
+        started.elapsed().as_secs_f64(),
+    );
+    Ok(())
+}
 
 fn pack_edge(left: GraphNode, right: GraphNode) -> PackedEdge {
     (left as u64) << 32 | right as u64
@@ -2027,17 +3584,6 @@ impl FoldUnionFind {
 
 /// FNV-1a over the column's f64 bit patterns (the equal-column
 /// bucket key; buckets are re-verified bit-exactly before use).
-fn column_bits_hash(column: &[f64]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &value in column {
-        for byte in value.to_bits().to_le_bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-    }
-    hash
-}
-
 /// Whether two sorted contained multisets share at least one node
 /// key (the alignment structure's adjacency: a shared interned node
 /// IS an alignment edge between the two rows).
@@ -2080,9 +3626,7 @@ fn shared_node_mass(left: &[(u64, u32)], right: &[(u64, u32)]) -> u64 {
 #[allow(clippy::type_complexity)]
 fn alignment_connected_merge(
     folds: Vec<Fold>,
-    matrix: Vec<Vec<f64>>,
-    pinned: Vec<Vec<bool>>,
-    mismatches: Vec<Vec<u32>>,
+    matrix: ScoreMatrix,
     territory: Vec<(u64, u64)>,
     axis_fold: Option<usize>,
     territory_axis_fold: Option<usize>,
@@ -2090,9 +3634,7 @@ fn alignment_connected_merge(
     observed_edge: &HashMap<u64, f64>,
 ) -> (
     Vec<Fold>,
-    Vec<Vec<f64>>,
-    Vec<Vec<bool>>,
-    Vec<Vec<u32>>,
+    ScoreMatrix,
     Vec<(u64, u64)>,
     Option<usize>,
     Vec<MergeGroupReceipt>,
@@ -2111,8 +3653,6 @@ fn alignment_connected_merge(
         return (
             folds,
             matrix,
-            pinned,
-            mismatches,
             territory,
             territory_axis_fold,
             groups,
@@ -2123,8 +3663,6 @@ fn alignment_connected_merge(
         return (
             folds,
             matrix,
-            pinned,
-            mismatches,
             territory,
             territory_axis_fold,
             groups,
@@ -2152,9 +3690,12 @@ fn alignment_connected_merge(
     let roots: Vec<usize> = (0..n).map(|i| components.find(i)).collect();
     // The equal-column buckets (the safety condition's candidate
     // set: only bit-identical columns can be indistinguishable).
+    // (Candidate C: the hash is the row's canonical VALUE hash — the
+    // committed fnv-over-bits, read through the compressed form — so
+    // two equal columns hash equal whichever encoding each row took.)
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (index, column) in matrix.iter().enumerate() {
-        buckets.entry(column_bits_hash(column)).or_default().push(index);
+    for index in 0..n {
+        buckets.entry(matrix.ll_bits_hash(index)).or_default().push(index);
     }
     let node_mass = |key: u64| observed_node.get(&key).copied().unwrap_or(0.0);
     let edge_mass = |key: u64| observed_edge.get(&key).copied().unwrap_or(0.0);
@@ -2186,11 +3727,7 @@ fn alignment_connected_merge(
                     // (Hash buckets can collide: verify the columns
                     // bit-exactly — the safety condition's exact
                     // predicate, never the hash.)
-                    if !matrix[i]
-                        .iter()
-                        .zip(&matrix[j])
-                        .all(|(x, y)| x.to_bits() == y.to_bits())
-                    {
+                    if !matrix.ll_bits_equal(i, j) {
                         continue;
                     }
                     out.equal_column_pairs += 1;
@@ -2290,10 +3827,7 @@ fn alignment_connected_merge(
                 // (The admitted-pair transitivity proof, asserted: every
                 // member's column is bit-identical to the representative's.)
                 assert!(
-                    matrix[member]
-                        .iter()
-                        .zip(&matrix[old])
-                        .all(|(x, y)| x.to_bits() == y.to_bits()),
+                    matrix.ll_bits_equal(member, old),
                     "merged group with distinguishable members"
                 );
                 let member_fold =
@@ -2348,26 +3882,25 @@ fn alignment_connected_merge(
     // fold's representative (the merged fold carries the
     // representative's column — asserted bit-identical to every
     // member's above).
-    let new_matrix: Vec<Vec<f64>> = new_representatives
+    // The per-fold rows regroup onto each new fold's representative
+    // (the merged fold carries the representative's column — asserted
+    // bit-identical to every member's above), at the row's own
+    // encoding (the committed clone, compressed).
+    let new_rows: Vec<ScoreRow> = new_representatives
         .iter()
-        .map(|&old| matrix[old].clone())
+        .map(|&old| matrix.row_clone(old))
         .collect();
-    let new_pinned: Vec<Vec<bool>> = new_representatives
-        .iter()
-        .map(|&old| pinned[old].clone())
-        .collect();
-    let new_mismatches: Vec<Vec<u32>> = new_representatives
-        .iter()
-        .map(|&old| mismatches[old].clone())
-        .collect();
+    let new_matrix = ScoreMatrix {
+        n_units: matrix.n_units,
+        elsewhere: matrix.elsewhere,
+        rows: new_rows,
+    };
     let new_territory: Vec<(u64, u64)> =
         new_representatives.iter().map(|&old| territory[old]).collect();
     let new_territory_axis_fold = territory_axis_fold.map(|index| remap[index]);
     (
         new_folds,
         new_matrix,
-        new_pinned,
-        new_mismatches,
         new_territory,
         new_territory_axis_fold,
         groups,
@@ -2543,6 +4076,9 @@ struct ClusterQual {
 /// the cut-index list is exactly that predicate set, so k, excluded,
 /// alternative, cluster_size, shape and p are identical under both.
 enum TieCertificate<'a> {
+    /// The naive full-band form — the ORACLE's own shape (the unit
+    /// tests construct it verbatim; the product path never does).
+    #[allow(dead_code)]
     Bands(&'a [(usize, Vec<f64>)]),
     CutIndices(&'a [(usize, Vec<usize>)]),
 }
@@ -2682,20 +4218,40 @@ fn cluster_form_qual(
     }
 }
 
-/// The DEGENERATE-LOCUS cut-index lists (the wall fix's compute core,
-/// extracted for the unit-test oracle): per tied called class (beyond
-/// the winner, in called order), its spectrum index and the exact
-/// <=cut predicate set of its band. Each (tied class, spectrum entry)
-/// distance is decided by the SOUND two-sided O(1) observed-mass
-/// bounds — D >= |Sm_n(t) - Sm_n(e)| + |Sm_e(t) - Sm_e(e)| and
-/// D <= Sm_n(t) + Sm_n(e) + Sm_e(t) + Sm_e(e), where Sm is the
-/// observed mass of the (merged, additive) multiset — with the exact
-/// differing_observed_mass as the fallback for the undecided middle
-/// band, so the emitted predicate set is IDENTICAL to the naive band
-/// matrix's by construction (the oracle test below proves it). The
-/// upper-bound-first ordering makes the common all-zero-mass case
-/// (both multisets observed-empty, D = 0) decidable without any merge.
-fn degenerate_cut_lists<NF, EF>(
+/// THE TIED-CLASS cut-index lists (the wall fix's compute core,
+/// extracted for the unit-test oracle; the per-pair constant's own fix):
+/// per tied called class (beyond the winner, in called order), its
+/// spectrum index and the exact <=cut predicate set of its band.
+/// Each (tied class, spectrum entry) distance is decided by the
+/// SOUND two-sided O(1) observed-mass bounds — D >= |Sm_n(t) -
+/// Sm_n(e)| + |Sm_e(t) - Sm_e(e)| and D <= Sm_n(t) + Sm_n(e) +
+/// Sm_e(t) + Sm_e(e), where Sm is the observed mass of the
+/// (merged, additive) multiset, computed from the PER-FOLD mass
+/// signatures (node_mass/edge_mass) built ONCE per locus — with the
+/// exact differing_observed_mass as the fallback for the undecided
+/// middle band, so the emitted predicate set is IDENTICAL to the
+/// naive band matrix's by construction (the oracle tests below
+/// prove it at BOTH the degenerate and the non-degenerate shapes).
+/// The upper-bound-first ordering makes the common all-zero-mass
+/// case (both multisets observed-empty, D = 0) decidable without
+/// any merge. THE PER-PAIR CONSTANT'S FIX (the fold-merge open
+/// term, closed): the naive certificate materialized |called| - 1
+/// bands x |spectrum| entries, EVERY entry a fresh pair of merged
+/// multisets (per-pair vector construction) plus two observed-mass
+/// walks (per-pair full-column walks) — the ~6.4 ms-per-class-pair
+/// constant the pre-merge fold-heavy shapes receipted (the ledger's
+/// T03226 l15 anatomy) — while the cluster machinery consumes from
+/// each band ONLY its <=cut predicate set (cluster_form_qual's
+/// own contract), so this form computes exactly that at O(1) per
+/// entry with the exact walk as the fallback. It now serves BOTH
+/// the degenerate path (every class ties at the pure-E score) and
+/// the non-degenerate path (a strict tie subset) — the answers are
+/// identical to the naive band matrix's at both, and the emitted
+/// certificate is the compact cut-index list everywhere (the
+/// qual_tied_bands receipt member is replaced by
+/// qual_tied_cut_indices at non-degenerate tie loci, mirroring the
+/// committed degenerate precedent).
+fn tied_class_cut_lists<NF, EF>(
     folds: &[Fold],
     called: &[(usize, usize)],
     spectrum: &[(f64, f64, f64, usize, usize, usize)],
@@ -2837,9 +4393,12 @@ impl Scoring {
     /// branch's per-placement terms; as a logsumexp term it
     /// underflows to +0.0 exactly wherever an anchored placement
     /// exists (150 * ln(eps/3) ~ -1546 against placement scores ~ -1).
+    /// (The read length is PER-CALL state now — passed by the caller,
+    /// never a process-global, so concurrent calls in one process
+    /// cannot read each other's length.)
     #[inline]
-    fn floor(&self) -> f64 {
-        read_len() as f64 * self.b
+    fn floor(&self, read_len: usize) -> f64 {
+        read_len as f64 * self.b
     }
 }
 
@@ -3024,6 +4583,112 @@ pub fn resolve_region_loci(
 /// remains the experiment's own path).
 pub fn row_is_excluded(path_name: &str, component: &str, globs: &[String]) -> bool {
     path_name != component && globs.iter().any(|g| path_matches_glob(path_name, g))
+}
+
+/// THE FLANK-OVERLAP CANDIDATE FILTER (the owner's design, the
+/// presence semantics ruled at the fork): a panel member row is KEPT
+/// in a window's candidate universe only if its row CARRIES ALIGNED
+/// MATERIAL OVER BOTH FLANKS of the window's axis extent - the first
+/// N bp and the last N bp, in the FOCAL REFERENCE's own coordinate
+/// frame (the partition maps' member rows live in exactly that
+/// frame: the axis row spans the window's extent and every member
+/// row's [start, end) is its aligned extent in the same frame). THE
+/// HULL-EDGE GEOMETRY, measured before the semantics was ruled: the
+/// member rows are alignment-correspondence hulls and structurally
+/// stop 0-50bp SHORT of the region's edges (a syncmer window cannot
+/// start in the last k+w-1 bases - the truth haplotypes' own rows
+/// end ~25bp short), so a literal containment reading of "covers the
+/// flank" removes 91-100% of every window's universe INCLUDING the
+/// truth folds at ~every window; the ruled semantics is PRESENCE
+/// (the owner's own degenerate-case wording): the row must OVERLAP
+/// both flank intervals. N is an absolute bp count
+/// (`--flank-overlap 10000`) or a percent of the window length
+/// (`--flank-overlap 10%` -> ceil(pct x length)). THE DEGENERATE
+/// CASE: a window shorter than N reduces the rule to simple
+/// presence in the window. OFF BY DEFAULT (unset: the committed
+/// candidate universe verbatim).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FlankOverlap {
+    Bp(u64),
+    Percent(f64),
+}
+
+impl std::str::FromStr for FlankOverlap {
+    type Err = String;
+    fn from_str(text: &str) -> Result<Self, String> {
+        let invalid = || format!(
+            "invalid --flank-overlap {text:?}: N in bp (e.g. 10000) or a percent (e.g. 10%)"
+        );
+        if let Some(pct) = text.strip_suffix('%') {
+            let pct: f64 = pct.parse().map_err(|_| invalid())?;
+            if !(pct > 0.0 && pct <= 100.0) {
+                return Err(format!(
+                    "invalid --flank-overlap {text:?}: the percent must be in (0, 100]"
+                ));
+            }
+            Ok(FlankOverlap::Percent(pct))
+        } else {
+            let bp: u64 = text.parse().map_err(|_| invalid())?;
+            if bp == 0 {
+                return Err(format!(
+                    "invalid --flank-overlap {text:?}: N must be positive (0 is the default-off)"
+                ));
+            }
+            Ok(FlankOverlap::Bp(bp))
+        }
+    }
+}
+
+impl FlankOverlap {
+    /// The flank size N in bp for a window of the given length.
+    pub fn flank_bp(&self, window_len: u64) -> u64 {
+        match *self {
+            FlankOverlap::Bp(n) => n,
+            FlankOverlap::Percent(pct) => ((pct / 100.0) * window_len as f64).ceil() as u64,
+        }
+    }
+
+    /// The CLI spelling of the setting (the receipt field).
+    pub fn setting(&self) -> String {
+        match *self {
+            FlankOverlap::Bp(n) => n.to_string(),
+            FlankOverlap::Percent(pct) => format!("{pct}%"),
+        }
+    }
+}
+
+/// True when the member row [member_start, member_end) stays in the
+/// window's candidate universe under the flank-overlap rule (THE
+/// PRESENCE SEMANTICS, ruled at the measured fork): the row must
+/// CARRY ALIGNED MATERIAL OVER BOTH FLANK INTERVALS of the window's
+/// axis extent [axis_start, axis_end) - it must OVERLAP the first N
+/// bp [axis_start, axis_start+N) AND the last N bp
+/// [axis_end-N, axis_end). A window shorter than N degenerates to
+/// simple presence in the window. THE AXIS ROW IS NEVER EXCLUDED (it
+/// is the coordinate frame of the call - the --exclude-paths
+/// precedent); the caller enforces that, this predicate is pure.
+pub fn row_covers_flanks(
+    member_start: u64,
+    member_end: u64,
+    axis_start: u64,
+    axis_end: u64,
+    flank: FlankOverlap,
+) -> bool {
+    let window_len = axis_end.saturating_sub(axis_start);
+    let n = flank.flank_bp(window_len);
+    if window_len < n {
+        // THE DEGENERATE CASE (the owner's rule): the window is
+        // shorter than N - simple presence in the region.
+        return member_start < axis_end && member_end > axis_start;
+    }
+    // PRESENCE in the first N bp [axis_start, axis_start + n) and
+    // the last N bp [axis_end - n, axis_end): the row's aligned
+    // hull must reach into both flanks (overlap, not contain - the
+    // hull-edge geometry: rows structally stop short of the edges).
+    member_start < axis_start + n
+        && member_end > axis_start
+        && member_start < axis_end
+        && member_end > axis_end - n
 }
 
 /// The COALESCED CALLED SET (the owner's ambiguity ruling: a tied
@@ -3289,14 +4954,1250 @@ fn direct_score(
 fn unit_log_likelihood(
     scores: &[f64],
     fold_len: u64,
+    read_len: usize,
 ) -> f64 {
-    if scores.is_empty() || fold_len < read_len() as u64 {
+    if scores.is_empty() || fold_len < read_len as u64 {
         return f64::NEG_INFINITY;
     }
-    let prior = -(2.0 * (fold_len - read_len() as u64 + 1) as f64).ln();
+    let prior = -(2.0 * (fold_len - read_len as u64 + 1) as f64).ln();
     let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let sum: f64 = scores.iter().map(|&s| (s - best).exp()).sum();
     prior + best + sum.ln()
+}
+
+// ---------------------------------------------------------------------------
+// THE ROW-COMPRESSED SCORING MATRIX (candidate C — the marathon
+// profile's dense-matrix memory tail, the guard-kill class's fix).
+//
+// THE MEASURED DISEASE (SS10.6.3's receipts): the per-locus scoring
+// matrix holds a dense (folds x units) ll/pinned/mismatches triple at
+// 13 B/pair — ~33GB at the worst measured marathon locus (T03411:
+// 490 x 5,160,612 = 2.53e9 pairs) — the 64GiB guard-kill class's
+// direct cause (134 kills; completions 54-71GB). At the >=98%-no-pin
+// loci the mass is the CONSTANT no-pin triple (ll = the elsewhere
+// branch, pinned = false, mismatches = 0) for nearly every pair.
+//
+// THE EXACTNESS ARGUMENT (bit-for-bit, NO approximation): the pair
+// loop's pinned path can never produce the no-pin triple — a pinned
+// pair's local branch is finite (scores nonempty), so its
+// marginalization logsumexp2(local, E) is STRICTLY greater than E;
+// and an unpinned pair's mismatches stay 0 (nothing accumulated) with
+// ll exactly E (the empty-scores local branch is NEG_INFINITY and
+// logsumexp2(-inf, E) = E). The triple therefore PARTITIONS: an entry
+// equals the no-pin constant iff the unit is unpinned on that fold —
+// a value-identical compression. Every consumer reads the SAME f64
+// bits, the SAME bool, the SAME u32 it read from the dense form, in
+// the SAME iteration order (the class scan's accumulation order is
+// unit order, unchanged), so every downstream float operation is
+// unchanged: the outputs are byte-identical by construction.
+//
+// THE ROW ENCODING (a DERIVED choice per row, never tuned): a row
+// keeps the committed dense form iff the sparse form would be no
+// smaller — the sparse form costs 16 B/pinned entry (unit + ll +
+// mismatches) against the dense 13 B/unit — so the pinned-majority
+// marathon loci (T03641 at 84% pinned) keep the committed size
+// EXACTLY (never larger), and the no-pin-majority loci (T03803 at 2%
+// pinned) collapse ~39x. The bound is per row: min(13 x n_units,
+// 16 x pinned_in_row) bytes.
+// ---------------------------------------------------------------------------
+
+/// The SPARSE row: the pinned entries only (unit, ll, mismatches),
+/// sorted by unit, structure-of-arrays. An absent unit reads the
+/// no-pin constant (elsewhere, false, 0) — exactly the dense form's
+/// value there, per the exactness argument above. (A pinned=false
+/// entry always equals the constant — proven above — so the sparse
+/// row IS the pinned set.)
+struct ScoreRowSparse {
+    units: Vec<u32>,
+    lls: Vec<f64>,
+    mismatches: Vec<u32>,
+}
+
+/// The DENSE row: the committed layout verbatim (13 B/unit).
+struct ScoreRowDense {
+    ll: Vec<f64>,
+    pinned: Vec<bool>,
+    mismatches: Vec<u32>,
+}
+
+enum ScoreRow {
+    Dense(ScoreRowDense),
+    Sparse(ScoreRowSparse),
+}
+
+impl ScoreRow {
+    /// Build the row from the pair loop's dense accumulators, taking
+    /// the SMALLER of the two encodings (the derived bound, never a
+    /// tuned crossover): dense bytes are 13/unit, sparse bytes are
+    /// 16 per entry that differs from the no-pin constant.
+    fn from_pair_loop(
+        ll: Vec<f64>,
+        pinned: Vec<bool>,
+        mismatches: Vec<u32>,
+        elsewhere: f64,
+    ) -> ScoreRow {
+        let default_bits = elsewhere.to_bits();
+        let sparse_len = ll
+            .iter()
+            .zip(&pinned)
+            .zip(&mismatches)
+            .filter(|((&value, &is_pinned), &m)| {
+                is_pinned || value.to_bits() != default_bits || m != 0
+            })
+            .count();
+        if 16 * sparse_len as u64 >= 13 * ll.len() as u64 {
+            return ScoreRow::Dense(ScoreRowDense {
+                ll,
+                pinned,
+                mismatches,
+            });
+        }
+        let mut units = Vec::with_capacity(sparse_len);
+        let mut lls = Vec::with_capacity(sparse_len);
+        let mut mism = Vec::with_capacity(sparse_len);
+        for (unit, ((&value, &is_pinned), &m)) in
+            ll.iter().zip(&pinned).zip(&mismatches).enumerate()
+        {
+            if is_pinned || value.to_bits() != default_bits || m != 0 {
+                units.push(unit as u32);
+                lls.push(value);
+                mism.push(m);
+            }
+        }
+        ScoreRow::Sparse(ScoreRowSparse {
+            units,
+            lls,
+            mismatches: mism,
+        })
+    }
+
+    /// ll at `unit` (a random-access probe; the monotone-scan form is
+    /// the cursor below). Absent sparse entries read the no-pin
+    /// constant.
+    fn ll_probe(&self, unit: usize, elsewhere: f64) -> f64 {
+        match self {
+            ScoreRow::Dense(dense) => dense.ll[unit],
+            ScoreRow::Sparse(sparse) => match sparse
+                .units
+                .binary_search(&(unit as u32))
+            {
+                Ok(index) => sparse.lls[index],
+                Err(_) => elsewhere,
+            },
+        }
+    }
+
+    /// The pinned flag at `unit`.
+    fn pinned_probe(&self, unit: usize) -> bool {
+        match self {
+            ScoreRow::Dense(dense) => dense.pinned[unit],
+            ScoreRow::Sparse(sparse) => {
+                sparse.units.binary_search(&(unit as u32)).is_ok()
+            }
+        }
+    }
+
+    /// The mismatches at `unit` (the committed u32 value).
+    fn mismatches_probe(&self, unit: usize) -> u32 {
+        match self {
+            ScoreRow::Dense(dense) => dense.mismatches[unit],
+            ScoreRow::Sparse(sparse) => {
+                match sparse.units.binary_search(&(unit as u32)) {
+                    Ok(index) => sparse.mismatches[index],
+                    Err(_) => 0,
+                }
+            }
+        }
+    }
+
+    /// The pinned pairs of this row in UNIT ORDER: (unit,
+    /// mismatches) — the enumeration the exactness sample and the
+    /// named-fold strata walk (the dense form's `(0..n_units)
+    /// .filter(pinned)` in the same order).
+    fn pinned_units(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
+        match self {
+            ScoreRow::Dense(dense) => dense
+                .pinned
+                .iter()
+                .enumerate()
+                .filter(|(_, &is_pinned)| is_pinned)
+                .map(|(unit, _)| (unit, dense.mismatches[unit]))
+                .collect::<Vec<_>>()
+                .into_iter(),
+            ScoreRow::Sparse(sparse) => sparse
+                .units
+                .iter()
+                .zip(&sparse.mismatches)
+                .map(|(&unit, &m)| (unit as usize, m))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        }
+    }
+
+    /// Bit-exact equality of the two rows' LL COLUMNS (the merge's
+    /// own safety predicate — the committed comparison was over the
+    /// ll matrix alone, and this one is too). Both rows walk units in
+    /// order, so every compared pair of values is the pair the dense
+    /// comparison compared.
+    fn ll_bits_equal(&self, other: &ScoreRow, n_units: usize, elsewhere: f64) -> bool {
+        let mut a = RowCursor::new(self);
+        let mut b = RowCursor::new(other);
+        for unit in 0..n_units {
+            if a.ll_at(unit, elsewhere).to_bits()
+                != b.ll_at(unit, elsewhere).to_bits()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The canonical LL-column hash (the merge's bucketing): the
+    /// value bits in unit order — variant-independent, so two equal
+    /// rows hash equal whichever encoding each took. (The hash only
+    /// buckets candidates; the exact predicate above decides.)
+    fn ll_bits_hash(&self, n_units: usize, elsewhere: f64) -> u64 {
+        let mut cursor = RowCursor::new(self);
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for unit in 0..n_units {
+            for byte in cursor.ll_at(unit, elsewhere).to_bits().to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// Serialize the row's LL column in the DENSE form's exact bytes
+    /// (serde_json's `Vec<Vec<f64>>` element shape: `[` + the values
+    /// joined by `,` + `]`), reconstructing the dense values from the
+    /// compressed form one at a time — the caller streams this row to
+    /// the ingredients spill, so the dense column never materializes.
+    fn write_ll_row_json(
+        &self,
+        writer: &mut impl std::io::Write,
+        n_units: usize,
+        elsewhere: f64,
+    ) -> std::io::Result<()> {
+        let mut cursor = RowCursor::new(self);
+        writer.write_all(b"[")?;
+        for unit in 0..n_units {
+            if unit > 0 {
+                writer.write_all(b",")?;
+            }
+            serde_json::to_writer(&mut *writer, &cursor.ll_at(unit, elsewhere))?;
+        }
+        writer.write_all(b"]")?;
+        Ok(())
+    }
+
+    /// The row's live bytes (the memory bound's own accounting).
+    fn live_bytes(&self) -> u64 {
+        match self {
+            ScoreRow::Dense(dense) => {
+                13 * dense.ll.len() as u64
+            }
+            ScoreRow::Sparse(sparse) => {
+                16 * sparse.units.len() as u64
+            }
+        }
+    }
+}
+
+/// A monotone cursor over one row (the class scan's per-unit walk):
+/// O(1) amortized per unit, sparse or dense — no binary search on the
+/// scan path.
+struct RowCursor<'a> {
+    row: &'a ScoreRow,
+    index: usize,
+}
+impl<'a> RowCursor<'a> {
+    fn new(row: &'a ScoreRow) -> RowCursor<'a> {
+        RowCursor { row, index: 0 }
+    }
+    /// The ll at `unit`, assuming monotone non-decreasing access.
+    fn ll_at(&mut self, unit: usize, elsewhere: f64) -> f64 {
+        match self.row {
+            ScoreRow::Dense(dense) => dense.ll[unit],
+            ScoreRow::Sparse(sparse) => {
+                while self.index < sparse.units.len()
+                    && (sparse.units[self.index] as usize) < unit
+                {
+                    self.index += 1;
+                }
+                if self.index < sparse.units.len()
+                    && sparse.units[self.index] as usize == unit
+                {
+                    sparse.lls[self.index]
+                } else {
+                    elsewhere
+                }
+            }
+        }
+    }
+}
+
+/// The per-locus scoring matrix: one row per fold, the committed
+/// triple (ll, pinned, mismatches) in the per-row smaller encoding.
+struct ScoreMatrix {
+    n_units: usize,
+    elsewhere: f64,
+    rows: Vec<ScoreRow>,
+}
+
+impl ScoreMatrix {
+    fn n_folds(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// ll at (fold, unit) — the dense form's `matrix[fold][unit]`.
+    fn ll(&self, fold: usize, unit: usize) -> f64 {
+        self.rows[fold].ll_probe(unit, self.elsewhere)
+    }
+
+    /// The pinned flag — the dense form's `pinned[fold][unit]`.
+    fn pinned(&self, fold: usize, unit: usize) -> bool {
+        self.rows[fold].pinned_probe(unit)
+    }
+
+    /// The mismatches — the dense form's `mismatches[fold][unit]`.
+    fn mismatches(&self, fold: usize, unit: usize) -> u32 {
+        self.rows[fold].mismatches_probe(unit)
+    }
+
+    /// The pinned pairs of a fold in unit order.
+    fn pinned_units(&self, fold: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
+        self.rows[fold].pinned_units()
+    }
+
+    /// THE CLASS PAIR SUM — the exhaustive classes' own accumulation,
+    /// verbatim in order and arithmetic: `total += count *
+    /// mix_logsumexp(ll_a[u], ll_b[u])` over units ascending. The
+    /// cursors read the same values the dense rows held (the
+    /// compressed form's absent entries ARE the no-pin constant), so
+    /// the sum is the committed sum bit for bit.
+    fn class_pair_sum(
+        &self,
+        first: usize,
+        second: usize,
+        unit_counts: &[f64],
+    ) -> f64 {
+        let mut a = RowCursor::new(&self.rows[first]);
+        let mut b = RowCursor::new(&self.rows[second]);
+        let mut total = 0.0f64;
+        for (unit, &count) in unit_counts.iter().enumerate() {
+            total += count
+                * mix_logsumexp(
+                    a.ll_at(unit, self.elsewhere),
+                    b.ll_at(unit, self.elsewhere),
+                );
+        }
+        total
+    }
+
+    /// The merge's bit-exact column predicate.
+    fn ll_bits_equal(&self, a: usize, b: usize) -> bool {
+        self.rows[a].ll_bits_equal(&self.rows[b], self.n_units, self.elsewhere)
+    }
+
+    /// The merge's bucketing hash.
+    fn ll_bits_hash(&self, fold: usize) -> u64 {
+        self.rows[fold].ll_bits_hash(self.n_units, self.elsewhere)
+    }
+
+    /// The row's canonical COLUMN-CONTENT key hash (the bit-equal-row
+    /// memoization's bucketing): the row's pinned entries whose ll
+    /// bits differ from the elsewhere constant's, as (unit, bits)
+    /// pairs in unit order, length-fed first — variant-independent
+    /// and encoding-independent by construction, because the column
+    /// IS its non-E entries (an absent entry reads E, and a pinned
+    /// entry whose value is exactly E reads E too, so both contribute
+    /// nothing to the column; `ll_bits_equal`'s own predicate is
+    /// exactly the equality of these entries' sets). Two bit-equal
+    /// columns therefore hash equal whichever encoding each row
+    /// took; a hash collision is decided by the exact predicate on
+    /// match — the merge's own discipline, never the hash alone.
+    /// The walk is over the row's PINNED entries only (both encodings
+    /// keep them ascending), so the key costs O(pinned), never the
+    /// full O(units) column walk.
+    fn column_key_hash(&self, fold: usize) -> u64 {
+        let elsewhere_bits = self.elsewhere.to_bits();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |hash: &mut u64, bytes: &[u8]| {
+            for &byte in bytes {
+                *hash ^= byte as u64;
+                *hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        };
+        let mut entries: u64 = 0;
+        match &self.rows[fold] {
+            ScoreRow::Sparse(sparse) => {
+                for (&unit, &ll) in sparse.units.iter().zip(&sparse.lls) {
+                    let bits = ll.to_bits();
+                    if bits != elsewhere_bits {
+                        entries += 1;
+                        feed(&mut hash, &unit.to_le_bytes());
+                        feed(&mut hash, &bits.to_le_bytes());
+                    }
+                }
+            }
+            ScoreRow::Dense(dense) => {
+                for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
+                    if is_pinned {
+                        let bits = dense.ll[unit].to_bits();
+                        if bits != elsewhere_bits {
+                            entries += 1;
+                            feed(&mut hash, &(unit as u32).to_le_bytes());
+                            feed(&mut hash, &bits.to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        feed(&mut hash, &entries.to_le_bytes());
+        hash
+    }
+
+    /// The representative's row for a merged fold (the committed
+    /// clone, at the row's own encoding).
+    fn row_clone(&self, fold: usize) -> ScoreRow {
+        match &self.rows[fold] {
+            ScoreRow::Dense(dense) => ScoreRow::Dense(ScoreRowDense {
+                ll: dense.ll.clone(),
+                pinned: dense.pinned.clone(),
+                mismatches: dense.mismatches.clone(),
+            }),
+            ScoreRow::Sparse(sparse) => ScoreRow::Sparse(ScoreRowSparse {
+                units: sparse.units.clone(),
+                lls: sparse.lls.clone(),
+                mismatches: sparse.mismatches.clone(),
+            }),
+        }
+    }
+
+    /// The matrix's live bytes (the memory bound receipt).
+    fn live_bytes(&self) -> u64 {
+        self.rows.iter().map(|row| row.live_bytes()).sum()
+    }
+
+    /// Serialize the WHOLE ll matrix in the dense form's exact bytes
+    /// (serde_json's `Vec<Vec<f64>>` shape), one row at a time — the
+    /// ingredients receipt's ll_matrix, streamed so the dense
+    /// materialization never exists (candidate C's second pole: the
+    /// committed form buffered the whole matrix as JSON text in RAM,
+    /// ~20 B/pair at the worst marathon loci — a second matrix,
+    /// larger than the first, held while the first was still alive).
+    fn write_ll_matrix_json(
+        &self,
+        writer: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        writer.write_all(b"[")?;
+        for fold in 0..self.rows.len() {
+            if fold > 0 {
+                writer.write_all(b",")?;
+            }
+            self.rows[fold]
+                .write_ll_row_json(&mut *writer, self.n_units, self.elsewhere)?;
+        }
+        writer.write_all(b"]")?;
+        Ok(())
+    }
+
+    /// The committed dense construction (the tests' and the merge
+    /// tests' own shape).
+    fn from_dense(
+        matrix: Vec<Vec<f64>>,
+        pinned: Vec<Vec<bool>>,
+        mismatches: Vec<Vec<u32>>,
+        elsewhere: f64,
+    ) -> ScoreMatrix {
+        let n_units = matrix.first().map(|row| row.len()).unwrap_or(0);
+        let rows = matrix
+            .into_iter()
+            .zip(pinned)
+            .zip(mismatches)
+            .map(|((ll, pinned), mismatches)| {
+                ScoreRow::from_pair_loop(ll, pinned, mismatches, elsewhere)
+            })
+            .collect();
+        ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows,
+        }
+    }
+}
+
+/// The class scan's accumulation-order toggle (the owner's Ruling
+/// 3): Exact = the committed unit-order accumulation (the default,
+/// bit-reproducible); SparseSkip = the fast mode (the constant
+/// entries skipped, the float accumulation regrouped — deltas
+/// measured and named).
+#[derive(Clone, Copy)]
+enum ClassScanOrder {
+    /// The committed exhaustive unit-order accumulation, bit-
+    /// reproducible — the receipts' form (the toggle-doctrine restore:
+    /// IMPG_CLASS_SCAN_ORDER=exact).
+    Exact,
+    /// The legacy sparse-skip accumulation order (IMPG_CLASS_SCAN-
+    /// ORDER=sparse-skip), unchanged.
+    SparseSkip,
+    /// THE SANCTIONED BOUNDED CLASS SCAN (the owner's ruling on
+    /// SS10.6.21's frontier-1 design; the PRODUCTION DEFAULT, env
+    /// unset): the per-fold excess-mass bound E*C + A_f + A_g with
+    /// the derived exp-underflow skip threshold — a branch-and-bound
+    /// over the class-pair space whose kept pairs are summed by the
+    /// EXACT committed unit-order accumulation, so every computed
+    /// value is bit-identical to the exhaustive scan's and every
+    /// answer (the MAP pair, the called set, the QUAL terms, the
+    /// truth fields, the best-outside rival) is preserved BY THE
+    /// BOUND'S OWN ARITHMETIC. The skipped pairs' instrument entries
+    /// become the labeled bounded receipt (the null skip
+    /// certificate + the per-pair bounds), so no bounded output can
+    /// be mistaken for an exhaustive one.
+    Bounded,
+}
+
+/// The ulp distance between two f64s on the monotone bit axis
+/// (0 for equal bits) — the sparse-skip compare receipt's named
+/// delta unit.
+fn ulp_distance(a: f64, b: f64) -> u64 {
+    let key = |x: f64| {
+        let bits = x.to_bits();
+        if bits >> 63 == 0 {
+            bits | 0x8000_0000_0000_0000
+        } else {
+            !bits
+        }
+    };
+    key(a).abs_diff(key(b))
+}
+
+/// One row of the fast class-scan index: the PINNED units in
+/// ascending order with their ll values (a sparse row's own arrays
+/// borrowed verbatim; a dense row's list built once per locus).
+enum FastRow<'a> {
+    Borrowed { units: &'a [u32], lls: &'a [f64] },
+    Owned { units: Vec<u32>, lls: Vec<f64> },
+}
+
+impl<'a> FastRow<'a> {
+    fn units(&self) -> &[u32] {
+        match self {
+            FastRow::Borrowed { units, .. } => units,
+            FastRow::Owned { units, .. } => units,
+        }
+    }
+    fn lls(&self) -> &[f64] {
+        match self {
+            FastRow::Borrowed { lls, .. } => lls,
+            FastRow::Owned { lls, .. } => lls,
+        }
+    }
+}
+
+/// THE FAST CLASS-SCAN INDEX (the sparse-skip form — the previously
+/// REFUSED accumulation-order change, §10.6.8, now the owner's
+/// Ruling 3 performance path behind IMPG_CLASS_SCAN_ORDER=1). Per
+/// fold: the pinned units ascending with their ll values, plus the
+/// locus's total unit-count mass. A class pair's sum then walks only
+/// the UNION of the two rows' pinned units — every other (fold, unit)
+/// entry is the no-pin constant on BOTH folds (mix_logsumexp(E, E) =
+/// E exactly, proven per the §10.6.8 exactness argument), so its
+/// whole contribution returns as ONE `elsewhere * constant_mass`
+/// term where constant_mass = total_count − (the union's counts).
+/// That regrouping CHANGES the float accumulation order relative to
+/// the committed unit-order walk — the exact mode's byte-identity
+/// invariant — so the fast mode's sums are measured and named
+/// (IMPG_CLASS_SCAN_COMPARE), never hidden, and the model string is
+/// suffixed so no fast-mode output can be mistaken for an exact one.
+struct ClassScanFastIndex<'a> {
+    n_units: usize,
+    elsewhere: f64,
+    total_count: f64,
+    rows: Vec<FastRow<'a>>,
+}
+
+impl<'a> ClassScanFastIndex<'a> {
+    fn build(matrix: &'a ScoreMatrix, unit_counts: &[f64]) -> ClassScanFastIndex<'a> {
+        let mut rows = Vec::with_capacity(matrix.rows.len());
+        for row in &matrix.rows {
+            rows.push(match row {
+                ScoreRow::Sparse(sparse) => FastRow::Borrowed {
+                    units: &sparse.units,
+                    lls: &sparse.lls,
+                },
+                ScoreRow::Dense(dense) => {
+                    let mut units = Vec::new();
+                    let mut lls = Vec::new();
+                    for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
+                        if is_pinned {
+                            units.push(unit as u32);
+                            lls.push(dense.ll[unit]);
+                        }
+                    }
+                    FastRow::Owned { units, lls }
+                }
+            });
+        }
+        ClassScanFastIndex {
+            n_units: matrix.n_units,
+            elsewhere: matrix.elsewhere,
+            total_count: unit_counts.iter().sum(),
+            rows,
+        }
+    }
+
+    /// The sparse-skip class pair sum (the fast mode's accumulation,
+    /// deterministic: the union walk ascending, the constant mass as
+    /// the final term).
+    fn class_pair_sum(&self, first: usize, second: usize, unit_counts: &[f64]) -> f64 {
+        let (a_units, a_lls) = (self.rows[first].units(), self.rows[first].lls());
+        let (b_units, b_lls) = (self.rows[second].units(), self.rows[second].lls());
+        let (mut ai, mut bi) = (0usize, 0usize);
+        let mut total = 0.0f64;
+        let mut union_count = 0.0f64;
+        while ai < a_units.len() || bi < b_units.len() {
+            let unit = if bi >= b_units.len()
+                || (ai < a_units.len() && a_units[ai] <= b_units[bi])
+            {
+                a_units[ai]
+            } else {
+                b_units[bi]
+            };
+            let la = if ai < a_units.len() && a_units[ai] == unit {
+                let value = a_lls[ai];
+                ai += 1;
+                value
+            } else {
+                self.elsewhere
+            };
+            let lb = if bi < b_units.len() && b_units[bi] == unit {
+                let value = b_lls[bi];
+                bi += 1;
+                value
+            } else {
+                self.elsewhere
+            };
+            let count = unit_counts[unit as usize];
+            total += count * mix_logsumexp(la, lb);
+            union_count += count;
+        }
+        let constant_mass = self.total_count - union_count;
+        total + self.elsewhere * constant_mass
+    }
+
+    /// The constant (fold, unit) entries this pair's union walk
+    /// skips — the compare receipt's honest measurement of what the
+    /// sparse-skip form actually skips at this locus.
+    fn constant_units_skipped(&self, first: usize, second: usize) -> u64 {
+        let (a_units, b_units) = (self.rows[first].units(), self.rows[second].units());
+        let (mut ai, mut bi) = (0usize, 0usize);
+        let mut union_len = 0usize;
+        while ai < a_units.len() || bi < b_units.len() {
+            match (ai < a_units.len(), bi < b_units.len()) {
+                (true, false) => ai += 1,
+                (false, true) => bi += 1,
+                (true, true) => {
+                    if a_units[ai] < b_units[bi] {
+                        ai += 1;
+                    } else if b_units[bi] < a_units[ai] {
+                        bi += 1;
+                    } else {
+                        ai += 1;
+                        bi += 1;
+                    }
+                }
+                (false, false) => unreachable!(),
+            }
+            union_len += 1;
+        }
+        (self.n_units - union_len) as u64
+    }
+}
+
+/// The f64 exp underflow point, DERIVED BY EVALUATION (never a tuned
+/// constant): the largest f64 t with exp(t) == +0.0, found by a
+/// bit-axis binary search between a known-nonzero anchor (-744 —
+/// e^-744 ~ 2^-1073.4, far above the boundary) and the
+/// real-arithmetic boundary -1075*ln 2 (known to underflow). Every
+/// x <= t underflows to exactly +0.0, so a class pair whose exact
+/// sum sits at or below best + t contributes EXACTLY +0.0 to every
+/// QUAL posterior term the exhaustive run computes — the derived
+/// skip threshold of the sanctioned bounded class scan (the same
+/// derivation the committed test exp_underflow_point_derived_by_
+/// evaluation proves, and the probe's own constant).
+fn exp_underflow_point() -> f64 {
+    let mut lo = -744.0f64;
+    let mut hi = -1075.0f64 * 2.0f64.ln();
+    assert!(lo.exp() > 0.0);
+    assert_eq!(hi.exp(), 0.0);
+    while hi.to_bits() - lo.to_bits() > 1 {
+        // the midpoint on the bit axis WITHOUT the u64 sum overflow
+        // (both anchors are negative doubles: their bit patterns sum
+        // past u64::MAX).
+        let mid = f64::from_bits(lo.to_bits() + (hi.to_bits() - lo.to_bits()) / 2);
+        if mid == lo || mid == hi {
+            break;
+        }
+        if mid.exp() == 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
+/// THE PER-FOLD EXCESS-MASS BOUND INDEX (the sanctioned frontier-1
+/// design, SS10.6.21 — the owner's "take the better, faster one"):
+/// every per-(fold, unit) log-likelihood is either exactly the
+/// elsewhere constant E (the no-pin branch — the committed
+/// row-compression exactness argument: a pinned pair's local branch
+/// is finite, so its marginalization logsumexp2(local, E) rounds to
+/// >= E, with float equality only by rounding; an unpinned entry is
+/// exactly E) or E + alpha with alpha >= 0, so with C = sum_u c_u
+/// the class pair sum decomposes exactly (real arithmetic) as
+/// S(f,g) = E*C + sum_u c_u * mix0(alpha_f[u], alpha_g[u]) and, since
+/// mix0(a, b) <= a + b for a, b >= 0 (WLOG a >= b: mix0 = a +
+/// ln(0.5 + 0.5e^{b-a}) <= a),
+///
+/// ```text
+///     S(f,g) <= E*C + A_f + A_g,   A_f = sum_u c_u * alpha_f[u]
+/// ```
+///
+/// — ONE SCALAR PER FOLD, one walk over the fold's pinned entries:
+/// the whole bound index costs a fraction of ONE class-pair walk per
+/// fold pair (the probe's receipted 0.01-1.2% of the scan it
+/// bounds). If E is not finite the bounds are NaN and NOTHING is
+/// skipped (NaN fails every skip comparison) — the conservative
+/// exhaustive fallback, never a silent wrong prune.
+struct ClassScanBoundIndex {
+    /// E * C (one multiply; C = the locus's total unit-count mass).
+    e_times_c: f64,
+    /// A_f per fold (sum over the fold's pinned units ascending —
+    /// deterministic, one spelling).
+    excess: Vec<f64>,
+    /// THE DERIVED ROUNDING-ERROR SLACK's own inputs (SS10.6.22's
+    /// fix: the bound's f64 evaluation can sit strictly BELOW the
+    /// exact unit-order sum — the receipted 12-ulp shortfall at
+    /// T03226 locus 16 — so every skip comparison consumes the
+    /// bound TOGETHER WITH its own forward-error term, derived in
+    /// `pair_slack` below from the two accumulations' op counts and
+    /// magnitudes; no tuned constants anywhere).
+    /// C itself (integer-valued, exact in f64 below 2^53).
+    total_count: f64,
+    /// |E| — the mix evaluation's error is bounded by it (the max
+    /// term m sits in [E, 0]).
+    abs_elsewhere: f64,
+    /// max over every pinned entry of (ll - E) >= 0 — the largest
+    /// spread the mix's exp/ln terms can carry at this locus.
+    max_spread: f64,
+    /// n_units — the exact accumulation's own length.
+    n_units: usize,
+    /// pinned entries per fold (the bound chain's own length).
+    pinned_counts: Vec<usize>,
+}
+
+/// The per-locus bounded-scan state carried between the scan's two
+/// stages: STAGE ONE (the deterministic search for best) at the
+/// class-scan site, STAGE TWO (the derived kept set + the truth
+/// window) once the truth pair is resolved, and the best-outside
+/// fallback afterwards. Every set it carries is a deterministic
+/// function of the matrix alone, so two bounded runs are
+/// byte-identical.
+struct BoundedScanState {
+    /// E*C + A_f + A_g per flat pair — the skip certificate's own
+    /// numbers, emitted in the labeled bounded receipt.
+    pair_bounds: Vec<f64>,
+    /// The DERIVED rounding-error slack per flat pair (the bound's
+    /// own forward-error term, `ClassScanBoundIndex::pair_slack` —
+    /// every skip comparison consumes bound + slack; SS10.6.22's
+    /// fix for the bound's inadmissible-by-rounding shapes).
+    pair_slack: Vec<f64>,
+    /// The exact sums computed so far (None = skipped so far; filled
+    /// by stage two's kept set and the best-outside fallback — all
+    /// deterministic).
+    computed: Vec<Option<f64>>,
+    /// Stage one's running best — the exhaustive run's own value,
+    /// bit for bit.
+    best: f64,
+    /// Stage one's own wall (the bound index + the search),
+    /// receipted separately from stage two's kept-set pass.
+    stage_one_seconds: f64,
+    /// THE BIT-EQUAL-ROW MEMOIZATION's per-locus state (the fourth
+    /// reduction): the canonical row classes (with the receipt
+    /// counters) and the persistent memo table shared by stage two
+    /// and the best-outside fallback — None is the direct form
+    /// (IMPG_CLASS_SCAN_MEMO=off).
+    scan_memo: Option<ClassScanMemo>,
+    /// The memo table: one slot per canonical flat (None = not yet
+    /// computed). Sized pair_count (the bounded path's own vectors
+    /// are that size already).
+    memo_values: Vec<Option<f64>>,
+}
+
+impl ClassScanBoundIndex {
+    fn build(matrix: &ScoreMatrix, unit_counts: &[f64]) -> ClassScanBoundIndex {
+        let total_count: f64 = unit_counts.iter().sum();
+        let mut excess = Vec::with_capacity(matrix.rows.len());
+        let mut pinned_counts = Vec::with_capacity(matrix.rows.len());
+        let mut max_spread = 0.0f64;
+        for row in &matrix.rows {
+            let mut a = 0.0f64;
+            let mut pinned = 0usize;
+            let mut spread = 0.0f64;
+            match row {
+                ScoreRow::Sparse(sparse) => {
+                    for (&unit, &ll) in sparse.units.iter().zip(&sparse.lls) {
+                        a += unit_counts[unit as usize] * (ll - matrix.elsewhere);
+                        pinned += 1;
+                        // total_cmp propagates a NaN spread upward
+                        // (the not-finite-E case) — the conservative
+                        // never-skip direction.
+                        if ll.total_cmp(&matrix.elsewhere) == std::cmp::Ordering::Greater
+                            && (ll - matrix.elsewhere).total_cmp(&spread)
+                                == std::cmp::Ordering::Greater
+                        {
+                            spread = ll - matrix.elsewhere;
+                        }
+                    }
+                }
+                ScoreRow::Dense(dense) => {
+                    for (unit, &is_pinned) in dense.pinned.iter().enumerate() {
+                        if is_pinned {
+                            a += unit_counts[unit] * (dense.ll[unit] - matrix.elsewhere);
+                            pinned += 1;
+                            if (dense.ll[unit] - matrix.elsewhere).total_cmp(&spread)
+                                == std::cmp::Ordering::Greater
+                            {
+                                spread = dense.ll[unit] - matrix.elsewhere;
+                            }
+                        }
+                    }
+                }
+            }
+            if spread.total_cmp(&max_spread) == std::cmp::Ordering::Greater {
+                max_spread = spread;
+            }
+            excess.push(a);
+            pinned_counts.push(pinned);
+        }
+        ClassScanBoundIndex {
+            e_times_c: matrix.elsewhere * total_count,
+            excess,
+            total_count,
+            abs_elsewhere: matrix.elsewhere.abs(),
+            max_spread,
+            n_units: unit_counts.len(),
+            pinned_counts,
+        }
+    }
+
+    /// The admissible upper bound E*C + A_f + A_g (deterministic:
+    /// one spelling, the folds' flat indices in order).
+    fn pair_bound(&self, first: usize, second: usize) -> f64 {
+        self.e_times_c + self.excess[first] + self.excess[second]
+    }
+
+    /// THE DERIVED ROUNDING-ERROR SLACK — a rigorous upper bound, in
+    /// the standard IEEE-754 round-to-nearest model (unit roundoff
+    /// u = 2^-53; gamma(n) = n*u/(1 - n*u); the standard calculus
+    /// gamma(a)*(1 + gamma(b)) <= gamma(a + b)), on
+    /// (exact_f64_sum - bound_f64) for the pair:
+    ///
+    /// ```text
+    ///     exact  <= real_sum + err_X      (the unit-order accumulation)
+    ///     real_sum <= real_bound          (the mix0 <= alpha+beta lemma)
+    ///     real_bound <= bound + err_B     (the bound chain)
+    ///     =>  exact <= bound + err_X + err_B.
+    /// ```
+    ///
+    /// err_X — the exact accumulation's own drift ABOVE the real
+    /// sum: every unit's term is c * mix with mix in [E, 0]
+    /// (logsumexp >= max >= E), so -real_sum <= |E|*C; the n_units
+    /// adds plus the n_units count-products contribute at most
+    /// gamma(2n)*|E*C| (the op headroom is doubled to carry the
+    /// |E*C| magnitude's own read off the rounded e_times_c); mix's
+    /// OWN evaluation (m + ln(0.5*e^{a-m} + 0.5*e^{b-m}): two
+    /// subtractions bounded by the spread, two exps of values in
+    /// (0, 1], one inner sum in [0.5, 1], one ln in [-ln 2, 0], one
+    /// final add of m with |m| <= |E|) drifts by at most
+    /// u*(|E| + 12*spread + 16) per unit, and the count product's
+    /// own rounding one more u*|E| per unit — together
+    /// u*(2|E| + 12*spread + 16)*C summed over the counts.
+    /// err_B — the bound chain's own drift BELOW the real bound:
+    /// the e_times_c product, the two excess accumulations at three
+    /// roundings per pinned entry (the ll-E subtract, the count
+    /// product, the accumulation add), and the two final adds —
+    /// the standard mixed-sign bound gamma(ops)*(sum of term
+    /// magnitudes), with ops = 3*(k_f + k_g) + 3, the term
+    /// magnitudes read off the rounded index values, and the factor
+    /// 2 carrying those reads' own rounding.
+    /// A non-finite result fails every skip comparison exactly the
+    /// way a NaN bound does — the conservative exhaustive fallback,
+    /// never a silent wrong prune.
+    fn pair_slack(&self, first: usize, second: usize) -> f64 {
+        let u = f64::EPSILON / 2.0;
+        let gamma = |ops: f64| {
+            if ops * u < 1.0 {
+                ops * u / (1.0 - ops * u)
+            } else {
+                f64::INFINITY
+            }
+        };
+        let n = self.n_units as f64;
+        let err_x = gamma(4.0 * n + 4.0) * self.e_times_c.abs()
+            + u * (2.0 * self.abs_elsewhere + 12.0 * self.max_spread + 16.0)
+                * self.total_count;
+        let ops_b =
+            3.0 * (self.pinned_counts[first] + self.pinned_counts[second]) as f64 + 3.0;
+        let err_b =
+            gamma(2.0 * ops_b) * (self.e_times_c.abs() + self.excess[first] + self.excess[second]);
+        err_x + err_b
+    }
+}
+
+/// THE BIT-EQUAL-ROW MEMOIZATION (the fourth expressibility
+/// reduction — the plateau lever, the named Frontier-1 residual,
+/// now implemented): the class scan's per-(class-pair, unit) work is
+/// a PURE FUNCTION of the pair's evidence-row bit patterns — the
+/// committed accumulation `total += count * mix_logsumexp(ll_a[u],
+/// ll_b[u])` reads, at every unit, the two rows' column values and
+/// nothing else — so two folds whose ll columns are bit-equal (the
+/// merge's own `ll_bits_equal` predicate, whichever encoding each
+/// row took) produce BIT-IDENTICAL class pair sums against every
+/// third fold, and their hom pairs are identical too. The scan
+/// therefore computes ONE sum per unordered (row-class, row-class)
+/// pair and shares it with every bit-equal pair: the memo SHARES
+/// VALUES, it never reorders — every pair's own flat slot is
+/// filled with the representative pair's value, so class_lls, best,
+/// the called set, the QUAL terms and every receipt field are the
+/// direct scan's own bits.
+/// THE EXACTNESS PROOF, BY CONSTRUCTION: for folds f, g with
+/// representatives r = canon[f], s = canon[g] (rows bit-equal by
+/// the exact predicate), class_pair_sum(r, s) executes the IDENTICAL
+/// f64 op sequence as class_pair_sum(f, g) — at each unit u the
+/// cursor reads the same bits (column equality is exactly the
+/// `ll_bits_equal` predicate), `count` is per-unit, and the
+/// accumulation walks units ascending in both — and IEEE-754
+/// round-to-nearest is a deterministic function of the input bits
+/// and the op sequence, so the results are equal bit for bit. Proven per-shape by
+/// `bit_equal_rows_share_one_class_sum` and per-fixture by
+/// `memoized_scan_is_bit_identical_to_direct_on_randomized_rows`.
+/// THE KEY DISCIPLINE (the fold-signature doctrine): bucketing by
+/// the canonical column-content hash (`column_key_hash` —
+/// encoding-independent, collision-decided by the exact predicate
+/// `ll_bits_equal` on match, never the hash alone). The build is
+/// O(total pinned entries) — the key walks only the row's pinned
+/// non-E entries — plus the within-bucket exact compares (buckets
+/// are the merge's own: tiny).
+/// THE TOGGLE (the measurement restore path, the bounded scan's own
+/// doctrine): IMPG_CLASS_SCAN_MEMO=off restores the direct
+/// per-pair form verbatim; the default is ON. The memo changes no
+/// emitted byte either way (the values are the direct scan's own),
+/// so no output label is warranted; the phase census (env
+/// IMPG_LOCUS_PHASE_CENSUS) receipts the hit rates per shape.
+struct ClassScanMemo {
+    /// fold -> the representative fold of its bit-equal row class
+    /// (the class's smallest fold index — deterministic; a fold
+    /// whose row is unique represents itself).
+    canon: Vec<usize>,
+    /// the row classes' count (the receipt's "distinct rows").
+    distinct_rows: usize,
+    /// the distinct canonical PAIR sums (over the row classes):
+    /// distinct_rows * (distinct_rows + 1) / 2.
+    canonical_pairs: u64,
+    /// the build's own wall (the overhead receipt; counted always,
+    /// printed under the census).
+    build_seconds: f64,
+    /// the receipt counters (always counted, printed under the
+    /// census): how many canonical sums the scan sites actually
+    /// computed, and how many pair lookups were served from the
+    /// memo (the hit rate's numerator is the pairs not computed).
+    computed_sums: AtomicU64,
+    memo_hits: AtomicU64,
+}
+
+impl ClassScanMemo {
+    fn build(matrix: &ScoreMatrix) -> ClassScanMemo {
+        let started = Instant::now();
+        let n = matrix.rows.len();
+        let mut canon: Vec<usize> = (0..n).collect();
+        // the canonical-content buckets (collision-decided below)
+        let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+        for fold in 0..n {
+            buckets
+                .entry(matrix.column_key_hash(fold))
+                .or_default()
+                .push(fold);
+        }
+        for bucket in buckets.values() {
+            if bucket.len() < 2 {
+                continue;
+            }
+            let mut sorted = bucket.clone();
+            sorted.sort_unstable();
+            // within a bucket, each fold joins the FIRST earlier fold
+            // whose column is bit-equal (the exact predicate decides
+            // every candidate — a hash collision can never merge).
+            // Bit-equality of columns is an equivalence relation
+            // (it IS equality of the column function), so the first
+            // match's canon is already the class's smallest index.
+            for a in 1..sorted.len() {
+                let fold = sorted[a];
+                for b in (0..a).rev() {
+                    let other = sorted[b];
+                    if matrix.ll_bits_equal(fold, other) {
+                        canon[fold] = canon[other];
+                        break;
+                    }
+                }
+            }
+        }
+        let distinct_rows = canon.iter().copied().collect::<HashSet<_>>().len();
+        let canonical_pairs = distinct_rows as u64 * (distinct_rows as u64 + 1) / 2;
+        ClassScanMemo {
+            canon,
+            distinct_rows,
+            canonical_pairs,
+            build_seconds: started.elapsed().as_secs_f64(),
+            computed_sums: AtomicU64::new(0),
+            memo_hits: AtomicU64::new(0),
+        }
+    }
+
+    /// The pair's CANONICAL flat index: the flat index of its
+    /// representatives' pair (canon preserves nothing about ORDER
+    /// between the two folds, so the min/max spelling of `unrank_pair`
+    /// is restated here; the value at that slot is the pair's own).
+    fn canonical_flat(&self, first: usize, second: usize) -> usize {
+        let (a, b) = (self.canon[first], self.canon[second]);
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        hi * (hi + 1) / 2 + lo
+    }
+
+    /// The memo's per-shape receipt numbers (the census line's own
+    /// fields; every counter counted always, printed under the env).
+    fn note_computed(&self, count: u64) {
+        self.computed_sums.fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn note_hits(&self, count: u64) {
+        self.memo_hits.fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// THE BOUNDED CLASS SCAN's STAGE ONE — the deterministic
+/// branch-and-bound search for best (the strict running-best form
+/// the receipts name): pairs are walked in bound-DESCENDING order
+/// (ties by flat index — one spelling, so the plan and every
+/// computed value are functions of the matrix alone, never of the
+/// thread schedule), in rounds of geometrically doubling width (a
+/// derived schedule — 1, 2, 4, ... pairs per round, no tuned
+/// constant); each round's exact sums are computed in parallel by
+/// the committed unit-order accumulation (bit-identical to the
+/// exhaustive scan's own value for every pair it touches), the
+/// running best is the max over everything computed so far, and
+/// the search stops when every remaining pair's bound PLUS ITS OWN
+/// DERIVED ROUNDING-ERROR SLACK is strictly below the running best
+/// — such a pair's exact sum is <= its bound + slack < best, so it
+/// can neither win nor tie the emitted argmax. THE WINNER IS NEVER
+/// SKIPPED, BY THE SLACK-CORRECTED ARITHMETIC: the winner's bound +
+/// slack >= its exact sum = best >= the running best at every
+/// point, and the skip requires bound + slack < running best.
+/// THE SLACK (SS10.6.22's fix) is the bound's own forward-error
+/// term, DERIVED from the two accumulations' op counts and
+/// magnitudes — the bound's f64 evaluation can otherwise sit
+/// strictly BELOW the exact unit-order sum (the receipted 12-ulp
+/// shortfall at T03226 locus 16), and the stop rule would fire
+/// legitimately between bit-identical ties. best is the exhaustive
+/// best bit for bit; the provisional called set is the computed
+/// ties in flat order (the exhaustive form's own order) — the
+/// emitted set is REBUILT from the final class_lls after stage
+/// two (see `called_set_from_class_lls`).
+fn bounded_stage_one(
+    matrix: &ScoreMatrix,
+    unit_counts: &[f64],
+    memo: Option<&ClassScanMemo>,
+) -> (Vec<f64>, Vec<f64>, Vec<Option<f64>>, f64, Vec<Option<f64>>) {
+    let pair_count = matrix.rows.len() * (matrix.rows.len() + 1) / 2;
+    let index = ClassScanBoundIndex::build(matrix, unit_counts);
+    let pair_bounds: Vec<f64> = (0..pair_count)
+        .into_par_iter()
+        .map(|flat| {
+            let (first, second) = unrank_pair(flat);
+            index.pair_bound(first, second)
+        })
+        .collect();
+    // the derived rounding-error slack per pair (never tuned: the
+    // bound's own forward-error term — see pair_slack)
+    let pair_slack: Vec<f64> = (0..pair_count)
+        .into_par_iter()
+        .map(|flat| {
+            let (first, second) = unrank_pair(flat);
+            index.pair_slack(first, second)
+        })
+        .collect();
+    // the deterministic search plan: bound descending (f64::total_cmp
+    // orders NaN above everything, so a NaN bound — the not-finite-E
+    // case — is walked early and never skips anything), ties by flat
+    // index ascending.
+    let mut order: Vec<u32> = (0..pair_count as u32).collect();
+    order.sort_by(|&a, &b| {
+        pair_bounds[b as usize]
+            .total_cmp(&pair_bounds[a as usize])
+            .then(a.cmp(&b))
+    });
+    // the stop certificate's suffix max: the largest bound + slack
+    // over every remaining pair of the plan (a per-pair slack does
+    // not preserve the plan's bound order, so the whole remaining
+    // suffix is folded once; NaN and +inf propagate upward through
+    // total_cmp — the conservative never-stop cases).
+    let mut dominated_suffix: Vec<f64> = vec![f64::NEG_INFINITY; order.len() + 1];
+    for position in (0..order.len()).rev() {
+        let flat = order[position] as usize;
+        let dominated = pair_bounds[flat] + pair_slack[flat];
+        dominated_suffix[position] = if dominated
+            .total_cmp(&dominated_suffix[position + 1])
+            == std::cmp::Ordering::Greater
+        {
+            dominated
+        } else {
+            dominated_suffix[position + 1]
+        };
+    }
+    let mut computed: Vec<Option<f64>> = vec![None; pair_count];
+    // THE BIT-EQUAL-ROW MEMO TABLE (the fourth reduction at the
+    // bounded path): one slot per canonical flat, persistent across
+    // the rounds — each distinct row-class pair sum is computed
+    // exactly once (by the committed accumulation on the
+    // representative rows, bit-identical to the direct per-pair
+    // form by construction), and every later pair — in this round or
+    // a later one — reads the shared value. With the memo off the
+    // table stays empty and the rounds take the direct form.
+    let mut memo_values: Vec<Option<f64>> =
+        memo.map(|_| vec![None; pair_count]).unwrap_or_default();
+    let mut running_best = f64::NEG_INFINITY;
+    let mut next = 0usize;
+    let mut chunk = 1usize;
+    while next < order.len() {
+        let end = (next + chunk).min(order.len());
+        let sums: Vec<(u32, f64)> = match memo {
+            None => order[next..end]
+                .par_iter()
+                .map(|&flat| {
+                    let (first, second) = unrank_pair(flat as usize);
+                    (flat, matrix.class_pair_sum(first, second, unit_counts))
+                })
+                .collect(),
+            Some(memo) => {
+                // the round's pairs, keyed by their canonical flats
+                let keyed: Vec<(u32, usize)> = order[next..end]
+                    .iter()
+                    .map(|&flat| {
+                        let (first, second) = unrank_pair(flat as usize);
+                        (flat, memo.canonical_flat(first, second))
+                    })
+                    .collect();
+                // the distinct canonical sums this round still
+                // misses — each computed exactly once, in parallel,
+                // by the committed unit-order accumulation on the
+                // representative rows
+                let mut missing: Vec<usize> =
+                    keyed.iter().map(|&(_, canon)| canon).collect();
+                missing.sort_unstable();
+                missing.dedup();
+                missing.retain(|canon| memo_values[*canon].is_none());
+                let fresh: Vec<(usize, f64)> = missing
+                    .par_iter()
+                    .map(|&canon| {
+                        let (first, second) = unrank_pair(canon);
+                        (canon, matrix.class_pair_sum(first, second, unit_counts))
+                    })
+                    .collect();
+                memo.note_computed(fresh.len() as u64);
+                memo.note_hits(
+                    keyed.len() as u64 - fresh.len() as u64,
+                );
+                for (canon, sum) in fresh {
+                    memo_values[canon] = Some(sum);
+                }
+                // the round's own pairs read the shared values (the
+                // flat slots keep the pair order — values shared,
+                // never reordered)
+                keyed.into_iter()
+                    .map(|(flat, canon)| {
+                        (flat, memo_values[canon].expect("the canonical sum is filled"))
+                    })
+                    .collect()
+            }
+        };
+        for (flat, sum) in sums {
+            computed[flat as usize] = Some(sum);
+            if sum > running_best {
+                running_best = sum;
+            }
+        }
+        // strict stop, slack-corrected: every remaining pair's exact
+        // sum is <= its bound + slack (the slack's own derivation),
+        // so when the largest remaining bound + slack is strictly
+        // below the running best, none can win or tie it.
+        if end == order.len()
+            || dominated_suffix[end].partial_cmp(&running_best)
+                == Some(std::cmp::Ordering::Less)
+        {
+            break;
+        }
+        next = end;
+        chunk *= 2;
+    }
+    (pair_bounds, pair_slack, computed, running_best, memo_values)
+}
+
+/// THE BOUNDED CLASS SCAN's STAGE-TWO KEEP THRESHOLD, derived from
+/// the emitted consumers' own arithmetic (no tuned constants):
+/// (a) the QUAL posterior terms need every pair whose exp(ll -
+/// best) can be nonzero, i.e. every pair with ll - best above the
+/// exp-underflow point — a pair with bound + slack < best + t has
+/// exact < best + t, so its every QUAL contribution is exactly +0.0 (the
+/// committed bit-identity argument); (b) the truth fields (the
+/// receipt's truth_rank / truth_tied_classes / truth_log_likelihood)
+/// need every pair that can be strictly above or tied with the
+/// truth pair — a pair with bound + slack < truth_ll has exact < truth_ll,
+/// so it is neither; where the truth pair sits INSIDE the QUAL
+/// window (the receipted shape: the log gaps are tens-to-hundreds
+/// of nats, under the 745-nat window) the truth threshold adds
+/// nothing. The kept set is therefore {bound + the derived
+/// rounding-error slack >= min(best + t, truth_ll)} — the minimum,
+/// deterministic, sound for every emitted consumer (the slack is
+/// SS10.6.22's fix: without it a pair with bound < best + t can
+/// still carry exact >= best + t — the bound's f64 evaluation
+/// rounds below the exact unit-order sum at some shapes, the
+/// receipted 12-ulp shortfall at T03226 locus 16).
+fn bounded_keep_threshold(best: f64, truth_ll: Option<f64>) -> f64 {
+    let qual = best + exp_underflow_point();
+    match truth_ll {
+        Some(truth) => qual.min(truth),
+        None => qual,
+    }
+}
+
+/// THE FINAL-VALUE TIE-SET CONSTRUCTION — best and the called set
+/// as pure functions of the class_lls vector, the exhaustive
+/// form's own definition (every pair at best, in flat order). The
+/// bounded scan emits through this AFTER stage two's kept window
+/// (the T03226 locus-16 fix, SS10.6.22: the emitted set is a
+/// function of the final exact values — which stage two has
+/// already recovered bit-identical — never of the bound's
+/// rounding); the exhaustive branch uses the same one spelling.
+fn called_set_from_class_lls(class_lls: &[f64]) -> (f64, Vec<(usize, usize)>) {
+    let best = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let called = (0..class_lls.len())
+        .filter(|&flat| class_lls[flat] == best)
+        .map(unrank_pair)
+        .collect();
+    (best, called)
 }
 
 /// The COLLINEARITY verdict of one placement's pins (the slice C
@@ -3402,6 +6303,18 @@ fn single_offset_score(
 // the outputs are interleaving-independent by construction — the
 // byte-identity gate against the serial receipts is the race
 // detector.)
+/// The per-locus ingredients spill path (candidate C's streaming
+/// emission): the receipts phase streams the locus's ingredients
+/// line here, and the ordered emission below copies it into the
+/// ingredients file and removes the spill — same bytes as the
+/// committed buffered form, bounded RAM.
+fn ingredients_spill_path(out: &Path, locus: u32) -> PathBuf {
+    out.with_file_name(format!(
+        "{}.ingredients.spill-{locus}.tmp",
+        out.file_name().and_then(|name| name.to_str()).unwrap_or("")
+    ))
+}
+
 fn seam_map<T: Sync, R: Send>(
     items: &[T],
     width: usize,
@@ -3443,9 +6356,257 @@ fn seam_map<T: Sync, R: Send>(
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// THE SPAN-CACHED LANE SEQUENCE SOURCE (phase 1, lever 2's call-bound fix,
+// at module scope so the cache's own byte-identity contract is unit-tested
+// directly). The load policy: whole-lane (the committed per-territory frame
+// — the lanes are the locus.fa record slices) or span-scoped (the GLOBAL
+// frame — the lanes are whole panel paths, so the cache holds the touched
+// SPAN per lane, grown by union on demand; the derived bound is the crops
+// actually requested, never a constant).
+//
+// THE DELTA-EXTEND GROWTH RULE (the union-regrowth re-decompression fix):
+// on a miss the cached span is extended by ONLY the missing sub-ranges —
+// fetch [new_lo, lo) and/or [hi, new_hi) — and stitched to the cached
+// interior; the covered interior is never re-decompressed. The committed
+// union-regrowth form re-fetched the WHOLE grown span on every miss (the
+// measured disease: 277,796 loads fetching 56.7GB for L1's ~117.6MB unique
+// territory envelope — ~482x re-decompression; SS10.5.1). BYTE-IDENTITY,
+// the served-crop argument restated for the stitch: a crop of a
+// Sources::fetch answer equals the direct fetch of the crop (the property
+// the covered branch serves by), so fetch(new_lo, lo) is fetch(new_lo,
+// new_hi)'s own [0, lo - new_lo) crop and fetch(hi, new_hi) is its
+// [hi - new_lo, new_hi - new_lo) crop; the cached span is byte-equal to
+// fetch(lo, hi) by the maintained invariant (base case: a direct fetch;
+// inductive step: this argument), so the concatenation IS fetch(new_lo,
+// new_hi) byte for byte — the buffer the union-regrowth form held. Every
+// served crop is therefore a slice of the same Sources::fetch answer
+// covering it, and the outputs are invariant; the identity gate re-proves
+// it end-to-end.
+// ---------------------------------------------------------------------------
+struct LaneCache {
+    sources: routes::Sources,
+    lane_lengths: Vec<u64>,
+    whole_lane: bool,
+    seqs: Vec<
+        std::sync::Mutex<
+            Option<(u64, u64, std::sync::Arc<Vec<u8>>)>,
+        >,
+    >,
+    loads: AtomicU64,
+    bytes: AtomicU64,
+    nanos: AtomicU64,
+    /// THE PER-LOAD SEEK-PATTERN TRACE (SS10.6.13 duty 2's receipt
+    /// instrument; default OFF — env IMPG_LANE_TRACE=<path> appends
+    /// one JSONL line per REAL sources.fetch (the AGC seek): source,
+    /// the fetched range, the delta kind, and the fetch's own wall.
+    /// The bind seek-floor anatomy's measured half: the offline
+    /// analysis classifies the loads (size histogram, per-lane run
+    /// counts, adjacency) against the ~0.4ms per-fetch fixed floor
+    /// the bind_seek_floor_anatomy_receipt measures at the AGC.
+    lane_trace: std::sync::OnceLock<Option<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
+}
+impl LaneCache {
+    fn trace_load(&self, source: usize, start: u64, end: u64, kind: &str, nanos: u128) {
+        use std::io::Write as _;
+        let trace = self
+            .lane_trace
+            .get_or_init(|| {
+                std::env::var("IMPG_LANE_TRACE")
+                    .ok()
+                    .and_then(|path| {
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .ok()
+                    })
+                    .map(|file| std::sync::Mutex::new(std::io::BufWriter::new(file)))
+            })
+            .as_ref();
+        if let Some(trace) = trace {
+            let line = format!(
+                "{{\"source\":{source},\"start\":{start},\"end\":{end},\
+                 \"bytes\":{},\"kind\":\"{kind}\",\"nanos\":{nanos}}}\n",
+                end.saturating_sub(start),
+            );
+            if let Ok(mut writer) = trace.lock() {
+                let _ = writer.write_all(line.as_bytes());
+            }
+        }
+    }
+    fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let started = Instant::now();
+        let mut slot = self.seqs[source].lock().unwrap();
+        if let Some((_, _, seq)) = slot.as_ref() {
+            return Ok(std::sync::Arc::clone(seq));
+        }
+        let len = self.lane_lengths[source];
+        let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+        self.nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        *slot = Some((0, len, std::sync::Arc::clone(&seq)));
+        Ok(seq)
+    }
+    fn span(
+        &self,
+        source: usize,
+        start: u64,
+        end: u64,
+    ) -> io::Result<(u64, std::sync::Arc<Vec<u8>>)> {
+        // The GLOBAL-frame policy: the cached span grows by union to
+        // cover the requested crop; a covering span serves the crop
+        // as a slice (the same bytes the direct fetch returns). The
+        // span's OWN [lo, hi) bounds are returned WITH it: the span is
+        // span-RELATIVE memory (a span grown from lo > 0 is not
+        // addressable by absolute path coordinates — the fetch below
+        // slices at (start - lo), and a covered crop equals the
+        // direct fetch exactly).
+        let started = Instant::now();
+        let mut slot = self.seqs[source].lock().unwrap();
+        let len = self.lane_lengths[source];
+        if let Some((lo, hi, seq)) = slot.as_ref() {
+            if *lo <= start && end <= *hi {
+                return Ok((*lo, std::sync::Arc::clone(seq)));
+            }
+            let seq = std::sync::Arc::clone(seq);
+            let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
+            // SEGMENT-ALIGNED GROWTH (the seek-floor fix, SS10.6.13
+            // duty 2): the AGC's per-fetch cost is a FIXED floor
+            // (~0.4ms per touched segment at the panel AGC — the pack
+            // re-read + whole-pack zstd decompress + LZ reference
+            // prepare get_contig_range pays EVERY fetch, measured by
+            // bind_seek_floor_anatomy_receipt: a 900B fetch costs the
+            // same 0.4ms as a 6KB fetch), so growing the cached span
+            // only to the requested edge re-pays the whole segment's
+            // decompression on the next adjacent request. The fetch
+            // below therefore grows to the touched SEGMENTS' own
+            // boundaries — the archive's layout unit, from its public
+            // descriptors, a derived bound (identity for
+            // non-segment-addressed sources) — and every later
+            // request inside the covered segments is a cache hit.
+            // Byte-identity: the covered span is still a contiguous
+            // [lo, hi) whose buffer is exactly fetch(lo, hi) by the
+            // delta-extend induction (a crop of a fetch answer IS the
+            // fetch of the crop — the Sources contract), and every
+            // served crop is a slice of it; the alignment changes
+            // only WHICH superset range is fetched, never a served
+            // byte. The counters receipt the aligned volume honestly
+            // (bytes rises toward the segment-hull of the touched
+            // set, loads collapse — the fixed-cost floor is what the
+            // load count multiplies).
+            let (alo, ahi) = self.sources.aligned_crop(source, new_lo, new_hi);
+            let mut grown: Vec<u8> = Vec::with_capacity((ahi - alo) as usize);
+            if alo < *lo {
+                let fetch_started = Instant::now();
+                grown.extend_from_slice(&self.sources.fetch(source, alo, *lo)?);
+                let fetch_nanos = fetch_started.elapsed().as_nanos();
+                self.trace_load(source, alo, *lo, "left", fetch_nanos);
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                self.bytes.fetch_add(*lo - alo, Ordering::Relaxed);
+            }
+            grown.extend_from_slice(&seq[..]);
+            if ahi > *hi {
+                let fetch_started = Instant::now();
+                grown.extend_from_slice(&self.sources.fetch(source, *hi, ahi)?);
+                let fetch_nanos = fetch_started.elapsed().as_nanos();
+                self.trace_load(source, *hi, ahi, "right", fetch_nanos);
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                self.bytes.fetch_add(ahi - *hi, Ordering::Relaxed);
+            }
+            self.nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let grown = std::sync::Arc::new(grown);
+            *slot = Some((alo, ahi, std::sync::Arc::clone(&grown)));
+            return Ok((alo, grown));
+        }
+        // (The initial fetch takes the same alignment: the first
+        // request in a segment pays the segment's decompression once
+        // and every later request inside it is a slice serve.)
+        let (alo, ahi) = self.sources.aligned_crop(source, start, end.min(len));
+        let fetch_started = Instant::now();
+        let seq = std::sync::Arc::new(self.sources.fetch(source, alo, ahi)?);
+        let fetch_nanos = fetch_started.elapsed().as_nanos();
+        self.trace_load(source, alo, ahi, "initial", fetch_nanos);
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(ahi - alo, Ordering::Relaxed);
+        self.nanos
+            .fetch_add(fetch_nanos as u64, Ordering::Relaxed);
+        *slot = Some((alo, ahi, std::sync::Arc::clone(&seq)));
+        Ok((alo, seq))
+    }
+    fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
+        // The Sources::fetch contract, mirrored exactly.
+        ensure(
+            source < self.lane_lengths.len()
+                && start < end
+                && end <= self.lane_lengths[source],
+            "invalid source crop",
+        )?;
+        if self.whole_lane {
+            let lane = self.lane(source)?;
+            let lo = start as usize;
+            let hi = end as usize;
+            return Ok(lane[lo..hi].to_vec());
+        }
+        let (span_lo, span) = self.span(source, start, end)?;
+        let lo = (start - span_lo) as usize;
+        let hi = (end - span_lo) as usize;
+        Ok(span[lo..hi].to_vec())
+    }
+}
+
+/// THE INJECTED-INDEX SEAM (the shared-index cut+call lever): `run` is
+/// the committed path — it loads the panel itself, exactly as before.
+/// `run_injected` runs the SAME machinery over a panel the caller
+/// already holds loaded (the combined cut+call process: the ONE
+/// global-panel load serves the batch's cuts AND calls, deleting the
+/// per-call inputs pole — the ~245s global load, 58-70% of the seam
+/// rung's per-lane wall). The injected panel must be the panel named
+/// by `options.panel` (the identity check below binds it to the
+/// routes graph exactly as the loaded path does; a mismatched panel
+/// fails loudly at that check).
 pub fn run(options: Options) -> io::Result<()> {
+    run_injected(options, None)
+}
+pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io::Result<()> {
+    // (THE PER-CALL READ LENGTH — the concurrent-calls audit's
+    // finding, the one mutable process-global the call path held:
+    // every committed receipt's E is computed at the FRESH-PROCESS
+    // value 150 BEFORE the derive cache stores the cache's own
+    // declared length, and every later read (the skipped-positions
+    // sites, the unit likelihood, the scoring receipt) reads the
+    // DECLARED value. The value is therefore PER-CALL state — a
+    // plain local, initialized fresh, stored once at the derive-cache
+    // load — so the combined process's CONCURRENT calls cannot read
+    // each other's length (the serial form's first-gate divergence,
+    // the stale-148 class, is impossible by construction, not by
+    // reset discipline).
+    // (Deferred to the derive-cache load below, where the declared
+    // length is stored — the only assignment; every read after it,
+    // including the seam threads' closures, sees the declared
+    // value.)
+    let read_length;
     let started = Instant::now();
     let rss = RssGuard::new(options.rss_budget_gib);
+    // (THE RECORD-ORIGIN GATE: the content-origin parameter belongs to
+    // the GLOBAL frame alone — the committed local frame is a closed
+    // frame that derives the substrate's content convention itself,
+    // per record, against the AGC; a nonzero origin without the
+    // global frame is a caller error, refused loudly.)
+    ensure(
+        options.record_origin == 0 || options.global_frame,
+        "--record-origin requires --global-frame (the committed local frame \
+         is closed: it never needed the absolute content origin)",
+    )?;
+    // (THE FAR-BIN PRUNE'S FRAME GATE: the prune is the global-frame
+    // product default — the working form the §10.6.18 receipts gated
+    // — and the committed LOCAL frame is byte-frozen; a default-on
+    // prune reaching the local frame is refused LOUDLY, naming the
+    // opt-out, never silently applied to the frozen path.)
+    far_bin_prune_frame_gate(options.global_frame, options.far_bin_prune)?;
     // (Phase 3 — the parallelism pilot: THE SEAM SWITCH. The committed
     // default is the serial code path — byte-for-byte the phase-1
     // behavior. With IMPG_REALIGN_PARALLEL_SEAMS set (and the width in
@@ -3502,6 +6663,109 @@ pub fn run(options: Options) -> io::Result<()> {
     // path verbatim — the committed receipts byte-identical.)
     let alignment_connected =
         std::env::var("IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS").is_ok();
+    // (The call-core autopsy instrument, receipt-side, DEFAULT OFF:
+    // IMPG_LOCUS_SCORING_CENSUS=1 wraps the per-locus scoring pair
+    // loop's four CPU-work classes in per-call Instant timers,
+    // atomically accumulated across the fold par_iter and emitted as
+    // a "scoring_census" member of the per-locus receipt: the
+    // per-orientation anchor/pin build (anchor_correspondence + the
+    // merged backbone), placement_score (the pinned pair's own
+    // alignment), the ALWAYS-ON direct_score exactness assertion
+    // (candidate B's target), and the marginalization
+    // (unit_log_likelihood + logsumexp2 + the row build). Default
+    // off: no timing call executes, no receipt byte changes. The
+    // honest rung is the SERIAL call (RAYON_NUM_THREADS=1, no seam),
+    // where every measured second is a CPU second; at the timer's
+    // own overhead (two Instant reads + one atomic add per class
+    // call) the census run's walls are upper bounds, never used as
+    // the committed receipt shape.)
+    let locus_scoring_census = std::env::var("IMPG_LOCUS_SCORING_CENSUS").is_ok();
+    // (THE LOCUS-PHASE CENSUS, receipt-side, DEFAULT OFF — the fold
+    // anatomy's own instrument, the OPEN per-pair constant's receipt:
+    // IMPG_LOCUS_PHASE_CENSUS=1 wraps the alignment-connected merge
+    // pass, the class scan, and the QUAL cluster's own phases (the
+    // winner's spectrum build, the tied-band certificate, the
+    // degenerate cut-index lists, the cluster form, the best-outside
+    // fallback) in per-phase Instant timers and emits them beside
+    // the shape counters that price them (the certificate's band
+    // entries, the per-fold multiset lengths, the spectrum entries)
+    // as a "phase_census" member of the per-locus receipt — counters
+    // computed at write time, never a raw dump. Default off: no
+    // timing call executes, no receipt byte changes. The honest rung
+    // is the SERIAL call (RAYON_NUM_THREADS=1), where every measured
+    // second is a CPU second.)
+    let locus_phase_census = std::env::var("IMPG_LOCUS_PHASE_CENSUS").is_ok();
+    // (THE FOLD-SET DIGEST, gate-side, DEFAULT OFF: IMPG_FOLD_SET
+    // _DIGEST=1 emits a per-locus "fold_set_digest" — an FNV-1a over
+    // the FINAL fold space's ordered identities (each fold's ordered
+    // member rows and length, in fold order — exactly the fields the
+    // receipt's fold_identities carries, in that order, so the digest
+    // is recomputable from any committed receipt) — so the fold-set
+    // bit-identity gate compares DIGESTS computed in-process, never
+    // two fold trees on disk. Default off: no receipt byte changes.)
+    let fold_set_digest = std::env::var("IMPG_FOLD_SET_DIGEST").is_ok();
+    // (THE OWNER'S RULING 1 — the exactness assertion OUT of the
+    // production path: the ALWAYS-ON direct_score re-verification
+    // (the §10.6.14 autopsy: 0.95 µs/pair, 32.9 core-s at L1 = 16%
+    // of the ex-load call, 58% of the pinned alignment work) becomes
+    // a receipt/gate/test instrument, env-gated:
+    // IMPG_SCORE_EXACTNESS_ASSERT restores the committed always-on
+    // form VERBATIM (every placement re-verified base-by-base, the
+    // per-locus and whole-run FACTORIZATION gates enforced);
+    // unset — the production default — the pair loop trusts the
+    // factorized (m, c) exactly as the committed receipts'
+    // assertion proved it, and the exactness SAMPLE receipt (the
+    // independent checker's vote-level detail) plus the unit tests
+    // keep proving the machinery. The assertion emits no product
+    // bit: the byte-identity gate against the committed receipts is
+    // the proof of the removal.)
+    let exactness_assert = std::env::var("IMPG_SCORE_EXACTNESS_ASSERT").is_ok();
+    // (THE OWNER'S RULING 3 — the accumulation-order TOGGLE at the
+    // class scan — extended by the SS10.6.21 sanction: the BOUNDED
+    // scan (the per-fold excess-mass branch-and-bound) is the
+    // PRODUCTION DEFAULT (the owner: "take the better, faster
+    // one"); IMPG_CLASS_SCAN_ORDER=exact restores the committed
+    // exhaustive unit-order accumulation VERBATIM (the receipts'
+    // form, the toggle doctrine); =sparse-skip is the legacy fast
+    // accumulation (unchanged, superseded by the bounded default —
+    // its receipted gain at the pruned form was -5.7%, under the
+    // bounded scan's 98-99.8% at the receipted worst shapes);
+    // =bounded is the explicit default form. Any other value is a
+    // loud error, never a silent fallback. The --truth-qv
+    // assessment mode keeps its EXHAUSTIVE form regardless (the
+    // truth-rank threshold keeps nearly everything at the receipted
+    // shapes, SS10.6.21's own caveat) — resolved at the scan site,
+    // so the assessment receipts stay byte-identical.)
+    let class_scan_order = match std::env::var("IMPG_CLASS_SCAN_ORDER") {
+        Err(_) => ClassScanOrder::Bounded,
+        Ok(value) if value == "exact" => ClassScanOrder::Exact,
+        Ok(value) if value == "sparse-skip" => ClassScanOrder::SparseSkip,
+        Ok(value) if value == "bounded" => ClassScanOrder::Bounded,
+        Ok(other) => {
+            return Err(invalid(&format!(
+                "unknown IMPG_CLASS_SCAN_ORDER {other:?} \
+                 (exact | sparse-skip | bounded)"
+            )))
+        }
+    };
+    // (The sparse-skip DELTA RECEIPT, receipt-side, DEFAULT OFF:
+    // IMPG_CLASS_SCAN_COMPARE=1 computes BOTH the exact and the
+    // sparse-skip sum for every class pair, receipts per locus how
+    // many sums differ / the max ulp delta / the constant entries
+    // skipped — and uses the EXACT value downstream, so the
+    // compare form itself changes no output byte.)
+    let class_scan_compare = std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok();
+    // (THE BIT-EQUAL-ROW MEMOIZATION's toggle — the fourth
+    // expressibility reduction, ON by default at every exact-sum
+    // site of the class scan: IMPG_CLASS_SCAN_MEMO=off restores the
+    // direct per-pair form verbatim (the bounded scan's own toggle
+    // doctrine, the measurement restore path). The memo is
+    // exact-preserving BY CONSTRUCTION — bit-equal rows share one
+    // sum, the flat order and every emitted bit untouched — so no
+    // output label is warranted; the per-shape hit rates are
+    // receipted under IMPG_LOCUS_PHASE_CENSUS.)
+    let scan_memo_enabled =
+        std::env::var("IMPG_CLASS_SCAN_MEMO").map_or(true, |v| v != "off");
     // The selection flag pins the convention exactly: Env defers to
     // the committed switches verbatim (the instrument default);
     // Default pins the committed base convention (env ignored);
@@ -3555,7 +6819,14 @@ pub fn run(options: Options) -> io::Result<()> {
     let fetch_calls = AtomicU64::new(0);
     let fetch_bytes = AtomicU64::new(0);
     let identity = PanelIdentity::read(&options.panel)?;
-    let panel = SyngIndex::load(&options.panel, SyncmerParams::default())?;
+    let loaded_panel;
+    let panel: &SyngIndex = match injected_panel {
+        Some(panel) => panel,
+        None => {
+            loaded_panel = SyngIndex::load(&options.panel, SyncmerParams::default())?;
+            &loaded_panel
+        }
+    };
     let k = panel.syncmer_length_bp() as u64;
     let graph: routes::Graph = read_json(&options.routes.join("graph.json"))?;
     if graph.panel != identity || !graph.generation_complete {
@@ -3599,51 +6870,25 @@ pub fn run(options: Options) -> io::Result<()> {
     // per-call AGC fetch it replaces — the identity gate proves it
     // end-to-end. The cache holds only touched lanes (<= ~515MB at
     // chrI), never the 3.34GB whole panel.)
-    struct LaneCache {
-        sources: routes::Sources,
-        lane_lengths: Vec<u64>,
-        seqs: Vec<std::sync::Mutex<Option<std::sync::Arc<Vec<u8>>>>>,
-        loads: AtomicU64,
-        bytes: AtomicU64,
-        nanos: AtomicU64,
-    }
-    impl LaneCache {
-        fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
-            let started = Instant::now();
-            let mut slot = self.seqs[source].lock().unwrap();
-            if let Some(seq) = slot.as_ref() {
-                return Ok(std::sync::Arc::clone(seq));
-            }
-            let len = self.lane_lengths[source];
-            let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
-            self.loads.fetch_add(1, Ordering::Relaxed);
-            self.bytes.fetch_add(len, Ordering::Relaxed);
-            self.nanos
-                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            *slot = Some(std::sync::Arc::clone(&seq));
-            Ok(seq)
-        }
-        fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
-            // The Sources::fetch contract, mirrored exactly.
-            ensure(
-                source < self.lane_lengths.len()
-                    && start < end
-                    && end <= self.lane_lengths[source],
-                "invalid source crop",
-            )?;
-            let lane = self.lane(source)?;
-            Ok(lane[start as usize..end as usize].to_vec())
-        }
-    }
+    // (THE GLOBAL-PANEL CALL MODE's amendment: under --global-frame
+    // the routes' lanes are WHOLE PANEL PATHS (a territory's member
+    // rows span hundreds of chromosome-scale lanes), so the whole-
+    // lane policy would hold the panel in RAM per territory. The
+    // span-scoped policy serves the same bytes from the touched
+    // SPAN per lane — the derived bound is the crops the call
+    // itself requests; the committed local frame keeps the
+    // whole-lane policy verbatim.)
     let lane_cache = LaneCache {
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
         sources,
+        whole_lane: !options.global_frame,
         seqs: (0..graph.lanes.len())
             .map(|_| std::sync::Mutex::new(None))
             .collect(),
         loads: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         nanos: AtomicU64::new(0),
+        lane_trace: Default::default(),
     };
     let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
         let path_idx = *path_of_name
@@ -3736,7 +6981,10 @@ pub fn run(options: Options) -> io::Result<()> {
     // CLI's interface is COORDINATES - "detect any locus, any
     // position, any allele"): the region resolved against the
     // component's own axis rows to the covered windows - the same
-    // --loci convention, computed instead of typed.
+    // --loci convention, computed instead of typed. (Resolved BEFORE
+    // the global-frame translation: the region is typed in the
+    // component's own LOCAL frame and the window ids are
+    // frame-independent.)
     let loci: Vec<u32> = match loci_request {
         LociRequest::Listed(loci) => loci,
         LociRequest::Region(region) => {
@@ -3748,6 +6996,58 @@ pub fn run(options: Options) -> io::Result<()> {
             loci
         }
     };
+    // THE GLOBAL-PANEL FRAME TRANSLATION (the campaign's lever 1:
+    // --panel names the ONE global panel; the locality maps are the
+    // committed territory-local substrate). The record header IS the
+    // frame statement: every member row "path:start-end" and the
+    // component lane translate to the global frame by the interval
+    // offset (conversion-not-materialization, the re-anchor
+    // principle); the product emission translates back via the
+    // inverse table. Default (unset): the maps verbatim, the
+    // component verbatim — the committed per-territory path
+    // byte-for-byte.
+    let (territory_frame, panel_component): (
+        Option<territory_frame::TerritoryFrame>,
+        String,
+    ) = if options.global_frame {
+        let frame = territory_frame::TerritoryFrame::from_local_names(
+            maps
+                .values()
+                .flat_map(|map| map.members.iter().map(|row| row.path_name.as_str())),
+            options.record_origin,
+        )?;
+        let panel_component = frame.global_name(&options.component)?;
+        for map in maps.values_mut() {
+            for row in &mut map.members {
+                let translated =
+                    territory_frame::translate_row(&row.path_name, row.start, row.end, options.record_origin)?;
+                row.path_name = translated.path_name;
+                row.start = translated.start;
+                row.end = translated.end;
+            }
+        }
+        for row in axis_rows.iter_mut() {
+            let translated =
+                territory_frame::translate_row(&options.component, row.1, row.2, options.record_origin)?;
+            row.1 = translated.start;
+            row.2 = translated.end;
+        }
+        eprintln!(
+            "[score] global-panel frame: component {:?} -> {panel_component:?} \
+             over {} records (record origin +{})",
+            options.component,
+            frame.records_len(),
+            options.record_origin,
+        );
+        (Some(frame), panel_component)
+    } else {
+        (None, options.component.clone())
+    };
+    // The window's OWN axis row, in the panel's frame (the machinery
+    // consumes the translated extents under the global frame; the
+    // region resolution above consumed the local ones).
+    let window_axis: Vec<(u64, u64)> =
+        axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
     // The partition membership per window: a partition hosting more
     // than one of the component's windows cannot attribute an SK1
     // member row to a window by placement alone (measured at chrIV's
@@ -3777,7 +7077,7 @@ pub fn run(options: Options) -> io::Result<()> {
     let axis_node_attribution: Option<(HashMap<u32, u32>, HashMap<u32, u32>)> =
         if territory_normalized {
             let path_idx = *path_of_name
-                .get(&options.component)
+                .get(&panel_component)
                 .ok_or_else(|| invalid("component path absent from the syng"))?;
             let path_len = panel.name_map.path_to_length[path_idx];
             let mut rep: HashMap<u32, u32> = HashMap::new();
@@ -3943,20 +7243,53 @@ pub fn run(options: Options) -> io::Result<()> {
     // documented construction: two haploid homologs).
     let mut strain_totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let elsewhere_started = Instant::now();
-    for (name, &len) in panel
-        .name_map
-        .path_to_name
-        .iter()
-        .zip(panel.name_map.path_to_length.iter())
-    {
-        let haplotype: String = name
-            .splitn(3, '#')
-        .take(2)
-            .collect::<Vec<_>>()
-            .join("#");
-        let entry = strain_totals.entry(haplotype).or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += len;
+    // THE GLOBAL-FRAME RECORD CONTEXT (the first L1 gate's named
+    // divergence class, fixed by the supervisor ruling): the committed
+    // local panel IS the territory's member record set — its name map
+    // iterates exactly the ~251kb `path:start-end` slices, so the
+    // committed E is measured at the TERRITORY'S RECORD context. The
+    // global panel's name map iterates whole chromosomes (mean haploid
+    // ~3.01 Gbp over the same strain families) — a DIFFERENT model
+    // quantity: the first L1 gate receipted E -14.418156 (local, 251150.0
+    // bp mean haploid) vs -23.810253 (global name map, 3011203926.4 bp)
+    // — a uniform -9.392 per-component additive shift, QUAL-inflating
+    // at 12+ loci. Under --global-frame the branch is therefore
+    // computed at the SAME RECORD CONTEXT as the committed path: the
+    // territory's own record statements (the frame table's records
+    // enumeration — the frame-invariant extents `end - start`, grouped
+    // by the same haplotype rule), reproducing the committed model
+    // quantity exactly. The whole-chromosome context remains the
+    // global-frame-NATIVE profile — arguably the more truthful
+    // universe (the 251kb slices were the materialization-era
+    // artifact) — named in the design doc as the OWNER's product
+    // decision, never switched silently.
+    if let Some(frame) = territory_frame.as_ref() {
+        for (path, start, end) in frame.records() {
+            let haplotype: String = path
+                .splitn(3, '#')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("#");
+            let entry = strain_totals.entry(haplotype).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += end - start;
+        }
+    } else {
+        for (name, &len) in panel
+            .name_map
+            .path_to_name
+            .iter()
+            .zip(panel.name_map.path_to_length.iter())
+        {
+            let haplotype: String = name
+                .splitn(3, '#')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("#");
+            let entry = strain_totals.entry(haplotype).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += len;
+        }
     }
     ensure(!strain_totals.is_empty(), "the panel has no paths")?;
     let panel_mean_haploid_bp: f64 = strain_totals
@@ -3973,8 +7306,15 @@ pub fn run(options: Options) -> io::Result<()> {
     eprintln!(
         "[score] elsewhere branch: E = {elsewhere:.6} \
          (panel strains {}, mean haploid {panel_mean_haploid_bp:.1} bp, \
-         diploid {genome_diploid_bp:.1} bp)",
+         diploid {genome_diploid_bp:.1} bp{})",
         strain_totals.len(),
+        if territory_frame.is_some() {
+            "; the territory's RECORD context (the committed local panel's \
+             own record set; the global panel's whole-chromosome context is \
+             the named native-profile alternative)"
+        } else {
+            ""
+        },
     );
     eprintln!(
         "[score] phase elsewhere: E derivation over {} haplotype sets \
@@ -4001,7 +7341,7 @@ pub fn run(options: Options) -> io::Result<()> {
             declared > 0 && seqs.iter().all(|seq| seq.len() == declared),
             "cached reads do not share one length",
         )?;
-        READ_LENGTH.store(declared, Ordering::Release);
+        read_length = declared;
         (tokens, lists, seqs, mults, records)
     };
     let derive_seconds = derive_started.elapsed().as_secs_f64();
@@ -4025,56 +7365,213 @@ pub fn run(options: Options) -> io::Result<()> {
         .collect();
     rss.probe("derivation")?;
 
+    // The identity gate (slice D): under IMPG_REALIGN_STORED_WALK_SKELETON
+    // the pin skeleton stays the stored path walk (the slice-B/C
+    // before-record; assessment-side diagnostic for the before/after
+    // pairing). The repair — the canonical-scheme skeleton — is the
+    // default.
+    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
+    let contig = panel_component
+        .splitn(3, '#')
+        .nth(2)
+        .ok_or_else(|| invalid("component lacks a contig suffix"))?
+        .to_string();
+    // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE SERVE, SS10.6.23 slice 1 +
+    // SS10.6.25 slice 2 — the labeled-toggle doctrine:
+    // IMPG_PANEL_PRECOMPUTE unset serves when the asset beside the
+    // partition maps is present and EVERY content key matches the
+    // live inputs; =off restores the live path VERBATIM (the
+    // IMPG_CLASS_SCAN_MEMO=off precedent); =on REQUIRES the serve (an
+    // absent/mismatched asset is a loud error, the gate form —
+    // including the slice-2 bind-scaffolding section: a format-/1
+    // asset predates it and is refused under =on); any other value is
+    // a loud error. A key mismatch under the default is a LOUD
+    // LIVE-PATH FALLBACK (the routes-inventory precedent: never serve
+    // stale structure, never fail a call because a panel-side asset
+    // is stale). The serve changes NO emitted byte — the answer gates
+    // are its proof — so no model label is warranted; it states
+    // itself here and in the phase lines. The discovery sits ABOVE
+    // the bind phase by slice 2's design: the bind scaffolding
+    // serves from this same asset, before the first record binds.)
+    let precompute_dir = options.partition_graphs.join("panel-precompute-loci");
+    let precompute_mode = match std::env::var("IMPG_PANEL_PRECOMPUTE") {
+        Err(_) => PanelPrecomputeMode::Auto,
+        Ok(value) if value == "off" => PanelPrecomputeMode::Off,
+        Ok(value) if value == "on" => PanelPrecomputeMode::On,
+        Ok(other) => {
+            return Err(invalid(&format!(
+                "unknown IMPG_PANEL_PRECOMPUTE {other:?} (off | on)"
+            )))
+        }
+    };
+    let mut served: Option<PrecomputeServe> = None;
+    if !matches!(precompute_mode, PanelPrecomputeMode::Off)
+        && precompute_dir.join("manifest.json").is_file()
+    {
+        let maps_digest = partition_maps_digest(&options.partition_graphs)?;
+        let routes_digest = routes_graph_digest(&options.routes.join("graph.json"))?;
+        let attempt = (|| -> io::Result<()> {
+            let keys = PanelPrecomputeKeys {
+                panel: identity.clone(),
+                k,
+                component: panel_component.clone(),
+                frame: if options.global_frame {
+                    "global".to_string()
+                } else {
+                    "local".to_string()
+                },
+                record_origin: options.record_origin,
+                stored_frame,
+                maps_digest,
+                routes_digest,
+            };
+            let asset = load_panel_precompute(&precompute_dir, &keys)?;
+            ensure(
+                asset.windows.len() == window_partition.len(),
+                &format!(
+                    "the panel-precompute asset carries {} windows against the call's {} \
+                     (the window grid drifted)",
+                    asset.windows.len(),
+                    window_partition.len(),
+                ),
+            )?;
+            // (SS10.6.25 slice 2 — THE BIND SCAFFOLDING SECTION: the
+            // /2 format carries it; a /1 asset serves the row context
+            // + fold layouts only and the bind derives live, loudly.
+            // The =on gate form requires the section — the serve is
+            // never partial without naming it.)
+            let bind = match asset.bind {
+                Some(paths) => {
+                    Some(BindScaffoldServe::from_asset(paths, &path_of_name, panel)?)
+                }
+                None => {
+                    ensure(
+                        !matches!(precompute_mode, PanelPrecomputeMode::On),
+                        "the panel-precompute asset predates the bind-scaffolding section \
+                         (format /1) — rebuild it (IMPG_PANEL_PRECOMPUTE=on requires the \
+                         serve)",
+                    )?;
+                    None
+                }
+            };
+            // The served store, built from the asset rows in the
+            // asset's row order (the builder's own creation order —
+            // window order, member order), with the sequences left
+            // in the sources (fetched live per representative row
+            // at serve time, FNV-verified).
+            for (row_index, row) in asset.rows.iter().enumerate() {
+                let path_idx = *path_of_name
+                    .get(&row.path_name)
+                    .ok_or_else(|| invalid("the asset names a path absent from the syng"))?;
+                ensure(
+                    row.walk.len() == row.frames.len(),
+                    "the asset's walk and frame tags disagree",
+                )?;
+                store.folds.push(RowFold {
+                    path: path_idx,
+                    start: row.start,
+                    end: row.end,
+                    seq: Vec::new(),
+                    walk: row.walk.clone(),
+                    frames: row.frames.clone(),
+                    stored_walk: row.stored_walk.clone(),
+                    members: row.members.clone(),
+                });
+                ensure(
+                    store
+                        .dedup
+                        .insert((path_idx, row.start, row.end), row_index)
+                        .is_none(),
+                    "the asset carries a duplicate row identity",
+                )?;
+            }
+            for (window, asset_window) in asset.windows.iter().enumerate() {
+                ensure(
+                    asset_window.partition == window_partition[window]
+                        && asset_window.axis_start == window_axis[window].0
+                        && asset_window.axis_end == window_axis[window].1,
+                    &format!(
+                        "the panel-precompute asset's window {window} disagrees with the \
+                         live window grid (content keys drifted)",
+                    ),
+                )?;
+                let map = maps
+                    .get(&window_partition[window])
+                    .ok_or_else(|| invalid("axis partition map missing"))?;
+                ensure(
+                    asset_window.member_fold.len() == map.members.len(),
+                    &format!(
+                        "the panel-precompute asset's member-fold map for window {window} \
+                         does not match the partition maps (content keys drifted)",
+                    ),
+                )?;
+            }
+            served = Some(PrecomputeServe {
+                windows: asset.windows,
+                seq_fnv: asset.rows.iter().map(|row| row.seq_fnv).collect(),
+                seqs: Mutex::new(HashMap::new()),
+                bind,
+            });
+            Ok(())
+        })();
+        match attempt {
+            Ok(()) => {
+                let bind_state = match served.as_ref().and_then(|s| s.bind.as_ref()) {
+                    Some(bind) => format!(
+                        "; bind scaffolding: {} paths, {} ranges, {} steps",
+                        bind.by_path.len(),
+                        bind.by_path.values().map(|p| p.ranges.len()).sum::<usize>(),
+                        bind.by_path.values().map(|p| p.steps.len()).sum::<usize>(),
+                    ),
+                    None => "; the bind-scaffolding section is absent — the bind derives \
+                           live"
+                        .to_string(),
+                };
+                eprintln!(
+                    "[score] panel-precompute: SERVING the row context + fold layouts \
+                     from {} ({} rows, {} windows, {} folds; panel identity, maps digest \
+                     {:016x}, routes digest {:016x}){bind_state}",
+                    precompute_dir.display(),
+                    served.as_ref().map(|s| s.seq_fnv.len()).unwrap_or(0),
+                    served.as_ref().map(|s| s.windows.len()).unwrap_or(0),
+                    served
+                        .as_ref()
+                        .map(|s| s.windows.iter().map(|w| w.fold_rep.len()).sum::<usize>())
+                        .unwrap_or(0),
+                    maps_digest,
+                    routes_digest,
+                );
+            }
+            Err(e) if matches!(precompute_mode, PanelPrecomputeMode::On) => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "[score] panel-precompute: NOT SERVED — {e}; the LIVE path runs \
+                     (rebuild the asset or remove it; never a silent stale serve)",
+                );
+                store.folds.clear();
+                store.dedup.clear();
+                served = None;
+            }
+        }
+    }
+
     // The routing's own canonical-scheme territory steps around one
     // panel position (ported from build_territory_index_rows, slice
     // A's binding lesson: the census occurrence starts live in THIS
-    // convention, not the stored path walk's single frame).
-    let canonical_steps_near = |path: usize, around: u64| -> io::Result<Vec<(u64, i32)>> {
-        let lo = around.saturating_sub(150);
-        let hi = around + 150;
-        let forward: Vec<(u64, i32)> = panel
-            .walk_path_range(path, lo, hi)?
-            .into_iter()
-            .map(|(node, bp)| (bp, node))
-            .collect();
-        let seq_lo = lo.saturating_sub(k);
-        let seq_hi = hi + k;
-        let seq = fetch_seq(&panel.name_map.path_to_name[path], seq_lo, seq_hi)?;
-        let rc_seq = revcomp(&seq);
-        let reverse: Vec<(u64, i32)> =
-            crate::genome_inference::mem_records::raw_matched_syncmers(&panel, &rc_seq)?
-                .into_iter()
-                .map(|(signed, q)| {
-                    (
-                        seq_lo + seq.len() as u64 - k - q,
-                        -signed,
-                    )
-                })
-                .collect();
-        let forward_map: BTreeMap<u64, i32> = forward.into_iter().collect();
-        let reverse_map: BTreeMap<u64, i32> = reverse.into_iter().collect();
-        let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
-        positions.extend(reverse_map.keys().copied());
-        let mut steps = Vec::with_capacity(positions.len());
-        for bp in positions {
-            let rel = (bp - seq_lo) as usize;
-            let canonical_forward = seq
-                .get(rel..rel + k as usize)
-                .map(|window| {
-                    crate::genome_inference::mem_records::window_is_canonical_forward(window)
-                })
-                .unwrap_or(false);
-            let chosen = if canonical_forward {
-                forward_map.get(&bp)
-            } else {
-                reverse_map.get(&bp)
-            };
-            if let Some(&node) = chosen {
-                steps.push((bp, node));
-            }
-        }
-        Ok(steps)
-    };
+    // convention, not the stored path walk's single frame) — extracted
+    // VERBATIM into the one-spelling `canonical_steps_over_range`
+    // (SS10.6.25 slice 2), so the live bind, the precompute builder,
+    // and the serve's uncovered-position fallback all run THE SAME
+    // code. THE BIND SCAFFOLDING SERVE: the scaffold (from the panel
+    // asset's bind-scaffolding section, when it is present and keyed)
+    // answers the canonical step at (path, position) from the
+    // builder's recorded derivation when the position lies inside a
+    // served band — the locality lemma's own exactness — and every
+    // uncovered position (the census's own set is sample-side, A4's
+    // own statement) derives LIVE, verbatim, counted loudly.
+    let bind_scaffold: Option<&BindScaffoldServe> =
+        served.as_ref().and_then(|serve| serve.bind.as_ref());
 
     // ------------------------- the pilot record set and the binding
     // The locus's evidence set: records with at least one occurrence
@@ -4108,7 +7605,23 @@ pub fn run(options: Options) -> io::Result<()> {
     let mut bind_occurrences = 0u64;
     let mut bind_shaped_keys: BTreeSet<u32> = BTreeSet::new();
     let mut pilot_records: BTreeSet<usize> = BTreeSet::new();
+    // (THE FAR-BIN PRUNE, the owner's routing principle at the call's
+    // census view: the non-adjacent multi-window records leave the
+    // census view ENTIRELY — bind, variants, and every locus's
+    // scoring — receipted here by count and mass. The prune is
+    // per-record and the record ids stay the census's own dense ids,
+    // so every locus the pruned records never touched is byte-
+    // identical to the committed receipts by construction.)
+    let mut far_bin_pruned_records = 0u64;
+    let mut far_bin_pruned_mult = 0u64;
+    let mut census_view_mult = 0u64;
     for (record, line) in census_records.iter().enumerate() {
+        if options.far_bin_prune && census_record_far_bin_scattered(line) {
+            far_bin_pruned_records += 1;
+            far_bin_pruned_mult += line.multiplicity;
+            continue;
+        }
+        census_view_mult += line.multiplicity;
         for occ in &line.occurrences {
             // (Locality mode: a record can vote at a pilot locus only
             // by overlapping a locality fold row, and every fold row
@@ -4130,6 +7643,15 @@ pub fn run(options: Options) -> io::Result<()> {
         }
     }
     eprintln!("[score] pilot records: {}", pilot_records.len());
+    if options.far_bin_prune {
+        let total_mult = census_view_mult + far_bin_pruned_mult;
+        eprintln!(
+            "[score] far-bin prune: {far_bin_pruned_records} records pruned, \
+             census mult {far_bin_pruned_mult} of {total_mult} \
+             ({:.1}%) — the non-adjacent-bin class",
+            100.0 * far_bin_pruned_mult as f64 / total_mult.max(1) as f64,
+        );
+    }
 
     // Bind every pilot record to its derived key (slice A's binding,
     // verbatim, restricted to the pilot set).
@@ -4236,11 +7758,24 @@ pub fn run(options: Options) -> io::Result<()> {
             .ok_or_else(|| invalid("census record has no occurrences"))?;
         let occurrences = line.occurrences.len() as u64;
         let steps_started = Instant::now();
-        let steps = canonical_steps_near(occ.path, occ.start)?
+        let steps: Vec<i32> = match bind_scaffold.and_then(|scaffold| {
+            scaffold.step_at(occ.path, occ.start, panel.name_map.path_to_length[occ.path])
+        }) {
+            Some(Some((_, node))) => vec![node],
+            Some(None) => Vec::new(),
+            None => canonical_steps_over_range(
+                panel,
+                &fetch_seq,
+                k,
+                occ.path,
+                occ.start.saturating_sub(150),
+                occ.start + 150,
+            )?
             .into_iter()
             .filter(|&(bp, _)| bp == occ.start)
             .map(|(_, node)| node)
-            .collect::<Vec<i32>>();
+            .collect(),
+        };
         let steps_seconds = steps_started.elapsed().as_secs_f64();
         ensure(!steps.is_empty(), "census occurrence start has no panel step")?;
         let mut candidates: BTreeSet<u32> = BTreeSet::new();
@@ -4465,7 +8000,8 @@ pub fn run(options: Options) -> io::Result<()> {
         "[score] phase binding: {} records / {} occurrences / {} candidate keys \
          ({} distinct shaped) / {} shape derivations / {} verify probes over \
          {} range fetches; steps {:.1}s ({} extractions), shapes {:.1}s, verify \
-         {:.1}s, fetches {} ({:.1} MB), lane loads {} ({:.1} MB), phase {:.1}s",
+         {:.1}s, fetches {} ({:.1} MB), lane loads {} ({:.1} MB), phase {:.1}s; bind \
+         scaffold: {} served / {} live-derived (uncovered)",
         pilot_records.len(),
         bind_occurrences,
         bind_candidates,
@@ -4483,6 +8019,12 @@ pub fn run(options: Options) -> io::Result<()> {
         (lane_cache.bytes.load(Ordering::Relaxed) - binding_lane_bytes) as f64
             / (1024.0 * 1024.0),
         binding_started.elapsed().as_secs_f64(),
+        bind_scaffold
+            .map(|s| s.served.load(Ordering::Relaxed))
+            .unwrap_or(0),
+        bind_scaffold
+            .map(|s| s.fallbacks.load(Ordering::Relaxed))
+            .unwrap_or(pilot_records.len() as u64),
     );
     let binding_seconds = binding_started.elapsed().as_secs_f64();
     rss.probe("binding")?;
@@ -4637,40 +8179,73 @@ pub fn run(options: Options) -> io::Result<()> {
     // the pin skeleton stays the stored path walk (the slice-B/C
     // before-record; assessment-side diagnostic for the before/after
     // pairing). The repair — the canonical-scheme skeleton — is the
-    // default.
-    let stored_frame = std::env::var("IMPG_REALIGN_STORED_WALK_SKELETON").is_ok();
+    // default. (SS10.6.25 slice 2 moved the stored-frame convention,
+    // the row store, and the serve discovery ABOVE the bind phase —
+    // the bind scaffolding serves from the same discovered asset.)
     let mut skeleton = match &options.skeleton_out {
         Some(path) => Some(BufWriter::new(File::create(path)?)),
         None => None,
     };
-    let mut store = RowStore::new(&panel, &path_of_name, &fetch_seq, k, stored_frame);
-    let contig = options
-        .component
-        .splitn(3, '#')
-        .nth(2)
-        .ok_or_else(|| invalid("component lacks a contig suffix"))?
-        .to_string();
     // The axis partitions of every window the pilot records touch
     // (the locality classification needs their rows).
     // (Phase instrumentation: this is the CONTEXT ASSEMBLY phase —
     // per-row sequence fetch, stored-walk extraction, and the
     // canonical-scheme skeleton extraction with in-process sequence
-    // verification.)
+    // verification. Under the precompute serve the phase is the
+    // INDEX WALK ONLY: the partition maps' member rows resolve to the
+    // asset's rows (the by-partition and by-partition-path indices,
+    // the live insertion order verbatim), with the row content
+    // already served and the representative rows' sequences fetched
+    // per scored locus at serve time.)
     let rows_started = Instant::now();
     let rows_fetch_calls = fetch_calls.load(Ordering::Relaxed);
     let rows_fetch_bytes = fetch_bytes.load(Ordering::Relaxed);
     let rows_lane_loads = lane_cache.loads.load(Ordering::Relaxed);
     let rows_lane_bytes = lane_cache.bytes.load(Ordering::Relaxed);
-    for &partition in &window_partition {
-        let map = maps
-            .get(&partition)
-            .ok_or_else(|| invalid("axis partition map missing"))?;
-        store.ensure_partition(&map.members, partition)?;
+    if served.is_some() {
+        for &partition in &window_partition {
+            if store.by_partition.contains_key(&partition) {
+                continue;
+            }
+            let map = maps
+                .get(&partition)
+                .ok_or_else(|| invalid("axis partition map missing"))?;
+            let mut indices = Vec::with_capacity(map.members.len());
+            for member in &map.members {
+                let path_idx = *path_of_name
+                    .get(&member.path_name)
+                    .ok_or_else(|| invalid("member path absent from the syng"))?;
+                let row_index = *store
+                    .dedup
+                    .get(&(
+                        path_idx,
+                        member.start,
+                        member.end.min(panel.name_map.path_to_length[path_idx]),
+                    ))
+                    .ok_or_else(|| {
+                        invalid("the precompute asset lacks a member row (content keys drifted)")
+                    })?;
+                store
+                    .by_partition_path
+                    .entry((partition, path_idx))
+                    .or_default()
+                    .push(row_index);
+                indices.push(row_index);
+            }
+            store.by_partition.insert(partition, indices);
+        }
+    } else {
+        for &partition in &window_partition {
+            let map = maps
+                .get(&partition)
+                .ok_or_else(|| invalid("axis partition map missing"))?;
+            store.ensure_partition(&map.members, partition)?;
+        }
     }
     eprintln!(
         "[score] phase rows: {} distinct rows over {} partitions ({} windows), context \
          assembly (canonical-scheme skeletons; fetches {} / {:.1} MB, \
-         lane loads {} / {:.1} MB) [{:.1}s]",
+         lane loads {} / {:.1} MB){} [{:.1}s]",
         store.folds.len(),
         windows_of_partition.len(),
         window_partition.len(),
@@ -4679,6 +8254,12 @@ pub fn run(options: Options) -> io::Result<()> {
         lane_cache.loads.load(Ordering::Relaxed) - rows_lane_loads,
         (lane_cache.bytes.load(Ordering::Relaxed) - rows_lane_bytes) as f64
             / (1024.0 * 1024.0),
+        if served.is_some() {
+            " — SERVED from the panel-precompute asset (the index walk only; the \
+             row content is the asset's own)"
+        } else {
+            ""
+        },
         rows_started.elapsed().as_secs_f64(),
     );
     let rows_seconds = rows_started.elapsed().as_secs_f64();
@@ -4722,12 +8303,65 @@ pub fn run(options: Options) -> io::Result<()> {
     } else {
         std::borrow::Cow::Borrowed(model_name)
     };
-    let truth_qv_haplotypes = &options.truth_qv;
+    // (The class-scan order's own label — the fast mode states
+    // itself in every emitted model string (the per-locus receipt,
+    // the product calls, the sequences), so a sparse-skip output can
+    // never be mistaken for an exact-mode one. Env-unset keeps the
+    // committed strings byte-identical.)
+    let model_name: std::borrow::Cow<str> =
+        if matches!(class_scan_order, ClassScanOrder::SparseSkip) {
+            std::borrow::Cow::Owned(format!("{model_name}-classscan-sparse"))
+        } else {
+            model_name
+        };
+    // (THE SANCTIONED BOUNDED CLASS SCAN's own label, the sparse-skip
+    // precedent's shape (SS10.6.21): the bounded mode states itself
+    // in every emitted model string — the per-locus receipt, the
+    // product calls, the sequences — so a bounded output can never
+    // be mistaken for an exhaustive one. THE PRODUCTION DEFAULT (the
+    // owner: "take the better, faster one"); the --truth-qv
+    // assessment mode keeps its EXHAUSTIVE form (the truth-rank
+    // threshold keeps nearly everything at the receipted shapes), so
+    // the assessment artifacts keep the committed model strings
+    // byte-identical; IMPG_CLASS_SCAN_ORDER=exact restores the
+    // exhaustive form with the committed unlabeled strings — the
+    // toggle doctrine.)
+    let class_scan_bounded =
+        matches!(class_scan_order, ClassScanOrder::Bounded) && !truth_qv_mode;
+    let model_name: std::borrow::Cow<str> = if class_scan_bounded {
+        std::borrow::Cow::Owned(format!("{model_name}-classscan-bounded"))
+    } else {
+        model_name
+    };
+    // (The truth haplotypes as panel path names: under the global
+    // frame a name carrying the territory-local interval form
+    // translates with the maps — the committed CLI input shape is
+    // preserved verbatim, and a name already in the panel's own
+    // frame passes through.)
+    let truth_qv_haplotypes: Vec<String> = options
+        .truth_qv
+        .iter()
+        .map(|name| {
+            if options.global_frame {
+                territory_frame::translate_row(name, 0, 1, options.record_origin)
+                    .map(|row| row.path_name)
+                    .unwrap_or_else(|_| name.clone())
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let truth_qv_haplotypes = &truth_qv_haplotypes;
     struct LocusOutput {
         skeleton: Vec<u8>,
         exactness: Vec<u8>,
         records: Vec<u8>,
-        ingredients: Vec<u8>,
+        // (Candidate C: the ingredients line is streamed to a
+        // per-locus SPILL file at the receipts phase and copied into
+        // the ordered ingredients file below — the ll_matrix JSON
+        // never materializes in RAM. The final file's bytes are the
+        // committed form's exactly.)
+        ingredients_spill: PathBuf,
         report: Vec<u8>,
         anatomy: Vec<u8>,
         product: Vec<u8>,
@@ -4737,12 +8371,15 @@ pub fn run(options: Options) -> io::Result<()> {
         factorized_equal: u64,
         locus_seconds: f64,
     }
+    // (The serve reference handed to the per-locus seam: the serve is
+    // read-only shared state (the window groupings, the rows' content
+    // keys, the Mutex-guarded sequence cache), Sync by construction.)
+    let served_precompute = served.as_ref();
     let compute_locus = |locus: u32| -> io::Result<LocusOutput> {
         let locus_started = Instant::now();
         let mut skeleton_buf: Vec<u8> = Vec::new();
         let mut exactness_buf: Vec<u8> = Vec::new();
         let mut records_buf: Vec<u8> = Vec::new();
-        let mut ingredients_buf: Vec<u8> = Vec::new();
         let mut report_buf: Vec<u8> = Vec::new();
         let mut anatomy_buf: Vec<u8> = Vec::new();
         let mut product_buf: Vec<u8> = Vec::new();
@@ -4755,105 +8392,48 @@ pub fn run(options: Options) -> io::Result<()> {
 
         // ------------------------------------------------------- the folds
         // Fold the partition's member rows by identical sequence AND
-        // walk (coalesced copies are ONE hypothesis).
+        // walk (coalesced copies are ONE hypothesis). Under the
+        // panel-precompute serve (SS10.6.23 slice 1) the grouping is
+        // SERVED from the asset — the masking commute lemma's regroup
+        // over the live member list, the fold content derived through
+        // the same one-spelling helpers, the representative rows'
+        // sequences fetched live and FNV-verified; the live path
+        // (and IMPG_PANEL_PRECOMPUTE=off) runs the extracted
+        // build_window_folds_live VERBATIM — one spelling of the
+        // derivation, two sources of the grouping.
         let fold_started = Instant::now();
-        let mut fold_map: BTreeMap<(Vec<u8>, Vec<(u64, i32)>), usize> = BTreeMap::new();
-        let mut folds: Vec<Fold> = Vec::new();
-        let mut excluded_rows: u64 = 0;
-        for member in &map.members {
-            // THE MASKING OPERATOR (the call-locus --exclude-paths
-            // surface): the stranger filter folded onto the call path
-            // - matching rows leave the candidate universe here, at
-            // fold construction, exactly as absent rows would (the
-            // axis row is never excluded: it is the frame). Loudly
-            // counted per locus.
-            if row_is_excluded(
-                &member.path_name,
-                &options.component,
-                &options.exclude_paths,
-            ) {
-                excluded_rows += 1;
-                continue;
-            }
-            let row_index = *store
-                .dedup
-                .get(&{
-                    let path_idx = path_of_name[&member.path_name];
-                    (path_idx, member.start, member.end.min(panel.name_map.path_to_length[path_idx]))
-                })
-                .ok_or_else(|| invalid("member row missing from the store"))?;
-            let row = &store.folds[row_index];
-            // The CONTAINED steps only (windows fully inside the row
-            // extent): an anchor whose window overlaps the row edge
-            // cannot be a pinned backbone anchor (the read must lie
-            // fully inside), and keeping it would place its window
-            // start at a NEGATIVE relative position — the u64
-            // subtraction would wrap and poison the monotone
-            // enumeration. Edge-overlapping anchors abstain (the named
-            // remainder class).
-            let relative: Vec<(u64, i32)> = row
-                .walk
-                .iter()
-                .filter(|&&(bp, _)| bp >= row.start && bp + k <= row.end)
-                .map(|&(bp, node)| (bp - row.start, node))
-                .collect();
-            let key = (row.seq.clone(), relative.clone());
-            let index = *fold_map.entry(key).or_insert_with(|| {
-                let mut node_positions: HashMap<u32, Vec<(u64, i32)>> = HashMap::new();
-                for &(bp, node) in &row.walk {
-                    if bp >= row.start && bp + k <= row.end {
-                        node_positions
-                            .entry(node.unsigned_abs())
-                            .or_default()
-                            .push((bp - row.start, node.signum()));
-                    }
-                }
-                let contained: Vec<(u64, i32)> = row
-                    .walk
-                    .iter()
-                    .copied()
-                    .filter(|&(bp, _)| bp >= row.start && bp + k <= row.end)
-                    .map(|(bp, node)| (bp - row.start, node))
-                    .collect();
-                let mut nodes: Vec<(u64, u32)> = contained
-                    .iter()
-                    .map(|&(_, node)| (node.unsigned_abs() as u64, 1))
-                    .collect();
-                nodes.sort_unstable();
-                nodes.dedup_by(|a, b| {
-                    if a.0 == b.0 {
-                        b.1 += a.1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                let mut edges: Vec<(u64, u32)> = contained
-                    .windows(2)
-                    .map(|w| (pack_edge(w[0].1.unsigned_abs(), w[1].1.unsigned_abs()), 1))
-                    .collect();
-                edges.sort_unstable();
-                edges.dedup_by(|a, b| {
-                    if a.0 == b.0 {
-                        b.1 += a.1;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                folds.push(Fold {
-                    seq: row.seq.clone(),
-                    len: (row.end - row.start) as u64,
-                    walk: relative,
-                    node_positions,
-                    members: Vec::new(),
-                    nodes,
-                    edges,
-                });
-                folds.len() - 1
-            });
-            folds[index].members.push(member.clone());
-        }
+        let (folds, excluded_rows, flank_excluded_rows): (Vec<Fold>, u64, u64) =
+            if let Some(serve) = served_precompute {
+                serve.serve_window_folds(
+                    &store.folds,
+                    window,
+                    &map.members,
+                    &panel_component,
+                    axis_start,
+                    axis_end,
+                    options.flank_overlap,
+                    &options.exclude_paths,
+                    k,
+                    &fetch_seq,
+                    &panel.name_map.path_to_name,
+                )?
+            } else {
+                let (folds, _rep_rows, _member_fold, excluded_rows, flank_excluded_rows) =
+                    build_window_folds_live(
+                        &store.folds,
+                        &store.dedup,
+                        &map.members,
+                        &panel_component,
+                        axis_start,
+                        axis_end,
+                        options.flank_overlap,
+                        &options.exclude_paths,
+                        &path_of_name,
+                        &|path_idx| panel.name_map.path_to_length[path_idx],
+                        k,
+                    )?;
+                (folds, excluded_rows, flank_excluded_rows)
+            };
         let n_folds = folds.len();
         // ------------------------------------------- the territory images
         // (Stage 2, rule 8: the locus's normalized comparison domain.
@@ -4871,7 +8451,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 .enumerate()
                 .filter(|(_, fold)| {
                     fold.members.iter().any(|m| {
-                        m.path_name == options.component
+                        m.path_name == panel_component
                             && m.start == axis_start
                             && m.end == axis_end
                     })
@@ -5014,8 +8594,14 @@ pub fn run(options: Options) -> io::Result<()> {
             }
         }
         eprintln!(
-            "[score] locus {locus}: partition {partition}, {} members -> {n_folds} folds [{:.1}s]",
+            "[score] locus {locus}: partition {partition}, {} members -> {n_folds} folds{} \
+             [{:.1}s]",
             map.members.len(),
+            if served_precompute.is_some() {
+                " (SERVED from the panel-precompute asset)"
+            } else {
+                ""
+            },
             fold_started.elapsed().as_secs_f64(),
         );
 
@@ -5209,14 +8795,77 @@ pub fn run(options: Options) -> io::Result<()> {
         // ------------------------------- the scoring matrix (parallel folds)
         let scoring_started = Instant::now();
         struct FoldScore {
-            ll: Vec<f64>,
-            pinned: Vec<bool>,
-            mismatches: Vec<u32>,
+            // (Candidate C: the row in its per-row smaller encoding —
+            // the dense triple below is the pair loop's accumulator,
+            // consumed by ScoreRow::from_pair_loop at the row's end.)
+            row: ScoreRow,
             factorized_checked: u64,
             factorized_equal: u64,
             edge_discarded: u64,
             no_pin_records: u64,
             abstained_hull_bp: u64,
+        }
+        // (THE PER-RECORD HOIST — the marathon profile's named
+        // fold-independent redundancy class: the canonical token
+        // decode, the own anchor positions, and the merged
+        // anchor-window hull are PURE functions of the record, but
+        // the committed pair loop recomputed them at every (fold,
+        // unit) pair — up to n_folds times per unit, up to ~2.4e9
+        // recomputes at the receipted marathon worst loci, the
+        // measured no-pin path's whole 0.2-0.3us/pair floor. Computed
+        // ONCE per record here; the pair loop reads the table.
+        // Byte-identity: the hoisted values are the same
+        // pure-function outputs the pair loop computed; the scoring
+        // math, the per-pair counter accumulation
+        // (abstained_hull_bp adds the same hull_covered - backbone_bp
+        // per pair), and every iteration order are unchanged.)
+        struct RecordData {
+            canonical: Vec<(i32, u64)>,
+            own_flat: Vec<u64>,
+            hull_covered: u64,
+        }
+        let mut hoist_max_record = 0usize;
+        for unit in &units {
+            hoist_max_record = hoist_max_record.max(unit.record);
+        }
+        let mut record_data: Vec<Option<RecordData>> =
+            (0..=hoist_max_record).map(|_| None).collect();
+        for unit in &units {
+            let record = unit.record;
+            if record_data[record].is_some() {
+                continue;
+            }
+            let canonical = decode_record_tokens(
+                &key_tokens[census_key[record].unwrap() as usize],
+            )
+            .expect("bound record");
+            let own_flat = own_positions_of(&canonical, false, 0);
+            let hull_windows: Vec<(u64, u64)> =
+                own_flat.iter().map(|&p| (p, p + k)).collect();
+            let hull_covered: u64 =
+                merge_windows(hull_windows).iter().map(|&(lo, hi)| hi - lo).sum();
+            record_data[record] = Some(RecordData {
+                canonical,
+                own_flat,
+                hull_covered,
+            });
+        }
+        // (The call-core census accumulators — per LOCUS, shared
+        // atomically across the fold par_iter; only touched when the
+        // env instrument is on, so the default path never pays an
+        // atomic or an Instant.)
+        let census_anchor_ns = AtomicU64::new(0);
+        let census_placement_ns = AtomicU64::new(0);
+        let census_assertion_ns = AtomicU64::new(0);
+        let census_marginal_ns = AtomicU64::new(0);
+        let census_anchor_calls = AtomicU64::new(0);
+        let census_placement_calls = AtomicU64::new(0);
+        let census_assertion_calls = AtomicU64::new(0);
+        // (THE ANCHOR-CLASS HOIST's record slot: locus_records-position
+        // per census record id, the O(1) unit→pins index.)
+        let mut slot_of_record = vec![u32::MAX; census_records.len()];
+        for (slot, &record) in locus_records.iter().enumerate() {
+            slot_of_record[record] = slot as u32;
         }
         let scored: Vec<FoldScore> = (0..n_folds)
             .into_par_iter()
@@ -5231,29 +8880,69 @@ pub fn run(options: Options) -> io::Result<()> {
                 let mut no_pin_records = 0u64;
                 let mut abstained_hull_bp = 0u64;
                 let positions_of = |node: u32| fold.positions_of(node);
-                for unit in &units {
-                    let record = unit.record;
-                    let canonical = decode_record_tokens(&key_tokens[census_key[record].unwrap() as usize])
-                        .expect("bound record");
+                // (THE ANCHOR-CLASS HOIST — the §10.6.14 autopsy's
+                // re-anchorable COORDINATE-LOOKUP class, implemented as
+                // the pure-function collapse it is: the pin build —
+                // anchor_correspondence's monotone DP over the fold's
+                // own node positions, the merged pinned-window
+                // backbone, the windows-inside test — is a PURE
+                // function of (record, fold, orientation): the
+                // canonical walk, the touching orientations, and the
+                // fold's node positions are all record- or fold-level
+                // state and NO unit (variant) input enters it, so
+                // every variant of one record shares one result per
+                // fold. The committed form rebuilt it at every
+                // (unit, fold, orientation) — 54.2M calls at L1,
+                // 16.8 core-s of pure re-computation at 0.31 µs/call,
+                // against ~150x fewer (record, fold, orientation)
+                // builds. The hoist computes the pins ONCE per
+                // (record, fold) before the unit loop; every per-unit
+                // term — the abstained-hull accumulation (an integer
+                // add, exact in any order), the no-pin elsewhere
+                // branch, the per-(unit, pin) placement — stays in the
+                // committed unit order with the committed values, so
+                // the pair loop's outputs are bit-identical by
+                // construction. The scoring-census instrument's
+                // anchor timer/call counters now wrap the (record,
+                // fold, orientation) builds — the class's true shape.)
+                struct FoldPins {
+                    pins: Vec<Option<Pin>>,
+                    any_pin: bool,
+                    // Per orientation IN THE COMMITTED ITERATION ORDER
+                    // (the touching orientations' BTreeSet order) that
+                    // pinned at all: its merged backbone bp — the
+                    // per-unit abstained-hull term's own input.
+                    abstain_backbone_bp: Vec<u64>,
+                }
+                let census_anchor_started =
+                    if locus_scoring_census { Some(Instant::now()) } else { None };
+                let mut pins_by_record: Vec<FoldPins> =
+                    Vec::with_capacity(locus_records.len());
+                for &record in &locus_records {
+                    let data = record_data[record]
+                        .as_ref()
+                        .expect("bound record (the per-record hoist)");
+                    let canonical = &data.canonical;
                     // (Stage 2: this fold's territory image — the
                     // placement-validity domain and the prior's
                     // support. Under the default convention it is the
                     // fold's full extent.)
                     let (img_lo, img_hi) = territory[fold_index];
-                    // The pins per orientation present among the
-                    // touching occurrences (fold-independent — the
-                    // convention cannot bias fold comparisons).
                     let mut pins: Vec<Option<Pin>> = vec![None, None];
                     let mut any_pin = false;
+                    let mut abstain_backbone_bp: Vec<u64> = Vec::new();
                     for &orientation in &touching[&record].orientations {
                         let (pinned, _ambiguous) =
-                            anchor_correspondence(&canonical, orientation, &positions_of);
+                            anchor_correspondence(canonical, orientation, &positions_of);
+                        if locus_scoring_census {
+                            census_anchor_calls.fetch_add(1, Ordering::Relaxed);
+                        }
                         if pinned.iter().all(|p| p.is_none()) {
                             continue;
                         }
                         // The merged pinned-window backbone (hull
                         // coordinates, mirror-invariant).
-                        let own_flat = own_positions_of(&canonical, false, 0);
+                        let own_flat = &data.own_flat;
                         let windows: Vec<(u64, u64)> = pinned
                             .iter()
                             .enumerate()
@@ -5267,14 +8956,9 @@ pub fn run(options: Options) -> io::Result<()> {
                         });
                         // The abstained hull bp (the named remainder:
                         // read hull bases inside unpinned anchor
-                        // windows).
-                        let hull_windows: Vec<(u64, u64)> =
-                            own_flat.iter().map(|&p| (p, p + k)).collect();
-                        let hull_covered: u64 = merge_windows(hull_windows)
-                            .iter()
-                            .map(|&(lo, hi)| hi - lo)
-                            .sum();
-                        abstained_hull_bp += hull_covered - backbone_bp;
+                        // windows) — the per-record hoisted value (the
+                        // hull is fold-independent).
+                        abstain_backbone_bp.push(backbone_bp);
                         if !windows_inside {
                             continue;
                         }
@@ -5287,7 +8971,40 @@ pub fn run(options: Options) -> io::Result<()> {
                             backbone_bp,
                         });
                     }
-                    if !any_pin {
+                    pins_by_record.push(FoldPins {
+                        pins,
+                        any_pin,
+                        abstain_backbone_bp,
+                    });
+                }
+                if let Some(started) = census_anchor_started {
+                    census_anchor_ns
+                        .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                for unit in &units {
+                    let record = unit.record;
+                    let data = record_data[record]
+                        .as_ref()
+                        .expect("bound record (the per-record hoist)");
+                    let canonical = &data.canonical;
+                    // (Stage 2: this fold's territory image — the
+                    // placement-validity domain and the prior's
+                    // support. Under the default convention it is the
+                    // fold's full extent.)
+                    let (img_lo, img_hi) = territory[fold_index];
+                    // The record's memoized pins for THIS fold (the
+                    // anchor-class hoist above): one build per
+                    // (record, fold), shared by every variant.
+                    // (The unit's record is one of the locus's own
+                    // records — the committed code's touching[&record]
+                    // lookup already assumed it; an out-of-set record
+                    // fails loudly at the pins index.)
+                    let slot = slot_of_record[record] as usize;
+                    let built = &pins_by_record[slot];
+                    for &backbone_bp in &built.abstain_backbone_bp {
+                        abstained_hull_bp += data.hull_covered - backbone_bp;
+                    }
+                    if !built.any_pin {
                         // No anchored placement: the ELSEWHERE branch
                         // (the generated-elsewhere marginalization's
                         // floor; a read a candidate cannot place is
@@ -5303,21 +9020,48 @@ pub fn run(options: Options) -> io::Result<()> {
                     let mut scores: Vec<f64> = Vec::new();
                     let mut unit_mismatches = 0u32;
                     let mut pinned_here = false;
-                    for pin in pins.iter().flatten() {
-                        let Some((m, c)) = placement_score(
-                            unit, &canonical, pin, &fold.seq, fold.len, &reads, k,
+                    for pin in built.pins.iter().flatten() {
+                        let census_placement_started =
+                            if locus_scoring_census { Some(Instant::now()) } else { None };
+                        let placement = placement_score(
+                            unit, canonical, pin, &fold.seq, fold.len, &reads, k,
                             img_lo as i64, img_hi as i64,
-                        ) else {
+                        );
+                        if let Some(started) = census_placement_started {
+                            census_placement_ns
+                                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                            census_placement_calls.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let Some((m, c)) = placement else {
                             edge_discarded += 1;
                             continue;
                         };
-                        let (dm, dc) = direct_score(
-                            unit, &canonical, pin, &fold.seq, fold.len, &reads, k,
-                        )
-                        .expect("direct score");
-                        factorized_checked += 1;
-                        if (m, c) == (dm, dc) {
-                            factorized_equal += 1;
+                        // (THE OWNER'S RULING 1: the direct_score
+                        // exactness assertion is a receipt/gate/test
+                        // instrument — IMPG_SCORE_EXACTNESS_ASSERT
+                        // restores the committed always-on
+                        // re-verification verbatim; the production
+                        // default TRUSTS the factorized (m, c) here.
+                        // No product/output bit ever depended on
+                        // (dm, dc).)
+                        if exactness_assert {
+                            let census_assertion_started =
+                                if locus_scoring_census { Some(Instant::now()) } else { None };
+                            let (dm, dc) = direct_score(
+                                unit, canonical, pin, &fold.seq, fold.len, &reads, k,
+                            )
+                            .expect("direct score");
+                            if let Some(started) = census_assertion_started {
+                                census_assertion_ns.fetch_add(
+                                    started.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                                census_assertion_calls.fetch_add(1, Ordering::Relaxed);
+                            }
+                            factorized_checked += 1;
+                            if (m, c) == (dm, dc) {
+                                factorized_equal += 1;
+                            }
                         }
                         unit_mismatches = unit_mismatches.max(c);
                         pinned_here = true;
@@ -5335,16 +9079,28 @@ pub fn run(options: Options) -> io::Result<()> {
                     // per-unit orderings the local branch preserves
                     // (a full-match truth placement vs a rival's
                     // worse placement) survive the marginalization.
+                    let census_marginal_started =
+                        if locus_scoring_census { Some(Instant::now()) } else { None };
                     ll.push(logsumexp2(
-                        unit_log_likelihood(&scores, img_hi - img_lo),
+                        unit_log_likelihood(&scores, img_hi - img_lo, read_length),
                         elsewhere,
                     ));
                     mismatches.push(unit_mismatches);
+                    if let Some(started) = census_marginal_started {
+                        census_marginal_ns
+                            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                }
+                let census_row_started =
+                    if locus_scoring_census { Some(Instant::now()) } else { None };
+                let row =
+                    ScoreRow::from_pair_loop(ll, pinned, mismatches, elsewhere);
+                if let Some(started) = census_row_started {
+                    census_marginal_ns
+                        .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
                 FoldScore {
-                    ll,
-                    pinned,
-                    mismatches,
+                    row,
                     factorized_checked,
                     factorized_equal,
                     edge_discarded,
@@ -5354,14 +9110,30 @@ pub fn run(options: Options) -> io::Result<()> {
             })
             .collect();
         let scoring_seconds = scoring_started.elapsed().as_secs_f64();
-        let matrix: Vec<Vec<f64>> = scored.iter().map(|s| s.ll.clone()).collect();
-        let pinned: Vec<Vec<bool>> = scored.iter().map(|s| s.pinned.clone()).collect();
-        let mismatches: Vec<Vec<u32>> = scored.iter().map(|s| s.mismatches.clone()).collect();
+        // (Candidate C: the matrix is the per-row smaller encoding —
+        // the committed dense clone-collect (a second 13B/pair copy,
+        // transiently TWO copies of the whole matrix) is gone; the
+        // pinned-majority rows keep the committed 13B/unit size and
+        // the no-pin-majority rows collapse to 16B/pinned entry.)
         let factorized_checked: u64 = scored.iter().map(|s| s.factorized_checked).sum();
         let factorized_equal: u64 = scored.iter().map(|s| s.factorized_equal).sum();
         let edge_discarded: u64 = scored.iter().map(|s| s.edge_discarded).sum();
         let no_pin: u64 = scored.iter().map(|s| s.no_pin_records).sum();
         let abstained_hull_bp: u64 = scored.iter().map(|s| s.abstained_hull_bp).sum();
+        let matrix = ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows: scored.into_iter().map(|s| s.row).collect(),
+        };
+        eprintln!(
+            "[score] locus {locus}: matrix {} folds x {} units = {} pairs, \
+             {} live MB (row-compressed; the dense form is {} MB)",
+            matrix.n_folds(),
+            n_units,
+            matrix.n_folds() as u64 * n_units as u64,
+            matrix.live_bytes() / (1024 * 1024),
+            matrix.n_folds() as u64 * n_units as u64 * 13 / (1024 * 1024),
+        );
         ensure(
             factorized_checked == factorized_equal,
             &format!(
@@ -5415,39 +9187,41 @@ pub fn run(options: Options) -> io::Result<()> {
         let merge_axis_fold = territory_axis_fold.or_else(|| {
             folds.iter().position(|fold| {
                 fold.members.iter().any(|m| {
-                    m.path_name == options.component
+                    m.path_name == panel_component
                         && m.start == axis_start
                         && m.end == axis_end
                 })
             })
         });
+        // (The phase census's merge timer — 0.0 and untouched with the
+        // census env unset or the merge env unset.)
+        let mut merge_seconds = 0.0f64;
         let (
             folds,
             matrix,
-            pinned,
-            mismatches,
             territory,
             territory_axis_fold,
             merge_groups,
             merge_counters,
         ) = if alignment_connected {
-            alignment_connected_merge(
+            let merge_started = locus_phase_census.then(Instant::now);
+            let merged = alignment_connected_merge(
                 folds,
                 matrix,
-                pinned,
-                mismatches,
                 territory,
                 merge_axis_fold,
                 territory_axis_fold,
                 &observed_nodes,
                 &observed_edges,
-            )
+            );
+            merge_seconds = merge_started
+                .map(|started| started.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            merged
         } else {
             (
                 folds,
                 matrix,
-                pinned,
-                mismatches,
                 territory,
                 territory_axis_fold,
                 Vec::new(),
@@ -5476,30 +9250,224 @@ pub fn run(options: Options) -> io::Result<()> {
         }
 
         // ------------------------------------------- the exhaustive classes
+        // (THE OWNER'S RULING 3 at the scan itself: EXACT = the
+        // committed unit-order accumulation verbatim (the toggle
+        // doctrine — IMPG_CLASS_SCAN_ORDER=exact), bit-reproducible;
+        // SPARSE-SKIP = the legacy fast mode — the union of the two
+        // rows' pinned units plus one constant-mass term (superseded
+        // by the bounded default; unchanged). The compare receipt
+        // (IMPG_CLASS_SCAN_COMPARE) sums BOTH ways and uses the EXACT
+        // value downstream, so it changes no output byte.
+        // THE SANCTIONED BOUNDED CLASS SCAN (SS10.6.21, the owner's
+        // "take the better, faster one") runs INSTEAD of the
+        // exhaustive/sparse forms at the production default: STAGE
+        // ONE here — the deterministic branch-and-bound search for
+        // best over the per-fold excess-mass bound, the strict
+        // running-best form (a pair whose bound falls below the
+        // running best can neither win nor tie the emitted argmax);
+        // STAGE TWO below, once the truth pair is resolved — the
+        // kept set {bound >= best + the derived exp-underflow
+        // point} (every skipped pair's QUAL terms are exactly +0.0,
+        // the committed bit-identity argument) extended by the truth
+        // window where the truth pair sits outside it (the receipt's
+        // truth fields need every pair that can be strictly above
+        // or tied with the truth pair). Every computed value is the
+        // exhaustive scan's own — the committed unit-order
+        // accumulation, bit for bit — so the ANSWERS (the MAP pair,
+        // the called set, the QUAL terms, the truth fields, the
+        // best-outside rival) are the exhaustive run's by the
+        // bound-plus-slack's own arithmetic and the final-value
+        // tie-set rebuild (SS10.6.22). The skipped pairs' instrument
+        // entries become the labeled bounded receipt (the null
+        // skip certificate + the per-pair bounds and their derived
+        // slack); the compare receipt has no bounded form (its
+        // both-ways sum IS the bounded scan's own bookkeeping)
+        // and is ignored here.)
         let class_started = Instant::now();
         let pair_count = n_folds * (n_folds + 1) / 2;
         let unit_counts: Vec<f64> = units.iter().map(|u| u.count as f64).collect();
-        let class_lls: Vec<f64> = (0..pair_count)
-            .into_par_iter()
-            .map(|flat| {
-                let (first, second) = unrank_pair(flat);
-                let ll_a = &matrix[first];
-                let ll_b = &matrix[second];
-                let mut total = 0.0f64;
-                for (u, &count) in unit_counts.iter().enumerate() {
-                    total += count * mix_logsumexp(ll_a[u], ll_b[u]);
-                }
-                total
-            })
-            .collect();
-        let class_seconds = class_started.elapsed().as_secs_f64();
-        let best_ll = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let sparse_skip = matches!(class_scan_order, ClassScanOrder::SparseSkip);
+        // THE BIT-EQUAL-ROW MEMOIZATION (the fourth expressibility
+        // reduction — see `ClassScanMemo`): built once per locus on
+        // the FINAL (post-merge) matrix, before every exact-sum site
+        // — the exhaustive scan, the bounded scan's two stages and
+        // its best-outside fallback all share one memo table per
+        // locus. IMPG_CLASS_SCAN_MEMO=off restores the direct
+        // per-pair form verbatim (the toggle doctrine's measurement
+        // restore path); the memo changes no emitted byte either
+        // way, so no output label is warranted.
+        let mut scan_memo: Option<ClassScanMemo> = if scan_memo_enabled {
+            Some(ClassScanMemo::build(&matrix))
+        } else {
+            None
+        };
+        // (The compare receipt's per-locus atomics: class pairs
+        // summed both ways, pairs whose f64 bits differ, the max ulp
+        // delta, and the constant (fold, unit) entries the fast
+        // form skips. Declared at the scan's own scope — the
+        // sparse/compare receipt line below reads them after the
+        // branch; under the bounded mode they stay zero and the
+        // line does not print.)
+        let compare_pairs = AtomicU64::new(0);
+        let compare_diff = AtomicU64::new(0);
+        let compare_max_ulp = AtomicU64::new(0);
+        let compare_skipped = AtomicU64::new(0);
+        // The per-locus bounded state, stage one -> stage two.
+        let mut bounded_state: Option<BoundedScanState> = None;
+        let (mut class_lls, mut best_ll, mut called): (Vec<f64>, f64, Vec<(usize, usize)>) =
+            if class_scan_bounded {
+                let (pair_bounds, pair_slack, computed, best, memo_values) =
+                    bounded_stage_one(&matrix, &unit_counts, scan_memo.as_ref());
+                let stage_one_seconds = class_started.elapsed().as_secs_f64();
+                // The PROVISIONAL called set from stage one's computed
+                // prefix, in flat order (the exhaustive form's own
+                // order) — it carries the winner and the scan-site
+                // invariants (best finite, called non-empty) until
+                // stage two's kept window completes the exact values;
+                // the emitted set is REBUILT from the final class_lls
+                // after stage two (the T03226 locus-16 fix — never a
+                // function of the bound's rounding).
+                let called: Vec<(usize, usize)> = computed
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(flat, value)| {
+                        let sum = (*value)?;
+                        (sum == best).then(|| unrank_pair(flat))
+                    })
+                    .collect();
+                let class_lls: Vec<f64> = computed
+                    .iter()
+                    .map(|value| value.unwrap_or(f64::NEG_INFINITY))
+                    .collect();
+                bounded_state = Some(BoundedScanState {
+                    pair_bounds,
+                    pair_slack,
+                    computed,
+                    best,
+                    stage_one_seconds,
+                    scan_memo: scan_memo.take(),
+                    memo_values,
+                });
+                (class_lls, best, called)
+            } else {
+                let scan_fast = if sparse_skip || class_scan_compare {
+                    Some(ClassScanFastIndex::build(&matrix, &unit_counts))
+                } else {
+                    None
+                };
+                // THE MEMOIZED EXHAUSTIVE SCAN (the exact arm — the
+                // assessment form's own): phase A computes each
+                // DISTINCT canonical pair sum exactly once, in
+                // parallel, by the committed unit-order accumulation
+                // on the representative rows; phase B fills every
+                // pair's own flat slot from the memo — the values are
+                // the direct scan's own bits (the construction proof
+                // at `ClassScanMemo`), the flat order untouched. The
+                // legacy sparse-skip/compare arms keep the direct
+                // per-pair form (they are measurement forms, off at
+                // the defaults).
+                let class_lls: Vec<f64> =
+                    if let (Some(memo), None) = (scan_memo.as_ref(), scan_fast.as_ref()) {
+                        let distinct: Vec<usize> = (0..pair_count)
+                            .into_par_iter()
+                            .filter(|&flat| {
+                                let (first, second) = unrank_pair(flat);
+                                memo.canonical_flat(first, second) == flat
+                            })
+                            .collect();
+                        memo.note_computed(distinct.len() as u64);
+                        memo.note_hits(pair_count as u64 - distinct.len() as u64);
+                        let sums: Vec<(usize, f64)> = distinct
+                            .into_par_iter()
+                            .map(|flat| {
+                                let (first, second) = unrank_pair(flat);
+                                (flat, matrix.class_pair_sum(first, second, &unit_counts))
+                            })
+                            .collect();
+                        let mut values = vec![f64::NAN; pair_count];
+                        for (flat, sum) in sums {
+                            values[flat] = sum;
+                        }
+                        (0..pair_count)
+                            .into_par_iter()
+                            .map(|flat| {
+                                let (first, second) = unrank_pair(flat);
+                                values[memo.canonical_flat(first, second)]
+                            })
+                            .collect()
+                    } else {
+                        (0..pair_count)
+                            .into_par_iter()
+                            .map(|flat| {
+                                let (first, second) = unrank_pair(flat);
+                                match scan_fast.as_ref() {
+                                    None => matrix.class_pair_sum(first, second, &unit_counts),
+                                    Some(fast) => {
+                                        let fast_sum =
+                                            fast.class_pair_sum(first, second, &unit_counts);
+                                        if !class_scan_compare {
+                                            return fast_sum;
+                                        }
+                                        let exact =
+                                            matrix.class_pair_sum(first, second, &unit_counts);
+                                        compare_pairs.fetch_add(1, Ordering::Relaxed);
+                                        compare_skipped.fetch_add(
+                                            fast.constant_units_skipped(first, second),
+                                            Ordering::Relaxed,
+                                        );
+                                        if exact.to_bits() != fast_sum.to_bits() {
+                                            compare_diff.fetch_add(1, Ordering::Relaxed);
+                                            let ulp = ulp_distance(exact, fast_sum);
+                                            let mut current =
+                                                compare_max_ulp.load(Ordering::Relaxed);
+                                            while ulp > current {
+                                                match compare_max_ulp.compare_exchange_weak(
+                                                    current,
+                                                    ulp,
+                                                    Ordering::Relaxed,
+                                                    Ordering::Relaxed,
+                                                ) {
+                                                    Ok(_) => break,
+                                                    Err(seen) => current = seen,
+                                                }
+                                            }
+                                        }
+                                        if sparse_skip {
+                                            fast_sum
+                                        } else {
+                                            exact
+                                        }
+                                    }
+                                }
+                            })
+                            .collect()
+                    };
+                let (best_ll, called) = called_set_from_class_lls(&class_lls);
+                (class_lls, best_ll, called)
+            };
+        let mut class_seconds = class_started.elapsed().as_secs_f64();
+        if locus_phase_census && !class_scan_bounded {
+            eprintln!(
+                "[score] locus {locus}: class scan {pair_count} pairs over {n_units} units \
+                 [{class_seconds:.1}s] (phase census)"
+            );
+        }
+        if !class_scan_bounded && (sparse_skip || class_scan_compare) {
+            eprintln!(
+                "[score] locus {locus}: class scan {} pairs in {class_seconds:.1}s \
+                 ({}{}; {} of {} pairs' sums differ bitwise, max {} ulp; \
+                 {} constant unit-pairs skipped)",
+                pair_count,
+                if sparse_skip { "sparse-skip" } else { "exact" },
+                if class_scan_compare { " + compare" } else { "" },
+                compare_diff.load(Ordering::Relaxed),
+                compare_pairs.load(Ordering::Relaxed),
+                compare_max_ulp.load(Ordering::Relaxed),
+                compare_skipped.load(Ordering::Relaxed),
+            );
+        }
         ensure(best_ll.is_finite(), "no class has anchored evidence at this locus")?;
-        let called: Vec<(usize, usize)> = (0..pair_count)
-            .filter(|&flat| class_lls[flat] == best_ll)
-            .map(unrank_pair)
-            .collect();
-        let winner_pair = called[0];
+        let mut winner_pair = called[0];
 
         // -------------------------------------------------- the truth folds
         // (Window-aware, the chrIV generalization: the truth FIRST
@@ -5520,7 +9488,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 .enumerate()
                 .filter(|(_, fold)| {
                     fold.members.iter().any(|m| {
-                        m.path_name == options.component
+                        m.path_name == panel_component
                             && m.start == axis_start
                             && m.end == axis_end
                     })
@@ -5593,7 +9561,7 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut truth_second_correspondence_test: Option<serde_json::Value> = None;
         let truth_pair_test = if truth_qv_mode {
             ensure(
-                truth_qv_haplotypes[0] == options.component,
+                truth_qv_haplotypes[0] == panel_component,
                 "the first --truth-qv haplotype must be the component lane \
                  (the window's own axis row is the truth-first fold)",
             )?;
@@ -5636,6 +9604,160 @@ pub fn run(options: Options) -> io::Result<()> {
             1 + class_lls.iter().filter(|&&ll| ll > value).count()
         });
         let truth_flat = truth_pair.map(|(a, b)| b * (b + 1) / 2 + a);
+        // ------------------------- the bounded scan's STAGE TWO (the kept set)
+        // (The truth pair is now resolved, so the derived keep
+        // threshold is final: the QUAL window {bound + the derived
+        // rounding-error slack >= best + the exp-underflow point}
+        // extended by the truth window where the truth pair sits
+        // outside it. The truth pair itself is computed FIRST — it
+        // is always kept (its own bound + slack >= its exact ll) —
+        // so the receipt's truth fields read the exact value.
+        // Every pair the stage-two pass computes is summed by the
+        // committed unit-order accumulation, so every value is the
+        // exhaustive scan's own bit for bit; the kept/skipped sets
+        // are deterministic functions of the matrix alone.)
+        if let Some(state) = bounded_state.as_mut() {
+            let stage_two_started = Instant::now();
+            // THE MEMOIZED EXACT SUM (the fourth reduction at the
+            // bounded path's own sites): the pair's canonical flat's
+            // value — computed on the representative rows if the
+            // slot is still empty, read from the memo otherwise —
+            // bit-identical to the direct per-pair accumulation by
+            // construction (`ClassScanMemo`'s proof).
+            let memoized_sum = |state: &mut BoundedScanState,
+                                first: usize,
+                                second: usize|
+             -> f64 {
+                match state.scan_memo.as_ref() {
+                    None => matrix.class_pair_sum(first, second, &unit_counts),
+                    Some(memo) => {
+                        let canon = memo.canonical_flat(first, second);
+                        match state.memo_values[canon] {
+                            Some(value) => {
+                                memo.note_hits(1);
+                                value
+                            }
+                            None => {
+                                let (r_first, r_second) = unrank_pair(canon);
+                                let value =
+                                    matrix.class_pair_sum(r_first, r_second, &unit_counts);
+                                memo.note_computed(1);
+                                state.memo_values[canon] = Some(value);
+                                value
+                            }
+                        }
+                    }
+                }
+            };
+            let truth_ll: Option<f64> = match truth_flat {
+                Some(flat) => match state.computed[flat] {
+                    Some(value) => Some(value),
+                    None => {
+                        let (first, second) = unrank_pair(flat);
+                        let value = memoized_sum(state, first, second);
+                        state.computed[flat] = Some(value);
+                        class_lls[flat] = value;
+                        Some(value)
+                    }
+                },
+                None => None,
+            };
+            let keep_threshold = bounded_keep_threshold(state.best, truth_ll);
+            let kept: Vec<usize> = (0..pair_count)
+                .filter(|&flat| {
+                    state.computed[flat].is_none()
+                        && state.pair_bounds[flat] + state.pair_slack[flat] >= keep_threshold
+                })
+                .collect();
+            // the kept set's distinct canonical sums first (each
+            // computed exactly once, in parallel), then every kept
+            // pair reads its own flat slot — the values shared,
+            // never reordered
+            let sums: Vec<(usize, f64)> = match state.scan_memo.as_ref() {
+                None => kept
+                    .par_iter()
+                    .map(|&flat| {
+                        let (first, second) = unrank_pair(flat);
+                        (flat, matrix.class_pair_sum(first, second, &unit_counts))
+                    })
+                    .collect(),
+                Some(memo) => {
+                    let keyed: Vec<(usize, usize)> = kept
+                        .iter()
+                        .map(|&flat| {
+                            let (first, second) = unrank_pair(flat);
+                            (flat, memo.canonical_flat(first, second))
+                        })
+                        .collect();
+                    let mut missing: Vec<usize> =
+                        keyed.iter().map(|&(_, canon)| canon).collect();
+                    missing.sort_unstable();
+                    missing.dedup();
+                    let owned: Vec<usize> = missing
+                        .iter()
+                        .copied()
+                        .filter(|&canon| state.memo_values[canon].is_none())
+                        .collect();
+                    memo.note_computed(owned.len() as u64);
+                    memo.note_hits(keyed.len() as u64 - owned.len() as u64);
+                    let fresh: Vec<(usize, f64)> = owned
+                        .par_iter()
+                        .map(|&canon| {
+                            let (first, second) = unrank_pair(canon);
+                            (canon, matrix.class_pair_sum(first, second, &unit_counts))
+                        })
+                        .collect();
+                    for (canon, sum) in fresh {
+                        state.memo_values[canon] = Some(sum);
+                    }
+                    keyed
+                        .into_iter()
+                        .map(|(flat, canon)| {
+                            (
+                                flat,
+                                state.memo_values[canon]
+                                    .expect("the kept set's canonical sum is filled"),
+                            )
+                        })
+                        .collect()
+                }
+            };
+            for (flat, sum) in sums {
+                state.computed[flat] = Some(sum);
+                class_lls[flat] = sum;
+            }
+            // THE TIE-SET REBUILD (the T03226 locus-16 fix,
+            // SS10.6.22): the emitted called set, best, and the
+            // winner they name are REBUILT from the FINAL class_lls
+            // — a pure function of the final exact values, never of
+            // the bound's rounding. Stage two's kept window has
+            // already recovered every tie bit-identical (a tie's
+            // bound + slack sits at best, far above the keep
+            // threshold), so this equals the exhaustive called set;
+            // the best-outside fallback that runs later can only
+            // patch pairs whose exact sums sit below the keep
+            // threshold — far below best — so it can never change
+            // the rebuilt set.
+            let (rebuilt_best, rebuilt_called) = called_set_from_class_lls(&class_lls);
+            best_ll = rebuilt_best;
+            called = rebuilt_called;
+            winner_pair = called[0];
+            class_seconds += stage_two_started.elapsed().as_secs_f64();
+            let known = state
+                .computed
+                .iter()
+                .filter(|value| value.is_some())
+                .count();
+            let skipped = pair_count - known;
+            eprintln!(
+                "[score] locus {locus}: class scan bounded: {pair_count} pairs in \
+                 {class_seconds:.1}s (stage one {:.1}s; kept {known}, skipped \
+                 {skipped} ({:.2}% pruned); the derived keep threshold and the \
+                 per-pair bounds are the receipt's skip certificate)",
+                state.stage_one_seconds,
+                100.0 * skipped as f64 / pair_count as f64,
+            );
+        }
         let truth_log_likelihood = truth_flat.map(|flat| class_lls[flat]);
         let truth_rank = truth_log_likelihood.map(|value| {
             1 + class_lls
@@ -5672,6 +9794,7 @@ pub fn run(options: Options) -> io::Result<()> {
             merged_multiset(&folds[first].edges, &folds[second].edges)
         };
         let called_score = Some(best_ll);
+        let spectrum_started = locus_phase_census.then(Instant::now);
         let spectrum: Vec<(f64, f64, f64, usize, usize, usize)> =
             match (winner_pair, called_score) {
                 ((winner_first, winner_second), Some(score)) => {
@@ -5727,17 +9850,41 @@ pub fn run(options: Options) -> io::Result<()> {
         // compact cut-index list; the answers (k, excluded,
         // alternative, cluster_size, shape, p) are identical to the
         // naive path BY CONSTRUCTION and unit-gated against a
-        // verbatim oracle below. Non-degenerate loci take the
-        // committed band path unchanged — byte-identical receipts.)
+        // verbatim oracle below.
+        //
+        // THE PER-PAIR CONSTANT'S FIX (the fold-merge open term,
+        // closed): the NON-degenerate path took the SAME naive band
+        // form (|called| - 1 bands x |spectrum| entries, every entry
+        // a fresh merged-multiset pair plus two observed-mass walks)
+        // — the ~6.4 ms-per-class-pair constant the PRE-MERGE
+        // fold-heavy shapes receipt (the ledger's T03226 l15: 228.4s
+        // serial pre-merge vs 0.5s committed, the tie class the
+        // committed merge collapses 455x). The cluster machinery's
+        // consumption contract is unchanged (only each band's <=cut
+        // predicate set), so BOTH paths now take the cut-index-list
+        // certificate — per-fold mass signatures computed once, O(1)
+        // two-sided bound decisions per (tied class, spectrum entry),
+        // the exact walk only in the undecided middle band — and the
+        // answers are the naive band matrix's own at every shape
+        // (the non-degenerate oracle test below proves it). The
+        // emitted receipt member changes at NON-degenerate tie loci:
+        // qual_tied_bands (the full band vectors) is replaced by
+        // qual_tied_cut_indices (the compact predicate lists) — the
+        // degenerate precedent's own form, sanctioned with the fix.)
         let degenerate = called.len() == pair_count;
-        let mut tied_bands: Vec<(usize, Vec<f64>)> = Vec::new();
         let mut cut_index_lists: Vec<(usize, Vec<usize>)> = Vec::new();
-        if degenerate {
-            let mut sorted: Vec<f64> =
-                spectrum.iter().map(|&(distance, _, _, _, _, _)| distance).collect();
+        let certificate_started = locus_phase_census.then(Instant::now);
+        {
+            let mut sorted: Vec<f64> = spectrum
+                .iter()
+                .map(|&(distance, ..)| distance)
+                .collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+            // (The same knee the cluster form itself takes — the
+            // predicate sets are decided at exactly the cut the
+            // cluster consumes them at.)
             let cut = spectrum_knee(&sorted).cut;
-            cut_index_lists = degenerate_cut_lists(
+            cut_index_lists = tied_class_cut_lists(
                 &folds,
                 &called,
                 &spectrum,
@@ -5745,33 +9892,29 @@ pub fn run(options: Options) -> io::Result<()> {
                 &observed_edge_fn,
                 cut,
             );
-        } else {
-            for &(first, second) in called.iter().skip(1) {
-                let index = spectrum
-                    .iter()
-                    .position(|&(_, _, _, a, b, _)| a == first && b == second)
-                    .expect("called class missing from the winner's spectrum");
-                let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
-                let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
-                let band: Vec<f64> = spectrum
-                    .par_iter()
-                    .map(|&(_, _, _, other_first, other_second, _)| {
-                        let other_nodes =
-                            merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
-                        let other_edges =
-                            merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
-                        differing_observed_mass(&nodes, &other_nodes, &observed_node_fn)
-                            + differing_observed_mass(&edges, &other_edges, &observed_edge_fn)
-                    })
-                    .collect();
-                tied_bands.push((index, band));
-            }
         }
-        let tie_certificate = if degenerate {
-            TieCertificate::CutIndices(&cut_index_lists)
-        } else {
-            TieCertificate::Bands(&tied_bands)
-        };
+        // (THE CERTIFICATE'S OWN RSS PROBE, the receipts-phase memory
+        // audit's blind window: `cut_index_lists` is the ONE structure
+        // here whose cardinality is (|called| - 1) x |spectrum|, and at
+        // the structurally degenerate shape (called.len() == pair_count,
+        // the equality this code already relies on) that is
+        // pair_count x pair_count. Whether it is the reported deep-locus
+        // peak is a measurement, not an argument: the delta against the
+        // `_scored` bookend prices it, and `_tie_emitted` prices the
+        // Value-tree emission downstream.)
+        rss.probe(&format!("locus_{locus}_certificate"))?;
+        let tie_certificate = TieCertificate::CutIndices(&cut_index_lists);
+        // (The phase census's certificate timer — one path for both
+        // shapes now; the before-fix receipts' qual_bands_seconds/
+        // qual_degenerate_seconds are this same certificate wall,
+        // branch-exclusive.)
+        let qual_certificate_seconds = certificate_started
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let qual_spectrum_seconds = spectrum_started
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let qual_cluster_started = locus_phase_census.then(Instant::now);
         let cluster = called_score
             .filter(|_| !spectrum.is_empty() || !called.is_empty())
             .map(|_| {
@@ -5781,6 +9924,9 @@ pub fn run(options: Options) -> io::Result<()> {
                     .collect();
                 cluster_form_qual(1.0, &pairs, &tie_certificate)
             });
+        let qual_cluster_seconds = qual_cluster_started
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
         let cluster_knee = cluster.as_ref().and_then(|state| state.knee);
         let cluster_shape = cluster.as_ref().map(|state| state.shape);
         let cluster_size = cluster.as_ref().map(|state| state.cluster_size);
@@ -5813,17 +9959,182 @@ pub fn run(options: Options) -> io::Result<()> {
             called.contains(&(first, second))
         });
         // The best divergent rival outside the excluded band.
-        let best_outside_log_likelihood = cluster
-            .as_ref()
-            .map(|state| {
-                spectrum
+        // (THE BOUNDED SCAN'S BEST-OUTSIDE FALLBACK — the receipted
+        // branch-and-bound form, SS10.6.21 (d), slack-corrected the
+        // SS10.6.22 way: the skipped pairs' exact sums are unknown,
+        // but each is bounded above by its own bound + the derived
+        // rounding-error slack, so the argmax over the SKIPPED
+        // non-excluded pairs is walked in bound-plus-slack
+        // DESCENDING order (ties by flat index — deterministic)
+        // until the next dominated bound falls to the running max
+        // or below: every pair beyond has exact <= bound + slack <=
+        // running max, so the walk's max is the exhaustive run's
+        // own value. A second deterministic sweep then computes the
+        // exact sums of every skipped non-excluded pair whose
+        // bound + slack is at or above the found max — the tied
+        // set's own members (a pair below the max's dominated bound
+        // cannot tie it) — and patches them into class_lls, so the
+        // emitted tied classes and the records' named pairs are the
+        // exhaustive run's own. Where nothing is skipped this is the
+        // committed fold verbatim.)
+        let best_outside_started = locus_phase_census.then(Instant::now);
+        let best_outside_log_likelihood = cluster.as_ref().map(|state| {
+            let kept_max = spectrum
+                .iter()
+                .zip(&state.excluded)
+                .filter(|(_, excluded)| !**excluded)
+                .map(|(entry, _)| class_lls[entry.5])
+                .fold(f64::NEG_INFINITY, f64::max);
+            let skipped_nonexcluded = bounded_state
+                .as_mut()
+                .map(|bounded| {
+                    let mut candidates: Vec<usize> = spectrum
+                        .iter()
+                        .zip(&state.excluded)
+                        .filter(|(_, excluded)| !**excluded)
+                        .map(|(entry, _)| entry.5)
+                        .filter(|&flat| bounded.computed[flat].is_none())
+                        .collect();
+                    candidates.sort_by(|&a, &b| {
+                        (bounded.pair_bounds[b] + bounded.pair_slack[b])
+                            .total_cmp(&(bounded.pair_bounds[a] + bounded.pair_slack[a]))
+                            .then(a.cmp(&b))
+                    });
+                    candidates
+                })
+                .unwrap_or_default();
+            let mut running_max = kept_max;
+            let mut next = 0usize;
+            while next < skipped_nonexcluded.len() {
+                let flat = skipped_nonexcluded[next];
+                // the dominated bound: the pair's own bound + its
+                // derived rounding-error slack (the same
+                // slack-corrected dominance premise as stage one's
+                // stop — the walk continues while it is strictly
+                // above the running max)
+                let bound = bounded_state
+                    .as_ref()
+                    .map(|bounded| bounded.pair_bounds[flat] + bounded.pair_slack[flat])
+                    .unwrap_or(f64::NEG_INFINITY);
+                if bound.partial_cmp(&running_max) != Some(std::cmp::Ordering::Greater) {
+                    break;
+                }
+                let (first, second) = unrank_pair(flat);
+                // the memoized exact sum (the fourth reduction at the
+                // best-outside walk's own site): the canonical flat's
+                // value, computed on the representative rows on a
+                // miss — bit-identical to the direct form by
+                // construction
+                let sum = if let Some(bounded) = bounded_state.as_mut() {
+                    match bounded.scan_memo.as_ref() {
+                        None => matrix.class_pair_sum(first, second, &unit_counts),
+                        Some(memo) => {
+                            let canon = memo.canonical_flat(first, second);
+                            match bounded.memo_values[canon] {
+                                Some(value) => {
+                                    memo.note_hits(1);
+                                    value
+                                }
+                                None => {
+                                    let (r_first, r_second) = unrank_pair(canon);
+                                    let value =
+                                        matrix.class_pair_sum(r_first, r_second, &unit_counts);
+                                    memo.note_computed(1);
+                                    bounded.memo_values[canon] = Some(value);
+                                    value
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    matrix.class_pair_sum(first, second, &unit_counts)
+                };
+                if let Some(bounded) = bounded_state.as_mut() {
+                    bounded.computed[flat] = Some(sum);
+                }
+                class_lls[flat] = sum;
+                if sum > running_max {
+                    running_max = sum;
+                }
+                next += 1;
+            }
+            // the tied-set sweep: every skipped non-excluded pair at
+            // or above the found max, exact — deterministic.
+            if let Some(bounded) = bounded_state.as_mut() {
+                let tied: Vec<usize> = skipped_nonexcluded
                     .iter()
-                    .zip(&state.excluded)
-                    .filter(|(_, excluded)| !**excluded)
-                    .map(|(entry, _)| class_lls[entry.5])
-                    .fold(f64::NEG_INFINITY, f64::max)
-            })
-            .filter(|value| value.is_finite());
+                    .copied()
+                    .filter(|&flat| {
+                        bounded.computed[flat].is_none()
+                            && bounded.pair_bounds[flat] + bounded.pair_slack[flat] >= running_max
+                    })
+                    .collect();
+                for flat in tied {
+                    let (first, second) = unrank_pair(flat);
+                    // the memoized exact sum — the same canonical-slot
+                    // discipline as the walk above
+                    let sum = match bounded.scan_memo.as_ref() {
+                        None => matrix.class_pair_sum(first, second, &unit_counts),
+                        Some(memo) => {
+                            let canon = memo.canonical_flat(first, second);
+                            match bounded.memo_values[canon] {
+                                Some(value) => {
+                                    memo.note_hits(1);
+                                    value
+                                }
+                                None => {
+                                    let (r_first, r_second) = unrank_pair(canon);
+                                    let value =
+                                        matrix.class_pair_sum(r_first, r_second, &unit_counts);
+                                    memo.note_computed(1);
+                                    bounded.memo_values[canon] = Some(value);
+                                    value
+                                }
+                            }
+                        }
+                    };
+                    bounded.computed[flat] = Some(sum);
+                    class_lls[flat] = sum;
+                }
+            }
+            running_max
+        })
+        .filter(|value| value.is_finite());
+        let best_outside_seconds = best_outside_started
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        // (The phase census's shape counters — computed here at write
+        // time, O(folds + lists): the entry counts that price the
+        // certificate phases and the per-fold multiset lengths that
+        // price every multiset walk. Zero and untouched with the
+        // census env unset.)
+        let phase_census_tied_list_entries: u64 = if locus_phase_census {
+            cut_index_lists.iter().map(|(_, list)| list.len() as u64).sum()
+        } else {
+            0
+        };
+        let phase_census_tied_list_count: usize = if locus_phase_census {
+            cut_index_lists.len()
+        } else {
+            0
+        };
+        let phase_census_fold_multiset_entries: u64 = if locus_phase_census {
+            folds
+                .iter()
+                .map(|fold| (fold.nodes.len() + fold.edges.len()) as u64)
+                .sum()
+        } else {
+            0
+        };
+        let phase_census_fold_multiset_max: usize = if locus_phase_census {
+            folds
+                .iter()
+                .map(|fold| fold.nodes.len() + fold.edges.len())
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let mut qual_alternative_classes: Vec<serde_json::Value> = Vec::new();
         let alternative_log_gap =
             best_outside_log_likelihood.map(|outside| best_ll - outside);
@@ -5859,15 +10170,30 @@ pub fn run(options: Options) -> io::Result<()> {
         // assertion already covers the WHOLE pilot domain; the sample
         // carries vote-level detail for the independent checker.
         let exactness_started = Instant::now();
-        let valid_pairs: Vec<(usize, usize)> = (0..n_folds)
-            .flat_map(|f| (0..n_units).map(move |u| (f, u)))
-            .filter(|&(f, u)| pinned[f][u])
-            .collect();
-        let mismatch_pairs: Vec<(usize, usize)> = valid_pairs
-            .iter()
-            .copied()
-            .filter(|&(f, u)| mismatches[f][u] > 0)
-            .collect();
+        // (Candidate C: the pinned-pair enumeration walks the rows'
+        // own pinned entries — the same (fold, unit) pairs in the same
+        // order the dense filter produced, with the mismatches read
+        // from the entry itself.)
+        //
+        // THE TWO VECTORS ARE NOT MATERIALIZED (the receipts-phase
+        // memory audit's Finding 3): the pinned-pair list is used for
+        // exactly two things - its LENGTH (to derive each stratum's
+        // stride) and every stride-th entry - so it is walked twice
+        // and never held. At a deep locus it was ~49.6M pairs x 16B =
+        // 794MB (up to ~1.6GB mid-growth, plus the same again for the
+        // mismatch vector), retained past the whole QUAL phase into
+        // the receipt emission. The walk order is identical, so the
+        // sampled set is identical, by construction.
+        let mut valid_len = 0usize;
+        let mut mismatch_len = 0usize;
+        for fold in 0..n_folds {
+            for (_, mismatches) in matrix.pinned_units(fold) {
+                valid_len += 1;
+                if mismatches > 0 {
+                    mismatch_len += 1;
+                }
+            }
+        }
         let stride_of = |len: usize, want: u64| -> usize {
             if len == 0 || want == 0 {
                 usize::MAX
@@ -5878,23 +10204,31 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut sampled: BTreeSet<(usize, usize)> = BTreeSet::new();
         let mut stratum_counts: BTreeMap<String, u64> = BTreeMap::new();
         {
-            let stride = stride_of(valid_pairs.len(), options.exactness_sample);
+            let stride = stride_of(valid_len, options.exactness_sample);
             let mut taken = 0u64;
-            for (index, &pair) in valid_pairs.iter().enumerate() {
-                if index % stride == 0 {
-                    sampled.insert(pair);
-                    taken += 1;
+            let mut index = 0usize;
+            for fold in 0..n_folds {
+                for (unit, _) in matrix.pinned_units(fold) {
+                    if index % stride == 0 {
+                        sampled.insert((fold, unit));
+                        taken += 1;
+                    }
+                    index += 1;
                 }
             }
             stratum_counts.insert("evenly_spaced_valid".to_string(), taken);
         }
         {
-            let stride = stride_of(mismatch_pairs.len(), options.exactness_sample);
+            let stride = stride_of(mismatch_len, options.exactness_sample);
             let mut taken = 0u64;
-            for (index, &pair) in mismatch_pairs.iter().enumerate() {
-                if index % stride == 0 {
-                    if sampled.insert(pair) {
-                        taken += 1;
+            let mut index = 0usize;
+            for fold in 0..n_folds {
+                for (unit, mismatches) in matrix.pinned_units(fold) {
+                    if mismatches > 0 {
+                        if index % stride == 0 && sampled.insert((fold, unit)) {
+                            taken += 1;
+                        }
+                        index += 1;
                     }
                 }
             }
@@ -5915,9 +10249,9 @@ pub fn run(options: Options) -> io::Result<()> {
             named_folds.push(("identical_pair".to_string(), index));
         }
         for (name, fold_index) in &named_folds {
-            let pairs: Vec<(usize, usize)> = (0..n_units)
-                .filter(|&u| pinned[*fold_index][u])
-                .map(|u| (*fold_index, u))
+            let pairs: Vec<(usize, usize)> = matrix
+                .pinned_units(*fold_index)
+                .map(|(unit, _)| (*fold_index, unit))
                 .collect();
             let stride = stride_of(pairs.len(), 25);
             let mut taken = 0u64;
@@ -5976,7 +10310,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 let forward = physical_forward(orientation, unit.mirror);
                 let own_positions = own_positions_of(&canonical, unit.mirror, unit.w_lo);
                 let own_hull = own_positions_of(&canonical, unit.mirror, 0);
-                let skipped = skipped_positions(&own_positions, k, read_len() as u64);
+                let skipped = skipped_positions(&own_positions, k, read_length as u64);
                 let mut votes: Vec<serde_json::Value> = Vec::new();
                 for &(lo, hi) in &skipped {
                     for i in lo..hi {
@@ -6023,8 +10357,8 @@ pub fn run(options: Options) -> io::Result<()> {
                     "read_fnv": fnv1a64(read),
                     "read": String::from_utf8(read.clone()).unwrap(),
                     "fold": fold_index,
-                    "ll": matrix[fold_index][unit_index],
-                    "ll_local": unit_log_likelihood(&local_scores, img_hi - img_lo),
+                    "ll": matrix.ll(fold_index, unit_index),
+                    "ll_local": unit_log_likelihood(&local_scores, img_hi - img_lo, read_length),
                     "elsewhere": elsewhere,
                     "placements": placements,
                 }),
@@ -6036,8 +10370,8 @@ pub fn run(options: Options) -> io::Result<()> {
             "[score] locus {locus}: exactness sample {} pairs of {} valid \
              ({} with mismatch votes) [{exactness_seconds:.1}s]",
             sampled.len(),
-            valid_pairs.len(),
-            mismatch_pairs.len(),
+            valid_len,
+            mismatch_len,
         );
 
         // -------------------------------------- the pocket-read anatomy
@@ -6067,10 +10401,11 @@ pub fn run(options: Options) -> io::Result<()> {
             }
             let truth_places_unit = |u: usize| {
                 truth_pair
-                    .map(|(a, b)| pinned[a][u] || pinned[b][u])
+                    .map(|(a, b)| matrix.pinned(a, u) || matrix.pinned(b, u))
                     .unwrap_or(false)
             };
-            let winner_places_unit = |u: usize| pinned[winner_first][u] || pinned[winner_second][u];
+            let winner_places_unit =
+                |u: usize| matrix.pinned(winner_first, u) || matrix.pinned(winner_second, u);
             let is_donor_path = |name: &str| {
                 name.starts_with("S288C#0#") || name.starts_with("SK1#0#")
             };
@@ -6089,7 +10424,7 @@ pub fn run(options: Options) -> io::Result<()> {
                     (false, false) => "neither",
                 };
                 let pinning_folds: Vec<usize> = (0..n_folds)
-                    .filter(|&f| pinned[f][u])
+                    .filter(|&f| matrix.pinned(f, u))
                     .collect();
                 // The donor-path full-read verification: at each
                 // verified occurrence of this record on a donor
@@ -6225,7 +10560,7 @@ pub fn run(options: Options) -> io::Result<()> {
                             placement_offset(&pin.pinned, &own_hull, forward);
                         let own_positions =
                             own_positions_of(&canonical, unit.mirror, unit.w_lo);
-                        let skipped = skipped_positions(&own_positions, k, read_len() as u64);
+                        let skipped = skipped_positions(&own_positions, k, read_length as u64);
                         let skipped_bp: u64 =
                             skipped.iter().map(|&(lo, hi)| hi - lo).sum();
                         let piecewise = placement_score(
@@ -6375,8 +10710,8 @@ pub fn run(options: Options) -> io::Result<()> {
                         "record": unit.record,
                         "variant": unit.variant,
                         "count": unit.count,
-                        "fold_ll": [matrix[first][u], matrix[second][u]],
-                        "pair_term": mix_logsumexp(matrix[first][u], matrix[second][u]),
+                        "fold_ll": [matrix.ll(first, u), matrix.ll(second, u)],
+                        "pair_term": mix_logsumexp(matrix.ll(first, u), matrix.ll(second, u)),
                     })
                 })
                 .collect();
@@ -6402,10 +10737,34 @@ pub fn run(options: Options) -> io::Result<()> {
         // map order, i.e. alphabetical, and every field here
         // serializes through the same writer in that same order. The
         // identity gate proves the sidecar byte-identical.)
-        let folds_json: Vec<serde_json::Value> = folds
-            .iter()
-            .map(|fold| {
-                json!({
+        // (THE INGREDIENT ARRAYS STREAM PER ELEMENT - the receipts-phase
+        // memory audit's Finding 2, the lever-3 form extended from
+        // ll_matrix to its two siblings. Building them as
+        // `Vec<serde_json::Value>` first cost several GB at a deep locus
+        // (per fold: members, the whole sequence, a walk/nodes/edges
+        // array pair per step; per unit: six keys including a heap copy
+        // of the read sequence) and held it through the whole receipt
+        // emission. Each element is now built, serialized and dropped in
+        // turn; the bytes are identical, because a Vec's serialization
+        // IS its elements' serializations joined by ',' inside "[" "]",
+        // and json!'s maps are alphabetical in both forms.)
+        // (Candidate C: the ingredients line — including the full
+        // ll_matrix — streams to a per-locus spill file, the dense
+        // JSON text never held in RAM; the ordered write below copies
+        // the spill into the ingredients file, so the emitted bytes
+        // are the committed form's exactly.)
+        let ingredients_spill_path =
+            ingredients_spill_path(&options.out, locus);
+        let mut ingredients_spill =
+            BufWriter::new(File::create(&ingredients_spill_path)?);
+        ingredients_spill.write_all(b"{\"folds\":[")?;
+        for (position, fold) in folds.iter().enumerate() {
+            if position > 0 {
+                ingredients_spill.write_all(b",")?;
+            }
+            serde_json::to_writer(
+                &mut ingredients_spill,
+                &json!({
                     "members": fold.members.iter().map(|m| json!({
                         "path_name": m.path_name, "start": m.start, "end": m.end,
                     })).collect::<Vec<_>>(),
@@ -6415,36 +10774,40 @@ pub fn run(options: Options) -> io::Result<()> {
                         .collect::<Vec<_>>(),
                     "nodes": fold.nodes,
                     "edges": fold.edges,
-                })
-            })
-            .collect();
-        let units_json: Vec<serde_json::Value> = units
-            .iter()
-            .map(|unit| {
-                json!({
+                }),
+            )?;
+        }
+        ingredients_spill.write_all(b"]")?;
+        // The per-unit per-fold log-likelihood matrix (folds x units,
+        // row-major; entries at E = no valid anchored placement).
+        ingredients_spill.write_all(b",\"ll_matrix\":")?;
+        matrix.write_ll_matrix_json(&mut ingredients_spill)?;
+        ingredients_spill.write_all(b",\"locus\":")?;
+        serde_json::to_writer(&mut ingredients_spill, &locus)?;
+        ingredients_spill.write_all(b",\"partition\":")?;
+        serde_json::to_writer(&mut ingredients_spill, &partition)?;
+        ingredients_spill.write_all(b",\"units\":[")?;
+        for (position, unit) in units.iter().enumerate() {
+            if position > 0 {
+                ingredients_spill.write_all(b",")?;
+            }
+            serde_json::to_writer(
+                &mut ingredients_spill,
+                &json!({
                     "record": unit.record,
                     "variant": unit.variant,
                     "mirror": if unit.mirror { 1 } else { 0 },
                     "w_lo": unit.w_lo,
                     "count": unit.count,
                     "read": String::from_utf8(reads[unit.read].clone()).unwrap(),
-                })
-            })
-            .collect();
-        ingredients_buf.write_all(b"{\"folds\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &folds_json)?;
-        // The per-unit per-fold log-likelihood matrix (folds x units,
-        // row-major; entries at E = no valid anchored placement).
-        ingredients_buf.write_all(b",\"ll_matrix\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &matrix)?;
-        ingredients_buf.write_all(b",\"locus\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &locus)?;
-        ingredients_buf.write_all(b",\"partition\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &partition)?;
-        ingredients_buf.write_all(b",\"units\":")?;
-        serde_json::to_writer(&mut ingredients_buf, &units_json)?;
-        ingredients_buf.write_all(b"}")?;
-        ingredients_buf.push(b'\n');
+                }),
+            )?;
+        }
+        ingredients_spill.write_all(b"]")?;
+        ingredients_spill.write_all(b"}")?;
+        ingredients_spill.write_all(b"\n")?;
+        ingredients_spill.flush()?;
+        drop(ingredients_spill);
         rss.probe(&format!("locus_{locus}_receipts"))?;
 
         // ---------------------------------------------------- the main receipt
@@ -6499,7 +10862,8 @@ pub fn run(options: Options) -> io::Result<()> {
         // neither homolog) versus per-base evidence on the reads both
         // place. The floor's magnitude is the model's derived minimum,
         // not the true unanchored likelihood (named).
-        let pair_places = |i: usize, j: usize, u: usize| pinned[i][u] || pinned[j][u];
+        let pair_places =
+            |i: usize, j: usize, u: usize| matrix.pinned(i, u) || matrix.pinned(j, u);
         let mut truth_unplaced_units = 0u64;
         let mut truth_unplaced_mass = 0.0f64;
         let mut winner_unplaced_units = 0u64;
@@ -6519,8 +10883,8 @@ pub fn run(options: Options) -> io::Result<()> {
                 }
                 if truth_places && winner_places {
                     both_place_gap += unit.count as f64
-                        * (mix_logsumexp(matrix[wi][u], matrix[wj][u])
-                            - mix_logsumexp(matrix[ti][u], matrix[tj][u]));
+                        * (mix_logsumexp(matrix.ll(wi, u), matrix.ll(wj, u))
+                            - mix_logsumexp(matrix.ll(ti, u), matrix.ll(tj, u)));
                 }
             }
         }
@@ -6562,7 +10926,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 "epsilon": epsilon,
                 "match_log_prob": scoring.a,
                 "mismatch_log_prob": scoring.b,
-                "read_length": read_len(),
+                "read_length": read_length,
                 "uniform_qualities": true,
                 "elsewhere_log_prob": elsewhere,
                 "genome_diploid_bp": genome_diploid_bp,
@@ -6576,8 +10940,19 @@ pub fn run(options: Options) -> io::Result<()> {
             "physical_members": map.members.len(),
             "class_count": pair_count,
             "class_fold_pairs": class_fold_pairs,
-            // null entries = no valid anchored placement for any unit
-            // of the class (the anchored evidence model's floor).
+            // null entries (the exhaustive form) = no valid anchored
+            // placement for any unit of the class (the anchored
+            // evidence model's floor); null entries (the labeled
+            // bounded form, stated by the -classscan-bounded model
+            // string and the gated classscan_bounded certificate
+            // member) = SKIPPED by the derived bound — the pair's
+            // exact sum sits below best + the derived exp-underflow
+            // point (its every QUAL contribution is exactly +0.0),
+            // its per-pair bound and the bound's derived
+            // rounding-error slack are emitted in the certificate,
+            // and the answers are the exhaustive run's own by the
+            // bound-plus-slack's arithmetic and the final-value
+            // tie-set rebuild (SS10.6.21, SS10.6.22).
             "class_log_likelihoods": class_lls,
             "best_log_likelihood": best_ll,
             "best_fold_indices": [winner_pair.0, winner_pair.1],
@@ -6635,14 +11010,15 @@ pub fn run(options: Options) -> io::Result<()> {
                 "examples": locality_examples,
             },
             "validation": {
+                "exactness_assert": exactness_assert,
                 "factorized_checked": factorized_checked,
                 "factorized_equal": factorized_equal,
                 "edge_discarded_placements": edge_discarded,
                 "floor_only_unit_fold": no_pin,
                 "abstained_hull_bp": abstained_hull_bp,
                 "exactness_sample_pairs": sampled.len(),
-                "exactness_valid_pairs": valid_pairs.len(),
-                "exactness_mismatch_pairs": mismatch_pairs.len(),
+                "exactness_valid_pairs": valid_len,
+                "exactness_mismatch_pairs": mismatch_len,
                 "exactness_strata": stratum_counts,
             },
             "walls": {
@@ -6687,26 +11063,44 @@ pub fn run(options: Options) -> io::Result<()> {
             // identical-LL called set), so the certificate is emitted
             // for the checker's faithful re-derivation. Territory
             // receipts only — the default receipt schema stays
-            // byte-identical. At a FULLY DEGENERATE locus (every
-            // class ties at the pure-E score) the certificate is the
-            // compact CUT-INDEX list — the band's exact <=cut
-            // predicate set, the only part of the band the cluster
-            // machinery consumes (the wall fix; the naive band
-            // matrix there is 35,510 x 35,510 distances, a ~6GB
-            // emission that breached the 64GiB guard).)
-            if degenerate {
-                report_value["qual_tied_cut_indices"] = json!(cut_index_lists
-                    .iter()
-                    .map(|(index, list)| json!([index, list]))
-                    .collect::<Vec<_>>());
-            } else {
-                report_value["qual_tied_bands"] = json!(tied_bands
-                    .iter()
-                    .map(|(index, band)| json!([index, band]))
-                    .collect::<Vec<_>>());
-            }
+            // byte-identical. THE CERTIFICATE FORM (the per-pair
+            // constant's fix, mirroring the committed degenerate
+            // precedent): the compact CUT-INDEX list at EVERY tie
+            // shape — each tied class's spectrum index and its band's
+            // exact <=cut predicate set, the only part of the band
+            // the cluster machinery consumes (the naive band matrix
+            // at the fully degenerate monsters is 35,510 x 35,510
+            // distances, a ~6GB emission that breached the 64GiB
+            // guard; at the non-degenerate fold-heavy shapes it is
+            // the |called| - 1 x |spectrum| per-pair constant the
+            // pre-merge anatomy receipted). The pre-fix
+            // non-degenerate receipts' qual_tied_bands member is
+            // replaced by this member — the answers are unchanged
+            // BY CONSTRUCTION (the oracle tests).)
+            // (THE CERTIFICATE STREAMS - the receipts-phase memory
+            // audit's Finding 1. This member is the one structure in a
+            // locus whose cardinality is (|called| - 1) x |spectrum|;
+            // at the structurally degenerate shape (called.len() ==
+            // pair_count, the equality this code already relies on for
+            // the certificate's own form) that is pair_count squared.
+            // Materializing it as a serde_json value tree cost ~32 B per
+            // entry ON TOP of the typed list's 8 B and the emitted
+            // text's ~6.5 B - three simultaneous copies, tens of GB at
+            // the pathological shape. The member is now spliced into the
+            // streamed report straight from the typed lists, so the
+            // Value never exists. A Null sentinel keeps the key in the
+            // map, which is what pins its alphabetical emission slot.
+            report_value["qual_tied_cut_indices"] = serde_json::Value::Null;
             report_buf.clear();
-            serde_json::to_writer(&mut report_buf, &report_value)?;
+            write_report_with_cut_indices(
+                &mut report_buf,
+                &report_value,
+                "qual_tied_cut_indices",
+                &cut_index_lists,
+            )?;
+            // (The tie certificate's emission cost - the Value tree plus
+            // the reserialized text - isolated against `_certificate`.)
+            rss.probe(&format!("locus_{locus}_tie_emitted"))?;
         }
         // (The alignment-connected fold relaxation's report field —
         // emitted ONLY under the relaxed rule: the merge anatomy with
@@ -6724,18 +11118,40 @@ pub fn run(options: Options) -> io::Result<()> {
                           indistinguishability: bit-identical per-unit 
                           likelihood columns and zero observed read mass on 
                           every variant pocket, or the fold does not happen",
-                "merge_groups": merge_groups.iter().map(|group| json!({
+                "merge_groups": merge_groups.iter().map(|group| {
+                    let row = match &territory_frame {
+                        Some(frame) => {
+                            let (name, start, end) = frame
+                                .local_row(
+                                    &group.representative_row.path_name,
+                                    group.representative_row.start,
+                                    group.representative_row.end,
+                                )
+                                .unwrap_or_else(|_| (
+                                    group.representative_row.path_name.clone(),
+                                    group.representative_row.start,
+                                    group.representative_row.end,
+                                ));
+                            (name, start, end)
+                        }
+                        None => (
+                            group.representative_row.path_name.clone(),
+                            group.representative_row.start,
+                            group.representative_row.end,
+                        ),
+                    };
+                    json!({
                     "fold": group.index,
                     "representative": group.representative,
                     "representative_row": {
-                        "path_name": group.representative_row.path_name,
-                        "start": group.representative_row.start,
-                        "end": group.representative_row.end,
+                        "path_name": row.0,
+                        "start": row.1,
+                        "end": row.2,
                     },
                     "members": group.members,
                     "pocket_node_mass": group.pocket_node_mass,
                     "pocket_edge_mass": group.pocket_edge_mass,
-                })).collect::<Vec<_>>(),
+                })}).collect::<Vec<_>>(),
                 "counters": {
                     "equal_column_pairs": merge_counters.equal_column_pairs,
                     "refused_outside_bubble": merge_counters.refused_outside_bubble,
@@ -6744,6 +11160,274 @@ pub fn run(options: Options) -> io::Result<()> {
                     "merged_pairs": merge_counters.merged_pairs,
                 },
                 "truth_second_correspondence": truth_second_correspondence,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
+        // (The call-core census emission — ONLY under the env
+        // instrument: the four measured work classes beside the
+        // committed walls, so the autopsy's arithmetic is
+        // checker-readable from the receipt itself. The default
+        // receipt schema stays byte-identical — the identity gate.)
+        let census_seconds = |nanos: &AtomicU64| {
+            nanos.load(Ordering::Relaxed) as f64 / 1.0e9
+        };
+        if locus_scoring_census {
+            let anchor_seconds = census_seconds(&census_anchor_ns);
+            let placement_seconds = census_seconds(&census_placement_ns);
+            let assertion_seconds = census_seconds(&census_assertion_ns);
+            let marginal_seconds = census_seconds(&census_marginal_ns);
+            let anchor_calls = census_anchor_calls.load(Ordering::Relaxed);
+            let placement_calls = census_placement_calls.load(Ordering::Relaxed);
+            let assertion_calls = census_assertion_calls.load(Ordering::Relaxed);
+            let mut report_value: serde_json::Value =
+                serde_json::from_slice(&report_buf)?;
+            report_value["scoring_census"] = json!({
+                "note": "the pair loop's four CPU-work classes, measured \n
+                         under the per-call Instant timers (env \n
+                         IMPG_LOCUS_SCORING_CENSUS; the timer's own \n
+                         overhead makes these upper bounds); anchor = the \n
+                         per-orientation pin build (anchor_correspondence + \n
+                         the merged backbone), placement = placement_score, \n
+                         assertion = the direct_score exactness check (env \n
+                         IMPG_SCORE_EXACTNESS_ASSERT; the production default \n
+                         is OFF — the receipt/gate form re-verifies every \n
+                         placement; 0.0s/0 calls when off), \n
+                         marginal = the marginalization + the row build",
+                "anchor_seconds": anchor_seconds,
+                "placement_seconds": placement_seconds,
+                "assertion_seconds": assertion_seconds,
+                "marginal_seconds": marginal_seconds,
+                "anchor_calls": anchor_calls,
+                "placement_calls": placement_calls,
+                "assertion_calls": assertion_calls,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+            eprintln!(
+                "[score] locus {locus} scoring census: anchor {anchor_seconds:.2}s \n
+                 ({anchor_calls} calls), placement {placement_seconds:.2}s \n
+                 ({placement_calls} calls), assertion {assertion_seconds:.2}s \n
+                 ({assertion_calls} calls), marginal {marginal_seconds:.2}s \n
+                 [scoring {scoring_seconds:.2}s]",
+            );
+        }
+        // (THE LOCUS-PHASE CENSUS's own receipt member — ONLY under
+        // the env: the per-phase walls beside the shape counters
+        // that price them, so the per-pair constants read off the
+        // receipt itself (the fold anatomy's OPEN term's own
+        // instrument). The default receipt schema stays
+        // byte-identical.)
+        if locus_phase_census {
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            report_value["phase_census"] = json!({
+                "note": "the per-locus phase walls and their shape \
+                         counters (env IMPG_LOCUS_PHASE_CENSUS; the \
+                         honest rung is the serial call): merge = the \
+                         alignment-connected fold-relaxation pass; \
+                         classes = the class scan (pairs x units is \
+                         the unit-pair model's term); qual_spectrum = \
+                         the winner's observed-mass spectrum (one \
+                         merged-multiset pair of walks per class \
+                         pair); qual_certificate = the tie \
+                         certificate (the cut-index-list form: \
+                         per-fold mass signatures once, O(1) \
+                         two-sided bounds per tied-class x \
+                         spectrum-entry, the exact walk as the \
+                         undecided-band fallback) — the pre-fix \
+                         receipts' qual_bands_seconds (the naive \
+                         |called|-1 x |spectrum| band matrix at \
+                         non-degenerate shapes) and \
+                         qual_degenerate_seconds are this same wall; \
+                         cluster = the cluster form; best_outside = \
+                         the bounded scan's best-outside fallback",
+                "merge_seconds": merge_seconds,
+                "merge_equal_column_pairs": merge_counters.equal_column_pairs,
+                "merge_admitted_pairs": merge_counters.merged_pairs,
+                "class_pairs": pair_count,
+                "class_units": n_units,
+                "classes_seconds": class_seconds,
+                "qual_spectrum_seconds": qual_spectrum_seconds,
+                "qual_spectrum_entries": spectrum.len(),
+                "qual_tied_list_count": phase_census_tied_list_count,
+                "qual_tied_list_entries": phase_census_tied_list_entries,
+                "qual_certificate_seconds": qual_certificate_seconds,
+                "qual_cluster_seconds": qual_cluster_seconds,
+                "best_outside_seconds": best_outside_seconds,
+                "called_class_count": called.len(),
+                "degenerate": degenerate,
+                "fold_multiset_entries_total": phase_census_fold_multiset_entries,
+                "fold_multiset_entries_max": phase_census_fold_multiset_max,
+                "scan_memo": bounded_state
+                    .as_ref()
+                    .and_then(|state| state.scan_memo.as_ref())
+                    .or(scan_memo.as_ref())
+                    .map(|memo| {
+                        json!({
+                            "note": "the bit-equal-row memoization (the \
+                                     fourth expressibility reduction; \
+                                     IMPG_CLASS_SCAN_MEMO=off restores \
+                                     the direct per-pair form): folds \
+                                     -> distinct bit-equal row classes; \
+                                     canonical_pairs = the distinct \
+                                     row-class pair sums the scan \
+                                     computes; dedup = pairs served from \
+                                     the memo; build = the canonicalization \
+                                     walk's own wall",
+                            "folds": n_folds,
+                            "distinct_rows": memo.distinct_rows,
+                            "deduplicated_rows": n_folds - memo.distinct_rows,
+                            "canonical_pairs": memo.canonical_pairs,
+                            "pairs": pair_count,
+                            "dedup_pairs": pair_count as u64 - memo.canonical_pairs,
+                            "computed_sums": memo.computed_sums.load(Ordering::Relaxed),
+                            "memo_hits": memo.memo_hits.load(Ordering::Relaxed),
+                            "build_seconds": memo.build_seconds,
+                        })
+                    }),
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+            let memo_line = bounded_state
+                .as_ref()
+                .and_then(|state| state.scan_memo.as_ref())
+                .or(scan_memo.as_ref())
+                .map(|memo| {
+                    format!(
+                        ", scan memo {}folds -> {} rows ({} dedup), \
+                         {} of {} pairs dedup ({:.1}%), {} sums computed / \
+                         {} memo hits, build {:.2}s",
+                        n_folds,
+                        memo.distinct_rows,
+                        n_folds - memo.distinct_rows,
+                        pair_count as u64 - memo.canonical_pairs,
+                        pair_count,
+                        100.0 * (pair_count as u64 - memo.canonical_pairs) as f64
+                            / pair_count as f64,
+                        memo.computed_sums.load(Ordering::Relaxed),
+                        memo.memo_hits.load(Ordering::Relaxed),
+                        memo.build_seconds,
+                    )
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "[score] locus {locus} phase census: merge {merge_seconds:.2}s \
+                 ({} eq-col pairs, {} admitted), classes {class_seconds:.2}s \
+                 ({pair_count} pairs x {n_units} units), qual spectrum \
+                 {qual_spectrum_seconds:.2}s ({} entries), tie certificate \
+                 {qual_certificate_seconds:.2}s ({phase_census_tied_list_count} lists x \
+                 {phase_census_tied_list_entries} predicate entries), cluster \
+                 {qual_cluster_seconds:.2}s, \
+                 best-outside {best_outside_seconds:.2}s, called {}, fold \
+                 multiset entries {} total / {} max{memo_line}",
+                merge_counters.equal_column_pairs,
+                merge_counters.merged_pairs,
+                spectrum.len(),
+                called.len(),
+                phase_census_fold_multiset_entries,
+                phase_census_fold_multiset_max,
+            );
+        }
+        // (THE FOLD-SET DIGEST's own receipt member — ONLY under the
+        // env: FNV-1a over the FINAL fold space's ordered identities
+        // (per fold, in fold order: the length as u64 LE bytes, then
+        // each member row's path-name bytes, start and end as u64 LE
+        // bytes) — exactly the fold_identities fields, in that order,
+        // so the digest is recomputable from any committed receipt
+        // and the fold-set bit-identity gate compares two digest
+        // lines, never two fold trees on disk.)
+        if fold_set_digest {
+            let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut feed = |bytes: &[u8], digest: &mut u64| {
+                for &byte in bytes {
+                    *digest ^= byte as u64;
+                    *digest = digest.wrapping_mul(0x100_0000_01b3);
+                }
+            };
+            for fold in folds.iter() {
+                feed(&fold.len.to_le_bytes(), &mut digest);
+                for member in &fold.members {
+                    feed(member.path_name.as_bytes(), &mut digest);
+                    feed(&member.start.to_le_bytes(), &mut digest);
+                    feed(&member.end.to_le_bytes(), &mut digest);
+                }
+            }
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            report_value["fold_set_digest"] = json!({
+                "folds": folds.len(),
+                "digest": format!("{digest:016x}"),
+                "note": "FNV-1a over the final fold space's ordered \
+                         identities: per fold, in fold order, the \
+                         length then each member row's (path_name, \
+                         start, end), all integers u64 little-endian — \
+                         the fold_identities fields in that order",
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
+        // (The class-scan order's own receipt member — ONLY under the
+        // fast mode or the compare instrument: the accumulation mode
+        // and the measured float deltas, so a fast-mode receipt
+        // states what it is. The default receipt schema stays
+        // byte-identical.)
+        if sparse_skip || class_scan_compare {
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            report_value["class_scan"] = json!({
+                "order": if sparse_skip { "sparse-skip" } else { "exact" },
+                "note": "the accumulation-order toggle (the owner's Ruling 3): \
+                         exact = the committed unit-order accumulation; \
+                         sparse-skip = the constant entries (units unpinned \
+                         on both folds) return as one elsewhere*mass term — \
+                         the float accumulation CHANGES, deltas named here",
+                "compare_pairs": compare_pairs.load(Ordering::Relaxed),
+                "compare_pairs_differing": compare_diff.load(Ordering::Relaxed),
+                "compare_max_ulp": compare_max_ulp.load(Ordering::Relaxed),
+                "constant_unit_pairs_skipped": compare_skipped.load(Ordering::Relaxed),
+                "classes_seconds": class_seconds,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
+        // (THE SANCTIONED BOUNDED CLASS SCAN's own receipt member —
+        // ONLY under the bounded mode (the sparse-skip precedent:
+        // the exhaustive receipt schema stays byte-identical; the
+        // labeled bounded form states its own skip certificate —
+        // the kept/skipped counts, stage one's wall, the derived
+        // threshold, and the per-pair bounds E*C + A_f + A_g, so a
+        // bounded receipt can never be mistaken for an exhaustive
+        // one and every skip is auditable offline.)
+        if let Some(bounded) = bounded_state.as_ref() {
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            let known = bounded
+                .computed
+                .iter()
+                .filter(|value| value.is_some())
+                .count();
+            report_value["classscan_bounded"] = json!({
+                "kept_pairs": known,
+                "skipped_pairs": pair_count - known,
+                "stage_one_seconds": bounded.stage_one_seconds,
+                "stage_one_best": bounded.best,
+                "exp_underflow_point": exp_underflow_point(),
+                "keep_threshold": bounded_keep_threshold(
+                    bounded.best,
+                    truth_log_likelihood,
+                ),
+                "pair_bounds": bounded.pair_bounds.clone(),
+                "pair_slack": bounded.pair_slack.clone(),
+                "note": "the labeled bounded class scan (the sanctioned \
+                         frontier-1 mode): class_log_likelihoods is the exact \
+                         committed sum at kept pairs and null at skipped ones; \
+                         pair_bounds carries E*C + A_f + A_g per pair and \
+                         pair_slack each bound's own derived rounding-error \
+                         term (every skip comparison consumes bound + slack — \
+                         the bound's f64 evaluation can round below the exact \
+                         unit-order sum, the receipted 12-ulp class at T03226 \
+                         locus 16); the emitted called set is rebuilt from the \
+                         final class_lls (the tie-set fix); every answer (the \
+                         MAP pair, the called set, the QUAL terms, the truth \
+                         fields, the best-outside rival) is the exhaustive \
+                         run's own (SS10.6.21, SS10.6.22)",
             });
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
@@ -6784,21 +11468,42 @@ pub fn run(options: Options) -> io::Result<()> {
         // QUAL and the E/alternative-gap fields — truth-free; the
         // instrument receipt above is unchanged, and this record is
         // emitted ONLY when --product-calls is given).
+        // (THE FRAME BACK-TRANSLATION, the global-panel call mode: the
+        // product rows are emitted in the PARTITION'S OWN frame — the
+        // committed reference-anchored output shape — via the inverse
+        // record table; the machinery's global rows translate back
+        // fail-closed. Under the default frame this is the identity.)
         if product_emission {
-            let product_fold = |index: usize| {
+            let product_fold = |index: usize| -> io::Result<serde_json::Value> {
                 let (image_lo, image_hi) = territory[index];
-                json!({
+                let members: Vec<serde_json::Value> = folds[index]
+                    .members
+                    .iter()
+                    .map(|m| match &territory_frame {
+                        Some(frame) => {
+                            let (name, start, end) =
+                                frame.local_row(&m.path_name, m.start, m.end)?;
+                            Ok(json!({
+                                "path_name": name, "start": start, "end": end,
+                            }))
+                        }
+                        None => Ok(json!({
+                            "path_name": m.path_name, "start": m.start, "end": m.end,
+                        })),
+                    })
+                    .collect::<io::Result<Vec<_>>>()?;
+                // (The territory image is FOLD-RELATIVE — the same
+                // extent in either frame; no translation.)
+                Ok(json!({
                     "fold_index": index,
-                    "members": folds[index].members.iter().map(|m| json!({
-                        "path_name": m.path_name, "start": m.start, "end": m.end,
-                    })).collect::<Vec<_>>(),
+                    "members": members,
                     "length": folds[index].len,
                     "territory_image": if image_hi > image_lo {
                         json!([image_lo, image_hi])
                     } else {
                         serde_json::Value::Null
                     },
-                })
+                }))
             };
             let (winner_first, winner_second) = winner_pair;
             // THE MODEL-INTERNAL QUAL (the owner's cluster semantics,
@@ -6850,7 +11555,7 @@ pub fn run(options: Options) -> io::Result<()> {
                     "model": model_name,
                     "diplotype": {
                         "fold_indices": [winner_first, winner_second],
-                        "paths": [product_fold(winner_first), product_fold(winner_second)],
+                        "paths": [product_fold(winner_first)?, product_fold(winner_second)?],
                     },
                     "class_count": pair_count,
                     "called_class_count": called.len(),
@@ -6887,6 +11592,31 @@ pub fn run(options: Options) -> io::Result<()> {
                      --exclude-paths (the stranger filter; the axis row kept as the frame)"
                 );
             }
+            if flank_excluded_rows > 0 {
+                if let Some(object) = product_value.as_object_mut() {
+                    object.insert(
+                        "flank_excluded_rows".to_string(),
+                        json!(flank_excluded_rows),
+                    );
+                    object.insert(
+                        "flank_overlap".to_string(),
+                        json!(options
+                            .flank_overlap
+                            .map(|f| f.setting())
+                            .unwrap_or_default()),
+                    );
+                }
+                eprintln!(
+                    "[score] locus {locus} (partition {partition}): {flank_excluded_rows} \
+                     fragmentary candidate rows excluded by --flank-overlap {} \
+                     (missing a flank of [{axis_start}, {axis_end}); the axis row kept \
+                     as the frame)",
+                    options
+                        .flank_overlap
+                        .map(|f| f.setting())
+                        .unwrap_or_default()
+                );
+            }
             serde_json::to_writer(&mut product_buf, &product_value)?;
             // The receipt's own serialization convention, mirrored
             // exactly: under the territory/locality conventions the
@@ -6919,11 +11649,25 @@ pub fn run(options: Options) -> io::Result<()> {
             // no truth name, alignment or QV field enters here.
             if options.product_sequences {
                 let fold_record = |index: usize| -> io::Result<serde_json::Value> {
+                    let members: Vec<serde_json::Value> = folds[index]
+                        .members
+                        .iter()
+                        .map(|m| match &territory_frame {
+                            Some(frame) => {
+                                let (name, start, end) =
+                                    frame.local_row(&m.path_name, m.start, m.end)?;
+                                Ok(json!({
+                                    "path_name": name, "start": start, "end": end,
+                                }))
+                            }
+                            None => Ok(json!({
+                                "path_name": m.path_name, "start": m.start, "end": m.end,
+                            })),
+                        })
+                        .collect::<io::Result<Vec<_>>>()?;
                     Ok(json!({
                         "fold_index": index,
-                        "members": folds[index].members.iter().map(|m| json!({
-                            "path_name": m.path_name, "start": m.start, "end": m.end,
-                        })).collect::<Vec<_>>(),
+                        "members": members,
                         "length": folds[index].len,
                         "sequence": fold_sequence_string(&folds[index].seq)?,
                     }))
@@ -7148,7 +11892,7 @@ pub fn run(options: Options) -> io::Result<()> {
             skeleton: skeleton_buf,
             exactness: exactness_buf,
             records: records_buf,
-            ingredients: ingredients_buf,
+            ingredients_spill: ingredients_spill_path,
             report: report_buf,
             anatomy: anatomy_buf,
             product: product_buf,
@@ -7159,13 +11903,24 @@ pub fn run(options: Options) -> io::Result<()> {
             locus_seconds,
         })
     };
-    let outputs: Vec<LocusOutput> = if seam_parallel {
-        seam_map(&loci, seam_width, &|&locus| compute_locus(locus))?
+    let outputs: Vec<LocusOutput> = match if seam_parallel {
+        seam_map(&loci, seam_width, &|&locus| compute_locus(locus))
     } else {
         loci
             .iter()
             .map(|&locus| compute_locus(locus))
-            .collect::<io::Result<Vec<_>>>()?
+            .collect::<io::Result<Vec<_>>>()
+    } {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            // (A failed locus may have left its ingredients spill
+            // behind; the run is failing — remove the spills.)
+            for &locus in &loci {
+                let _ =
+                    std::fs::remove_file(ingredients_spill_path(&options.out, locus));
+            }
+            return Err(error);
+        }
     };
     // The ordered emission: the per-locus buffers are written in LOCUS
     // ORDER — the receipt line order of the committed serial runs.
@@ -7175,7 +11930,12 @@ pub fn run(options: Options) -> io::Result<()> {
         }
         exactness.write_all(&output.exactness)?;
         records_file.write_all(&output.records)?;
-        ingredients.write_all(&output.ingredients)?;
+        // (Candidate C: stream the locus's ingredients spill into the
+        // ordered file — identical bytes to the committed buffered
+        // write — then remove the spill.)
+        let spill = File::open(&output.ingredients_spill)?;
+        std::io::copy(&mut BufReader::new(spill), &mut ingredients)?;
+        std::fs::remove_file(&output.ingredients_spill)?;
         report.write_all(&output.report)?;
         if let Some(writer) = product_calls.as_mut() {
             writer.write_all(&output.product)?;
@@ -7443,10 +12203,13 @@ mod tests {
         // full extent) — and an image shorter than the read has no
         // support at all.
         let a = 0.0f64;
-        let full = unit_log_likelihood(&[a], 200);
-        let image = unit_log_likelihood(&[a], 150);
+        let full = unit_log_likelihood(&[a], 200, READ_LENGTH_FRESH);
+        let image = unit_log_likelihood(&[a], 150, READ_LENGTH_FRESH);
         assert!(full < image); // the smaller support carries the larger prior
-        assert_eq!(unit_log_likelihood(&[a], 149), f64::NEG_INFINITY);
+        assert_eq!(
+            unit_log_likelihood(&[a], 149, READ_LENGTH_FRESH),
+            f64::NEG_INFINITY,
+        );
     }
 
     #[test]
@@ -7466,16 +12229,22 @@ mod tests {
     #[test]
     fn unit_likelihood_is_prior_plus_logsumexp() {
         // No placements: the anchored floor.
-        assert_eq!(unit_log_likelihood(&[], 200), f64::NEG_INFINITY);
-        assert_eq!(unit_log_likelihood(&[0.0], 100), f64::NEG_INFINITY);
+        assert_eq!(
+            unit_log_likelihood(&[], 200, READ_LENGTH_FRESH),
+            f64::NEG_INFINITY,
+        );
+        assert_eq!(
+            unit_log_likelihood(&[0.0], 100, READ_LENGTH_FRESH),
+            f64::NEG_INFINITY,
+        );
         let a = -3.0f64;
         let b = -5.0f64;
-        let ll = unit_log_likelihood(&[a, b], 200);
+        let ll = unit_log_likelihood(&[a, b], 200, READ_LENGTH_FRESH);
         let expect = -(2.0 * (200 - 149) as f64).ln() + (a.exp() + b.exp()).ln();
         assert!((ll - expect).abs() < 1e-12);
         // Bit-exact when the placements are equal (the identical-fold
         // case): the sum is the placement plus ln 2.
-        let ll = unit_log_likelihood(&[a, a], 200);
+        let ll = unit_log_likelihood(&[a, a], 200, READ_LENGTH_FRESH);
         let expect = -(2.0 * (200 - 149) as f64).ln() + (2.0 * a.exp()).ln();
         assert!((ll - expect).abs() < 1e-12);
     }
@@ -7796,7 +12565,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let tiered = degenerate_cut_lists(
+            let tiered = tied_class_cut_lists(
                 &folds, &called, &spectrum, &node_fn, &edge_fn, cut,
             );
             assert_eq!(tiered, oracle_cut_lists, "case {case}: predicate sets differ");
@@ -7948,7 +12717,7 @@ mod tests {
                 )
             })
             .collect();
-        let tiered = degenerate_cut_lists(&folds, &called, &spectrum, &node_fn, &edge_fn, cut);
+        let tiered = tied_class_cut_lists(&folds, &called, &spectrum, &node_fn, &edge_fn, cut);
         assert_eq!(tiered, oracle_cut_lists, "monster shape: predicate sets differ");
         let pairs: Vec<(f64, f64)> = spectrum
             .iter()
@@ -7962,6 +12731,179 @@ mod tests {
         assert_eq!(state_lists.excluded, state_bands.excluded);
         assert_eq!(state_lists.p, state_bands.p);
         assert!(started.elapsed().as_secs() < 60, "the liveness bound");
+    }
+    #[test]
+    fn the_non_degenerate_tie_certificate_matches_the_naive_band_oracle() {
+        // THE PER-PAIR CONSTANT'S OWN EXACTNESS GATE (the fold-merge
+        // open term's fix): the NON-degenerate tie certificate — a
+        // STRICT tie subset (called.len() > 1 but called.len() <
+        // pair_count, the fold-heavy shapes' uncollapsed tie sets;
+        // the pre-fix naive path materialized |called| - 1 bands x
+        // |spectrum| distances there) — against a VERBATIM copy of
+        // the pre-fix naive band matrix. Randomized folds and observed
+        // maps; the naive path materializes every band and derives
+        // its <=cut predicate set; the cut-index path (per-fold mass
+        // signatures computed once, O(1) two-sided bounds per entry,
+        // the exact walk as the undecided-band fallback) must emit the
+        // IDENTICAL predicate set and drive cluster_form_qual to the
+        // IDENTICAL state (k, excluded, alternative, cluster_size,
+        // cut, shape, p) — the bounds are exact-deciding, never
+        // approximating, and the fallback computes the very distance
+        // the band would have carried.
+        let mut seed = 0x5eed_5678u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for case in 0..4000 {
+            let n_folds = 3 + (next() % 10) as usize; // 3..=12 folds
+            let pair_count = n_folds * (n_folds + 1) / 2;
+            let folds: Vec<Fold> = (0..n_folds)
+                .map(|_| {
+                    let mut nodes: Vec<(u64, u32)> = (0..(next() % 8))
+                        .map(|_| (1 + (next() % 30) as u64, 1 + next() % 3))
+                        .collect();
+                    nodes.sort_unstable();
+                    nodes.dedup_by(|a, b| {
+                        if a.0 == b.0 {
+                            b.1 += a.1;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    let mut edges: Vec<(u64, u32)> = (0..(next() % 6))
+                        .map(|_| (1000 + (next() % 30) as u64, 1 + next() % 2))
+                        .collect();
+                    edges.sort_unstable();
+                    edges.dedup_by(|a, b| {
+                        if a.0 == b.0 {
+                            b.1 += a.1;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    Fold {
+                        seq: vec![],
+                        len: 0,
+                        walk: vec![],
+                        node_positions: HashMap::new(),
+                        members: vec![],
+                        nodes,
+                        edges,
+                    }
+                })
+                .collect();
+            let observed_node: HashMap<u64, f64> = (0..9)
+                .map(|_| (1 + (next() % 34) as u64, (next() % 97) as f64))
+                .collect();
+            let observed_edge: HashMap<u64, f64> = (0..7)
+                .map(|_| (1000 + (next() % 34) as u64, (next() % 89) as f64))
+                .collect();
+            let node_fn = |key: u64| observed_node.get(&key).copied().unwrap_or(0.0);
+            let edge_fn = |key: u64| observed_edge.get(&key).copied().unwrap_or(0.0);
+            // THE NON-DEGENERATE SHAPE: the winner is the flat-order
+            // first pair (the exhaustive scan's own convention) and
+            // the tie set is a STRICT random subset of the remaining
+            // pairs (2..=pair_count - 1 members — always a proper
+            // subset, never the full degenerate class).
+            let winner = unrank_pair(0);
+            let remaining: Vec<(usize, usize)> = (1..pair_count).map(unrank_pair).collect();
+            let tie_count = 1 + (next() as usize % (remaining.len() - 1));
+            let mut called: Vec<(usize, usize)> = vec![winner];
+            let mut pool = remaining.clone();
+            for _ in 0..tie_count {
+                let pick = (next() as usize) % pool.len();
+                called.push(pool.swap_remove(pick));
+            }
+            assert!(called.len() > 1 && called.len() < pair_count);
+            let (winner_first, winner_second) = called[0];
+            let winner_nodes =
+                merged_multiset(&folds[winner_first].nodes, &folds[winner_second].nodes);
+            let winner_edges =
+                merged_multiset(&folds[winner_first].edges, &folds[winner_second].edges);
+            let mut spectrum: Vec<(f64, f64, f64, usize, usize, usize)> = (0..pair_count)
+                .filter_map(|flat| {
+                    let (first, second) = unrank_pair(flat);
+                    if first == winner_first && second == winner_second {
+                        return None;
+                    }
+                    let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+                    let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+                    let distance =
+                        differing_observed_mass(&nodes, &winner_nodes, &node_fn)
+                            + differing_observed_mass(&edges, &winner_edges, &edge_fn);
+                    let signature = signature_cosine_distance(
+                        &nodes, &edges, &winner_nodes, &winner_edges,
+                    );
+                    Some((distance, 1.0, signature, first, second, flat))
+                })
+                .collect();
+            spectrum
+                .sort_by(|a, b| a.partial_cmp(b).expect("finite spectrum entries"));
+            let mut sorted: Vec<f64> =
+                spectrum.iter().map(|&(distance, ..)| distance).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
+            let cut = spectrum_knee(&sorted).cut;
+            // The VERBATIM naive oracle (the pre-fix NON-degenerate
+            // band construction, kept here as the test's oracle).
+            let mut oracle_bands: Vec<(usize, Vec<f64>)> = Vec::new();
+            for &(first, second) in called.iter().skip(1) {
+                let index = spectrum
+                    .iter()
+                    .position(|&(_, _, _, a, b, _)| a == first && b == second)
+                    .expect("called class missing from the winner's spectrum");
+                let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+                let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+                let band: Vec<f64> = spectrum
+                    .iter()
+                    .map(|&(_, _, _, other_first, other_second, _)| {
+                        let other_nodes =
+                            merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
+                        let other_edges =
+                            merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
+                        differing_observed_mass(&nodes, &other_nodes, &node_fn)
+                            + differing_observed_mass(&edges, &other_edges, &edge_fn)
+                    })
+                    .collect();
+                oracle_bands.push((index, band));
+            }
+            let oracle_cut_lists: Vec<(usize, Vec<usize>)> = oracle_bands
+                .iter()
+                .map(|(index, band)| {
+                    (
+                        *index,
+                        band.iter()
+                            .enumerate()
+                            .filter(|&(_, &distance)| distance <= cut)
+                            .map(|(position, _)| position)
+                            .collect(),
+                    )
+                })
+                .collect();
+            let tiered = tied_class_cut_lists(
+                &folds, &called, &spectrum, &node_fn, &edge_fn, cut,
+            );
+            assert_eq!(tiered, oracle_cut_lists, "case {case}: predicate sets differ");
+            let pairs: Vec<(f64, f64)> = spectrum
+                .iter()
+                .map(|&(distance, score, ..)| (distance, score))
+                .collect();
+            let state_bands =
+                cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
+            let state_lists =
+                cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+            assert_eq!(state_lists.k, state_bands.k, "case {case}: k differs");
+            assert_eq!(state_lists.excluded, state_bands.excluded, "case {case}: excluded differs");
+            assert_eq!(state_lists.alternative, state_bands.alternative, "case {case}: alternative differs");
+            assert_eq!(state_lists.cluster_size, state_bands.cluster_size, "case {case}: cluster_size differs");
+            assert_eq!(state_lists.cut, state_bands.cut, "case {case}: cut differs");
+            assert_eq!(state_lists.shape, state_bands.shape, "case {case}: shape differs");
+            assert_eq!(state_lists.p, state_bands.p, "case {case}: p differs");
+        }
     }
     #[test]
     fn canonical_scheme_selects_per_window_form() {
@@ -8339,6 +13281,374 @@ mod tests {
     }
 
     #[test]
+    fn score_matrix_row_compression_is_value_identical() {
+        // Candidate C's exactness proof, at the accessor level: the
+        // compressed rows return the dense form's own bits at every
+        // probe, the pinned enumeration is the dense filter's own
+        // order, the class scan's accumulation is bit-for-bit the
+        // committed dense loop's, the merge's predicates agree with
+        // the dense bit comparisons, and the streamed JSON is the
+        // committed serde bytes — for BOTH row encodings and across
+        // encodings (a dense row and a sparse row holding the same
+        // values must hash and compare equal).
+        let elsewhere = -14.418156f64;
+        // (folds x units, the pinned fraction) cases: a no-pin-heavy
+        // row (takes Sparse), a pinned-heavy row (takes Dense), and
+        // an all-no-pin row.
+        let shapes = [(6usize, 40usize, 0.1f64), (6, 40, 0.9), (6, 40, 0.0)];
+        for (n_folds, n_units, pinned_fraction) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                // a deterministic pattern: every k-th unit pins
+                let stride = ((pinned_fraction * n_units as f64).round() as usize)
+                    .max(1);
+                for unit in (fold..n_units).step_by(stride.max(1)) {
+                    pin[unit] = true;
+                    row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                    mism[unit] = (unit % 7) as u32;
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense.clone(), pinned.clone(), mismatches.clone(), elsewhere);
+            // every probe equals the dense form's own value
+            for fold in 0..n_folds {
+                for unit in 0..n_units {
+                    assert_eq!(matrix.ll(fold, unit).to_bits(), dense[fold][unit].to_bits());
+                    assert_eq!(matrix.pinned(fold, unit), pinned[fold][unit]);
+                    assert_eq!(matrix.mismatches(fold, unit), mismatches[fold][unit]);
+                }
+                // the pinned enumeration is the dense filter's order
+                let dense_order: Vec<(usize, u32)> = (0..n_units)
+                    .filter(|&u| pinned[fold][u])
+                    .map(|u| (u, mismatches[fold][u]))
+                    .collect();
+                assert_eq!(matrix.pinned_units(fold).collect::<Vec<_>>(), dense_order);
+            }
+            // the encoding choice: sparse iff 16B/pinned < 13B/unit
+            for fold in 0..n_folds {
+                let pinned_count = pinned[fold].iter().filter(|&&p| p).count();
+                let expected_sparse = (16 * pinned_count as u64) < (13 * n_units as u64);
+                let is_sparse = matches!(matrix.rows[fold], ScoreRow::Sparse(_));
+                assert_eq!(
+                    is_sparse, expected_sparse,
+                    "the derived encoding choice, fold {fold}"
+                );
+            }
+            // the class scan: bit-for-bit the committed dense loop
+            let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+            for first in 0..n_folds {
+                for second in first..n_folds {
+                    let mut committed = 0.0f64;
+                    for (u, &count) in counts.iter().enumerate() {
+                        committed +=
+                            count * mix_logsumexp(dense[first][u], dense[second][u]);
+                    }
+                    assert_eq!(
+                        matrix.class_pair_sum(first, second, &counts).to_bits(),
+                        committed.to_bits(),
+                        "the class pair sum, ({first},{second})"
+                    );
+                }
+            }
+            // the merge predicates: equal columns bit-equal and
+            // hash-equal (across encodings too)
+            let mut clone = dense[0].clone();
+            clone[3] = f64::from_bits(elsewhere.to_bits() + 1); // ONE ULP
+            let matrix2 = ScoreMatrix::from_dense(
+                vec![dense[0].clone(), clone, dense[0].clone()],
+                vec![pinned[0].clone(), pinned[0].clone(), pinned[0].clone()],
+                vec![mismatches[0].clone(); 3],
+                elsewhere,
+            );
+            assert!(matrix2.ll_bits_equal(0, 2));
+            assert!(!matrix2.ll_bits_equal(0, 1));
+            assert_eq!(matrix2.ll_bits_hash(0), matrix2.ll_bits_hash(2));
+            // the streamed JSON is the committed serde bytes
+            let mut streamed = Vec::new();
+            matrix.write_ll_matrix_json(&mut streamed).unwrap();
+            assert_eq!(streamed, serde_json::to_vec(&dense).unwrap());
+        }
+    }
+
+    #[test]
+    fn class_scan_sparse_skip_union_walk() {
+        // THE OWNER'S RULING 3's own exactness proof, at the scan
+        // level: the sparse-skip form walks exactly the UNION of
+        // the two rows' pinned units (the skipped count is the
+        // brute-force complement), and its sum is BIT-IDENTICAL to
+        // the committed accumulation whenever the union covers
+        // every unit (the constant-mass term is exactly zero); when
+        // constant entries are skipped, the regrouped accumulation
+        // is allowed its named small ulp delta (never more than a
+        // few ulps at this toy scale) — the delta is the honest
+        // cost of the fast mode, measured not hidden.
+        let elsewhere = -14.418156f64;
+        // ulp_distance's own contract: equal bits are 0, adjacent
+        // floats are 1.
+        assert_eq!(ulp_distance(1.0, 1.0), 0);
+        assert_eq!(
+            ulp_distance(f64::from_bits(1.0f64.to_bits() + 1), 1.0),
+            1
+        );
+        // (folds x units, the pin STRIDE; 0 = no pins) shapes: a
+        // no-pin-heavy row (Sparse encoding), a mid row (Sparse), a
+        // pinned-heavy row (Dense encoding — exercises the built-list
+        // path), and an all-no-pin row.
+        let shapes = [(5usize, 40usize, 8usize), (5, 40, 2), (5, 40, 1), (5, 40, 0)];
+        for (n_folds, n_units, pin_stride) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                if pin_stride > 0 {
+                    for unit in (fold..n_units).step_by(pin_stride) {
+                        pin[unit] = true;
+                        row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                        mism[unit] = (unit % 7) as u32;
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix = ScoreMatrix::from_dense(
+                dense.clone(),
+                pinned.clone(),
+                mismatches.clone(),
+                elsewhere,
+            );
+            let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+            let fast = ClassScanFastIndex::build(&matrix, &counts);
+            for first in 0..n_folds {
+                for second in first..n_folds {
+                    // the skipped count is the brute-force complement
+                    let brute_union = (0..n_units)
+                        .filter(|&u| pinned[first][u] || pinned[second][u])
+                        .count();
+                    assert_eq!(
+                        fast.constant_units_skipped(first, second),
+                        (n_units - brute_union) as u64,
+                        "the union walk's skipped count, ({first},{second})"
+                    );
+                    let exact = matrix.class_pair_sum(first, second, &counts);
+                    let fast_sum = fast.class_pair_sum(first, second, &counts);
+                    if brute_union == n_units {
+                        assert_eq!(
+                            fast_sum.to_bits(),
+                            exact.to_bits(),
+                            "full-union pair bit-identical, ({first},{second})"
+                        );
+                    } else {
+                        assert!(
+                            ulp_distance(exact, fast_sum) <= 64,
+                            "the named delta is small at toy scale: \
+                             ({first},{second}) {} ulps",
+                            ulp_distance(exact, fast_sum)
+                        );
+                        assert!(
+                            (fast_sum - exact).abs() <= 1e-12 * exact.abs().max(1.0),
+                            "the named delta is a rounding-scale effect"
+                        );
+                    }
+                }
+            }
+            // the all-no-pin pair: the fast sum is exactly the one
+            // constant term elsewhere * total_count.
+            if pin_stride == 0 {
+                let total_count: f64 = counts.iter().sum();
+                for first in 0..n_folds {
+                    assert_eq!(
+                        fast.class_pair_sum(first, first, &counts).to_bits(),
+                        (elsewhere * total_count).to_bits(),
+                        "the all-no-pin pair's single-term form"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "the marathon worst-locus shape receipt (a ~3GB build; run explicitly)"]
+    fn marathon_worst_locus_shape_memory_receipt() {
+        // The profiled worst-locus shape (SS10.6.3's roster, T03803:
+        // 532 folds x 4,438,575 units, 2.1% pinned pairs) built as
+        // the compressed matrix, with the RSS delta measured from
+        // /proc/self/status — the memory bound receipt. The dense
+        // form's 13 B/pair (30.7GB) is exact arithmetic, never built.
+        fn vm_rss_kb() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .and_then(|line| {
+                    line.split_whitespace().nth(1).and_then(|n| n.parse().ok())
+                })
+                .unwrap_or(0)
+        }
+        let (n_folds, n_units, pinned_stride) = (532usize, 4_438_575usize, 48usize);
+        let elsewhere = -14.418156f64;
+        let before = vm_rss_kb();
+        let mut rows = Vec::with_capacity(n_folds);
+        for fold in 0..n_folds {
+            // a sparse row at the roster's own pinned share: every
+            // 48th unit pins (~2.1%)
+            let mut units = Vec::new();
+            let mut lls = Vec::new();
+            let mut mism = Vec::new();
+            let mut unit = fold % pinned_stride;
+            while unit < n_units {
+                units.push(unit as u32);
+                lls.push(elsewhere + (unit % 977) as f64 * 1e-6);
+                mism.push((unit % 7) as u32);
+                unit += pinned_stride;
+            }
+            rows.push(ScoreRow::Sparse(ScoreRowSparse {
+                units,
+                lls,
+                mismatches: mism,
+            }));
+        }
+        let matrix = ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows,
+        };
+        let after = vm_rss_kb();
+        let live = matrix.live_bytes();
+        let pairs = n_folds as u64 * n_units as u64;
+        let dense_bytes = pairs * 13;
+        eprintln!(
+            "marathon shape T03803: {} folds x {} units = {} pairs; \\
+             compressed live {} MB ({:.2} B/pair); the dense form's \\
+             bound {} MB (13 B/pair); RSS delta {} MB; collapse {:.1}x",
+            n_folds,
+            n_units,
+            pairs,
+            live / (1024 * 1024),
+            live as f64 / pairs as f64,
+            dense_bytes / (1024 * 1024),
+            (after.saturating_sub(before)) / 1024,
+            dense_bytes as f64 / live as f64,
+        );
+        // the bound: the compressed form is a small fraction of the
+        // dense 13 B/pair at the roster's own no-pin share, and the
+        // measured RSS delta is the live bytes' own magnitude class
+        // (allocator overhead included).
+        assert!(live * 20 < dense_bytes, "the compression bound");
+        assert!(
+            (after.saturating_sub(before)) * 1024 < live * 3,
+            "the RSS delta is the live bytes' class"
+        );
+        // the pinned-majority control (T03641's class, 84% pinned):
+        // the DERIVED choice keeps the committed dense size EXACTLY
+        // (never larger) — 16 B/pinned >= 13 B/unit chooses dense.
+        let pinned_majority = 0.85 * n_units as f64;
+        assert!((16.0 * pinned_majority) >= (13.0 * n_units as f64));
+    }
+
+    #[test]
+    #[ignore = "the marathon core scan-wall receipt at the profiled worst-locus shape (~1-2 min on a 64-thread pool; run explicitly)"]
+    fn marathon_worst_locus_shape_scan_wall_receipt() {
+        // THE MARATHON RE-RECEIPT'S MEASURABLE PART (SS10.6.3's
+        // profile: the marathon substrates are reaped, so the full
+        // marathon wall is NOT re-receiptable — this receipts what the
+        // profiled worst-locus shape can still exercise, and names
+        // what it cannot): the scoring core's own scan walls at the
+        // T03803 shape (532 folds x 4,438,575 units, the roster's own
+        // ~2.1% pinned share, sparse rows — candidate C's compressed
+        // form), measured on this test's rayon pool:
+        //   (a) the merge's equal-column hash pass (ll_bits_hash over
+        //       every row — the bucketing key of the committed
+        //       merge),
+        //   (b) the exhaustive class scan (every fold pair's
+        //       class_pair_sum — the committed accumulation verbatim),
+        // both as ns per (fold, unit) pair walked. NOT measured here,
+        // because the reaped substrates carried them: the pair loop's
+        // PINNED alignment class (records + reads), the bind phase,
+        // the records/census phases — no marathon wall number is
+        // claimed from this receipt, only the scan-core rates.
+        let (n_folds, n_units, pinned_stride) = (532usize, 4_438_575usize, 48usize);
+        let elsewhere = -14.418156f64;
+        let mut rows = Vec::with_capacity(n_folds);
+        for fold in 0..n_folds {
+            let mut units = Vec::new();
+            let mut lls = Vec::new();
+            let mut mism = Vec::new();
+            let mut unit = fold % pinned_stride;
+            while unit < n_units {
+                units.push(unit as u32);
+                lls.push(elsewhere + (unit % 977) as f64 * 1e-6);
+                mism.push((unit % 7) as u32);
+                unit += pinned_stride;
+            }
+            rows.push(ScoreRow::Sparse(ScoreRowSparse {
+                units,
+                lls,
+                mismatches: mism,
+            }));
+        }
+        let matrix = ScoreMatrix {
+            n_units,
+            elsewhere,
+            rows,
+        };
+        // (a) the merge's hash pass.
+        let hash_started = std::time::Instant::now();
+        let mut hash_sum: u64 = 0;
+        for fold in 0..n_folds {
+            hash_sum ^= matrix.ll_bits_hash(fold);
+        }
+        let hash_seconds = hash_started.elapsed().as_secs_f64();
+        // (b) the exhaustive class scan, the committed shape: every
+        // fold pair, unit counts all 1.0 (the synthetic shape carries
+        // no real read mass; the count is one FMA per unit and does
+        // not change the rate).
+        let unit_counts: Vec<f64> = vec![1.0; n_units];
+        let pair_count = n_folds * (n_folds + 1) / 2;
+        let scan_started = std::time::Instant::now();
+        let class_lls: Vec<f64> = (0..pair_count)
+            .into_par_iter()
+            .map(|flat| {
+                let (first, second) = unrank_pair(flat);
+                matrix.class_pair_sum(first, second, &unit_counts)
+            })
+            .collect();
+        let scan_seconds = scan_started.elapsed().as_secs_f64();
+        let walked = n_folds as u64 * n_units as u64;
+        let scanned_pairs = pair_count as u64 * n_units as u64;
+        let best = class_lls.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        eprintln!(
+            "marathon shape T03803 scan-wall receipt: merge hash pass \
+             {} rows in {:.1}s = {:.2} ns/(fold,unit); class scan \
+             {} pairs x {} units = {:.3}e12 unit-pairs in {:.1}s \
+             ({} threads) = {:.2} ns/unit-pair; best class ll {:.3}",
+            n_folds,
+            hash_seconds,
+            hash_seconds * 1e9 / walked as f64,
+            pair_count,
+            n_units,
+            scanned_pairs as f64 / 1e12,
+            scan_seconds,
+            rayon::current_num_threads(),
+            scan_seconds * 1e9 / scanned_pairs as f64,
+            best,
+        );
+        assert!(best.is_finite(), "the class scan produced a finite best");
+        let _ = hash_sum;
+    }
+
+    #[test]
     fn the_alignment_connected_merge_folds_indistinguishable_copies() {
         // The axis fold (0) and two near-identical copies (1, 2) share
         // nodes (alignment-connected), carry bit-identical likelihood
@@ -8379,9 +13689,10 @@ mod tests {
         let observed_node: HashMap<u64, f64> =
             [(5u64, 7.5f64)].into_iter().collect();
         let observed_edge: HashMap<u64, f64> = HashMap::new();
-        let (new_folds, new_matrix, _pinned, _mismatches, new_territory, new_axis, groups, counters) =
+        let matrix = ScoreMatrix::from_dense(matrix, pinned, mismatches, -14.0);
+        let (new_folds, new_matrix, new_territory, new_axis, groups, counters) =
             alignment_connected_merge(
-                folds, matrix, pinned, mismatches, territory, Some(0), Some(0),
+                folds, matrix, territory, Some(0), Some(0),
                 &observed_node, &observed_edge,
             );
         // Exactly one merge group: {0, 1, 2} (the axis bubble's
@@ -8400,7 +13711,8 @@ mod tests {
         assert_eq!(new_folds[0].nodes, vec![(1, 1), (2, 1)]);
         assert_eq!(new_folds[0].edges, vec![(100, 1)]);
         // The merged fold's column is the representative's.
-        assert_eq!(new_matrix[0], vec![1.5, -2.0]);
+        assert_eq!(new_matrix.ll(0, 0), 1.5);
+        assert_eq!(new_matrix.ll(0, 1), -2.0);
         assert_eq!(new_territory[0], (0, 4));
         assert_eq!(new_axis, Some(0));
         // The refusal anatomy: fold 3 refused on pocket mass (with the
@@ -8430,10 +13742,11 @@ mod tests {
             vec![1.0f64],
             vec![1.0f64 + f64::EPSILON], // one ULP apart
         ];
-        let (new_folds, _m, _p, _mm, _t, _a, groups, counters) =
+        let matrix =
+            ScoreMatrix::from_dense(matrix, vec![vec![true]; 2], vec![vec![0u32]; 2], -14.0);
+        let (new_folds, _m, _t, _a, groups, counters) =
             alignment_connected_merge(
-                folds, matrix, vec![vec![true]; 2], vec![vec![0u32]; 2],
-                vec![(0, 4); 2], Some(0), Some(0),
+                folds, matrix, vec![(0, 4); 2], Some(0), Some(0),
                 &HashMap::new(), &HashMap::new(),
             );
         assert!(groups.is_empty(), "a ULP distinction refuses the fold");
@@ -8451,9 +13764,10 @@ mod tests {
             alignfold_toy(&[(1, 1)], &[], &["b"]),
         ];
         let matrix = vec![vec![1.0], vec![1.0]];
-        let (new_folds, _m, _p, _mm, _t, _a, groups, _c) = alignment_connected_merge(
-            folds, matrix, vec![vec![true]; 2], vec![vec![0u32]; 2],
-            vec![(0, 4); 2], None, None,
+        let matrix =
+            ScoreMatrix::from_dense(matrix, vec![vec![true]; 2], vec![vec![0u32]; 2], -14.0);
+        let (new_folds, _m, _t, _a, groups, _c) = alignment_connected_merge(
+            folds, matrix, vec![(0, 4); 2], None, None,
             &HashMap::new(), &HashMap::new(),
         );
         assert!(groups.is_empty());
@@ -8672,6 +13986,78 @@ mod tests {
     }
 
     #[test]
+    fn the_flank_overlap_parses_both_forms() {
+        // The bp form and the percent form; the loud rejections.
+        assert_eq!("10000".parse::<FlankOverlap>(), Ok(FlankOverlap::Bp(10000)));
+        assert_eq!("10%".parse::<FlankOverlap>(), Ok(FlankOverlap::Percent(10.0)));
+        assert_eq!("100%".parse::<FlankOverlap>(), Ok(FlankOverlap::Percent(100.0)));
+        assert!("0".parse::<FlankOverlap>().is_err());
+        assert!("0%".parse::<FlankOverlap>().is_err());
+        assert!("101%".parse::<FlankOverlap>().is_err());
+        assert!("abc".parse::<FlankOverlap>().is_err());
+        assert!("".parse::<FlankOverlap>().is_err());
+        assert_eq!(FlankOverlap::Bp(10000).setting(), "10000");
+        assert_eq!(FlankOverlap::Percent(10.0).setting(), "10%");
+    }
+
+    #[test]
+    fn the_flank_rule_keeps_only_rows_reaching_into_both_flanks() {
+        // THE PRESENCE SEMANTICS (ruled at the measured fork): the
+        // window [1000, 1100) (100bp); N = 10bp - a member row is kept
+        // iff its hull OVERLAPS [1000, 1010) AND [1090, 1100).
+        let flank = FlankOverlap::Bp(10);
+        // full coverage: kept
+        assert!(row_covers_flanks(1000, 1100, 1000, 1100, flank));
+        assert!(row_covers_flanks(900, 1200, 1000, 1100, flank));
+        // rows reaching into both flanks (edge truncation is not
+        // fragmentation - the hull-edge geometry): kept
+        assert!(row_covers_flanks(1005, 1100, 1000, 1100, flank));
+        assert!(row_covers_flanks(1000, 1095, 1000, 1100, flank));
+        assert!(row_covers_flanks(1000, 1091, 1000, 1100, flank));
+        // missing the first flank entirely (starts after it ends):
+        // removed
+        assert!(!row_covers_flanks(1010, 1100, 1000, 1100, flank));
+        assert!(!row_covers_flanks(1095, 1200, 1000, 1100, flank));
+        // missing the last flank entirely (ends before it starts):
+        // removed
+        assert!(!row_covers_flanks(1000, 1090, 1000, 1100, flank));
+        // an interior row missing both flanks: removed
+        assert!(!row_covers_flanks(1020, 1080, 1000, 1100, flank));
+        // a disjoint row: removed
+        assert!(!row_covers_flanks(2000, 2100, 1000, 1100, flank));
+    }
+
+    #[test]
+    fn the_flank_percent_form_is_ceil_of_the_window_length() {
+        // 10% of a 10,036bp window is 1,004bp (ceil); 10% of 100bp is
+        // exactly 10bp.
+        assert_eq!(FlankOverlap::Percent(10.0).flank_bp(10_036), 1_004);
+        assert_eq!(FlankOverlap::Percent(10.0).flank_bp(100), 10);
+        assert_eq!(FlankOverlap::Percent(50.0).flank_bp(101), 51);
+        // at 100% the flank intervals span the whole window: the rule
+        // is presence in the window.
+        assert!(row_covers_flanks(1, 100, 0, 100, FlankOverlap::Percent(100.0)));
+        assert!(!row_covers_flanks(100, 200, 0, 100, FlankOverlap::Percent(100.0)));
+    }
+
+    #[test]
+    fn the_flank_rule_degenerates_to_presence_below_n() {
+        // THE DEGENERATE CASE (the owner's rule): a window shorter
+        // than N keeps every PRESENT row - even an interior fragment.
+        let flank = FlankOverlap::Bp(1000);
+        assert!(row_covers_flanks(20, 80, 0, 100, flank));
+        assert!(row_covers_flanks(0, 10, 0, 100, flank));
+        assert!(!row_covers_flanks(200, 300, 0, 100, flank));
+        // a window exactly N long: both flank intervals span the
+        // whole window - presence keeps every overlapping row (not
+        // the degenerate case - "shorter than N" - the same result
+        // either way).
+        assert!(row_covers_flanks(0, 1000, 0, 1000, flank));
+        assert!(row_covers_flanks(1, 999, 0, 1000, flank));
+        assert!(!row_covers_flanks(1000, 2000, 0, 1000, flank));
+    }
+
+    #[test]
     fn the_exclude_paths_glob_matches_fnmatch_style() {
         // The masking operator's matcher: `*` any run, `?` one char,
         // literal otherwise; no escapes.
@@ -8790,4 +14176,2088 @@ mod tests {
         assert!(coalesced_called_set(&[]).is_empty());
     }
 
+    #[test]
+    fn lane_cache_span_delta_extend_serves_direct_fetch_bytes() {
+        // THE DELTA-EXTEND CONTRACT, unit-proved: every served crop is
+        // byte-equal to the direct Sources::fetch of the crop, through
+        // a union-growth request order that forces the left-extend,
+        // right-extend, and both-side extension paths — and the
+        // counters receipt the DELTA fetch volume (the missing
+        // sub-ranges only), never the regrown span's.
+        let len = 40_000u64;
+        let seq: Vec<u8> = (0..len)
+            .map(|i| b"ACGT"[(i.wrapping_mul(2_654_435_761u64) % 4) as usize])
+            .collect();
+        let dir = std::env::temp_dir().join(format!("impg-lanecache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fa = dir.join("lane.fa");
+        {
+            use std::io::Write;
+            let mut out = std::fs::File::create(&fa).unwrap();
+            writeln!(out, ">lane0").unwrap();
+            for chunk in seq.chunks(60) {
+                out.write_all(chunk).unwrap();
+                out.write_all(b"\n").unwrap();
+            }
+        }
+        let sources = routes::Sources::open(
+            &[fa.display().to_string()],
+            vec![("lane0".into(), len)],
+        )
+        .unwrap();
+        // The served-crop property itself, first: a crop of a fetch
+        // answer equals the direct fetch of the crop (the property the
+        // covered branch and the stitch both ride).
+        let whole = sources.fetch(0, 5_000, 30_000).unwrap();
+        assert_eq!(whole.len(), 25_000);
+        assert_eq!(&whole[..3_000], &sources.fetch(0, 5_000, 8_000).unwrap()[..]);
+        assert_eq!(&whole[20_000..], &sources.fetch(0, 25_000, 30_000).unwrap()[..]);
+        let cache = LaneCache {
+            lane_lengths: vec![len],
+            sources,
+            whole_lane: false,
+            seqs: vec![std::sync::Mutex::new(None)],
+            loads: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+            lane_trace: Default::default(),
+        };
+        // (initial span) right-extend, both-side extend, covered,
+        // right-extend again — every crop >1,024bp (outside the small-
+        // crop fetch memo; the memo path returns the same bytes either
+        // way).
+        for (start, end) in [
+            (1_000u64, 5_000u64),
+            (20_000, 25_000),
+            (500, 30_000),
+            (1_200, 4_800),
+            (30_000, 35_000),
+        ] {
+            let served = cache.fetch(0, start, end).unwrap();
+            assert_eq!(
+                served,
+                cache.sources.fetch(0, start, end).unwrap(),
+                "served crop {start}..{end} differs from the direct fetch"
+            );
+        }
+        // The delta-volume receipt: loads = 1 initial + 1 right-extend
+        // ([5_000, 25_000)) + 2 both-side ([500, 1_000) + [25_000,
+        // 30_000)) + 1 right-extend ([30_000, 35_000)) = 5; bytes = the
+        // missing sub-ranges only = 4_000 + 20_000 + 500 + 5_000 +
+        // 5_000 = 34_500 (the union-regrowth form would have fetched
+        // 4_000 + 24_000 + 29_500 + 0 + 34_500 = 92_000).
+        assert_eq!(cache.loads.load(Ordering::Relaxed), 5);
+        assert_eq!(cache.bytes.load(Ordering::Relaxed), 34_500);
+        // The whole-lane policy stays verbatim: one load, the whole
+        // lane, every crop a slice of it.
+        let whole_cache = LaneCache {
+            lane_lengths: vec![len],
+            sources: routes::Sources::open(
+                &[fa.display().to_string()],
+                vec![("lane0".into(), len)],
+            )
+            .unwrap(),
+            whole_lane: true,
+            seqs: vec![std::sync::Mutex::new(None)],
+            loads: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+            lane_trace: Default::default(),
+        };
+        assert_eq!(
+            whole_cache.fetch(0, 1_234, 4_321).unwrap(),
+            whole_cache.sources.fetch(0, 1_234, 4_321).unwrap()
+        );
+        assert_eq!(whole_cache.loads.load(Ordering::Relaxed), 1);
+        assert_eq!(whole_cache.bytes.load(Ordering::Relaxed), len);
+        let _ = std::fs::remove_file(&fa);
+        let _ = std::fs::remove_file(dir.join("lane.fa.fai"));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn far_bin_prune_is_pure_window_geometry() {
+        // THE OWNER'S FAR-BIN RULE, the pure-function proof: a
+        // record's own routing keeps one window, or two ADJACENT
+        // windows when the anchors straddle a boundary (the routing's
+        // own interval-overlap rule); placements scattering into
+        // NON-ADJACENT windows are the "different bins, not basically
+        // adjacent" class — pruned from the census view ENTIRELY
+        // (there is no choice-free home bin). The test is the
+        // touched-window diameter against the census's own pair-bins
+        // adjacency constant 1: no thresholds, nothing tuned.
+        let line = |partitions_per_occ: &[&[u32]]| CensusRecordLine {
+            record: 0,
+            multiplicity: 1,
+            anchors: 1,
+            occurrences: partitions_per_occ
+                .iter()
+                .map(|&partitions| CensusOccurrence {
+                    path: 0,
+                    start: 0,
+                    orientation: 0,
+                    partitions: partitions.to_vec(),
+                    intervals: Vec::new(),
+                })
+                .collect(),
+        };
+        // One window — the read's own bin: kept.
+        assert!(!census_record_far_bin_scattered(&line(&[&[7]])));
+        // No windows at all (votes nowhere by its own routing): not
+        // the far-bin class.
+        assert!(!census_record_far_bin_scattered(&line(&[&[]])));
+        // The boundary-straddler: two ADJACENT bins, kept at BOTH
+        // (the owner's own boundary case, pure interval overlap).
+        assert!(!census_record_far_bin_scattered(&line(&[&[12, 13]])));
+        // Straddling placements at separate bins of one boundary:
+        // still the adjacent class.
+        assert!(!census_record_far_bin_scattered(&line(&[&[12], &[13]])));
+        assert!(!census_record_far_bin_scattered(&line(&[&[13, 14], &[13]])));
+        // THE MEASURED FAR-BIN CLASS: the [12,16] scatter — L1's
+        // 43,686-multiplicity single-anchor pattern's own shape —
+        // pruned (diameter 4).
+        assert!(census_record_far_bin_scattered(&line(&[&[12], &[16]])));
+        // The [4,11] class (L1's second family) and the [2,13] class.
+        assert!(census_record_far_bin_scattered(&line(&[&[4], &[11]])));
+        assert!(census_record_far_bin_scattered(&line(&[&[2], &[13]])));
+        // A mixed shape — an adjacent pair PLUS a far outlier — is
+        // still the scatter class as a whole (the pattern's bins
+        // are not "basically adjacent"); no per-bin surgery, no
+        // choice of a home component.
+        assert!(census_record_far_bin_scattered(&line(&[&[12, 13], &[16]])));
+        // A three-window chain (diameter 2) is NOT basically
+        // adjacent as a set: the far pair 4 and 6 rules it out.
+        assert!(census_record_far_bin_scattered(&line(&[&[4], &[5], &[6]])));
+        // Windows are per-occurrence in the census: the scatter is
+        // visible only across occurrences, never within one
+        // occurrence's own interval-overlap partitions.
+        assert!(census_record_far_bin_scattered(&line(
+            &[&[12, 13], &[15, 16]]
+        )));
+    }
+
+    #[test]
+    fn far_bin_prune_frame_gate_keeps_the_local_frame_byte_frozen() {
+        // THE PRODUCT DEFAULT'S OWN GATE (the §10.6.19 default flip):
+        // the prune is ON by default at the GLOBAL frame, and the
+        // committed LOCAL frame is byte-frozen — a default-on prune
+        // reaching the local frame is REFUSED LOUDLY (naming the
+        // --far-bin-prune=false opt-out), never silently applied;
+        // the explicit opt-out at the local frame is the committed
+        // local form.
+        assert!(far_bin_prune_frame_gate(true, true).is_ok());
+        assert!(far_bin_prune_frame_gate(true, false).is_ok());
+        assert!(far_bin_prune_frame_gate(false, false).is_ok());
+        let refused = far_bin_prune_frame_gate(false, true).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(refused.to_string().contains("--far-bin-prune=false"));
+    }
+
+
+    #[test]
+    fn mix0_additive_bound_holds_for_nonnegative_excesses() {
+        // THE ADMISSIBLE BOUND'S OWN LEMMA (the frontier-1 design's
+        // core, SS10.6.21): for alpha, beta >= 0,
+        //   mix0(alpha, beta) = ln(0.5e^alpha + 0.5e^beta) <= alpha + beta
+        // — because WLOG alpha >= beta gives mix0 = alpha +
+        // ln(0.5 + 0.5e^{beta - alpha}) <= alpha <= alpha + beta. This
+        // is the per-unit form of the per-fold excess-mass bound
+        // S(f,g) <= E*C + A_f + A_g: with every ll entry either
+        // exactly E (the no-pin constant) or E + alpha (alpha > 0),
+        // the class pair sum's excess over the E-floor is bounded by
+        // the sum of the two folds' own excess masses. The float-level
+        // check carries a DERIVED slack — the accumulation/rounding
+        // slack of the two sides' own magnitudes (a few ulps), never
+        // a tuned tolerance: the real-arithmetic lemma is exact.
+        let e = -14.418156f64;
+        // A deterministic adversarial grid + LCG sweep of excesses,
+        // including the degenerate corners (0, 0), (0, big), the
+        // near-equal plateau (the segdup-copy class), and the
+        // far-apart class (the winner-vs-rival class).
+        let mut cases: Vec<(f64, f64)> = vec![(0.0, 0.0), (0.0, 40.0), (40.0, 0.0)];
+        let mut alpha = 0.0f64;
+        while alpha <= 40.0 {
+            let mut beta = 0.0f64;
+            while beta <= 40.0 {
+                cases.push((alpha, beta));
+                cases.push((beta, alpha));
+                beta += 0.37;
+            }
+            cases.push((alpha, alpha.max(1e-9)));
+            alpha += 0.61;
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..4096 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let a = (state >> 32) as f64 / u32::MAX as f64 * 44.0;
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let b = (state >> 32) as f64 / u32::MAX as f64 * 44.0;
+            cases.push((a, b));
+        }
+        for (alpha, beta) in cases {
+            let lhs = mix_logsumexp(e + alpha, e + beta) - e;
+            let rhs = alpha + beta;
+            // The real lemma is lhs <= rhs; each side's float
+            // evaluation carries at most a few ulps of its own
+            // magnitude (the mix's ln/exp rounding and the sum's).
+            let slack = 8.0f64
+                * f64::EPSILON
+                * (lhs.abs() + rhs.abs() + e.abs()).max(1.0);
+            assert!(
+                lhs <= rhs + slack,
+                "mix0({alpha},{beta}) = {lhs} exceeds alpha + beta = {rhs}"
+            );
+            // The max form is tighter and also holds (the same
+            // proof): mix0 <= max(alpha, beta) + ln(1) + slack.
+            let tighter = alpha.max(beta) + slack;
+            assert!(
+                lhs <= tighter,
+                "mix0({alpha},{beta}) = {lhs} exceeds max form {tighter}"
+            );
+        }
+    }
+
+    #[test]
+    fn exp_underflow_point_derived_by_evaluation() {
+        // THE DERIVED SKIP THRESHOLD'S CONSTANT (the frontier-1
+        // design): a class pair whose exact sum sits at or below
+        // best + t — t the largest f64 with exp(t) == +0.0 —
+        // contributes EXACTLY +0.0 to every QUAL posterior term the
+        // exact run computes (exp(ll - best) underflows to the exact
+        // +0.0, and adding +0.0 to the non-negative running sums is
+        // float identity), so a skipped pair's QUAL arithmetic is
+        // bit-identical by construction. The constant is DERIVED BY
+        // EVALUATION from the f64 semantics (the subnormal underflow
+        // point of exp, -1075*ln(2) in real arithmetic), never tuned:
+        // walk down by ulps from the real-arithmetic point until the
+        // rounded exponential is exactly zero.
+        // DERIVED BY EVALUATION: the runtime's own exp is monotone,
+        // so the boundary between the nonzero and the underflowed
+        // region is found by a bit-axis binary search between a
+        // known-nonzero point (e^-744 ~ 2^-1073.4, far above the
+        // boundary) and a known-zero point (-1075*ln(2), the
+        // real-arithmetic boundary itself).
+        let mut lo = -744.0f64;
+        let mut hi = -1075.0f64 * 2.0f64.ln();
+        assert!(lo.exp() > 0.0, "the search's low anchor must not underflow");
+        assert_eq!(hi.exp(), 0.0, "the search's high anchor must underflow");
+        while hi.to_bits() - lo.to_bits() > 1 {
+            // the midpoint on the bit axis WITHOUT the u64 sum
+            // overflow (both anchors are negative doubles: their bit
+            // patterns sum past u64::MAX).
+            let mid = f64::from_bits(
+                lo.to_bits() + (hi.to_bits() - lo.to_bits()) / 2,
+            );
+            if mid == lo || mid == hi {
+                break;
+            }
+            if mid.exp() == 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let t = hi;
+        // (a) the constant's own contract: exp(t) is exactly +0.0
+        // and one ulp up the exponential is already nonzero.
+        assert_eq!(t.exp(), 0.0);
+        let up = f64::from_bits(t.to_bits() - 1);
+        assert!(up.exp() > 0.0, "one ulp above the derived point must not underflow");
+        // (b) the constant sits at the real-arithmetic underflow
+        // point -1075*ln(2) (within the runtime exp's own boundary
+        // error — a derived-scale sanity bound, not a tolerance).
+        let real = -1075.0f64 * 2.0f64.ln();
+        assert!(
+            (t - real).abs() <= 1e-9,
+            "derived point {t} vs the real-arithmetic point {real}"
+        );
+        // (c) monotone safety: everything at or below the point
+        // underflows exactly (spot-check a ladder DOWN the bit axis
+        // — for negative doubles, more-negative is the LARGER bit
+        // pattern).
+        let mut probe = t;
+        for _ in 0..4 {
+            probe = f64::from_bits(probe.to_bits() + 1);
+            assert_eq!(probe.exp(), 0.0);
+        }
+        // (d) the QUAL identity the skip rule uses: adding the
+        // underflowed +0.0 to a non-negative running sum is
+        // bit-identity (including at +0.0 itself).
+        let running = 3.7e-300f64;
+        assert_eq!((running + 0.0f64).to_bits(), running.to_bits());
+        assert_eq!((0.0f64 + 0.0f64).to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn bit_equal_rows_share_one_class_sum() {
+        // THE EXACT-PRESERVING MEMOIZATION'S OWN PROOF (the only
+        // frontier-1 lever that can pass the committed byte-identity
+        // bar, SS10.6.21): the class pair sum is a function of the
+        // rows' VALUES in unit order alone — two folds whose ll
+        // columns are bit-equal (whichever encoding each row took)
+        // produce BIT-IDENTICAL sums against every third fold, so
+        // one computed sum per unordered (row-class, row-class) pair
+        // serves every merged-fold pair without changing an output
+        // bit. The construction crosses the ENCODINGS: one twin keeps
+        // pinned=true at units whose value is exactly E (the sparse
+        // form stores those entries), the other holds pinned=false
+        // there (its sparse form drops them — the values are the
+        // constant either way); the columns are bit-equal, the
+        // encodings differ.
+        let elsewhere = -14.418156f64;
+        let n_units = 40usize;
+        let mut dense: Vec<Vec<f64>> = Vec::new();
+        let mut pinned: Vec<Vec<bool>> = Vec::new();
+        let mut mismatches: Vec<Vec<u32>> = Vec::new();
+        // Fold 0: the pinned-heavy row (Dense encoding).
+        let mut row0 = vec![elsewhere; n_units];
+        let mut pin0 = vec![false; n_units];
+        for unit in (0..n_units).step_by(2) {
+            row0[unit] = elsewhere + unit as f64 / 8.0;
+            pin0[unit] = true;
+        }
+        dense.push(row0.clone());
+        pinned.push(pin0);
+        mismatches.push(vec![0; n_units]);
+        // Fold 1: fold 0's VALUES with pinned=false at the constant
+        // units (Sparse encoding, values unchanged).
+        dense.push(row0.clone());
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // Fold 2: an all-no-pin row (Sparse, empty).
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // Fold 3: bit-equal to fold 0's values but pinned=true at a
+        // CONSTANT unit too (the cross-encoding case: the sparse
+        // form stores the E-valued entry, the column is unchanged).
+        let mut pin3 = vec![false; n_units];
+        pin3[1] = true;
+        dense.push(row0.clone());
+        pinned.push(pin3);
+        mismatches.push(vec![0; n_units]);
+        let matrix = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        assert!(
+            matrix.ll_bits_equal(0, 1),
+            "the twins' ll columns are bit-equal"
+        );
+        assert!(
+            matrix.ll_bits_equal(0, 3),
+            "the cross-encoding twin's column is bit-equal"
+        );
+        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+        for other in 0..matrix.n_folds() {
+            assert_eq!(
+                matrix.class_pair_sum(0, other, &counts).to_bits(),
+                matrix.class_pair_sum(1, other, &counts).to_bits(),
+                "twin rows share one sum against fold {other}"
+            );
+            assert_eq!(
+                matrix.class_pair_sum(0, other, &counts).to_bits(),
+                matrix.class_pair_sum(3, other, &counts).to_bits(),
+                "the cross-encoding twin shares one sum against fold {other}"
+            );
+        }
+        // The hom pair too (a twin against itself is trivially equal;
+        // the twin's hom pair is the same accumulation).
+        assert_eq!(
+            matrix.class_pair_sum(0, 0, &counts).to_bits(),
+            matrix.class_pair_sum(1, 1, &counts).to_bits(),
+            "the twins' hom pairs share one sum"
+        );
+    }
+
+    #[test]
+    fn scan_memo_canonicalizes_only_bit_equal_columns() {
+        // THE BIT-EQUAL-ROW MEMOIZATION'S OWN KEY DISCIPLINE (the
+        // fourth expressibility reduction): the canonical row class
+        // is EXACTLY the ll column (the merge's own predicate) — a
+        // pinned entry whose value is exactly E is INVISIBLE to the
+        // column (it reads E, like an absent entry), so rows that
+        // differ only in such entries share one class and one sum;
+        // a one-ulp difference at any non-E entry is a DIFFERENT
+        // column — a different class, never merged (the exact
+        // predicate decides every bucket candidate, so a hash
+        // collision can never merge either). The representative is
+        // the class's smallest fold index — deterministic.
+        let elsewhere = -12.5f64;
+        let n_units = 10usize;
+        let mut dense: Vec<Vec<f64>> = Vec::new();
+        let mut pinned: Vec<Vec<bool>> = Vec::new();
+        let mut mismatches: Vec<Vec<u32>> = Vec::new();
+        // fold 0: two non-E pinned entries.
+        let mut row0 = vec![elsewhere; n_units];
+        let mut pin0 = vec![false; n_units];
+        row0[2] = elsewhere + 3.25;
+        pin0[2] = true;
+        row0[7] = elsewhere + 0.5;
+        pin0[7] = true;
+        // the working copies the later twins read (the originals move
+        // into the matrix vectors below)
+        let (row1, pin1) = (row0.clone(), pin0.clone());
+        let (row2_src, pin2_src) = (row0.clone(), pin0.clone());
+        let (row3_src, pin3_src) = (row0.clone(), pin0.clone());
+        dense.push(row0);
+        pinned.push(pin0);
+        mismatches.push(vec![0; n_units]);
+        // fold 1: an exact clone.
+        dense.push(row1);
+        pinned.push(pin1);
+        mismatches.push(vec![0; n_units]);
+        // fold 2: the clone with an EXTRA pinned entry at exactly E
+        // (the cross-encoding case: the entry is invisible to the
+        // column).
+        let mut row2 = row2_src;
+        let mut pin2 = pin2_src;
+        row2[4] = elsewhere;
+        pin2[4] = true;
+        dense.push(row2);
+        pinned.push(pin2);
+        mismatches.push(vec![0; n_units]);
+        // fold 3: a NEAR-TWIN — one ulp off at a non-E pinned entry.
+        // A different column: its own class, never merged.
+        let mut row3 = row3_src;
+        let pin3 = pin3_src;
+        row3[2] = f64::from_bits(row3[2].to_bits() + 1);
+        dense.push(row3);
+        pinned.push(pin3);
+        mismatches.push(vec![0; n_units]);
+        // fold 4: the all-E row, unpinned.
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // fold 5: the all-E row PINNED EVERYWHERE at exactly E — the
+        // same column (every pinned entry is invisible).
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![true; n_units]);
+        mismatches.push(vec![0; n_units]);
+        // fold 6: the all-E row again, unpinned (a third member of
+        // the all-E class).
+        dense.push(vec![elsewhere; n_units]);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
+        let matrix = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        // the canonical key: the pinned-at-E entries are invisible —
+        // folds 0/1/2 share one key, folds 4/5/6 share one, fold 3
+        // is its own.
+        assert_eq!(
+            matrix.column_key_hash(0),
+            matrix.column_key_hash(1),
+            "exact clones share the canonical key"
+        );
+        assert_eq!(
+            matrix.column_key_hash(0),
+            matrix.column_key_hash(2),
+            "an extra pinned-at-E entry is invisible to the key"
+        );
+        assert_ne!(
+            matrix.column_key_hash(0),
+            matrix.column_key_hash(3),
+            "a one-ulp difference is a different key"
+        );
+        assert_eq!(
+            matrix.column_key_hash(4),
+            matrix.column_key_hash(5),
+            "pinned-at-E everywhere is the all-E column"
+        );
+        let memo = ClassScanMemo::build(&matrix);
+        assert_eq!(memo.canon, vec![0, 0, 0, 3, 4, 4, 4]);
+        assert_eq!(memo.distinct_rows, 3);
+        assert_eq!(memo.canonical_pairs, 6);
+        // the memo's flat spelling: bit-equal pairs share one
+        // canonical flat, whatever their own indices.
+        assert_eq!(memo.canonical_flat(0, 3), memo.canonical_flat(2, 3));
+        assert_eq!(memo.canonical_flat(1, 5), memo.canonical_flat(0, 4));
+        assert_eq!(memo.canonical_flat(5, 6), memo.canonical_flat(4, 4));
+        // and the shared VALUE, bit for bit, against a third fold
+        // and as the hom pair.
+        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+        assert_eq!(
+            matrix.class_pair_sum(0, 3, &counts).to_bits(),
+            matrix.class_pair_sum(2, 3, &counts).to_bits(),
+            "the cross-encoding twin shares the sum against fold 3"
+        );
+        assert_eq!(
+            matrix.class_pair_sum(4, 4, &counts).to_bits(),
+            matrix.class_pair_sum(5, 6, &counts).to_bits(),
+            "the all-E class shares one hom sum"
+        );
+        // (The near-twin fold 3 carries a DIFFERENT column — proven
+        // above by canon and the key — but its pair SUMS may still
+        // collide in f64 after accumulation: the class discipline is
+        // the memo's, never a sum-inequality claim.)
+    }
+
+    #[test]
+    fn memoized_scan_is_bit_identical_to_direct_on_randomized_rows() {
+        // THE MEMO'S OWN RANDOMIZED ORACLE (the task's own gate:
+        // memoized == direct on randomized bit-row fixtures): for
+        // every case, the memo's canonical classes are EXACTLY the
+        // brute-force bit-equality classes (the exact predicate,
+        // never the hash), and the memoized two-phase scan — the
+        // scan site's own shape: phase A computes each distinct
+        // canonical pair sum once, phase B fills every pair's own
+        // flat slot — reproduces the direct per-pair accumulation
+        // BIT FOR BIT at every pair, clones and near-twins included.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for case in 0..60u32 {
+            let elsewhere = -10.0 - (next() % 200) as f64 / 7.0;
+            let n_units = 12 + (next() as usize) % 40;
+            let base_folds = 3 + (next() as usize) % 8;
+            let extra_folds = (next() as usize) % 6;
+            let n_folds = base_folds + extra_folds;
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..base_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                for _ in 0..1 + (next() as usize) % 9 {
+                    let unit = (next() as usize) % n_units;
+                    if !pin[unit] {
+                        pin[unit] = true;
+                        mism[unit] = next() % 5;
+                        // every so often a pinned entry carries
+                        // EXACTLY E — invisible to the column
+                        row[unit] = if next() % 7 == 0 {
+                            elsewhere
+                        } else {
+                            elsewhere
+                                + (next() % 97) as f64 / 13.0
+                                + (fold as f64 + 0.5) / 4.0
+                        };
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            for _ in 0..extra_folds {
+                let source = (next() as usize) % base_folds;
+                let mut row = dense[source].clone();
+                let mut pin = pinned[source].clone();
+                match next() % 3 {
+                    // the exact clone (a bit-equal row)
+                    0 => {}
+                    // the cross-encoding twin: an extra pinned entry
+                    // at exactly E — invisible, still bit-equal
+                    1 => {
+                        for unit in 0..n_units {
+                            if !pin[unit] {
+                                pin[unit] = true;
+                                row[unit] = elsewhere;
+                                break;
+                            }
+                        }
+                    }
+                    // the near-twin NEGATIVE CONTROL: one ulp off at
+                    // a pinned non-E entry — a different column
+                    _ => {
+                        let mut moved = false;
+                        for unit in 0..n_units {
+                            if pin[unit] && row[unit].to_bits() != elsewhere.to_bits() {
+                                row[unit] = f64::from_bits(row[unit].to_bits() + 1);
+                                moved = true;
+                                break;
+                            }
+                        }
+                        if !moved {
+                            // no non-E pinned entry to perturb: pin
+                            // one fresh unit one ulp above E instead
+                            for unit in 0..n_units {
+                                if !pin[unit] {
+                                    pin[unit] = true;
+                                    row[unit] =
+                                        f64::from_bits(elsewhere.to_bits() + 1);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(vec![0u32; n_units]);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+            let counts: Vec<f64> = (0..n_units)
+                .map(|unit| 1.0 + (next() % 9) as f64 * (unit as f64 + 1.0))
+                .collect();
+            let pair_count = n_folds * (n_folds + 1) / 2;
+            // the canonical classes are EXACTLY the brute-force
+            // bit-equality classes (the exact predicate decides)
+            let memo = ClassScanMemo::build(&matrix);
+            for a in 0..n_folds {
+                for b in 0..n_folds {
+                    assert_eq!(
+                        matrix.ll_bits_equal(a, b),
+                        memo.canon[a] == memo.canon[b],
+                        "case {case}: the canon classes must be exactly \
+                         the bit-equality classes at ({a}, {b})"
+                    );
+                }
+            }
+            for fold in 0..n_folds {
+                assert!(
+                    memo.canon[fold] <= fold,
+                    "case {case}: the representative is the class's min"
+                );
+            }
+            // the direct reference
+            let direct: Vec<f64> = (0..pair_count)
+                .map(|flat| {
+                    let (first, second) = unrank_pair(flat);
+                    matrix.class_pair_sum(first, second, &counts)
+                })
+                .collect();
+            // the memoized two-phase scan (the scan site's own shape)
+            let mut values = vec![f64::NAN; pair_count];
+            let distinct: Vec<usize> = (0..pair_count)
+                .filter(|&flat| {
+                    let (first, second) = unrank_pair(flat);
+                    memo.canonical_flat(first, second) == flat
+                })
+                .collect();
+            assert_eq!(
+                distinct.len() as u64,
+                memo.canonical_pairs,
+                "case {case}: the canonical pair count"
+            );
+            for flat in &distinct {
+                let (first, second) = unrank_pair(*flat);
+                values[*flat] = matrix.class_pair_sum(first, second, &counts);
+            }
+            for flat in 0..pair_count {
+                let (first, second) = unrank_pair(flat);
+                let memoized = values[memo.canonical_flat(first, second)];
+                assert_eq!(
+                    memoized.to_bits(),
+                    direct[flat].to_bits(),
+                    "case {case}: the memoized pair {flat} must be the \
+                     direct sum bit for bit"
+                );
+            }
+        }
+    }
+
+
+    #[test]
+    fn receipt_f64_text_is_the_non_roundtrip_serialization_class() {
+        // THE RECEIPT-SERIALIZATION CLASS, NAMED AND PROOFED (the
+        // frontier-1 probe's verify flags resolved to it, SS10.6.21):
+        // this repo's serde_json carries NO float_roundtrip feature,
+        // so a serialized f64 can emit JSON text that parses back to
+        // a DIFFERENT f64 — one ulp off on the monotone bit axis.
+        // The committed receipts' float fields (the instrument
+        // receipt's class_log_likelihoods, the ingredients' ll_matrix)
+        // are that emission: an offline re-accumulation of the
+        // emitted text can sit 1-2 ulps from the emitted class sum at
+        // pairs whose accumulation crosses affected values, while the
+        // emitting BINARY reproduces its own receipt bit-identically
+        // (the rerun receipt: same binary, same inputs, same bytes).
+        // The class therefore lives in the EMISSION, never in the
+        // scan's float path and never in a consumer's parse: the
+        // byte-identity gates compare BYTES (unaffected); only
+        // offline value-level recomputations see the ulps. The
+        // counterexample below is pinned against the repo's locked
+        // serde_json; if a future dependency flip enables
+        // float_roundtrip, this test names exactly what changed.
+        let value = 1.1919406916781266e-278f64;
+        let text = serde_json::to_string(&value).unwrap();
+        let parsed: f64 = serde_json::from_str(&text).unwrap();
+        assert_eq!(text, "1.1919406916781266e-278");
+        assert_ne!(
+            parsed.to_bits(),
+            value.to_bits(),
+            "the emitted text must parse back one ulp off (the class)"
+        );
+        assert_eq!(ulp_distance(parsed, value), 1);
+        // The class is COMMON, not a corner: a deterministic sweep
+        // finds it across the exponent range (receipted ~31.5% of a
+        // random sweep at the probe; here a small pinned sample).
+        let mut bad = 0usize;
+        let mut state = 0x243F_6A88_85A3_08D3u64;
+        for _ in 0..100_000u64 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let v = f64::from_bits(state & !(0xFu64 << 60));
+            if !v.is_finite() {
+                continue;
+            }
+            let t = serde_json::to_string(&v).unwrap();
+            let back: f64 = serde_json::from_str(&t).unwrap();
+            if back.to_bits() != v.to_bits() {
+                bad += 1;
+            }
+        }
+        assert!(
+            bad > 10_000,
+            "the non-roundtrip class is the common case at this              dependency configuration (saw {bad} of 100k)"
+        );
+    }
+
+    #[test]
+    fn excess_mass_bound_dominates_every_class_pair_sum() {
+        // THE PER-FOLD EXCESS-MASS BOUND'S OWN PROOF, at the scan
+        // level: A_f >= 0 (a pinned entry's marginalization rounds to
+        // >= E, never below — the row-compression exactness
+        // argument), and E*C + A_f + A_g >= the exact class pair sum
+        // for EVERY pair (the mix0 <= alpha + beta lemma the
+        // committed design-proof test proves) — the admissibility
+        // contract the bounded scan's every skip rests on.
+        let elsewhere = -14.418156f64;
+        let shapes = [
+            (5usize, 40usize, 8usize),
+            (5, 40, 2),
+            (6, 40, 1),
+            (4, 40, 0),
+            (7, 33, 3),
+        ];
+        for (n_folds, n_units, pin_stride) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                if pin_stride > 0 {
+                    for unit in (fold..n_units).step_by(pin_stride) {
+                        pin[unit] = true;
+                        row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                        mism[unit] = (unit % 7) as u32;
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense, pinned.clone(), mismatches, elsewhere);
+            let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+            let index = ClassScanBoundIndex::build(&matrix, &counts);
+            for &excess in &index.excess {
+                assert!(
+                    excess >= 0.0,
+                    "A_f must be nonnegative (the pinned entries round to >= E)"
+                );
+            }
+            for first in 0..n_folds {
+                for second in first..n_folds {
+                    let bound = index.pair_bound(first, second);
+                    let exact = matrix.class_pair_sum(first, second, &counts);
+                    assert!(
+                        bound >= exact,
+                        "bound {bound} below exact {exact} at ({first},{second})"
+                    );
+                    // THE SLACK-CORRECTED DOMINANCE (the shape class
+                    // the committed five shapes do NOT include — the
+                    // bound's f64 evaluation can round below the
+                    // exact unit-order sum, SS10.6.22's receipted
+                    // 12-ulp shortfall): exact <= bound + the
+                    // derived forward-error term, at every shape.
+                    let slack = index.pair_slack(first, second);
+                    assert!(
+                        exact <= bound + slack,
+                        "exact {exact} above bound {bound} + derived slack {slack} \
+                         at ({first},{second})"
+                    );
+                    assert!(
+                        slack.is_finite() && slack >= 0.0,
+                        "the derived slack must be a finite nonnegative term"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_class_scan_preserves_the_exhaustive_answers() {
+        // THE SANCTIONED BOUNDED CLASS SCAN'S OWN ANSWER-PRESERVATION
+        // PROOF, at the scan level, over shapes that include a
+        // DEEP landscape (pairs thousands of nats below best — the
+        // pruning regime) and the flat controls (nothing prunable):
+        // (a) stage one's best is the exhaustive best bit for bit;
+        // (b) the called set (the computed ties, flat order) is the
+        // exhaustive called set; (c) every computed exact sum is the
+        // exhaustive scan's own value bit for bit (the committed
+        // unit-order accumulation); (d) every SKIPPED pair's exact
+        // sum sits below best + the derived exp-underflow point, so
+        // its every QUAL posterior term is exactly +0.0 — the bit
+        // identity the answers rest on; (e) the winner is never
+        // skipped (it is in the computed set — the bound's own
+        // arithmetic); (f) stage one is a pure function of the
+        // matrix (two runs bit-identical — the determinism gate).
+        let elsewhere = -14.418156f64;
+        // (fold-giant, sparse, flat, and a DEEP shape: fold 0 pinned
+        // everywhere with a 3-nat excess and heavy counts — the
+        // (0,0) pair sits thousands of nats above the all-elsewhere
+        // pairs, past the 745-nat window, so stage two genuinely
+        // prunes.)
+        let shapes = [(5usize, 40usize, 8usize), (5, 40, 2), (4, 40, 0)];
+        for (n_folds, n_units, pin_stride) in shapes {
+            let mut dense: Vec<Vec<f64>> = Vec::new();
+            let mut pinned: Vec<Vec<bool>> = Vec::new();
+            let mut mismatches: Vec<Vec<u32>> = Vec::new();
+            for fold in 0..n_folds {
+                let mut row = vec![elsewhere; n_units];
+                let mut pin = vec![false; n_units];
+                let mut mism = vec![0u32; n_units];
+                if pin_stride > 0 {
+                    for unit in (fold..n_units).step_by(pin_stride) {
+                        pin[unit] = true;
+                        row[unit] = elsewhere + (unit as f64) / (fold as f64 + 1.0);
+                        mism[unit] = (unit % 7) as u32;
+                    }
+                }
+                dense.push(row);
+                pinned.push(pin);
+                mismatches.push(mism);
+            }
+            let matrix =
+                ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+            let counts: Vec<f64> = (0..n_units).map(|u| 25.0 + 5.0 * u as f64).collect();
+            let pair_count = n_folds * (n_folds + 1) / 2;
+            // the exhaustive reference
+            let exhaustive: Vec<f64> = (0..pair_count)
+                .map(|flat| {
+                    let (first, second) = unrank_pair(flat);
+                    matrix.class_pair_sum(first, second, &counts)
+                })
+                .collect();
+            let exhaustive_best = exhaustive.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let exhaustive_called: Vec<(usize, usize)> = (0..pair_count)
+                .filter(|&flat| exhaustive[flat] == exhaustive_best)
+                .map(unrank_pair)
+                .collect();
+            // stage one, twice (the determinism receipt), once with
+            // the bit-equal-row memo and once without — the memo's
+            // values are the direct form's own bits either way
+            let (bounds_a, slacks_a, computed_a, best_a, _) =
+                bounded_stage_one(&matrix, &counts, None);
+            let (_bounds_b, slacks_b, computed_b, best_b, _) =
+                bounded_stage_one(&matrix, &counts, None);
+            let memo = ClassScanMemo::build(&matrix);
+            let (_bounds_m, _slacks_m, computed_m, best_m, _) =
+                bounded_stage_one(&matrix, &counts, Some(&memo));
+            assert_eq!(best_a.to_bits(), best_b.to_bits());
+            assert_eq!(slacks_a, slacks_b, "the derived slack is deterministic");
+            assert_eq!(best_a.to_bits(), exhaustive_best.to_bits(), "stage one's best");
+            // THE MEMOIZED STAGE ONE's own gate: the memo's kept
+            // values are the direct form's own bits (the fourth
+            // reduction's construction proof, exercised here at the
+            // bounded path's stage one)
+            assert_eq!(
+                best_m.to_bits(),
+                best_a.to_bits(),
+                "the memoized stage one's best"
+            );
+            assert!(
+                computed_a.len() == computed_m.len()
+                    && computed_a
+                        .iter()
+                        .zip(&computed_m)
+                        .all(|(a, b)| match (a, b) {
+                            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
+                            (None, None) => true,
+                            _ => false,
+                        }),
+                "the memoized stage one's kept values are the direct form's own"
+            );
+            assert!(
+                computed_a.len() == computed_b.len()
+                    && computed_a
+                        .iter()
+                        .zip(&computed_b)
+                        .all(|(a, b)| match (a, b) {
+                            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
+                            (None, None) => true,
+                            _ => false,
+                        }),
+                "stage one is a pure function of the matrix"
+            );
+            let called: Vec<(usize, usize)> = computed_a
+                .iter()
+                .enumerate()
+                .filter_map(|(flat, value)| {
+                    let sum = (*value)?;
+                    (sum == best_a).then(|| unrank_pair(flat))
+                })
+                .collect();
+            assert_eq!(called, exhaustive_called, "the bounded called set");
+            // stage two: the derived keep threshold (no truth pair at
+            // this locus — the production call's own form)
+            let keep_threshold = bounded_keep_threshold(best_a, None);
+            assert_eq!(
+                keep_threshold.to_bits(),
+                (best_a + exp_underflow_point()).to_bits()
+            );
+            let mut known = computed_a.clone();
+            for flat in 0..pair_count {
+                if known[flat].is_none() && bounds_a[flat] + slacks_a[flat] >= keep_threshold {
+                    let (first, second) = unrank_pair(flat);
+                    known[flat] = Some(matrix.class_pair_sum(first, second, &counts));
+                }
+            }
+            let skipped_any = known.iter().any(|value| value.is_none());
+            for flat in 0..pair_count {
+                match known[flat] {
+                    Some(sum) => {
+                        // every computed value is the exhaustive one
+                        assert_eq!(
+                            sum.to_bits(),
+                            exhaustive[flat].to_bits(),
+                            "kept pair {flat} bit-identical"
+                        );
+                    }
+                    None => {
+                        // every skipped pair is below the QUAL window:
+                        // its exact sum underflows to +0.0 at best
+                        assert!(
+                            exhaustive[flat] < keep_threshold,
+                            "skipped pair {flat} inside the QUAL window"
+                        );
+                        assert_eq!((exhaustive[flat] - best_a).exp(), 0.0);
+                        assert!(
+                            bounds_a[flat] + slacks_a[flat] < keep_threshold,
+                            "the skip certificate's own slack-corrected threshold"
+                        );
+                    }
+                }
+            }
+            // the deep shape actually prunes (the regime is reached)
+            if pin_stride == 8 {
+                assert!(
+                    skipped_any,
+                    "the deep shape must prune (the 745-nat window is exceeded)"
+                );
+            }
+            // the winner is never skipped: the exhaustive argmax is
+            // in the computed set
+            let (winner_first, winner_second) = exhaustive_called[0];
+            let winner_flat = winner_second * (winner_second + 1) / 2 + winner_first;
+            assert!(computed_a[winner_flat].is_some(), "the winner is kept");
+            // THE FINAL-VALUE TIE-SET REBUILD (the T03226 locus-16
+            // fix's own construction): best and the called set as
+            // pure functions of the stage-two-patched class_lls —
+            // the exhaustive ones, at every shape above.
+            let final_lls: Vec<f64> = known
+                .iter()
+                .map(|value| value.unwrap_or(f64::NEG_INFINITY))
+                .collect();
+            let (rebuilt_best, rebuilt_called) = called_set_from_class_lls(&final_lls);
+            assert_eq!(
+                rebuilt_best.to_bits(),
+                exhaustive_best.to_bits(),
+                "the rebuilt best"
+            );
+            assert_eq!(rebuilt_called, exhaustive_called, "the rebuilt called set");
+        }
+    }
+
+    #[test]
+    fn bounded_tie_set_rebuilt_from_the_final_class_lls() {
+        // THE T03226 LOCUS-16 BUG CLASS, SYNTHESIZED AND FIXED: the
+        // bound's f64 evaluation can sit strictly BELOW the exact
+        // unit-order sum (the receipted 12-ulp shortfall — the bound
+        // inadmissible-by-rounding at tie shapes), so stage one's
+        // strict stop could fire legitimately BETWEEN bit-identical
+        // ties and the emitted called set — built from stage one's
+        // computed prefix only — silently lost them. The fix under
+        // test, both halves: (a) THE DERIVED SLACK — every skip
+        // comparison consumes bound + the bound's own
+        // forward-error term, restoring exact <= bound + slack so
+        // the stop can no longer fire between ties; (b) THE
+        // FINAL-VALUE REBUILD — the emitted called set is a pure
+        // function of the final class_lls, never of the bound's
+        // rounding. SYNTHESIZING THE SHAPE CLASS: two BIT-IDENTICAL
+        // folds (a guaranteed three-way tie: pairs (0,0), (0,1),
+        // (1,1) share one accumulation bit for bit) whose pinned
+        // entries sit a FEW ULPs ABOVE E (the committed
+        // row-compression class — a pinned entry's marginalization
+        // rounds to >= E — with the excess mass tiny), so the bound
+        // fl(fl(E*C + A_f) + A_g) carries the big E*C-against-A
+        // cancellation while the exact sums accumulate unit-order:
+        // the bound can round strictly BELOW the exact tie —
+        // precisely the receipted mechanism. The search is
+        // deterministic (a fixed grid, no RNG) and asserts its own
+        // premise found.
+        let ulps_up = |value: f64, k: usize| {
+            let mut bits = value.to_bits();
+            for _ in 0..k {
+                bits += 1; // value < 0: +1 bit pattern is one ulp toward +inf
+            }
+            f64::from_bits(bits)
+        };
+        let shape_rows = |n_units: usize, elsewhere: f64| -> Vec<Vec<f64>> {
+            vec![
+                (0..n_units)
+                    .map(|unit| {
+                        if unit % 5 < 3 {
+                            ulps_up(elsewhere, 1 + unit % 3)
+                        } else {
+                            elsewhere
+                        }
+                    })
+                    .collect(),
+                (0..n_units)
+                    .map(|unit| {
+                        if unit % 5 < 3 {
+                            ulps_up(elsewhere, 1 + unit % 3)
+                        } else {
+                            elsewhere
+                        }
+                    })
+                    .collect(),
+            ]
+        };
+        let shape_matrix = |n_units: usize, elsewhere: f64| -> ScoreMatrix {
+            ScoreMatrix::from_dense(
+                shape_rows(n_units, elsewhere),
+                vec![
+                    (0..n_units).map(|unit| unit % 5 < 3).collect(),
+                    (0..n_units).map(|unit| unit % 5 < 3).collect(),
+                ],
+                vec![vec![0u32; n_units], vec![0u32; n_units]],
+                elsewhere,
+            )
+        };
+        let mut found: Option<(usize, f64, f64, f64)> = None;
+        for n_units in [61usize, 131, 293] {
+            let counts: Vec<f64> =
+                (0..n_units).map(|unit| 1.0 + (unit % 9) as f64).collect();
+            for step in 1..=400i32 {
+                let elsewhere = -(2.0 + step as f64 * 0.0137713137);
+                let matrix = shape_matrix(n_units, elsewhere);
+                let exact0 = matrix.class_pair_sum(0, 0, &counts);
+                let index = ClassScanBoundIndex::build(&matrix, &counts);
+                let bound = index.pair_bound(0, 0);
+                // the rounding class: the exact tie sits strictly
+                // ABOVE the bound (the bound is
+                // inadmissible-by-rounding at this shape), and all
+                // three pairs share the bound (the tie shape)
+                if exact0 > bound
+                    && index.pair_bound(0, 1) == bound
+                    && index.pair_bound(1, 1) == bound
+                {
+                    found = Some((n_units, elsewhere, bound, exact0));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let Some((n_units, elsewhere, bound, exact0)) = found else {
+            panic!(
+                "the search found no inadmissible-by-rounding tie shape — \
+                 the test's premise shape class is gone"
+            );
+        };
+        let counts: Vec<f64> =
+            (0..n_units).map(|unit| 1.0 + (unit % 9) as f64).collect();
+        let matrix = shape_matrix(n_units, elsewhere);
+        let pair_count = 3usize;
+        // all three pairs tie bit-identical at the accumulated sum
+        let exhaustive: Vec<f64> = (0..pair_count)
+            .map(|flat| {
+                let (first, second) = unrank_pair(flat);
+                matrix.class_pair_sum(first, second, &counts)
+            })
+            .collect();
+        assert_eq!(exhaustive[0].to_bits(), exact0.to_bits());
+        assert_eq!(exhaustive[1].to_bits(), exact0.to_bits());
+        assert_eq!(exhaustive[2].to_bits(), exact0.to_bits());
+        let (exhaustive_best, exhaustive_called) = called_set_from_class_lls(&exhaustive);
+        assert_eq!(exhaustive_best.to_bits(), exact0.to_bits());
+        assert_eq!(exhaustive_called, vec![(0, 0), (0, 1), (1, 1)]);
+        // THE RECEIPTED MECHANISM, at this shape: the bound sits
+        // strictly below the exact best (the old stop rule fired on
+        // exactly this comparison after computing (0,0) alone)
+        assert!(
+            bound < exact0,
+            "the premise: bound {bound} must sit below the exact tie {exact0}"
+        );
+        // (a) THE DERIVED SLACK: the bound-plus-slack dominance
+        // holds at exactly the shape where the bare bound fails
+        let index = ClassScanBoundIndex::build(&matrix, &counts);
+        for flat in 0..pair_count {
+            let (first, second) = unrank_pair(flat);
+            let slack = index.pair_slack(first, second);
+            assert!(slack.is_finite() && slack < 1e-6);
+            assert!(
+                exhaustive[flat] <= index.pair_bound(first, second) + slack,
+                "the slack-corrected dominance must hold at pair {flat}"
+            );
+        }
+        // and the slack-corrected stop no longer fires between the
+        // ties: stage one computes the full tie set
+        let (bounds, slacks, computed, best, _) =
+            bounded_stage_one(&matrix, &counts, None);
+        assert_eq!(best.to_bits(), exact0.to_bits(), "stage one's best");
+        for flat in 0..pair_count {
+            assert!(
+                computed[flat].is_some(),
+                "the slack-corrected stop must not skip tie pair {flat}"
+            );
+            assert_eq!(
+                computed[flat].unwrap().to_bits(),
+                exact0.to_bits(),
+                "stage one's tie value must be the exhaustive one"
+            );
+        }
+        // (b) THE FINAL-VALUE REBUILD, at the receipted old state:
+        // the OLD code's stage one stopped after (0,0) — the two
+        // other ties uncomputed, their equal bounds strictly below
+        // the exact best — so the old class_lls carried the prefix
+        // only, and the old construction (from the prefix) emitted
+        // the short set: the bug, receipted
+        let old_class_lls = vec![exact0, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let (_, old_called) = called_set_from_class_lls(&old_class_lls);
+        assert_eq!(old_called, vec![(0, 0)], "the old prefix-only emission");
+        // stage two's keep window (the production form: no truth
+        // pair) selects the two skipped ties of the old state —
+        // their bounds + slack sit far above the derived threshold
+        let keep_threshold = bounded_keep_threshold(best, None);
+        let mut patched = old_class_lls;
+        for flat in 0..pair_count {
+            if patched[flat] == f64::NEG_INFINITY
+                && bounds[flat] + slacks[flat] >= keep_threshold
+            {
+                let (first, second) = unrank_pair(flat);
+                patched[flat] = matrix.class_pair_sum(first, second, &counts);
+            }
+        }
+        assert_eq!(patched[1].to_bits(), exact0.to_bits());
+        assert_eq!(patched[2].to_bits(), exact0.to_bits());
+        // and the rebuild from the FINAL values emits the full tie
+        let (rebuilt_best, rebuilt_called) = called_set_from_class_lls(&patched);
+        assert_eq!(rebuilt_best.to_bits(), exact0.to_bits());
+        assert_eq!(rebuilt_called, exhaustive_called);
+    }
+
+    #[test]
+    fn bounded_keep_threshold_carries_the_truth_window() {
+        // THE TRUTH WINDOW'S OWN SOUNDNESS: where the truth pair sits
+        // BELOW the QUAL window (best + t), the derived keep
+        // threshold drops to the truth pair's own exact ll, so every
+        // pair that can be strictly above or tied with the truth is
+        // kept (a skipped pair's bound < truth_ll forces its exact <
+        // truth_ll — neither above nor tied) and the receipt's truth
+        // fields read the exhaustive values; where the truth pair
+        // sits INSIDE the window the threshold is the QUAL window's
+        // own (the receipted shape — the log gaps are under the
+        // 745-nat window).
+        let best = -1234.5f64;
+        let t = exp_underflow_point();
+        assert_eq!(
+            bounded_keep_threshold(best, None).to_bits(),
+            (best + t).to_bits()
+        );
+        assert_eq!(
+            bounded_keep_threshold(best, Some(best)).to_bits(),
+            (best + t).to_bits(),
+            "the truth pair at best adds nothing"
+        );
+        let deep_truth = best + 2.0 * t; // ~1490 nats below best
+        assert_eq!(
+            bounded_keep_threshold(best, Some(deep_truth)).to_bits(),
+            deep_truth.to_bits(),
+            "a truth pair below the window drops the threshold to itself"
+        );
+        assert!(deep_truth < best + t);
+    }
+
+    // ---------------------------------------------------------------------
+    // (THE PANEL-SIDE PER-LOCUS PRECOMPUTE, SS10.6.23 slice 1 — the
+    // unit bars the design names: the asset round trip is lossless;
+    // the serve == live-built fold layouts on randomized fixtures
+    // INCLUDING the masked forms (the masking commute lemma); the
+    // representative-independence clause; the sequence-FNV drift
+    // detector is a loud error, never a served structure.)
+    // ---------------------------------------------------------------------
+
+    /// A tiny deterministic LCG (no tuned constants, reproducible).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 11
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn folds_equal(a: &[Fold], b: &[Fold]) {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "fold count differs: live {} vs served {}",
+            a.len(),
+            b.len()
+        );
+        for (index, (live, served)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                live.seq, served.seq,
+                "fold {index}: the sequence differs"
+            );
+            assert_eq!(live.len, served.len, "fold {index}: the length differs");
+            assert_eq!(live.walk, served.walk, "fold {index}: the walk differs");
+            assert_eq!(
+                live.node_positions, served.node_positions,
+                "fold {index}: the node positions differ"
+            );
+            assert_eq!(live.nodes, served.nodes, "fold {index}: the nodes differ");
+            assert_eq!(live.edges, served.edges, "fold {index}: the edges differ");
+            assert_eq!(
+                live.members, served.members,
+                "fold {index}: the members differ"
+            );
+        }
+    }
+
+    /// The randomized-fixture world: a synthetic row set over a few
+    /// paths, with (a) rows sharing their (sequence, relative walk)
+    /// content but not their extents (the coalesced-copy class, the
+    /// representative-independence clause), (b) unique rows, (c) rows
+    /// whose member entries repeat. The fetch closure keys on
+    /// (path name, start, end) exactly as the live fetch does.
+    struct Fixture {
+        names: Vec<String>,
+        path_of_name: HashMap<String, usize>,
+        rows: Vec<RowFold>,
+        dedup: HashMap<(usize, u64, u64), usize>,
+        members: Vec<MemberRow>,
+        axis_start: u64,
+        axis_end: u64,
+        component: String,
+    }
+
+    fn precompute_fixture(seed: u64) -> Fixture {
+        let mut rng = Lcg(seed);
+        let names: Vec<String> = (0..5)
+            .map(|i| format!("DONOR#{i}#chr1"))
+            .chain(std::iter::once("STRANGER#0#chr1".to_string()))
+            .collect();
+        let mut path_of_name = HashMap::new();
+        for (index, name) in names.iter().enumerate() {
+            path_of_name.insert(name.clone(), index);
+        }
+        let component = "AXIS#0#chr1".to_string();
+        let axis_path = names.len();
+        path_of_name.insert(component.clone(), axis_path);
+        let stranger_path = names.len() - 1;
+        let mut rows: Vec<RowFold> = Vec::new();
+        let mut members: Vec<MemberRow> = Vec::new();
+        // The CONTENT-CLONE class: identical sequence bytes and
+        // identical contained relative walks, at different extents and
+        // paths — one fold whichever row represents it.
+        let clone_len = 80u64;
+        let clone_seq: Vec<u8> = (0..clone_len)
+            .map(|i| b"ACGT"[(i * 7 + (i / 13)) as usize % 4])
+            .collect();
+        let clone_walk: Vec<(u64, i32)> = (0..6)
+            .map(|i| (20 + i * 9, if i % 3 == 2 { -(10 + i as i32) } else { 10 + i as i32 }))
+            .collect();
+        for clone in 0..3 {
+            let start = 500 + clone * 137;
+            let end = start + clone_len;
+            let walk = clone_walk
+                .iter()
+                .map(|&(bp, node)| (bp + start, node))
+                .collect::<Vec<_>>();
+            let path = (clone as usize) % stranger_path;
+            rows.push(RowFold {
+                path,
+                start,
+                end,
+                seq: clone_seq.clone(),
+                walk: walk.clone(),
+                frames: walk.iter().map(|&(_, node)| (node < 0) as u8).collect(),
+                stored_walk: walk.clone(),
+                members: Vec::new(),
+            });
+            members.push(MemberRow {
+                path_name: names[path].clone(),
+                start,
+                end,
+            });
+        }
+        // Unique rows with randomized walks.
+        for row_index in 0..12 {
+            let start = 40 + row_index as u64 * 90;
+            let len = 60 + rng.below(60);
+            let end = start + len;
+            let mut walk: Vec<(u64, i32)> = Vec::new();
+            let mut bp = start + rng.below(6);
+            while bp + K <= end {
+                let node = 1 + rng.below(30) as i32;
+                walk.push((bp, if rng.below(2) == 0 { node } else { -node }));
+                bp += 1 + rng.below(9);
+            }
+            walk.sort_unstable_by_key(|&(bp, _)| bp);
+            let path = rng.below(stranger_path as u64) as usize;
+            rows.push(RowFold {
+                path,
+                start,
+                end,
+                seq: (0..len)
+                    .map(|i| b"ACGT"[((i as u64 * 11 + row_index as u64) % 4) as usize])
+                    .collect(),
+                walk: walk.clone(),
+                frames: walk.iter().map(|&(_, node)| (node < 0) as u8).collect(),
+                stored_walk: walk.clone(),
+                members: Vec::new(),
+            });
+            members.push(MemberRow {
+                path_name: names[path].clone(),
+                start,
+                end,
+            });
+            // A repeated member entry over the SAME row identity (the
+            // deduplication class: one row, two member entries).
+            if rng.below(3) == 0 {
+                members.push(MemberRow {
+                    path_name: names[path].clone(),
+                    start,
+                    end,
+                });
+            }
+        }
+        // The axis row itself (never excluded, the coordinate frame).
+        let axis_start = 100u64;
+        let axis_end = 900u64;
+        let axis_walk: Vec<(u64, i32)> = (0..10)
+            .map(|i| (axis_start + i * 80, 100 + i as i32))
+            .collect();
+        rows.push(RowFold {
+            path: axis_path,
+            start: axis_start,
+            end: axis_end,
+            seq: (0..axis_end - axis_start)
+                .map(|i| b"ACGT"[(i % 4) as usize])
+                .collect(),
+            walk: axis_walk.clone(),
+            frames: axis_walk.iter().map(|_| 0u8).collect(),
+            stored_walk: axis_walk,
+            members: Vec::new(),
+        });
+        members.push(MemberRow {
+            path_name: component.clone(),
+            start: axis_start,
+            end: axis_end,
+        });
+        // The stranger member (the masking operator's target — a REAL
+        // panel path masked at call time, so its row identity exists).
+        let stranger_start = 5230u64;
+        let stranger_end = stranger_start + 64;
+        rows.push(RowFold {
+            path: stranger_path,
+            start: stranger_start,
+            end: stranger_end,
+            seq: vec![b'T'; (stranger_end - stranger_start) as usize],
+            walk: vec![(stranger_start + 9, -77)],
+            frames: vec![1],
+            stored_walk: vec![(stranger_start + 9, -77)],
+            members: Vec::new(),
+        });
+        members.push(MemberRow {
+            path_name: names[stranger_path].clone(),
+            start: stranger_start,
+            end: stranger_end,
+        });
+        // The row table: dedup by (path, start, end), the members
+        // attached in member order (the live insertion discipline).
+        let mut dedup: HashMap<(usize, u64, u64), usize> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            dedup.insert((row.path, row.start, row.end), index);
+        }
+        for (member_index, member) in members.iter().enumerate() {
+            let path_idx = path_of_name[&member.path_name];
+            let row_index = dedup[&(path_idx, member.start, member.end)];
+            rows[row_index].members.push((0, member_index));
+        }
+        Fixture {
+            names,
+            path_of_name,
+            rows,
+            dedup,
+            members,
+            axis_start,
+            axis_end,
+            component,
+        }
+    }
+
+
+
+    fn fixture_fetch(fixture: &Fixture) -> impl Fn(&str, u64, u64) -> io::Result<Vec<u8>> + Sync {
+        let rows = fixture.rows.clone();
+        let path_of_name = fixture.path_of_name.clone();
+        move |name: &str, start: u64, end: u64| {
+            let path_idx = path_of_name[name];
+            for row in &rows {
+                if row.path == path_idx && row.start == start && row.end == end {
+                    return Ok(row.seq.clone());
+                }
+            }
+            Err(invalid("the fixture fetch misses a row"))
+        }
+    }
+
+    fn build_serve_state(
+        fixture: &Fixture,
+    ) -> (PrecomputeServe, Vec<RowFold>, Vec<u64>) {
+        // The builder's own path, in miniature: the row context asset
+        // (with the FNV content keys), the unmasked live grouping, the
+        // asset round trip through the REAL encoder/decoder.
+        let rows: Vec<PrecomputeRowAsset> = fixture
+            .rows
+            .iter()
+            .map(|row| PrecomputeRowAsset {
+                path_name: if let Some(name) = fixture.names.get(row.path) {
+                    name.clone()
+                } else {
+                    fixture.component.clone()
+                },
+                start: row.start,
+                end: row.end,
+                seq_fnv: fnv1a64(&row.seq),
+                stored_walk: row.stored_walk.clone(),
+                walk: row.walk.clone(),
+                frames: row.frames.clone(),
+                members: row.members.clone(),
+            })
+            .collect();
+        let encoded = encode_rows(&rows);
+        let decoded = decode_rows(&encoded).expect("the asset round trip decodes");
+        // The served rows, built as run() builds them (sequences
+        // left in the sources).
+        let served_rows: Vec<RowFold> = decoded
+            .iter()
+            .map(|row| RowFold {
+                path: fixture.path_of_name[&row.path_name],
+                start: row.start,
+                end: row.end,
+                seq: Vec::new(),
+                walk: row.walk.clone(),
+                frames: row.frames.clone(),
+                stored_walk: row.stored_walk.clone(),
+                members: row.members.clone(),
+            })
+            .collect();
+        let (_, fold_rep, member_fold, _, _) = build_window_folds_live(
+            &fixture.rows,
+            &fixture.dedup,
+            &fixture.members,
+            &fixture.component,
+            fixture.axis_start,
+            fixture.axis_end,
+            None,
+            &[],
+            &fixture.path_of_name,
+            &|_| u64::MAX / 4,
+            K,
+        )
+        .expect("the unmasked live grouping builds");
+        let windows = vec![PrecomputeWindowAsset {
+            partition: 0,
+            axis_start: fixture.axis_start,
+            axis_end: fixture.axis_end,
+            fold_rep,
+            member_fold,
+        }];
+        let serve = PrecomputeServe {
+            windows,
+            seq_fnv: decoded.iter().map(|row| row.seq_fnv).collect(),
+            seqs: Mutex::new(HashMap::new()),
+            bind: None,
+        };
+        (serve, served_rows, decoded.iter().map(|row| row.seq_fnv).collect())
+    }
+
+    #[test]
+    fn panel_precompute_asset_round_trip_is_lossless() {
+        for seed in [1u64, 7, 42, 20261023] {
+            let fixture = precompute_fixture(seed);
+            let rows: Vec<PrecomputeRowAsset> = fixture
+                .rows
+                .iter()
+                .map(|row| PrecomputeRowAsset {
+                    path_name: fixture.names[row.path.min(fixture.names.len() - 1)].clone(),
+                    start: row.start,
+                    end: row.end,
+                    seq_fnv: fnv1a64(&row.seq),
+                    stored_walk: row.stored_walk.clone(),
+                    walk: row.walk.clone(),
+                    frames: row.frames.clone(),
+                    members: row.members.clone(),
+                })
+                .collect();
+            let decoded = decode_rows(&encode_rows(&rows)).expect("decode");
+            assert_eq!(decoded.len(), rows.len());
+            for (a, b) in rows.iter().zip(decoded.iter()) {
+                assert_eq!(a.path_name, b.path_name);
+                assert_eq!(a.start, b.start);
+                assert_eq!(a.end, b.end);
+                assert_eq!(a.seq_fnv, b.seq_fnv);
+                assert_eq!(a.stored_walk, b.stored_walk);
+                assert_eq!(a.walk, b.walk);
+                assert_eq!(a.frames, b.frames);
+                assert_eq!(a.members, b.members);
+            }
+        }
+    }
+
+    #[test]
+    fn panel_precompute_serve_equals_live_built_on_randomized_fixtures() {
+        // The masking commute lemma, exercised on every fixture and
+        // every filter combination: unmasked, the flank filter, the
+        // masking operator, and both together.
+        for seed in [1u64, 7, 42, 20261023] {
+            let fixture = precompute_fixture(seed);
+            let (serve, served_rows, _) = build_serve_state(&fixture);
+            let fetch = fixture_fetch(&fixture);
+            let mut path_names = fixture.names.clone();
+            path_names.push(fixture.component.clone());
+            for (flank, exclude) in [
+                (None::<FlankOverlap>, Vec::<String>::new()),
+                (
+                    Some(FlankOverlap::Bp(120)),
+                    Vec::<String>::new(),
+                ),
+                (None::<FlankOverlap>, vec!["STRANGER#*".to_string()]),
+                (
+                    Some(FlankOverlap::Bp(120)),
+                    vec!["STRANGER#*".to_string()],
+                ),
+            ] {
+                let (live_folds, _rep, _member_fold, excluded, flank_excluded) =
+                    build_window_folds_live(
+                        &fixture.rows,
+                        &fixture.dedup,
+                        &fixture.members,
+                        &fixture.component,
+                        fixture.axis_start,
+                        fixture.axis_end,
+                        flank,
+                        &exclude,
+                        &fixture.path_of_name,
+                        &|_| u64::MAX / 4,
+                        K,
+                    )
+                    .expect("the live masked build");
+                let (served_folds, s_excluded, s_flank_excluded) = serve
+                    .serve_window_folds(
+                        &served_rows,
+                        0,
+                        &fixture.members,
+                        &fixture.component,
+                        fixture.axis_start,
+                        fixture.axis_end,
+                        flank,
+                        &exclude,
+                        K,
+                        &fetch,
+                        &path_names,
+                    )
+                    .expect("the serve");
+                assert_eq!(excluded, s_excluded, "the excluded counts differ");
+                assert_eq!(
+                    flank_excluded, s_flank_excluded,
+                    "the flank-excluded counts differ"
+                );
+                folds_equal(&live_folds, &served_folds);
+                // The representative-independence clause, live on the
+                // fixture: the content-clone rows (equal sequence,
+                // equal relative walk, different extents) group into
+                // ONE fold, and whichever row represents it the
+                // served content is identical to the live one —
+                // asserted on the unmasked form (the masked forms may
+                // filter the class away, which is the filters' own
+                // semantics, proved identical above).
+                if flank.is_none() && exclude.is_empty() {
+                    let coalesced = live_folds
+                        .iter()
+                        .any(|fold| fold.seq == fixture.rows[0].seq && fold.members.len() >= 3);
+                    assert!(
+                        coalesced,
+                        "the fixture must exercise the coalesced-copy class \
+                         (seed {seed})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_precompute_serve_requires_the_axis_fold_under_territory_masks() {
+        // The masking filters never exclude the axis row (it is the
+        // coordinate frame), so the territory machinery's axis-fold
+        // discovery holds under the serve exactly as under the live
+        // build — asserted here over the fixtures' masked forms.
+        for seed in [1u64, 7, 42] {
+            let fixture = precompute_fixture(seed);
+            let (serve, served_rows, _) = build_serve_state(&fixture);
+            let fetch = fixture_fetch(&fixture);
+            let mut path_names = fixture.names.clone();
+            path_names.push(fixture.component.clone());
+            let (folds, _, _) = serve
+                .serve_window_folds(
+                    &served_rows,
+                    0,
+                    &fixture.members,
+                    &fixture.component,
+                    fixture.axis_start,
+                    fixture.axis_end,
+                    Some(FlankOverlap::Bp(120)),
+                    &["STRANGER#*".to_string()],
+                    K,
+                    &fetch,
+                    &path_names,
+                )
+                .expect("the masked serve");
+            assert!(folds.iter().any(|fold| {
+                fold.members.iter().any(|m| {
+                    m.path_name == fixture.component
+                        && m.start == fixture.axis_start
+                        && m.end == fixture.axis_end
+                })
+            }));
+        }
+    }
+
+    #[test]
+    fn panel_precompute_sequence_fnv_drift_is_a_loud_error() {
+        // The drift detector: a source whose bytes no longer match the
+        // asset's recorded FNV-64 content key is a HARD ERROR at serve
+        // time — never a silently served structure.
+        let fixture = precompute_fixture(7);
+        let (serve, served_rows, mut seq_fnv) = build_serve_state(&fixture);
+        // Corrupt one representative row's content key.
+        let rep = serve.windows[0].fold_rep[0];
+        seq_fnv[rep] ^= 1;
+        let serve = PrecomputeServe {
+            windows: serve.windows,
+            seq_fnv,
+            seqs: Mutex::new(HashMap::new()),
+            bind: None,
+        };
+        let fetch = fixture_fetch(&fixture);
+        let mut path_names = fixture.names.clone();
+        path_names.push(fixture.component.clone());
+        let result = serve.serve_window_folds(
+            &served_rows,
+            0,
+            &fixture.members,
+            &fixture.component,
+            fixture.axis_start,
+            fixture.axis_end,
+            None,
+            &[],
+            K,
+            &fetch,
+            &path_names,
+        );
+        assert!(result.is_err(), "a drifted sequence content key must be loud");
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("mismatches the fetched bytes"),
+            "the error must name the drift class"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // (THE BIND SCAFFOLDING, SS10.6.25 slice 2 — the unit bars the
+    // design names: the asset round trip is lossless; the serve ==
+    // live derivation at EVERY position of randomized in-process
+    // panels (the locality lemma — served band, uncovered fallback,
+    // path edges included); the loader serves the slice-1 /1 format
+    // without the section and validates the /2 section's counters.)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn bind_scaffold_asset_round_trip_is_lossless() {
+        for seed in [1u64, 7, 42, 20261024] {
+            let mut rng = Lcg(seed);
+            let paths: Vec<BindScaffoldPathAsset> = (0..4)
+                .map(|path| {
+                    let ranges: Vec<(u64, u64)> = (0..1 + rng.below(3))
+                        .map(|_| {
+                            let lo = rng.below(2000);
+                            (lo, lo + 1 + rng.below(500))
+                        })
+                        .collect();
+                    let steps: Vec<(u64, i32)> = (0..rng.below(200))
+                        .map(|_| {
+                            let bp = rng.below(2000);
+                            let node = rng.below(1 << 20) as i64;
+                            (
+                                bp,
+                                ((node >> 1) as i64 ^ -(node & 1)) as i32,
+                            )
+                        })
+                        .collect();
+                    BindScaffoldPathAsset {
+                        path_name: format!("PATH#{path}#chrT:0-1"),
+                        ranges,
+                        steps,
+                    }
+                })
+                .collect();
+            let decoded =
+                decode_bind_scaffolding(&encode_bind_scaffolding(&paths)).expect("decode");
+            assert_eq!(decoded.len(), paths.len());
+            for (a, b) in paths.iter().zip(decoded.iter()) {
+                assert_eq!(a.path_name, b.path_name);
+                assert_eq!(a.ranges, b.ranges);
+                assert_eq!(a.steps, b.steps);
+            }
+        }
+    }
+
+    #[test]
+    fn bind_scaffold_serve_equals_live_at_every_position() {
+        // The syng C library's global state serializes against every
+        // other in-process test that touches the FFI (the shared
+        // SYNG_TEST_LOCK — the in-process panels below are real
+        // indexes built through the same C library).
+        let _guard = crate::syng::SYNG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let k = 63u64; // the committed k63/s8 convention's syncmer length
+        for seed in [3u64, 19, 91] {
+            let mut rng = Lcg(seed);
+            // The randomized-panel world: three paths of varied length
+            // (path-edge bands exercised), deterministic ACGT with an
+            // N-run on one path (the invalid-base skip class) and a
+            // shared segment between two paths (the multi-match
+            // dictionary class — the reverse map's node can come from
+            // another path's dictionary entry).
+            let lengths = [1400usize, 1900, 2300];
+            let mut sequences: Vec<Vec<u8>> = lengths
+                .iter()
+                .map(|&len| {
+                    (0..len)
+                        .map(|_| b"ACGT"[rng.below(4) as usize])
+                        .collect()
+                })
+                .collect();
+            for i in 600..640 {
+                sequences[1][i] = b'N';
+            }
+            let shared_segment: Vec<u8> = sequences[0][100..400].to_vec();
+            for (i, &base) in shared_segment.iter().enumerate() {
+                sequences[2][1500 + i] = base;
+            }
+            let names: Vec<String> =
+                (0..3).map(|p| format!("PATH#{p}#chrT:0-{}", lengths[p])).collect();
+            let panel = crate::syng::SyngIndex::build(
+                crate::syng::SyncmerParams::default(),
+                names.iter().cloned().zip(sequences.iter().cloned()),
+            );
+            let path_of_name: HashMap<String, usize> = names
+                .iter()
+                .enumerate()
+                .map(|(path, name)| (name.clone(), path))
+                .collect();
+            // The in-memory sources, fetched with the production
+            // fetch's own semantics (the hi clamp at the path length;
+            // lo >= hi is empty).
+            let fetch = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
+                let path = path_of_name[name];
+                let len = lengths[path] as u64;
+                let hi = hi.min(len);
+                if lo >= hi {
+                    return Ok(Vec::new());
+                }
+                Ok(sequences[path][lo as usize..hi as usize].to_vec())
+            };
+            // Randomized member-row extents per path: overlapping,
+            // gapped (a gap wider than the window's reach must exist —
+            // the uncovered fallback class), an extent at the path
+            // start and one at the path end (the clamped-context
+            // clause).
+            let mut member_rows: Vec<(usize, u64, u64)> = Vec::new();
+            for (path, &len) in lengths.iter().enumerate() {
+                member_rows.push((path, 0, 100 + rng.below(150)));
+                member_rows.push((path, len as u64 - 200, len as u64));
+                let mut cursor = 300u64;
+                while cursor + 100 < len as u64 - 400 {
+                    let span = 100 + rng.below(400);
+                    member_rows.push((path, cursor, cursor + span));
+                    // The gap: sometimes within the window's reach
+                    // (merged), sometimes beyond it (uncovered).
+                    cursor += span
+                        + if rng.below(2) == 0 {
+                            rng.below(40)
+                        } else {
+                            100 + rng.below(200)
+                        };
+                }
+            }
+            let assets =
+                build_bind_scaffold(&panel, &fetch, k, member_rows.iter().copied())
+                    .expect("the scaffold builds");
+            let serve = BindScaffoldServe::from_asset(assets.clone(), &path_of_name, &panel)
+                .expect("the serve state builds");
+            let mut served_positions = 0u64;
+            let mut fallback_positions = 0u64;
+            for (path, &len) in lengths.iter().enumerate() {
+                let path_len = len as u64;
+                for position in 0..path_len {
+                    // THE LIVE DERIVATION (the committed bind's own
+                    // spelling, at the record's own window).
+                    let live = canonical_steps_over_range(
+                        &panel,
+                        &fetch,
+                        k,
+                        path,
+                        position.saturating_sub(150),
+                        position + 150,
+                    )
+                    .expect("the live derivation")
+                    .into_iter()
+                    .find(|&(bp, _)| bp == position);
+                    // The band classification must be exactly the
+                    // locality lemma's predicate over the builder's
+                    // own ranges.
+                    let covered = assets
+                        .iter()
+                        .find(|asset| asset.path_name == names[path])
+                        .map(|asset| {
+                            asset.ranges.iter().any(|&(lo, hi)| {
+                                bind_range_covers(
+                                    lo,
+                                    hi,
+                                    position,
+                                    path_len,
+                                    panel.params.w as u64 - 1,
+                                    panel.syncmer_length_bp() as u64,
+                                )
+                            })
+                        })
+                        .unwrap_or(false);
+                    match serve.step_at(path, position, path_len) {
+                        Some(recorded) => {
+                            assert!(covered, "a position outside the served band was served");
+                            assert_eq!(
+                                recorded, live,
+                                "path {path} position {position}: the served step differs \
+                                 from the live derivation"
+                            );
+                            served_positions += 1;
+                        }
+                        None => {
+                            assert!(
+                                !covered,
+                                "path {path} position {position}: a covered position \
+                                 fell back (the serve must answer it)"
+                            );
+                            fallback_positions += 1;
+                        }
+                    }
+                }
+            }
+            // The fixture must exercise BOTH classes at every seed
+            // (the served band and the uncovered fallback).
+            assert!(
+                served_positions > 0 && fallback_positions > 0,
+                "seed {seed}: the fixture must exercise both the served band \
+                 ({served_positions}) and the fallback ({fallback_positions})"
+            );
+            assert_eq!(
+                serve.served.load(Ordering::Relaxed),
+                served_positions,
+                "the served counter must count the lookups"
+            );
+            assert_eq!(
+                serve.fallbacks.load(Ordering::Relaxed),
+                fallback_positions,
+                "the fallback counter must count the uncovered positions"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_scaffold_loader_serves_slice1_format_and_validates_counters() {
+        // The slice-1 /1 manifest (no bind counters, no section file)
+        // loads with `bind: None` — the row context + fold layouts
+        // serve, the bind derives live; the /2 format requires the
+        // section and validates its counters against the manifest.
+        let dir = std::env::temp_dir().join(format!(
+            "impg-bind-scaffold-loader-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let identity = crate::genome_inference::PanelIdentity {
+            checksum_algorithm: "fnv1a64".to_string(),
+            sidecars: Vec::new(),
+        };
+        let keys = PanelPrecomputeKeys {
+            panel: identity.clone(),
+            k: 63,
+            component: "PATH#1#chrT:0-1000".to_string(),
+            frame: "local".to_string(),
+            record_origin: 0,
+            stored_frame: false,
+            maps_digest: 1,
+            routes_digest: 2,
+        };
+        let write_asset = |format: &str, bind: Option<&Vec<BindScaffoldPathAsset>>| {
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let (bind_paths, bind_ranges, bind_steps) = match bind {
+                Some(paths) => (
+                    paths.len() as u64,
+                    paths.iter().map(|p| p.ranges.len() as u64).sum(),
+                    paths.iter().map(|p| p.steps.len() as u64).sum(),
+                ),
+                None => (0, 0, 0),
+            };
+            let manifest = PanelPrecomputeManifest {
+                format: format.to_string(),
+                panel: identity.clone(),
+                k: 63,
+                component: keys.component.clone(),
+                frame: "local".to_string(),
+                record_origin: 0,
+                stored_frame: false,
+                maps_digest: 1,
+                routes_digest: 2,
+                windows: 0,
+                rows: 0,
+                folds: 0,
+                bind_paths,
+                bind_ranges,
+                bind_steps,
+            };
+            crate::genome_inference::atomic_write(
+                &dir.join("rows.bin"),
+                &encode_rows(&[]),
+            )
+            .expect("rows");
+            crate::genome_inference::atomic_write(
+                &dir.join("windows.bin"),
+                &encode_windows(&[]),
+            )
+            .expect("windows");
+            if let Some(paths) = bind {
+                crate::genome_inference::atomic_write(
+                    &dir.join("bind-scaffolding.bin"),
+                    &encode_bind_scaffolding(paths),
+                )
+                .expect("bind");
+            }
+            crate::genome_inference::write_json(&dir.join("manifest.json"), &manifest)
+                .expect("manifest");
+        };
+        // The slice-1 /1 form: no section, `bind: None`.
+        write_asset("impg-panel-precompute-loci/1", None);
+        let asset = load_panel_precompute(&dir, &keys).expect("the /1 asset loads");
+        assert!(asset.bind.is_none(), "the /1 asset carries no bind section");
+        // The /2 form with the section.
+        let paths = vec![BindScaffoldPathAsset {
+            path_name: "PATH#1#chrT:0-1000".to_string(),
+            ranges: vec![(0, 600)],
+            steps: vec![(10, 7), (40, -9)],
+        }];
+        write_asset("impg-panel-precompute-loci/2", Some(&paths));
+        let asset = load_panel_precompute(&dir, &keys).expect("the /2 asset loads");
+        let bind = asset.bind.expect("the /2 asset carries the section");
+        assert_eq!(bind.len(), 1);
+        assert_eq!(bind[0].ranges, paths[0].ranges);
+        assert_eq!(bind[0].steps, paths[0].steps);
+        // A corrupted counter is a loud error, never a served section:
+        // the manifest still carries the good counters while the
+        // section file was replaced underneath it.
+        let mut bad = paths.clone();
+        bad[0].steps.clear();
+        crate::genome_inference::atomic_write(
+            &dir.join("bind-scaffolding.bin"),
+            &encode_bind_scaffolding(&bad),
+        )
+        .expect("bind");
+        let result = load_panel_precompute(&dir, &keys);
+        assert!(result.is_err(), "a mismatched counter must be loud");
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("bind-scaffolding counters disagree"),
+            "the error must name the counter class"
+        );
+        // An unknown format string is refused outright.
+        write_asset("impg-panel-precompute-loci/9", None);
+        let result = load_panel_precompute(&dir, &keys);
+        assert!(result.is_err(), "an unknown format must be loud");
+        assert!(
+            result.err().unwrap().to_string().contains("unknown format"),
+            "the error must name the format class"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE SPLICED RECEIPT WRITER IS THE VALUE-TREE FORM, BYTE FOR
+    /// BYTE. The certificate streams from its typed lists instead of
+    /// being built as a `serde_json::Value` first (the 32-bytes-per-entry
+    /// copy the receipts-phase audit found); the emission order is
+    /// serde_json's ordered map, so the two forms must agree exactly -
+    /// otherwise the receipts stop being comparable to the committed
+    /// ones, which is the whole point of the doctrine.
+    #[test]
+    fn the_spliced_report_writer_matches_the_value_tree_form_byte_for_byte() {
+        let lists: Vec<(usize, Vec<usize>)> =
+            vec![(0, vec![3, 1, 4]), (7, Vec::new()), (2, vec![9, 0])];
+        // The sentinel keeps the key in the map (its alphabetical slot),
+        // and the reference builds the member the committed way.
+        let report = json!({
+            "alpha": 1,
+            "zeta": "x",
+            "mid": [1.5, 2],
+            "qual_tied_cut_indices": serde_json::Value::Null,
+        });
+        let mut reference_value = report.clone();
+        reference_value["qual_tied_cut_indices"] = json!(lists
+            .iter()
+            .map(|(index, list)| json!([index, list]))
+            .collect::<Vec<_>>());
+        let mut reference = Vec::new();
+        serde_json::to_writer(&mut reference, &reference_value).unwrap();
+
+        let mut spliced = Vec::new();
+        write_report_with_cut_indices(
+            &mut spliced,
+            &report,
+            "qual_tied_cut_indices",
+            &lists,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(spliced).unwrap(),
+            String::from_utf8(reference).unwrap(),
+            "the streamed certificate must emit the value tree's own bytes"
+        );
+    }
 }

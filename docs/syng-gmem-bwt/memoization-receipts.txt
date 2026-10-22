@@ -1,0 +1,369 @@
+THE BIT-EQUAL-ROW MEMOIZATION RECEIPTS (the fourth expressibility
+reduction — the named Frontier-1 residual, IMPLEMENTED 2026-10-22;
+the answers gates + the hit-rate + timing receipts at the kept
+corpus's re-derivable shapes, under THE STREAM DISCIPLINE).
+
+================================================================================
+0. THE MECHANISM, AND ITS EXACTNESS PROOF (stated in the code,
+   `ClassScanMemo`, src/genome_inference/realign_score.rs)
+================================================================================
+
+The class scan's per-(class-pair, unit) work is a PURE FUNCTION of the
+pair's evidence-row bit patterns: the committed accumulation
+`total += count * mix_logsumexp(ll_a[u], ll_b[u])` reads, at every
+unit, the two rows' column values and nothing else. Two folds whose
+ll columns are bit-equal (the merge's own `ll_bits_equal` predicate,
+whichever encoding each row took) therefore produce BIT-IDENTICAL
+class pair sums against every third fold, and their hom pairs are
+identical too. The scan computes ONE sum per unordered (row-class,
+row-class) pair and shares it with every bit-equal pair.
+
+EXACTNESS BY CONSTRUCTION: for folds f, g with representatives
+r = canon[f], s = canon[g], class_pair_sum(r, s) executes the
+IDENTICAL f64 op sequence as class_pair_sum(f, g) — at each unit the
+cursor reads the same bits (column equality is exactly the
+`ll_bits_equal` predicate), `count` is per-unit, the accumulation
+walks units ascending in both — and IEEE-754 round-to-nearest is a
+deterministic function of the input bits and the op sequence, so the
+results are equal bit for bit. The memo SHARES VALUES, it never
+reorders: every pair's own flat slot is filled with the
+representative pair's value, so class_lls, best, the called set, the
+QUAL terms and every receipt field are the direct scan's own bits.
+
+THE KEY DISCIPLINE (the fold-signature doctrine): bucketing by the
+canonical column-content hash (`column_key_hash` — the row's pinned
+entries whose ll bits differ from the elsewhere constant's, as
+(unit, bits) pairs in unit order, the entry count fed last;
+encoding-independent by construction, O(pinned) per row, never the
+full O(units) column walk), with every bucket candidate decided by
+the EXACT predicate `ll_bits_equal` on match — a hash collision can
+never merge. The representative is the class's smallest fold index
+(deterministic).
+
+SITES (all the scan's exact-sum consumers, one memo table per
+locus, built once on the FINAL post-merge matrix): the exhaustive
+scan (the assessment form's own path — phase A computes each
+distinct canonical pair sum once, in parallel, phase B fills every
+pair's own flat slot), the bounded scan's stage-one rounds (the
+round's distinct canonical sums, persistent across rounds), stage
+two (the truth pair + the kept set), and the best-outside fallback's
+walk and tied sweep. The legacy sparse-skip/compare arms keep the
+direct form (measurement forms, off at the defaults).
+
+THE TOGGLE: IMPG_CLASS_SCAN_MEMO=off restores the direct per-pair
+form verbatim (the bounded scan's own toggle doctrine); the default
+is ON. No output label is warranted — the memo changes no emitted
+byte either way (the gates below prove it), and the phase census
+(env IMPG_LOCUS_PHASE_CENSUS) receipts the hit rates per shape.
+
+THE UNIT TESTS (cargo test --release --lib 586/0, 5 ignored — 584
+committed + the two new):
+- `memoized_scan_is_bit_identical_to_direct_on_randomized_rows` —
+  the randomized bit-row oracle: 60 cases, each with exact clones,
+  cross-encoding twins (extra pinned entries at exactly E —
+  invisible to the column), and one-ulp NEAR-TWIN negative controls;
+  per case: the canonical classes must be EXACTLY the brute-force
+  `ll_bits_equal` classes (the exact predicate decides, never the
+  hash), and the memoized two-phase scan (the scan site's own shape)
+  must reproduce the direct per-pair accumulation BIT FOR BIT at
+  every pair.
+- `scan_memo_canonicalizes_only_bit_equal_columns` — the key
+  discipline: pinned-at-E entries are invisible (folds differing
+  only in them share one class), a one-ulp non-E difference is its
+  own class, the representative is the class's min, and the shared
+  values are bit-identical (incl. the all-E class's hom pair).
+- the bounded stage-one determinism test now also runs the MEMOIZED
+  stage one and gates its kept values against the direct form's own
+  bits (bit-for-bit, plus the best).
+
+================================================================================
+1. THE SUBSTRATE RE-DERIVATIONS (the stream doctrine, the T09724
+   precedent's own form; runners committed at
+   scripts/complexity-ledger/run-memo-{T09724,L1}.sh)
+================================================================================
+
+THE FOLD-HEAVY MEMBER (T09724, the kept corpus's T00940-l1-class
+instance: locus 9 = 439 folds x 246,224 units = 96,580 pairs — the
+class's own numbers, T00940 l1 being 449 folds x 171,590 units =
+101,025 pairs / the 319.3s class scan): rebuilt transiently from the
+KEPT tranche-2 member smalls
+(/home/erikg/hprcv2/panel/tranche2/members/T09724/) —
+extract 468 members / 116,658,139 bp; reference-axis IDENTICAL to
+the kept member small; domain-structure IDENTICAL to the kept member
+small; cutA census mult 776,096 / reads 406,876 IDENTICAL to the
+committed tranche-2 receipt; cutA wall 439s; routes re-derived
+1,410s (the reap receipt's own ~25min class); peak scratch 18G of the
+150G budget (never approached).
+
+THE STANDARD TARGET (L1, the five-locality chain's committed 10kb
+recipe): rebuilt transiently from the read-only source assets at
+/home/erikg/hprcv2/generic-sampling/L1 — 25 partitions, 19 windows,
+the 137.3x deep census; peak scratch 9.1G of the 150G budget.
+
+Binaries: BASE = the committed HEAD (aaefecc) rebuilt from source
+at the clean-PATH env (CARGO_TARGET_DIR=target-frontier,
+LIBCLANG_PATH pinned, PATH without /usr/local/bin — the NFS-wedge
+fix; validated by the answer-digest gates below: every leg
+reproduces the committed receipts bit for bit); MEMO = the
+bit-equal-row memoization build. The substrate stages pin to the
+BASE binary (the one-era discipline); target/release/impg untouched.
+
+================================================================================
+2. THE ANSWER GATES (sha256, byte-identity; every leg serial
+   RAYON=1, census + fold-set-digest instruments ON)
+================================================================================
+
+L1 (19 loci, the committed form):
+    base      calls 3ca9648c2211ade176ab0f2ddf394331d1b0559206a6cead315df30bfb013cfa (71,214 bytes)
+              truth-qv 1c3dc4e1297194d78293ae0109d8341f30806a522951f16cbc14ec1776a0fcff (34,791 bytes)
+    memo      IDENTICAL (calls + truth-qv)
+    memo-off  IDENTICAL (calls + truth-qv)
+    -> the committed mergefix L1 receipts reproduced by all three
+       legs — the memo's answer-neutrality at the standard target,
+       and the TOGGLE-RESTORE gate (the memo binary with
+       IMPG_CLASS_SCAN_MEMO=off is byte-identical too).
+    fold-set digests: base (offline-mirror) == memo (in-process) ==
+       memo-off, 19/19 IDENTICAL.
+
+T09724 locus 9 (the fold-heavy locus, the committed form):
+    base  calls c32c50e7041c34d1a4df0a07a4263c1c860aa1d04e99621b493cf8ea6bca4bb2 IDENTICAL to the committed l9 receipt
+          truth-qv 5302ed6775ecd64d17f3795230e300e810a44f7bd50e4a202d5f9630a3cd378c
+    memo  IDENTICAL (calls + truth-qv)
+
+T09724 all 16 loci (the committed form):
+    base      calls c852d70f8e508d2959876cfbaf1df275dd362f06566444f41194ec6bf4e24d34 (34,860 bytes)
+              truth-qv c769b7725d7b1e5511594375fe27cabe547ee4896afb609b7d7b5b9f523336d1 (35,870 bytes)
+    memo      IDENTICAL (calls + truth-qv)
+    memo-off  IDENTICAL (calls + truth-qv)
+    -> the committed mergefix committed-form receipts reproduced by
+       every leg.
+    fold-set digests: base == memo == memo-off, 16/16 IDENTICAL —
+       and IDENTICAL to the committed mergefix committed-form
+       digests, locus for locus.
+
+T09724 all 16 loci (the PRE-MERGE anatomy form, merge env off):
+    memo      calls 34e05ac5bdeded875eba37be47e2c757af736c593766f2e6f701c13990a3d364 (34,319 bytes)
+              truth-qv 1101b4eb5f8c96ef0447529aa5df90828faf9c864f942febc10b8df1c1e3ade (34,112 bytes)
+    -> IDENTICAL to the committed mergefix pre-merge receipts; fold
+       digests 16/16 IDENTICAL to the committed pre-merge digests.
+
+================================================================================
+3. THE HIT-RATE RECEIPTS (the memo census, per shape; "dedup" =
+   pair sums served from the memo; the memo's catchment at the
+   committed stack IS the merge's refusal set — receipted row for
+   row below)
+================================================================================
+
+L1 (19 loci, the committed form):
+    locus  0:  184 folds ->  184 rows (  0 dedup rows),      0 of  17020 pairs ( 0.0%)
+    locus  1:  139 folds ->  139 rows (  0 dedup rows),      0 of   9730 pairs ( 0.0%)
+    locus  2:  129 folds ->  129 rows (  0 dedup rows),      0 of   8385 pairs ( 0.0%)
+    locus  3:  284 folds ->  284 rows (  0 dedup rows),      0 of  40470 pairs ( 0.0%)
+    locus  4:  443 folds ->  443 rows (  0 dedup rows),      0 of  98346 pairs ( 0.0%)
+    locus  5:   77 folds ->   77 rows (  0 dedup rows),      0 of   3003 pairs ( 0.0%)
+    locus  6:  164 folds ->  164 rows (  0 dedup rows),      0 of  13530 pairs ( 0.0%)
+    locus  7:  133 folds ->  133 rows (  0 dedup rows),      0 of   8911 pairs ( 0.0%)
+    locus  8:  114 folds ->  114 rows (  0 dedup rows),      0 of   6555 pairs ( 0.0%)
+    locus  9:  162 folds ->  162 rows (  0 dedup rows),      0 of  13203 pairs ( 0.0%)
+    locus 10:  213 folds ->  213 rows (  0 dedup rows),      0 of  22791 pairs ( 0.0%)
+    locus 11:  135 folds ->  135 rows (  0 dedup rows),      0 of   9180 pairs ( 0.0%)
+    locus 12:  126 folds ->  126 rows (  0 dedup rows),      0 of   8001 pairs ( 0.0%)
+    locus 13:  160 folds ->  160 rows (  0 dedup rows),      0 of  12880 pairs ( 0.0%)
+    locus 14:  175 folds ->  175 rows (  0 dedup rows),      0 of  15400 pairs ( 0.0%)
+    locus 15:  257 folds ->  253 rows (  4 dedup rows),   1022 of  33153 pairs ( 3.1%)
+    locus 16:  164 folds ->  164 rows (  0 dedup rows),      0 of  13530 pairs ( 0.0%)
+    locus 17:  115 folds ->  115 rows (  0 dedup rows),      0 of   6670 pairs ( 0.0%)
+    locus 18:  247 folds ->  247 rows (  0 dedup rows),      0 of  30628 pairs ( 0.0%)
+    (the memo build: 0.00-0.06s per locus, 0.68s at the 443-fold
+     monster l4 — the O(pinned) key walk)
+
+T09724 (16 loci, the committed form) — the catchment tracks the
+merge's refusals EXACTLY (l3: 13 eq-col / 11 admitted -> 2 dedup
+rows; l7: 20/13 -> 2; l9: 7/6 -> 1; l14: 18/17 -> 1; every locus
+that admitted everything -> 0):
+    locus  0:   95 folds ->   95 rows (  0 dedup),      0 of   4560 pairs ( 0.0%)
+    locus  1:  165 folds ->  165 rows (  0 dedup),      0 of  13695 pairs ( 0.0%)
+    locus  2:  210 folds ->  210 rows (  0 dedup),      0 of  22155 pairs ( 0.0%)
+    locus  3:  163 folds ->  161 rows (  2 dedup),    325 of  13366 pairs ( 2.4%)
+    locus  4:  160 folds ->  160 rows (  0 dedup),      0 of  12880 pairs ( 0.0%)
+    locus  5:  115 folds ->  115 rows (  0 dedup),      0 of   6670 pairs ( 0.0%)
+    locus  6:   80 folds ->   80 rows (  0 dedup),      0 of   3240 pairs ( 0.0%)
+    locus  7:  114 folds ->  112 rows (  2 dedup),    227 of   6555 pairs ( 3.5%)
+    locus  8:  293 folds ->  293 rows (  0 dedup),      0 of  43071 pairs ( 0.0%)
+    locus  9:  439 folds ->  438 rows (  1 dedup),    439 of  96580 pairs ( 0.5%)
+    locus 10:   43 folds ->   43 rows (  0 dedup),      0 of    946 pairs ( 0.0%)
+    locus 11:   68 folds ->   68 rows (  0 dedup),      0 of   2346 pairs ( 0.0%)
+    locus 12:  133 folds ->  133 rows (  0 dedup),      0 of   8911 pairs ( 0.0%)
+    locus 13:  143 folds ->  143 rows (  0 dedup),      0 of  10296 pairs ( 0.0%)
+    locus 14:  158 folds ->  157 rows (  1 dedup),    158 of  12561 pairs ( 1.3%)
+    locus 15:  213 folds ->  213 rows (  0 dedup),      0 of  22791 pairs ( 0.0%)
+
+T09724 (16 loci, the PRE-MERGE anatomy form — the merge OFF, every
+bit-equal row rides; THE PROBE'S OWN BAND, MEASURED LIVE: 7.7-41.8%
+per locus, the 23.9% lower edge landing EXACTLY at locus 0 and the
+41.8% at locus 6 EXCEEDING the probe's 37.7% upper edge):
+    locus  0:  109 folds ->   95 rows (14 dedup),   1435 of   5995 pairs (23.9%)
+    locus  1:  195 folds ->  165 rows (30 dedup),   5415 of  19110 pairs (28.3%)
+    locus  2:  249 folds ->  210 rows (39 dedup),   8970 of  31125 pairs (28.8%)
+    locus  3:  174 folds ->  161 rows (13 dedup),   2184 of  15225 pairs (14.3%)
+    locus  4:  182 folds ->  160 rows (22 dedup),   3773 of  16653 pairs (22.7%)
+    locus  5:  129 folds ->  115 rows (14 dedup),   1715 of   8385 pairs (20.5%)
+    locus  6:  105 folds ->   80 rows (25 dedup),   2325 of   5565 pairs (41.8%)
+    locus  7:  124 folds ->  112 rows (12 dedup),   1422 of   7750 pairs (18.3%)
+    locus  8:  305 folds ->  293 rows (12 dedup),   3594 of  46665 pairs ( 7.7%)
+    locus  9:  445 folds ->  438 rows (  7 dedup),   3094 of  99235 pairs ( 3.1%)
+    locus 10:   51 folds ->   43 rows (  8 dedup),    380 of   1326 pairs (28.7%)
+    locus 11:   77 folds ->   68 rows (  9 dedup),    657 of   3003 pairs (21.9%)
+    locus 12:  138 folds ->  133 rows (  5 dedup),    680 of   9591 pairs ( 7.1%)
+    locus 13:  151 folds ->  143 rows (  8 dedup),   1180 of  11476 pairs (10.3%)
+    locus 14:  170 folds ->  157 rows (13 dedup),   2132 of  14535 pairs (14.7%)
+    locus 15:  247 folds ->  213 rows (34 dedup),   7837 of  30628 pairs (25.6%)
+    -> the l15-class shape (the ledger's fold-heavy/unit-light
+       extreme, the 455x pre-merge receipt's own locus class) dedups
+       25.6% of its class pairs — INSIDE the probe band.
+
+================================================================================
+4. THE TIMING RECEIPTS (serial RAYON=1 = core-seconds, same wave,
+   box load ~30 receipted at every leg's .rss poll)
+================================================================================
+
+T09724 locus 9 (the 319.3s-class target's kept-corpus instance,
+the committed form):
+    base  class scan 96,580 pairs x 246,224 units  438.9s; loci phase 505.8s; whole call 866s
+    memo  class scan 96,580 pairs x 246,224 units  437.7s; loci phase 500.9s; whole call 858s
+    -> the dedup (439 pairs, 0.5% — the ONE pocket-mass-refused
+       equal-column pair, reproduced identically) buys ~1s and the
+       build costs 0.42s: the honest net ~0 at this shape. THE
+       REASON, RECEIPTED: the committed merge already collapsed every
+       bit-equal row it admits (6 of 7 candidates at l9), and the
+       single refusal is all that remains.
+
+T09724 all 16 loci (the committed form, whole-territory):
+    base      loci 521.2s;  memo loci 519.9s
+    -> the territory's 1,149 dedup'd pairs sit at the unit-light
+       loci; the fold-heavy l9 is the wall and it is unchanged —
+       net ~0, honestly inside the run-to-run noise.
+
+L1 (the whole territory, serial loci phase):
+    base      loci 406.7s;  memo loci 402.4s
+    -> the 19 builds (0.00-0.68s) and the 1,022-pair dedup at l15
+       net to ~0 (inside the noise).
+
+T09724 all 16 loci (the PRE-MERGE form, the shape where the memo's
+classes ride — the SAME-WAVE before/after, the direct form being
+the memo binary with the memo OFF):
+    memo-off  l9 class scan 99,235 pairs x 246,224 units  446.4s; loci phase 527.0s
+    memo      l9 class scan 99,235 pairs x 246,224 units  437.3s; loci phase 517.3s
+    -> THE MEASURED SAME-WAVE SAVING at the fold-heavy locus: -9.1s
+       (-2.0% of the scan; the dedup is 3,094 pairs = 3.1%, whose
+       unit-pair model at the 18.42ns rate is ~14s — the measured
+       net lands under it by the build + lookup overheads, honest);
+       the whole pre-merge territory -9.7s (527.0 -> 517.3). The
+       small-locus dedups (l15: 7,837 pairs = 25.6%; l6: 41.8%) land
+       at sub-second loci — the memo's honest measured ceiling at
+       THIS member is bounded by where its duplicate rows live.
+    (the memo-off pre-merge leg's answers are byte-identical too —
+       the toggle-restore gate at the pre-merge form: calls
+       34e05ac5bdeded875eba37be47e2c757af736c593766f2e6f701c13990a3d364 /
+       truth-qv 1101b4eb5f8c96ef0447529aa5df90828faf9c864f942febc10b8df1c1e3ade,
+       the committed pre-merge digests.)
+
+================================================================================
+5. THE HONEST VERDICT ON THE 37.7% FLOOR (the probe's tranche-1
+   band vs the kept corpus's measured truth)
+================================================================================
+
+The 23.9-37.7% band was measured by the frontier-1 probe at the
+TRANCHE-1 monsters (T03226 l0/l10, T00940 l0/l1/l5, T03901 l10/l13)
+— the fold-saturated segdup plateaus whose bit-equal rows the merge
+REFUSES wholesale (outside-bubble: the segdup copies are not
+alignment-connected to the axis bubble). Those substrates were
+REAPED with the disk crisis (tranche-1's definitional smalls are
+gone — the ledger's own receipt), and tranche 2 drew NO S_SEG
+members (its strata are S_EXP/S_BIND/S_MAR), so the T00940-class
+plateau is NOT re-derivable from the kept corpus today.
+
+What the kept corpus measures instead (the receipts above):
+- at the COMMITTED stack the memo's catchment IS the merge's
+  refusal set — L1: 1,022 pairs at one locus of 19 (3.1%), ZERO
+  elsewhere; T09724: 0-3.5% per locus, 0.5% at the fold-heavy
+  monster — because the second reduction (the merge) already
+  collapses every bit-equal row it admits, and its refusals are few
+  at these shapes;
+- at the PRE-MERGE anatomy form (the sanctioned one-env form, the
+  l15-class shape's own territory) the memo's live band is
+  7.7-41.8% per locus — the probe band's lower edge landed EXACTLY
+  (23.9% at l0) and its upper edge EXCEEDED (41.8% at l6) — but the
+  wall-weighted saving is small because the fold-heavy l9 (the
+  437s term) carries only 7 duplicate rows (3.1%).
+
+The fourth reduction is therefore IMPLEMENTED, PROVEN EXACT
+(byte-identical at every gate, both forms, both targets), and
+essentially FREE (the build is O(pinned) — 0.42s at the 246k-unit
+monster; the lookup O(1)); its heavy catchment (the plateau class's
+37.7%-band) lives in the reaped tranche-1 stratum and CANNOT be
+re-measured at a real plateau until a plateau substrate exists
+again (the panel precompute's era will carry re-derivable
+substrates). The tail term at the kept corpus stands as measured:
+NOT collapsed by the memo — the plateau's collapse is bounded by
+the memo's construction catchment (the merge's refusals), which the
+tranche-1 probe measured at 23.9-37.7% and which the pre-merge form
+re-measures live at 7.7-41.8% per locus here.
+
+================================================================================
+6. THE 16-CORE ARITHMETIC, REFRESHED (the scan term's state after
+   the fourth reduction)
+================================================================================
+
+The memo moves NO budget line at the kept corpus (the measured
+committed-stack dedup is 0-3.5% per locus, the builds sub-second) —
+the ~44 core-s/locus mean decomposition (the ledger's §6) stands.
+What changed is the STRUCTURE of the scan term's tail: the scan is
+now bounded where peaked (the bound) AND memoized where bit-equal
+rows exist (the fourth reduction, at every exact-sum site, the
+assessment and production paths both), so the tail's remaining
+residue is exactly the genuinely expressible hypothesis space at
+the shapes where BOTH levers are empty — the T00940-class uniform
+plateaus, whose re-measurement requires a re-derivable plateau
+substrate. The 0.14 path is unchanged: fleet COW + precompute +
+bounded-and-memoized scan + the pair loop's floor — with all four
+expressibility reductions now in the product.
+
+================================================================================
+7. THE DISCIPLINE'S RECEIPTS
+================================================================================
+
+- HARD WORKDIR BUDGET 150G per runner, checked before every stage
+  (budget.log, fail-closed): peak scratch T09724 18G + L1 9.1G = 27.1G
+  total (~18% of ONE runner's budget) — the budget never
+  approached.
+- RECEIPTS AT WRITE TIME: every stage's .wall/.exit/.rss + the
+  calls' phase-census/digest/answer-digest receipt lines computed as
+  they ran; no raw dump banked. The verbatim per-leg receipt .txt
+  files live in the keep dirs until the reap; the census lines are
+  embedded in this file's tables.
+- TRANSIENTS REAPED IN-PASS: extract.raw.fa, the rvcut census/cache,
+  the cut-reads.fasta (reaped the moment cutA completed).
+- NAMED EXCEPTIONS (rule 6): the cutA census/cache + reads +
+  substrate (consumer: the call legs; reap: the runners' `reap`
+    subcommand, executed at the increment's close).
+- vendor/syng untouched; target/release/impg untouched
+  (CARGO_TARGET_DIR=target-frontier, the clean-PATH build env).
+- cargo test --release --lib 586/0 green, 5 ignored (584 committed +
+  the two new memo tests).
+
+================================================================================
+APPENDIX — the verbatim per-leg receipt files
+================================================================================
+
+The ten verbatim call receipt .txt files (one per leg — the
+answer digests, the per-locus phase-census lines with the scan-memo
+fields, the fold-set digests, the walls, the rss polls) are
+committed at docs/syng-gmem-bwt/memoization-receipts/:
+call-base-l9, call-memo-l9, call-base-all, call-memo-all,
+call-memo-off-all, call-memo-premerge-all, call-memo-off-premerge-all
+(T09724) and call-base, call-memo, call-memo-off (L1) — ~260K
+total, the mergefix precedent's own keep form. The workdirs
+(/mnt/nvme2n1/erikg/memo-T09724{,-keep} and memo-L1{,-keep}) are
+reaped at the increment's close (mine first — this file and the
+receipt dir are committed BEFORE the `reap` subcommands run).
