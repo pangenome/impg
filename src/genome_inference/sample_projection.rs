@@ -4600,6 +4600,23 @@ struct ForkCowSnapshot {
 
 const FORK_COW_BIG_MAPPING_KB: u64 = 1 << 20; // >= 1 GiB
 
+/// THE ALLOCATOR TRIM, portably called: ask glibc to return every
+/// arena's free tail to the OS. `malloc_trim` is a glibc symbol with no
+/// macOS equivalent, so the mechanic is cfg-gated — the receipt line at
+/// every call site still prints (with `applied=false`), so a
+/// non-glibc platform loses the measurement, never the build.
+#[cfg(target_os = "linux")]
+fn trim_allocator() -> bool {
+    // free-list state is not program semantics; the return value is
+    // reported, never asserted.
+    unsafe { libc::malloc_trim(0) == 1 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn trim_allocator() -> bool {
+    false
+}
+
 fn fork_cow_snapshot() -> io::Result<ForkCowSnapshot> {
     let rollup_text = std::fs::read_to_string("/proc/self/smaps_rollup")?;
     let rollup = ForkSmapsRollup {
@@ -4930,11 +4947,11 @@ pub fn fork_cut_call_batch_global_specs(
                     // the before/after private so the effect is
                     // measured, never assumed.
                     let pre_trim = fork_cow_snapshot()?;
-                    unsafe { libc::malloc_trim(0) };
+                    let trim_applied = trim_allocator();
                     let post_trim = fork_cow_snapshot()?;
                     let gb = |kb: u64| kb as f64 / (1 << 20) as f64;
                     eprintln!(
-                        "[fork-cow] child chunk={chunk} malloc_trim: private {:.2}GB -> {:.2}GB (returned {:.2}GB)",
+                        "[fork-cow] child chunk={chunk} malloc_trim(applied={trim_applied}): private {:.2}GB -> {:.2}GB (returned {:.2}GB)",
                         gb(pre_trim.rollup.private_kb()),
                         gb(post_trim.rollup.private_kb()),
                         gb(pre_trim
