@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fmt;
 use std::io::{self};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 // THE AGC'S OWN LAYOUT UNIT (the bind seek-floor anatomy's fix basis):
@@ -55,24 +56,62 @@ impl AgcSegmentLayout {
     }
 }
 
+/// THE BOUNDED DECOMPRESSOR POOL'S DEFAULT: the K-sweep's operating
+/// point. Each slot costs about an archive's decompression state, so
+/// this number is a memory/time trade, measured - not a guess.
+const DEFAULT_DECOMPRESSOR_SLOTS: usize = 8;
+
+/// THE BOUNDED DECOMPRESSOR POOL'S SIZE: `IMPG_AGC_DECOMPRESSOR_SLOTS`
+/// when set and parseable, else the default. The ambient thread count
+/// is a CEILING, never a plan - see the field's own doc for why every
+/// extra slot costs about an archive.
+fn decompressor_slot_count() -> usize {
+    let requested = std::env::var("IMPG_AGC_DECOMPRESSOR_SLOTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok());
+    bounded_slot_count(requested, rayon::current_num_threads())
+}
+
+/// The bound application, pure and testable: `None` (or a nonsense
+/// zero) means the default; the ambient thread count is a CEILING on
+/// the request, never a floor; the result is always >= 1.
+fn bounded_slot_count(requested: Option<usize>, ceiling: usize) -> usize {
+    requested
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_DECOMPRESSOR_SLOTS)
+        .min(ceiling.max(1))
+        .max(1)
+}
+
 // Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
-    /// Per-RAYON-thread decompressor pools. Indexed by
-    /// rayon::current_thread_index(). Each slot is lazily initialized
-    /// on first access by opening the AGC files.
-    rayon_decompressors: Vec<Mutex<Option<Vec<Decompressor>>>>,
-    /// Per-OS-thread decompressor pools for NON-rayon threads (the
-    /// realign-score parallel seams run on scoped std::threads, not
-    /// the rayon pool). Measured disease, the bind-seam profile's own
-    /// pole: the committed code routed EVERY non-rayon thread to the
-    /// ONE fallback slot behind a single Mutex, serializing all
-    /// seam-thread AGC fetches (the parallel bind would have paid the
-    /// serial decompression wall unchanged). Every OS thread now
-    /// claims its OWN pool, lazily, keyed by thread id — decompressors
-    /// are independent readers of immutable files, so which pool
-    /// serves a fetch never changes the bytes returned.
-    other_decompressors:
-        Mutex<FxHashMap<std::thread::ThreadId, Arc<Mutex<Vec<Decompressor>>>>>,
+    /// THE BOUNDED DECOMPRESSOR POOL (the memory-blowup fix): a fixed
+    /// number of lazily-opened decompressor sets, shared round-robin by
+    /// every caller - rayon threads and the realign-score seam's
+    /// scoped std::threads alike.
+    ///
+    /// WHY BOUNDED: an AGC `Decompressor` holds the archive's own
+    /// decompression state (the pack being expanded, the LZ reference
+    /// state, the descriptor tables) in RAM, and that state measures
+    /// about the archive's own size - 3.70 GB per slot against the
+    /// 3.30 GB HPRC panel, the arithmetic of the routes derivation's
+    /// measured 711 GB peak at 192 slots. The committed code opened ONE
+    /// DECOMPRESSOR PER AMBIENT THREAD (`0..current_num_threads()`), so
+    /// a 192-thread box paid 192 copies of the archive to avoid a mutex
+    /// on an operation whose critical section IS the decompression.
+    ///
+    /// SHARING COSTS NO CORRECTNESS: decompressors are independent
+    /// readers of immutable files, and whichever slot serves a fetch
+    /// never changes the bytes returned (the previous per-thread design
+    /// said exactly this in its own comment). Contention is bounded by
+    /// the slot count, which is the tunable.
+    decompressor_slots: Vec<Mutex<Option<Vec<Decompressor>>>>,
+    /// Round-robin cursor over `decompressor_slots`.
+    next_slot: AtomicUsize,
+    /// How many slots have actually opened their decompressor sets
+    /// (`<= decompressor_slots.len()`) - the memory bound's own
+    /// regression receipt.
+    slots_opened: AtomicUsize,
     pub agc_paths: Vec<String>,
     // Maps use Arc<str> for zero-cost sharing (String key for efficient lookup)
     sample_contig_to_agc: FxHashMap<String, usize>,
@@ -87,17 +126,10 @@ impl fmt::Debug for AgcIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgcIndex")
             .field("agc_paths", &self.agc_paths)
-            .field("num_rayon_slots", &self.rayon_decompressors.len())
+            .field("decompressor_slots", &self.decompressor_slots.len())
+            .field("slots_opened", &self.slots_opened.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
-}
-
-/// The calling thread's decompressor pool: a rayon thread's own
-/// lazily-initialized slot, or a non-rayon (seam) thread's own
-/// per-thread pool.
-enum PoolRef<'a> {
-    Rayon(&'a Mutex<Option<Vec<Decompressor>>>),
-    Other(Arc<Mutex<Vec<Decompressor>>>),
 }
 
 impl AgcIndex {
@@ -193,12 +225,16 @@ impl AgcIndex {
             }
         }
 
-        // Initialize per-rayon-thread decompressor slots (slot 0 reuses
-        // the metadata decompressors to avoid re-opening AGC files)
-        let num_slots = rayon::current_num_threads();
-        let rayon_decompressors: Vec<_> = (0..num_slots).map(|_| Mutex::new(None)).collect();
+        // THE BOUNDED SLOT COUNT (the memory-blowup fix's knob): the
+        // ambient thread count is the CEILING, never the plan - each
+        // slot costs about an archive's decompression state, so the
+        // committed `0..current_num_threads()` opened 192 copies on a
+        // 192-thread box (the measured 711 GB peak). Slot 0 reuses the
+        // metadata decompressors to avoid re-opening the AGC files.
+        let slot_count = decompressor_slot_count();
+        let decompressor_slots: Vec<_> = (0..slot_count).map(|_| Mutex::new(None)).collect();
 
-        rayon_decompressors[0]
+        decompressor_slots[0]
             .lock()
             .unwrap()
             .replace(saved_decomps);
@@ -208,8 +244,9 @@ impl AgcIndex {
         contig_to_sample_info.shrink_to_fit();
 
         Ok(AgcIndex {
-            rayon_decompressors,
-            other_decompressors: Mutex::new(FxHashMap::default()),
+            decompressor_slots,
+            next_slot: AtomicUsize::new(0),
+            slots_opened: AtomicUsize::new(1),
             agc_paths: agc_files.to_vec(),
             sample_contig_to_agc,
             contig_to_sample_info,
@@ -217,12 +254,9 @@ impl AgcIndex {
         })
     }
 
-    /// The calling thread's decompressor pool: rayon threads use
-    /// their own indexed slot (lazily initialized, exactly the
-    /// committed code); every OTHER OS thread claims its OWN pool,
-    /// lazily, keyed by thread id — never the ONE shared fallback
-    /// slot the committed code put every non-rayon thread behind
-    /// (the bind-seam profile's named serialization pole).
+    /// Open one decompressor set (one decompressor per AGC archive).
+    /// Callers hold their slot's lock while using it, so a set is never
+    /// aliased.
     fn open_decompressors(&self) -> Vec<Decompressor> {
         self.agc_paths
             .iter()
@@ -232,16 +266,35 @@ impl AgcIndex {
             })
             .collect()
     }
-    fn my_pool(&self) -> PoolRef<'_> {
-        if let Some(index) = rayon::current_thread_index() {
-            return PoolRef::Rayon(&self.rayon_decompressors[index]);
+    /// THE SLOT FOR THIS FETCH: round-robin over the bounded pool.
+    /// Never per-thread state, so the process's decompressor footprint
+    /// is bounded by the slot count no matter how many threads (rayon or
+    /// scoped std::thread) ever touch the archive.
+    fn decompressor_slot(&self) -> &Mutex<Option<Vec<Decompressor>>> {
+        let slot = self.next_slot.fetch_add(1, Ordering::Relaxed) % self.decompressor_slots.len();
+        &self.decompressor_slots[slot]
+    }
+
+    /// Borrow an initialised decompressor set from the pool for the
+    /// duration of `f` (the slot's lock IS the borrow). A slot opens its
+    /// decompressors on first use, under its own lock, so at most once.
+    fn with_decompressors<T>(&self, f: impl FnOnce(&mut Vec<Decompressor>) -> T) -> T {
+        let mut guard = self.decompressor_slot().lock().unwrap();
+        if guard.is_none() {
+            self.slots_opened.fetch_add(1, Ordering::Relaxed);
         }
-        let thread_id = std::thread::current().id();
-        let mut map = self.other_decompressors.lock().unwrap();
-        PoolRef::Other(Arc::clone(
-            map.entry(thread_id)
-                .or_insert_with(|| Arc::new(Mutex::new(Vec::new()))),
-        ))
+        let decomps = guard.get_or_insert_with(|| self.open_decompressors());
+        f(decomps)
+    }
+
+    /// The pool's size (the memory bound's own receipt field).
+    pub fn decompressor_slot_count(&self) -> usize {
+        self.decompressor_slots.len()
+    }
+
+    /// How many slots have actually opened their decompressor sets.
+    pub fn decompressors_opened(&self) -> usize {
+        self.slots_opened.load(Ordering::Relaxed)
     }
     fn parse_query(&self, seq_name: &str) -> (String, String, Option<usize>) {
         if let Some((contig, sample)) = seq_name.split_once('@') {
@@ -268,20 +321,9 @@ impl AgcIndex {
         let Some(agc_idx) = agc_idx else {
             return None;
         };
-        let layout = match self.my_pool() {
-            PoolRef::Rayon(slot) => {
-                let mut guard = slot.lock().unwrap();
-                let decomps = guard.get_or_insert_with(|| self.open_decompressors());
-                Self::segment_layout_of(&mut decomps[agc_idx], &sample, &contig)
-            }
-            PoolRef::Other(pool) => {
-                let mut guard = pool.lock().unwrap();
-                if guard.is_empty() {
-                    *guard = self.open_decompressors();
-                }
-                Self::segment_layout_of(&mut guard[agc_idx], &sample, &contig)
-            }
-        };
+        let layout = self.with_decompressors(|decomps| {
+            Self::segment_layout_of(&mut decomps[agc_idx], &sample, &contig)
+        });
         let layout = Arc::new(layout?);
         self.segment_layouts
             .lock()
@@ -329,35 +371,15 @@ impl AgcIndex {
             )
         })?;
 
-        // Use per-thread decompressors to avoid mutex contention: rayon
-        // threads take their own slot; every non-rayon OS thread claims
-        // its own pool by thread id (the bind seam's scoped std::threads
-        // would otherwise ALL queue on one shared fallback slot).
-        let sequence = match self.my_pool() {
-            PoolRef::Rayon(slot) => {
-                let mut guard = slot.lock().unwrap();
-                let decomps = guard.get_or_insert_with(|| self.open_decompressors());
-                decomps[agc_idx].get_contig_range(
-                    &sample,
-                    &contig,
-                    start as usize,
-                    end as usize,
-                )
-            }
-            PoolRef::Other(pool) => {
-                let mut guard = pool.lock().unwrap();
-                if guard.is_empty() {
-                    *guard = self.open_decompressors();
-                }
-                guard[agc_idx].get_contig_range(
-                    &sample,
-                    &contig,
-                    start as usize,
-                    end as usize,
-                )
-            }
-        }
-        .map_err(|e| {
+        // THE BOUNDED POOL (see the field's doc): this fetch borrows one
+        // of a fixed number of shared decompressor sets. No thread owns
+        // a slot, so the archive's decompression state is held
+        // `decompressor_slots` times at most - never once per thread.
+        let sequence = self
+            .with_decompressors(|decomps| {
+                decomps[agc_idx].get_contig_range(&sample, &contig, start as usize, end as usize)
+            })
+            .map_err(|e| {
             io::Error::other(format!(
                 "Failed to fetch sequence '{contig}@{sample}:{start}-{end}': {e}"
             ))
@@ -386,21 +408,11 @@ impl AgcIndex {
             )
         })?;
 
-        let length = match self.my_pool() {
-            PoolRef::Rayon(slot) => {
-                let mut guard = slot.lock().unwrap();
-                let decomps = guard.get_or_insert_with(|| self.open_decompressors());
+        let length = self
+            .with_decompressors(|decomps| {
                 decomps[agc_idx].get_contig_length(&sample, &contig)
-            }
-            PoolRef::Other(pool) => {
-                let mut guard = pool.lock().unwrap();
-                if guard.is_empty() {
-                    *guard = self.open_decompressors();
-                }
-                guard[agc_idx].get_contig_length(&sample, &contig)
-            }
-        }
-        .map_err(|e| {
+            })
+            .map_err(|e| {
             io::Error::other(format!("Failed to get length for '{contig}@{sample}': {e}"))
         })?;
 
@@ -411,6 +423,24 @@ impl AgcIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE MEMORY BOUND IS THE POOL SIZE (the 711 GB regression's own
+    /// guard): the ambient thread count may never inflate the pool, an
+    /// explicit request may restore the old behaviour for a measured
+    /// comparison, and a nonsense request degrades to the default.
+    #[test]
+    fn decompressor_pool_is_bounded_by_the_request_not_the_thread_count() {
+        // the default at a 192-thread box: bounded, NOT 192
+        assert_eq!(bounded_slot_count(None, 192), DEFAULT_DECOMPRESSOR_SLOTS);
+        // an explicit request is honoured (the old behaviour, opt-in)
+        assert_eq!(bounded_slot_count(Some(192), 192), 192);
+        // ... but never above the ceiling
+        assert_eq!(bounded_slot_count(Some(64), 16), 16);
+        // zero/small ceiling/absent request all stay sane
+        assert_eq!(bounded_slot_count(Some(0), 16), DEFAULT_DECOMPRESSOR_SLOTS);
+        assert_eq!(bounded_slot_count(Some(4), 0), 1);
+        assert_eq!(bounded_slot_count(None, 1), 1);
+    }
     use std::time::Instant;
 
     #[test]
