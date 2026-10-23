@@ -81,7 +81,12 @@ for K in $KS; do
     echo "K=$K FAILED exit=$st wall=${wall}s - log: $SWEEP/K$K.log" | tee -a "$RCP"
     continue
   fi
-  core=$(awk '{printf "%.1f", $1+$2}' "$cpu" 2>/dev/null)
+  # (THE LAST NUMERIC LINE, not every line: the derivation writes its own
+  # stderr lines into this capture (e.g. the LEGACY-PANEL OPT-IN notice),
+  # and a bare awk over all lines concatenated its per-line prints into
+  # garbage like "0.00.054221.9". The time report is the final line and is
+  # the only one that is two floats.)
+  core=$(awk '/^[0-9]+\.[0-9]+ [0-9]+\.[0-9]+$/{printf "%.1f", $1+$2; found=1} END{if(!found) printf "NA"}' "$cpu" 2>/dev/null)
   sha=$(sha256sum "$OUT/graph.json" | cut -d' ' -f1)
   bytes=$(stat -c %s "$OUT/graph.json")
   echo "K=$K ${wall} ${core} ${peak} ${sha} ${bytes}" >> "$RCP"
