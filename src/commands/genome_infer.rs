@@ -879,6 +879,12 @@ pub enum Command {
     /// any allele"); --exclude-paths is the masking operator; --truth-qv the test mode.
     /// Named call-region because the literal `call` name is held by the legacy
     /// provisional presence-compatibility command (the committed CLI paths are immutable).
+    /// That collision reaches INSIDE the `infer` subtree too - `impg infer call`
+    /// already resolves to the legacy provisional command (verified: adding
+    /// `name = "call"` here made clap route BOTH `call` and `call-region` to the
+    /// legacy variant, i.e. it would silently run the wrong command). So this
+    /// stays `call-region` until the legacy provisional command is renamed, which
+    /// is a schema decision, not a rename.
     CallRegion {
         /// The MAP step's output directory (the per-partition cuts + the manifest)
         #[arg(long)]
