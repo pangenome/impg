@@ -1061,7 +1061,7 @@ fn write_report_with_cut_indices(
     writer: &mut impl Write,
     report: &serde_json::Value,
     cut_indices_key: &str,
-    lists: &[(usize, Vec<usize>)],
+    lists: &[(usize, CutSet)],
 ) -> io::Result<()> {
     let serde_json::Value::Object(map) = report else {
         // (Not an object: nothing to splice. The plain writer's own
@@ -4080,7 +4080,7 @@ enum TieCertificate<'a> {
     /// tests construct it verbatim; the product path never does).
     #[allow(dead_code)]
     Bands(&'a [(usize, Vec<f64>)]),
-    CutIndices(&'a [(usize, Vec<usize>)]),
+    CutIndices(&'a [(usize, CutSet)]),
 }
 
 impl TieCertificate<'_> {
@@ -4167,7 +4167,7 @@ fn cluster_form_qual(
                 ordinal_of.insert(index, ordinal);
             }
             for (left, &(index, ref list)) in entries.iter().enumerate() {
-                for &member in list {
+                for member in list.iter() {
                     excluded[member] = true;
                 }
                 if spectrum[index].0 <= cut {
@@ -4176,7 +4176,7 @@ fn cluster_form_qual(
                         parent[a] = b;
                     }
                 }
-                for &member in list {
+                for member in list.iter() {
                     if let Some(&right) = ordinal_of.get(&member) {
                         let (a, b) =
                             (root(&mut parent, left + 1), root(&mut parent, right + 1));
@@ -4215,6 +4215,79 @@ fn cluster_form_qual(
         excluded,
         alternative,
         p,
+    }
+}
+
+/// THE BAND'S `<=cut` PREDICATE SET, PACKED.
+///
+/// One BIT per spectrum position (8 B -> 1 bit per member, ~64x). At
+/// the structurally degenerate shape this code already detects
+/// (`called.len() == pair_count`) a locus carries `|called| - 1` sets
+/// over a `pair_count`-long spectrum, so the unpacked form is quadratic
+/// in the pair count with a 8-byte constant - the receipts-phase
+/// audit's tens-of-GB class. Packed, the same content is 1/64th of it.
+///
+/// ITERATION IS ASCENDING, which is the order the producer pushes (it
+/// walks the spectrum in position order) and therefore the exact order
+/// the receipt lists the indices in - so the emitted bytes are the
+/// unpacked form's own bytes, and `cluster_form_qual`'s list-driven
+/// walk sees the same sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CutSet {
+    /// Position bits, little-endian within each word.
+    words: Vec<u64>,
+    /// The number of SET bits (not the capacity), so the receipt's
+    /// entry counter stays the predicate-set cardinality.
+    len: usize,
+}
+
+impl CutSet {
+    fn insert(&mut self, position: usize) {
+        let word = position / 64;
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
+        }
+        let mask = 1u64 << (position % 64);
+        if self.words[word] & mask == 0 {
+            self.words[word] |= mask;
+            self.len += 1;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The set's members, ASCENDING (the producer's and the receipt's
+    /// own order).
+    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(|(word_index, &word)| {
+                let mut remaining = word;
+                std::iter::from_fn(move || {
+                    if remaining == 0 {
+                        return None;
+                    }
+                    let bit = remaining.trailing_zeros() as usize;
+                    remaining &= remaining - 1;
+                    Some(word_index * 64 + bit)
+                })
+            })
+    }
+
+    /// Build from ascending positions (the oracle/tests' own shape).
+    fn from_ascending<I: IntoIterator<Item = usize>>(positions: I) -> CutSet {
+        let mut set = CutSet::default();
+        for position in positions {
+            set.insert(position);
+        }
+        set
     }
 }
 
@@ -4258,7 +4331,7 @@ fn tied_class_cut_lists<NF, EF>(
     observed_node: &NF,
     observed_edge: &EF,
     cut: f64,
-) -> Vec<(usize, Vec<usize>)>
+) -> Vec<(usize, CutSet)>
 where
     NF: Fn(u64) -> f64 + Sync,
     EF: Fn(u64) -> f64 + Sync,
@@ -4310,7 +4383,7 @@ where
                 node_mass[first] + node_mass[second],
                 edge_mass[first] + edge_mass[second],
             );
-            let mut list: Vec<usize> = Vec::new();
+            let mut list = CutSet::default();
             for (position, &(other_first, other_second, gn, ge)) in entries.iter().enumerate() {
                 let lower = (tn - gn).abs() + (te - ge).abs();
                 if lower > cut {
@@ -4318,7 +4391,7 @@ where
                 }
                 let upper = tn + gn + te + ge;
                 if upper <= cut {
-                    list.push(position);
+                    list.insert(position);
                     continue;
                 }
                 let other_nodes =
@@ -4328,7 +4401,7 @@ where
                 let distance = differing_observed_mass(&nodes, &other_nodes, &node_lookup)
                     + differing_observed_mass(&edges, &other_edges, &edge_lookup);
                 if distance <= cut {
-                    list.push(position);
+                    list.insert(position);
                 }
             }
             (index, list)
@@ -9872,7 +9945,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // qual_tied_cut_indices (the compact predicate lists) — the
         // degenerate precedent's own form, sanctioned with the fix.)
         let degenerate = called.len() == pair_count;
-        let mut cut_index_lists: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut cut_index_lists: Vec<(usize, CutSet)> = Vec::new();
         let certificate_started = locus_phase_census.then(Instant::now);
         {
             let mut sorted: Vec<f64> = spectrum
@@ -12568,7 +12641,18 @@ mod tests {
             let tiered = tied_class_cut_lists(
                 &folds, &called, &spectrum, &node_fn, &edge_fn, cut,
             );
-            assert_eq!(tiered, oracle_cut_lists, "case {case}: predicate sets differ");
+            // The oracle stays fully independent (it derives each band's
+            // predicate set from the naive band vectors); the packed form
+            // is unpacked back into the oracle's own representation, so
+            // this also proves the bit order and the ASCENDING iteration.
+            let tiered_indices: Vec<(usize, Vec<usize>)> = tiered
+                .iter()
+                .map(|(index, set)| (*index, set.iter().collect()))
+                .collect();
+            assert_eq!(
+                tiered_indices, oracle_cut_lists,
+                "case {case}: predicate sets differ"
+            );
             let pairs: Vec<(f64, f64)> = spectrum
                 .iter()
                 .map(|&(distance, score, ..)| (distance, score))
@@ -12718,7 +12802,14 @@ mod tests {
             })
             .collect();
         let tiered = tied_class_cut_lists(&folds, &called, &spectrum, &node_fn, &edge_fn, cut);
-        assert_eq!(tiered, oracle_cut_lists, "monster shape: predicate sets differ");
+        let tiered_indices: Vec<(usize, Vec<usize>)> = tiered
+            .iter()
+            .map(|(index, set)| (*index, set.iter().collect()))
+            .collect();
+        assert_eq!(
+            tiered_indices, oracle_cut_lists,
+            "monster shape: predicate sets differ"
+        );
         let pairs: Vec<(f64, f64)> = spectrum
             .iter()
             .map(|&(distance, score, ..)| (distance, score))
@@ -12887,7 +12978,18 @@ mod tests {
             let tiered = tied_class_cut_lists(
                 &folds, &called, &spectrum, &node_fn, &edge_fn, cut,
             );
-            assert_eq!(tiered, oracle_cut_lists, "case {case}: predicate sets differ");
+            // The oracle stays fully independent (it derives each band's
+            // predicate set from the naive band vectors); the packed form
+            // is unpacked back into the oracle's own representation, so
+            // this also proves the bit order and the ASCENDING iteration.
+            let tiered_indices: Vec<(usize, Vec<usize>)> = tiered
+                .iter()
+                .map(|(index, set)| (*index, set.iter().collect()))
+                .collect();
+            assert_eq!(
+                tiered_indices, oracle_cut_lists,
+                "case {case}: predicate sets differ"
+            );
             let pairs: Vec<(f64, f64)> = spectrum
                 .iter()
                 .map(|&(distance, score, ..)| (distance, score))
@@ -16218,6 +16320,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// THE PACKED PREDICATE SET: set semantics, ascending iteration, and
+    /// the cardinality counter (the receipt's entry count) that the
+    /// packed form must keep identical to the list's length.
+    #[test]
+    fn cut_set_packs_members_and_iterates_them_ascending() {
+        // insertion order must not matter, duplicates must not double
+        let mut set = CutSet::default();
+        for position in [130usize, 0, 65, 3, 64, 130, 129] {
+            set.insert(position);
+        }
+        assert_eq!(set.len(), 6, "duplicates must not count");
+        assert!(!set.is_empty());
+        assert_eq!(set.iter().collect::<Vec<_>>(), vec![0, 3, 64, 65, 129, 130]);
+        // empty stays empty, and the counter stays zero
+        let empty = CutSet::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.iter().count(), 0);
+        // from_ascending agrees with the incremental build
+        let built = CutSet::from_ascending([0usize, 3, 64, 65, 129, 130]);
+        assert_eq!(built, set);
+        // the packed form is 1 bit per position, not 8 bytes per member
+        let wide = CutSet::from_ascending(0..1000usize);
+        assert_eq!(wide.len(), 1000);
+        assert_eq!(wide.iter().collect::<Vec<_>>(), (0..1000).collect::<Vec<_>>());
+        // THE FOOTPRINT IS THE POINT: ~1 bit per spectrum position, not
+        // 8 bytes per member (the unpacked form's constant), so a dense
+        // predicate set is ~64x smaller and the degenerate monster
+        // (|called| sets over a pair_count-long spectrum) stops being
+        // an allocation that cannot exist.
+        let packed_bytes = wide.words.len() * std::mem::size_of::<u64>();
+        let unpacked_bytes = wide.len() * std::mem::size_of::<usize>();
+        assert!(
+            packed_bytes * 8 <= unpacked_bytes,
+            "packed {packed_bytes} B must be at least 8x under unpacked {unpacked_bytes} B"
+        );
+    }
+
     /// THE SPLICED RECEIPT WRITER IS THE VALUE-TREE FORM, BYTE FOR
     /// BYTE. The certificate streams from its typed lists instead of
     /// being built as a `serde_json::Value` first (the 32-bytes-per-entry
@@ -16227,8 +16367,11 @@ mod tests {
     /// ones, which is the whole point of the doctrine.
     #[test]
     fn the_spliced_report_writer_matches_the_value_tree_form_byte_for_byte() {
+        // ASCENDING, as the producer builds them (it walks the spectrum
+        // in position order); insertion-order independence is CutSet's
+        // own test.
         let lists: Vec<(usize, Vec<usize>)> =
-            vec![(0, vec![3, 1, 4]), (7, Vec::new()), (2, vec![9, 0])];
+            vec![(0, vec![1, 3, 4]), (7, Vec::new()), (2, vec![0, 9])];
         // The sentinel keeps the key in the map (its alphabetical slot),
         // and the reference builds the member the committed way.
         let report = json!({
@@ -16245,12 +16388,16 @@ mod tests {
         let mut reference = Vec::new();
         serde_json::to_writer(&mut reference, &reference_value).unwrap();
 
+        let packed: Vec<(usize, CutSet)> = lists
+            .iter()
+            .map(|(index, list)| (*index, CutSet::from_ascending(list.iter().copied())))
+            .collect();
         let mut spliced = Vec::new();
         write_report_with_cut_indices(
             &mut spliced,
             &report,
             "qual_tied_cut_indices",
-            &lists,
+            &packed,
         )
         .unwrap();
 
