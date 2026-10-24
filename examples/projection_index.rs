@@ -34,11 +34,24 @@ use std::time::Instant;
 /// One bucket covers 2^20 token values; the panel's node space is
 /// ~1.09e9, so ~1,040 buckets — a tiny table, and a query reads only
 /// the buckets its targets touch.
-const BUCKET_SHIFT: u32 = 20;
+/// One bucket covers 2^SHIFT token values. MEASURED on a real territory
+/// (T00048's 176,659 global node ids spanning -271M..+271M, i.e.
+/// scattered across the panel's whole node space): at 2^20 a query
+/// touches 49.7% of the buckets and beats the scan by only 2.0x; at 2^12
+/// it touches 2.2% and beats it by 45x. The table at 2^12 costs ~6.4 MB,
+/// so the fine shift is free. Override with IMPG_INDEX_BUCKET_SHIFT.
+fn bucket_shift() -> u32 {
+    std::env::var("IMPG_INDEX_BUCKET_SHIFT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|s| *s >= 6 && *s <= 24)
+        .unwrap_or(12)
+}
 const MAGIC: &[u8; 8] = b"OCCIDX02";
 
 fn bucket_of(token: i64) -> u64 {
-    ((token as u64) >> BUCKET_SHIFT) & ((1u64 << (64 - BUCKET_SHIFT)) - 1)
+    let shift = bucket_shift();
+    ((token as u64) >> shift) & ((1u64 << (64 - shift)) - 1)
 }
 
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
@@ -195,6 +208,12 @@ fn query(dir: &str, prefix: &str, wanted: usize, shape: &str) -> io::Result<()> 
                 .collect()
         }
     };
+    query_with(dir, prefix, targets, shape)
+}
+
+fn query_with(dir: &str, prefix: &str, mut targets: Vec<i64>, shape: &str) -> io::Result<()> {
+    let (bytes, records) = read_records(&shard_path(dir, prefix, "occ.bin"))?;
+    let wanted = targets.len();
     targets.sort_unstable();
     let target_set: HashSet<i64> = targets.iter().copied().collect();
 
@@ -298,6 +317,16 @@ fn main() -> io::Result<()> {
         Some("query") => {
             let wanted = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(176_659);
             query(&args[2], &args[3], wanted, args.get(5).map(String::as_str).unwrap_or("scattered"))
+        }
+        // query-file: the target set is a REAL territory's node dump
+        // (IMPG_DUMP_TERRITORY_NODES) — the receipt form.
+        Some("query-file") => {
+            let text = std::fs::read_to_string(&args[4])?;
+            let targets: Vec<i64> = text
+                .lines()
+                .filter_map(|line| line.trim().parse::<i64>().ok())
+                .collect();
+            query_with(&args[2], &args[3], targets, "territory-dump")
         }
         _ => {
             eprintln!("usage: projection_index build <dir> <shard-prefix> | query <dir> <shard-prefix> <targets> [scattered|clustered]");
