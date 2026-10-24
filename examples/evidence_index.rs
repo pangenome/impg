@@ -32,6 +32,54 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const MAGIC: &[u8; 8] = b"EVDIDX01";
+const POS_MAGIC: &[u8; 8] = b"PNLPOS01";
+
+/// `node -> (path, offset)`, sorted by node. Panel-side, built by
+/// `panel_positions`. This is the key that gives a walk LOCALITY: its 3
+/// nodes sit at ~one position, so the read lands in ONE bucket, and the
+/// bucket is a locus (the beds' own `path,start,end` coordinate).
+struct Positions {
+    entries: Vec<(i32, u32, u64)>,
+}
+
+impl Positions {
+    fn load(path: &str) -> io::Result<Positions> {
+        let mut bytes = Vec::new();
+        File::open(path)?.read_to_end(&mut bytes)?;
+        if bytes.len() < 32 || &bytes[..8] != POS_MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad positions table"));
+        }
+        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        let n = u64_at(8) as usize;
+        let mut entries = Vec::with_capacity(n);
+        let mut at = 40usize; // magic(8) + n,path_count,end_path,total_bp (4x8)
+        for _ in 0..n {
+            let node = i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let path = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap());
+            let offset = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap());
+            entries.push((node, path, offset));
+            at += 16;
+        }
+        entries.sort_unstable();
+        Ok(Positions { entries })
+    }
+
+    /// The panel position of a node, or None when the panel has no walk
+    /// for it (a node the table's path range does not cover).
+    fn position(&self, node: i32) -> Option<(u32, u64)> {
+        match self.entries.binary_search_by_key(&node, |e| e.0) {
+            Ok(at) => Some((self.entries[at].1, self.entries[at].2)),
+            Err(_) => None,
+        }
+    }
+}
+
+/// The store's key: (path, offset/width) packed into a u64. Paths number
+/// < 2^16 and offsets/width < 2^24 at any sane width, so this is exact.
+fn position_key(path: u32, offset: u64, width: u64) -> u64 {
+    ((path as u64) << 24) | (offset / width)
+}
+
 
 fn bucket_nodes() -> u64 {
     std::env::var("IMPG_EVIDENCE_BUCKET_NODES")
@@ -121,6 +169,117 @@ fn read_packets(path: &Path) -> io::Result<Vec<Vec<u8>>> {
     Ok(packets)
 }
 
+fn build_keyed(dir: &str, prefix: &str, positions_path: &str, width_bp: u64) -> io::Result<()> {
+    let t0 = Instant::now();
+    let positions = Positions::load(positions_path)?;
+    let load_positions = t0.elapsed();
+    let packets = read_packets(&shard_gz(dir, prefix))?;
+    let read_time = t0.elapsed() - load_positions;
+
+    // place each read in the bucket(s) of its walk nodes' PANEL POSITIONS
+    let t1 = Instant::now();
+    let mut buckets: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let mut unplaced = 0usize;
+    let mut multi = 0usize;
+    for (index, packet) in packets.iter().enumerate() {
+        let (nodes, _, _) = walk_nodes(packet)?;
+        let mut keys: Vec<u64> = Vec::new();
+        for &node in &nodes {
+            if let Some((path, offset)) = positions.position(node) {
+                keys.push(position_key(path, offset, width_bp));
+            }
+        }
+        if keys.is_empty() {
+            unplaced += 1;
+            continue;
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.len() > 1 {
+            multi += 1;
+        }
+        for key in keys {
+            buckets.entry(key).or_default().push(index);
+        }
+    }
+    let place = t1.elapsed();
+
+    let t2 = Instant::now();
+    let evd = Path::new(dir).join(format!("shard.{prefix}.p.evd"));
+    let idx = Path::new(dir).join(format!("shard.{prefix}.p.evd.idx"));
+    let sum = Path::new(dir).join(format!("shard.{prefix}.p.evd.sum"));
+    let mut table: Vec<(u64, u64, u64)> = Vec::with_capacity(buckets.len());
+    {
+        let mut out = BufWriter::new(File::create(&evd)?);
+        let mut offset = 0u64;
+        for (&bucket, members) in &buckets {
+            let start = offset;
+            for &index in members {
+                // THE READ ORDINAL travels with the packet: a read whose
+                // walk spans two buckets is stored in BOTH (the price of
+                // locality), so a multi-bucket query must be able to
+                // dedup - without an identity it double-counts (caught by
+                // the gate: 19,270 vs the scan's 17,192).
+                out.write_all(&(index as u32).to_le_bytes())?;
+                out.write_all(&packets[index])?;
+                offset += 4 + packets[index].len() as u64;
+            }
+            table.push((bucket, start, offset - start));
+        }
+        out.flush()?;
+    }
+    {
+        let mut out = BufWriter::new(File::create(&idx)?);
+        out.write_all(MAGIC)?;
+        out.write_all(&width_bp.to_le_bytes())?;
+        out.write_all(&(table.len() as u64).to_le_bytes())?;
+        out.write_all(&(packets.len() as u64).to_le_bytes())?;
+        out.write_all(&0u64.to_le_bytes())?; // rewind is 0: the key has locality
+        for &(bucket, offset, len) in &table {
+            out.write_all(&bucket.to_le_bytes())?;
+            out.write_all(&offset.to_le_bytes())?;
+            out.write_all(&len.to_le_bytes())?;
+        }
+    }
+    {
+        let mut out = BufWriter::new(File::create(&sum)?);
+        for (&bucket, members) in &buckets {
+            let (mut reads, mut records, mut tokens) = (0u64, 0u64, 0u64);
+            for &index in members {
+                let (nodes, recs, toks) = walk_nodes(&packets[index])?;
+                if !nodes.is_empty() {
+                    reads += 1;
+                    records += recs;
+                    tokens += toks;
+                }
+            }
+            out.write_all(&bucket.to_le_bytes())?;
+            out.write_all(&reads.to_le_bytes())?;
+            out.write_all(&records.to_le_bytes())?;
+            out.write_all(&tokens.to_le_bytes())?;
+        }
+    }
+    let write = t2.elapsed();
+
+    let evd_bytes = std::fs::metadata(&evd)?.len();
+    let idx_bytes = std::fs::metadata(&idx)?.len();
+    let sum_bytes = std::fs::metadata(&sum)?.len();
+    println!("shard.{prefix} (POSITION-keyed, {width_bp} bp/bucket)");
+    println!("  positions table    {} nodes ({:.1}s)", positions.entries.len(), load_positions.as_secs_f64());
+    println!("  reads              {}", packets.len());
+    println!("  placed             {} (unplaced {unplaced}, spanning >1 bucket {multi})", packets.len() - unplaced);
+    println!("  buckets occupied   {}", table.len());
+    println!("  read {:.1}s  place {:.1}s  write {:.1}s", read_time.as_secs_f64(), place.as_secs_f64(), write.as_secs_f64());
+    println!(
+        "  store {:.1} MB   index {:.2} MB   summary {:.2} MB   (overhead {:.3}%)",
+        evd_bytes as f64 / 1e6,
+        idx_bytes as f64 / 1e6,
+        sum_bytes as f64 / 1e6,
+        100.0 * (idx_bytes + sum_bytes) as f64 / evd_bytes.max(1) as f64
+    );
+    Ok(())
+}
+
 fn build(dir: &str, prefix: &str) -> io::Result<()> {
     let width = bucket_nodes();
     let t0 = Instant::now();
@@ -161,8 +320,14 @@ fn build(dir: &str, prefix: &str) -> io::Result<()> {
         for (&bucket, members) in &buckets {
             let start = offset;
             for &index in members {
+                // THE READ ORDINAL travels with the packet: a read whose
+                // walk spans two buckets is stored in BOTH (the price of
+                // locality), so a multi-bucket query must be able to
+                // dedup - without an identity it double-counts (caught by
+                // the gate: 19,270 vs the scan's 17,192).
+                out.write_all(&(index as u32).to_le_bytes())?;
                 out.write_all(&packets[index])?;
-                offset += packets[index].len() as u64;
+                offset += 4 + packets[index].len() as u64;
             }
             table.push((bucket, start, offset - start));
         }
@@ -231,10 +396,10 @@ fn load_manifest(dir: &str, prefix: &str) -> io::Result<(u64, Vec<(u64, u64, u64
     let u64_at = |at: usize| u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
     let width = u64_at(8);
     let n_buckets = u64_at(16) as usize;
-    let rewind = u64_at(32 - 8);
+    let rewind = u64_at(32);
     let mut table = Vec::with_capacity(n_buckets);
     for i in 0..n_buckets {
-        let base = 32 + i * 24;
+        let base = 40 + i * 24; // magic(8) + width,n_buckets,n_reads,rewind (4x8)
         table.push((u64_at(base), u64_at(base + 8), u64_at(base + 16)));
     }
     Ok((width, table, rewind))
@@ -278,6 +443,81 @@ fn read_buckets(
         }
     }
     Ok((packets, buckets_read, bytes_read))
+}
+
+/// `evidence(locus)` — THE interface: a (path, bp range) in, the reads with
+/// evidence there out, by seek.
+fn evidence_pos(dir: &str, prefix: &str, positions_path: &str, path: u32, lo_bp: u64, hi_bp: u64) -> io::Result<()> {
+    let positions = Positions::load(positions_path)?;
+    let mut head = Vec::new();
+    File::open(Path::new(dir).join(format!("shard.{prefix}.p.evd.idx")))?.read_to_end(&mut head)?;
+    let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+    let width = u64_at(8);
+    let n_buckets = u64_at(16) as usize;
+    let mut table = Vec::with_capacity(n_buckets);
+    for i in 0..n_buckets {
+        let base = 40 + i * 24;
+        table.push((u64_at(base), u64_at(base + 8), u64_at(base + 16)));
+    }
+    let lo_key = position_key(path, lo_bp, width);
+    let hi_key = position_key(path, hi_bp, width);
+    let spine: Vec<u64> = table.iter().map(|&(b, _, _)| b).collect();
+    let start = spine.partition_point(|&b| b < lo_key);
+    let t0 = Instant::now();
+    let mut file = File::open(Path::new(dir).join(format!("shard.{prefix}.p.evd")))?;
+    use std::io::{Seek, SeekFrom};
+    let mut hits = 0usize;
+    let mut examined = 0usize;
+    let mut bytes_read = 0u64;
+    let mut bucket_count = 0usize;
+    // a read spanning two buckets is stored twice; count it once
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for &(key, offset, len) in &table[start..] {
+        if key > hi_key {
+            break;
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len as usize];
+        file.read_exact(&mut buf)?;
+        bytes_read += len;
+        bucket_count += 1;
+        let mut at = 0usize;
+        while at + 8 <= buf.len() {
+            let ordinal = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+            let plen = u32::from_le_bytes(buf[at + 4..at + 8].try_into().unwrap()) as usize;
+            let end = at + 8 + plen;
+            if end > buf.len() { break; }
+            let packet = &buf[at + 4..end];
+            if seen.insert(ordinal) {
+                examined += 1;
+                let (nodes, _, _) = walk_nodes(packet)?;
+                if nodes.iter().any(|&n| matches!(positions.position(n), Some((p, o)) if p == path && o >= lo_bp && o <= hi_bp)) {
+                    hits += 1;
+                }
+            }
+            at = end;
+        }
+    }
+    println!("evidence(path {path}, {lo_bp}..{hi_bp}): {examined} reads examined, {hits} with evidence, {:.3} MB read, {bucket_count} buckets, {:.2} ms",
+        bytes_read as f64/1e6, t0.elapsed().as_secs_f64()*1e3);
+    Ok(())
+}
+
+/// The gate's other arm: the same predicate over every packet.
+fn scan_pos(dir: &str, prefix: &str, positions_path: &str, path: u32, lo_bp: u64, hi_bp: u64) -> io::Result<()> {
+    let t0 = Instant::now();
+    let positions = Positions::load(positions_path)?;
+    let packets = read_packets(&shard_gz(dir, prefix))?;
+    let mut hits = 0usize;
+    for packet in &packets {
+        let (nodes, _, _) = walk_nodes(packet)?;
+        if nodes.iter().any(|&n| matches!(positions.position(n), Some((p, o)) if p == path && o >= lo_bp && o <= hi_bp)) {
+            hits += 1;
+        }
+    }
+    println!("scan     (path {path}, {lo_bp}..{hi_bp}): {} reads examined, {hits} with evidence, {:.1} ms (whole shard decompressed)",
+        packets.len(), t0.elapsed().as_secs_f64()*1e3);
+    Ok(())
 }
 
 fn evidence(dir: &str, prefix: &str, lo_node: u64, hi_node: u64) -> io::Result<()> {
@@ -379,7 +619,15 @@ fn main() -> io::Result<()> {
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
     match args.get(1).map(String::as_str) {
         Some("build") => build(&arg(2), &arg(3)),
+        Some("build-keyed") => build_keyed(
+            &arg(2),
+            &arg(3),
+            &arg(4),
+            arg(5).parse().unwrap_or(10_000),
+        ),
         Some("evidence") => evidence(&arg(2), &arg(3), arg(4).parse().unwrap_or(0), arg(5).parse().unwrap_or(0)),
+        Some("evidence-pos") => evidence_pos(&arg(2), &arg(3), &arg(4), arg(5).parse().unwrap_or(0), arg(6).parse().unwrap_or(0), arg(7).parse().unwrap_or(0)),
+        Some("scan-pos") => scan_pos(&arg(2), &arg(3), &arg(4), arg(5).parse().unwrap_or(0), arg(6).parse().unwrap_or(0), arg(7).parse().unwrap_or(0)),
         Some("summary") => summary(&arg(2), &arg(3), arg(4).parse().unwrap_or(0), arg(5).parse().unwrap_or(0)),
         Some("scan") => scan(&arg(2), &arg(3), arg(4).parse().unwrap_or(0), arg(5).parse().unwrap_or(0)),
         _ => {
