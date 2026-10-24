@@ -67,6 +67,12 @@ impl Positions {
     /// The panel position of a node, or None when the panel has no walk
     /// for it (a node the table's path range does not cover).
     fn position(&self, node: i32) -> Option<(u32, u64)> {
+        // THE KEY IS |node|: a vertex's position is the same in either
+        // orientation, and the panel walk emits most vertices only once
+        // (forward). Keying on the signed id silently dropped EVERY
+        // reverse-strand read - measured: node 118354468 FOUND,
+        // -118354468 ABSENT, so 20% of walk-bearing reads never placed.
+        let node = node.unsigned_abs() as i32;
         match self.entries.binary_search_by_key(&node, |e| e.0) {
             Ok(at) => Some((self.entries[at].1, self.entries[at].2)),
             Err(_) => None,
@@ -520,6 +526,192 @@ fn scan_pos(dir: &str, prefix: &str, positions_path: &str, path: u32, lo_bp: u64
     Ok(())
 }
 
+/// Stream one shard's packets, one at a time (the whole sample is 46 GB
+/// gzipped; only the per-bucket spills are held on disk).
+fn stream_packets(path: &Path) -> io::Result<Box<dyn FnMut() -> io::Result<Option<Vec<u8>>>>> {
+    let file = File::open(path)?;
+    let gz = flate2::read::GzDecoder::new(BufReader::with_capacity(1 << 20, file));
+    let mut reader = BufReader::with_capacity(1 << 20, gz);
+    Ok(Box::new(move || {
+        let mut len_buf = [0u8; 4];
+        match reader.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut packet = vec![0u8; 4 + len];
+        packet[..4].copy_from_slice(&len_buf);
+        reader.read_exact(&mut packet[4..])?;
+        Ok(Some(packet))
+    }))
+}
+
+/// THE WHOLE-SAMPLE BUILDER: every region shard, one position-ordered
+/// store. Two passes, because 46 GB of packets cannot be held: pass 1
+/// spills each (key, read, packet) into one of NSPILL files chosen by
+/// key range; pass 2 sorts each spill by key and appends it to the store
+/// in order, recording the bucket boundaries. This is an external
+/// bucketed sort, and it is the shape the projection emission should
+/// eventually produce directly.
+fn build_all(dir: &str, positions_path: &str, out_prefix: &str, width_bp: u64) -> io::Result<()> {
+    const NSPILL: u64 = 256;
+    let t0 = Instant::now();
+    let positions = Positions::load(positions_path)?;
+    println!("positions {} nodes ({:.1}s)", positions.entries.len(), t0.elapsed().as_secs_f64());
+
+    let mut shards: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
+            shards.push(path);
+        }
+    }
+    shards.sort();
+    println!("shards {}", shards.len());
+
+    // ---- pass 1: spill by key range ----
+    let t1 = Instant::now();
+    let spill_dir = Path::new(dir).join("evd-spill");
+    std::fs::create_dir_all(&spill_dir)?;
+    let mut spills: Vec<BufWriter<File>> = (0..NSPILL)
+        .map(|i| File::create(spill_dir.join(format!("{i:03}.spill"))).map(BufWriter::new))
+        .collect::<io::Result<_>>()?;
+    let mut read_id = 0u64;
+    let mut placed = 0u64;
+    let mut unplaced = 0u64;
+    for shard in &shards {
+        let mut next = stream_packets(shard)?;
+        while let Some(packet) = next()? {
+            let ordinal = read_id;
+            read_id += 1;
+            let (nodes, _, _) = walk_nodes(&packet)?;
+            let mut keys: Vec<u64> = Vec::new();
+            for &node in &nodes {
+                if let Some((path, offset)) = positions.position(node) {
+                    keys.push(position_key(path, offset, width_bp));
+                }
+            }
+            if keys.is_empty() {
+                unplaced += 1;
+                continue;
+            }
+            keys.sort_unstable();
+            keys.dedup();
+            placed += 1;
+            for key in keys {
+                let spill = &mut spills[(key % NSPILL) as usize];
+                spill.write_all(&key.to_le_bytes())?;
+                spill.write_all(&ordinal.to_le_bytes())?;
+                spill.write_all(&(packet.len() as u32).to_le_bytes())?;
+                spill.write_all(&packet)?;
+            }
+        }
+    }
+    drop(spills);
+    let spill_time = t1.elapsed();
+
+    // ---- pass 2: merge each spill in key order ----
+    let t2 = Instant::now();
+    let evd = Path::new(dir).join(format!("{out_prefix}.evd"));
+    let idx = Path::new(dir).join(format!("{out_prefix}.evd.idx"));
+    let sum = Path::new(dir).join(format!("{out_prefix}.evd.sum"));
+    let mut table: Vec<(u64, u64, u64)> = Vec::new();
+    let mut offset = 0u64;
+    {
+        let mut out = BufWriter::new(File::create(&evd)?);
+        for i in 0..NSPILL {
+            let path = spill_dir.join(format!("{i:03}.spill"));
+            let mut buf = Vec::new();
+            File::open(&path)?.read_to_end(&mut buf)?;
+            if buf.is_empty() {
+                continue;
+            }
+            // decode (key, ordinal, packet) triples, then sort by key
+            let mut entries: Vec<(u64, u64, Vec<u8>)> = Vec::new();
+            let mut at = 0usize;
+            while at + 16 <= buf.len() {
+                let key = u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
+                let ordinal = u64::from_le_bytes(buf[at + 8..at + 16].try_into().unwrap());
+                let plen = u32::from_le_bytes(buf[at + 16..at + 20].try_into().unwrap()) as usize;
+                let end = at + 20 + plen;
+                if end > buf.len() {
+                    break;
+                }
+                entries.push((key, ordinal, buf[at + 20..end].to_vec()));
+                at = end;
+            }
+            entries.sort_unstable_by_key(|e| (e.0, e.1));
+            let mut current: Option<(u64, u64)> = None; // (key, start)
+            for (key, ordinal, packet) in entries {
+                if current.map(|(k, _)| k) != Some(key) {
+                    if let Some((k, start)) = current {
+                        table.push((k, start, offset - start));
+                    }
+                    current = Some((key, offset));
+                }
+                out.write_all(&(ordinal as u32).to_le_bytes())?;
+                out.write_all(&packet)?;
+                offset += 4 + packet.len() as u64;
+            }
+            if let Some((k, start)) = current {
+                table.push((k, start, offset - start));
+            }
+        }
+        out.flush()?;
+    }
+    table.sort_unstable_by_key(|e| e.0);
+    let merge_time = t2.elapsed();
+
+    // ---- manifests ----
+    let t3 = Instant::now();
+    {
+        let mut out = BufWriter::new(File::create(&idx)?);
+        out.write_all(MAGIC)?;
+        out.write_all(&width_bp.to_le_bytes())?;
+        out.write_all(&(table.len() as u64).to_le_bytes())?;
+        out.write_all(&read_id.to_le_bytes())?;
+        out.write_all(&0u64.to_le_bytes())?;
+        for &(bucket, start, len) in &table {
+            out.write_all(&bucket.to_le_bytes())?;
+            out.write_all(&start.to_le_bytes())?;
+            out.write_all(&len.to_le_bytes())?;
+        }
+    }
+    {
+        // the O(1) layer: per bucket, an approximate read count is enough
+        // for plan(); exact counts come from the summary pass at emission
+        let mut out = BufWriter::new(File::create(&sum)?);
+        for &(bucket, start, len) in &table {
+            out.write_all(&bucket.to_le_bytes())?;
+            out.write_all(&0u64.to_le_bytes())?; // reads
+            out.write_all(&len.to_le_bytes())?; // bytes (the usable number)
+            out.write_all(&0u64.to_le_bytes())?; // tokens
+        }
+    }
+    let write_time = t3.elapsed();
+    let evd_bytes = std::fs::metadata(&evd)?.len();
+    let idx_bytes = std::fs::metadata(&idx)?.len();
+    let sum_bytes = std::fs::metadata(&sum)?.len();
+    println!("  reads {read_id}  placed {placed}  unplaced {unplaced}");
+    println!("  buckets {}", table.len());
+    println!(
+        "  pass1 spill {:.1}s  pass2 merge {:.1}s  manifests {:.1}s",
+        spill_time.as_secs_f64(),
+        merge_time.as_secs_f64(),
+        write_time.as_secs_f64()
+    );
+    println!(
+        "  store {:.1} MB   index {:.2} MB   summary {:.2} MB   (overhead {:.4}%)",
+        evd_bytes as f64 / 1e6,
+        idx_bytes as f64 / 1e6,
+        sum_bytes as f64 / 1e6,
+        100.0 * (idx_bytes + sum_bytes) as f64 / evd_bytes.max(1) as f64
+    );
+    Ok(())
+}
+
 fn evidence(dir: &str, prefix: &str, lo_node: u64, hi_node: u64) -> io::Result<()> {
     let width = {
         let (w, _, _) = load_manifest(dir, prefix)?;
@@ -626,6 +818,12 @@ fn main() -> io::Result<()> {
             arg(5).parse().unwrap_or(10_000),
         ),
         Some("evidence") => evidence(&arg(2), &arg(3), arg(4).parse().unwrap_or(0), arg(5).parse().unwrap_or(0)),
+        Some("build-all") => build_all(
+            &arg(2),
+            &arg(3),
+            &arg(4),
+            arg(5).parse().unwrap_or(10_000),
+        ),
         Some("evidence-pos") => evidence_pos(&arg(2), &arg(3), &arg(4), arg(5).parse().unwrap_or(0), arg(6).parse().unwrap_or(0), arg(7).parse().unwrap_or(0)),
         Some("scan-pos") => scan_pos(&arg(2), &arg(3), &arg(4), arg(5).parse().unwrap_or(0), arg(6).parse().unwrap_or(0), arg(7).parse().unwrap_or(0)),
         Some("summary") => summary(&arg(2), &arg(3), arg(4).parse().unwrap_or(0), arg(5).parse().unwrap_or(0)),
