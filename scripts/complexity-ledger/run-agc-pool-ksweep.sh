@@ -30,7 +30,12 @@ source /home/erikg/impg-genome-inference/scripts/end-to-end/ee-env.sh
 SWEEP=${SWEEP:-/mnt/nvme2n1/erikg/agc-pool-ksweep}
 RCP=$SWEEP/ksweep-receipt.txt
 CENSUS=${CENSUS:-$EE/cut-census-L1/cut-census.jsonl}
-KS=${KS:-"1 2 4 8 16 32 64 192"}
+# SMALL FIRST: K=8 is the shipped default, and the committed behaviour
+# (one decompressor per thread) is the LAST point, so the safe receipts
+# land before the memory-hungry one. K=1 is the serial floor - the
+# committed serial form measured ~7.5h - so it is NOT in the default
+# list; run it explicitly (KS="1") if the floor is ever needed.
+KS=${KS:-"8 16 32 64 192"}
 THREADS=${RAYON_NUM_THREADS:-192}
 mkdir -p "$SWEEP"
 
@@ -76,7 +81,12 @@ for K in $KS; do
     echo "K=$K FAILED exit=$st wall=${wall}s - log: $SWEEP/K$K.log" | tee -a "$RCP"
     continue
   fi
-  core=$(awk '{printf "%.1f", $1+$2}' "$cpu" 2>/dev/null)
+  # (THE LAST NUMERIC LINE, not every line: the derivation writes its own
+  # stderr lines into this capture (e.g. the LEGACY-PANEL OPT-IN notice),
+  # and a bare awk over all lines concatenated its per-line prints into
+  # garbage like "0.00.054221.9". The time report is the final line and is
+  # the only one that is two floats.)
+  core=$(awk '/^[0-9]+\.[0-9]+ [0-9]+\.[0-9]+$/{printf "%.1f", $1+$2; found=1} END{if(!found) printf "NA"}' "$cpu" 2>/dev/null)
   sha=$(sha256sum "$OUT/graph.json" | cut -d' ' -f1)
   bytes=$(stat -c %s "$OUT/graph.json")
   echo "K=$K ${wall} ${core} ${peak} ${sha} ${bytes}" >> "$RCP"
@@ -93,7 +103,12 @@ for K in $KS; do
   # is a transient (re-derivable; the campaign's own cheap rerun)
   rm -rf "$OUT"
   touch "$M"
-  ee_budget_check || { echo "BUDGET STOP after K=$K" >> "$RCP"; exit 1; }
+  # THE SWEEP'S OWN DISK GATE (NOT the campaign workdir's budget: $EE is
+  # a different scratch root and sits at its own bound, which would stop
+  # an unrelated run for an unrelated reason). Each point's artifact is
+  # small and removed above; this only guards the box's headroom.
+  free_g=$(df -BG --output=avail "$SWEEP" | tail -1 | tr -dc '0-9')
+  [ "${free_g:-0}" -ge 20 ] || { echo "DISK STOP after K=$K (${free_g}G free)" >> "$RCP"; exit 1; }
 done
 
 echo "=== ksweep receipt ($RCP) ==="

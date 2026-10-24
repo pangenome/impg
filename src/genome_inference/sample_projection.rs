@@ -3543,6 +3543,27 @@ fn run_cut_batch(
         routing.len(),
         n_terr
     );
+    // THE TERRITORY-NODE DUMP (an env-gated INSTRUMENT, no answer change):
+    // `routing`'s key set IS the global-node set a projection index must
+    // serve, so this is the only honest way to answer the index-design
+    // question - whether those ids CLUSTER in the panel's node space (an
+    // inverted index then wins 900x, measured on a contiguous band) or
+    // SPREAD across it (the index reads every bucket and wins nothing).
+    // Default (env unset): nothing is written and the path is byte-identical.
+    if let Ok(dump_path) = std::env::var("IMPG_DUMP_TERRITORY_NODES") {
+        let mut node_ids: Vec<i32> = routing.keys().copied().collect();
+        node_ids.sort_unstable();
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&dump_path)?);
+        for id in &node_ids {
+            writeln!(out, "{}", id)?;
+        }
+        out.flush()?;
+        eprintln!(
+            "[cut-batch] TERRITORY NODE DUMP: {} global node ids -> {}",
+            node_ids.len(),
+            dump_path
+        );
+    }
     let load_seconds = load_started.elapsed().as_secs_f64();
 
     // The ONE shard scan (parallel over files; per read, every routed
@@ -4002,6 +4023,27 @@ fn cut_batch_global_with(
         routing.len(),
         n_terr
     );
+    // THE TERRITORY-NODE DUMP (an env-gated INSTRUMENT, no answer change):
+    // `routing`'s key set IS the global-node set a projection index must
+    // serve, so this is the only honest way to answer the index-design
+    // question - whether those ids CLUSTER in the panel's node space (an
+    // inverted index then wins ~900x, measured on a contiguous band) or
+    // SPREAD across it (the index reads every bucket and wins nothing).
+    // Default (env unset): nothing written, the path byte-identical.
+    if let Ok(dump_path) = std::env::var("IMPG_DUMP_TERRITORY_NODES") {
+        let mut node_ids: Vec<i32> = routing.keys().copied().collect();
+        node_ids.sort_unstable();
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&dump_path)?);
+        for id in &node_ids {
+            writeln!(out, "{}", id)?;
+        }
+        out.flush()?;
+        eprintln!(
+            "[cut-batch-global] TERRITORY NODE DUMP: {} global node ids -> {}",
+            node_ids.len(),
+            dump_path
+        );
+    }
 
     // THE RESTRICTED-BASIS INVERTED INDEX (the §10.6.17 product
     // default carried into the batch form): read hash -> the
