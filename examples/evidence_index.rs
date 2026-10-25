@@ -32,6 +32,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const MAGIC: &[u8; 8] = b"EVDIDX01";
+/// THE COMPRESSED STORE (per-bucket zstd). The store is 168 GB raw -
+/// 2/3 of it the reads' own sequence - and compresses 7.4x at zstd-3
+/// (measured at 0/40/80% of the file: 7.48/7.39/7.42), so the artifact
+/// lands near 23 GB instead of 168. A bucket is the seek unit and the
+/// median bucket is 2.3 KB, so the decompression is microseconds.
+const MAGIC_Z: &[u8; 8] = b"EVDIDX03";
 const POS_MAGIC: &[u8; 8] = b"PNLPOS01";
 
 /// `node -> (path, offset)`, sorted by node. Panel-side, built by
@@ -393,10 +399,27 @@ fn build(dir: &str, prefix: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether this store's buckets are zstd frames (format EVDIDX03).
+/// The store's file stem: the whole-sample builder writes `<prefix>.evd*`,
+/// the per-shard prototype wrote `shard.<prefix>.p.evd*`.
+fn store_stem(dir: &str, prefix: &str, ext: &str) -> PathBuf {
+    let whole = Path::new(dir).join(format!("{prefix}.{ext}"));
+    if whole.exists() {
+        return whole;
+    }
+    Path::new(dir).join(format!("shard.{prefix}.p.{ext}"))
+}
+
+fn manifest_is_compressed(dir: &str, prefix: &str) -> io::Result<bool> {
+    let mut head = [0u8; 8];
+    File::open(store_stem(dir, prefix, "evd.idx"))?.read_exact(&mut head)?;
+    Ok(&head == MAGIC_Z)
+}
+
 fn load_manifest(dir: &str, prefix: &str) -> io::Result<(u64, Vec<(u64, u64, u64)>, u64)> {
     let mut buf = Vec::new();
     File::open(Path::new(dir).join(format!("shard.{prefix}.evd.idx")))?.read_to_end(&mut buf)?;
-    if buf.len() < 32 || &buf[..8] != MAGIC {
+    if buf.len() < 32 || (&buf[..8] != MAGIC && &buf[..8] != MAGIC_Z) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad evd.idx"));
     }
     let u64_at = |at: usize| u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
@@ -419,6 +442,7 @@ fn read_buckets(
     hi: u64,
 ) -> io::Result<(Vec<Vec<u8>>, usize, u64)> {
     let (_, table, rewind) = load_manifest(dir, prefix)?;
+    let is_compressed = manifest_is_compressed(dir, prefix)?;
     let first_bucket = lo.saturating_sub(rewind);
     let spine: Vec<u64> = table.iter().map(|&(b, _, _)| b).collect();
     let start = spine.partition_point(|&b| b < first_bucket);
@@ -456,8 +480,9 @@ fn read_buckets(
 fn evidence_pos(dir: &str, prefix: &str, positions_path: &str, path: u32, lo_bp: u64, hi_bp: u64) -> io::Result<()> {
     let positions = Positions::load(positions_path)?;
     let mut head = Vec::new();
-    File::open(Path::new(dir).join(format!("shard.{prefix}.p.evd.idx")))?.read_to_end(&mut head)?;
+    File::open(store_stem(dir, prefix, "evd.idx"))?.read_to_end(&mut head)?;
     let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+    let is_compressed = &head[..8] == MAGIC_Z;
     let width = u64_at(8);
     let n_buckets = u64_at(16) as usize;
     let mut table = Vec::with_capacity(n_buckets);
@@ -470,7 +495,7 @@ fn evidence_pos(dir: &str, prefix: &str, positions_path: &str, path: u32, lo_bp:
     let spine: Vec<u64> = table.iter().map(|&(b, _, _)| b).collect();
     let start = spine.partition_point(|&b| b < lo_key);
     let t0 = Instant::now();
-    let mut file = File::open(Path::new(dir).join(format!("shard.{prefix}.p.evd")))?;
+    let mut file = File::open(store_stem(dir, prefix, "evd"))?;
     use std::io::{Seek, SeekFrom};
     let mut hits = 0usize;
     let mut examined = 0usize;
@@ -487,6 +512,13 @@ fn evidence_pos(dir: &str, prefix: &str, positions_path: &str, path: u32, lo_bp:
         file.read_exact(&mut buf)?;
         bytes_read += len;
         bucket_count += 1;
+        let stored = if is_compressed {
+            // one zstd frame per bucket: decode it, then read the records
+            zstd::stream::decode_all(std::io::Cursor::new(&buf))?
+        } else {
+            buf
+        };
+        let buf = stored;
         let mut at = 0usize;
         while at + 8 <= buf.len() {
             let ordinal = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
@@ -643,20 +675,34 @@ fn build_all(dir: &str, positions_path: &str, out_prefix: &str, width_bp: u64) -
                 at = end;
             }
             entries.sort_unstable_by_key(|e| (e.0, e.1));
-            let mut current: Option<(u64, u64)> = None; // (key, start)
+            let mut current: Option<(u64, u64)> = None; // (key, bucket start offset)
+            let mut bucket: Vec<u8> = Vec::new();
+            let mut flush = |bucket: &mut Vec<u8>,
+                             key: u64,
+                             start: u64,
+                             out: &mut BufWriter<File>,
+                             offset: &mut u64,
+                             table: &mut Vec<(u64, u64, u64)>|
+             -> io::Result<()> {
+                let compressed = zstd::bulk::compress(bucket, 3)?;
+                out.write_all(&compressed)?;
+                *offset += compressed.len() as u64;
+                table.push((key, start, compressed.len() as u64));
+                bucket.clear();
+                Ok(())
+            };
             for (key, ordinal, packet) in entries {
                 if current.map(|(k, _)| k) != Some(key) {
                     if let Some((k, start)) = current {
-                        table.push((k, start, offset - start));
+                        flush(&mut bucket, k, start, &mut out, &mut offset, &mut table)?;
                     }
                     current = Some((key, offset));
                 }
-                out.write_all(&(ordinal as u32).to_le_bytes())?;
-                out.write_all(&packet)?;
-                offset += 4 + packet.len() as u64;
+                bucket.extend_from_slice(&(ordinal as u32).to_le_bytes());
+                bucket.extend_from_slice(&packet);
             }
             if let Some((k, start)) = current {
-                table.push((k, start, offset - start));
+                flush(&mut bucket, k, start, &mut out, &mut offset, &mut table)?;
             }
         }
         out.flush()?;
@@ -668,7 +714,7 @@ fn build_all(dir: &str, positions_path: &str, out_prefix: &str, width_bp: u64) -
     let t3 = Instant::now();
     {
         let mut out = BufWriter::new(File::create(&idx)?);
-        out.write_all(MAGIC)?;
+        out.write_all(MAGIC_Z)?;
         out.write_all(&width_bp.to_le_bytes())?;
         out.write_all(&(table.len() as u64).to_le_bytes())?;
         out.write_all(&read_id.to_le_bytes())?;
