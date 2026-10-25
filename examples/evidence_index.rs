@@ -586,6 +586,267 @@ fn stream_packets(path: &Path) -> io::Result<Box<dyn FnMut() -> io::Result<Optio
 /// in order, recording the bucket boundaries. This is an external
 /// bucketed sort, and it is the shape the projection emission should
 /// eventually produce directly.
+/// MATERIALISE ONE TERRITORY'S EVIDENCE as a single virtual shard.
+///
+/// This needs NO product change: the cut's scan already reads
+/// `shard.*.bin.gz` from `--shards-dir`, so a directory holding one shard
+/// built from the evidence store (the territory's reads, sorted by their
+/// arrival ordinal so the scan sees them in the same relative order) makes
+/// the existing pipeline fetch instead of scan. That is the measurement
+/// the 66-hour question needs, and the gate is cut-census.jsonl +
+/// cut-cache.bin byte-identity against the full-shard run.
+fn materialize(
+    store_prefix: &str,
+    positions_path: &str,
+    names_path: &str,
+    beds_dir: &str,
+    out_dir: &str,
+    width_bp: u64,
+) -> io::Result<()> {
+    use std::collections::HashMap as Map;
+    use std::io::{Seek, SeekFrom};
+    let t0 = Instant::now();
+    // name -> path index, from the panel's own name list (idx TAB name ...)
+    let mut name_to_idx: Map<String, u32> = Map::new();
+    for line in std::fs::read_to_string(names_path)?.lines() {
+        let mut fields = line.split('\t');
+        if let (Some(idx), Some(name)) = (fields.next(), fields.next()) {
+            if let Ok(idx) = idx.parse::<u32>() {
+                name_to_idx.insert(name.to_string(), idx);
+            }
+        }
+    }
+    // the store's manifest
+    let mut head = Vec::new();
+    File::open(format!("{store_prefix}.evd.idx"))?.read_to_end(&mut head)?;
+    let is_compressed = &head[..8] == MAGIC_Z;
+    let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+    let width = u64_at(8);
+    let n_buckets = u64_at(16) as usize;
+    let mut table: Vec<(u64, u64, u64)> = Vec::with_capacity(n_buckets);
+    for i in 0..n_buckets {
+        let base = 40 + i * 24;
+        table.push((u64_at(base), u64_at(base + 8), u64_at(base + 16)));
+    }
+    let spine: Vec<u64> = table.iter().map(|&(k, _, _)| k).collect();
+    let _ = positions_path; // the windows are already in path coordinates
+
+    // the territory's windows, from the partition beds (path_name TAB start TAB end)
+    let mut windows: Vec<(u32, u64, u64)> = Vec::new();
+    let mut unmatched = 0usize;
+    for entry in std::fs::read_dir(beds_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("bed") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&path)?.lines() {
+            let mut fields = line.split('\t');
+            let (Some(name), Some(start), Some(end)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            // the bed names carry a ":start-end" suffix; the panel's do not
+            let base = name.split(':').next().unwrap_or(name);
+            let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+                continue;
+            };
+            match name_to_idx.get(base) {
+                Some(&idx) => windows.push((idx, start, end)),
+                None => unmatched += 1,
+            }
+        }
+    }
+    println!(
+        "  windows {} (unmatched path names {unmatched}) from {beds_dir}",
+        windows.len()
+    );
+
+    // fetch: every bucket any window covers
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut packets: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut file = File::open(format!("{store_prefix}.evd"))?;
+    let mut bytes = 0u64;
+    let mut bucket_visits = 0usize;
+    for &(path_idx, lo_bp, hi_bp) in &windows {
+        let lo_key = position_key(path_idx, lo_bp, width);
+        let hi_key = position_key(path_idx, hi_bp, width);
+        let start_at = spine.partition_point(|&k| k < lo_key);
+        for &(key, offset, len) in &table[start_at..] {
+            if key > hi_key {
+                break;
+            }
+            file.seek(SeekFrom::Start(offset))?;
+            let mut raw = vec![0u8; len as usize];
+            file.read_exact(&mut raw)?;
+            bytes += len as u64;
+            bucket_visits += 1;
+            let buf = if is_compressed {
+                zstd::stream::decode_all(std::io::Cursor::new(&raw))?
+            } else {
+                raw
+            };
+            let mut at = 0usize;
+            while at + 8 <= buf.len() {
+                let ordinal = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+                let plen = u32::from_le_bytes(buf[at + 4..at + 8].try_into().unwrap()) as usize;
+                let end = at + 8 + plen;
+                if end > buf.len() {
+                    break;
+                }
+                if seen.insert(ordinal) {
+                    packets.push((ordinal, buf[at + 4..end].to_vec()));
+                }
+                at = end;
+            }
+        }
+    }
+    println!(
+        "  fetched {} packets ({} duplicated placements dropped), {:.1} MB read, {bucket_visits} bucket visits",
+        packets.len(),
+        seen.len() - packets.len(),
+        bytes as f64 / 1e6
+    );
+
+    // the scan sees reads in ARRIVAL order: sort by ordinal, then write one shard
+    packets.sort_unstable_by_key(|p| p.0);
+    std::fs::create_dir_all(out_dir)?;
+    {
+        let out_path = Path::new(out_dir).join("shard.evidence.bin.gz");
+        let mut encoder =
+            flate2::write::GzEncoder::new(BufWriter::new(File::create(&out_path)?), flate2::Compression::fast());
+        for (_, packet) in &packets {
+            encoder.write_all(&packet[..4])?;
+            encoder.write_all(&packet[4..])?;
+        }
+        encoder.finish()?;
+        println!(
+            "  wrote {} ({:.1} MB) in {:.1}s",
+            out_path.display(),
+            std::fs::metadata(&out_path)?.len() as f64 / 1e6,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
+/// MATERIALISE A TERRITORY BY ITS NODE SET - the exact query.
+///
+/// The bed windows are NOT the territory: the cut's predicate is "does a
+/// walk node belong to the territory's node set", and that set extends
+/// past the window edges (measured: bed windows fetched 488 of the 5,678
+/// records the scan produces, a strict subset - zero extra). The node set
+/// is what the cut itself computes as its expressibility map, BEFORE the
+/// scan, so querying by it is both exact and cheap: each node resolves to
+/// one (path, offset) via the panel position table, hence to one bucket,
+/// and a read touching that node is stored in that bucket by construction.
+fn materialize_nodes(
+    store_prefix: &str,
+    positions_path: &str,
+    nodes_path: &str,
+    out_dir: &str,
+) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let t0 = Instant::now();
+    let positions = Positions::load(positions_path)?;
+    // the width comes from the store's own manifest
+    let mut head = Vec::new();
+    File::open(format!("{store_prefix}.evd.idx"))?.read_to_end(&mut head)?;
+    let is_compressed = &head[..8] == MAGIC_Z;
+    let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+    let width = u64_at(8);
+    let n_buckets = u64_at(16) as usize;
+    let mut table: Vec<(u64, u64, u64)> = Vec::with_capacity(n_buckets);
+    for i in 0..n_buckets {
+        let base = 40 + i * 24;
+        table.push((u64_at(base), u64_at(base + 8), u64_at(base + 16)));
+    }
+    let spine: Vec<u64> = table.iter().map(|&(k, _, _)| k).collect();
+
+    // the territory's node ids -> the set of bucket keys they occupy
+    let text = std::fs::read_to_string(nodes_path)?;
+    let mut keys: Vec<u64> = Vec::new();
+    let mut resolved = 0usize;
+    let mut unresolved = 0usize;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(node) = line.trim().parse::<i32>() else { continue };
+        match positions.position(node) {
+            Some((path, offset)) => {
+                keys.push(position_key(path, offset, width));
+                resolved += 1;
+            }
+            None => unresolved += 1,
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    println!(
+        "  territory nodes resolved {resolved} (unresolved {unresolved}) -> {} distinct buckets",
+        keys.len()
+    );
+
+    // fetch exactly those buckets
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut packets: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut file = File::open(format!("{store_prefix}.evd"))?;
+    let mut bytes = 0u64;
+    for &key in &keys {
+        let at = spine.partition_point(|&k| k < key);
+        if at >= spine.len() || spine[at] != key {
+            continue;
+        }
+        let (_, offset, len) = table[at];
+        file.seek(SeekFrom::Start(offset))?;
+        let mut raw = vec![0u8; len as usize];
+        file.read_exact(&mut raw)?;
+        bytes += len as u64;
+        let buf = if is_compressed {
+            zstd::stream::decode_all(std::io::Cursor::new(&raw))?
+        } else {
+            raw
+        };
+        let mut p = 0usize;
+        while p + 8 <= buf.len() {
+            let ordinal = u32::from_le_bytes(buf[p..p + 4].try_into().unwrap());
+            let plen = u32::from_le_bytes(buf[p + 4..p + 8].try_into().unwrap()) as usize;
+            let end = p + 8 + plen;
+            if end > buf.len() {
+                break;
+            }
+            if seen.insert(ordinal) {
+                packets.push((ordinal, buf[p + 4..end].to_vec()));
+            }
+            p = end;
+        }
+    }
+    println!(
+        "  fetched {} packets, {:.1} MB read, {} buckets",
+        packets.len(),
+        bytes as f64 / 1e6,
+        keys.len()
+    );
+    packets.sort_unstable_by_key(|p| p.0);
+    std::fs::create_dir_all(out_dir)?;
+    let out_path = Path::new(out_dir).join("shard.evidence.bin.gz");
+    let mut encoder = flate2::write::GzEncoder::new(
+        BufWriter::new(File::create(&out_path)?),
+        flate2::Compression::fast(),
+    );
+    for (_, packet) in &packets {
+        encoder.write_all(packet)?;
+    }
+    encoder.finish()?;
+    println!(
+        "  wrote {} ({:.1} MB) in {:.1}s",
+        out_path.display(),
+        std::fs::metadata(&out_path)?.len() as f64 / 1e6,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 fn build_all(dir: &str, positions_path: &str, out_prefix: &str, width_bp: u64) -> io::Result<()> {
     const NSPILL: u64 = 256;
     let t0 = Instant::now();
@@ -869,6 +1130,15 @@ fn main() -> io::Result<()> {
             &arg(3),
             &arg(4),
             arg(5).parse().unwrap_or(10_000),
+        ),
+        Some("materialize-nodes") => materialize_nodes(&arg(2), &arg(3), &arg(4), &arg(5)),
+        Some("materialize") => materialize(
+            &arg(2),
+            &arg(3),
+            &arg(4),
+            &arg(5),
+            &arg(6),
+            arg(7).parse().unwrap_or(10_000),
         ),
         Some("evidence-pos") => evidence_pos(&arg(2), &arg(3), &arg(4), arg(5).parse().unwrap_or(0), arg(6).parse().unwrap_or(0), arg(7).parse().unwrap_or(0)),
         Some("scan-pos") => scan_pos(&arg(2), &arg(3), &arg(4), arg(5).parse().unwrap_or(0), arg(6).parse().unwrap_or(0), arg(7).parse().unwrap_or(0)),
