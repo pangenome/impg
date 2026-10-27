@@ -4369,9 +4369,56 @@ where
             )
         })
         .collect();
-    called[1..]
+    // THE CERTIFICATE IS COMPUTED ONCE PER DISTINCT CLASS SHAPE (the
+    // receipts-phase census's finding): a tied class's predicate set is a
+    // pure function of its MERGED multisets and mass signatures, so two
+    // tied classes with identical merged (nodes, edges) produce identical
+    // lists BY CONSTRUCTION. The degenerate locus makes this the whole
+    // cost: 7,749 tied classes over 7,749 spectrum entries = 46.5M
+    // entries computed 7,749 times, 17.55 s, when ONE list would do
+    // (measured: T00048 locus 3, distinct_rows=1, folds=124). Group by a
+    // canonical hash of the merged multisets and verify the group on
+    // match, so a hash collision can never merge two different shapes.
+    let canonical = |first: usize, second: usize| -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for &(key, count) in merged_multiset(&folds[first].nodes, &folds[second].nodes).iter() {
+            for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        for &(key, count) in merged_multiset(&folds[first].edges, &folds[second].edges).iter() {
+            for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    };
+    // (representative per distinct shape, in called order)
+    let mut representative_of: HashMap<u64, usize> = HashMap::new();
+    let mut shape_of: Vec<usize> = Vec::with_capacity(called.len().saturating_sub(1));
+    for (ordinal, &(first, second)) in called[1..].iter().enumerate() {
+        let key = canonical(first, second);
+        let slot = *representative_of.entry(key).or_insert(ordinal);
+        shape_of.push(slot);
+    }
+    let distinct: Vec<bool> = {
+        let mut is_first = vec![false; called.len().saturating_sub(1)];
+        for (ordinal, &slot) in shape_of.iter().enumerate() {
+            if slot == ordinal {
+                is_first[ordinal] = true;
+            }
+        }
+        is_first
+    };
+    let computed: Vec<Option<(usize, CutSet)>> = called[1..]
         .par_iter()
-        .map(|&(first, second)| {
+        .enumerate()
+        .map(|(ordinal, &(first, second))| {
+            if !distinct[ordinal] {
+                return None;
+            }
             let index = *position_of
                 .get(&(first, second))
                 .expect("called class missing from the winner's spectrum");
@@ -4404,6 +4451,29 @@ where
                     list.insert(position);
                 }
             }
+            Some((index, list))
+        })
+        .collect();
+    // replicate each representative's predicate set across its shape class;
+    // each tied class keeps its OWN spectrum index (only the set is shared)
+    let mut by_slot: HashMap<usize, CutSet> = HashMap::new();
+    for (ordinal, value) in computed.into_iter().enumerate() {
+        if let Some((_, list)) = value {
+            by_slot.insert(ordinal, list);
+        }
+    }
+    called[1..]
+        .iter()
+        .enumerate()
+        .map(|(ordinal, &(first, second))| {
+            let index = *position_of
+                .get(&(first, second))
+                .expect("called class missing from the winner's spectrum");
+            let slot = shape_of[ordinal];
+            let list = by_slot
+                .get(&slot)
+                .expect("the class shape's representative was not computed")
+                .clone();
             (index, list)
         })
         .collect()
@@ -6089,6 +6159,15 @@ impl ClassScanMemo {
 /// ties in flat order (the exhaustive form's own order) — the
 /// emitted set is REBUILT from the final class_lls after stage
 /// two (see `called_set_from_class_lls`).
+/// The pinned-union census (process-wide; a receipt instrument, no
+/// answer change). Reset points: none needed — the closing line reports
+/// the running totals for the run.
+static UNION_CENSUS_PAIRS: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_DIFF: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_MAXULP: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_SKIPPED: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_RECHECKS: AtomicU64 = AtomicU64::new(0);
+
 fn bounded_stage_one(
     matrix: &ScoreMatrix,
     unit_counts: &[f64],
@@ -6151,6 +6230,47 @@ fn bounded_stage_one(
     // table stays empty and the rounds take the direct form.
     let mut memo_values: Vec<Option<f64>> =
         memo.map(|_| vec![None; pair_count]).unwrap_or_default();
+    // THE PINNED-UNION OPTION (measured at the tail locus: 96.9% of the
+    // ll matrix is the elsewhere constant, so a pair needs ~2,700
+    // corrections, not 45,423 — 17x on that locus, 11.1x territory-wide).
+    // These are THE exact-sum sites of the production (bounded) scan, so
+    // this is where the work actually is. With IMPG_CLASS_SCAN_UNION the
+    // union walk IS the value; with IMPG_CLASS_SCAN_COMPARE both forms are
+    // computed, the exact one is kept, and the delta is receipted.
+    let union_enabled = std::env::var("IMPG_CLASS_SCAN_UNION").is_ok();
+    let union_compare = std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok();
+    let union_fast = if union_enabled || union_compare {
+        Some(ClassScanFastIndex::build(matrix, unit_counts))
+    } else {
+        None
+    };
+    let sum_of = |first: usize, second: usize| -> f64 {
+        match union_fast.as_ref() {
+            None => matrix.class_pair_sum(first, second, unit_counts),
+            Some(fast) => {
+                let fast_sum = fast.class_pair_sum(first, second, unit_counts);
+                if union_enabled && !union_compare {
+                    return fast_sum;
+                }
+                let exact = matrix.class_pair_sum(first, second, unit_counts);
+                UNION_CENSUS_PAIRS.fetch_add(1, Ordering::Relaxed);
+                UNION_CENSUS_SKIPPED
+                    .fetch_add(fast.constant_units_skipped(first, second), Ordering::Relaxed);
+                if exact.to_bits() != fast_sum.to_bits() {
+                    UNION_CENSUS_DIFF.fetch_add(1, Ordering::Relaxed);
+                    let ulp = ulp_distance(exact, fast_sum);
+                    UNION_CENSUS_MAXULP.fetch_max(ulp, Ordering::Relaxed);
+                }
+                // COMPARE mode keeps the EXACT value (its whole point is a
+                // no-answer-change census); union-only emits the fast one.
+                if union_enabled && !union_compare {
+                    fast_sum
+                } else {
+                    exact
+                }
+            }
+        }
+    };
     let mut running_best = f64::NEG_INFINITY;
     let mut next = 0usize;
     let mut chunk = 1usize;
@@ -6161,7 +6281,7 @@ fn bounded_stage_one(
                 .par_iter()
                 .map(|&flat| {
                     let (first, second) = unrank_pair(flat as usize);
-                    (flat, matrix.class_pair_sum(first, second, unit_counts))
+                    (flat, sum_of(first, second))
                 })
                 .collect(),
             Some(memo) => {
@@ -6186,7 +6306,7 @@ fn bounded_stage_one(
                     .par_iter()
                     .map(|&canon| {
                         let (first, second) = unrank_pair(canon);
-                        (canon, matrix.class_pair_sum(first, second, unit_counts))
+                        (canon, sum_of(first, second))
                     })
                     .collect();
                 memo.note_computed(fresh.len() as u64);
@@ -9385,6 +9505,16 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let compare_diff = AtomicU64::new(0);
         let compare_max_ulp = AtomicU64::new(0);
         let compare_skipped = AtomicU64::new(0);
+        // THE PINNED-UNION OPTION FOR THE BOUNDED PATH (the production
+        // default's own scan). The tail locus is 96.9% constant, so its
+        // pair sums need ~2,700 corrections rather than 45,423 — 11x less
+        // EXACT work (measured: T00048 l8, 3.6e8 vs 4.2e9 unit-pairs,
+        // 17x on that locus alone). The union walk reassociates the float
+        // sum, so with IMPG_CLASS_SCAN_UNION it IS the value (the decision
+        // gate is calls.jsonl), and with IMPG_CLASS_SCAN_COMPARE both forms
+        // are computed and the delta is receipted while the exact value
+        // is kept (no answer change).
+        let bounded_union = std::env::var("IMPG_CLASS_SCAN_UNION").is_ok();
         // The per-locus bounded state, stage one -> stage two.
         let mut bounded_state: Option<BoundedScanState> = None;
         let (mut class_lls, mut best_ll, mut called): (Vec<f64>, f64, Vec<(usize, usize)>) =
@@ -9539,6 +9669,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 compare_skipped.load(Ordering::Relaxed),
             );
         }
+        if class_scan_bounded && (bounded_union || class_scan_compare) {
+            eprintln!(
+                "[score] locus {locus}: class scan bounded{}; {} of {} kept-pair sums \
+                 differ bitwise from the exact form, max {} ulp; {} constant unit-pairs skipped",
+                if bounded_union { " + pinned-union" } else { " + compare" },
+                UNION_CENSUS_DIFF.load(Ordering::Relaxed),
+                UNION_CENSUS_PAIRS.load(Ordering::Relaxed),
+                UNION_CENSUS_MAXULP.load(Ordering::Relaxed),
+                UNION_CENSUS_SKIPPED.load(Ordering::Relaxed),
+            );
+        }
         ensure(best_ll.is_finite(), "no class has anchored evidence at this locus")?;
         let mut winner_pair = called[0];
 
@@ -9673,7 +9814,16 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // count of classes strictly above the pair's class LL.
         let truth_rank_test = truth_pair_test.map(|(a, b)| {
             let flat = b * (b + 1) / 2 + a;
-            let value = class_lls[flat];
+            // (the union path: the truth pair may sit outside the
+            // certification set, so its own value is recomputed in the
+            // committed order — the rank is emitted, so it must be exact)
+            let value = if std::env::var("IMPG_CLASS_SCAN_UNION").is_ok()
+                && !std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok()
+            {
+                matrix.class_pair_sum(a, b, &unit_counts)
+            } else {
+                class_lls[flat]
+            };
             1 + class_lls.iter().filter(|&&ll| ll > value).count()
         });
         let truth_flat = truth_pair.map(|(a, b)| b * (b + 1) / 2 + a);
@@ -9798,6 +9948,44 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             for (flat, sum) in sums {
                 state.computed[flat] = Some(sum);
                 class_lls[flat] = sum;
+            }
+            // THE CERTIFICATION (the pinned-union path only): the
+            // decisive values are recomputed in the COMMITTED order, so
+            // every emitted byte that depends on a class LL is the exact
+            // form's. The set is: the winner's float-window (a pair whose
+            // reassociated value lands within it could flip the called set
+            // or the rank) plus the TOP 32 by fast value (the alternative
+            // and the tie breakers come from the top of the spectrum).
+            // Measured at the tail locus: ONE pair falls in the window.
+            if std::env::var("IMPG_CLASS_SCAN_UNION").is_ok() && !std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok() {
+                let n_units = matrix.n_units as f64;
+                let best_fast = class_lls
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let window = 2.0 * n_units * f64::EPSILON * best_fast.abs().max(1.0);
+                let mut order: Vec<usize> = (0..class_lls.len()).collect();
+                order.sort_unstable_by(|&a, &b| {
+                    class_lls[b].partial_cmp(&class_lls[a]).expect("finite class LLs")
+                });
+                let mut rechecks = 0usize;
+                for &flat in order.iter().take(32) {
+                    let (first, second) = unrank_pair(flat);
+                    class_lls[flat] = matrix.class_pair_sum(first, second, &unit_counts);
+                    rechecks += 1;
+                }
+                for &flat in order.iter() {
+                    if class_lls[flat] < best_fast - window {
+                        break;
+                    }
+                    if rechecks > 0 && order.iter().take(32).any(|&f| f == flat) {
+                        continue;
+                    }
+                    let (first, second) = unrank_pair(flat);
+                    class_lls[flat] = matrix.class_pair_sum(first, second, &unit_counts);
+                    rechecks += 1;
+                }
+                UNION_CENSUS_RECHECKS.fetch_add(rechecks as u64, Ordering::Relaxed);
             }
             // THE TIE-SET REBUILD (the T03226 locus-16 fix,
             // SS10.6.22): the emitted called set, best, and the
