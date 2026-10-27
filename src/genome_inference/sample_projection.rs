@@ -1671,8 +1671,30 @@ fn readset_hashes(path: &Path, label: &str) -> io::Result<HashSet<u64>> {
     Ok(set)
 }
 
+/// THE PACKET SOURCE SEAM. The cut's scan is a function of the PACKETS it
+/// is given, not of where they came from: `scan_shard_file` streams them
+/// out of one `.bin.gz` shard, and a position-ordered evidence store can
+/// supply the same packets for one territory's windows. Everything below
+/// is unchanged either way, which is what makes the substitution
+/// gate-able (the census and cache must come out identical).
 fn scan_shard_file(
     path: &Path,
+    node_map: &HashMap<i32, i32>,
+    territory_nodes_abs: &HashSet<u32>,
+    mode: RemapMode,
+    local_panel: Option<&SyngIndex>,
+) -> io::Result<FileCut> {
+    scan_packets(
+        shard_packet_stream(path, 1024)?,
+        node_map,
+        territory_nodes_abs,
+        mode,
+        local_panel,
+    )
+}
+
+fn scan_packets(
+    batches: impl Iterator<Item = io::Result<Vec<Vec<u8>>>>,
     node_map: &HashMap<i32, i32>,
     territory_nodes_abs: &HashSet<u32>,
     mode: RemapMode,
@@ -1711,7 +1733,7 @@ fn scan_shard_file(
         key_reads: Vec::new(),
         read_records: Vec::new(),
     };
-    for batch in shard_packet_stream(path, 1024)? {
+    for batch in batches {
         let packets = batch?;
         cut.reads_scanned += packets.len() as u64;
         let per_read: Vec<io::Result<DecodedRead>> = packets
@@ -2390,11 +2412,47 @@ fn run_cut(
     } else {
         RemapMode::Strict
     };
-    let per_file: Vec<io::Result<FileCut>> = shard_paths
-        .par_iter()
-        .map(|path| {
-            scan_shard_file(
-                path,
+    // THE EVIDENCE STORE AS THE PACKET SOURCE (env-gated, default OFF =
+    // the committed shard scan). The cut's predicate is "does any walk node
+    // belong to the territory's node set", and the store places a read in
+    // the bucket of EVERY walk node's position - so fetching the node set's
+    // buckets is exactly that predicate, structurally (no window geometry,
+    // no rewind). Measured on T00048: 18,932,413 packets / 845 MB fetched
+    // against 46 GB decompressed, cut-census.jsonl AND cut-cache.bin
+    // BYTE-IDENTICAL, 307 s against 637-670 s.
+    let evidence_packets: Option<Vec<Vec<u8>>> = match (
+        std::env::var("IMPG_EVIDENCE_STORE").ok(),
+        std::env::var("IMPG_PANEL_POSITIONS").ok(),
+    ) {
+        (Some(store_prefix), Some(positions_path)) => {
+            let started = Instant::now();
+            let positions = crate::genome_inference::evidence_store::PanelPositions::load(
+                Path::new(&positions_path),
+            )?;
+            let mut store =
+                crate::genome_inference::evidence_store::EvidenceStore::open(&store_prefix)?;
+            let (keys, unresolved) =
+                store.buckets_for_nodes(node_map.keys().copied(), &positions);
+            let packets = store.packets_for_buckets(&keys)?;
+            eprintln!(
+                "[cut] EVIDENCE STORE: {} nodes -> {} buckets (unresolved {}), \
+                 {} packets fetched, {:.1} MB read, {:.1}s",
+                node_map.len(),
+                keys.len(),
+                unresolved,
+                store.fetched_packets,
+                store.bytes_read as f64 / 1e6,
+                started.elapsed().as_secs_f64()
+            );
+            Some(packets)
+        }
+        _ => None,
+    };
+    let per_file: Vec<io::Result<FileCut>> = match evidence_packets {
+        Some(packets) => {
+            let batches = packets.chunks(1024).map(|chunk| Ok(chunk.to_vec()));
+            vec![scan_packets(
+                batches,
                 node_map_ref,
                 territory_nodes_ref,
                 mode,
@@ -2403,9 +2461,25 @@ fn run_cut(
                 } else {
                     None
                 },
-            )
-        })
-        .collect();
+            )]
+        }
+        None => shard_paths
+            .par_iter()
+            .map(|path| {
+                scan_shard_file(
+                    path,
+                    node_map_ref,
+                    territory_nodes_ref,
+                    mode,
+                    if mode == RemapMode::LocalDerive {
+                        Some(&panel)
+                    } else {
+                        None
+                    },
+                )
+            })
+            .collect(),
+    };
 
     // Merge in file order (deterministic).
     struct Merged {

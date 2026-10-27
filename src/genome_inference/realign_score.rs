@@ -6230,9 +6230,20 @@ fn bounded_stage_one(
     // table stays empty and the rounds take the direct form.
     let mut memo_values: Vec<Option<f64>> =
         memo.map(|_| vec![None; pair_count]).unwrap_or_default();
-    // THE PINNED-UNION OPTION (measured at the tail locus: 96.9% of the
-    // ll matrix is the elsewhere constant, so a pair needs ~2,700
-    // corrections, not 45,423 — 17x on that locus, 11.1x territory-wide).
+    // THE PINNED-UNION OPTION. The ll matrix is mostly the elsewhere
+    // constant (2.9% pinned at the tail locus), so in principle a pair
+    // needs ~2,700 corrections, not 45,423 — 17x on that locus, 11.1x
+    // territory-wide IN UNIT-PAIR COUNT.
+    //
+    // THE REALIZED SPEEDUP IS 2.1x, MEASURED, and the reason is a
+    // tension worth knowing: the excess-mass bound keeps exactly the
+    // pairs with HIGH excess mass (the pinned-heavy folds), so the pairs
+    // it evaluates are the ones where sparsity buys least. The bound and
+    // the union walk work against each other. The measured phase census
+    // at T00048 (24 loci): classes_seconds 4.96 -> 2.33 (2.1x), while
+    // qual_spectrum (16.0s) and qual_certificate (14.8s) are untouched —
+    // and those, not the class scan, are the model's poles at an
+    // ordinary territory.
     // These are THE exact-sum sites of the production (bounded) scan, so
     // this is where the work actually is. With IMPG_CLASS_SCAN_UNION the
     // union walk IS the value; with IMPG_CLASS_SCAN_COMPARE both forms are
