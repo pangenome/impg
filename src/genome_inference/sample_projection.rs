@@ -255,6 +255,31 @@ enum Mode {
     /// process - every routed read's records derived by the committed
     /// local MEM accessor (IMPG_CUT_LOCAL_DERIVE=1 required), each
     /// territory's outputs byte-identical to the single cut's.
+    CutBatchSeq {
+        /// The GLOBAL panel syng prefix (the projection's panel).
+        #[arg(long)]
+        global_panel: String,
+        /// The global panel AGC (the committed --sequence-files input).
+        #[arg(long)]
+        agc: PathBuf,
+        /// The projection output directory (the shard files).
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// JSONL manifest, the SAME schema as `cut-batch`: one territory
+        /// per row {name, panel, axis, bed_directory, component, sources,
+        /// out_dir}.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The cut frame (local, the map leg's own).
+        #[arg(long, value_enum, default_value_t = CutFrame::Local)]
+        frame: CutFrame,
+        /// The substrate's content origin (the committed d=1 convention).
+        #[arg(long, default_value_t = 1)]
+        record_origin: u64,
+        /// The census profile.
+        #[arg(long, value_enum, default_value_t = CensusProfile::Restricted)]
+        census_profile: CensusProfile,
+    },
     CutBatch {
         /// The GLOBAL panel syng prefix (the projection's panel).
         #[arg(long)]
@@ -3506,6 +3531,75 @@ fn batch_emit_territory(
 
 /// THE BATCH CUT: one global syng + AGC load, one shard scan, many
 /// territories' cut outputs (each byte-identical to the single cut's).
+/// THE SEQUENTIAL BATCH CUT — one panel load, the SINGLE cut's own code
+/// per territory, in order.
+///
+/// The single cut pays the ~190s global panel load PER TERRITORY, and that
+/// load is 51% of the map leg's wall (371s: load 190 + syng build 2.7 +
+/// evidence fetch 23 + scan/derive 155). This mode loads the ONE panel
+/// once and runs the committed single cut against it for every row of the
+/// manifest — so each territory's outputs are byte-identical by
+/// CONSTRUCTION (same function, same inputs), and the per-territory
+/// intermediates die inside `run_cut`, so memory stays one territory's
+/// worth beside the resident panel.
+///
+/// (`cut-batch` is the OTHER batch form: it is the local-derive fleet
+/// mode, whose per-read path re-derives against the locality panel. The
+/// map leg runs the Strict remap, so that form is not interchangeable.)
+fn run_cut_batch_seq(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    manifest: &Path,
+    frame: CutFrame,
+    record_origin: u64,
+    census_profile: CensusProfile,
+) -> io::Result<()> {
+    let mut specs: Vec<CutBatchSpec> = Vec::new();
+    for line in std::io::BufReader::new(std::fs::File::open(manifest)?).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        specs.push(
+            serde_json::from_str(&line)
+                .map_err(|e| invalid(format!("manifest row parse: {e}")))?,
+        );
+    }
+    ensure(!specs.is_empty(), "empty cut-batch-seq manifest")?;
+    let started = Instant::now();
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    eprintln!(
+        "[cut-batch-seq] panel loaded once in {:.1}s; {} territories",
+        started.elapsed().as_secs_f64(),
+        specs.len()
+    );
+    for spec in &specs {
+        let one = Instant::now();
+        run_cut(
+            Some(&global),
+            global_panel_prefix,
+            frame,
+            record_origin,
+            census_profile,
+            Some(spec.panel.as_str()),
+            &spec.axis,
+            &spec.bed_directory,
+            &spec.component,
+            Some(spec.sources.as_path()),
+            agc_path,
+            shards_dir,
+            &spec.out_dir,
+        )?;
+        eprintln!(
+            "[cut-batch-seq] {} done in {:.1}s",
+            spec.name,
+            one.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
 fn run_cut_batch(
     global_panel_prefix: &str,
     agc_path: &Path,
@@ -6212,6 +6306,23 @@ pub fn main() -> io::Result<()> {
                 &out_dir,
             )
         }
+        Mode::CutBatchSeq {
+            global_panel,
+            agc,
+            shards_dir,
+            manifest,
+            frame,
+            record_origin,
+            census_profile,
+        } => run_cut_batch_seq(
+            &global_panel,
+            &agc,
+            &shards_dir,
+            &manifest,
+            frame,
+            record_origin,
+            census_profile,
+        ),
         Mode::CutBatch {
             global_panel,
             agc,
