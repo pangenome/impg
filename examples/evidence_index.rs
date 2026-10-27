@@ -998,6 +998,11 @@ fn build_all(dir: &str, positions_path: &str, out_prefix: &str, width_bp: u64) -
         }
     }
     let write_time = t3.elapsed();
+    // THE SPILL IS TRANSIENT: 256 key-range files holding the whole raw
+    // store (168 GB at this sample). Reaping it here is not tidiness - a
+    // forgotten spill dir sits in the projection root looking like an
+    // artifact.
+    let _ = std::fs::remove_dir_all(&spill_dir);
     let evd_bytes = std::fs::metadata(&evd)?.len();
     let idx_bytes = std::fs::metadata(&idx)?.len();
     let sum_bytes = std::fs::metadata(&sum)?.len();
