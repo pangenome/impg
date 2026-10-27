@@ -2028,6 +2028,7 @@ fn parse_locus_header(header: &str) -> io::Result<(String, u64, u64)> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_cut(
+    injected_global: Option<&SyngIndex>,
     global_panel_prefix: &str,
     frame: CutFrame,
     record_origin: u64,
@@ -2060,7 +2061,18 @@ fn run_cut(
     );
     let load_started = Instant::now();
     let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
-    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    // THE INJECTED-PANEL SEAM: a caller that already holds the ONE panel
+    // (a batch of territories, one load) passes it here; the committed
+    // path loads it per invocation. The ~190s load is 51% of the map leg's
+    // wall, and it is the same panel for every territory of a chunk.
+    let loaded_global;
+    let global: &SyngIndex = match injected_global {
+        Some(panel) => panel,
+        None => {
+            loaded_global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+            &loaded_global
+        }
+    };
     // THE FRAME'S PANEL: the local frame loads the locality's own syng
     // beside the global one (the node-map conversion needs both); the
     // global frame binds to the ONE global panel alone — no locality
@@ -6185,6 +6197,7 @@ pub fn main() -> io::Result<()> {
                 );
             }
             run_cut(
+                None,
                 &global_panel,
                 frame,
                 record_origin,
