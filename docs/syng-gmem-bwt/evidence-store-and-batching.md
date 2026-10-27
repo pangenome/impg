@@ -166,3 +166,22 @@ missing). Artifact-vs-artifact for design; full runs only for the closing
 gate.
 
 NO PR PUSH (the owner pushes).
+
+## 8. THE OBJECTIVE: THE LIKELIHOOD STAYS (the owner's ruling)
+
+Asked whether the pipeline should move to likegt's objective (cosine over
+node-coverage vectors — one dot product per candidate, cheap by
+construction) the owner's answer was that **the likelihood is the stronger
+object, and node-coverage cosine is a soft feature by comparison**
+("the cosine distance of the node coverage ... is kind of a soft object").
+
+So the expensive objective stays, and the cost work is to make IT cheaper —
+which is what sections 2-4 above did (and what the interaction-dominated
+evidence in section 5 explains: the pair structure is the signal, which is
+also why no cheap screen recovered the winner).
+
+Consequence for the cost target: likegt-class wall is NOT reachable while
+keeping this objective. The reachable envelope is what the measurements say
+it is — the map leg at 154 s/territory, the model's poles (spectrum 16 s +
+certificate) to be attacked on their own terms, and the certificate's
+enumeration removed (the O(f^4)) without touching the answer.
