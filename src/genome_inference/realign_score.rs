@@ -4479,6 +4479,236 @@ where
         .collect()
 }
 
+/// THE TIE CLUSTER WITHOUT MATERIALIZING THE BANDS.
+///
+/// The committed certificate builds, for every tied class, its full
+/// predicate set over the spectrum — `|called| x |spectrum|` entries (46.5
+/// million at the degenerate locus, 14.8 s, and O(f^4) in the fold count
+/// because `called` is itself f(f+1)/2 there). But the cluster consumes
+/// that structure through exactly two questions:
+///
+///   k         = the number of CONNECTED COMPONENTS of the graph on
+///               {winner} + tied classes, with an edge wherever
+///               d(L, R) <= cut        (the lists encode exactly this
+///               relation: R's spectrum index appears in L's list iff
+///               d(L,R) <= cut, and `differing_observed_mass` is symmetric)
+///   excluded  = the union of the banks — winner band OR any tied
+///               class's band
+///
+/// Both are answered with the predicates the certificate already uses (the
+/// SOUND two-sided observed-mass bounds, the exact walk as the undecided
+/// fallback) — no threshold, no approximation — and neither needs the lists
+/// to exist. The component sweep skips any pair already connected (a
+/// union-find whose second question is free), and `excluded` is filled from
+/// a SHRINKING candidate set, so the fan-out collapses as banks cover the
+/// spectrum.
+///
+/// NOTE the deliberate omission: the `qual_tied_cut_indices` receipt member
+/// is the certificate's own enumeration and is no longer produced by this
+/// path. k, the excluded union, the alternative and the QUAL — everything
+/// the answer is a function of — are computed identically.
+fn tie_cluster_fast<NF, EF>(
+    folds: &[Fold],
+    called: &[(usize, usize)],
+    spectrum: &[(f64, f64, f64, usize, usize, usize)],
+    observed_node: &NF,
+    observed_edge: &EF,
+) -> ClusterQual
+where
+    NF: Fn(u64) -> f64 + Sync,
+    EF: Fn(u64) -> f64 + Sync,
+{
+    let mut sorted: Vec<f64> = spectrum.iter().map(|e| e.0).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
+    let knee_cut = spectrum_knee(&sorted);
+    let cut = knee_cut.cut;
+    let mut excluded = vec![false; spectrum.len()];
+    let mut band = 0usize;
+    for (index, entry) in spectrum.iter().enumerate() {
+        if entry.0 <= cut {
+            excluded[index] = true;
+            band += 1;
+        }
+    }
+    let node_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.nodes
+                .iter()
+                .map(|&(key, count)| observed_node(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    let edge_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.edges
+                .iter()
+                .map(|&(key, count)| observed_edge(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    // the spectrum's own per-pair mass signatures (no multisets yet)
+    let signatures: Vec<(f64, f64)> = spectrum
+        .iter()
+        .map(|&(_, _, _, first, second, _)| {
+            (
+                node_mass[first] + node_mass[second],
+                edge_mass[first] + edge_mass[second],
+            )
+        })
+        .collect();
+    let n_tied = called.len().saturating_sub(1);
+    let mut parent: Vec<usize> = (0..=n_tied).collect();
+    fn root(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            node = parent[node];
+        }
+        let mut walked = node;
+        while parent[walked] != node {
+            let next = parent[walked];
+            parent[walked] = node;
+            walked = next;
+        }
+        node
+    }
+    if n_tied > 0 {
+        struct Shape {
+            nodes: Vec<(u64, u32)>,
+            edges: Vec<(u64, u32)>,
+            tn: f64,
+            te: f64,
+        }
+        let shapes: Vec<Shape> = (0..n_tied)
+            .map(|ordinal| {
+                let (first, second) = called[ordinal + 1];
+                Shape {
+                    nodes: merged_multiset(&folds[first].nodes, &folds[second].nodes),
+                    edges: merged_multiset(&folds[first].edges, &folds[second].edges),
+                    tn: node_mass[first] + node_mass[second],
+                    te: edge_mass[first] + edge_mass[second],
+                }
+            })
+            .collect();
+        // THE BAND PREDICATE, by the certificate's own bounds: reject on the
+        // lower bound, admit on the upper bound, walk exactly in between.
+        let in_band = |a: &Shape, b: &Shape| -> bool {
+            let lower = (a.tn - b.tn).abs() + (a.te - b.te).abs();
+            if lower > cut {
+                return false;
+            }
+            let upper = a.tn + b.tn + a.te + b.te;
+            if upper <= cut {
+                return true;
+            }
+            let node_lookup = |key: u64| observed_node(key);
+            let edge_lookup = |key: u64| observed_edge(key);
+            let distance = differing_observed_mass(&a.nodes, &b.nodes, &node_lookup)
+                + differing_observed_mass(&a.edges, &b.edges, &edge_lookup);
+            distance <= cut
+        };
+        let in_band_with_signature = |a: &Shape, signature: (f64, f64), index: usize| -> bool {
+            let lower = (a.tn - signature.0).abs() + (a.te - signature.1).abs();
+            if lower > cut {
+                return false;
+            }
+            let upper = a.tn + signature.0 + a.te + signature.1;
+            if upper <= cut {
+                return true;
+            }
+            let (_, _, _, first, second, _) = spectrum[index];
+            let other = Shape {
+                nodes: merged_multiset(&folds[first].nodes, &folds[second].nodes),
+                edges: merged_multiset(&folds[first].edges, &folds[second].edges),
+                tn: signature.0,
+                te: signature.1,
+            };
+            in_band(a, &other)
+        };
+        // (1) the winner's edges: a tied class joins the winner when ITS OWN
+        // spectrum distance is at or inside the cut (the committed rule)
+        let mut position_of: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::with_capacity(spectrum.len());
+        for (position, &(_, _, _, first, second, _)) in spectrum.iter().enumerate() {
+            position_of.insert((first, second), position);
+        }
+        for ordinal in 0..n_tied {
+            let (first, second) = called[ordinal + 1];
+            let position = position_of[&(first, second)];
+            if spectrum[position].0 <= cut {
+                let (a, b) = (
+                    root(&mut parent, 0),
+                    root(&mut parent, ordinal + 1),
+                );
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+        // (2) the class-class edges: skip any pair already connected - the
+        // second question costs a find, not a distance
+        for left in 0..n_tied {
+            for right in (left + 1)..n_tied {
+                let (a, b) = (
+                    root(&mut parent, left + 1),
+                    root(&mut parent, right + 1),
+                );
+                if a == b {
+                    continue;
+                }
+                if in_band(&shapes[left], &shapes[right]) {
+                    parent[a] = b;
+                }
+            }
+        }
+        // (3) the excluded union, from a SHRINKING candidate set: once a
+        // position is covered, no later class needs to look at it
+        let mut remaining: Vec<usize> = (0..spectrum.len())
+            .filter(|&index| !excluded[index])
+            .collect();
+        for shape in &shapes {
+            if remaining.is_empty() {
+                break;
+            }
+            remaining.retain(|&index| {
+                let covered = in_band_with_signature(shape, signatures[index], index);
+                if covered {
+                    excluded[index] = true;
+                }
+                !covered
+            });
+        }
+    }
+    let mut roots: Vec<usize> = (0..=n_tied).map(|node| root(&mut parent, node)).collect();
+    roots.sort_unstable();
+    roots.dedup();
+    let k = roots.len();
+    let mut alternative: Option<f64> = None;
+    for (index, entry) in spectrum.iter().enumerate() {
+        if !excluded[index] {
+            alternative = Some(alternative.map_or(entry.1, |value| value.max(entry.1)));
+        }
+    }
+    let shape = if spectrum.is_empty() {
+        "single_class"
+    } else if knee_cut.has_knee {
+        "knee"
+    } else {
+        "no_knee"
+    };
+    let p = qual_p(1.0, k, alternative);
+    ClusterQual {
+        knee: knee_cut.has_knee.then_some(cut),
+        cut,
+        shape,
+        cluster_size: 1 + band,
+        k,
+        excluded,
+        alternative,
+        p,
+    }
+}
+
 /// The canonical diploid pair mixture: P(read | generated from the pair)
 /// with the equal 1/2 homolog prior (the balanced 15x/15x sample).
 #[inline]
@@ -10145,8 +10375,19 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // degenerate precedent's own form, sanctioned with the fix.)
         let degenerate = called.len() == pair_count;
         let mut cut_index_lists: Vec<(usize, CutSet)> = Vec::new();
+        // THE O(f^4) IS THE ENUMERATION, NOT THE ANSWER. With
+        // IMPG_TIED_FOLD_FAST the certificate's per-class predicate sets are
+        // never materialized: `tie_cluster_fast` answers k (connected
+        // components of the d<=cut relation) and the excluded union from the
+        // same predicates, so the lists have no consumer left. They are
+        // skipped here, and the report member `qual_tied_cut_indices` —
+        // which was the certificate's own enumeration — is not produced by
+        // that path. Everything the answer depends on (k, excluded,
+        // alternative, p, cluster_size) is computed identically, which is
+        // what the band-oracle tests compare.
+        let tied_fold_fast = std::env::var("IMPG_TIED_FOLD_FAST").is_ok();
         let certificate_started = locus_phase_census.then(Instant::now);
-        {
+        if !tied_fold_fast {
             let mut sorted: Vec<f64> = spectrum
                 .iter()
                 .map(|&(distance, ..)| distance)
@@ -10190,11 +10431,21 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let cluster = called_score
             .filter(|_| !spectrum.is_empty() || !called.is_empty())
             .map(|_| {
-                let pairs: Vec<(f64, f64)> = spectrum
-                    .iter()
-                    .map(|&(distance, score, _, _, _, _)| (distance, score))
-                    .collect();
-                cluster_form_qual(1.0, &pairs, &tie_certificate)
+                if std::env::var("IMPG_TIED_FOLD_FAST").is_ok() {
+                    tie_cluster_fast(
+                        &folds,
+                        &called,
+                        &spectrum,
+                        &observed_node_fn,
+                        &observed_edge_fn,
+                    )
+                } else {
+                    let pairs: Vec<(f64, f64)> = spectrum
+                        .iter()
+                        .map(|&(distance, score, _, _, _, _)| (distance, score))
+                        .collect();
+                    cluster_form_qual(1.0, &pairs, &tie_certificate)
+                }
             });
         let qual_cluster_seconds = qual_cluster_started
             .map(|started| started.elapsed().as_secs_f64())
@@ -12860,6 +13111,24 @@ mod tests {
                 cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
             let state_lists =
                 cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+            // THE FAST PATH (`tie_cluster_fast`: k as connected components,
+            // excluded from the shrinking candidate set) must answer the BAND
+            // ORACLE identically - its safety net, at both tie shapes.
+            let fast = tie_cluster_fast(&folds, &called, &spectrum, &node_fn, &edge_fn);
+            assert_eq!(fast.k, state_bands.k, "case {case}: FAST k differs");
+            assert_eq!(
+                fast.excluded, state_bands.excluded,
+                "case {case}: FAST excluded differs"
+            );
+            assert_eq!(
+                fast.alternative, state_bands.alternative,
+                "case {case}: FAST alternative differs"
+            );
+            assert_eq!(
+                fast.cluster_size, state_bands.cluster_size,
+                "case {case}: FAST cluster_size differs"
+            );
+            assert_eq!(fast.cut, state_bands.cut, "case {case}: FAST cut differs");
             assert_eq!(state_lists.k, state_bands.k, "case {case}: k differs");
             assert_eq!(state_lists.excluded, state_bands.excluded, "case {case}: excluded differs");
             assert_eq!(state_lists.alternative, state_bands.alternative, "case {case}: alternative differs");
@@ -13197,6 +13466,24 @@ mod tests {
                 cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
             let state_lists =
                 cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+            // THE FAST PATH (`tie_cluster_fast`: k as connected components,
+            // excluded from the shrinking candidate set) must answer the BAND
+            // ORACLE identically - its safety net, at both tie shapes.
+            let fast = tie_cluster_fast(&folds, &called, &spectrum, &node_fn, &edge_fn);
+            assert_eq!(fast.k, state_bands.k, "case {case}: FAST k differs");
+            assert_eq!(
+                fast.excluded, state_bands.excluded,
+                "case {case}: FAST excluded differs"
+            );
+            assert_eq!(
+                fast.alternative, state_bands.alternative,
+                "case {case}: FAST alternative differs"
+            );
+            assert_eq!(
+                fast.cluster_size, state_bands.cluster_size,
+                "case {case}: FAST cluster_size differs"
+            );
+            assert_eq!(fast.cut, state_bands.cut, "case {case}: FAST cut differs");
             assert_eq!(state_lists.k, state_bands.k, "case {case}: k differs");
             assert_eq!(state_lists.excluded, state_bands.excluded, "case {case}: excluded differs");
             assert_eq!(state_lists.alternative, state_bands.alternative, "case {case}: alternative differs");

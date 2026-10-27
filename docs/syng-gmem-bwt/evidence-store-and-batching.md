@@ -185,3 +185,44 @@ keeping this objective. The reachable envelope is what the measurements say
 it is — the map leg at 154 s/territory, the model's poles (spectrum 16 s +
 certificate) to be attacked on their own terms, and the certificate's
 enumeration removed (the O(f^4)) without touching the answer.
+
+## 9. THE O(f^4) ATTEMPT: RIGHT ANSWER, WRONG COST (a recorded negative)
+
+The certificate's enumeration (`|called| x |spectrum|`, 46.5M entries,
+14.8 s at the degenerate locus) exists to feed two questions: `k` (the
+cluster count) and the `excluded` union. `k` is exactly the number of
+connected components of the graph on {winner} + tied classes with an edge
+where `d(L,R) <= cut` (the lists encode that relation, and
+`differing_observed_mass` is symmetric), and `excluded` is the union of the
+bands. Both are answerable from the same bounds without ever building the
+lists — no threshold, no approximation.
+
+IMPLEMENTED (`tie_cluster_fast`, `IMPG_TIED_FOLD_FAST`, default OFF) and
+GATED:
+
+  **calls.jsonl and calls.jsonl.sequences.jsonl BYTE-IDENTICAL** to the
+  committed path at T00048 (24 loci, the degenerate locus included), and
+  both band-oracle tests now compare the fast path against the naive band
+  form at both tie shapes.
+
+**AND IT IS 20x SLOWER — the attempt is a recorded negative, not a fix:**
+
+| phase | exact | fast |
+|---|---:|---:|
+| qual_spectrum (contains the enumeration) | 16.00 s | 1.25 s |
+| qual_certificate | 14.79 s | **0.00 s** |
+| qual_cluster | 0.95 s | **299.32 s** |
+
+The enumeration already shares its per-class work: one multiset merge per
+tied class, reused across all spectrum positions, with the bounds deciding
+almost every position. A direct pairwise component sweep gives that sharing
+up — it pays a per-pair distance decision instead of a per-(class,
+position) one, and the surviving undecided-band walks dominate. So the
+enumeration is the cheaper way to answer these questions **at this shape**,
+and the O(f^4) stays open.
+
+The next attempt should profile the cluster step first (the phase census
+already brackets it) and keep the per-class sharing: a per-class *sorted
+band scan* that stops at the cut rather than materializing the set, or a
+bound-refined partition of the spectrum that lets one scan serve many
+classes.
