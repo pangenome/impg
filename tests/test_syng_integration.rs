@@ -485,7 +485,7 @@ fn test_syng_render_bundle_preserves_source_namespace() {
     );
     let infer_bundle = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "--render-bundle",
             bundle.to_str().unwrap(),
             "--pack",
@@ -2597,7 +2597,7 @@ fn test_syng_infer_pack_partitions_and_discovery() {
     let target_range = format!("sampleA#0#chr1:0-{}", hap_a.len());
     let infer_range = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -2656,7 +2656,7 @@ fn test_syng_infer_pack_partitions_and_discovery() {
     let infer_bed_zst = dir.join("infer.bed.tsv.zst");
     let infer_bed = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -2712,7 +2712,7 @@ fn test_syng_infer_pack_partitions_and_discovery() {
     }
     let infer_partitions = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -2780,7 +2780,7 @@ fn test_syng_infer_pack_partitions_and_discovery() {
 
     let no_d = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -2800,7 +2800,7 @@ fn test_syng_infer_pack_partitions_and_discovery() {
 
     let infer_discovery = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -2956,7 +2956,7 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
     let mosaic_path = dir.join("mosaic.tsv");
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3014,7 +3014,7 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
     let zero_weight_mosaic_path = dir.join("mosaic.zero_read_weight.tsv");
     let infer_zero_weight = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3079,7 +3079,7 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
     let target_range = "sampleA#0#chr1:0-1900";
     let infer_blocks = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3292,7 +3292,7 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
     let target_range = format!("sampleSingle#0#chr1:0-{}", hap_single.len());
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3335,7 +3335,7 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
     let mosaic_path = dir.join("cnv_phase_blocks.tsv");
     let infer_blocks = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3510,7 +3510,7 @@ fn test_syng_infer_triplicated_syncmer_path_beats_lower_copy_decoys() {
     let target_range = format!("sampleSingle#0#chr1:0-{}", hap_single.len());
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3675,7 +3675,7 @@ fn test_syng_infer_nested_sv_noisy_low_coverage_phase_blocks() {
     let mosaic_path = dir.join("nested_sv_mosaic.tsv");
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -3874,7 +3874,7 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
     let mosaic_path = dir.join("ordered_repeat_mosaic.tsv");
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",
@@ -4059,7 +4059,7 @@ fn test_syng_infer_paralogous_swapped_copies_avoid_decoy_collapse() {
     let mosaic_path = dir.join("paralogy_mosaic.tsv");
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             idx_prefix.to_str().unwrap(),
             "--proj",

@@ -707,7 +707,7 @@ fn test_projection_bundle_gaf_read_walk_evidence_rewards_recombinant_stitching()
     let mosaic_path = dir.join("mosaic.tsv");
     let infer = Command::new(&bin)
         .args([
-            "infer",
+            "genotype-infer",
             "-a",
             prefix.to_str().unwrap(),
             "--proj",
