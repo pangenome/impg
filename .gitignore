@@ -21,3 +21,7 @@ perf.data
 perf.data.old
 # release tarballs from scripts/make-release-tarball.sh
 /impg-v*.tar.gz
+
+# the frontier build dir and its logs (the campaign's alternate CARGO_TARGET_DIR)
+/target-frontier
+/build-examples-frontier.log
