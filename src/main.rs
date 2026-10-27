@@ -5245,13 +5245,17 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Experimental MEM-BWT bootstrap: provisional source-occurrence compatibility, not genotypes/mosaics
+    /// Genotype from a syncmer panel: the three-step surface (partition -> map -> call),
+    /// the product call, the panel-side precomputes and the diplotype emission path.
+    #[command(name = "infer", alias = "genome-infer")]
     GenomeInfer {
         #[command(subcommand)]
         command: impg::commands::genome_infer::Command,
     },
 
     /// Infer allele calls across ranges or partitions from graph-derived evidence
+    /// (the graph-evidence path; the syncmer-panel pipeline is `impg infer`)
+    #[command(name = "genotype-infer")]
     Infer {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(
@@ -15653,7 +15657,10 @@ mod tests {
 
     #[test]
     fn test_infer_cli_merge_distance_accepts_metric_suffix() {
-        let args = Args::try_parse_from(["impg", "infer", "-a", "idx", "-d", "1m"]).unwrap();
+        // (The graph-evidence path is `genotype-infer` since `infer` became the
+        // syncmer-panel pipeline's umbrella; the flag surface is unchanged.)
+        let args =
+            Args::try_parse_from(["impg", "genotype-infer", "-a", "idx", "-d", "1m"]).unwrap();
         match args {
             Args::Infer { merge_distance, .. } => {
                 assert_eq!(merge_distance, Some(1_000_000));

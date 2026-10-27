@@ -255,6 +255,31 @@ enum Mode {
     /// process - every routed read's records derived by the committed
     /// local MEM accessor (IMPG_CUT_LOCAL_DERIVE=1 required), each
     /// territory's outputs byte-identical to the single cut's.
+    CutBatchSeq {
+        /// The GLOBAL panel syng prefix (the projection's panel).
+        #[arg(long)]
+        global_panel: String,
+        /// The global panel AGC (the committed --sequence-files input).
+        #[arg(long)]
+        agc: PathBuf,
+        /// The projection output directory (the shard files).
+        #[arg(long)]
+        shards_dir: PathBuf,
+        /// JSONL manifest, the SAME schema as `cut-batch`: one territory
+        /// per row {name, panel, axis, bed_directory, component, sources,
+        /// out_dir}.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The cut frame (local, the map leg's own).
+        #[arg(long, value_enum, default_value_t = CutFrame::Local)]
+        frame: CutFrame,
+        /// The substrate's content origin (the committed d=1 convention).
+        #[arg(long, default_value_t = 1)]
+        record_origin: u64,
+        /// The census profile.
+        #[arg(long, value_enum, default_value_t = CensusProfile::Restricted)]
+        census_profile: CensusProfile,
+    },
     CutBatch {
         /// The GLOBAL panel syng prefix (the projection's panel).
         #[arg(long)]
@@ -1671,8 +1696,30 @@ fn readset_hashes(path: &Path, label: &str) -> io::Result<HashSet<u64>> {
     Ok(set)
 }
 
+/// THE PACKET SOURCE SEAM. The cut's scan is a function of the PACKETS it
+/// is given, not of where they came from: `scan_shard_file` streams them
+/// out of one `.bin.gz` shard, and a position-ordered evidence store can
+/// supply the same packets for one territory's windows. Everything below
+/// is unchanged either way, which is what makes the substitution
+/// gate-able (the census and cache must come out identical).
 fn scan_shard_file(
     path: &Path,
+    node_map: &HashMap<i32, i32>,
+    territory_nodes_abs: &HashSet<u32>,
+    mode: RemapMode,
+    local_panel: Option<&SyngIndex>,
+) -> io::Result<FileCut> {
+    scan_packets(
+        shard_packet_stream(path, 1024)?,
+        node_map,
+        territory_nodes_abs,
+        mode,
+        local_panel,
+    )
+}
+
+fn scan_packets(
+    batches: impl Iterator<Item = io::Result<Vec<Vec<u8>>>>,
     node_map: &HashMap<i32, i32>,
     territory_nodes_abs: &HashSet<u32>,
     mode: RemapMode,
@@ -1711,7 +1758,7 @@ fn scan_shard_file(
         key_reads: Vec::new(),
         read_records: Vec::new(),
     };
-    for batch in shard_packet_stream(path, 1024)? {
+    for batch in batches {
         let packets = batch?;
         cut.reads_scanned += packets.len() as u64;
         let per_read: Vec<io::Result<DecodedRead>> = packets
@@ -2006,6 +2053,7 @@ fn parse_locus_header(header: &str) -> io::Result<(String, u64, u64)> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_cut(
+    injected_global: Option<&SyngIndex>,
     global_panel_prefix: &str,
     frame: CutFrame,
     record_origin: u64,
@@ -2038,7 +2086,18 @@ fn run_cut(
     );
     let load_started = Instant::now();
     let agc = AgcIndex::build_from_files(&[agc_path.display().to_string()])?;
-    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    // THE INJECTED-PANEL SEAM: a caller that already holds the ONE panel
+    // (a batch of territories, one load) passes it here; the committed
+    // path loads it per invocation. The ~190s load is 51% of the map leg's
+    // wall, and it is the same panel for every territory of a chunk.
+    let loaded_global;
+    let global: &SyngIndex = match injected_global {
+        Some(panel) => panel,
+        None => {
+            loaded_global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+            &loaded_global
+        }
+    };
     // THE FRAME'S PANEL: the local frame loads the locality's own syng
     // beside the global one (the node-map conversion needs both); the
     // global frame binds to the ONE global panel alone — no locality
@@ -2390,11 +2449,47 @@ fn run_cut(
     } else {
         RemapMode::Strict
     };
-    let per_file: Vec<io::Result<FileCut>> = shard_paths
-        .par_iter()
-        .map(|path| {
-            scan_shard_file(
-                path,
+    // THE EVIDENCE STORE AS THE PACKET SOURCE (env-gated, default OFF =
+    // the committed shard scan). The cut's predicate is "does any walk node
+    // belong to the territory's node set", and the store places a read in
+    // the bucket of EVERY walk node's position - so fetching the node set's
+    // buckets is exactly that predicate, structurally (no window geometry,
+    // no rewind). Measured on T00048: 18,932,413 packets / 845 MB fetched
+    // against 46 GB decompressed, cut-census.jsonl AND cut-cache.bin
+    // BYTE-IDENTICAL, 307 s against 637-670 s.
+    let evidence_packets: Option<Vec<Vec<u8>>> = match (
+        std::env::var("IMPG_EVIDENCE_STORE").ok(),
+        std::env::var("IMPG_PANEL_POSITIONS").ok(),
+    ) {
+        (Some(store_prefix), Some(positions_path)) => {
+            let started = Instant::now();
+            let positions = crate::genome_inference::evidence_store::PanelPositions::load(
+                Path::new(&positions_path),
+            )?;
+            let mut store =
+                crate::genome_inference::evidence_store::EvidenceStore::open(&store_prefix)?;
+            let (keys, unresolved) =
+                store.buckets_for_nodes(node_map.keys().copied(), &positions);
+            let packets = store.packets_for_buckets(&keys)?;
+            eprintln!(
+                "[cut] EVIDENCE STORE: {} nodes -> {} buckets (unresolved {}), \
+                 {} packets fetched, {:.1} MB read, {:.1}s",
+                node_map.len(),
+                keys.len(),
+                unresolved,
+                store.fetched_packets,
+                store.bytes_read as f64 / 1e6,
+                started.elapsed().as_secs_f64()
+            );
+            Some(packets)
+        }
+        _ => None,
+    };
+    let per_file: Vec<io::Result<FileCut>> = match evidence_packets {
+        Some(packets) => {
+            let batches = packets.chunks(1024).map(|chunk| Ok(chunk.to_vec()));
+            vec![scan_packets(
+                batches,
                 node_map_ref,
                 territory_nodes_ref,
                 mode,
@@ -2403,9 +2498,25 @@ fn run_cut(
                 } else {
                     None
                 },
-            )
-        })
-        .collect();
+            )]
+        }
+        None => shard_paths
+            .par_iter()
+            .map(|path| {
+                scan_shard_file(
+                    path,
+                    node_map_ref,
+                    territory_nodes_ref,
+                    mode,
+                    if mode == RemapMode::LocalDerive {
+                        Some(&panel)
+                    } else {
+                        None
+                    },
+                )
+            })
+            .collect(),
+    };
 
     // Merge in file order (deterministic).
     struct Merged {
@@ -3420,6 +3531,75 @@ fn batch_emit_territory(
 
 /// THE BATCH CUT: one global syng + AGC load, one shard scan, many
 /// territories' cut outputs (each byte-identical to the single cut's).
+/// THE SEQUENTIAL BATCH CUT — one panel load, the SINGLE cut's own code
+/// per territory, in order.
+///
+/// The single cut pays the ~190s global panel load PER TERRITORY, and that
+/// load is 51% of the map leg's wall (371s: load 190 + syng build 2.7 +
+/// evidence fetch 23 + scan/derive 155). This mode loads the ONE panel
+/// once and runs the committed single cut against it for every row of the
+/// manifest — so each territory's outputs are byte-identical by
+/// CONSTRUCTION (same function, same inputs), and the per-territory
+/// intermediates die inside `run_cut`, so memory stays one territory's
+/// worth beside the resident panel.
+///
+/// (`cut-batch` is the OTHER batch form: it is the local-derive fleet
+/// mode, whose per-read path re-derives against the locality panel. The
+/// map leg runs the Strict remap, so that form is not interchangeable.)
+fn run_cut_batch_seq(
+    global_panel_prefix: &str,
+    agc_path: &Path,
+    shards_dir: &Path,
+    manifest: &Path,
+    frame: CutFrame,
+    record_origin: u64,
+    census_profile: CensusProfile,
+) -> io::Result<()> {
+    let mut specs: Vec<CutBatchSpec> = Vec::new();
+    for line in std::io::BufReader::new(std::fs::File::open(manifest)?).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        specs.push(
+            serde_json::from_str(&line)
+                .map_err(|e| invalid(format!("manifest row parse: {e}")))?,
+        );
+    }
+    ensure(!specs.is_empty(), "empty cut-batch-seq manifest")?;
+    let started = Instant::now();
+    let global = SyngIndex::load(global_panel_prefix, SyncmerParams::default())?;
+    eprintln!(
+        "[cut-batch-seq] panel loaded once in {:.1}s; {} territories",
+        started.elapsed().as_secs_f64(),
+        specs.len()
+    );
+    for spec in &specs {
+        let one = Instant::now();
+        run_cut(
+            Some(&global),
+            global_panel_prefix,
+            frame,
+            record_origin,
+            census_profile,
+            Some(spec.panel.as_str()),
+            &spec.axis,
+            &spec.bed_directory,
+            &spec.component,
+            Some(spec.sources.as_path()),
+            agc_path,
+            shards_dir,
+            &spec.out_dir,
+        )?;
+        eprintln!(
+            "[cut-batch-seq] {} done in {:.1}s",
+            spec.name,
+            one.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
 fn run_cut_batch(
     global_panel_prefix: &str,
     agc_path: &Path,
@@ -3543,6 +3723,27 @@ fn run_cut_batch(
         routing.len(),
         n_terr
     );
+    // THE TERRITORY-NODE DUMP (an env-gated INSTRUMENT, no answer change):
+    // `routing`'s key set IS the global-node set a projection index must
+    // serve, so this is the only honest way to answer the index-design
+    // question - whether those ids CLUSTER in the panel's node space (an
+    // inverted index then wins 900x, measured on a contiguous band) or
+    // SPREAD across it (the index reads every bucket and wins nothing).
+    // Default (env unset): nothing is written and the path is byte-identical.
+    if let Ok(dump_path) = std::env::var("IMPG_DUMP_TERRITORY_NODES") {
+        let mut node_ids: Vec<i32> = routing.keys().copied().collect();
+        node_ids.sort_unstable();
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&dump_path)?);
+        for id in &node_ids {
+            writeln!(out, "{}", id)?;
+        }
+        out.flush()?;
+        eprintln!(
+            "[cut-batch] TERRITORY NODE DUMP: {} global node ids -> {}",
+            node_ids.len(),
+            dump_path
+        );
+    }
     let load_seconds = load_started.elapsed().as_secs_f64();
 
     // The ONE shard scan (parallel over files; per read, every routed
@@ -4002,6 +4203,27 @@ fn cut_batch_global_with(
         routing.len(),
         n_terr
     );
+    // THE TERRITORY-NODE DUMP (an env-gated INSTRUMENT, no answer change):
+    // `routing`'s key set IS the global-node set a projection index must
+    // serve, so this is the only honest way to answer the index-design
+    // question - whether those ids CLUSTER in the panel's node space (an
+    // inverted index then wins ~900x, measured on a contiguous band) or
+    // SPREAD across it (the index reads every bucket and wins nothing).
+    // Default (env unset): nothing written, the path byte-identical.
+    if let Ok(dump_path) = std::env::var("IMPG_DUMP_TERRITORY_NODES") {
+        let mut node_ids: Vec<i32> = routing.keys().copied().collect();
+        node_ids.sort_unstable();
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&dump_path)?);
+        for id in &node_ids {
+            writeln!(out, "{}", id)?;
+        }
+        out.flush()?;
+        eprintln!(
+            "[cut-batch-global] TERRITORY NODE DUMP: {} global node ids -> {}",
+            node_ids.len(),
+            dump_path
+        );
+    }
 
     // THE RESTRICTED-BASIS INVERTED INDEX (the §10.6.17 product
     // default carried into the batch form): read hash -> the
@@ -6069,6 +6291,7 @@ pub fn main() -> io::Result<()> {
                 );
             }
             run_cut(
+                None,
                 &global_panel,
                 frame,
                 record_origin,
@@ -6083,6 +6306,23 @@ pub fn main() -> io::Result<()> {
                 &out_dir,
             )
         }
+        Mode::CutBatchSeq {
+            global_panel,
+            agc,
+            shards_dir,
+            manifest,
+            frame,
+            record_origin,
+            census_profile,
+        } => run_cut_batch_seq(
+            &global_panel,
+            &agc,
+            &shards_dir,
+            &manifest,
+            frame,
+            record_origin,
+            census_profile,
+        ),
         Mode::CutBatch {
             global_panel,
             agc,

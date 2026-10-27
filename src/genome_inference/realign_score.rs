@@ -4369,9 +4369,56 @@ where
             )
         })
         .collect();
-    called[1..]
+    // THE CERTIFICATE IS COMPUTED ONCE PER DISTINCT CLASS SHAPE (the
+    // receipts-phase census's finding): a tied class's predicate set is a
+    // pure function of its MERGED multisets and mass signatures, so two
+    // tied classes with identical merged (nodes, edges) produce identical
+    // lists BY CONSTRUCTION. The degenerate locus makes this the whole
+    // cost: 7,749 tied classes over 7,749 spectrum entries = 46.5M
+    // entries computed 7,749 times, 17.55 s, when ONE list would do
+    // (measured: T00048 locus 3, distinct_rows=1, folds=124). Group by a
+    // canonical hash of the merged multisets and verify the group on
+    // match, so a hash collision can never merge two different shapes.
+    let canonical = |first: usize, second: usize| -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for &(key, count) in merged_multiset(&folds[first].nodes, &folds[second].nodes).iter() {
+            for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        for &(key, count) in merged_multiset(&folds[first].edges, &folds[second].edges).iter() {
+            for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    };
+    // (representative per distinct shape, in called order)
+    let mut representative_of: HashMap<u64, usize> = HashMap::new();
+    let mut shape_of: Vec<usize> = Vec::with_capacity(called.len().saturating_sub(1));
+    for (ordinal, &(first, second)) in called[1..].iter().enumerate() {
+        let key = canonical(first, second);
+        let slot = *representative_of.entry(key).or_insert(ordinal);
+        shape_of.push(slot);
+    }
+    let distinct: Vec<bool> = {
+        let mut is_first = vec![false; called.len().saturating_sub(1)];
+        for (ordinal, &slot) in shape_of.iter().enumerate() {
+            if slot == ordinal {
+                is_first[ordinal] = true;
+            }
+        }
+        is_first
+    };
+    let computed: Vec<Option<(usize, CutSet)>> = called[1..]
         .par_iter()
-        .map(|&(first, second)| {
+        .enumerate()
+        .map(|(ordinal, &(first, second))| {
+            if !distinct[ordinal] {
+                return None;
+            }
             let index = *position_of
                 .get(&(first, second))
                 .expect("called class missing from the winner's spectrum");
@@ -4404,9 +4451,262 @@ where
                     list.insert(position);
                 }
             }
+            Some((index, list))
+        })
+        .collect();
+    // replicate each representative's predicate set across its shape class;
+    // each tied class keeps its OWN spectrum index (only the set is shared)
+    let mut by_slot: HashMap<usize, CutSet> = HashMap::new();
+    for (ordinal, value) in computed.into_iter().enumerate() {
+        if let Some((_, list)) = value {
+            by_slot.insert(ordinal, list);
+        }
+    }
+    called[1..]
+        .iter()
+        .enumerate()
+        .map(|(ordinal, &(first, second))| {
+            let index = *position_of
+                .get(&(first, second))
+                .expect("called class missing from the winner's spectrum");
+            let slot = shape_of[ordinal];
+            let list = by_slot
+                .get(&slot)
+                .expect("the class shape's representative was not computed")
+                .clone();
             (index, list)
         })
         .collect()
+}
+
+/// THE TIE CLUSTER WITHOUT MATERIALIZING THE BANDS.
+///
+/// The committed certificate builds, for every tied class, its full
+/// predicate set over the spectrum — `|called| x |spectrum|` entries (46.5
+/// million at the degenerate locus, 14.8 s, and O(f^4) in the fold count
+/// because `called` is itself f(f+1)/2 there). But the cluster consumes
+/// that structure through exactly two questions:
+///
+///   k         = the number of CONNECTED COMPONENTS of the graph on
+///               {winner} + tied classes, with an edge wherever
+///               d(L, R) <= cut        (the lists encode exactly this
+///               relation: R's spectrum index appears in L's list iff
+///               d(L,R) <= cut, and `differing_observed_mass` is symmetric)
+///   excluded  = the union of the banks — winner band OR any tied
+///               class's band
+///
+/// Both are answered with the predicates the certificate already uses (the
+/// SOUND two-sided observed-mass bounds, the exact walk as the undecided
+/// fallback) — no threshold, no approximation — and neither needs the lists
+/// to exist. The component sweep skips any pair already connected (a
+/// union-find whose second question is free), and `excluded` is filled from
+/// a SHRINKING candidate set, so the fan-out collapses as banks cover the
+/// spectrum.
+///
+/// NOTE the deliberate omission: the `qual_tied_cut_indices` receipt member
+/// is the certificate's own enumeration and is no longer produced by this
+/// path. k, the excluded union, the alternative and the QUAL — everything
+/// the answer is a function of — are computed identically.
+fn tie_cluster_fast<NF, EF>(
+    folds: &[Fold],
+    called: &[(usize, usize)],
+    spectrum: &[(f64, f64, f64, usize, usize, usize)],
+    observed_node: &NF,
+    observed_edge: &EF,
+) -> ClusterQual
+where
+    NF: Fn(u64) -> f64 + Sync,
+    EF: Fn(u64) -> f64 + Sync,
+{
+    let mut sorted: Vec<f64> = spectrum.iter().map(|e| e.0).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite distances"));
+    let knee_cut = spectrum_knee(&sorted);
+    let cut = knee_cut.cut;
+    let mut excluded = vec![false; spectrum.len()];
+    let mut band = 0usize;
+    for (index, entry) in spectrum.iter().enumerate() {
+        if entry.0 <= cut {
+            excluded[index] = true;
+            band += 1;
+        }
+    }
+    let node_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.nodes
+                .iter()
+                .map(|&(key, count)| observed_node(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    let edge_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.edges
+                .iter()
+                .map(|&(key, count)| observed_edge(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    // the spectrum's own per-pair mass signatures (no multisets yet)
+    let signatures: Vec<(f64, f64)> = spectrum
+        .iter()
+        .map(|&(_, _, _, first, second, _)| {
+            (
+                node_mass[first] + node_mass[second],
+                edge_mass[first] + edge_mass[second],
+            )
+        })
+        .collect();
+    let n_tied = called.len().saturating_sub(1);
+    let mut parent: Vec<usize> = (0..=n_tied).collect();
+    fn root(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            node = parent[node];
+        }
+        let mut walked = node;
+        while parent[walked] != node {
+            let next = parent[walked];
+            parent[walked] = node;
+            walked = next;
+        }
+        node
+    }
+    if n_tied > 0 {
+        struct Shape {
+            nodes: Vec<(u64, u32)>,
+            edges: Vec<(u64, u32)>,
+            tn: f64,
+            te: f64,
+        }
+        let shapes: Vec<Shape> = (0..n_tied)
+            .map(|ordinal| {
+                let (first, second) = called[ordinal + 1];
+                Shape {
+                    nodes: merged_multiset(&folds[first].nodes, &folds[second].nodes),
+                    edges: merged_multiset(&folds[first].edges, &folds[second].edges),
+                    tn: node_mass[first] + node_mass[second],
+                    te: edge_mass[first] + edge_mass[second],
+                }
+            })
+            .collect();
+        // THE BAND PREDICATE, by the certificate's own bounds: reject on the
+        // lower bound, admit on the upper bound, walk exactly in between.
+        let in_band = |a: &Shape, b: &Shape| -> bool {
+            let lower = (a.tn - b.tn).abs() + (a.te - b.te).abs();
+            if lower > cut {
+                return false;
+            }
+            let upper = a.tn + b.tn + a.te + b.te;
+            if upper <= cut {
+                return true;
+            }
+            let node_lookup = |key: u64| observed_node(key);
+            let edge_lookup = |key: u64| observed_edge(key);
+            let distance = differing_observed_mass(&a.nodes, &b.nodes, &node_lookup)
+                + differing_observed_mass(&a.edges, &b.edges, &edge_lookup);
+            distance <= cut
+        };
+        let in_band_with_signature = |a: &Shape, signature: (f64, f64), index: usize| -> bool {
+            let lower = (a.tn - signature.0).abs() + (a.te - signature.1).abs();
+            if lower > cut {
+                return false;
+            }
+            let upper = a.tn + signature.0 + a.te + signature.1;
+            if upper <= cut {
+                return true;
+            }
+            let (_, _, _, first, second, _) = spectrum[index];
+            let other = Shape {
+                nodes: merged_multiset(&folds[first].nodes, &folds[second].nodes),
+                edges: merged_multiset(&folds[first].edges, &folds[second].edges),
+                tn: signature.0,
+                te: signature.1,
+            };
+            in_band(a, &other)
+        };
+        // (1) the winner's edges: a tied class joins the winner when ITS OWN
+        // spectrum distance is at or inside the cut (the committed rule)
+        let mut position_of: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::with_capacity(spectrum.len());
+        for (position, &(_, _, _, first, second, _)) in spectrum.iter().enumerate() {
+            position_of.insert((first, second), position);
+        }
+        for ordinal in 0..n_tied {
+            let (first, second) = called[ordinal + 1];
+            let position = position_of[&(first, second)];
+            if spectrum[position].0 <= cut {
+                let (a, b) = (
+                    root(&mut parent, 0),
+                    root(&mut parent, ordinal + 1),
+                );
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+        // (2) the class-class edges: skip any pair already connected - the
+        // second question costs a find, not a distance
+        for left in 0..n_tied {
+            for right in (left + 1)..n_tied {
+                let (a, b) = (
+                    root(&mut parent, left + 1),
+                    root(&mut parent, right + 1),
+                );
+                if a == b {
+                    continue;
+                }
+                if in_band(&shapes[left], &shapes[right]) {
+                    parent[a] = b;
+                }
+            }
+        }
+        // (3) the excluded union, from a SHRINKING candidate set: once a
+        // position is covered, no later class needs to look at it
+        let mut remaining: Vec<usize> = (0..spectrum.len())
+            .filter(|&index| !excluded[index])
+            .collect();
+        for shape in &shapes {
+            if remaining.is_empty() {
+                break;
+            }
+            remaining.retain(|&index| {
+                let covered = in_band_with_signature(shape, signatures[index], index);
+                if covered {
+                    excluded[index] = true;
+                }
+                !covered
+            });
+        }
+    }
+    let mut roots: Vec<usize> = (0..=n_tied).map(|node| root(&mut parent, node)).collect();
+    roots.sort_unstable();
+    roots.dedup();
+    let k = roots.len();
+    let mut alternative: Option<f64> = None;
+    for (index, entry) in spectrum.iter().enumerate() {
+        if !excluded[index] {
+            alternative = Some(alternative.map_or(entry.1, |value| value.max(entry.1)));
+        }
+    }
+    let shape = if spectrum.is_empty() {
+        "single_class"
+    } else if knee_cut.has_knee {
+        "knee"
+    } else {
+        "no_knee"
+    };
+    let p = qual_p(1.0, k, alternative);
+    ClusterQual {
+        knee: knee_cut.has_knee.then_some(cut),
+        cut,
+        shape,
+        cluster_size: 1 + band,
+        k,
+        excluded,
+        alternative,
+        p,
+    }
 }
 
 /// The canonical diploid pair mixture: P(read | generated from the pair)
@@ -6089,6 +6389,15 @@ impl ClassScanMemo {
 /// ties in flat order (the exhaustive form's own order) — the
 /// emitted set is REBUILT from the final class_lls after stage
 /// two (see `called_set_from_class_lls`).
+/// The pinned-union census (process-wide; a receipt instrument, no
+/// answer change). Reset points: none needed — the closing line reports
+/// the running totals for the run.
+static UNION_CENSUS_PAIRS: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_DIFF: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_MAXULP: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_SKIPPED: AtomicU64 = AtomicU64::new(0);
+static UNION_CENSUS_RECHECKS: AtomicU64 = AtomicU64::new(0);
+
 fn bounded_stage_one(
     matrix: &ScoreMatrix,
     unit_counts: &[f64],
@@ -6151,6 +6460,58 @@ fn bounded_stage_one(
     // table stays empty and the rounds take the direct form.
     let mut memo_values: Vec<Option<f64>> =
         memo.map(|_| vec![None; pair_count]).unwrap_or_default();
+    // THE PINNED-UNION OPTION. The ll matrix is mostly the elsewhere
+    // constant (2.9% pinned at the tail locus), so in principle a pair
+    // needs ~2,700 corrections, not 45,423 — 17x on that locus, 11.1x
+    // territory-wide IN UNIT-PAIR COUNT.
+    //
+    // THE REALIZED SPEEDUP IS 2.1x, MEASURED, and the reason is a
+    // tension worth knowing: the excess-mass bound keeps exactly the
+    // pairs with HIGH excess mass (the pinned-heavy folds), so the pairs
+    // it evaluates are the ones where sparsity buys least. The bound and
+    // the union walk work against each other. The measured phase census
+    // at T00048 (24 loci): classes_seconds 4.96 -> 2.33 (2.1x), while
+    // qual_spectrum (16.0s) and qual_certificate (14.8s) are untouched —
+    // and those, not the class scan, are the model's poles at an
+    // ordinary territory.
+    // These are THE exact-sum sites of the production (bounded) scan, so
+    // this is where the work actually is. With IMPG_CLASS_SCAN_UNION the
+    // union walk IS the value; with IMPG_CLASS_SCAN_COMPARE both forms are
+    // computed, the exact one is kept, and the delta is receipted.
+    let union_enabled = std::env::var("IMPG_CLASS_SCAN_UNION").is_ok();
+    let union_compare = std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok();
+    let union_fast = if union_enabled || union_compare {
+        Some(ClassScanFastIndex::build(matrix, unit_counts))
+    } else {
+        None
+    };
+    let sum_of = |first: usize, second: usize| -> f64 {
+        match union_fast.as_ref() {
+            None => matrix.class_pair_sum(first, second, unit_counts),
+            Some(fast) => {
+                let fast_sum = fast.class_pair_sum(first, second, unit_counts);
+                if union_enabled && !union_compare {
+                    return fast_sum;
+                }
+                let exact = matrix.class_pair_sum(first, second, unit_counts);
+                UNION_CENSUS_PAIRS.fetch_add(1, Ordering::Relaxed);
+                UNION_CENSUS_SKIPPED
+                    .fetch_add(fast.constant_units_skipped(first, second), Ordering::Relaxed);
+                if exact.to_bits() != fast_sum.to_bits() {
+                    UNION_CENSUS_DIFF.fetch_add(1, Ordering::Relaxed);
+                    let ulp = ulp_distance(exact, fast_sum);
+                    UNION_CENSUS_MAXULP.fetch_max(ulp, Ordering::Relaxed);
+                }
+                // COMPARE mode keeps the EXACT value (its whole point is a
+                // no-answer-change census); union-only emits the fast one.
+                if union_enabled && !union_compare {
+                    fast_sum
+                } else {
+                    exact
+                }
+            }
+        }
+    };
     let mut running_best = f64::NEG_INFINITY;
     let mut next = 0usize;
     let mut chunk = 1usize;
@@ -6161,7 +6522,7 @@ fn bounded_stage_one(
                 .par_iter()
                 .map(|&flat| {
                     let (first, second) = unrank_pair(flat as usize);
-                    (flat, matrix.class_pair_sum(first, second, unit_counts))
+                    (flat, sum_of(first, second))
                 })
                 .collect(),
             Some(memo) => {
@@ -6186,7 +6547,7 @@ fn bounded_stage_one(
                     .par_iter()
                     .map(|&canon| {
                         let (first, second) = unrank_pair(canon);
-                        (canon, matrix.class_pair_sum(first, second, unit_counts))
+                        (canon, sum_of(first, second))
                     })
                     .collect();
                 memo.note_computed(fresh.len() as u64);
@@ -9385,6 +9746,16 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let compare_diff = AtomicU64::new(0);
         let compare_max_ulp = AtomicU64::new(0);
         let compare_skipped = AtomicU64::new(0);
+        // THE PINNED-UNION OPTION FOR THE BOUNDED PATH (the production
+        // default's own scan). The tail locus is 96.9% constant, so its
+        // pair sums need ~2,700 corrections rather than 45,423 — 11x less
+        // EXACT work (measured: T00048 l8, 3.6e8 vs 4.2e9 unit-pairs,
+        // 17x on that locus alone). The union walk reassociates the float
+        // sum, so with IMPG_CLASS_SCAN_UNION it IS the value (the decision
+        // gate is calls.jsonl), and with IMPG_CLASS_SCAN_COMPARE both forms
+        // are computed and the delta is receipted while the exact value
+        // is kept (no answer change).
+        let bounded_union = std::env::var("IMPG_CLASS_SCAN_UNION").is_ok();
         // The per-locus bounded state, stage one -> stage two.
         let mut bounded_state: Option<BoundedScanState> = None;
         let (mut class_lls, mut best_ll, mut called): (Vec<f64>, f64, Vec<(usize, usize)>) =
@@ -9539,6 +9910,17 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 compare_skipped.load(Ordering::Relaxed),
             );
         }
+        if class_scan_bounded && (bounded_union || class_scan_compare) {
+            eprintln!(
+                "[score] locus {locus}: class scan bounded{}; {} of {} kept-pair sums \
+                 differ bitwise from the exact form, max {} ulp; {} constant unit-pairs skipped",
+                if bounded_union { " + pinned-union" } else { " + compare" },
+                UNION_CENSUS_DIFF.load(Ordering::Relaxed),
+                UNION_CENSUS_PAIRS.load(Ordering::Relaxed),
+                UNION_CENSUS_MAXULP.load(Ordering::Relaxed),
+                UNION_CENSUS_SKIPPED.load(Ordering::Relaxed),
+            );
+        }
         ensure(best_ll.is_finite(), "no class has anchored evidence at this locus")?;
         let mut winner_pair = called[0];
 
@@ -9673,7 +10055,16 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // count of classes strictly above the pair's class LL.
         let truth_rank_test = truth_pair_test.map(|(a, b)| {
             let flat = b * (b + 1) / 2 + a;
-            let value = class_lls[flat];
+            // (the union path: the truth pair may sit outside the
+            // certification set, so its own value is recomputed in the
+            // committed order — the rank is emitted, so it must be exact)
+            let value = if std::env::var("IMPG_CLASS_SCAN_UNION").is_ok()
+                && !std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok()
+            {
+                matrix.class_pair_sum(a, b, &unit_counts)
+            } else {
+                class_lls[flat]
+            };
             1 + class_lls.iter().filter(|&&ll| ll > value).count()
         });
         let truth_flat = truth_pair.map(|(a, b)| b * (b + 1) / 2 + a);
@@ -9798,6 +10189,44 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             for (flat, sum) in sums {
                 state.computed[flat] = Some(sum);
                 class_lls[flat] = sum;
+            }
+            // THE CERTIFICATION (the pinned-union path only): the
+            // decisive values are recomputed in the COMMITTED order, so
+            // every emitted byte that depends on a class LL is the exact
+            // form's. The set is: the winner's float-window (a pair whose
+            // reassociated value lands within it could flip the called set
+            // or the rank) plus the TOP 32 by fast value (the alternative
+            // and the tie breakers come from the top of the spectrum).
+            // Measured at the tail locus: ONE pair falls in the window.
+            if std::env::var("IMPG_CLASS_SCAN_UNION").is_ok() && !std::env::var("IMPG_CLASS_SCAN_COMPARE").is_ok() {
+                let n_units = matrix.n_units as f64;
+                let best_fast = class_lls
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let window = 2.0 * n_units * f64::EPSILON * best_fast.abs().max(1.0);
+                let mut order: Vec<usize> = (0..class_lls.len()).collect();
+                order.sort_unstable_by(|&a, &b| {
+                    class_lls[b].partial_cmp(&class_lls[a]).expect("finite class LLs")
+                });
+                let mut rechecks = 0usize;
+                for &flat in order.iter().take(32) {
+                    let (first, second) = unrank_pair(flat);
+                    class_lls[flat] = matrix.class_pair_sum(first, second, &unit_counts);
+                    rechecks += 1;
+                }
+                for &flat in order.iter() {
+                    if class_lls[flat] < best_fast - window {
+                        break;
+                    }
+                    if rechecks > 0 && order.iter().take(32).any(|&f| f == flat) {
+                        continue;
+                    }
+                    let (first, second) = unrank_pair(flat);
+                    class_lls[flat] = matrix.class_pair_sum(first, second, &unit_counts);
+                    rechecks += 1;
+                }
+                UNION_CENSUS_RECHECKS.fetch_add(rechecks as u64, Ordering::Relaxed);
             }
             // THE TIE-SET REBUILD (the T03226 locus-16 fix,
             // SS10.6.22): the emitted called set, best, and the
@@ -9946,8 +10375,19 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // degenerate precedent's own form, sanctioned with the fix.)
         let degenerate = called.len() == pair_count;
         let mut cut_index_lists: Vec<(usize, CutSet)> = Vec::new();
+        // THE O(f^4) IS THE ENUMERATION, NOT THE ANSWER. With
+        // IMPG_TIED_FOLD_FAST the certificate's per-class predicate sets are
+        // never materialized: `tie_cluster_fast` answers k (connected
+        // components of the d<=cut relation) and the excluded union from the
+        // same predicates, so the lists have no consumer left. They are
+        // skipped here, and the report member `qual_tied_cut_indices` —
+        // which was the certificate's own enumeration — is not produced by
+        // that path. Everything the answer depends on (k, excluded,
+        // alternative, p, cluster_size) is computed identically, which is
+        // what the band-oracle tests compare.
+        let tied_fold_fast = std::env::var("IMPG_TIED_FOLD_FAST").is_ok();
         let certificate_started = locus_phase_census.then(Instant::now);
-        {
+        if !tied_fold_fast {
             let mut sorted: Vec<f64> = spectrum
                 .iter()
                 .map(|&(distance, ..)| distance)
@@ -9991,11 +10431,21 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let cluster = called_score
             .filter(|_| !spectrum.is_empty() || !called.is_empty())
             .map(|_| {
-                let pairs: Vec<(f64, f64)> = spectrum
-                    .iter()
-                    .map(|&(distance, score, _, _, _, _)| (distance, score))
-                    .collect();
-                cluster_form_qual(1.0, &pairs, &tie_certificate)
+                if std::env::var("IMPG_TIED_FOLD_FAST").is_ok() {
+                    tie_cluster_fast(
+                        &folds,
+                        &called,
+                        &spectrum,
+                        &observed_node_fn,
+                        &observed_edge_fn,
+                    )
+                } else {
+                    let pairs: Vec<(f64, f64)> = spectrum
+                        .iter()
+                        .map(|&(distance, score, _, _, _, _)| (distance, score))
+                        .collect();
+                    cluster_form_qual(1.0, &pairs, &tie_certificate)
+                }
             });
         let qual_cluster_seconds = qual_cluster_started
             .map(|started| started.elapsed().as_secs_f64())
@@ -12661,6 +13111,24 @@ mod tests {
                 cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
             let state_lists =
                 cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+            // THE FAST PATH (`tie_cluster_fast`: k as connected components,
+            // excluded from the shrinking candidate set) must answer the BAND
+            // ORACLE identically - its safety net, at both tie shapes.
+            let fast = tie_cluster_fast(&folds, &called, &spectrum, &node_fn, &edge_fn);
+            assert_eq!(fast.k, state_bands.k, "case {case}: FAST k differs");
+            assert_eq!(
+                fast.excluded, state_bands.excluded,
+                "case {case}: FAST excluded differs"
+            );
+            assert_eq!(
+                fast.alternative, state_bands.alternative,
+                "case {case}: FAST alternative differs"
+            );
+            assert_eq!(
+                fast.cluster_size, state_bands.cluster_size,
+                "case {case}: FAST cluster_size differs"
+            );
+            assert_eq!(fast.cut, state_bands.cut, "case {case}: FAST cut differs");
             assert_eq!(state_lists.k, state_bands.k, "case {case}: k differs");
             assert_eq!(state_lists.excluded, state_bands.excluded, "case {case}: excluded differs");
             assert_eq!(state_lists.alternative, state_bands.alternative, "case {case}: alternative differs");
@@ -12998,6 +13466,24 @@ mod tests {
                 cluster_form_qual(1.0, &pairs, &TieCertificate::Bands(&oracle_bands));
             let state_lists =
                 cluster_form_qual(1.0, &pairs, &TieCertificate::CutIndices(&tiered));
+            // THE FAST PATH (`tie_cluster_fast`: k as connected components,
+            // excluded from the shrinking candidate set) must answer the BAND
+            // ORACLE identically - its safety net, at both tie shapes.
+            let fast = tie_cluster_fast(&folds, &called, &spectrum, &node_fn, &edge_fn);
+            assert_eq!(fast.k, state_bands.k, "case {case}: FAST k differs");
+            assert_eq!(
+                fast.excluded, state_bands.excluded,
+                "case {case}: FAST excluded differs"
+            );
+            assert_eq!(
+                fast.alternative, state_bands.alternative,
+                "case {case}: FAST alternative differs"
+            );
+            assert_eq!(
+                fast.cluster_size, state_bands.cluster_size,
+                "case {case}: FAST cluster_size differs"
+            );
+            assert_eq!(fast.cut, state_bands.cut, "case {case}: FAST cut differs");
             assert_eq!(state_lists.k, state_bands.k, "case {case}: k differs");
             assert_eq!(state_lists.excluded, state_bands.excluded, "case {case}: excluded differs");
             assert_eq!(state_lists.alternative, state_bands.alternative, "case {case}: alternative differs");
