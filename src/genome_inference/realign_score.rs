@@ -4412,6 +4412,39 @@ where
         }
         is_first
     };
+    // THE SPECTRUM'S SHAPES ARE BUILT ONCE, BEFORE THE LOOP: the inner
+    // loop below needs an entry's merged multisets for every (class,
+    // entry) test the two O(1) bounds cannot decide, and each such test
+    // used to rebuild them from the entry's fold pair — two
+    // `merged_multiset` allocations plus the merge walk, per test. An
+    // entry's merged multisets are a function of its (first, second)
+    // fold pair ALONE, so they are built once per spectrum index here
+    // and INDEXED below. A pure cache: the bound tests, their order, the
+    // exact walk and every f64 operation on the same operands are
+    // untouched, so the predicate sets are bit-identical.
+    //
+    // MEMORY: merged(i, j) is at most len(i) + len(j) entries of 12 B,
+    // so the cache is at most 12 * (sum of the locus's fold multiset
+    // entries) * folds bytes — at the degenerate locus (T00048 locus 2:
+    // 74,381 fold multiset entries, 124 folds, 7,749 spectrum entries)
+    // 110.7 MB. It is built only when there is a tied class to evaluate
+    // (`called[1..]` is the loop's domain), so a locus with no tie
+    // never pays for it.
+    struct Shape {
+        nodes: Vec<(u64, u32)>,
+        edges: Vec<(u64, u32)>,
+    }
+    let spectrum_shapes: Vec<Shape> = if called.len() > 1 {
+        spectrum
+            .iter()
+            .map(|&(_, _, _, first, second, _)| Shape {
+                nodes: merged_multiset(&folds[first].nodes, &folds[second].nodes),
+                edges: merged_multiset(&folds[first].edges, &folds[second].edges),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let computed: Vec<Option<(usize, CutSet)>> = called[1..]
         .par_iter()
         .enumerate()
@@ -4431,7 +4464,7 @@ where
                 edge_mass[first] + edge_mass[second],
             );
             let mut list = CutSet::default();
-            for (position, &(other_first, other_second, gn, ge)) in entries.iter().enumerate() {
+            for (position, &(_, _, gn, ge)) in entries.iter().enumerate() {
                 let lower = (tn - gn).abs() + (te - ge).abs();
                 if lower > cut {
                     continue;
@@ -4441,12 +4474,9 @@ where
                     list.insert(position);
                     continue;
                 }
-                let other_nodes =
-                    merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
-                let other_edges =
-                    merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
-                let distance = differing_observed_mass(&nodes, &other_nodes, &node_lookup)
-                    + differing_observed_mass(&edges, &other_edges, &edge_lookup);
+                let other = &spectrum_shapes[position];
+                let distance = differing_observed_mass(&nodes, &other.nodes, &node_lookup)
+                    + differing_observed_mass(&edges, &other.edges, &edge_lookup);
                 if distance <= cut {
                     list.insert(position);
                 }
