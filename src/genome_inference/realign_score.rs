@@ -3953,6 +3953,7 @@ fn alignment_connected_merge(
         n_units: matrix.n_units,
         elsewhere: matrix.elsewhere,
         rows: new_rows,
+        unit_fold: None,
     };
     let new_territory: Vec<(u64, u64)> =
         new_representatives.iter().map(|&old| territory[old]).collect();
@@ -5742,6 +5743,12 @@ struct ScoreMatrix {
     n_units: usize,
     elsewhere: f64,
     rows: Vec<ScoreRow>,
+    /// THE UNIT-FOLD REDUCTION's plan (the class scan's unit-dimension
+    /// twin of the bit-equal-row memo; env IMPG_UNIT_FOLD, DEFAULT
+    /// OFF — see `UnitFoldPlan`): `None` IS the committed unit-order
+    /// accumulation, verbatim. Attached once per locus by `fold_units`
+    /// at the class scan site, never built with the flag unset.
+    unit_fold: Option<UnitFoldPlan>,
 }
 
 impl ScoreMatrix {
@@ -5775,12 +5782,40 @@ impl ScoreMatrix {
     /// cursors read the same values the dense rows held (the
     /// compressed form's absent entries ARE the no-pin constant), so
     /// the sum is the committed sum bit for bit.
+    ///
+    /// With a `unit_fold` plan attached (env IMPG_UNIT_FOLD) the walk is
+    /// over the plan's SURVIVING COLUMN GROUPS instead: the same
+    /// `count * mix_logsumexp(...)` term per group at its smallest unit
+    /// index, ascending — the original unit order with the redundant
+    /// terms removed — plus the constant columns' ONE scalar
+    /// `count_total * c` as the sum's final term (mix(c,c) = c exactly,
+    /// so it is pair-independent; it stays IN the value, so every
+    /// reported class LL still carries the whole mass). A different
+    /// association of the same addends: exact in real arithmetic, NOT
+    /// bit-identical (see `UnitFoldPlan`).
     fn class_pair_sum(
         &self,
         first: usize,
         second: usize,
         unit_counts: &[f64],
     ) -> f64 {
+        if let Some(plan) = self.unit_fold.as_ref() {
+            let mut a = RowCursor::new(&self.rows[first]);
+            let mut b = RowCursor::new(&self.rows[second]);
+            let mut total = 0.0f64;
+            for &(unit, count) in plan.groups() {
+                let unit = unit as usize;
+                total += count
+                    * mix_logsumexp(
+                        a.ll_at(unit, self.elsewhere),
+                        b.ll_at(unit, self.elsewhere),
+                    );
+            }
+            return match plan.constant_scalar {
+                Some(scalar) => total + scalar,
+                None => total,
+            };
+        }
         let mut a = RowCursor::new(&self.rows[first]);
         let mut b = RowCursor::new(&self.rows[second]);
         let mut total = 0.0f64;
@@ -5792,6 +5827,21 @@ impl ScoreMatrix {
                 );
         }
         total
+    }
+
+    /// Build and attach the unit-fold plan (THE UNIT-FOLD REDUCTION,
+    /// env IMPG_UNIT_FOLD — see `UnitFoldPlan`). `None` when the
+    /// reduction declines (one fold: every column is trivially constant
+    /// and the whole sum would become a single product — a shape
+    /// measured nowhere), leaving the committed walk in place.
+    fn fold_units(&mut self, unit_counts: &[f64]) -> Option<&UnitFoldPlan> {
+        self.unit_fold = UnitFoldPlan::build(self, unit_counts);
+        self.unit_fold.as_ref()
+    }
+
+    /// The attached plan (the class-scan site's receipt reader).
+    fn unit_fold(&self) -> Option<&UnitFoldPlan> {
+        self.unit_fold.as_ref()
     }
 
     /// The merge's bit-exact column predicate.
@@ -5923,6 +5973,7 @@ impl ScoreMatrix {
             n_units,
             elsewhere,
             rows,
+            unit_fold: None,
         }
     }
 }
@@ -6354,6 +6405,220 @@ impl ClassScanBoundIndex {
         let err_b =
             gamma(2.0 * ops_b) * (self.e_times_c.abs() + self.excess[first] + self.excess[second]);
         err_x + err_b
+    }
+}
+
+/// The unit-fold column hash's FNV-1a 64 prime (the class scan's own
+/// hashing discipline: the hash only BUCKETS candidates, the exact
+/// column-key comparison decides every merge).
+const UNIT_FOLD_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// THE UNIT-FOLD REDUCTION (the class scan's unit-dimension twin of the
+/// bit-equal-row memo, behind env `IMPG_UNIT_FOLD` — DEFAULT OFF).
+/// The class scan's inner term walks UNITS, and at the deep loci most of
+/// those units are redundant (docs/syng-gmem-bwt/unit-redundancy.md:
+/// T00048 locus 8 = 45,423 units in 842 bit-distinct ll columns, 40,777
+/// of them one constant column). Two reductions, both grouped by the
+/// EXACT f64 bit pattern of the WHOLE column (`ll[f][u]` over every fold
+/// — nothing rounded, nothing hashed-loose):
+///
+///   1. CONSTANT columns (every fold bit-equal): the pair's term is
+///      `count[u] * mix(c,c)`, and mix(c,c) = c BIT FOR BIT (exp(0) = 1
+///      and ln(1) = +0.0 are exact, so `m + 0.0 = m`; the identity is
+///      asserted by the `mix_logsumexp` unit tests), so such columns
+///      contribute `count_total * c` to EVERY pair identically — ONE
+///      scalar, computed once per locus and added as each pair sum's
+///      final term. It is never dropped from the reported value: the
+///      class LL (and so every QUAL term derived from it) still carries
+///      the constant mass, which is what keeps the numbers comparable
+///      with the committed run's.
+///   2. IDENTICAL columns: units whose whole column is bit-identical are
+///      ONE term with their summed count mass (integer-exact in f64),
+///      evaluated by the SAME `count * mix_logsumexp(...)` arithmetic as
+///      today, in the surviving groups' ORIGINAL unit order (each group
+///      at its smallest unit index) — the only change is FEWER TERMS.
+///
+/// THE EXACTNESS STATEMENT (never over-claimed): the reduction is exact
+/// in REAL arithmetic — every dropped addend is replaced by a real
+/// quantity equal to it, so the sum's real value is unchanged — but it
+/// is NOT bit-identical: it removes addends from the middle of a fixed
+/// left-to-right IEEE-754 accumulation and merges duplicate products, so
+/// round-to-nearest sees a different association. Measured at T00048
+/// locus 8 (unit-redundancy.md §6.1, the same V3 form): 65,520 of the
+/// 65,535 kept pairs change bits, max 1,362 ulp (1.59e-7 absolute at the
+/// sums' ~-7.1e5 magnitude); the argmax pair is unchanged with a 1.5e7x
+/// margin and that locus carries no class ties. This is therefore a
+/// LABELLED accumulation change, never the exact path's default: with
+/// the env unset the committed unit-order walk runs verbatim.
+///
+/// THE BOUNDED SCAN'S CAVEAT (stated, not hidden): `pair_bounds` is
+/// untouched (it is built from per-fold aggregates, and the row totals
+/// are unchanged), but its derived slack prices the BOUND's own
+/// evaluation error, not the accumulation's reassociation — so a
+/// skipped pair could in principle sit a few hundred ulp above the
+/// running best. The measured margin is 1.5e7x and the gate is
+/// calls.jsonl, which the receipts' decision fields compare.
+struct UnitFoldPlan {
+    /// the surviving column groups, ASCENDING by their smallest unit
+    /// index: (representative unit, the group's summed unit count) —
+    /// the original summation order with the redundant terms removed.
+    groups: Vec<(u32, f64)>,
+    /// the constant columns' pair-independent contribution: the sum
+    /// over the constant groups of `count_total * c`, computed ONCE per
+    /// locus; `None` when the locus has no constant column.
+    constant_scalar: Option<f64>,
+    /// the receipt numbers (the `[unit-fold]` line's own fields).
+    units: usize,
+    distinct_columns: usize,
+    constant_columns: usize,
+    constant_units: usize,
+    pair_terms: usize,
+    build_seconds: f64,
+}
+
+impl UnitFoldPlan {
+    /// The plan for one locus's FINAL (post-merge) matrix — `None`
+    /// when the reduction declines: with fewer than two folds every
+    /// column is trivially constant and the whole class sum would
+    /// collapse to a single product, a shape measured nowhere, so the
+    /// committed walk stays.
+    fn build(matrix: &ScoreMatrix, unit_counts: &[f64]) -> Option<UnitFoldPlan> {
+        let started = Instant::now();
+        let n_folds = matrix.n_folds();
+        let n_units = matrix.n_units;
+        if n_folds < 2 || n_units == 0 {
+            return None;
+        }
+        let elsewhere = matrix.elsewhere;
+        let elsewhere_bits = elsewhere.to_bits();
+        // THE COLUMN KEY: per unit, its NON-CONSTANT entries (fold, value
+        // bits) in fold order. An entry equal to the elsewhere constant
+        // reads the constant whichever way it is stored (absent from a
+        // sparse row, or a pinned/unpinned entry whose value IS E), so
+        // the non-constant entries ARE the column — the row-compression
+        // exactness argument, transposed — and two units' columns are
+        // bit-identical iff their key lists are. The walk is over the
+        // rows' non-constant entries only (604,977 of 19,486,467 cells at
+        // T00048 locus 8), never the full F x U matrix.
+        let mut keys: Vec<Vec<(u32, u64)>> = vec![Vec::new(); n_units];
+        for fold in 0..n_folds {
+            match &matrix.rows[fold] {
+                ScoreRow::Sparse(sparse) => {
+                    for (&unit, &ll) in sparse.units.iter().zip(&sparse.lls) {
+                        let bits = ll.to_bits();
+                        if bits != elsewhere_bits {
+                            keys[unit as usize].push((fold as u32, bits));
+                        }
+                    }
+                }
+                ScoreRow::Dense(dense) => {
+                    for (unit, &ll) in dense.ll.iter().enumerate() {
+                        let bits = ll.to_bits();
+                        if bits != elsewhere_bits {
+                            keys[unit].push((fold as u32, bits));
+                        }
+                    }
+                }
+            }
+        }
+        // the bucketing hash (the merge's own key discipline: buckets
+        // only — the exact key-list comparison below decides)
+        let mut buckets: HashMap<u64, Vec<u32>> = HashMap::new();
+        for (unit, key) in keys.iter().enumerate() {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for &(fold, bits) in key {
+                hash = (hash ^ bits).wrapping_mul(UNIT_FOLD_HASH_PRIME);
+                hash = (hash ^ fold as u64).wrapping_mul(UNIT_FOLD_HASH_PRIME);
+            }
+            hash = (hash ^ key.len() as u64).wrapping_mul(UNIT_FOLD_HASH_PRIME);
+            buckets.entry(hash).or_default().push(unit as u32);
+        }
+        // THE COLUMN CLASSES: within a bucket every unit joins the first
+        // class whose key list is EQUAL (a hash collision can never
+        // merge). Bucket members are pushed in unit order, so each class
+        // keeps its SMALLEST unit index as the representative — the
+        // merged group's own summation position. The mass is summed in
+        // ascending unit order and the counts are integers, so it is
+        // exact in f64.
+        let mut classes: Vec<(u32, f64, usize)> = Vec::new();
+        for bucket in buckets.values() {
+            let mut bucket_classes: Vec<(u32, f64, usize)> = Vec::new();
+            for &unit in bucket {
+                let key = &keys[unit as usize];
+                match bucket_classes
+                    .iter_mut()
+                    .find(|class| keys[class.0 as usize] == *key)
+                {
+                    Some(class) => {
+                        class.1 += unit_counts[unit as usize];
+                        class.2 += 1;
+                    }
+                    None => bucket_classes.push((
+                        unit,
+                        unit_counts[unit as usize],
+                        1,
+                    )),
+                }
+            }
+            classes.extend(bucket_classes);
+        }
+        classes.sort_unstable_by_key(|class| class.0);
+        let mut groups: Vec<(u32, f64)> = Vec::new();
+        let mut constant_columns = 0usize;
+        let mut constant_units = 0usize;
+        let mut constant_scalar: Option<f64> = None;
+        for &(rep, mass, members) in &classes {
+            let key = &keys[rep as usize];
+            // a CONSTANT column: every fold holds the same value bits,
+            // i.e. the key is empty (all folds read the elsewhere
+            // constant) or it names every fold once with one repeated
+            // value.
+            let constant_value = if key.is_empty() {
+                Some(elsewhere)
+            } else if key.len() == n_folds
+                && key.iter().all(|&(_, bits)| bits == key[0].1)
+            {
+                Some(f64::from_bits(key[0].1))
+            } else {
+                None
+            };
+            match constant_value {
+                Some(value) => {
+                    constant_columns += 1;
+                    constant_units += members;
+                    constant_scalar =
+                        Some(constant_scalar.unwrap_or(0.0) + mass * value);
+                }
+                None => groups.push((rep, mass)),
+            }
+        }
+        Some(UnitFoldPlan {
+            pair_terms: groups.len() + usize::from(constant_scalar.is_some()),
+            groups,
+            constant_scalar,
+            units: n_units,
+            distinct_columns: classes.len(),
+            constant_columns,
+            constant_units,
+            build_seconds: started.elapsed().as_secs_f64(),
+        })
+    }
+
+    /// The surviving groups (the pair sum's own walk).
+    fn groups(&self) -> &[(u32, f64)] {
+        &self.groups
+    }
+
+    /// The units folded into another unit's column (the receipt's
+    /// "merged" mass = units - distinct columns).
+    fn merged_units(&self) -> usize {
+        self.units - self.distinct_columns
+    }
+
+    /// The distinct columns that are NOT constant (each formed by
+    /// merging its units, possibly a class of one).
+    fn merged_columns(&self) -> usize {
+        self.distinct_columns - self.constant_columns
     }
 }
 
@@ -7326,6 +7591,26 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // receipted under IMPG_LOCUS_PHASE_CENSUS.)
     let scan_memo_enabled =
         std::env::var("IMPG_CLASS_SCAN_MEMO").map_or(true, |v| v != "off");
+    // (THE UNIT-FOLD REDUCTION, model-side, DEFAULT OFF:
+    // IMPG_UNIT_FOLD=1 folds the class scan's UNIT dimension — the
+    // bit-equal-row memo's twin on the other axis. Two exactness-
+    // preserving reductions, grouped by the EXACT f64 bit pattern of
+    // each unit's whole ll column: a CONSTANT column (every fold
+    // bit-equal) contributes count_total * c to every pair identically
+    // (mix(c,c) = c exactly) so it leaves the per-pair loop as ONE
+    // scalar, still counted in the reported class LL; units whose
+    // columns are BIT-IDENTICAL share one term with their summed
+    // count mass, in the surviving groups' original unit order.
+    // Exact in REAL arithmetic (the same addends, nothing rounded), NOT
+    // bit-identical (a different association of the fixed left-to-
+    // right accumulation — measured at T00048 locus 8: 65,520 of
+    // 65,535 kept pairs change bits, max 1,362 ulp, argmax unchanged by
+    // 1.5e7x; docs/syng-gmem-bwt/unit-redundancy.md). Unset — the
+    // committed unit-order walk, verbatim, and no receipt byte
+    // changes; set — the labeled `unit_fold` receipt member and the
+    // per-locus `[unit-fold]` stderr line state the mode and its
+    // shape counters.)
+    let unit_fold_enabled = std::env::var("IMPG_UNIT_FOLD").is_ok();
     // The selection flag pins the convention exactly: Env defers to
     // the committed switches verbatim (the instrument default);
     // Default pins the committed base convention (env ignored);
@@ -9684,6 +9969,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             n_units,
             elsewhere,
             rows: scored.into_iter().map(|s| s.row).collect(),
+            unit_fold: None,
         };
         eprintln!(
             "[score] locus {locus}: matrix {} folds x {} units = {} pairs, \
@@ -9758,7 +10044,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let mut merge_seconds = 0.0f64;
         let (
             folds,
-            matrix,
+            mut matrix,
             territory,
             territory_axis_fold,
             merge_groups,
@@ -9846,6 +10132,37 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let class_started = Instant::now();
         let pair_count = n_folds * (n_folds + 1) / 2;
         let unit_counts: Vec<f64> = units.iter().map(|u| u.count as f64).collect();
+        // THE UNIT-FOLD REDUCTION (env IMPG_UNIT_FOLD — see
+        // `UnitFoldPlan`): the plan is attached to the matrix ONCE, on
+        // the FINAL (post-merge) matrix, so every exact-sum site below
+        // — the bounded scan's two stages, its best-outside fallback
+        // and the exhaustive arm — walks the same surviving groups and
+        // adds the same constant scalar; there is no site that can keep
+        // the old walk by omission.
+        if unit_fold_enabled {
+            match matrix.fold_units(&unit_counts) {
+                Some(plan) => eprintln!(
+                    "[unit-fold] locus {locus}: U {} -> {} columns \
+                     ({} constant, {} merged), pair terms {} -> {} \
+                     [constant units {}, non-constant units {}, \
+                     build {:.3}s]",
+                    plan.units,
+                    plan.distinct_columns,
+                    plan.constant_columns,
+                    plan.merged_columns(),
+                    plan.units,
+                    plan.pair_terms,
+                    plan.constant_units,
+                    plan.units - plan.constant_units,
+                    plan.build_seconds,
+                ),
+                None => eprintln!(
+                    "[unit-fold] locus {locus}: declined (one fold \
+                     — every column is trivially constant, so the whole \
+                     sum would be one product)"
+                ),
+            }
+        }
         let sparse_skip = matches!(class_scan_order, ClassScanOrder::SparseSkip);
         // THE BIT-EQUAL-ROW MEMOIZATION (the fourth expressibility
         // reduction — see `ClassScanMemo`): built once per locus on
@@ -12081,6 +12398,49 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             report_buf.clear();
             serde_json::to_writer(&mut report_buf, &report_value)?;
         }
+        // (THE UNIT-FOLD REDUCTION's own receipt member — ONLY when
+        // the plan is attached (env IMPG_UNIT_FOLD): the shape counters
+        // the `[unit-fold]` stderr line states, so a folded receipt can
+        // never be mistaken for the committed walk's. The default
+        // receipt schema stays byte-identical, the labeled-toggle
+        // doctrine's own form.)
+        if let Some(plan) = matrix.unit_fold() {
+            let mut report_value: serde_json::Value = serde_json::from_slice(&report_buf)?;
+            report_value["unit_fold"] = json!({
+                "note": "the unit-fold reduction (env IMPG_UNIT_FOLD, \
+                         DEFAULT OFF): the class scan's unit dimension \
+                         walked over the distinct bit-identical ll \
+                         COLUMNS instead of the units, grouped by the \
+                         exact f64 bits of each unit's whole column and \
+                         never by a rounded value. A constant column \
+                         (every fold bit-equal) contributes count_total \
+                         * c to every pair identically (mix(c,c) = c \
+                         exactly) and enters each pair sum as ONE scalar \
+                         term — kept in the class LL, so the values stay \
+                         comparable with the committed walk's; units with \
+                         bit-identical columns share one term with their \
+                         summed count mass, at the group's smallest unit \
+                         index, so the surviving terms keep the original \
+                         unit order. Exact in real arithmetic (the same \
+                         addends), NOT bit-identical (a different \
+                         association of the fixed left-to-right \
+                         accumulation: T00048 locus 8, 65,520 of 65,535 \
+                         kept pairs change bits, max 1,362 ulp, argmax \
+                         unchanged by 1.5e7x)",
+                "units": plan.units,
+                "columns": plan.distinct_columns,
+                "constant_columns": plan.constant_columns,
+                "constant_units": plan.constant_units,
+                "merged_units": plan.merged_units(),
+                "merged_columns": plan.merged_columns(),
+                "pair_terms_before": plan.units,
+                "pair_terms_after": plan.pair_terms,
+                "build_seconds": plan.build_seconds,
+                "classes_seconds": class_seconds,
+            });
+            report_buf.clear();
+            serde_json::to_writer(&mut report_buf, &report_value)?;
+        }
         report_buf.push(b'\n');
         eprintln!(
             "[score] locus {locus}: receipts/IO (named classes + ingredients + \
@@ -14207,6 +14567,170 @@ mod tests {
         }
     }
 
+    /// The unit-fold fixture: 3 folds x 8 units carrying every class
+    /// the plan must tell apart — a constant column at the elsewhere
+    /// constant (units 0, 6, 7), a constant column pinned on EVERY fold
+    /// with one repeated value (unit 4, c != E), a bit-identical twin
+    /// pair (units 1 and 5), a ONE-ULP near-twin that must NOT merge
+    /// (unit 2), and a singleton column (unit 3). Returns the dense
+    /// rows; the pin flags are the plan-irrelevant "value != E" form.
+    fn unit_fold_fixture(elsewhere: f64) -> (Vec<Vec<f64>>, Vec<Vec<bool>>, Vec<Vec<u32>>) {
+        let n_folds = 3usize;
+        let n_units = 8usize;
+        let mut dense = vec![vec![elsewhere; n_units]; n_folds];
+        dense[0][1] = -7.5;
+        dense[0][5] = -7.5;
+        dense[0][2] = f64::from_bits((-7.5f64).to_bits() + 1); // ONE ULP
+        dense[2][3] = -9.25;
+        for row in dense.iter_mut() {
+            row[4] = -6.0;
+        }
+        let pinned: Vec<Vec<bool>> = dense
+            .iter()
+            .map(|row| row.iter().map(|&ll| ll != elsewhere).collect())
+            .collect();
+        let mismatches = vec![vec![0u32; n_units]; n_folds];
+        (dense, pinned, mismatches)
+    }
+
+    #[test]
+    fn unit_fold_plan_is_the_exact_column_equality_partition() {
+        // The grouping is the EXACT f64-bit column partition — a
+        // one-ulp near-twin stays its own class, a bit-identical twin
+        // merges, and a column pinned on every fold with one repeated
+        // value is CONSTANT (mix(c,c) = c exactly, so it joins the
+        // scalar). Both row encodings must give the SAME plan.
+        let elsewhere = -14.0f64;
+        let (dense, pinned, mismatches) = unit_fold_fixture(elsewhere);
+        let counts: Vec<f64> = (1..=dense[0].len()).map(|u| u as f64).collect();
+        // the sparse-encoded form (the fixture's own pin density)
+        let mut sparse_matrix =
+            ScoreMatrix::from_dense(dense.clone(), pinned.clone(), mismatches.clone(), elsewhere);
+        assert!(matches!(sparse_matrix.rows[0], ScoreRow::Sparse(_)));
+        assert!(sparse_matrix.fold_units(&counts).is_some());
+        let sparse_plan = sparse_matrix.unit_fold().expect("the plan builds");
+        // the all-pinned DENSE-encoded form (the same ll values)
+        let all_pinned = vec![vec![true; dense[0].len()]; dense.len()];
+        let mut dense_matrix =
+            ScoreMatrix::from_dense(dense.clone(), all_pinned, mismatches.clone(), elsewhere);
+        assert!(matches!(dense_matrix.rows[0], ScoreRow::Dense(_)));
+        assert!(dense_matrix.fold_units(&counts).is_some());
+        let dense_plan = dense_matrix.unit_fold().expect("the plan builds");
+        assert_eq!(sparse_plan.groups, dense_plan.groups);
+        assert_eq!(
+            sparse_plan.constant_scalar.map(f64::to_bits),
+            dense_plan.constant_scalar.map(f64::to_bits)
+        );
+        // THE EXPECTED CLASSES, hand-derived: {0,6,7} constant at E
+        // (mass 16), {4} constant at -6.0 (mass 5) — the scalar is
+        // their sum in representative order; {1,5} merge to mass 8 at
+        // unit 1; {2} and {3} are singletons.
+        assert_eq!(dense_plan.units, 8);
+        assert_eq!(dense_plan.distinct_columns, 5);
+        assert_eq!(dense_plan.constant_columns, 2);
+        assert_eq!(dense_plan.constant_units, 4);
+        assert_eq!(dense_plan.merged_units(), 3);
+        assert_eq!(dense_plan.merged_columns(), 3);
+        assert_eq!(dense_plan.groups(), &[(1u32, 8.0), (2, 3.0), (3, 4.0)]);
+        assert_eq!(dense_plan.pair_terms, 4);
+        let scalar = dense_plan.constant_scalar.expect("constant columns");
+        assert_eq!(scalar.to_bits(), (16.0 * elsewhere + 5.0 * -6.0).to_bits());
+    }
+
+    #[test]
+    fn unit_fold_keeps_the_constant_mass_in_the_class_ll() {
+        // The scalar is NOT dropped: with 20 constant columns carrying
+        // most of the mass, the folded class LL stays within a few ulp
+        // of the committed walk (a dropped scalar would be off by
+        // ~|count_total * E|, i.e. thousands).
+        let elsewhere = -14.901063413333642f64;
+        let n_folds = 4usize;
+        let n_units = 21usize;
+        let mut dense = vec![vec![elsewhere; n_units]; n_folds];
+        for fold in 0..n_folds {
+            dense[fold][20] = elsewhere + 0.5 * (fold as f64 + 1.0);
+            dense[fold][7] = elsewhere + 1e-3;
+        }
+        let pinned: Vec<Vec<bool>> = dense
+            .iter()
+            .map(|row| row.iter().map(|&ll| ll != elsewhere).collect())
+            .collect();
+        let mismatches = vec![vec![0u32; n_units]; n_folds];
+        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + (u % 3) as f64).collect();
+        let committed =
+            ScoreMatrix::from_dense(dense.clone(), pinned.clone(), mismatches.clone(), elsewhere);
+        let mut folded =
+            ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        assert!(folded.fold_units(&counts).is_some());
+        for first in 0..n_folds {
+            for second in first..n_folds {
+                let exact = committed.class_pair_sum(first, second, &counts);
+                let reduced = folded.class_pair_sum(first, second, &counts);
+                let relative = ((reduced - exact) / exact).abs();
+                assert!(
+                    relative < 1e-13,
+                    "the constant mass stays in the value: ({first},{second}) \
+                     exact {exact} reduced {reduced}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unit_fold_is_bit_identical_when_nothing_folds() {
+        // The identity case: no constant column and no bit-identical
+        // column pair, so the surviving groups ARE the units in order
+        // — the folded walk executes the committed op sequence and
+        // must reproduce its bits exactly.
+        let elsewhere = -13.75f64;
+        let n_folds = 2usize;
+        let n_units = 5usize;
+        let mut dense = vec![vec![elsewhere; n_units]; n_folds];
+        for fold in 0..n_folds {
+            for unit in 0..n_units {
+                dense[fold][unit] = elsewhere + 3.0 * unit as f64 + fold as f64 * 1.5;
+            }
+        }
+        let pinned = vec![vec![true; n_units]; n_folds];
+        let mismatches = vec![vec![0u32; n_units]; n_folds];
+        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
+        let committed =
+            ScoreMatrix::from_dense(dense.clone(), pinned.clone(), mismatches.clone(), elsewhere);
+        let mut folded = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        let plan = folded.fold_units(&counts).expect("the plan builds");
+        assert_eq!(plan.pair_terms, n_units);
+        assert!(plan.constant_scalar.is_none());
+        for first in 0..n_folds {
+            for second in first..n_folds {
+                assert_eq!(
+                    folded.class_pair_sum(first, second, &counts).to_bits(),
+                    committed.class_pair_sum(first, second, &counts).to_bits(),
+                    "no unit folds: the walk is the committed one, ({first},{second})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unit_fold_declines_with_one_fold() {
+        // One fold leaves every column trivially constant, so the plan
+        // declines and the committed walk stays — measured nowhere,
+        // never a silent rewrite.
+        let elsewhere = -12.5f64;
+        let dense = vec![vec![elsewhere, elsewhere + 1.0, elsewhere + 2.0]];
+        let pinned = vec![vec![true, true, true]];
+        let mismatches = vec![vec![0u32; 3]];
+        let counts = vec![1.0f64, 2.0, 3.0];
+        let committed =
+            ScoreMatrix::from_dense(dense.clone(), pinned.clone(), mismatches.clone(), elsewhere);
+        let mut declined = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        assert!(declined.fold_units(&counts).is_none());
+        assert_eq!(
+            declined.class_pair_sum(0, 0, &counts).to_bits(),
+            committed.class_pair_sum(0, 0, &counts).to_bits()
+        );
+    }
+
     #[test]
     fn class_scan_sparse_skip_union_walk() {
         // THE OWNER'S RULING 3's own exactness proof, at the scan
@@ -14352,6 +14876,7 @@ mod tests {
             n_units,
             elsewhere,
             rows,
+            unit_fold: None,
         };
         let after = vm_rss_kb();
         let live = matrix.live_bytes();
@@ -14431,6 +14956,7 @@ mod tests {
             n_units,
             elsewhere,
             rows,
+            unit_fold: None,
         };
         // (a) the merge's hash pass.
         let hash_started = std::time::Instant::now();
