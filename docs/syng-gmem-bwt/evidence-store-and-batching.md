@@ -272,3 +272,53 @@ parallelism, which is what a COW child-per-territory fleet would.
 The floor under all of this is the panel's own 32.36 GB of shared arenas
 (GBWT 12.87 + khash 4.31 + the mmap'd sidecars) plus a ~185 s load. Only an
 index-format change moves that.
+
+## 11. TWO MEASUREMENT CORRECTIONS THAT CHANGE THE ARITHMETIC
+
+Both from one map leg, same territory, same store, same output.
+
+### 11.1 THE DEFAULT RAYON POOL WASTES 98% OF ITS CPU
+
+| configuration | core-s | wall | cores avg |
+|---|---:|---:|---:|
+| default rayon (all 192 threads) | **17,154** | 395 s | 43.5 |
+| `RAYON_NUM_THREADS=12` | **381** | 289 s | 1.3 |
+
+The same work, the same output, **45x the CPU and 1.37x the wall** at the
+default pool. The wall is worse *and* the CPU is absurd: the extra threads
+are contending, not working. So **core-seconds measured at the default pool
+are not a measure of work** - and any earlier "core-s" figure in this
+document (or in the campaign's ledgers) taken at the default pool inherits
+that inflation. The routes derivation's own 163,159-vs-62,169 core-s swing
+between thread counts is the same phenomenon.
+
+The consequences:
+* **The campaign's measured throughput was accidentally right for the wrong
+  reason.** 88 territories/hour at 16 lanes is consistent with ~7,800
+  core-s/leg, not with the 106,496 that a leg reports when it runs alone
+  over the whole pool.
+* **Wall at a fixed concurrency is the only trustworthy cost metric here.**
+  Quote (lanes x rayon-per-lane, wall/territory, throughput/hour); do not
+  quote core-s unless the thread count is stated and sane.
+
+### 11.2 THE STORE-FED SCAN IS SERIAL - and that is now the opportunity
+
+With the store the cut reads ONE packet stream (the territory's fetched
+evidence) instead of nineteen sharded ones, so the scan no longer
+parallelizes: the leg averages 1.3 cores. That is *why* it is cheap in core-s
+and why the wall did not fall further.
+
+**So the honest current arithmetic, at a sane thread count:**
+
+| | value |
+|---|---:|
+| work per territory (map leg) | **381 core-s** |
+| whole sample, map only | 2.2M core-s |
+| floor at 192 cores | **3.2 h** |
+| lanes that fit at 41 GB/lane | ~24 -> ~20 h |
+| lanes that fit if the panel is fork-COW shared (~7 GB private/lane) | **~140 -> ~3-4 h** |
+
+**That is the 5-hour target, and it is reachable** - not by more threads and
+not by more lanes on a private panel, but by (a) sharing the panel across
+lanes (COW, the call fleet's proven form) and (b) giving the store-fed scan
+its parallelism back, since today it leaves ~190 of the 192 cores idle.
