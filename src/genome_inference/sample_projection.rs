@@ -2514,13 +2514,16 @@ fn run_cut(
                     let (incidences, candidates) = postings.mark(node_map.keys().copied());
                     let (packets, filtered) =
                         store.packets_for_buckets_filtered(&keys, |read| candidates.contains(read))?;
+                    // Report the ratio that is attributable to the postings.
+                    // NOT a "buckets avoided" figure: the same buckets are read
+                    // either way (a candidate's bytes only exist inside its own
+                    // bucket), so the stored bucket count is not a postings win.
+                    let examined = filtered.records.max(1);
                     eprintln!(
-                        "[node-postings] marked {incidences} incidences, {} candidate reads, \
-                         swept {} buckets avoided",
+                        "[node-postings] marked {incidences} incidences, {} candidate reads \
+                         ({:.1}% of the fetch)",
                         candidates.ones(),
-                        // of the store's buckets, only the territory's own were
-                        // swept: the rest of the store is never opened
-                        store.bucket_count().saturating_sub(store.buckets_read as usize)
+                        100.0 * filtered.kept as f64 / examined as f64
                     );
                     eprintln!(
                         "[node-postings] filter: {} records examined, {} skipped, {} survived \

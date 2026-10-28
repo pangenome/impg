@@ -322,3 +322,61 @@ and why the wall did not fall further.
 not by more lanes on a private panel, but by (a) sharing the panel across
 lanes (COW, the call fleet's proven form) and (b) giving the store-fed scan
 its parallelism back, since today it leaves ~190 of the 192 cores idle.
+
+## 12. NODE->READ POSTINGS: THE MEASURED GATE (and what it is not)
+
+`.n2r` is a per-sample sibling artifact: node -> the read ordinals whose walk
+touches it. Built once in **409 s** from the store (22.4 GB read, 168.4 GB
+decompressed, 349 MB peak RSS via a hash-partitioned spill), **3.41 GB**, and
+it leaves `sample.evd*` byte-untouched. Ordinals are the store's own domain,
+which IS globally unique in the whole-sample store (`evidence_index.rs:874-881`
+increments one counter across all shards) - unlike the per-shard prototypes,
+whose ordinals are per shard.
+
+The cut then refuses non-candidate records BEFORE decode/derive. The per-read
+predicate is untouched, so this is exact by construction, and measured so on
+T00048 (same thread count, RAYON=12):
+
+| | without postings | with postings |
+|---|---:|---:|
+| packets examined | 14,949,866 | 14,949,866 |
+| candidate reads | 14,949,866 | **7,157,270** (47.9%) |
+| kept | 276,042 | **276,042** |
+| cut phase | 68.2 s | **49.9 s** (-27%) |
+| map leg wall | 289 s | **228 s** (-21%) |
+| map leg core-s | 381 | **294** (-23%) |
+| cut-census / cut-cache / cut-reads | | **BYTE-IDENTICAL** |
+
+### 12.1 WHAT IT IS NOT: the bucket sweep was never the problem
+
+The premise that motivated this work - "the fetch is 54:1, so an exact
+node->read index makes it 1:1" - is WRONG, and the measurement says why: the
+territory's node set is **145,441 nodes**, and fully half the reads sitting in
+its locus-granular buckets genuinely touch one of them. The postings can only
+discharge the other half; the remaining 3.9% keep-rate is the per-read
+predicate's own work, which no index above it can do.
+
+So: **-27% on the cut, not 47x.** Bounded by construction, because the bytes of
+a candidate read only exist inside its own bucket and the bucket is a ~10 kb
+locus, not a node.
+
+### 12.2 AND NOW THE LOAD DOMINATES
+
+With the cut at 50 s, the map leg is **183 s of panel load + 50 s of cut**: the
+load is 80% of the leg. That is why the batch behaviour (section 9) matters more
+than the cut does - and why any further cut-side work should be justified
+against 50 s, not 191 s.
+
+### 12.3 THE BUILD-CHAIN TRAP, AGAIN (it cost a full run)
+
+`impg infer map` does not run the cut itself: it execs
+`target-frontier/release/examples/sample_projection`. Rebuilding `--bin impg`
+therefore measures a STALE child, and `strings .../impg | grep node-postings`
+returns 0 even when the code is current, because `run_cut` is only reachable
+from the example binary and the linker strips it from `impg`. The only valid
+staleness check on this path is:
+
+    strings target-frontier/release/examples/sample_projection | grep node-postings
+
+Rebuild `--bin impg` AND `--example sample_projection` before believing any
+cut-side measurement.
