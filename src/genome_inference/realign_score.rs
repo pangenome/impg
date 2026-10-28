@@ -3459,6 +3459,65 @@ fn differing_observed_mass(
     total
 }
 
+/// THE SAME WALK WITH THE PER-KEY OBSERVED MASS READ FROM PARALLEL
+/// ARRAYS — the committed certificate's dominant residual: one HashMap
+/// probe per merged key per undecided test (~1,200 probes per test,
+/// 13.6M tests at T00048 locus 2, ~1.0 us of each ~1.2 us test).
+///
+/// THE ARRAYS HOLD `observed(key)` — THE UNIT — AND NOT THE PRODUCT
+/// `observed(key) * count as f64`. That is deliberate, and it must stay
+/// that way: this walk multiplies by `count` on the less/greater/tail
+/// branches but by `delta` (the count difference) on the equal branch,
+/// so a stored product would reproduce three of the four products and
+/// silently perturb the equal branch's bits. Holding the unit keeps
+/// EVERY product the committed expression on identical operands, so
+/// the total is the same f64 as `differing_observed_mass`'s. Do not
+/// "optimise" this into a stored product.
+///
+/// The two key lists are walked in the committed order with the
+/// committed `delta > 0` skip; only the probe is replaced (an array
+/// read), so the accumulation sequence and every operand are the
+/// committed ones.
+fn differing_observed_mass_from_units(
+    left: &[(u64, u32)],
+    left_observed: &[f64],
+    right: &[(u64, u32)],
+    right_observed: &[f64],
+) -> f64 {
+    debug_assert_eq!(left.len(), left_observed.len());
+    debug_assert_eq!(right.len(), right_observed.len());
+    let (mut i, mut j, mut total) = (0usize, 0usize, 0.0f64);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => {
+                total += left_observed[i] * left[i].1 as f64;
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                total += right_observed[j] * right[j].1 as f64;
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let delta = (left[i].1 as i64 - right[j].1 as i64).unsigned_abs();
+                if delta > 0 {
+                    total += left_observed[i] * delta as f64;
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    while i < left.len() {
+        total += left_observed[i] * left[i].1 as f64;
+        i += 1;
+    }
+    while j < right.len() {
+        total += right_observed[j] * right[j].1 as f64;
+        j += 1;
+    }
+    total
+}
+
 // ---------------------------------------------------------------------------
 // The alignment-connected fold relaxation (the segdup follow-up's
 // stage-1 rule, env IMPG_REALIGN_ALIGNMENT_CONNECTED_FOLDS).
@@ -4424,23 +4483,47 @@ where
     // untouched, so the predicate sets are bit-identical.
     //
     // MEMORY: merged(i, j) is at most len(i) + len(j) entries of 12 B,
-    // so the cache is at most 12 * (sum of the locus's fold multiset
+    // plus one 8 B unit observed mass per entry (see the Shape fields),
+    // so the cache is at most 20 * (sum of the locus's fold multiset
     // entries) * folds bytes — at the degenerate locus (T00048 locus 2:
     // 74,381 fold multiset entries, 124 folds, 7,749 spectrum entries)
-    // 110.7 MB. It is built only when there is a tied class to evaluate
+    // ~184 MB. It is built only when there is a tied class to evaluate
     // (`called[1..]` is the loop's domain), so a locus with no tie
     // never pays for it.
+    //
+    // THE UNIT OBSERVED MASS RIDES WITH THE MULTISETS (the residual
+    // fix): the undecided tests' walk probed the observed map once per
+    // merged key. `node_observed`/`edge_observed` are index-parallel to
+    // `nodes`/`edges` and hold `observed(key)` — the unit, NOT the
+    // product; the walk's equal branch multiplies by `delta` rather
+    // than by `count` (the reason is spelled out at
+    // `differing_observed_mass_from_units`). The probes still happen
+    // here, ONCE per spectrum entry, and the walk that ran 13.6M times
+    // reads arrays instead.
     struct Shape {
         nodes: Vec<(u64, u32)>,
         edges: Vec<(u64, u32)>,
+        node_observed: Vec<f64>,
+        edge_observed: Vec<f64>,
     }
+    let shape_of_pair = |first: usize, second: usize| -> Shape {
+        let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
+        let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
+        let node_observed: Vec<f64> =
+            nodes.iter().map(|&(key, _)| observed_node(key)).collect();
+        let edge_observed: Vec<f64> =
+            edges.iter().map(|&(key, _)| observed_edge(key)).collect();
+        Shape {
+            nodes,
+            edges,
+            node_observed,
+            edge_observed,
+        }
+    };
     let spectrum_shapes: Vec<Shape> = if called.len() > 1 {
         spectrum
             .iter()
-            .map(|&(_, _, _, first, second, _)| Shape {
-                nodes: merged_multiset(&folds[first].nodes, &folds[second].nodes),
-                edges: merged_multiset(&folds[first].edges, &folds[second].edges),
-            })
+            .map(|&(_, _, _, first, second, _)| shape_of_pair(first, second))
             .collect()
     } else {
         Vec::new()
@@ -4457,8 +4540,12 @@ where
                 .expect("called class missing from the winner's spectrum");
             let nodes = merged_multiset(&folds[first].nodes, &folds[second].nodes);
             let edges = merged_multiset(&folds[first].edges, &folds[second].edges);
-            let node_lookup = |key: u64| observed_node(key);
-            let edge_lookup = |key: u64| observed_edge(key);
+            // the class's own unit observed mass, one probe per merged
+            // key ONCE (the walk below then reads these arrays)
+            let node_observed: Vec<f64> =
+                nodes.iter().map(|&(key, _)| observed_node(key)).collect();
+            let edge_observed: Vec<f64> =
+                edges.iter().map(|&(key, _)| observed_edge(key)).collect();
             let (tn, te) = (
                 node_mass[first] + node_mass[second],
                 edge_mass[first] + edge_mass[second],
@@ -4475,8 +4562,17 @@ where
                     continue;
                 }
                 let other = &spectrum_shapes[position];
-                let distance = differing_observed_mass(&nodes, &other.nodes, &node_lookup)
-                    + differing_observed_mass(&edges, &other.edges, &edge_lookup);
+                let distance = differing_observed_mass_from_units(
+                    &nodes,
+                    &node_observed,
+                    &other.nodes,
+                    &other.node_observed,
+                ) + differing_observed_mass_from_units(
+                    &edges,
+                    &edge_observed,
+                    &other.edges,
+                    &other.edge_observed,
+                );
                 if distance <= cut {
                     list.insert(position);
                 }
@@ -12980,6 +13076,121 @@ mod tests {
         assert_eq!(state.alternative, Some(1e-40));
         let p = state.p.expect("finite p");
         assert!((p - 1.0 / (1.0 + 1e-40)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_observed_mass_arrays_match_the_hash_probe_walk() {
+        // THE ARRAY WALK'S EXACTNESS LEMMA (the residual fix's gate):
+        // `differing_observed_mass_from_units` must be the committed
+        // `differing_observed_mass` BIT FOR BIT on the same inputs,
+        // including the equal branch, whose product multiplies the unit
+        // observed mass by `delta` and not by `count` — the branch a
+        // stored product would break, and the branch most undecided
+        // ties sit on (near-identical shapes share most of their keys).
+        // The observed map carries hostile values (non-representable
+        // decimals, 1/3, a magnitude that annihilates small addends) so
+        // a reordered accumulation or a stored product would show up in
+        // the bits.
+        let mut observed: HashMap<u64, f64> = HashMap::new();
+        for key in 0..40u64 {
+            observed.insert(key, 0.1 * (key as f64 + 1.0) + key as f64 / 3.0);
+        }
+        observed.insert(9, 1e16);
+        observed.insert(17, 1.0 / 3.0);
+        let lookup = |key: u64| observed.get(&key).copied().unwrap_or(0.0);
+
+        // the plain lemma, hand-written: key 2 equal at DIFFERENT counts
+        // (the delta product), key 7 equal at equal counts (skipped),
+        // key 11 left-only and key 13 right-only (the two tails)
+        let left = vec![(2u64, 5u32), (7, 3), (11, 2)];
+        let right = vec![(2u64, 1u32), (7, 3), (13, 4)];
+        let left_observed: Vec<f64> = left.iter().map(|&(key, _)| lookup(key)).collect();
+        let right_observed: Vec<f64> =
+            right.iter().map(|&(key, _)| lookup(key)).collect();
+        let expected = differing_observed_mass(&left, &right, &lookup);
+        // (the accumulation is the committed one: observed(2) * delta,
+        // then the left tail, then the right tail — no term carries
+        // count 5 or count 1, which is what the equal branch forbids)
+        assert_eq!(expected, lookup(2) * 4.0 + lookup(11) * 2.0 + lookup(13) * 4.0);
+        assert_eq!(
+            differing_observed_mass_from_units(
+                &left,
+                &left_observed,
+                &right,
+                &right_observed,
+            )
+            .to_bits(),
+            expected.to_bits()
+        );
+
+        // the sweep: every branch fires, on both key lists, at every
+        // shape; the array walk's bits are the probe walk's bits
+        let mut seed = 0x0b5e_c0deu64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut equal_with_delta = 0usize;
+        let mut left_only = 0usize;
+        let mut right_only = 0usize;
+        for _ in 0..2000 {
+            let span = 1 + next() % 12;
+            let mut left: Vec<(u64, u32)> = Vec::new();
+            let mut right: Vec<(u64, u32)> = Vec::new();
+            for key in 0..span as u64 {
+                if next() % 4 != 0 {
+                    left.push((key * 3, 1 + next() % 4));
+                }
+                if next() % 4 != 0 {
+                    right.push((key * 3, 1 + next() % 4));
+                }
+            }
+            // (the branch census: the equal-branch delta product and both
+            // tails must actually occur, so the gate cannot pass vacuously)
+            let (mut i, mut j) = (0usize, 0usize);
+            while i < left.len() && j < right.len() {
+                match left[i].0.cmp(&right[j].0) {
+                    std::cmp::Ordering::Equal => {
+                        if left[i].1 != right[j].1 {
+                            equal_with_delta += 1;
+                        }
+                        i += 1;
+                        j += 1;
+                    }
+                    std::cmp::Ordering::Less => {
+                        left_only += 1;
+                        i += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        right_only += 1;
+                        j += 1;
+                    }
+                }
+            }
+            left_only += left.len() - i;
+            right_only += right.len() - j;
+            let left_observed: Vec<f64> =
+                left.iter().map(|&(key, _)| lookup(key)).collect();
+            let right_observed: Vec<f64> =
+                right.iter().map(|&(key, _)| lookup(key)).collect();
+            let expected = differing_observed_mass(&left, &right, &lookup);
+            let got = differing_observed_mass_from_units(
+                &left,
+                &left_observed,
+                &right,
+                &right_observed,
+            );
+            assert_eq!(
+                got.to_bits(),
+                expected.to_bits(),
+                "left {left:?} right {right:?}"
+            );
+        }
+        assert!(equal_with_delta > 100, "equal-branch deltas {equal_with_delta}");
+        assert!(left_only > 100, "left-only keys {left_only}");
+        assert!(right_only > 100, "right-only keys {right_only}");
     }
 
     #[test]
