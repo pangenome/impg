@@ -450,6 +450,7 @@ scripts/unit-redundancy/analyze.py         per-locus table       (~18 s)
 scripts/unit-redundancy/exactness.py       deep-locus arms       (~110 s)
 scripts/unit-redundancy/census.py          exhaustive 17 loci    (~28 s, 24 procs)
 scripts/unit-redundancy/mix_self_check.py  the mix(v,v)=v lemma  (~25 s)
+scripts/unit-redundancy/union_probe.py     sparse-skip inner length (~5 s)
 ```
 
 ```
@@ -465,10 +466,6 @@ python3 scripts/unit-redundancy/mix_self_check.py $ING
 
 The JSON receipts under `docs/syng-gmem-bwt/unit-redundancy/` are the
 outputs of exactly those commands.
-
-```
-scripts/unit-redundancy/union_probe.py     sparse-skip inner length (~5 s)
-```
 
 Walls above are wall-clock on `erikg`'s box with **other work running**
 (load average 15–18 on 256 cores; a `scatter_sort` and another `impg` were
