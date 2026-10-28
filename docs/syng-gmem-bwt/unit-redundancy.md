@@ -252,13 +252,15 @@ locus 15 = 54.2×, locus 14 = 52.0×, locus 16 = 23.4×, locus 5 = 17.2×.
 
 Two different questions, two different answers:
 
-* **Is it exact in real arithmetic?** Yes, by construction. The reduced
-  form sums the *same* real-valued addends
-  (`count[u] * mix(ll[f][u], ll[g][u])`, resp. `mass_g * mix(rep,rep)`
-  with `mass_g = Σ count`, exact in f64) and only one exactness lemma is
-  needed beyond that: `mix(v,v) = v` bit for bit, verified over all
-  24,392 distinct values in the file. No term is approximated, dropped,
-  or thresholded; no underflow/overflow shortcut is taken.
+* **Is it exact in real arithmetic?** Yes, by construction — nothing is
+  approximated. Every *dropped* addend is replaced by a real quantity
+  equal to it: a constant unit's per-pair term is `count[u]*mix(v,v)` and
+  `mix(v,v) = v` **bit for bit** (verified over all 24,392 distinct
+  values in the file: `exp(0)=1` and `ln(1)=+0.0` are exact, so
+  `m + 0.0 = m`), and a merged group's terms
+  `count1*x + count2*x + …` sum to `mass_g*x` with `mass_g = Σ count` an
+  exact f64 integer. No threshold, no underflow shortcut, no truncated
+  series; the sum's real value is unchanged.
 * **Is it bit-identical to the committed emission (⇒ same `calls.jsonl`
   bytes)?** **No.** The committed sum is a fixed left-to-right
   accumulation; the reduction is a different association of the same
