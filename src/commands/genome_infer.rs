@@ -2230,8 +2230,13 @@ pub fn run(command: Command) -> io::Result<()> {
             )?;
             std::fs::create_dir_all(&out_dir)?;
             let mut cut_receipts = Vec::new();
+            // The batch cut's manifest rows: the committed single cut,
+            // run per row after ONE panel load instead of N loads per
+            // territory (the ~190s global panel load is 51% of the map
+            // leg's wall).
+            let mut cut_specs: Vec<serde_json::Value> = Vec::new();
             for index in &selected {
-                let (chrom, start, end, name) = &bed_rows[*index];
+                let (_, _, _, name) = &bed_rows[*index];
                 let manifest: serde_json::Value =
                     genome::read_json(&partitions.join(name).join("partition.json"))?;
                 let cut_dir = out_dir.join(name);
@@ -2277,40 +2282,67 @@ pub fn run(command: Command) -> io::Result<()> {
                     std::borrow::Cow::Borrowed(manifest["syng"].as_str().ok_or_else(
                         || invalid("the partition manifest carries no syng"))?)
                 };
-                let mut command = std::process::Command::new(sample_projection_bin()?);
-                command
-                    .arg("cut")
-                    .arg("--global-panel").arg(&panel)
-                    .arg("--panel").arg(cut_panel.as_ref())
-                    .arg("--axis").arg(manifest["axis"].as_str().ok_or_else(
-                        || invalid("the partition manifest carries no axis"))?)
-                    .arg("--bed-directory").arg(manifest["beds"].as_str().ok_or_else(
-                        || invalid("the partition manifest carries no beds"))?)
-                    .arg("--component").arg(manifest["component"].as_str().ok_or_else(
-                        || invalid("the partition manifest carries no component"))?)
-                    .arg("--sources").arg(manifest["sources"].as_str().ok_or_else(
-                        || invalid("the partition manifest carries no sources"))?)
-                    .arg("--agc").arg(&agc)
-                    .arg("--shards-dir").arg(&shards_dir)
-                    .arg("--out-dir").arg(&cut_dir);
-                if local_derive {
-                    command.env("IMPG_CUT_LOCAL_DERIVE", "1");
-                }
-                let started = std::time::Instant::now();
-                let status = command
-                    .status()
-                    .map_err(|e| invalid(format!("the sample_projection helper failed to launch: {e}")))?;
-                ensure(
-                    status.success(),
-                    format!("the cut of partition {name} failed (status {status:?})"),
-                )?;
-                let seconds = started.elapsed().as_secs_f64();
+                cut_specs.push(serde_json::json!({
+                    "name": name,
+                    "panel": cut_panel.as_ref(),
+                    "axis": manifest["axis"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no axis"))?,
+                    "bed_directory": manifest["beds"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no beds"))?,
+                    "component": manifest["component"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no component"))?,
+                    "sources": manifest["sources"].as_str().ok_or_else(
+                        || invalid("the partition manifest carries no sources"))?,
+                    "out_dir": cut_dir,
+                }));
+            }
+            // ONE panel load for the whole batch (the committed single
+            // cut, run per manifest row): the frame and record-origin
+            // stay the helper's defaults, exactly as the per-territory
+            // exec above left them.
+            let batch_manifest = out_dir.join("cut-batch-seq.manifest.jsonl");
+            let mut batch_rows = String::new();
+            for row in &cut_specs {
+                batch_rows.push_str(&serde_json::to_string(row)?);
+                batch_rows.push('\n');
+            }
+            std::fs::write(&batch_manifest, batch_rows)?;
+            let mut command = std::process::Command::new(sample_projection_bin()?);
+            command
+                .arg("cut-batch-seq")
+                .arg("--global-panel").arg(&panel)
+                .arg("--agc").arg(&agc)
+                .arg("--shards-dir").arg(&shards_dir)
+                .arg("--manifest").arg(&batch_manifest);
+            if local_derive {
+                command.env("IMPG_CUT_LOCAL_DERIVE", "1");
+            }
+            let started = std::time::Instant::now();
+            let status = command
+                .status()
+                .map_err(|e| invalid(format!("the sample_projection helper failed to launch: {e}")))?;
+            ensure(
+                status.success(),
+                format!(
+                    "the map's batch cut of {} partitions failed (status {status:?})",
+                    cut_specs.len()
+                ),
+            )?;
+            let batch_seconds = started.elapsed().as_secs_f64();
+            println!(
+                "=== map: batch cut of {} partitions ({batch_seconds:.1}s, one panel load)",
+                cut_specs.len()
+            );
+            for index in &selected {
+                let (chrom, start, end, name) = &bed_rows[*index];
+                let cut_dir = out_dir.join(name);
                 let record = serde_json::json!({
                     "partition": name,
                     "chrom": chrom,
                     "start": start,
                     "end": end,
-                    "seconds": seconds,
+                    "seconds": batch_seconds,
+                    "wall_scope": "batch",
                     "census": genome::reconstruction::fingerprint(
                         &cut_dir.join("cut-census.jsonl"))?,
                     "cache": {
@@ -2318,7 +2350,7 @@ pub fn run(command: Command) -> io::Result<()> {
                         "bytes": std::fs::metadata(cut_dir.join("cut-cache.bin"))?.len(),
                     },
                 });
-                println!("=== map: partition {name} cut ({seconds:.1}s)");
+                println!("=== map: partition {name} cut (batch wall {batch_seconds:.1}s)");
                 cut_receipts.push(record);
             }
             let manifest = serde_json::json!({
