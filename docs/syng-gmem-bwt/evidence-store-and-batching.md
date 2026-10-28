@@ -425,3 +425,42 @@ is order-dependent: the same tree gives
 It passes in isolation. Every byte-identity claim in this document rests on
 `cargo test --release --lib`, so a flaky member means a real regression can
 hide in a green-looking run. Treat a single green run as insufficient.
+
+## 14. THE UNIT FOLD: A REAL 20.8x, BEHIND A FLAG, DECISION-NEUTRAL HERE
+
+`IMPG_UNIT_FOLD=1` (default OFF). Measured in the DEFAULT env, RAYON=12, T00048:
+
+| | before | after |
+|---|---:|---:|
+| locus 8 `classes` (unit sum) | 4.36 s | **0.21 s** (20.8x; 45,423 -> 842 unit terms) |
+| locus 2 structure + certificate | 35 units, 7,750 pairs, 46.5M | unchanged |
+| records differing in any non-float field | | **0 of 24** |
+| max relative float move | | **8.25e-8** (`best_log_likelihood`, `alternative_log_gap`, `qual_alternative_similarity`, `qual`) |
+| flag OFF | | `calls.jsonl` + sequences **BYTE-IDENTICAL** |
+
+The constant column's contribution is COLLAPSED TO ONE SCALAR, never dropped:
+`mix(c,c) = c` bit for bit, so it adds `count_total * c` to every class, and the
+reported class LL keeps carrying it. That is what keeps QUAL comparable.
+
+It is NOT bit-identical (fewer summation terms move the last digits) - an
+accuracy-bearing knob in this repo's sense, documented as one, default off.
+
+### 14.1 THE ENV DISCIPLINE LESSON (it nearly produced a false claim)
+
+The first measurement of this change also set `IMPG_CLASS_SCAN_MEMO=off`,
+`IMPG_CLASS_SCAN_ORDER=exact` and `IMPG_CLASS_SCAN_COMPARE=1`. Under those the
+locus-2 fold structure collapsed 275x (7,750 pairs -> 28), which looked like a
+property of the unit fold and was nothing of the kind. Re-derived under the
+default env, the structure is unchanged.
+
+RULE: state the full env with every measurement, and re-derive any number taken
+under a non-default env before reporting it.
+
+### 14.2 THE COMPONENT-ONLY CERTIFICATE STAYS REFUTED
+
+`IMPG_TIED_FOLD_FAST=1` with the same spectrum-shape cache: locus 2 cluster
+**264.64 s** against the default path's **13.30 s** - still 16x slower, and only
+~35 s of the original 299 s was the per-test construction. The component-only
+formulation is intrinsically slower here; the 46.5M-bit materialisation is the
+cheaper way to the same `k`. `calls.jsonl` is byte-identical either way, so the
+flag remains a valid - just slower - decision-identical alternative.
