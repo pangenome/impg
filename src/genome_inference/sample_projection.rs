@@ -2466,6 +2466,18 @@ fn run_cut(
     // no rewind). Measured on T00048: 18,932,413 packets / 845 MB fetched
     // against 46 GB decompressed, cut-census.jsonl AND cut-cache.bin
     // BYTE-IDENTICAL, 307 s against 637-670 s.
+
+    // IMPG_NODE_POSTINGS is a candidate supply for this store fetch, so on its
+    // own it would be a silent no-op: say so rather than pay for nothing.
+    if std::env::var("IMPG_NODE_POSTINGS").is_ok_and(|value| !value.is_empty())
+        && std::env::var("IMPG_EVIDENCE_STORE").is_err()
+    {
+        eprintln!(
+            "[node-postings] IMPG_NODE_POSTINGS is set but IMPG_EVIDENCE_STORE \
+             (with IMPG_PANEL_POSITIONS) is not: the postings filter the store's \
+             bucket fetch, so they are ignored"
+        );
+    }
     let evidence_packets: Option<Vec<Vec<u8>>> = match (
         std::env::var("IMPG_EVIDENCE_STORE").ok(),
         std::env::var("IMPG_PANEL_POSITIONS").ok(),
@@ -2479,7 +2491,50 @@ fn run_cut(
                 crate::genome_inference::evidence_store::EvidenceStore::open(&store_prefix)?;
             let (keys, unresolved) =
                 store.buckets_for_nodes(node_map.keys().copied(), &positions);
-            let packets = store.packets_for_buckets(&keys)?;
+            // THE NODE->READ POSTINGS AS THE CANDIDATE SUPPLY (env-gated,
+            // default OFF = the unfiltered bucket fetch). The buckets are
+            // locus-granular (~10 kb), so a territory's bucket set holds every
+            // read in the same locus, not only the reads whose walk touches a
+            // territory node: measured on T00048, 18,932,413 packets fetched
+            // for 276,042 kept reads. `<prefix>.n2r` says exactly which reads
+            // touch which nodes, so it can refuse the rest BEFORE they are
+            // decoded and re-derived — the fetch itself is unchanged (the
+            // bytes for a candidate read only exist inside its buckets).
+            let postings = std::env::var("IMPG_NODE_POSTINGS")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|prefix| {
+                    crate::genome_inference::node_postings::NodePostings::open(Path::new(
+                        &format!("{prefix}.n2r"),
+                    ))
+                })
+                .transpose()?;
+            let packets = match &postings {
+                Some(postings) => {
+                    let (incidences, candidates) = postings.mark(node_map.keys().copied());
+                    let (packets, filtered) =
+                        store.packets_for_buckets_filtered(&keys, |read| candidates.contains(read))?;
+                    eprintln!(
+                        "[node-postings] marked {incidences} incidences, {} candidate reads, \
+                         swept {} buckets avoided",
+                        candidates.ones(),
+                        // of the store's buckets, only the territory's own were
+                        // swept: the rest of the store is never opened
+                        store.bucket_count().saturating_sub(store.buckets_read as usize)
+                    );
+                    eprintln!(
+                        "[node-postings] filter: {} records examined, {} skipped, {} survived \
+                         ({} marked candidates, {} not in the fetched buckets)",
+                        filtered.records,
+                        filtered.skipped,
+                        filtered.kept,
+                        candidates.ones(),
+                        candidates.ones().saturating_sub(filtered.kept)
+                    );
+                    packets
+                }
+                None => store.packets_for_buckets(&keys)?,
+            };
             eprintln!(
                 "[cut] EVIDENCE STORE: {} nodes -> {} buckets (unresolved {}), \
                  {} packets fetched, {:.1} MB read, {:.1}s",

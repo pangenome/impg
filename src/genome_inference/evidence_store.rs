@@ -100,6 +100,18 @@ impl PanelPositions {
     }
 }
 
+/// What a candidate filter did, so a filtered fetch can be reported against
+/// the unfiltered one (the gate compares the two record counts).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FetchFilter {
+    /// Distinct records (read ordinals) in the fetched buckets.
+    pub records: u64,
+    /// Records the filter refused, not copied out.
+    pub skipped: u64,
+    /// Records that survived the filter.
+    pub kept: u64,
+}
+
 /// The sample's position-ordered read evidence.
 pub struct EvidenceStore {
     payload: File,
@@ -205,8 +217,27 @@ impl EvidenceStore {
     /// ordinal and sorted by it — so the scan sees the reads in their
     /// ARRIVAL order, which is what keeps its output byte-identical.
     pub fn packets_for_buckets(&mut self, keys: &[u64]) -> io::Result<Vec<Vec<u8>>> {
+        Ok(self.packets_for_buckets_filtered(keys, |_| true)?.0)
+    }
+
+    /// `packets_for_buckets` over the SAME bucket sweep and record loop, but a
+    /// record whose read ordinal the filter refuses is not copied out.
+    ///
+    /// The ordinal is the store's own arrival id: ONE counter per store
+    /// (`.evd` is written by the whole-sample builder, whose `read_id`
+    /// increments across every shard in order and whose manifest records the
+    /// total as `n_reads`), so a caller holding a set of read ids — a
+    /// node -> read postings artifact, say — can address these records
+    /// directly. A filter is a candidate supply only: the caller's own
+    /// per-read predicate still decides what is kept.
+    pub fn packets_for_buckets_filtered(
+        &mut self,
+        keys: &[u64],
+        mut keep: impl FnMut(u32) -> bool,
+    ) -> io::Result<(Vec<Vec<u8>>, FetchFilter)> {
         let mut seen: HashSet<u32> = HashSet::new();
         let mut packets: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut filter = FetchFilter::default();
         let mut buf = Vec::new();
         for &key in keys {
             let Ok(at) = self.table.binary_search_by_key(&key, |e| e.0) else {
@@ -235,14 +266,20 @@ impl EvidenceStore {
                     break;
                 }
                 if seen.insert(ordinal) {
-                    packets.push((ordinal, raw[p + 4..end].to_vec()));
+                    filter.records += 1;
+                    if keep(ordinal) {
+                        filter.kept += 1;
+                        packets.push((ordinal, raw[p + 4..end].to_vec()));
+                    } else {
+                        filter.skipped += 1;
+                    }
                 }
                 p = end;
             }
         }
         packets.sort_unstable_by_key(|p| p.0);
         self.fetched_packets += packets.len() as u64;
-        Ok(packets.into_iter().map(|(_, packet)| packet).collect())
+        Ok((packets.into_iter().map(|(_, packet)| packet).collect(), filter))
     }
 }
 

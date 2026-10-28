@@ -7,6 +7,7 @@ pub mod evidence_store;
 pub mod genotype;
 pub mod mem_records;
 pub mod joint;
+pub mod node_postings;
 pub mod observations;
 pub mod panel_routes;
 pub mod realign_score;
