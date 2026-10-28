@@ -380,3 +380,48 @@ staleness check on this path is:
 
 Rebuild `--bin impg` AND `--example sample_projection` before believing any
 cut-side measurement.
+
+## 13. THE DEGENERATE CERTIFICATE, THREE MEASURED CUTS
+
+`qual_certificate` at T00048 locus 2 (f=124 folds, 7,749 tied classes) was
+19.68 s. Its structure, measured rather than assumed:
+
+    60,052,001 pair tests
+    46,456,131  TRUE predicates, admitted by the O(1) upper bound  <- this IS the answer
+    13,592,xxx  needed the exact distance walk (1.45 us each)      <- 16.3 s of the 16.7
+    ...and the emitted predicate lists collapse to 9 distinct member sets
+       (6,786 + 582 + 232 + 116 + 14 + 10 + 5 + 3 + 1 = 7,749: a partition into cliques)
+
+| cut | mechanism | effect | identity |
+|---|---|---|---|
+| spectrum shape cache | build each entry's merged multisets once, index them | 19.80 -> 16.84 s (-15.0%) | byte-identical |
+| observed-mass arrays | cache `observed(key)` per entry; the walk multiplies | 16.67 -> 13.30 s (-20.2%) | byte-identical |
+| unit-column fold (flag) | drop constant ll columns, merge bit-identical ones | see section 4 | not bit-identical (1,362 ulp) |
+
+Cumulative: **19.68 -> 13.30 s (-32%)**, with `calls.jsonl`,
+`calls.jsonl.sequences.jsonl`, `cut-census.jsonl` and all four instrument
+receipt parts byte-identical at every step.
+
+### 13.1 THREE HYPOTHESES OF MINE DIED HERE - record them
+
+1. "423 ns/pair means the loop is 10-100x off; it must be allocation churn."
+   The cache removed only 0.22 us of the 1.45 us per test. The other ~1.2 us
+   was the walk itself (a HashMap probe per merged key), i.e. the WORK.
+2. "Caching the probes should be 2-4x." It was 20%.
+3. "The component-only path (`tie_cluster_fast`) is 20x slower because of a
+   different reason." It carried the SAME per-test construction defect as the
+   default path. The original 299 s negative was measured against the buggy
+   code and must not be treated as a property of the algorithm until the
+   cached variant is timed.
+
+### 13.2 A FLAKY TEST IN THE SUITE IS A GATE RISK
+
+`resolution::tests::abpoa_ordered_sequence_helper_preserves_exact_paths_in_header_order`
+is order-dependent: the same tree gives
+
+    run 1: 602 passed; 1 failed
+    run 2: 603 passed; 0 failed
+
+It passes in isolation. Every byte-identity claim in this document rests on
+`cargo test --release --lib`, so a flaky member means a real regression can
+hide in a green-looking run. Treat a single green run as insufficient.
