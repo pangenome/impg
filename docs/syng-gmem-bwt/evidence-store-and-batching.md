@@ -226,3 +226,49 @@ already brackets it) and keep the per-class sharing: a per-class *sorted
 band scan* that stops at the cut rather than materializing the set, or a
 bound-refined partition of the spectrum that lets one scan serve many
 classes.
+
+## 10. THE PER-LANE MEMORY: IT IS THE PANEL, NOT THE WORKING SET
+
+The lane ceiling (which sets the whole-genome wall) is per-lane RSS. Measured
+on one map leg, same territory, same box:
+
+| configuration | peak RSS |
+|---|---:|
+| the fleet parent holding the panel alone (the COW receipt) | **33.88 GB** |
+| map leg, shard scan (pre-store) | 36.40 GB |
+| map leg, evidence store, `IMPG_AGC_DECOMPRESSOR_SLOTS=1` | 39.70 GB |
+| map leg, evidence store, + `drop(agc)` at the frame setup's end + slot affinity | 39.30 GB |
+
+**The global panel is 86% of it.** Everything the cut and the census hold -
+the evidence packets, the packet arena, the territory index, `FileCut`, the
+census JSON, the local syng, `locus.fa` - is ~2-6 GB.
+
+A static audit had argued the dominant term was eight AGC decompressor
+copies (~30 GB at ~3.7 GB each, the pool's round-robin opening one per
+fetch). **The measurement refuses that**: forcing one slot changed the peak
+by nothing (39.70 GB), and slot affinity changed it by 0.4 GB (39.30 GB).
+The reason is visible in the numbers: the panel is already 33.88 GB, so a
+few decompressors cannot be 30 GB on top of it. The two fixes were kept -
+they are correct hygiene (one archive copy instead of up to eight; the AGC
+released after its last reader, which is what the compiler confirms) - but
+they are NOT the lever, and the dashboard above is why.
+
+**THE LEVER IS SHARING THE PANEL, NOT TRIMMING THE WORKING SET:**
+
+| lanes | panel paid privately (33.88 GB each) | panel shared (fork-COW) |
+|---:|---:|---:|
+| 16 | 542 GB - fits | 34 + 16x5.4 = 120 GB |
+| 28 | 949 GB - barely | 185 GB |
+| 64 | **2,168 GB - impossible** | **~380 GB - fits** |
+
+So "64 threads / ~5 hours" is reachable, but only as a **fork-COW map fleet**
+- one panel load, one child per territory, children inheriting the panel the
+way the call fleet already does (`fork-cut-call-batch-global`). Thread count
+per lane buys nothing: a map leg already saturates its cores (153 of 192
+when alone). The present `cut-batch-seq` amortizes the *load* by running
+territories serially inside one process; it does not add cross-territory
+parallelism, which is what a COW child-per-territory fleet would.
+
+The floor under all of this is the panel's own 32.36 GB of shared arenas
+(GBWT 12.87 + khash 4.31 + the mmap'd sidecars) plus a ~185 s load. Only an
+index-format change moves that.

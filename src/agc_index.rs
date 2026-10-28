@@ -271,8 +271,34 @@ impl AgcIndex {
     /// is bounded by the slot count no matter how many threads (rayon or
     /// scoped std::thread) ever touch the archive.
     fn decompressor_slot(&self) -> &Mutex<Option<Vec<Decompressor>>> {
-        let slot = self.next_slot.fetch_add(1, Ordering::Relaxed) % self.decompressor_slots.len();
-        &self.decompressor_slots[slot]
+        // SLOT AFFINITY BEFORE ROUND-ROBIN. A pure round-robin advances on
+        // every fetch, so a SERIAL caller (the cut's frame setup, one thread
+        // doing a handful of fetches) opens one archive copy per fetch: eight
+        // slots x ~3.7 GB = ~30 GB of decompressor state for work that needs
+        // ONE. Measured as the map leg's dominant memory term (85-90% of its
+        // 34.8 GB peak).
+        //
+        // So: prefer an already-open, unlocked slot; a new slot opens only
+        // when every open slot is busy, i.e. under real contention - which
+        // preserves the parallel behaviour the pool was built for. Any slot
+        // serves any fetch (decompressors are independent readers of
+        // immutable files), so this cannot change a byte; the pool doc's
+        // identity sweep covers a 24x range of slot counts for the same
+        // reason.
+        let count = self.decompressor_slots.len();
+        let start = self.next_slot.fetch_add(1, Ordering::Relaxed) % count;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let slot = &self.decompressor_slots[index];
+            if let Ok(guard) = slot.try_lock() {
+                let already_open = guard.is_some();
+                drop(guard);
+                if already_open {
+                    return slot;
+                }
+            }
+        }
+        &self.decompressor_slots[start]
     }
 
     /// Borrow an initialised decompressor set from the pool for the

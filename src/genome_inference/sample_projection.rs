@@ -2414,6 +2414,15 @@ fn run_cut(
             );
         }
     }
+    // DROP THE AGC HERE, not at the end of the function. Its last readers are
+    // the frame setup just above (the offset probe and the global_seq refetch
+    // in the local frame; `fetch_lane` in the global frame). Everything after
+    // this point reads `sources` and the evidence store, never the archive -
+    // and one AGC decompressor is ~3.7 GB of resident collection descriptors
+    // (measured: 3.70 GB/slot against the 3.30 GB archive), so holding it
+    // across the scan and the census peak was the map leg's dominant memory
+    // term, not the scan's own structures (~2-4 GB).
+    drop(agc);
     let load_seconds = load_started.elapsed().as_secs_f64();
 
     // The shard scan (parallel over files; deterministic merge order).
