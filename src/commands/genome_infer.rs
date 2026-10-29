@@ -2088,10 +2088,25 @@ pub fn run(command: Command) -> io::Result<()> {
                 manifest["agc"] = serde_json::json!(agc);
             }
             genome::write_json(&dir.join("partition.json"), &manifest)?;
+            // THE LEDGER WRITE IS A READ-MODIFY-WRITE UNDER CONCURRENCY. The
+            // campaign pools several PANEL-PREP lanes over one partitions.bed,
+            // and the naive form (read_to_string + push + write) has three
+            // failure modes, all three observed in one night:
+            //   lost update - two lanes read the same text and one rewrite
+            //     wins, so a territory's row disappears (a partition dir with
+            //     no BED row);
+            //   torn read - a reader sees a truncated file mid-write and
+            //     reports "invalid BED4 row N" (a row with an empty chrom);
+            //   ledger wipe - `unwrap_or_default()` turns a read ERROR into
+            //     "", and the rewrite then replaces every row with just this
+            //     one.
+            // So: exclusive flock on a sibling lock file across the whole
+            // read-modify-write, read errors PROPAGATED (NotFound is the only
+            // acceptable empty), and the new text installed by rename - atomic
+            // on one filesystem, so a concurrent reader sees the old file or
+            // the new one and never a partial one.
             let row = format!("{chrom}\t{start}\t{end}\t{name}\n");
-            let mut text = std::fs::read_to_string(&bed).unwrap_or_default();
-            text.push_str(&row);
-            std::fs::write(&bed, text)?;
+            append_partition_row(&bed, &row)?;
             bed_rows.push((chrom.clone(), start, end, name.clone()));
             let routes_manifest = std::path::Path::new(&routes).join("manifest.json");
             let receipt = serde_json::json!({
@@ -2776,6 +2791,53 @@ fn ensure(ok: bool, message: impl Into<String>) -> io::Result<()> {
 
 /// THE BED4 READER (the one partition artifact: chrom, start, end,
 /// PARTITION_NAME - each row a named reference range).
+/// Append one BED4 row under an exclusive advisory lock, atomically.
+///
+/// Several PANEL-PREP lanes write this ledger concurrently, so a bare
+/// read-modify-write loses rows (see the call site for the three observed
+/// failure modes). The lock is held across the whole read-modify-write, and
+/// the result is installed with `rename`, which is atomic on one filesystem:
+/// a concurrent reader sees either the old file or the new one, never a
+/// partially written one.
+///
+/// Errors are PROPAGATED: a read error must not be silently turned into an
+/// empty string, because the following rewrite would then erase every row.
+fn append_partition_row(bed: &Path, row: &str) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(bed.with_extension("bed.lock"))?;
+    // SAFETY: `lock` holds the descriptor for the whole call, and flock only
+    // inspects that descriptor.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut text = match std::fs::read_to_string(bed) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    text.push_str(row);
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let temp = bed.with_extension(format!("bed.tmp.{}.{}", std::process::id(), stamp));
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp, bed)?;
+    // the exclusive lock is released when `lock` drops here
+    Ok(())
+}
+
 fn read_partitions_bed(path: &Path) -> io::Result<Vec<(String, u64, u64, String)>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -3232,5 +3294,55 @@ mod tests {
         .expect("an explicit row parses");
         assert_eq!(explicit.read_lengths, vec![148, 250]);
         assert_eq!(explicit.record_origin, 1);
+    }
+
+    #[test]
+    fn concurrent_partition_row_appends_lose_nothing() {
+        // The campaign pools several PANEL-PREP lanes over one partitions.bed.
+        // Before the flock + rename form this test loses rows (and can leave a
+        // torn file): it is the regression guard for that race, which was
+        // observed live as a partition directory with no BED row and as an
+        // "invalid BED4 row" from a concurrent reader.
+        let dir = std::env::temp_dir().join(format!(
+            "impg-bed-append-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bed = dir.join("partitions.bed");
+        const WRITERS: usize = 8;
+        const PER_WRITER: usize = 12;
+        let mut handles = Vec::new();
+        for writer in 0..WRITERS {
+            let bed = bed.clone();
+            handles.push(std::thread::spawn(move || {
+                for index in 0..PER_WRITER {
+                    let row = format!("chr{}	{}	{}	T{}_{}\n", writer, index, index + 1, writer, index);
+                    append_partition_row(&bed, &row).expect("append must succeed");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&bed).unwrap();
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            rows.len(),
+            WRITERS * PER_WRITER,
+            "every appended row must survive; a lost update means the lock is broken"
+        );
+        for row in &rows {
+            assert_eq!(
+                row.split('\t').count(),
+                4,
+                "no partially written row may be visible: {row:?}"
+            );
+            assert!(!row.starts_with('\t'), "a torn row has an empty chrom: {row:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
