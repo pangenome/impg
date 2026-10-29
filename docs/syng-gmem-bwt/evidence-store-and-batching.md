@@ -529,3 +529,26 @@ when measuring the map leg.
    0 even when current, because the linker strips the cut from the parent.
 7. **A number produced under a non-default env gets re-derived under the
    default before it is reported.**
+
+## 16. THE CERTIFICATE PLATEAU, FINAL: five attempts, all measured
+
+| attempt | result | identity | shipped |
+|---|---|---|---|
+| spectrum shape cache | 19.80 -> 16.84 s (-15.0%) | byte-identical | yes |
+| observed-mass arrays (no per-key probe) | 16.67 -> 13.30 s (-20.2%) | byte-identical | yes |
+| component-only formulation (`IMPG_TIED_FOLD_FAST`) | 264.64 s (16x SLOWER) | byte-identical k | no (flag stays off) |
+| signature-keyed dedupe | 60.0M -> 28.7M walks (2.09x) but NOT exact for 351 groups | not exact | no |
+| identical-tail skipping (per-shape digest) | 16.35 -> 15.68 s spectrum, 16.34 -> 15.67 s certificate (-4%) | byte-identical | no |
+
+The tail-skip is the interesting negative: the idea (skip a bit-identical
+aligned block, contribution provably +0.0) is sound, and its author correctly
+rejected FIXED blocks - an insertion/deletion shifts the offsets permanently and
+resyncing costs a rolling digest per key, the same order as walking it - and
+skipped the identical REMAINING TAIL instead. It fires rarely: the compared
+shapes rarely share an identical tail at the same index. 335 lines for -4% is
+not a trade; recorded and not merged.
+
+**So `qual_certificate` at T00048 locus 2 is ~13.3 s (with the shipped cuts) and
+that is its exact floor.** 60.0M pair tests, 46.5M of them TRUE predicates (the
+answer itself), 13.6M boundary walks over 52.7 B key visits per territory. The
+remaining levers there are accuracy trades, not optimisations.
