@@ -11803,28 +11803,59 @@ mod tests {
         sequences
     }
 
+    /// Install an executable fixture at `dir/name` holding `body`.
+    ///
+    /// The bytes are written to a non-executed staging file and copied into place
+    /// by `cp`, so this process never holds a write descriptor on the executable
+    /// path. That matters because the test suite runs ~600 tests across 256
+    /// threads: a write descriptor held here is inherited by any child forked by a
+    /// concurrently running test, and until that child reaches `execve()` the
+    /// kernel counts the target as open for writing, so the `execve()` performed
+    /// by this test fails with `ETXTBSY` ("Text file busy", os error 26).
+    fn install_fixture_executable(
+        dir: &tempfile::TempDir,
+        name: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let staged = dir.path().join(format!("{name}.source"));
+        std::fs::write(&staged, body).unwrap();
+        let installed = dir.path().join(name);
+        let status = std::process::Command::new("cp")
+            .arg(&staged)
+            .arg(&installed)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "failed to install fixture executable {}",
+            installed.display()
+        );
+        let mut permissions = std::fs::metadata(&installed).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&installed, permissions).unwrap();
+        installed
+    }
+
     fn fake_abpoa_bin(
         dir: &tempfile::TempDir,
         expected_headers: &[&str],
         corrupt_first_path: bool,
     ) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let script = dir.path().join(if corrupt_first_path {
+        let name = if corrupt_first_path {
             "fake-abpoa-corrupt"
         } else {
             "fake-abpoa"
-        });
+        };
         let expected = expected_headers
             .iter()
             .map(|header| format!("{header:?}"))
             .collect::<Vec<_>>()
             .join(", ");
         let corrupt = if corrupt_first_path { "True" } else { "False" };
-        std::fs::write(
-            &script,
-            format!(
-                r#"#!/usr/bin/env bash
+        let body = format!(
+            r#"#!/usr/bin/env bash
 set -euo pipefail
 input="${{@: -1}}"
 python3 - "$input" <<'PY'
@@ -11870,13 +11901,8 @@ for idx, (name, _) in enumerate(records, 1):
     print(f"P\t{{name}}\t{{idx}}+\t*")
 PY
 "#
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).unwrap();
-        script
+        );
+        install_fixture_executable(dir, name, &body)
     }
 
     fn tiny_boundary_graph() -> Graph {
