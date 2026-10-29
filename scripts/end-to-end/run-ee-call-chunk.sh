@@ -76,7 +76,7 @@ if [ "${#TS[@]}" -eq 0 ]; then
     rm -f "$EE/prep/$T/locus.fa" "$EE/prep/$T/locus.fa.fai" "$EE/prep/$T/extract.raw.fa" \
           "$EE/prep/$T"/locus-pos64.syng* "$EE/prep/$T/export-walks.jsonl" "$EE/prep/$T/walk-requests.tsv" 2>/dev/null
     rm -rf "$EE/prep/$T/partition-w10k-d1k" "$EE/prep/$T/export-graphs" \
-           "$EE/prep/$T/locality-graphs" "$EE/map/$T" "$EE/reads/$T.fq.gz" 2>/dev/null
+           "$EE/map/$T" "$EE/reads/$T.fq.gz" 2>/dev/null
   done
   touch "$L/call.done"
   echo "$(ee_now) chunk $CID COMPLETE: 0 callable, ${POISONED} fail-closed poison members named and reaped" >> "$RCP"
@@ -203,28 +203,43 @@ OUT=$OUT_SAVE
 
 # ---- THE JIT REAPER (the stream law: transients reaped in-pass at
 # the leg's completion; the answers + receipts are the keep set) ----
+# THE PANEL-PREP ASSET IS NOT A TRANSIENT (work/panel-asset-durable):
+# prep/<T>/locality-graphs is kept, in all three reap sites of this
+# script. It is ONE-TIME per-panel work, and reaping it made every
+# later sample pay for it again. Evidence: with the asset present,
+# panel-prep returns in 0.02s printing "REUSED (built once per panel)"
+# (genome_infer.rs: a format-/2 manifest short-circuits to Ok(())); the
+# rebuild it replaces costs 338s of near-serial CPU (121 real
+# invocations: mean wall 338.0s vs cpu 335.1s, cpu/wall 0.986). What
+# keeping it costs: 137.5 MiB mean per territory (n=159 complete
+# assets; p50 128.0, p90 155.0, max 370.0 MiB) = ~731-785 GiB at the
+# full 5,844-territory universe against ~1.1 TB free - so it pays for
+# itself after ONE sample. The call leg is unaffected either way: the
+# serve is content-keyed and falls back to the live path LOUDLY on any
+# mismatch (realign_score.rs), and the serve changes no emitted byte.
 freed=$(du -sBG "$ROOT" "$EE/reads/chunk-$CID.fq.gz" 2>/dev/null | awk '{s+=$1} END{print s+0}')
 rm -rf "$ROOT" "$EE/reads/chunk-$CID.fq.gz"
 for T in "${TS[@]}"; do
   [ -f "$EE/ledger/$T/call.done" ] || continue
   p=$EE/prep/$T
-  # the substrate + the precompute asset (the named exception's own
-  # reap condition: the territory's call is complete)
+  # the substrate (the territory's call is complete; its precompute
+  # asset is the kept one-time class named above)
   rm -rf "$p/locus.fa" "$p/extract.raw.fa" "$p"/locus-pos64.syng* \
         "$p/partition-w10k-d1k" "$p/export-graphs" "$p/export-walks.jsonl" \
-        "$p/walk-requests.tsv" "$p/locality-graphs" 2>/dev/null
+        "$p/walk-requests.tsv" 2>/dev/null
   rm -rf "$EE/map/$T" "$EE/reads/$T.fq.gz" "$OUT/$T-cut" 2>/dev/null
 done
 # THE POISON MEMBERS' OWN REAP (the fail-closed doctrine at chunk
 # shape): a named poison member's call will never run - its
-# transients (the substrate smalls' heavy pieces + the precompute
-# asset + any partial map root) are the reaped class here, at the
-# chunk's close; the per-step receipts + ledger markers are kept
+# transients (the substrate smalls' heavy pieces + any partial map
+# root) are the reaped class here, at the chunk's close; the per-step
+# receipts + ledger markers are kept, and so is the precompute asset
+# (the kept one-time class named at the JIT reaper above)
 for T in "${POISON[@]}"; do
   rm -f "$EE/prep/$T/locus.fa" "$EE/prep/$T/locus.fa.fai" "$EE/prep/$T/extract.raw.fa" \
         "$EE/prep/$T"/locus-pos64.syng* "$EE/prep/$T/export-walks.jsonl" "$EE/prep/$T/walk-requests.tsv" 2>/dev/null
   rm -rf "$EE/prep/$T/partition-w10k-d1k" "$EE/prep/$T/export-graphs" \
-         "$EE/prep/$T/locality-graphs" "$EE/map/$T" "$EE/reads/$T.fq.gz" 2>/dev/null
+         "$EE/map/$T" "$EE/reads/$T.fq.gz" 2>/dev/null
 done
 touch "$L/call.done"
 echo "$(ee_now) chunk $CID COMPLETE: ${#TS[@]} territories, wall ${wall}s; reaped ~${freed}G of transients (answers + receipts kept${POISONED:+, ${POISONED} poison members named and reaped})" >> "$RCP"
