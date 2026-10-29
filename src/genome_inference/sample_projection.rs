@@ -4608,6 +4608,24 @@ fn run_cut_call_batch_global(
     );
     let calls_started = Instant::now();
     let shared_panel: &SyngIndex = &global;
+    // THE CHUNK-INVARIANT CALL INPUTS, derived ONCE for every territory
+    // of this process (the panel's content identity, the routes
+    // graph+sources, the name maps — the same values each territory
+    // would have derived for itself).
+    let inputs_started = Instant::now();
+    let mut inputs_laps = realign_score::InputsLaps::start();
+    let shared_inputs = realign_score::ScoreInputsShared::load(
+        shared_panel,
+        global_panel_prefix,
+        routes_dir,
+        &mut inputs_laps,
+    )?;
+    inputs_laps.emit(inputs_started.elapsed().as_secs_f64());
+    eprintln!(
+        "[cut-call-batch-global] chunk-invariant call inputs derived once in {:.1}s, shared by {} territories",
+        inputs_started.elapsed().as_secs_f64(),
+        call_rows.len(),
+    );
     // The committed combined-process form: the UNPRUNED census view
     // (its receipts are byte-frozen; the product default is the
     // product call path's own statement).
@@ -4620,6 +4638,7 @@ fn run_cut_call_batch_global(
         load_seconds,
         "cut-call-batch-global",
         false,
+        &shared_inputs,
     );
     eprintln!(
         "[cut-call-batch-global] call phase done in {:.0}s ({} concurrent)",
@@ -4638,17 +4657,19 @@ fn run_cut_call_batch_global(
 /// calls run CONCURRENTLY — one scoped thread per call row (the
 /// manifest's own width, never tuned). The shared state is read-only
 /// by construction (the loaded panel, the routes dir, the per-call
-/// options; every mutable thing a call touches is its own: its out
-/// dir, its LaneCache, its Sources handles, its receipt buffers), and
-/// the ONE mutable process-global the call path held (the read
-/// length) is PER-CALL state — so each call sees exactly the
-/// committed fresh-process trajectory at any concurrency; the
-/// outputs are the committed machinery's own, byte-identical by the
-/// thread-schedule-invariance every gate has proven. Error
-/// discipline: the serial form failed at the first failing row; this
-/// form returns the FIRST error in ROW ORDER (no failure is
-/// swallowed). (THE SS10.6.4 cheapest-named step, landed with the
-/// combined process; extracted verbatim for the fork form.)
+/// options, the chunk-invariant score inputs; every mutable thing a
+/// call touches is its own: its out dir, its receipt buffers — and the
+/// chunk-invariant `ScoreInputsShared` it captures holds only values
+/// derived once, the same values every territory's own derivation
+/// produced), and the ONE mutable process-global the call path held
+/// (the read length) is PER-CALL state — so each call sees exactly the
+/// committed fresh-process trajectory at any concurrency; the outputs
+/// are the committed machinery's own, byte-identical by the
+/// thread-schedule-invariance every gate has proven. Error discipline:
+/// the serial form failed at the first failing row; this form returns
+/// the FIRST error in ROW ORDER (no failure is swallowed). (THE
+/// SS10.6.4 cheapest-named step, landed with the combined process;
+/// extracted verbatim for the fork form.)
 fn run_combined_call_rows(
     shared_panel: &SyngIndex,
     global_panel_prefix: &str,
@@ -4658,6 +4679,7 @@ fn run_combined_call_rows(
     load_seconds: f64,
     tag: &str,
     far_bin_prune: bool,
+    shared_inputs: &realign_score::ScoreInputsShared,
 ) -> Vec<io::Result<()>> {
     // THE MODEL LABEL states the effective census view exactly as the
     // call-diplotypes CLI does (the -farbin-prune suffix the committed
@@ -4713,7 +4735,11 @@ fn run_combined_call_rows(
                                 far_bin_prune,
                                 qv_biwfa: "genome/instrumented/qv-biwfa/target/release/qv-biwfa".into(),
                             };
-                            realign_score::run_injected(options, Some(shared_panel))?;
+                            realign_score::run_injected(
+                                options,
+                                Some(shared_panel),
+                                Some(shared_inputs),
+                            )?;
                             let calls = out_dir.join("calls.jsonl");
                             let sequences = out_dir.join("calls.jsonl.sequences.jsonl");
                             Ok(serde_json::json!({
@@ -5267,6 +5293,27 @@ pub fn fork_cut_call_batch_global_specs(
                             })
                             .collect();
                     if !call_rows.is_empty() {
+                        // THE CHUNK-INVARIANT CALL INPUTS, derived ONCE
+                        // per child process and shared by every territory
+                        // of the chunk (the panel's content identity, the
+                        // routes graph+sources, the name maps — the same
+                        // values each territory's own derivation produced;
+                        // the census, the locality partition maps and the
+                        // axis attribution stay per territory below).
+                        let inputs_started = Instant::now();
+                        let mut inputs_laps = realign_score::InputsLaps::start();
+                        let shared_inputs = realign_score::ScoreInputsShared::load(
+                            shared_panel,
+                            global_panel_prefix,
+                            routes_dir,
+                            &mut inputs_laps,
+                        )?;
+                        inputs_laps.emit(inputs_started.elapsed().as_secs_f64());
+                        eprintln!(
+                            "[fork-cut-call-batch-global] child chunk={chunk} chunk-invariant call inputs derived once in {:.1}s, shared by {} territories",
+                            inputs_started.elapsed().as_secs_f64(),
+                            call_rows.len(),
+                        );
                         let results = run_combined_call_rows(
                             shared_panel,
                             global_panel_prefix,
@@ -5276,6 +5323,7 @@ pub fn fork_cut_call_batch_global_specs(
                             load_seconds,
                             "fork-cut-call-batch-global",
                             far_bin_prune,
+                            &shared_inputs,
                         );
                         for result in results {
                             result?;

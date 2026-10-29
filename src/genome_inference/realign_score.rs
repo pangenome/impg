@@ -3141,7 +3141,7 @@ pub fn precompute_panel_loci(
         .collect();
     let lane_cache = LaneCache {
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
-        sources,
+        sources: std::sync::Arc::new(sources),
         whole_lane: !global_frame,
         seqs: (0..graph.lanes.len())
             .map(|_| std::sync::Mutex::new(None))
@@ -7210,7 +7210,11 @@ fn seam_map<T: Sync, R: Send>(
 // it end-to-end.
 // ---------------------------------------------------------------------------
 struct LaneCache {
-    sources: routes::Sources,
+    /// The route sources, shared with the chunk's other territories when
+    /// the caller derived them once per process (`ScoreInputsShared`):
+    /// `fetch` takes `&self` (its memo is a Mutex), so a shared fetch
+    /// returns the same bytes a private one would.
+    sources: std::sync::Arc<routes::Sources>,
     lane_lengths: Vec<u64>,
     whole_lane: bool,
     seqs: Vec<
@@ -7383,6 +7387,150 @@ impl LaneCache {
     }
 }
 
+/// THE INPUTS PHASE'S COMPONENT BREAKDOWN (IMPG_INPUTS_CENSUS=1,
+/// receipt-side, DEFAULT OFF): sequential laps over the call's inputs
+/// phase, emitted as one stderr line beside the phase's own total.
+/// THE SHAREABILITY AUDIT'S INSTRUMENT: the parts are timed one after
+/// another (never nested), so they sum to the phase total, and the
+/// line states WHICH part is a pure function of (panel, routes) —
+/// shareable by a whole chunk of territories — and which is
+/// inherently per-territory. Default off: `lap` returns before any
+/// Instant read, so no timing call executes and no receipt byte
+/// changes.
+pub struct InputsLaps {
+    enabled: bool,
+    started: Instant,
+    laps: Vec<(&'static str, f64)>,
+}
+impl InputsLaps {
+    pub fn start() -> Self {
+        InputsLaps {
+            enabled: std::env::var("IMPG_INPUTS_CENSUS").is_ok(),
+            started: Instant::now(),
+            laps: Vec::new(),
+        }
+    }
+    pub fn lap(&mut self, component: &'static str) {
+        if !self.enabled {
+            return;
+        }
+        self.laps.push((component, self.started.elapsed().as_secs_f64()));
+        self.started = Instant::now();
+    }
+    pub fn emit(&self, total_seconds: f64) {
+        if !self.enabled {
+            return;
+        }
+        let parts = self
+            .laps
+            .iter()
+            .map(|(component, seconds)| format!("{component} {seconds:.2}s"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("[score] inputs breakdown: {parts} [total {total_seconds:.1}s]");
+    }
+}
+
+/// THE CHUNK-INVARIANT SCORE INPUTS (the chunk's per-process derivation
+/// share): the call's inputs phase splits along one line — the half that
+/// is a pure function of (panel, routes) and the half that is the
+/// territory's own. The first half is the panel's content identity (an
+/// FNV over every sidecar: ~18.5GB of the HPRC panel), the routes graph,
+/// the opened route sources, and the panel/route name maps; the SAME
+/// values for every territory of a chunk, and a chunk runs its rows
+/// (width 32 at the product form) inside ONE child process. The second
+/// half — the territory's cut census, its locality partition maps, its
+/// region resolution, its axis-node attribution — differs per territory
+/// and stays where it is.
+///
+/// This struct is the first half, derived ONCE per process and captured
+/// by every territory's call: the same shape as the fork-COW panel share
+/// (`shared_panel` in the combined cut+call driver), where the chunk's
+/// territories hold a reference instead of re-deriving. BYTE-IDENTITY:
+/// every member is the value the per-territory derivation produced — the
+/// same files hashed, the same graph parsed, the same name maps built —
+/// and `sources` is shared behind an `Arc` because `Sources::fetch` takes
+/// `&self` (its memo is a Mutex): a concurrent second territory's fetch
+/// returns the same bytes as its own. No territory's product bit reads a
+/// value this share did not compute.
+pub struct ScoreInputsShared {
+    /// The (panel, routes) pair this context was derived from: a call
+    /// naming a different pair is refused loudly, never served another
+    /// panel's identity.
+    panel_prefix: String,
+    routes_dir: PathBuf,
+    identity: PanelIdentity,
+    graph: routes::Graph,
+    path_of_name: HashMap<String, usize>,
+    source_of_name: HashMap<String, usize>,
+    sources: std::sync::Arc<routes::Sources>,
+}
+
+impl ScoreInputsShared {
+    /// Derive the chunk-invariant half over the panel the caller already
+    /// holds loaded (the combined cut+call process's ONE panel load). The
+    /// identity-versus-routes check the per-territory path performs lives
+    /// here, once: it binds this panel to this routes inventory.
+    pub fn load(
+        panel: &SyngIndex,
+        panel_prefix: &str,
+        routes_dir: &Path,
+        laps: &mut InputsLaps,
+    ) -> io::Result<Self> {
+        let identity = PanelIdentity::read(panel_prefix)?;
+        laps.lap("panel-identity");
+        let graph: routes::Graph = read_json(&routes_dir.join("graph.json"))?;
+        if graph.panel != identity || !graph.generation_complete {
+            return Err(invalid("incompatible route inventory"));
+        }
+        laps.lap("routes-graph");
+        let lanes = graph
+            .lanes
+            .iter()
+            .map(|lane| (lane.name.clone(), lane.length))
+            .collect::<Vec<_>>();
+        let sources = routes::Sources::open(&graph.source_paths, lanes)?;
+        laps.lap("routes-sources");
+        let path_of_name: HashMap<String, usize> = panel
+            .name_map
+            .name_to_path
+            .iter()
+            .map(|(name, &path)| (name.clone(), path as usize))
+            .collect();
+        let source_of_name: HashMap<String, usize> = graph
+            .lanes
+            .iter()
+            .map(|lane| (lane.name.clone(), lane.id))
+            .collect();
+        laps.lap("name-maps");
+        Ok(ScoreInputsShared {
+            panel_prefix: panel_prefix.to_string(),
+            routes_dir: routes_dir.to_path_buf(),
+            identity,
+            graph,
+            path_of_name,
+            source_of_name,
+            sources: std::sync::Arc::new(sources),
+        })
+    }
+
+    /// The reuse gate: the shared inputs speak for exactly the (panel,
+    /// routes) pair this call names — the values are held, never
+    /// reinterpreted for another panel.
+    fn ensure_names(&self, panel_prefix: &str, routes_dir: &Path) -> io::Result<()> {
+        ensure(
+            self.panel_prefix == panel_prefix && self.routes_dir == routes_dir,
+            &format!(
+                "the shared score inputs were derived from panel {:?} + routes {}; this \
+                 call names panel {panel_prefix:?} + routes {}",
+                self.panel_prefix,
+                self.routes_dir.display(),
+                routes_dir.display(),
+            ),
+        )
+    }
+}
+
 /// THE INJECTED-INDEX SEAM (the shared-index cut+call lever): `run` is
 /// the committed path — it loads the panel itself, exactly as before.
 /// `run_injected` runs the SAME machinery over a panel the caller
@@ -7394,9 +7542,18 @@ impl LaneCache {
 /// routes graph exactly as the loaded path does; a mismatched panel
 /// fails loudly at that check).
 pub fn run(options: Options) -> io::Result<()> {
-    run_injected(options, None)
+    run_injected(options, None, None)
 }
-pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io::Result<()> {
+/// `shared_inputs` is the chunk-invariant half of the inputs phase, when
+/// the caller (the combined cut+call driver) already derived it for this
+/// process: `Some(context)` reuses it, `None` derives it here — the same
+/// values either way (`ScoreInputsShared::ensure_names` binds the reuse
+/// to the (panel, routes) pair this call names).
+pub fn run_injected(
+    options: Options,
+    injected_panel: Option<&SyngIndex>,
+    shared_inputs: Option<&ScoreInputsShared>,
+) -> io::Result<()> {
     // (THE PER-CALL READ LENGTH — the concurrent-calls audit's
     // finding, the one mutable process-global the call path held:
     // every committed receipt's E is computed at the FRESH-PROCESS
@@ -7661,9 +7818,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // counters only, all emitted to stderr; no receipt field changes,
     // no behavior change.)
     let inputs_started = Instant::now();
+    let mut inputs_laps = InputsLaps::start();
     let fetch_calls = AtomicU64::new(0);
     let fetch_bytes = AtomicU64::new(0);
-    let identity = PanelIdentity::read(&options.panel)?;
     let loaded_panel;
     let panel: &SyngIndex = match injected_panel {
         Some(panel) => panel,
@@ -7672,28 +7829,28 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             &loaded_panel
         }
     };
+    inputs_laps.lap("panel-load");
+    // THE CHUNK-INVARIANT HALF (panel identity, routes graph, route
+    // sources, name maps): reused when this process already derived it
+    // for the chunk's other territories, derived here otherwise.
+    let derived_inputs;
+    let inputs: &ScoreInputsShared = match shared_inputs {
+        Some(shared) => {
+            shared.ensure_names(&options.panel, &options.routes)?;
+            inputs_laps.lap("shared-inputs-reused");
+            shared
+        }
+        None => {
+            derived_inputs =
+                ScoreInputsShared::load(panel, &options.panel, &options.routes, &mut inputs_laps)?;
+            &derived_inputs
+        }
+    };
+    let identity = &inputs.identity;
     let k = panel.syncmer_length_bp() as u64;
-    let graph: routes::Graph = read_json(&options.routes.join("graph.json"))?;
-    if graph.panel != identity || !graph.generation_complete {
-        return Err(invalid("incompatible route inventory"));
-    }
-    let lanes = graph
-        .lanes
-        .iter()
-        .map(|lane| (lane.name.clone(), lane.length))
-        .collect::<Vec<_>>();
-    let sources = routes::Sources::open(&graph.source_paths, lanes)?;
-    let path_of_name: HashMap<String, usize> = panel
-        .name_map
-        .name_to_path
-        .iter()
-        .map(|(name, &path)| (name.clone(), path as usize))
-        .collect();
-    let source_of_name: HashMap<&str, usize> = graph
-        .lanes
-        .iter()
-        .map(|lane| (lane.name.as_str(), lane.id))
-        .collect();
+    let sources = &inputs.sources;
+    let path_of_name = &inputs.path_of_name;
+    let source_of_name = &inputs.source_of_name;
     // (Phase 1, lever 2 — the call-bound fix: a per-lane in-memory
     // sequence cache over the route sources. Phase 0 measured the
     // binding verify loop at ~90%/93% of the whole instrument wall,
@@ -7725,9 +7882,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // whole-lane policy verbatim.)
     let lane_cache = LaneCache {
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
-        sources,
+        sources: std::sync::Arc::clone(sources),
         whole_lane: !options.global_frame,
-        seqs: (0..graph.lanes.len())
+        seqs: (0..inputs.graph.lanes.len())
             .map(|_| std::sync::Mutex::new(None))
             .collect(),
         loads: AtomicU64::new(0),
@@ -7735,6 +7892,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         nanos: AtomicU64::new(0),
         lane_trace: Default::default(),
     };
+    inputs_laps.lap("lane-cache-skeleton");
     let fetch_seq = |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
         let path_idx = *path_of_name
             .get(name)
@@ -7771,6 +7929,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             "census record ids are not dense",
         )?;
     }
+    inputs_laps.lap("census");
 
     // The partition graph maps; the AXIS ROWS (the component path's
     // own member rows) ranked by start map to the component's window
@@ -7906,6 +8065,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     for &locus in &loci {
         ensure((locus as usize) < n_windows, "locus outside the window span")?;
     }
+    inputs_laps.lap("maps-frame-loci");
     // (Stage 2, rule 8's EDGE REFINEMENT: the per-window axis-node
     // attribution, built ONCE per component from the panel's own
     // stored walks over every window's axis row. A fold's image
@@ -7940,6 +8100,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         } else {
             None
         };
+    inputs_laps.lap("axis-attribution");
     let inputs_seconds = inputs_started.elapsed().as_secs_f64();
     eprintln!(
         "[score] phase inputs: panel+routes+census+partition maps \
@@ -7947,6 +8108,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         census_records.len(),
         n_windows,
     );
+    inputs_laps.emit(inputs_seconds);
     rss.probe("inputs")?;
 
     // ------------------------------------- slice D gate 1: the frame audit
@@ -8258,7 +8420,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let routes_digest = routes_graph_digest(&options.routes.join("graph.json"))?;
         let attempt = (|| -> io::Result<()> {
             let keys = PanelPrecomputeKeys {
-                panel: identity.clone(),
+                panel: identity.to_owned(),
                 k,
                 component: panel_component.clone(),
                 frame: if options.global_frame {
@@ -15569,7 +15731,7 @@ mod tests {
         assert_eq!(&whole[20_000..], &sources.fetch(0, 25_000, 30_000).unwrap()[..]);
         let cache = LaneCache {
             lane_lengths: vec![len],
-            sources,
+            sources: std::sync::Arc::new(sources),
             whole_lane: false,
             seqs: vec![std::sync::Mutex::new(None)],
             loads: AtomicU64::new(0),
@@ -15607,11 +15769,13 @@ mod tests {
         // lane, every crop a slice of it.
         let whole_cache = LaneCache {
             lane_lengths: vec![len],
-            sources: routes::Sources::open(
-                &[fa.display().to_string()],
-                vec![("lane0".into(), len)],
-            )
-            .unwrap(),
+            sources: std::sync::Arc::new(
+                routes::Sources::open(
+                    &[fa.display().to_string()],
+                    vec![("lane0".into(), len)],
+                )
+                .unwrap(),
+            ),
             whole_lane: true,
             seqs: vec![std::sync::Mutex::new(None)],
             loads: AtomicU64::new(0),
