@@ -8,6 +8,7 @@ use crate::sample_mem_bwt::invalid;
 use crate::syng::{SyncmerParams, SyngIndex};
 use clap::{Args, Subcommand};
 use std::io;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
@@ -832,6 +833,51 @@ pub enum Command {
         #[arg(long)]
         out_dir: PathBuf,
     },
+    /// THE BATCHED PANEL-PREP (one global panel load, N territories) —
+    /// the `cut-batch-seq` pattern at the panel-prep step.
+    /// WHERE THE LOAD COSTS ANYTHING: in STEADY STATE it does not — an
+    /// already-prepped territory takes the per-locus reuse path in both
+    /// forms (~0.02s, nothing to batch). The multiplication is the
+    /// ONE-TIME BUILD of a panel's territory backlog: every
+    /// substrate-done-but-unprepped territory pays `SyngIndex::load` of
+    /// the same panel in its own process. Measured at
+    /// RAYON_NUM_THREADS=8 on three genuinely un-prepped territories
+    /// (T00643, T00645, T00648): the single form 271.25 / 271.77 /
+    /// 258.35s (801.37s total), this form 372.81s — one 189.4s load
+    /// plus 58.0 / 56.2 / 56.8s of per-territory work. The load is 71%
+    /// of a single-territory wall and is paid once per batch instead of
+    /// once per territory; per-territory cost becomes
+    /// load/B + ~57s for a batch of B. This form loads the panel ONCE
+    /// and then runs the committed single-territory panel-prep row for
+    /// every manifest line, so each territory's outputs are
+    /// byte-identical by construction (same function, same inputs):
+    /// verified on those three territories — partition.json identical
+    /// but for its out-dir spelling, all 74 window beds and all 12
+    /// precompute-asset files identical by sha256. Like the single form
+    /// it REUSES a whole-panel routes inventory and a current-format
+    /// per-locus precompute asset rather than rebuilding either.
+    PanelPrepBatch {
+        /// The JSONL manifest: one territory per line (name, chrom,
+        /// start, end, sources, component, axis, partition_graphs,
+        /// census, read_lengths, record_origin)
+        #[arg(long)]
+        manifest: PathBuf,
+        /// THE GLOBAL PANEL syng prefix (the ONE panel: loaded once for
+        /// the whole manifest instead of once per row)
+        #[arg(long)]
+        global_panel: String,
+        /// THE GLOBAL PANEL'S AGC (derive-routes' --sources input)
+        #[arg(long)]
+        global_agc: PathBuf,
+        /// The whole-panel routes inventory (built by the first row that
+        /// needs it, reused by every later one)
+        #[arg(long)]
+        global_routes: PathBuf,
+        /// The partitions root output directory (partitions.bed + <name>/):
+        /// the rows share it — one BED4 universe, one immutability check
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
     /// THE THREE-STEP UI - MAP (the owner's UI doctrine: map -> partition -> call): the
     /// SAMPLE-side step, run ONCE per sample: the projection. Cuts every (selected)
     /// partition's territory evidence out of the sample's projection - the per-partition
@@ -1118,6 +1164,7 @@ pub fn run(command: Command) -> io::Result<()> {
                 global_frame,
                 record_origin,
                 &out_dir,
+                None,
             )
         }
         Command::CallDiplotypes {
@@ -2083,124 +2130,72 @@ pub fn run(command: Command) -> io::Result<()> {
             global_routes,
             record_origin,
             out_dir,
-        } => {
-            // STEP 1's OWN TWO PIECES, IN SEQUENCE (the owner's 2-3
-            // step doctrine: ONE panel-prep step, once per panel,
-            // reusable forever):
-            // (1) THE WHOLE-PANEL ROUTES INVENTORY (derive-routes over
-            // the ONE global panel): built at the FIRST invocation,
-            // REUSED by every later one — an existing inventory is
-            // skipped, loudly (the routes inventory is a panel-side
-            // asset, never rebuilt per partition row).
-            if global_routes.join("manifest.json").is_file() {
-                println!(
-                    "=== panel-prep: the whole-panel routes inventory {} exists — REUSED \
-                     (built once per panel)",
-                    global_routes.display()
-                );
-            } else {
-                println!(
-                    "=== panel-prep: building the whole-panel routes inventory into {} \
-                     (derive-routes over the ONE global panel; the once-per-panel step)",
-                    global_routes.display()
-                );
-                let read_lengths = read_lengths
-                    .iter()
-                    .map(|l| l.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                run_self(&[
-                    "genome-infer",
-                    "derive-routes",
-                    "--panel",
-                    &global_panel,
-                    "--census",
-                    &census.display().to_string(),
-                    "--sources",
-                    &global_agc.display().to_string(),
-                    "--read-lengths",
-                    &read_lengths,
-                    "--out-dir",
-                    &global_routes.display().to_string(),
-                ])?;
-            }
-            // (2) THE PARTITION GLOBAL FORM (the BED4 row + the window
-            // beds + the registry): the committed PARTITION step's own
-            // machinery, verbatim, with the global pair + the panel
-            // AGC recorded so the CALL step needs no manual flags.
-            run(Command::Partition {
+        } => run_panel_prep_row(
+            // The single form loads the panel inside the precompute
+            // piece's own subprocess, exactly as it always did.
+            None,
+            &global_panel,
+            &global_agc,
+            &global_routes,
+            &out_dir,
+            PanelPrepRow {
                 name,
                 chrom,
                 start,
                 end,
                 sources,
-                component: component.clone(),
+                component,
                 axis,
-                partition_graphs: partition_graphs.clone(),
+                partition_graphs,
                 census,
                 read_lengths,
-                global_panel: Some(global_panel.clone()),
-                global_routes: Some(global_routes.clone()),
-                global_agc: Some(global_agc),
                 record_origin,
-                out_dir,
-            })?;
-            // (3) THE PANEL-SIDE PER-LOCUS PRECOMPUTE (SS10.6.23 slice 1
-            // + SS10.6.25 slice 2 — the Frontier-2 increment's own
-            // panel-prep pieces): the row context + the per-window fold
-            // groupings + the bind scaffolding, keyed on content into
-            // <partition-graphs>/panel-precompute-loci — the
-            // once-per-panel price the CALL step's serve amortizes to
-            // zero per sample. An asset of the CURRENT format is REUSED
-            // loudly (the routes-inventory precedent); a slice-1 /1
-            // asset is UPGRADED loudly (rebuilt with the
-            // bind-scaffolding section); the call falls back to the
-            // live path loudly on any content-key mismatch.
-            let precompute_dir = partition_graphs.join("panel-precompute-loci");
-            let precompute_format = std::fs::read_to_string(precompute_dir.join("manifest.json"))
-                .ok()
-                .and_then(|text| {
-                    serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
-                        .ok()
-                })
-                .map(|manifest| manifest.format_text());
-            if precompute_format.as_deref() == Some("impg-panel-precompute-loci/2") {
-                println!(
-                    "=== panel-prep: the per-locus precompute asset {} exists — REUSED \
-                     (built once per panel)",
-                    precompute_dir.display()
-                );
-            } else {
-                if precompute_format.is_some() {
-                    println!(
-                        "=== panel-prep: the existing asset {} is format {:?} (slice 1's) — \
-                         REBUILDING with the bind-scaffolding section",
-                        precompute_dir.display(),
-                        precompute_format.unwrap()
-                    );
-                } else {
-                    println!(
-                        "=== panel-prep: building the per-locus precompute asset into {} \
-                         (the row context + the fold layouts + the bind scaffolding; the \
-                         once-per-panel price)",
-                        precompute_dir.display()
-                    );
+            },
+        ),
+        Command::PanelPrepBatch {
+            manifest,
+            global_panel,
+            global_agc,
+            global_routes,
+            out_dir,
+        } => {
+            let mut rows: Vec<PanelPrepRow> = Vec::new();
+            for line in std::io::BufReader::new(std::fs::File::open(&manifest)?).lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
                 }
-                run_self(&[
-                    "genome-infer",
-                    "precompute-panel-loci",
-                    "--panel",
+                rows.push(serde_json::from_str(&line).map_err(|e| {
+                    invalid(format!(
+                        "panel-prep-batch manifest row parse in {}: {e}",
+                        manifest.display()
+                    ))
+                })?);
+            }
+            ensure(!rows.is_empty(), "empty panel-prep-batch manifest")?;
+            let started = std::time::Instant::now();
+            let panel = SyngIndex::load(&global_panel, SyncmerParams::default())?;
+            eprintln!(
+                "[panel-prep-batch] panel loaded once in {:.1}s; {} territories",
+                started.elapsed().as_secs_f64(),
+                rows.len()
+            );
+            for row in rows {
+                let one = std::time::Instant::now();
+                let name = row.name.clone();
+                run_panel_prep_row(
+                    Some(&panel),
                     &global_panel,
-                    "--routes",
-                    &global_routes.display().to_string(),
-                    "--partition-graphs",
-                    &partition_graphs.display().to_string(),
-                    "--component",
-                    &component,
-                    "--global-frame",
-                    "--record-origin",
-                    &record_origin.to_string(),
-                ])?;
+                    &global_agc,
+                    &global_routes,
+                    &out_dir,
+                    row,
+                )?;
+                eprintln!(
+                    "[panel-prep-batch] {} done in {:.1}s",
+                    name,
+                    one.elapsed().as_secs_f64()
+                );
             }
             Ok(())
         }
@@ -2888,6 +2883,208 @@ fn region_filter_range(region: Option<&str>) -> io::Result<Option<&str>> {
 /// Run this binary with the given subcommand args (the thin-wrapper
 /// composition: the committed commands, as they are, in-process
 /// semantics identical to typing them).
+/// ONE PANEL-PREP TERRITORY'S ROW: the per-territory half of the
+/// panel-prep step (name, range, substrate, component, axis, locality
+/// maps, census). The other half — the global panel, its AGC and the
+/// whole-panel routes inventory — is shared by every row of a batch and
+/// is the caller's. The single form builds one row from its flags;
+/// `panel-prep-batch` reads one row per manifest line, and BOTH call
+/// `run_panel_prep_row`, so the two forms cannot drift apart.
+#[derive(serde::Deserialize)]
+struct PanelPrepRow {
+    name: String,
+    chrom: String,
+    start: u64,
+    end: u64,
+    sources: PathBuf,
+    component: String,
+    axis: PathBuf,
+    partition_graphs: PathBuf,
+    census: PathBuf,
+    /// The routes inventory's read lengths. Default 148, the committed
+    /// default of the single form's flag.
+    #[serde(default = "panel_prep_default_read_lengths")]
+    read_lengths: Vec<u64>,
+    /// The content-origin convention the registry records. Default 0,
+    /// the single form's own default.
+    #[serde(default)]
+    record_origin: u64,
+}
+
+fn panel_prep_default_read_lengths() -> Vec<u64> {
+    vec![148]
+}
+
+/// ONE TERRITORY'S PANEL-PREP, the committed three pieces in sequence.
+/// THE COST CENTRE (measured: 271.6s for T00000 at RAYON_NUM_THREADS=8):
+/// piece (3) shells out to `genome-infer precompute-panel-loci`, whose
+/// `SyngIndex::load` of the ONE global panel costs 195.9s while the
+/// derivation behind it is 21.4s. That load is a pure function of the
+/// panel, so `panel` lets the batched form hand in the ONE load it
+/// already paid; `None` is the single form, whose precompute piece keeps
+/// its own subprocess and its own load, unchanged.
+/// THE REUSES this must not defeat (both stated, both loud): the
+/// whole-panel routes inventory is skipped when `global_routes`
+/// already carries a manifest.json, and the per-locus precompute asset
+/// is skipped when its manifest names the current format. A batch whose
+/// rows are already prepped therefore does no panel work at all beyond
+/// the one load.
+fn run_panel_prep_row(
+    panel: Option<&SyngIndex>,
+    global_panel: &str,
+    global_agc: &Path,
+    global_routes: &Path,
+    out_dir: &Path,
+    row: PanelPrepRow,
+) -> io::Result<()> {
+    let PanelPrepRow {
+        name,
+        chrom,
+        start,
+        end,
+        sources,
+        component,
+        axis,
+        partition_graphs,
+        census,
+        read_lengths,
+        record_origin,
+    } = row;
+    // STEP 1's OWN TWO PIECES, IN SEQUENCE (the owner's 2-3
+    // step doctrine: ONE panel-prep step, once per panel,
+    // reusable forever):
+    // (1) THE WHOLE-PANEL ROUTES INVENTORY (derive-routes over
+    // the ONE global panel): built at the FIRST invocation,
+    // REUSED by every later one — an existing inventory is
+    // skipped, loudly (the routes inventory is a panel-side
+    // asset, never rebuilt per partition row).
+    if global_routes.join("manifest.json").is_file() {
+        println!(
+            "=== panel-prep: the whole-panel routes inventory {} exists — REUSED \
+             (built once per panel)",
+            global_routes.display()
+        );
+    } else {
+        println!(
+            "=== panel-prep: building the whole-panel routes inventory into {} \
+             (derive-routes over the ONE global panel; the once-per-panel step)",
+            global_routes.display()
+        );
+        let read_lengths = read_lengths
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        run_self(&[
+            "genome-infer",
+            "derive-routes",
+            "--panel",
+            global_panel,
+            "--census",
+            &census.display().to_string(),
+            "--sources",
+            &global_agc.display().to_string(),
+            "--read-lengths",
+            &read_lengths,
+            "--out-dir",
+            &global_routes.display().to_string(),
+        ])?;
+    }
+    // (2) THE PARTITION GLOBAL FORM (the BED4 row + the window
+    // beds + the registry): the committed PARTITION step's own
+    // machinery, verbatim, with the global pair + the panel
+    // AGC recorded so the CALL step needs no manual flags.
+    run(Command::Partition {
+        name,
+        chrom,
+        start,
+        end,
+        sources,
+        component: component.clone(),
+        axis,
+        partition_graphs: partition_graphs.clone(),
+        census,
+        read_lengths,
+        global_panel: Some(global_panel.to_string()),
+        global_routes: Some(global_routes.to_path_buf()),
+        global_agc: Some(global_agc.to_path_buf()),
+        record_origin,
+        out_dir: out_dir.to_path_buf(),
+    })?;
+    // (3) THE PANEL-SIDE PER-LOCUS PRECOMPUTE (SS10.6.23 slice 1
+    // + SS10.6.25 slice 2 — the Frontier-2 increment's own
+    // panel-prep pieces): the row context + the per-window fold
+    // groupings + the bind scaffolding, keyed on content into
+    // <partition-graphs>/panel-precompute-loci — the
+    // once-per-panel price the CALL step's serve amortizes to
+    // zero per sample. An asset of the CURRENT format is REUSED
+    // loudly (the routes-inventory precedent); a slice-1 /1
+    // asset is UPGRADED loudly (rebuilt with the
+    // bind-scaffolding section); the call falls back to the
+    // live path loudly on any content-key mismatch.
+    let precompute_dir = partition_graphs.join("panel-precompute-loci");
+    let precompute_format = std::fs::read_to_string(precompute_dir.join("manifest.json"))
+        .ok()
+        .and_then(|text| {
+            serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text).ok()
+        })
+        .map(|manifest| manifest.format_text());
+    if precompute_format.as_deref() == Some("impg-panel-precompute-loci/2") {
+        println!(
+            "=== panel-prep: the per-locus precompute asset {} exists — REUSED \
+             (built once per panel)",
+            precompute_dir.display()
+        );
+    } else {
+        if let Some(format) = precompute_format {
+            println!(
+                "=== panel-prep: the existing asset {} is format {:?} (slice 1's) — \
+                 REBUILDING with the bind-scaffolding section",
+                precompute_dir.display(),
+                format
+            );
+        } else {
+            println!(
+                "=== panel-prep: building the per-locus precompute asset into {} \
+                 (the row context + the fold layouts + the bind scaffolding; the \
+                 once-per-panel price)",
+                precompute_dir.display()
+            );
+        }
+        match panel {
+            // The batched form's ONE load, handed to the SAME function
+            // the subprocess would have run — the same panel, the same
+            // arguments, so the same asset.
+            Some(panel) => genome::realign_score::precompute_panel_loci(
+                global_panel,
+                global_routes,
+                &partition_graphs,
+                &component,
+                true,
+                record_origin,
+                &precompute_dir,
+                Some(panel),
+            )?,
+            None => run_self(&[
+                "genome-infer",
+                "precompute-panel-loci",
+                "--panel",
+                global_panel,
+                "--routes",
+                &global_routes.display().to_string(),
+                "--partition-graphs",
+                &partition_graphs.display().to_string(),
+                "--component",
+                &component,
+                "--global-frame",
+                "--record-origin",
+                &record_origin.to_string(),
+            ])?,
+        }
+    }
+    Ok(())
+}
+
 fn run_self(args: &[&str]) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let status = std::process::Command::new(&exe)
@@ -3005,5 +3202,35 @@ mod tests {
             panic!("expected call-region");
         };
         assert!(far_bin_prune, "the default is ON");
+    }
+
+    #[test]
+    fn panel_prep_batch_row_defaults_are_the_single_forms_flag_defaults() {
+        // A manifest row that omits them must state the SAME panel-prep
+        // parameters the single form's flags default to -- read_lengths
+        // [148] (--read-lengths) and record_origin 0 (--record-origin) --
+        // or the batched form would silently precompute against a
+        // different parameter pair than the territory's single-form run.
+        let row: PanelPrepRow = serde_json::from_str(
+            r#"{"name":"T1","chrom":"chr1","start":0,"end":25000,
+                "sources":"locus.fa","component":"HG002#1#chr1:1-2",
+                "axis":"axis.json","partition_graphs":"maps",
+                "census":"census.jsonl"}"#,
+        )
+        .expect("a minimal row parses");
+        assert_eq!(row.name, "T1");
+        assert_eq!(row.read_lengths, vec![148]);
+        assert_eq!(row.record_origin, 0);
+
+        let explicit: PanelPrepRow = serde_json::from_str(
+            r#"{"name":"T1","chrom":"chr1","start":0,"end":25000,
+                "sources":"locus.fa","component":"HG002#1#chr1:1-2",
+                "axis":"axis.json","partition_graphs":"maps",
+                "census":"census.jsonl",
+                "read_lengths":[148,250],"record_origin":1}"#,
+        )
+        .expect("an explicit row parses");
+        assert_eq!(explicit.read_lengths, vec![148, 250]);
+        assert_eq!(explicit.record_origin, 1);
     }
 }

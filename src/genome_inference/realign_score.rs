@@ -3099,6 +3099,18 @@ impl PrecomputeServe {
 /// CONTENT, never filenames: the panel identity object, the maps
 /// digest, the routes digest, the component, the frame + origin, the
 /// stored-frame convention, k.
+/// THE PANEL INJECTION SEAM (the batched panel-prep's ONE load):
+/// `precompute_panel_loci` loads the global panel itself. That load is
+/// 189.4s at RAYON_NUM_THREADS=8 on the HPRC panel, against a
+/// per-territory precompute total of ~57s (row context ~16s, fold
+/// layouts ~0.2s, bind scaffolding ~4s, and the maps/frame/encode I/O
+/// the rest) — so 71% of a single-territory panel-prep wall is the
+/// panel, and the ONE-TIME backlog build pays it once per territory
+/// for the same panel. `injected_panel` lets a caller that already
+/// holds the SAME panel (`panel-prep-batch`'s one load, the
+/// `cut-batch-seq` pattern) hand it in instead of paying that load
+/// again. `None` is today's behaviour byte-for-byte: the load happens
+/// here, as it always did.
 pub fn precompute_panel_loci(
     panel_prefix: &str,
     routes_dir: &Path,
@@ -3107,6 +3119,7 @@ pub fn precompute_panel_loci(
     global_frame: bool,
     record_origin: u64,
     out_dir: &Path,
+    injected_panel: Option<&SyngIndex>,
 ) -> io::Result<()> {
     let started = Instant::now();
     ensure(
@@ -3114,7 +3127,14 @@ pub fn precompute_panel_loci(
         "--record-origin requires --global-frame (the committed local frame is closed)",
     )?;
     let identity = PanelIdentity::read(panel_prefix)?;
-    let panel = SyngIndex::load(panel_prefix, SyncmerParams::default())?;
+    let loaded_panel;
+    let panel = match injected_panel {
+        Some(panel) => panel,
+        None => {
+            loaded_panel = SyngIndex::load(panel_prefix, SyncmerParams::default())?;
+            &loaded_panel
+        }
+    };
     let k = panel.syncmer_length_bp() as u64;
     let graph_path = routes_dir.join("graph.json");
     let graph: routes::Graph = read_json(&graph_path)?;
