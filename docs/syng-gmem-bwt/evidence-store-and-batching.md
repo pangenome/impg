@@ -464,3 +464,68 @@ under a non-default env before reporting it.
 formulation is intrinsically slower here; the 46.5M-bit materialisation is the
 cheaper way to the same `k`. `calls.jsonl` is byte-identical either way, so the
 flag remains a valid - just slower - decision-identical alternative.
+
+## 15. THE PER-SAMPLE BUDGET, STAGE BY STAGE (the night's consolidated state)
+
+Everything below is measured on T00048/chunk-width, not extrapolated, except
+where marked "mean".
+
+| stage | campaign | now | what changed |
+|---|---:|---:|---|
+| P substrate (extract -> local syng -> beds -> walks -> locality maps) | 57 | **31** | mean; marker-gated per step. HEAVY TAIL: one territory spent 12+ min in `impg partition` |
+| PP panel-prep | 232 (per sample) | **0** | the per-locus precompute asset is REUSED in **0.02 s** when kept (measured) |
+| M map leg | ~650 | **56** | evidence store + node->read postings + one panel load per 32 territories (183 s load / 32 + 50 s cut) |
+| C call, at chunk width | ~70 | **49** | chunk-invariant inputs shared (54.6 s -> ~2.2 s/territory) + certificate -32% |
+| **per territory** | **~950** | **136** | **~7x** |
+
+    5,844 territories x 136 s:  13.8 h at 16 cores
+                               ~1.5 h on this box at full width
+
+### 15.1 THE DURABLE ASSET IS THE BIGGEST SINGLE WIN, AND DISK IS ITS BOUND
+
+`prep/<T>/locality-graphs/panel-precompute-loci` is the panel-side per-locus
+precompute asset: **136.9 MiB/territory measured (p50 127.1, p90 153.0,
+max 370.0)**, i.e. **781 GiB at full 5,844 coverage**. Keeping it turns the
+338 s near-serial panel-prep build (cpu/wall = 0.986 measured over 121 real
+invocations) from a PER-SAMPLE cost into a ONE-TIME one. It pays for itself
+after one sample.
+
+`run-ee-call-chunk.sh` deletes it (the workdir-budget law). The volume has
+1,063 GiB free and is 92% full, so full durable coverage fits only with a
+~280 GiB margin, and 700 GiB of budget caps coverage at ~34%. **This is a
+capacity decision, not a code one.**
+
+### 15.2 locus.fa IS REAPED, SO A LATER MAP LEG MUST RE-EXTRACT
+
+`run-ee-mapcut.sh:101` reaps `prep/<T>/locus.fa`. Consequence, observed live:
+re-running `infer map` for an already-mapped chunk fails with
+
+    ERROR impg] No such file or directory (os error 2)
+    the command ["syng", "-f", ".../prep/T00247/locus.fa", ...]
+
+A re-map needs the extract step cleared first (~6 s/territory). Budget it in
+any re-run recipe; and prefer chunks that are panel-prepped but NOT yet mapped
+when measuring the map leg.
+
+### 15.3 MEASUREMENT RULES EARNED THE HARD WAY TONIGHT
+
+1. **State the full env.** A subagent's well-meant `IMPG_CLASS_SCAN_MEMO=off`
+   changed a locus's fold structure 275x (7,750 pairs -> 28) and had nothing
+   to do with the change under test.
+2. **State the width.** A call leg measured at N=1 reports 320 s of cut that is
+   231 s for a whole 32-territory chunk. Measuring at the wrong width produced
+   a 457 h estimate for a 81 h job.
+3. **Never quote whole-run wall for a per-phase change.** One -3 s certificate
+   delta was reported as a 7% wall win because the run overlapped two others.
+   Quote the phase.
+4. **core-seconds at the default rayon pool are not work.** The map leg: 17,154
+   core-s at the default pool vs **381** at RAYON=12 - 45x the CPU for 1.37x
+   the *slower* wall.
+5. **A flaky suite member is a gate risk.** `abpoa_ordered_sequence_helper_*`
+   was ETXTBSY from an inherited write fd in a forked child; every byte-identity
+   claim in this work rests on that suite.
+6. **`impg infer map` execs `examples/sample_projection`.** Rebuilding `--bin
+   impg` measures a stale child, and `strings impg | grep <cut symbol>` returns
+   0 even when current, because the linker strips the cut from the parent.
+7. **A number produced under a non-default env gets re-derived under the
+   default before it is reported.**
