@@ -3163,8 +3163,8 @@ pub fn precompute_panel_loci(
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
         sources: std::sync::Arc::new(sources),
         whole_lane: !global_frame,
-        seqs: (0..graph.lanes.len())
-            .map(|_| std::sync::Mutex::new(None))
+        windows: (0..graph.lanes.len())
+            .map(|_| std::sync::Mutex::new(LaneWindows::default()))
             .collect(),
         loads: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
@@ -7206,9 +7206,8 @@ fn seam_map<T: Sync, R: Send>(
 // at module scope so the cache's own byte-identity contract is unit-tested
 // directly). The load policy: whole-lane (the committed per-territory frame
 // — the lanes are the locus.fa record slices) or span-scoped (the GLOBAL
-// frame — the lanes are whole panel paths, so the cache holds the touched
-// SPAN per lane, grown by union on demand; the derived bound is the crops
-// actually requested, never a constant).
+// frame — the lanes are whole panel paths, so the cache holds a BOUNDED SET
+// OF TOUCHED WINDOWS per lane, each covering crops actually requested).
 //
 // THE DELTA-EXTEND GROWTH RULE (the union-regrowth re-decompression fix):
 // on a miss the cached span is extended by ONLY the missing sub-ranges —
@@ -7228,7 +7227,107 @@ fn seam_map<T: Sync, R: Send>(
 // served crop is therefore a slice of the same Sources::fetch answer
 // covering it, and the outputs are invariant; the identity gate re-proves
 // it end-to-end.
+//
+// THE BOUNDED MULTI-WINDOW RULE (the union-hull fix). The correctness
+// invariant is only that SOME resident window cover the requested crop;
+// nothing requires one window to cover the gap between far-apart requests.
+// The union-growth form grew the lane's single span to
+// (min(lo, start), max(hi, end)) — the hull of EVERY request ever made on
+// the path — and delta-fetched the whole gap, so a lane whose requests sit
+// in a handful of disjoint local regions paid for the empty space between
+// them. The measured class (the 31-territory global-frame chunk, one lane
+// set = the whole panel): T00341's bind phase delta-fetched 28,667.6MB
+// through 5,912 lane loads for ~288MB of touched crop volume (100x) and
+// spent 524.1s in the phase, ~= the fetched bytes / 56MB/s. The policy now
+// keeps up to LANE_WINDOW_CAP windows per lane, most-recently-used first,
+// and serves each crop from whichever window covers it: a miss either
+// delta-extends the cheapest resident window whose gap to the request is
+// inside LANE_WINDOW_GAP_BYTES, or fetches the requested crop's aligned
+// span as a NEW window (evicting the least-recently-used above the cap).
+// The merge budget is what keeps the policy from degenerating into
+// per-crop fetching — a walking crop pattern inside one window's aligned
+// span costs no fetch at all, and the 4.13M crops of the T00341 class at
+// the AGC's ~0.4ms per-fetch floor would cost ~1,650s if every crop
+// fetched (3x the union hull's 524.1s). Every served crop is still a
+// slice of one Sources::fetch answer covering it (the same argument as
+// above, applied per window), so the served bytes are unchanged; the
+// identity gate re-proves it end-to-end.
 // ---------------------------------------------------------------------------
+
+/// THE MERGE BUDGET: the widest gap (in bytes) between a request and a
+/// resident window that still delta-extends that window instead of
+/// fetching the request as a new window. The bound's two ends are
+/// measured, not tuned: the AGC's per-fetch cost is a FIXED floor
+/// (~0.4ms — the segment's pack read + whole-pack zstd decompress + LZ
+/// prepare, paid EVERY fetch), so at the ~56MB/s decode rate one extra
+/// fetch buys only ~22KB of deltas; at the other end the per-lane request
+/// positions of the heavy territories form at most 4 clusters per lane at
+/// a 100KB gap threshold (~294MB footprint vs the ~288MB touched), and
+/// that cluster count is FLAT from 250KB to 1MB — so 1MB sits inside a
+/// plateau where bridging a gap costs no extra resident bytes, while the
+/// Mbp-scale gaps between clusters (the hull's 100x) stay unbridged.
+const LANE_WINDOW_GAP_BYTES: u64 = 1 << 20;
+
+/// THE RESIDENT WINDOW CAP per lane (LRU). The measured heavy-territory
+/// class is at most 4 clusters per lane, so 6 leaves headroom without
+/// letting the per-lane footprint drift above the touched volume.
+const LANE_WINDOW_CAP: usize = 6;
+
+/// ONE RESIDENT WINDOW: a contiguous [lo, hi) of the lane whose buffer is
+/// exactly fetch(lo, hi) by the delta-extend invariant.
+struct LaneWindow {
+    lo: u64,
+    hi: u64,
+    seq: std::sync::Arc<Vec<u8>>,
+}
+
+/// A LANE'S RESIDENT WINDOWS, most-recently-used first (the LRU order the
+/// cap evicts by).
+#[derive(Default)]
+struct LaneWindows {
+    windows: Vec<LaneWindow>,
+}
+impl LaneWindows {
+    /// The resident window covering [start, end), promoted to MRU; the
+    /// window's OWN lo is returned with it (the span-relative coordinates
+    /// the crop is sliced at).
+    fn covering(&mut self, start: u64, end: u64) -> Option<(u64, std::sync::Arc<Vec<u8>>)> {
+        let index = self
+            .windows
+            .iter()
+            .position(|window| window.lo <= start && end <= window.hi)?;
+        let window = self.windows.remove(index);
+        let answer = (window.lo, std::sync::Arc::clone(&window.seq));
+        self.windows.insert(0, window);
+        Some(answer)
+    }
+    /// The resident window to delta-extend for [start, end): the one whose
+    /// extension adds the fewest bytes, and only when that added volume
+    /// (the gap between it and the request) is inside the merge budget.
+    fn extendable(&self, start: u64, end: u64) -> Option<usize> {
+        let mut best: Option<(u64, usize)> = None;
+        for (index, window) in self.windows.iter().enumerate() {
+            let added = window.lo.saturating_sub(start) + end.saturating_sub(window.hi);
+            if added > LANE_WINDOW_GAP_BYTES {
+                continue;
+            }
+            if best.map_or(true, |(cheapest, _)| added < cheapest) {
+                best = Some((added, index));
+            }
+        }
+        best.map(|(_, index)| index)
+    }
+    /// Install a fetched window as MRU, retiring any resident window it
+    /// fully covers (that window's bytes are now a slice of this one) and
+    /// evicting the least-recently-used above the cap.
+    fn install(&mut self, lo: u64, hi: u64, seq: std::sync::Arc<Vec<u8>>) {
+        self.windows
+            .retain(|window| !(lo <= window.lo && window.hi <= hi));
+        self.windows.insert(0, LaneWindow { lo, hi, seq });
+        self.windows.truncate(LANE_WINDOW_CAP);
+    }
+}
+
 struct LaneCache {
     /// The route sources, shared with the chunk's other territories when
     /// the caller derived them once per process (`ScoreInputsShared`):
@@ -7237,18 +7336,18 @@ struct LaneCache {
     sources: std::sync::Arc<routes::Sources>,
     lane_lengths: Vec<u64>,
     whole_lane: bool,
-    seqs: Vec<
-        std::sync::Mutex<
-            Option<(u64, u64, std::sync::Arc<Vec<u8>>)>,
-        >,
-    >,
+    /// The per-lane window sets, one mutex per lane: the lane's loads are
+    /// serialized by construction (the caller's seam plan), and the window
+    /// set behind the lock is the whole span state.
+    windows: Vec<std::sync::Mutex<LaneWindows>>,
     loads: AtomicU64,
     bytes: AtomicU64,
     nanos: AtomicU64,
     /// THE PER-LOAD SEEK-PATTERN TRACE (SS10.6.13 duty 2's receipt
     /// instrument; default OFF — env IMPG_LANE_TRACE=<path> appends
     /// one JSONL line per REAL sources.fetch (the AGC seek): source,
-    /// the fetched range, the delta kind, and the fetch's own wall.
+    /// the fetched range, the kind (`initial` = a cold window fetch,
+    /// `left`/`right` = a delta extension), and the fetch's own wall.
     /// The bind seek-floor anatomy's measured half: the offline
     /// analysis classifies the loads (size histogram, per-lane run
     /// counts, adjacency) against the ~0.4ms per-fetch fixed floor
@@ -7286,17 +7385,17 @@ impl LaneCache {
     }
     fn lane(&self, source: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
         let started = Instant::now();
-        let mut slot = self.seqs[source].lock().unwrap();
-        if let Some((_, _, seq)) = slot.as_ref() {
-            return Ok(std::sync::Arc::clone(seq));
-        }
+        let mut slot = self.windows[source].lock().unwrap();
         let len = self.lane_lengths[source];
+        if let Some((_, seq)) = slot.covering(0, len) {
+            return Ok(seq);
+        }
         let seq = std::sync::Arc::new(self.sources.fetch(source, 0, len)?);
         self.loads.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(len, Ordering::Relaxed);
         self.nanos
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        *slot = Some((0, len, std::sync::Arc::clone(&seq)));
+        slot.install(0, len, std::sync::Arc::clone(&seq));
         Ok(seq)
     }
     fn span(
@@ -7305,23 +7404,25 @@ impl LaneCache {
         start: u64,
         end: u64,
     ) -> io::Result<(u64, std::sync::Arc<Vec<u8>>)> {
-        // The GLOBAL-frame policy: the cached span grows by union to
-        // cover the requested crop; a covering span serves the crop
-        // as a slice (the same bytes the direct fetch returns). The
-        // span's OWN [lo, hi) bounds are returned WITH it: the span is
-        // span-RELATIVE memory (a span grown from lo > 0 is not
-        // addressable by absolute path coordinates — the fetch below
-        // slices at (start - lo), and a covered crop equals the
-        // direct fetch exactly).
+        // The GLOBAL-frame policy: serve the crop from whichever resident
+        // window covers it (the same bytes the direct fetch returns); a
+        // miss extends ONE resident window by delta-fetch when the gap is
+        // inside the merge budget, else fetches the crop's own aligned
+        // span as a new window. The serving window's OWN [lo, hi) bounds
+        // are returned WITH it: the window is span-RELATIVE memory (one
+        // grown from lo > 0 is not addressable by absolute path
+        // coordinates — the fetch below slices at (start - lo), and a
+        // covered crop equals the direct fetch exactly).
         let started = Instant::now();
-        let mut slot = self.seqs[source].lock().unwrap();
+        let mut slot = self.windows[source].lock().unwrap();
         let len = self.lane_lengths[source];
-        if let Some((lo, hi, seq)) = slot.as_ref() {
-            if *lo <= start && end <= *hi {
-                return Ok((*lo, std::sync::Arc::clone(seq)));
-            }
-            let seq = std::sync::Arc::clone(seq);
-            let (new_lo, new_hi) = ((*lo).min(start), (*hi).max(end));
+        if let Some((lo, seq)) = slot.covering(start, end) {
+            return Ok((lo, seq));
+        }
+        if let Some(index) = slot.extendable(start, end) {
+            let window = slot.windows.remove(index);
+            let (lo, hi) = (window.lo, window.hi);
+            let (new_lo, new_hi) = (lo.min(start), hi.max(end));
             // SEGMENT-ALIGNED GROWTH (the seek-floor fix, SS10.6.13
             // duty 2): the AGC's per-fetch cost is a FIXED floor
             // (~0.4ms per touched segment at the panel AGC — the pack
@@ -7348,30 +7449,30 @@ impl LaneCache {
             // load count multiplies).
             let (alo, ahi) = self.sources.aligned_crop(source, new_lo, new_hi);
             let mut grown: Vec<u8> = Vec::with_capacity((ahi - alo) as usize);
-            if alo < *lo {
+            if alo < lo {
                 let fetch_started = Instant::now();
-                grown.extend_from_slice(&self.sources.fetch(source, alo, *lo)?);
+                grown.extend_from_slice(&self.sources.fetch(source, alo, lo)?);
                 let fetch_nanos = fetch_started.elapsed().as_nanos();
-                self.trace_load(source, alo, *lo, "left", fetch_nanos);
+                self.trace_load(source, alo, lo, "left", fetch_nanos);
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                self.bytes.fetch_add(*lo - alo, Ordering::Relaxed);
+                self.bytes.fetch_add(lo - alo, Ordering::Relaxed);
             }
-            grown.extend_from_slice(&seq[..]);
-            if ahi > *hi {
+            grown.extend_from_slice(&window.seq[..]);
+            if ahi > hi {
                 let fetch_started = Instant::now();
-                grown.extend_from_slice(&self.sources.fetch(source, *hi, ahi)?);
+                grown.extend_from_slice(&self.sources.fetch(source, hi, ahi)?);
                 let fetch_nanos = fetch_started.elapsed().as_nanos();
-                self.trace_load(source, *hi, ahi, "right", fetch_nanos);
+                self.trace_load(source, hi, ahi, "right", fetch_nanos);
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                self.bytes.fetch_add(ahi - *hi, Ordering::Relaxed);
+                self.bytes.fetch_add(ahi - hi, Ordering::Relaxed);
             }
             self.nanos
                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
             let grown = std::sync::Arc::new(grown);
-            *slot = Some((alo, ahi, std::sync::Arc::clone(&grown)));
+            slot.install(alo, ahi, std::sync::Arc::clone(&grown));
             return Ok((alo, grown));
         }
-        // (The initial fetch takes the same alignment: the first
+        // (A new window's fetch takes the same alignment: the first
         // request in a segment pays the segment's decompression once
         // and every later request inside it is a slice serve.)
         let (alo, ahi) = self.sources.aligned_crop(source, start, end.min(len));
@@ -7383,7 +7484,7 @@ impl LaneCache {
         self.bytes.fetch_add(ahi - alo, Ordering::Relaxed);
         self.nanos
             .fetch_add(fetch_nanos as u64, Ordering::Relaxed);
-        *slot = Some((alo, ahi, std::sync::Arc::clone(&seq)));
+        slot.install(alo, ahi, std::sync::Arc::clone(&seq));
         Ok((alo, seq))
     }
     fn fetch(&self, source: usize, start: u64, end: u64) -> io::Result<Vec<u8>> {
@@ -7897,15 +7998,16 @@ pub fn run_injected(
     // rows span hundreds of chromosome-scale lanes), so the whole-
     // lane policy would hold the panel in RAM per territory. The
     // span-scoped policy serves the same bytes from the touched
-    // SPAN per lane — the derived bound is the crops the call
-    // itself requests; the committed local frame keeps the
-    // whole-lane policy verbatim.)
+    // windows per lane — a bounded set, each window only as wide as
+    // the crops it serves plus the merge budget (LaneCache's own
+    // rule); the committed local frame keeps the whole-lane policy
+    // verbatim.)
     let lane_cache = LaneCache {
         lane_lengths: sources.lanes.iter().map(|&(_, len)| len).collect(),
         sources: std::sync::Arc::clone(sources),
         whole_lane: !options.global_frame,
-        seqs: (0..inputs.graph.lanes.len())
-            .map(|_| std::sync::Mutex::new(None))
+        windows: (0..inputs.graph.lanes.len())
+            .map(|_| std::sync::Mutex::new(LaneWindows::default()))
             .collect(),
         loads: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
@@ -15753,7 +15855,7 @@ mod tests {
             lane_lengths: vec![len],
             sources: std::sync::Arc::new(sources),
             whole_lane: false,
-            seqs: vec![std::sync::Mutex::new(None)],
+            windows: vec![std::sync::Mutex::new(LaneWindows::default())],
             loads: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             nanos: AtomicU64::new(0),
@@ -15797,7 +15899,7 @@ mod tests {
                 .unwrap(),
             ),
             whole_lane: true,
-            seqs: vec![std::sync::Mutex::new(None)],
+            windows: vec![std::sync::Mutex::new(LaneWindows::default())],
             loads: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             nanos: AtomicU64::new(0),
@@ -15809,6 +15911,124 @@ mod tests {
         );
         assert_eq!(whole_cache.loads.load(Ordering::Relaxed), 1);
         assert_eq!(whole_cache.bytes.load(Ordering::Relaxed), len);
+        let _ = std::fs::remove_file(&fa);
+        let _ = std::fs::remove_file(dir.join("lane.fa.fai"));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn lane_cache_bounded_windows_serve_direct_fetch_bytes_when_scattered() {
+        // THE BOUNDED MULTI-WINDOW CONTRACT, unit-proved: a scattered
+        // request pattern never grows one window across the gap
+        // between far-apart requests (the union-hull form's 100x
+        // volume), the resident set never exceeds LANE_WINDOW_CAP, a
+        // gap inside the merge budget still delta-extends (the
+        // per-fetch floor stays amortised), crops inside a resident
+        // window cost NO fetch (the property that makes per-crop
+        // fetching the wrong shape), and every served crop is
+        // byte-identical to a COLD direct fetch — including the crops
+        // of an evicted window, refetched after eviction.
+        let len = 16u64 << 20;
+        let seq: Vec<u8> = (0..len)
+            .map(|i| b"ACGT"[(i.wrapping_mul(2_654_435_761u64) % 4) as usize])
+            .collect();
+        let dir = std::env::temp_dir().join(format!(
+            "impg-lanecache-windows-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fa = dir.join("lane.fa");
+        {
+            use std::io::Write;
+            let mut out = std::fs::File::create(&fa).unwrap();
+            writeln!(out, ">lane0").unwrap();
+            for chunk in seq.chunks(60) {
+                out.write_all(chunk).unwrap();
+                out.write_all(b"\n").unwrap();
+            }
+        }
+        // The byte-identity oracle: a SEPARATE Sources instance, so every
+        // comparison below is against a cold direct fetch, never against
+        // a memo the cache itself filled.
+        let direct = routes::Sources::open(
+            &[fa.display().to_string()],
+            vec![("lane0".into(), len)],
+        )
+        .unwrap();
+        let cache = LaneCache {
+            lane_lengths: vec![len],
+            sources: std::sync::Arc::new(
+                routes::Sources::open(
+                    &[fa.display().to_string()],
+                    vec![("lane0".into(), len)],
+                )
+                .unwrap(),
+            ),
+            whole_lane: false,
+            windows: vec![std::sync::Mutex::new(LaneWindows::default())],
+            loads: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+            lane_trace: Default::default(),
+        };
+        // Every request: byte-identical to the cold direct fetch, and the
+        // resident set inside the cap afterwards. The resident count is
+        // returned so the eviction transitions are asserted exactly.
+        let request = |start: u64, end: u64| {
+            let served = cache.fetch(0, start, end).unwrap();
+            assert_eq!(
+                served,
+                direct.fetch(0, start, end).unwrap(),
+                "served crop {start}..{end} differs from the cold direct fetch"
+            );
+            let resident = cache.windows[0].lock().unwrap().windows.len();
+            assert!(
+                resident <= LANE_WINDOW_CAP,
+                "{resident} resident windows after {start}..{end} exceeds the cap"
+            );
+            resident
+        };
+        // (1) THE DENSE RUN: one wide request warms one window; a hundred
+        // walking crops inside it are slices, so the cache does NOT fetch
+        // per crop (the amortisation the merge budget exists to keep).
+        assert_eq!(request(1_000, 201_000), 1);
+        assert_eq!(cache.loads.load(Ordering::Relaxed), 1);
+        for step in 0..100u64 {
+            let start = 1_000 + 2_000 * step;
+            request(start, start + 1_500);
+        }
+        assert_eq!(
+            cache.loads.load(Ordering::Relaxed),
+            1,
+            "crops inside a resident window must not refetch"
+        );
+        // (2) THE SCATTER: seven requests 2MiB apart — each gap is far
+        // outside the merge budget, so each is a NEW window, the union
+        // hull is never built, and the cap starts evicting at the
+        // seventh resident window.
+        for step in 0..7u64 {
+            let start = 2_097_152 * (step + 1);
+            request(start, start + 2_000);
+        }
+        assert_eq!(cache.loads.load(Ordering::Relaxed), 8);
+        assert_eq!(cache.bytes.load(Ordering::Relaxed), 200_000 + 7 * 2_000);
+        // (3) THE EVICTED WINDOW'S CROPS STILL SERVE THE SAME BYTES: the
+        // dense window (least recently used two installs ago) is gone, so
+        // this is a cold refetch — and it must be byte-identical.
+        assert_eq!(request(1_000, 201_000), LANE_WINDOW_CAP);
+        assert_eq!(cache.loads.load(Ordering::Relaxed), 9);
+        // (4) THE MERGE BUDGET STILL AMORTISES: a request 98KB past a
+        // resident window's right edge extends it with ONE delta fetch of
+        // the gap — no new window, no re-decompression of the covered
+        // interior.
+        let bridged = 2_097_152 * 7;
+        assert_eq!(request(bridged + 98_000, bridged + 100_000), LANE_WINDOW_CAP);
+        assert_eq!(cache.loads.load(Ordering::Relaxed), 10);
+        // The fetch-volume receipt: the dense window (200_000), the seven
+        // scattered crops (7 x 2_000), the cold refetch (200_000), and
+        // the bridged gap ([the 14MiB window's end, +98KB) = 98_000) —
+        // NOT the union hull's 200_000 + (14MiB - 1_000) of gap.
+        assert_eq!(cache.bytes.load(Ordering::Relaxed), 512_000);
         let _ = std::fs::remove_file(&fa);
         let _ = std::fs::remove_file(dir.join("lane.fa.fai"));
         let _ = std::fs::remove_dir(&dir);
