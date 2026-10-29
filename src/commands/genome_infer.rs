@@ -2826,13 +2826,12 @@ fn select_partition_rows(
         return Ok((0..bed_rows.len()).collect());
     };
     if let Some(range) = region_filter_range(Some(region))? {
-        let (chrom, bounds) = range
-            .split_once(':')
-            .ok_or_else(|| invalid("the region must be chr:start-end: {region:?}"))?;
+        let bad_region = || invalid(&format!("the region must be chr:start-end: {region:?}"));
+        let (chrom, bounds) = range.split_once(':').ok_or_else(bad_region)?;
         let (lo, hi) = bounds
             .split_once('-')
             .and_then(|(s, e)| Some((s.parse::<u64>().ok()?, e.parse::<u64>().ok()?)))
-            .ok_or_else(|| invalid("the region must be chr:start-end: {region:?}"))?;
+            .ok_or_else(bad_region)?;
         let selected: Vec<usize> = bed_rows
             .iter()
             .enumerate()
@@ -2846,9 +2845,23 @@ fn select_partition_rows(
         return Ok(selected);
     }
     let names: Vec<&str> = region.split(',').map(|s| s.trim()).collect();
+    // NAME the absent partitions. A literal "{region:?}" here prints the
+    // braces (ensure takes impl Into<String>, so it compiles), and the
+    // failure it hides is usually a RACE: the PANEL-PREP step appends each
+    // territory's row to partitions.bed as it completes, so a map leg
+    // started while a panel-prep backlog is running can see a partition
+    // whose directory exists but whose BED row is not yet written.
+    let missing: Vec<&&str> = names
+        .iter()
+        .filter(|name| !bed_rows.iter().any(|row| row.3 == **name))
+        .collect();
     ensure(
-        names.iter().all(|name| bed_rows.iter().any(|row| row.3 == *name)),
-        "the region names {region:?} name partitions absent from the BED",
+        missing.is_empty(),
+        format!(
+            "the region names {missing:?} name partitions absent from the BED \
+             ({} rows present; a concurrent PANEL-PREP writes these rows)",
+            bed_rows.len()
+        ),
     )?;
     let selected: Vec<usize> = bed_rows
         .iter()

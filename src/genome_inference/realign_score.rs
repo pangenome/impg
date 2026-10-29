@@ -5044,7 +5044,7 @@ pub fn resolve_region_loci(
     let (lo, hi) = bounds.split_once('-').ok_or_else(invalid_region)?;
     let (lo, hi): (u64, u64) = (lo.parse().map_err(|_| invalid_region())?,
         hi.parse().map_err(|_| invalid_region())?);
-    ensure(lo < hi, "the region is empty: {region:?}")?;
+    ensure(lo < hi, &format!("the region is empty: {region:?}"))?;
     // the component's own path frame: its name ends chr:start-end
     let (name, interval) = component
         .rsplit_once(':')
