@@ -552,3 +552,47 @@ not a trade; recorded and not merged.
 that is its exact floor.** 60.0M pair tests, 46.5M of them TRUE predicates (the
 answer itself), 13.6M boundary walks over 52.7 B key visits per territory. The
 remaining levers there are accuracy trades, not optimisations.
+
+## 17. THE PANEL BUILD IS COMPLETE: 5,837 / 5,844 (99.88%)
+
+    BACKLOG EXIT after 69 iters: sub=5837 panelprep=5837 substrate_exit=7 pp_poison=0
+    ledger 5,837 dirs = 5,837 rows, 0 malformed
+    disk 785 GB used, 948 GB free (asset 129 MiB/territory)
+
+Every accepted territory now carries a durable per-territory assay asset, which
+turns panel-prep from 338 s of near-serial CPU per territory per sample into a
+0.02 s reuse. This is the one-time cost that makes a new sample cost hours
+instead of days.
+
+### 17.1 THE 7 MISSING TERRITORIES, BY CLASS
+
+| territories | exit | step | message | class |
+|---|---|---|---|---|
+| T00024, T00197 | 139 | syng build | SIGSEGV `addDirect` | the segfault with a 321 KB single-sequence repro (docs/syng-gmem-bwt/bug-syng-bwt-adddirect-segfault.md) |
+| T03256, T05878, T07076, T08109, T08629 | 255 | beds (`impg partition`) | `FATAL ERROR: shouldn't get here in rsFind` | a library-internal fatal in the range search on a large-member territory (T03256: 472 members, 118.7 Mb) |
+
+### 17.2 263 TERRITORIES RECOVERED FROM ONE BASE
+
+The build first lost 4.5% of the genome to a technicality: 263 members (across
+262 territories) have a contig whose last base is 1 bp short of the grid
+window's end, so `rv-extract.py`'s `assert len(seq) == e - s` aborted the whole
+territory. The assertion is RIGHT to care (a member shorter than its bed row
+would corrupt downstream coordinates); treating it as FATAL was the defect.
+
+Fix: clamp that member's own bed to the sequence actually extracted, so member
+and coordinates stay consistent, and record the trim in
+`prep/<T>/extract.trimmed.tsv`. A member that does not span the full window
+simply does not appear in windows beyond its end, which the partition beds
+already handle. Validated end-to-end on T07804 (substrate + panel-prep 293 s,
+asset built, 0 poison) before releasing the other 262; the 6 territories with a
+DIFFERENT extract error were left poisoned deliberately.
+
+### 17.3 THE CAMPAIGN-SCRIPT DEFECTS FOUND BY RUNNING IT AT SCALE
+
+1. `partitions.bed` read-modify-write under ~11 concurrent lanes: 5 of 264 rows
+   damaged (4 lost, 1 with an empty chrom) - projected ~111 territories silently
+   missing genome-wide. Fixed with flock + atomic rename (section 15).
+2. Stage P regenerates `prep/<T>/locus.fa` (171 MiB) per territory and only
+   stage M reaps it, so the backlog re-filled ~300 GiB per 1,750 territories -
+   twice - against a budget meant for the 129 MiB asset. The driver now reaps it
+   per wave.
