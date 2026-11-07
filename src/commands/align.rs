@@ -1107,6 +1107,12 @@ pub fn run_align(
         ));
     }
 
+    // Absolute paths: FastGA runs in the input's directory
+    let fasta_files = fasta_files
+        .iter()
+        .map(|f| std::path::absolute(f).map(|p| p.to_string_lossy().into_owned()))
+        .collect::<io::Result<Vec<_>>>()?;
+
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
 
