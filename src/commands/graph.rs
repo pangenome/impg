@@ -852,7 +852,10 @@ fn reverse_complement_bases(seq: &[u8]) -> Vec<u8> {
 /// Used by the pair selection path in `build_graph()`.
 fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!("Failed to open reader for '{}': {}", path.display(), e))
+    })?;
+    let reader = BufReader::new(reader);
     let mut sequences = Vec::new();
     let mut current_name = String::new();
     let mut current_seq = Vec::new();
