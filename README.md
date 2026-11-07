@@ -163,7 +163,7 @@ alignment needed.
 impg graph --sequence-files genomes.fa -g output.gfa -t 16
 
 # Partitioned mode for large inputs (aligns once, then builds per-window)
-impg graph --sequence-files genomes.fa -g output.gfa --gfa-engine pggb:10000
+impg graph --sequence-files genomes.fa -g output.gfa --gfa-engine pggb:10000 -d 1000
 
 # Reuse an existing PAF instead of aligning
 impg graph --sequence-files genomes.fa -g output.gfa --paf-file aln.paf
@@ -545,7 +545,7 @@ Append `:WINDOW` to any engine to build per-window and lace:
 ```bash
 impg query    -a aln.paf -r chr1:0-500000 -o gfa \
               -d 1000 --gfa-engine pggb:10000 --sequence-files *.fa -O out
-impg graph    --sequence-files *.fa -g out.gfa --gfa-engine seqwish:10000
+impg graph    --sequence-files *.fa -g out.gfa --gfa-engine seqwish:10000 -d 1000
 impg partition -a aln.paf -w 100000 -d 100000 -o gfa --gfa-engine pggb:10000 \
                --sequence-files *.fa --output-folder results/
 ```
@@ -653,7 +653,7 @@ odgi draw   -i yeast.sort.og      -c yeast.lay      -p yeast.draw.png
 ```
 
 For modern inputs, you can replace steps 1–4 with a single
-`impg graph --sequence-files "$FASTA" -g yeast.gfa --gfa-engine pggb:100000`.
+`impg graph --sequence-files "$FASTA" -g yeast.gfa --gfa-engine pggb:100000 -d 1000`.
 
 ## Visualizing FASTA alignments
 

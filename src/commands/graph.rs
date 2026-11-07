@@ -1319,10 +1319,10 @@ pub fn run_graph_build_partitioned(
     engine_opts: &crate::EngineOpts,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     partition_size: usize,
+    merge_distance: i32,
 ) -> io::Result<()> {
     use crate::alignment_record::AlignmentRecord;
     use crate::impg::Impg;
-    use crate::impg_index::ImpgIndex;
     use crate::seqidx::SequenceIndex;
     use crate::sequence_index::UnifiedSequenceIndex;
     use std::num::NonZeroUsize;
@@ -1360,79 +1360,41 @@ pub fn run_graph_build_partitioned(
         .to_string();
     let sequence_index = UnifiedSequenceIndex::from_files(&[combined_fasta_path])?;
 
-    // 4. Partition: split all sequences into windows and query each
-    info!(
-        "[partitioned-graph] Partitioning with window size {}",
-        partition_size
-    );
-    let mut partitions: Vec<Vec<coitrees::Interval<u32>>> = Vec::new();
-    let seq_index = impg.seq_index();
-    let num_seqs = seq_index.len();
-
-    for seq_id in 0..num_seqs as u32 {
-        let seq_len = match seq_index.get_len_from_id(seq_id) {
-            Some(len) => len as i32,
-            None => continue,
-        };
-
-        let mut window_start = 0i32;
-        while window_start < seq_len {
-            let window_end = (window_start + partition_size as i32).min(seq_len);
-
-            // Query this window
-            let results = impg.query_transitive_bfs(
-                seq_id,
-                window_start,
-                window_end,
-                None,
-                2,     // max_depth
-                101,   // min_transitive_len
-                10,    // min_distance_between_ranges
-                None,  // min_output_length
-                false, // store_cigar
-                None,  // min_identity
-                Some(&sequence_index),
-                false, // approximate_mode
-                None,  // subset_filter
-            );
-
-            if !results.is_empty() {
-                let intervals: Vec<coitrees::Interval<u32>> =
-                    results.into_iter().map(|(qi, _, _)| qi).collect();
-                partitions.push(intervals);
-            }
-
-            window_start = window_end;
-        }
-        // Only partition the first/longest sequence to avoid duplicating work
-        // (subsequent sequences are found via transitive queries)
-        break;
-    }
-
-    if partitions.is_empty() {
-        info!("[partitioned-graph] No partitions found");
-        let empty_gfa = "H\tVN:Z:1.0\n";
-        if output == "-" {
-            io::stdout().write_all(empty_gfa.as_bytes())?;
-        } else {
-            File::create(output)?.write_all(empty_gfa.as_bytes())?;
-        }
-        return Ok(());
-    }
-
-    info!(
-        "[partitioned-graph] Created {} partitions, running pipeline",
-        partitions.len()
-    );
-
-    // 5. Run the partitioned GFA pipeline
-    let final_gfa = crate::partitioned_gfa_pipeline(
-        &partitions,
+    // 4-5. Partition and build graphs, as `impg partition -o gfa`
+    let out_dir = tempfile::Builder::new()
+        .prefix("partitioned-graph")
+        .tempdir_in(config.temp_dir.as_deref().unwrap_or("."))?;
+    crate::commands::partition::partition_alignments(
         &impg,
-        &sequence_index,
+        partition_size,
+        None,
+        "longest",
+        merge_distance,
+        None,
+        3000, // min_missing_size, `impg partition` default
+        3000, // min_boundary_distance, `impg partition` default
+        false,
+        2,   // max_depth
+        101, // min_transitive_len
+        10,  // min_distance_between_ranges
+        "gfa",
+        out_dir.path().to_str(),
+        Some(&sequence_index),
         scoring_params,
+        false,
+        false,
+        false,
+        false,
         engine_opts,
+        true, // rehome singleton slivers
     )?;
+    let partitions_gfa = out_dir.path().join("partitions.gfa");
+    let final_gfa = if partitions_gfa.exists() {
+        std::fs::read_to_string(&partitions_gfa)?
+    } else {
+        info!("[partitioned-graph] No partitions found");
+        "H\tVN:Z:1.0\n".to_string()
+    };
 
     // 6. Write output
     if output == "-" {

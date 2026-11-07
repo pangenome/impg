@@ -5464,6 +5464,19 @@ GFA engine shorthand:
         #[clap(short = 'g', long, value_parser, default_value = "-")]
         output: String,
 
+        /// Partitioned mode (`--gfa-engine ENGINE:WINDOW`): merge ranges
+        /// separated by at most this many bp before partition assignment, as
+        /// `impg partition -d` (accepts k/m/g suffixes). Required with a window.
+        /// Use 0 for only overlapping/touching ranges, or --no-merge.
+        #[arg(help_heading = "Filtering and merging")]
+        #[clap(short = 'd', long, value_parser = parse_merge_distance, conflicts_with = "no_merge")]
+        merge_distance: Option<i32>,
+
+        /// Partitioned mode: explicitly disable merging before partition assignment
+        #[arg(help_heading = "Filtering and merging")]
+        #[clap(long, action, conflicts_with = "merge_distance")]
+        no_merge: bool,
+
         #[clap(flatten)]
         engine_cli: EngineCliOpts,
 
@@ -8768,6 +8781,8 @@ fn run() -> io::Result<()> {
             fasta_input,
             paf_file,
             output,
+            merge_distance,
+            no_merge,
             engine_cli,
             common,
         } => {
@@ -8815,6 +8830,7 @@ fn run() -> io::Result<()> {
 
             if let Some(ps) = parsed_partition_size {
                 // Partitioned mode: align → IMPG → partition → per-partition engine → lace → gfaffix
+                let merge_distance = require_merge_distance("graph", merge_distance, no_merge)?;
                 let engine_opts = engine_cli.build(num_threads)?;
                 let graph_config = build_graph_config(
                     &engine_cli,
@@ -8834,6 +8850,7 @@ fn run() -> io::Result<()> {
                     &engine_opts,
                     scoring,
                     ps,
+                    merge_distance,
                 )?;
             } else {
                 let graph_config = build_graph_config(
