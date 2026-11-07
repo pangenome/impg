@@ -39,7 +39,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allwave"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/allwave?rev=089746bac1c6cd412e1960733c1ab812c5b1bf22#089746bac1c6cd412e1960733c1ab812c5b1bf22"
+source = "git+https://github.com/pangenome/allwave?rev=a145a311f2d341b0a7d3747c46fd197bb34177d4#a145a311f2d341b0a7d3747c46fd197bb34177d4"
 dependencies = [
  "atty",
  "bio",
@@ -1744,7 +1744,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=1f8972d7c292418492c68501d8d4ef2e611fc444#1f8972d7c292418492c68501d8d4ef2e611fc444"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=787093a7880a26b1b9b25bdb038b899784e01c81#787093a7880a26b1b9b25bdb038b899784e01c81"
 
 [[package]]
 name = "libc"
@@ -3312,7 +3312,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=d8db3084b38eb4029d7de9b46d1beda3eed5613b#d8db3084b38eb4029d7de9b46d1beda3eed5613b"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=f21b0127c46646d0e73657ddd3162d0417e5c3c1#f21b0127c46646d0e73657ddd3162d0417e5c3c1"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -3328,7 +3328,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/GuarracinoLab/tracepoints?rev=bd21f3746ddfec9991cd2578d84f1563f958a17d#bd21f3746ddfec9991cd2578d84f1563f958a17d"
+source = "git+https://github.com/GuarracinoLab/tracepoints?rev=2aa427e774e66adab6e2a864f2ed2e865ca16f71#2aa427e774e66adab6e2a864f2ed2e865ca16f71"
 dependencies = [
  "lib_wfa2",
 ]
