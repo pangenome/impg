@@ -1420,7 +1420,7 @@ mod tests {
     #[test]
     fn partition_point_finds_the_sorted_range() {
         let sorted = vec![0u64, 10, 20, 30];
-        assert_eq!(partition_point(&sorted, |&s| s < 0), 0);
+        assert_eq!(partition_point(&sorted, |_| false), 0);
         assert_eq!(partition_point(&sorted, |&s| s < 10), 1);
         assert_eq!(partition_point(&sorted, |&s| s < 25), 3);
         assert_eq!(partition_point(&sorted, |&s| s < 100), 4);

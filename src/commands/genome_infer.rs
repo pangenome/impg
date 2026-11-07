@@ -2877,7 +2877,6 @@ fn sample_projection_bin() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Subcommand as _;
 
     /// Parse a `genome-infer` subcommand invocation (the CLI surface
     /// itself, the interface-change tests' own form: the flag defaults
