@@ -178,10 +178,7 @@ struct MemberRow {
 struct CallFold {
     #[allow(dead_code)]
     fold_index: u64,
-    length: u64,
     members: Vec<MemberRow>,
-    #[serde(default)]
-    territory_image: Option<Vec<u64>>,
 }
 
 #[derive(Deserialize)]
@@ -215,7 +212,6 @@ struct LocusCall {
     /// fold's rows are identical-sequence coalesced copies by the
     /// product's construction), per emitted fold.
     fold_row_head: [(String, u64, u64); 2],
-    fold_length: [u64; 2],
     homozygous: bool,
     tied_classes: bool,
     qual: Option<f64>,
@@ -539,7 +535,6 @@ pub fn run(options: Options) -> io::Result<()> {
         )?;
         let mut fold_rows: [Vec<(usize, u64, u64)>; 2] = [Vec::new(), Vec::new()];
         let mut fold_row_head: [(String, u64, u64); 2] = Default::default();
-        let mut fold_length = [0u64; 2];
         for side in 0..2 {
             let fold = &record.diplotype.paths[side];
             let head = &fold.members[0];
@@ -548,7 +543,6 @@ pub fn run(options: Options) -> io::Result<()> {
                 .ok_or_else(|| invalid("a fold row's path is absent from the syng"))?;
             let capped_end = head.end.min(panel.name_map.path_to_length[path_idx]);
             fold_row_head[side] = (head.path_name.clone(), head.start, capped_end);
-            fold_length[side] = capped_end.saturating_sub(head.start);
             for member in &fold.members {
                 let path_idx = *path_of_name
                     .get(&member.path_name)
@@ -568,7 +562,6 @@ pub fn run(options: Options) -> io::Result<()> {
             ],
             fold_rows,
             fold_row_head,
-            fold_length,
             homozygous: record.diplotype.fold_indices[0] == record.diplotype.fold_indices[1],
             tied_classes: record.called_class_count > 1,
             qual: record.qual,
@@ -1122,7 +1115,7 @@ mod tests {
 
     #[test]
     fn truth_assignment_brackets_ties_and_inexpressible() {
-        let base = |expressible, assignment, pairs, edits_direct, edits_crossed| TruthQvRecord {
+        let base = |expressible, assignment, pairs, _edits_direct, _edits_crossed| TruthQvRecord {
             locus: 0,
             truth_pair_expressible: expressible,
             assignment,

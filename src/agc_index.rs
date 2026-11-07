@@ -26,7 +26,6 @@ pub struct AgcSegmentLayout {
     /// Cumulative segment end positions (ends[i] = starts[i] +
     /// contribution_i; ends.last() = the contig's own length).
     ends: Vec<u64>,
-    kmer_length: u32,
 }
 
 impl AgcSegmentLayout {
@@ -354,11 +353,7 @@ impl AgcIndex {
             position += contribution;
             ends.push(position);
         }
-        Some(AgcSegmentLayout {
-            starts,
-            ends,
-            kmer_length,
-        })
+        Some(AgcSegmentLayout { starts, ends })
     }
 
     pub fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
@@ -453,7 +448,6 @@ mod tests {
             // contributions 100, 90, 90 -> ends 100, 190, 280 (kmer 10)
             starts: vec![0, 100, 190],
             ends: vec![100, 190, 280],
-            kmer_length: 10,
         };
         // Interior request inside one segment: aligns to that segment.
         assert_eq!(layout.aligned_crop(10, 20), (0, 100));
@@ -502,11 +496,10 @@ mod tests {
         let length = index.get_sequence_length(&lane).unwrap() as u64;
         let layout = index.segment_layout(&lane).expect("lane layout");
         eprintln!(
-            "[bind-anatomy] lane {lane}: length {length}, {} segments, first raw {} (contribution {}), kmer {}",
+            "[bind-anatomy] lane {lane}: length {length}, {} segments, first raw {} (contribution {})",
             layout.starts.len(),
             layout.ends[0],
             layout.ends[0],
-            layout.kmer_length,
         );
         assert!(layout.ends.last().copied().unwrap() <= length);
         // A deterministic LCG for reproducible positions.

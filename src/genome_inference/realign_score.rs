@@ -2472,7 +2472,6 @@ struct PrecomputeWindowAsset {
 
 /// The loaded, validated asset beside the call's own partition maps.
 struct PanelPrecomputeAsset {
-    manifest: PanelPrecomputeManifest,
     rows: Vec<PrecomputeRowAsset>,
     windows: Vec<PrecomputeWindowAsset>,
     // (SS10.6.25 slice 2 — None for the slice-1 /1 format: the asset
@@ -2493,9 +2492,6 @@ impl AssetWriter {
     }
     fn i32(&mut self, v: i32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn u8(&mut self, v: u8) {
-        self.buf.push(v);
     }
     fn str(&mut self, v: &str) {
         self.u64(v.len() as u64);
@@ -2549,9 +2545,6 @@ impl<'a> AssetReader<'a> {
     }
     fn i32(&mut self) -> io::Result<i32> {
         Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn u8(&mut self) -> io::Result<u8> {
-        Ok(self.take(1)?[0])
     }
     fn str(&mut self) -> io::Result<String> {
         let len = self.u64()? as usize;
@@ -2833,7 +2826,6 @@ fn load_panel_precompute(
         None
     };
     Ok(PanelPrecomputeAsset {
-        manifest,
         rows,
         windows,
         bind,
@@ -4258,6 +4250,7 @@ impl CutSet {
         self.len
     }
 
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -4282,6 +4275,7 @@ impl CutSet {
     }
 
     /// Build from ascending positions (the oracle/tests' own shape).
+    #[cfg(test)]
     fn from_ascending<I: IntoIterator<Item = usize>>(positions: I) -> CutSet {
         let mut set = CutSet::default();
         for position in positions {
@@ -4757,21 +4751,6 @@ impl Scoring {
     #[inline]
     fn placement(&self, m: u32, c: u32) -> f64 {
         m as f64 * self.a + c as f64 * self.b
-    }
-
-    /// The model's derived per-placement MINIMUM likelihood: every
-    /// base of the read mismatching (read_len() * ln(eps/3)) — the
-    /// rigorous lower bound of the read's likelihood under ANY
-    /// placement. It remains the stated lower bound of the local
-    /// branch's per-placement terms; as a logsumexp term it
-    /// underflows to +0.0 exactly wherever an anchored placement
-    /// exists (150 * ln(eps/3) ~ -1546 against placement scores ~ -1).
-    /// (The read length is PER-CALL state now — passed by the caller,
-    /// never a process-global, so concurrent calls in one process
-    /// cannot read each other's length.)
-    #[inline]
-    fn floor(&self, read_len: usize) -> f64 {
-        read_len as f64 * self.b
     }
 }
 
@@ -5471,6 +5450,7 @@ impl ScoreRow {
     }
 
     /// The mismatches at `unit` (the committed u32 value).
+    #[cfg(test)]
     fn mismatches_probe(&self, unit: usize) -> u32 {
         match self {
             ScoreRow::Dense(dense) => dense.mismatches[unit],
@@ -5634,6 +5614,7 @@ impl ScoreMatrix {
     }
 
     /// The mismatches — the dense form's `mismatches[fold][unit]`.
+    #[cfg(test)]
     fn mismatches(&self, fold: usize, unit: usize) -> u32 {
         self.rows[fold].mismatches_probe(unit)
     }
@@ -5696,7 +5677,7 @@ impl ScoreMatrix {
     fn column_key_hash(&self, fold: usize) -> u64 {
         let elsewhere_bits = self.elsewhere.to_bits();
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut feed = |hash: &mut u64, bytes: &[u8]| {
+        let feed = |hash: &mut u64, bytes: &[u8]| {
             for &byte in bytes {
                 *hash ^= byte as u64;
                 *hash = hash.wrapping_mul(0x100_0000_01b3);
@@ -5778,6 +5759,7 @@ impl ScoreMatrix {
 
     /// The committed dense construction (the tests' and the merge
     /// tests' own shape).
+    #[cfg(test)]
     fn from_dense(
         matrix: Vec<Vec<f64>>,
         pinned: Vec<Vec<bool>>,
@@ -11861,7 +11843,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         // lines, never two fold trees on disk.)
         if fold_set_digest {
             let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
-            let mut feed = |bytes: &[u8], digest: &mut u64| {
+            let feed = |bytes: &[u8], digest: &mut u64| {
                 for &byte in bytes {
                     *digest ^= byte as u64;
                     *digest = digest.wrapping_mul(0x100_0000_01b3);
@@ -12154,7 +12136,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             // convention neither record is reparsed (raw values
             // both).
             if territory_normalized {
-                let mut value: serde_json::Value = serde_json::from_slice(&product_buf)?;
+                let value: serde_json::Value = serde_json::from_slice(&product_buf)?;
                 product_buf.clear();
                 serde_json::to_writer(&mut product_buf, &value)?;
             }
@@ -12224,8 +12206,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 // committed double-buffer discipline), so the emitted
                 // QUAL floats are bit-identical to the product call's.
                 if territory_normalized {
-                    let mut value: serde_json::Value =
-                        serde_json::from_slice(&product_sequences_buf)?;
+                    let value: serde_json::Value = serde_json::from_slice(&product_sequences_buf)?;
                     product_sequences_buf.clear();
                     serde_json::to_writer(&mut product_sequences_buf, &value)?;
                 }

@@ -40,7 +40,6 @@
 //! the unchanged CLI binds cut census records to cut cache keys
 //! exactly), and the cut reads FASTA. No GRCh38 fetch, no MEM
 //! machinery, no re-projection at cut time.
-#![recursion_limit = "512"]
 
 use clap::Parser;
 use crate::agc_index::AgcIndex;
@@ -2995,7 +2994,6 @@ struct BatchTerritory {
     territory_nodes_abs: HashSet<u32>,
     node_map: HashMap<i32, i32>,
     node_map_pairs: usize,
-    global_only_anchor_total: usize,
     offset_variants: BTreeMap<String, u64>,
 }
 
@@ -3243,7 +3241,6 @@ fn batch_emit_territory(
         territory_nodes_abs: _,
         node_map: _,
         node_map_pairs,
-        global_only_anchor_total: _,
         offset_variants,
     } = t;
     let out_dir = spec.out_dir.as_path();
@@ -3692,7 +3689,6 @@ fn run_cut_batch(
                 territory_nodes_abs,
                 node_map,
                 node_map_pairs,
-                global_only_anchor_total,
                 offset_variants,
             })
         })
@@ -5589,6 +5585,11 @@ fn batch_global_emit_territory(
     };
     let text = serde_json::to_string_pretty(&stats)?;
     std::fs::write(out_dir.join("cut-stats.json"), text + "\n")?;
+    eprintln!(
+        "[cut-batch] {} DONE: {routed_patterns} routed patterns ({dropped_no_occurrence} dropped, \
+         no occurrence), mult {census_mult_total} [{wall_seconds:.1}s]",
+        spec.name
+    );
     Ok(serde_json::json!({
         "name": spec.name,
         "reads_kept": stats.reads_kept,
@@ -5836,7 +5837,7 @@ fn scan_trace_file(
                             if recover {
                                 recover_count += 1;
                             }
-                            for &(node, in_slice) in &unmapped {
+                            for &(_, in_slice) in &unmapped {
                                 if !in_slice {
                                     any_outslice = true;
                                 }

@@ -854,7 +854,6 @@ struct GraphQuality {
 struct CandidateFrontier {
     selected: Vec<BubbleCandidate>,
     sites_seen: usize,
-    candidates_seen: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -876,8 +875,8 @@ struct ChainFrontier {
 #[derive(Clone, Debug)]
 enum BubbleState {
     Unresolved,
-    Resolved { at_round: usize },
-    Failed { at_round: usize },
+    Resolved,
+    Failed,
 }
 
 /// One node in the explicit bubble tree. The tree is grown top-down: roots
@@ -1188,7 +1187,7 @@ fn resolve_graph_bubbles(
         // exceeds the configured max_traversal_len AND which have children in
         // the tree (initial POVU saw nested structure), DON'T feed the parent
         // into the aligner — that triggers the F3-F4 sweepga cascade on full
-        // C4. Instead, mark the parent Resolved (state=Resolved with at_round=0)
+        // C4. Instead, mark the parent skipped (state=Failed)
         // and descend immediately to its children for THIS round. The small-
         // bubble test fixture is unaffected (its L0 root has max_len=409,
         // well below max_traversal_len=10000), but C4's megabase-scale roots
@@ -1202,7 +1201,7 @@ fn resolve_graph_bubbles(
                 {
                     // Mark this oversized root as "skipped — descended to children"
                     // so the provenance / state-tracking still makes sense.
-                    tree[n].state = BubbleState::Failed { at_round: 0 };
+                    tree[n].state = BubbleState::Failed;
                     if emit_logs {
                         log::info!(
                             "crush round 1: skipping oversized root site_id={} (initial max_traversal_len={} > {}); descending to {} child(ren)",
@@ -1232,7 +1231,7 @@ fn resolve_graph_bubbles(
                     if tree[n].initial_traversal_max_len > skip_threshold
                         && !tree[n].children.is_empty()
                     {
-                        tree[n].state = BubbleState::Failed { at_round: 0 };
+                        tree[n].state = BubbleState::Failed;
                         if emit_logs {
                             log::info!(
                                 "crush round 1: skipping oversized descendant site_id={} (max_traversal_len={} > {}); descending to {} child(ren)",
@@ -1293,7 +1292,6 @@ fn resolve_graph_bubbles(
             config,
             active_candidates,
             sites_seen,
-            candidates_seen,
             emit_logs,
             timings,
             0,
@@ -1539,9 +1537,7 @@ fn resolve_graph_bubbles(
                 bp_to_node.insert(plan.candidate.signature.clone(), new_idx);
                 new_idx
             };
-            tree[parent_nidx].state = BubbleState::Resolved {
-                at_round: round + 1,
-            };
+            tree[parent_nidx].state = BubbleState::Resolved;
             just_resolved_nodes.push(parent_nidx);
 
             // Record the parent's reference bp region.
@@ -1937,13 +1933,11 @@ fn resolve_graph_bubbles_chain_povu(
             DEFAULT_CHAIN_POVU_MAX_BLOCK_BP,
             &resolved_signatures,
         );
-        let candidates_seen = selection.selected.len();
         let frontier = finalize_frontier(
             &graph,
             config,
             selection.selected,
             sites_seen,
-            candidates_seen,
             emit_logs,
             timings,
             0,
@@ -2197,13 +2191,11 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
         .iter()
         .map(chain_povu_block_bp)
         .collect::<Vec<_>>();
-    let candidates_seen = selection.selected.len();
     let frontier = finalize_frontier(
         &graph,
         config,
         selection.selected,
         sites_seen,
-        candidates_seen,
         emit_logs,
         timings,
         0,
@@ -3394,6 +3386,7 @@ fn coverage_mode_includes_outward(config: &ResolutionConfig) -> bool {
         )
 }
 
+#[cfg(test)]
 fn generate_multi_level_candidates(
     graph: &Graph,
     config: &ResolutionConfig,
@@ -6979,8 +6972,7 @@ struct DiscoveredCandidate {
 
 /// Run POVU on `graph` and return all polymorphic candidates with their
 /// POVU site metadata, before any tree-driven filtering or non-overlap
-/// selection. Pulled out of `find_candidate_frontier` so the same discovery
-/// can be reused by `build_initial_bubble_tree`.
+/// selection. Also used by `build_initial_bubble_tree`.
 fn discover_all_candidates(
     graph: &Graph,
     config: &ResolutionConfig,
@@ -7166,38 +7158,6 @@ struct RoundDiscoveryTimings {
     id_map: std::time::Duration,
     path_index: std::time::Duration,
     candidate_build: std::time::Duration,
-}
-
-fn find_candidate_frontier(
-    graph: &Graph,
-    config: &ResolutionConfig,
-    seen: &FxHashSet<String>,
-    emit_logs: bool,
-) -> io::Result<CandidateFrontier> {
-    // Bottom-up leaf-driven frontier — kept for legacy callers (the two
-    // `phase6_*` unit tests that exercise this path directly). The tree-driven
-    // level-descent loop in `resolve_graph_bubbles` does NOT call this; it
-    // calls `discover_all_candidates` directly and applies its own
-    // tree-driven filter.
-    let (all_candidates, sites_seen, timings) = discover_all_candidates(graph, config, emit_logs)?;
-    let leaves_seen = all_candidates.iter().filter(|c| c.is_leaf).count();
-    let candidates: Vec<BubbleCandidate> = all_candidates
-        .into_iter()
-        .filter(|d| d.is_leaf)
-        .filter(|d| !seen.contains(&d.candidate.signature))
-        .map(|d| d.candidate)
-        .collect();
-    let candidates_seen = candidates.len();
-    finalize_frontier(
-        graph,
-        config,
-        candidates,
-        sites_seen,
-        candidates_seen,
-        emit_logs,
-        timings,
-        leaves_seen,
-    )
 }
 
 fn find_path_walk_chain_frontier(
@@ -7481,14 +7441,13 @@ fn materialize_chain_frontier(
     })
 }
 
-/// Sort + non-overlap-select + materialize sequences. Shared by the legacy
-/// leaf-driven path and the tree-driven level-descent loop.
+/// Sort + non-overlap-select + materialize sequences. Shared by the
+/// level-descent, chain-POVU and top-flubble loops.
 fn finalize_frontier(
     graph: &Graph,
     config: &ResolutionConfig,
     mut candidates: Vec<BubbleCandidate>,
     sites_seen: usize,
-    candidates_seen: usize,
     emit_logs: bool,
     timings: RoundDiscoveryTimings,
     leaves_seen: usize,
@@ -7510,7 +7469,6 @@ fn finalize_frontier(
 
     let mut frontier = CandidateFrontier {
         sites_seen,
-        candidates_seen,
         ..CandidateFrontier::default()
     };
     let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
@@ -10707,12 +10665,6 @@ fn polish_replacement_gfa_with_smooth(
         after_quality.summary()
     );
     Ok(smoothed)
-}
-
-fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
-    let (base, range) = name.rsplit_once(':')?;
-    let (start, end) = range.split_once('-')?;
-    Some((base, start.parse().ok()?, end.parse().ok()?))
 }
 
 fn validate_replacement_paths(

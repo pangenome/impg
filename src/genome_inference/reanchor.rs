@@ -836,7 +836,6 @@ mod tests {
         // occurrences): no covered node on the source grid -> no
         // recovered span -> the territory re-anchor is skipped and
         // the recorded windows are kept VERBATIM.
-        let grid = fixture_grid(&[0, 24, 48], &[10, 11, 12]);
         let mut territory = Territory {
             window_partition: vec![0, 1],
             rows: vec![vec![
