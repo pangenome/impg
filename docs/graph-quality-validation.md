@@ -44,9 +44,11 @@ global repeat-glue nodes.
 larger, wider, or high-copy bounded bubbles through pairwise graph induction.
 The replacement seqwish step uses `seqwish-k=311` by default in crush so human
 repeats require long exact matches before graph induction; residual bounded
-bubbles are then handled by global SPOA polish. Direct SPOA/POASTA replacements
-are accepted after exact path-sequence validation, while pairwise-induced
-replacements remain guarded by local and round graph-quality checks.
+bubbles are then handled by global SPOA polish. All replacements, direct
+SPOA/POASTA and pairwise-induced, are accepted after exact path-sequence
+validation (`validate_replacement_paths`). There is no local or round
+graph-quality gate: commit 0af1a4c removed it, and graph-quality metrics are
+diagnostics only.
 
 ## Current HPRCv2 Validation Panel
 
