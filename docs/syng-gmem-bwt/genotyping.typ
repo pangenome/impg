@@ -346,9 +346,7 @@ not implementations of this sample-index design.
 - #link("https://doi.org/10.1186/s13059-026-04242-4")[Bolognini et al., COSIGT, Genome Biology (2026).]
 - #link("https://davidebolo1993.github.io/cosigtdoc/workflow/workflow.html")[COSIGT workflow and coverage semantics.]
 - #link("https://github.com/pangenome/likegt")[LikeGT: Rust coverage-based genotyping toolkit.]
-- Repository notes: `docs/syng-gmem-bwt/benchmark.md` and
-  `docs/syng-gmem-bwt/evidence-notes.md`. Earlier read-provenance proposals in those
-  notes are superseded by this compact sample-index design.
+- Repository note: `docs/syng-gmem-bwt/benchmark.md`.
 
 This document has no external Typst package dependencies. From the repository
 root, using Typst 0.14.2:

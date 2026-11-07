@@ -4117,7 +4117,7 @@ machinery's premise); `panel_precompute_sequence_fnv_drift_is_a_loud_
 error` (a drifted source byte is a hard error at serve, naming the
 drift class — never a silently served structure).
 
-**THE WORK-DIR RECEIPTS:** `docs/syng-gmem-bwt/panel-precompute-receipts/`
+**THE WORK-DIR RECEIPTS:** `docs/syng-gmem-bwt/panel-precompute-receipts/` (in git history at 5fe8993)
 (the six verbatim per-leg receipts + the two gate files), the runners
 `scripts/complexity-ledger/run-precompute-{L1,T09724}.sh` (the memo
 runners' substrate shape verbatim, marker-gated, 150G-guarded,
@@ -4430,7 +4430,7 @@ global state is serialized across every in-process test through the
 now-shared `SYNG_TEST_LOCK`.
 
 **THE WORK-DIR RECEIPTS:** the slice-2 legs' verbatim receipts + the
-gate files in `docs/syng-gmem-bwt/panel-precompute-receipts/`
+gate files in `docs/syng-gmem-bwt/panel-precompute-receipts/` (in git history at 5fe8993)
 (`call-slice2-{off,on}[-all].receipt.txt`, `precompute-slice2-{L1,
 T09724}.receipt.txt`, `gates-slice2-{L1,T09724}.txt`); the runners
 `scripts/complexity-ledger/run-slice2-{L1,T09724}.sh` (the slice-1

@@ -15,8 +15,6 @@ graph is required.
   background, contextual COSIGT/count scoring, and windowed mosaic inference.
 - [COSIGT/LikeGT audit and HPRCv2 pilot](benchmark.md) — source findings,
   completed dictionary-mapping smoke test, and proposed truth-based comparisons.
-- [Existing impg capabilities and earlier alternatives](evidence-notes.md) —
-  evidence semantics, graph-translation limitations, and whole-genome caveats.
 
 The supporting notes preserve earlier read-by-candidate/provenance proposals
 for context. Those storage proposals are superseded by the compact MEM-BWT

@@ -22,6 +22,13 @@ perf.data.old
 # release tarballs from scripts/make-release-tarball.sh
 /impg-v*.tar.gz
 
-# the frontier build dir and its logs (the campaign's alternate CARGO_TARGET_DIR)
+# the frontier build dir (the campaign's alternate CARGO_TARGET_DIR)
 /target-frontier
-/build-examples-frontier.log
+# run artifacts in the repo root (logs, exit codes, pid files)
+/*.log
+/*.err
+/*.done
+/*.exit
+/*.nohup
+/pid*
+__pycache__/

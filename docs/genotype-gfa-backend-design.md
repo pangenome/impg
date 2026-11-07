@@ -313,8 +313,8 @@ without changing the typed pack compatibility checks.
 ### Syng Pack To Local GFA Features
 
 For render bundles built from syng candidates, syng evidence can be projected
-without remapping reads using the path-step-aware records designed in
-[`syng-to-local-graph-translation.md`](syng-to-local-graph-translation.md):
+without remapping reads using path-step-aware records (not implemented; the
+design `docs/syng-to-local-graph-translation.md` is in git history at 5fe8993):
 
 ```text
 syng_node_id + rendered_path_id + source interval
