@@ -1126,7 +1126,7 @@ pub fn align_sequences(
 
     // Create FASTA index (.fai) — required by wfmash
     if config.aligner == "wfmash" {
-        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+        crate::faidx::open_reader(combined_fasta.path())
             .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
     }
 

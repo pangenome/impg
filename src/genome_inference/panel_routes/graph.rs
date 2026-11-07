@@ -57,7 +57,7 @@ pub fn source_access_paths(paths: &[String]) -> io::Result<Vec<(usize, String)>>
 pub fn bind_source_access(paths: &[String]) -> io::Result<Vec<SourceAccess>> {
     for path in paths {
         if !Path::new(path).extension().is_some_and(|x| x == "agc") {
-            rust_htslib::faidx::Reader::from_path(path).map_err(io::Error::other)?;
+            crate::faidx::open_reader(path)?;
         }
     }
     source_access_paths(paths)?

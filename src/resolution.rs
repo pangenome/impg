@@ -9722,7 +9722,7 @@ fn run_local_wfmash_replacement_alignment(
         writer.flush()?;
     }
 
-    rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|err| {
+    crate::faidx::open_reader(combined_fasta.path()).map_err(|err| {
         io::Error::other(format!(
             "failed to create FASTA index for local wfmash: {err}"
         ))

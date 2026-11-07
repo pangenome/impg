@@ -488,7 +488,7 @@ fn run_alignments(
         let mut total_len: u64 = 0;
         let mut count: u64 = 0;
         for path in unique_files.iter() {
-            if let Ok(fai) = rust_htslib::faidx::Reader::from_path(path) {
+            if let Ok(fai) = crate::faidx::open_reader(path) {
                 let n = fai.n_seqs();
                 for i in 0..n {
                     if let Ok(name) = fai.seq_name(i as i32) {
@@ -882,7 +882,7 @@ fn sweepga_align_all_vs_all(
 
     // Create FASTA index (.fai) — required by wfmash
     if config.aligner == "wfmash" {
-        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+        crate::faidx::open_reader(combined_fasta.path())
             .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
     }
 
@@ -981,7 +981,7 @@ fn sweepga_align_pairwise_wfmash(
     }
 
     // Create FASTA index (.fai) — required by wfmash
-    rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+    crate::faidx::open_reader(combined_fasta.path())
         .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
 
     // 2. Write pairs to a temp TSV file (both directions for bidirectional alignment)
@@ -1065,7 +1065,7 @@ fn sweepga_align_pairwise_generic(
         }
         // Create FASTA index (.fai) — required by wfmash
         if config.aligner == "wfmash" {
-            rust_htslib::faidx::Reader::from_path(fasta.path())
+            crate::faidx::open_reader(fasta.path())
                 .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
         }
         fasta_files.insert(idx, fasta);
