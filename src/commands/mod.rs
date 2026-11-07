@@ -18,6 +18,11 @@ use sweepga::fastga_integration::FastGAIntegration;
 use sweepga::paf_filter::{FilterConfig, FilterMode, ScoringFunction};
 use sweepga::wfmash_integration::WfmashIntegration;
 
+/// Floor for the haplotype-derived FastGA seed frequency, as the sweepga
+/// help states. FastGA drops seeds with frequency >= -f, so -f equal to
+/// the haplotype count drops every k-mer shared by all haplotypes.
+pub const MIN_FASTGA_FREQUENCY: usize = 10;
+
 /// Create an aligner backend based on the name ("wfmash" or "fastga").
 pub fn create_aligner(
     aligner_name: &str,

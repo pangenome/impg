@@ -359,11 +359,12 @@ fn write_fastga_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
-    let freq_arg = if let Some(f) = config.frequency {
-        format!("-f{}", f)
-    } else {
-        format!("-f{}", sequences.len() * config.frequency_multiplier)
-    };
+    let freq_arg = format!(
+        "-f{}",
+        config.frequency.unwrap_or(
+            (sequences.len() * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
+        )
+    );
 
     let mut count = 0usize;
     for (file_i, file_j) in collect_file_pairs(pairs, sequences) {
@@ -451,7 +452,7 @@ fn run_alignments(
     let (_num_sequences, num_genomes) = count_sequences_and_genomes(&unique_files)?;
     let kmer_frequency = config
         .frequency
-        .unwrap_or(num_genomes * config.frequency_multiplier);
+        .unwrap_or((num_genomes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY));
 
     if config.show_progress {
         info!(
