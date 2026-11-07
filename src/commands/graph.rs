@@ -1056,12 +1056,16 @@ pub fn align_sequences(
     let (num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(fasta_files)?;
     // Delegate to sweepga's resolver
     let fasta_paths: Vec<&Path> = fasta_files.iter().map(Path::new).collect();
-    let kmer_frequency = sweepga::pansn::resolve_fastga_frequency(
-        config.frequency,
-        config.frequency_multiplier,
-        &fasta_paths,
-    )
-    .map_err(|e| io::Error::other(format!("Failed to resolve FastGA frequency: {e}")))?;
+    let kmer_frequency = match config.frequency {
+        Some(f) => f,
+        None => sweepga::pansn::resolve_fastga_frequency(
+            None,
+            config.frequency_multiplier,
+            &fasta_paths,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to resolve FastGA frequency: {e}")))?
+        .max(super::MIN_FASTGA_FREQUENCY),
+    };
 
     if config.show_progress {
         info!(
