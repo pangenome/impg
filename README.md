@@ -582,7 +582,7 @@ doesn't meet your need.
 --min-aln-identity 0.9
 
 # Aligner backend
---aligner wfmash              # default; alt: fastga
+--aligner fastga              # default; alt: wfmash
 --sparsify auto               # wfmash-only; pair-selection heuristic
 --map-pct-identity 90         # wfmash -p value
 --fastga-frequency / --fastga-frequency-multiplier   # fastga-only
