@@ -170,3 +170,43 @@ fn graph_seqwish_crush_cli_c4_tiny_empty_paf_finishes_under_10s_and_sorts_gfa() 
     assert_valid_c4_gfa(&gfa);
     assert_segment_ids_are_sorted(&gfa);
 }
+
+#[test]
+fn graph_pggb_cli_reads_gzipped_fasta() {
+    let dir = tempfile::tempdir().expect("create test temp dir");
+    let fasta_path = dir.path().join("c4.fa.gz");
+    let paf_path = dir.path().join("input.paf");
+    let gfa_path = dir.path().join("output.gfa");
+    {
+        let file = std::fs::File::create(&fasta_path).expect("create FASTA");
+        let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        write!(gz, ">{C4_A_NAME}\n{C4_A_SEQ}\n>{C4_B_NAME}\n{C4_B_SEQ}\n").unwrap();
+        gz.finish().expect("finish gzip FASTA");
+    }
+    std::fs::write(&paf_path, C4_ONE_ROW_PAF).expect("write PAF");
+
+    let mut command = Command::new(impg_binary());
+    command
+        .args(["graph", "--sequence-files"])
+        .arg(&fasta_path)
+        .arg("--paf-file")
+        .arg(&paf_path)
+        .args(["--gfa-engine", "pggb", "--no-filter", "--temp-dir"])
+        .arg(dir.path())
+        .arg("-g")
+        .arg(&gfa_path)
+        .args(["-t", "1"]);
+    let (output, _) = run_with_timeout(&mut command, Duration::from_secs(10));
+    assert!(
+        output.status.success(),
+        "impg graph failed on gzipped FASTA\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let gfa = std::fs::read_to_string(&gfa_path).expect("read output GFA");
+    for name in [C4_A_NAME, C4_B_NAME] {
+        assert!(
+            gfa.lines().any(|l| l.starts_with(&format!("P\t{name}\t"))),
+            "missing path {name} in GFA"
+        );
+    }
+}
