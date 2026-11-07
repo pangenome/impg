@@ -852,7 +852,10 @@ fn reverse_complement_bases(seq: &[u8]) -> Vec<u8> {
 /// Used by the pair selection path in `build_graph()`.
 fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!("Failed to open reader for '{}': {}", path.display(), e))
+    })?;
+    let reader = BufReader::new(reader);
     let mut sequences = Vec::new();
     let mut current_name = String::new();
     let mut current_seq = Vec::new();
@@ -1056,12 +1059,16 @@ pub fn align_sequences(
     let (num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(fasta_files)?;
     // Delegate to sweepga's resolver
     let fasta_paths: Vec<&Path> = fasta_files.iter().map(Path::new).collect();
-    let kmer_frequency = sweepga::pansn::resolve_fastga_frequency(
-        config.frequency,
-        config.frequency_multiplier,
-        &fasta_paths,
-    )
-    .map_err(|e| io::Error::other(format!("Failed to resolve FastGA frequency: {e}")))?;
+    let kmer_frequency = match config.frequency {
+        Some(f) => f,
+        None => sweepga::pansn::resolve_fastga_frequency(
+            None,
+            config.frequency_multiplier,
+            &fasta_paths,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to resolve FastGA frequency: {e}")))?
+        .max(super::MIN_FASTGA_FREQUENCY),
+    };
 
     if config.show_progress {
         info!(
@@ -1126,7 +1133,7 @@ pub fn align_sequences(
 
     // Create FASTA index (.fai) — required by wfmash
     if config.aligner == "wfmash" {
-        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+        crate::faidx::open_reader(combined_fasta.path())
             .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
     }
 

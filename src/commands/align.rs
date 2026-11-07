@@ -359,11 +359,12 @@ fn write_fastga_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
-    let freq_arg = if let Some(f) = config.frequency {
-        format!("-f{}", f)
-    } else {
-        format!("-f{}", sequences.len() * config.frequency_multiplier)
-    };
+    let freq_arg = format!(
+        "-f{}",
+        config.frequency.unwrap_or(
+            (sequences.len() * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
+        )
+    );
 
     let mut count = 0usize;
     for (file_i, file_j) in collect_file_pairs(pairs, sequences) {
@@ -451,7 +452,7 @@ fn run_alignments(
     let (_num_sequences, num_genomes) = count_sequences_and_genomes(&unique_files)?;
     let kmer_frequency = config
         .frequency
-        .unwrap_or(num_genomes * config.frequency_multiplier);
+        .unwrap_or((num_genomes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY));
 
     if config.show_progress {
         info!(
@@ -488,7 +489,7 @@ fn run_alignments(
         let mut total_len: u64 = 0;
         let mut count: u64 = 0;
         for path in unique_files.iter() {
-            if let Ok(fai) = rust_htslib::faidx::Reader::from_path(path) {
+            if let Ok(fai) = crate::faidx::open_reader(path) {
                 let n = fai.n_seqs();
                 for i in 0..n {
                     if let Ok(name) = fai.seq_name(i as i32) {
@@ -882,7 +883,7 @@ fn sweepga_align_all_vs_all(
 
     // Create FASTA index (.fai) — required by wfmash
     if config.aligner == "wfmash" {
-        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+        crate::faidx::open_reader(combined_fasta.path())
             .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
     }
 
@@ -981,7 +982,7 @@ fn sweepga_align_pairwise_wfmash(
     }
 
     // Create FASTA index (.fai) — required by wfmash
-    rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+    crate::faidx::open_reader(combined_fasta.path())
         .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
 
     // 2. Write pairs to a temp TSV file (both directions for bidirectional alignment)
@@ -1065,7 +1066,7 @@ fn sweepga_align_pairwise_generic(
         }
         // Create FASTA index (.fai) — required by wfmash
         if config.aligner == "wfmash" {
-            rust_htslib::faidx::Reader::from_path(fasta.path())
+            crate::faidx::open_reader(fasta.path())
                 .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
         }
         fasta_files.insert(idx, fasta);
@@ -1106,6 +1107,12 @@ pub fn run_align(
             "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
+
+    // Absolute paths: FastGA runs in the input's directory
+    let fasta_files = fasta_files
+        .iter()
+        .map(|f| std::path::absolute(f).map(|p| p.to_string_lossy().into_owned()))
+        .collect::<io::Result<Vec<_>>>()?;
 
     // Create output directory
     std::fs::create_dir_all(output_dir)?;

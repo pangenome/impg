@@ -10437,6 +10437,7 @@ fn build_engine_opts(
         scaffold_dist: aln.sw.scaffold_dist,
         min_map_length: aln.min_map_length,
         min_aln_length: aln.sw.block_length.unwrap_or(0),
+        frequency: aln.sw.frequency,
         frequency_multiplier: aln.sw.fastga_frequency_multiplier,
         repeat_max: seqwish.repeat_max,
         min_repeat_dist: seqwish.min_repeat_dist,

@@ -5,6 +5,27 @@ use std::io::{self};
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Open a faidx reader. rust-htslib returns Ok with a NULL index when
+/// htslib cannot load or build it (plain gzip, unreadable file), and the
+/// first use then segfaults, so check the index first.
+pub fn open_reader<P: AsRef<Path>>(path: P) -> io::Result<faidx::Reader> {
+    let path = path.as_ref();
+    let cpath =
+        std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
+    let fai = unsafe { rust_htslib::htslib::fai_load(cpath.as_ptr()) };
+    if fai.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot load or build the FASTA index of '{}' (a .gz FASTA must be bgzip-compressed)",
+                path.display()
+            ),
+        ));
+    }
+    unsafe { rust_htslib::htslib::fai_destroy(fai) };
+    faidx::Reader::from_path(path).map_err(io::Error::other)
+}
+
 struct ReaderCache {
     entries: HashMap<usize, (faidx::Reader, u64)>,
     counter: u64,
@@ -41,7 +62,7 @@ impl ReaderCache {
             self.entries.remove(&lru_key);
         }
 
-        let reader = faidx::Reader::from_path(fasta_path)
+        let reader = open_reader(fasta_path)
             .unwrap_or_else(|e| panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e));
         self.entries.insert(fasta_idx, (reader, counter));
         &mut self.entries.get_mut(&fasta_idx).unwrap().0
@@ -111,7 +132,7 @@ impl FastaIndex {
                 Ok(content) => content,
                 Err(_) => {
                     // Try to create the index using rust-htslib
-                    match faidx::Reader::from_path(fasta_path) {
+                    match open_reader(fasta_path) {
                         Ok(_) => {
                             // Index was created, now read it
                             std::fs::read_to_string(&fai_path)?
@@ -194,5 +215,29 @@ impl FastaIndex {
                 format!("Sequence '{seq_name}' not found"),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod open_reader_tests {
+    use super::open_reader;
+    use std::io::Write;
+
+    #[test]
+    fn plain_gzip_fasta_is_an_error_not_a_null_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.fa.gz");
+        let mut gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::default(),
+        );
+        gz.write_all(b">s\nACGTACGT\n").unwrap();
+        gz.finish().unwrap();
+        let err = open_reader(&path).err().expect("plain gzip must fail");
+        assert!(err.to_string().contains("bgzip"), "{err}");
+
+        let plain = dir.path().join("x.fa");
+        std::fs::write(&plain, b">s\nACGTACGT\n").unwrap();
+        assert_eq!(open_reader(&plain).unwrap().n_seqs(), 1);
     }
 }
