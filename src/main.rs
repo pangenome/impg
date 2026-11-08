@@ -7000,14 +7000,13 @@ fn run() -> io::Result<()> {
                                 // laces them together with a single final
                                 // gfaffix. Structurally mirrors the alignment
                                 // path's `output_results_gfa_partitioned`.
-                                let ps = partition_size as i32;
-                                let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
-                                let mut window_start = *range_start;
                                 let mut window_idx = 0usize;
-                                while window_start < *range_end {
-                                    let window_end = (window_start + ps).min(*range_end);
-                                    let intervals = if use_boundary_realign {
-                                        impg::syng_transitive::query_transitive_ext_with_seed_filter(
+                                let partitions = query_windows(
+                                    (*range_start, *range_end),
+                                    partition_size,
+                                    |window_start, window_end| {
+                                        let intervals = if use_boundary_realign {
+                                            impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                             wrapper.syng_index(),
                                             target_name,
                                             window_start as u64,
@@ -7022,38 +7021,37 @@ fn run() -> io::Result<()> {
                                             query.effective_merge_distance(),
                                             sequence_index.as_ref().unwrap(),
                                         )?
-                                    } else {
-                                        query_raw_syng(
+                                        } else {
+                                            query_raw_syng(
+                                                target_name,
+                                                window_start,
+                                                window_end,
+                                                syng_padding,
+                                                syng_extension,
+                                            )?
+                                        };
+                                        let window_intervals =
+                                            syng_intervals_to_merged_query_intervals(
+                                                &intervals,
+                                                target_name,
+                                                window_start,
+                                                window_end,
+                                                wrapper.seq_index(),
+                                                query.effective_merge_distance(),
+                                                query.merge_strands_for_output(resolved_format),
+                                            );
+                                        info!(
+                                            "  [syng sub-window {}] {}:{}-{} → {} intervals",
+                                            window_idx,
                                             target_name,
                                             window_start,
                                             window_end,
-                                            syng_padding,
-                                            syng_extension,
-                                        )?
-                                    };
-                                    let window_intervals = syng_intervals_to_merged_query_intervals(
-                                        &intervals,
-                                        target_name,
-                                        window_start,
-                                        window_end,
-                                        wrapper.seq_index(),
-                                        query.effective_merge_distance(),
-                                        query.merge_strands_for_output(resolved_format),
-                                    );
-                                    info!(
-                                        "  [syng sub-window {}] {}:{}-{} → {} intervals",
-                                        window_idx,
-                                        target_name,
-                                        window_start,
-                                        window_end,
-                                        window_intervals.len()
-                                    );
-                                    if !window_intervals.is_empty() {
-                                        partitions.push(window_intervals);
-                                    }
-                                    window_start = window_end;
-                                    window_idx += 1;
-                                }
+                                            window_intervals.len()
+                                        );
+                                        window_idx += 1;
+                                        Ok(window_intervals)
+                                    },
+                                )?;
 
                                 if partitions.is_empty() {
                                     write_graph_output_and_render(
@@ -7566,7 +7564,7 @@ fn run() -> io::Result<()> {
                             let engine_opts = engine_cli.build(common.threads.get())?;
                             if let Some(ps) = engine_opts.partition_size {
                                 // Partitioned mode: split query region into sub-windows
-                                output_results_gfa_partitioned(
+                                output_results_graph_partitioned(
                                     &impg,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
@@ -7577,10 +7575,12 @@ fn run() -> io::Result<()> {
                                     ps,
                                     &query,
                                     subset_filter.as_ref(),
+                                    "gfa",
+                                    &[],
+                                    &name,
                                     &graph_render,
                                     &graph_report,
                                     bed_graph_dir.as_deref(),
-                                    &name,
                                     common.threads.get(),
                                 )?;
                             } else {
@@ -7605,7 +7605,7 @@ fn run() -> io::Result<()> {
                             let engine_opts = engine_cli.build(common.threads.get())?;
                             let reference_names = vcf_reference_names(&name, &target_name);
                             if let Some(ps) = engine_opts.partition_size {
-                                output_results_vcf_partitioned(
+                                output_results_graph_partitioned(
                                     &impg,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
@@ -7616,6 +7616,7 @@ fn run() -> io::Result<()> {
                                     ps,
                                     &query,
                                     subset_filter.as_ref(),
+                                    "vcf",
                                     &reference_names,
                                     &name,
                                     &graph_render,
@@ -9440,7 +9441,11 @@ fn run() -> io::Result<()> {
                 min_identity: min_identity_f64,
                 scaffold_dist: aln.sw.scaffold_dist,
                 min_map_length: aln.min_map_length,
-                map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
+                map_pct_identity: aln
+                    .sw
+                    .map_pct_identity
+                    .clone()
+                    .or_else(|| Some("90".to_string())),
             };
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;
@@ -10415,7 +10420,11 @@ fn build_engine_opts(
         sparsify,
         mash_params,
         aligner: aln.sw.aligner.clone(),
-        map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
+        map_pct_identity: aln
+            .sw
+            .map_pct_identity
+            .clone()
+            .or_else(|| Some("90".to_string())),
         num_mappings: aln.sw.num_mappings.clone(),
         scaffold_jump: aln.sw.scaffold_jump,
         scaffold_mass: aln.sw.scaffold_mass,
@@ -12282,10 +12291,29 @@ fn output_results_vcf(
     )
 }
 
-/// Partitioned GFA output for the query command: splits the query region into
-/// sub-windows of `partition_size` bp, queries each, then runs the partitioned
-/// GFA pipeline (per-partition engine → lace → gfaffix).
-fn output_results_gfa_partitioned(
+/// Run `query_window` on each `partition_size` bp window of `range`.
+fn query_windows(
+    (start, end): (i32, i32),
+    partition_size: usize,
+    mut query_window: impl FnMut(i32, i32) -> io::Result<Vec<Interval<u32>>>,
+) -> io::Result<Vec<Vec<Interval<u32>>>> {
+    let mut partitions = Vec::new();
+    let mut window_start = start;
+    while window_start < end {
+        let window_end = (window_start + partition_size as i32).min(end);
+        let intervals = query_window(window_start, window_end)?;
+        if !intervals.is_empty() {
+            partitions.push(intervals);
+        }
+        window_start = window_end;
+    }
+    Ok(partitions)
+}
+
+/// Partitioned GFA or VCF output for the query command: queries each
+/// sub-window, then runs the partitioned GFA pipeline (per-partition
+/// engine, lace, gfaffix).
+fn output_results_graph_partitioned(
     impg: &impl ImpgIndex,
     target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
@@ -12296,23 +12324,15 @@ fn output_results_gfa_partitioned(
     partition_size: usize,
     query: &QueryOpts,
     subset_filter: Option<&SubsetFilter>,
+    output_format: &str,
+    reference_names: &[String],
+    range_name: &str,
     graph_render: &GraphRenderOpts,
     graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
-    range_name: &str,
     threads: usize,
 ) -> io::Result<()> {
-    let (start, end) = target_range;
-    let ps = partition_size as i32;
-
-    // Split into sub-windows
-    let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
-    let mut window_start = start;
-
-    while window_start < end {
-        let window_end = (window_start + ps).min(end);
-
-        // Query this sub-window
+    let partitions = query_windows(target_range, partition_size, |window_start, window_end| {
         let mut results = perform_query(
             impg,
             target_name,
@@ -12327,24 +12347,15 @@ fn output_results_gfa_partitioned(
             query.approximate,
             subset_filter,
         )?;
-
         if !results.is_empty() {
-            // Merge intervals
             merge_query_adjusted_intervals(
                 &mut results,
                 query.effective_merge_distance(),
                 query.merge_strands_for_output("gfa"),
             );
-
-            // Extract query intervals
-            let query_intervals: Vec<Interval<u32>> =
-                results.drain(..).map(|(qi, _, _)| qi).collect();
-
-            partitions.push(query_intervals);
         }
-
-        window_start = window_end;
-    }
+        Ok(results.into_iter().map(|(qi, _, _)| qi).collect())
+    })?;
 
     let gfa_output = impg::partitioned_gfa_pipeline(
         &partitions,
@@ -12355,81 +12366,9 @@ fn output_results_gfa_partitioned(
     )?;
     write_graph_output_and_render(
         &gfa_output,
-        "gfa",
+        output_format,
         target_output_prefix,
-        "gfa",
-        &[],
-        graph_render,
-        graph_report,
-        bed_graph_dir,
-        range_name,
-        threads,
-    )
-}
-
-fn output_results_vcf_partitioned(
-    impg: &impl ImpgIndex,
-    target_output_prefix: &Option<String>,
-    sequence_index: &UnifiedSequenceIndex,
-    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-    engine_opts: &EngineOpts,
-    target_name: &str,
-    target_range: (i32, i32),
-    partition_size: usize,
-    query: &QueryOpts,
-    subset_filter: Option<&SubsetFilter>,
-    reference_names: &[String],
-    range_name: &str,
-    graph_render: &GraphRenderOpts,
-    graph_report: &GraphReportCliOpts,
-    bed_graph_dir: Option<&Path>,
-    threads: usize,
-) -> io::Result<()> {
-    let (start, end) = target_range;
-    let ps = partition_size as i32;
-    let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
-    let mut window_start = start;
-    while window_start < end {
-        let window_end = (window_start + ps).min(end);
-        let mut results = perform_query(
-            impg,
-            target_name,
-            (window_start, window_end),
-            false,
-            query.min_result_identity,
-            query.min_output_length,
-            query.transitive,
-            query.transitive_opts.transitive_dfs,
-            &query.transitive_opts,
-            Some(sequence_index),
-            query.approximate,
-            subset_filter,
-        )?;
-        if !results.is_empty() {
-            merge_query_adjusted_intervals(
-                &mut results,
-                query.effective_merge_distance(),
-                query.merge_strands_for_output("gfa"),
-            );
-            let query_intervals: Vec<Interval<u32>> =
-                results.drain(..).map(|(qi, _, _)| qi).collect();
-            partitions.push(query_intervals);
-        }
-        window_start = window_end;
-    }
-
-    let gfa_output = impg::partitioned_gfa_pipeline(
-        &partitions,
-        impg,
-        sequence_index,
-        scoring_params,
-        engine_opts,
-    )?;
-    write_graph_output_and_render(
-        &gfa_output,
-        "vcf",
-        target_output_prefix,
-        "vcf",
+        output_format,
         reference_names,
         graph_render,
         graph_report,
