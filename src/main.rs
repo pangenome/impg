@@ -5839,6 +5839,10 @@ GFA engine shorthand:
         )]
         multi_level_repeat_aware_boundaries: bool,
 
+        /// Skip the final Ygs sort (the :crush pipeline stage sorts too)
+        #[clap(long)]
+        no_sort: bool,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -9024,6 +9028,7 @@ fn run() -> io::Result<()> {
             multi_level_min_objective_delta,
             multi_level_objective,
             multi_level_repeat_aware_boundaries,
+            no_sort,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -9234,7 +9239,15 @@ fn run() -> io::Result<()> {
                 resolved.stats.candidates_seen,
                 resolved.stats.iterations
             );
-            let gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
+            let mut gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
+            if !no_sort {
+                info!("crush: sorting with {}", impg::DEFAULT_SYNG_GFA_SORT_PIPELINE);
+                gfa = impg::graph::sort_gfa_pipeline(
+                    &gfa,
+                    impg::DEFAULT_SYNG_GFA_SORT_PIPELINE,
+                    common.threads.get(),
+                )?;
+            }
 
             if output == "-" {
                 let stdout = io::stdout();
