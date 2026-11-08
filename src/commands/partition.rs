@@ -2,7 +2,7 @@ use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
 use crate::partition_profile::PartitionProfile;
-use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
+use crate::sequence_index::UnifiedSequenceIndex;
 use crate::EngineOpts;
 use coitrees::Interval;
 use log::{debug, info};
@@ -1699,41 +1699,13 @@ fn write_partition_fasta(
     let full_path = create_output_path(output_folder, &filename)?;
     let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
-
-    for query_interval in query_intervals {
-        let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
-
-        // Determine actual start and end based on orientation
-        let (start, end, strand) = if query_interval.first <= query_interval.last {
-            (query_interval.first, query_interval.last, '+')
-        } else {
-            (query_interval.last, query_interval.first, '-')
-        };
-
-        // Fetch the sequence
-        let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
-
-        // If reverse strand and reverse_complement strand, reverse complement the sequence
-        let sequence = if strand == '-' && reverse_complement {
-            crate::graph::reverse_complement(&sequence)
-        } else {
-            sequence
-        };
-
-        // Write FASTA format
-        let header_suffix = if strand == '-' && reverse_complement {
-            "/rc"
-        } else {
-            ""
-        };
-        writeln!(writer, ">{query_name}:{start}-{end}{header_suffix}")?;
-
-        // Write sequence in lines of 80 characters
-        let sequence_str = String::from_utf8_lossy(&sequence);
-        for line in sequence_str.as_bytes().chunks(80) {
-            writeln!(writer, "{}", String::from_utf8_lossy(line))?;
-        }
-    }
+    crate::graph::write_intervals_fasta(
+        &mut writer,
+        impg,
+        query_intervals,
+        sequence_index,
+        reverse_complement,
+    )?;
     writer.flush()?;
     Ok(())
 }
