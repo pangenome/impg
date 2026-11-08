@@ -58,3 +58,19 @@ fn graph_without_window_rejects_terminal_n_clip() {
     let (out, _) = graph(dir.path(), &fasta, "cut-n=10:pggb");
     assert!(!out.status.success(), "cut-n= must be rejected without a window");
 }
+
+/// Soft-masked input kept `:start-end` names one base off (`:1-3001`).
+#[test]
+fn graph_pggb_keeps_names_of_soft_masked_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = write_pair(dir.path(), true, ":1-3000");
+    let (out, gfa) = graph(dir.path(), &fasta, "pggb");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut names: Vec<&str> = gfa
+        .lines()
+        .filter_map(|l| l.strip_prefix("P\t"))
+        .map(|l| l.split('\t').next().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["A#0#chr1:1-3000", "B#0#chr1:1-3000"]);
+}

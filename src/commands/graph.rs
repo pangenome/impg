@@ -677,7 +677,9 @@ fn restore_direct_fasta_path_names(gfa: &str, fasta_files: &[String]) -> io::Res
     let mut exact_full_range_name: HashMap<String, String> = HashMap::new();
 
     for fasta_path in fasta_files {
-        for (name, sequence) in read_sequences_from_fasta(Path::new(fasta_path))? {
+        for (name, mut sequence) in read_sequences_from_fasta(Path::new(fasta_path))? {
+            // seqwish uppercases, so soft-masked input must match uppercased
+            sequence.make_ascii_uppercase();
             if let Some((key, start, _end)) = split_numeric_path_range(&name) {
                 let generated = format!("{key}:{start}-{}", start + sequence.len());
                 exact_full_range_name
