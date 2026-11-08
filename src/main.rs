@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
@@ -6209,8 +6209,127 @@ fn main() {
     }
 }
 
+/// sweepga options (flattened from `sweepga::AlnArgs`) that no impg
+/// command reads: hidden from help, and an error when given.
+const UNUSED_SWEEPGA_ARGS: &[&str] = &[
+    "all_pairs",
+    "batch_size",
+    "max_disk",
+    "zstd_compress",
+    "zstd_level",
+    "scoring",
+    "keep_self",
+    "group_by",
+    "scaffold_overlap",
+    "min_scaffold_identity",
+    "scaffolds_only",
+    "no_adaptive_scaffolds",
+    "joblist",
+    "joblist_output_dir",
+    "ani_method",
+    "agc_prefix",
+    "agc_samples",
+    "agc_queries",
+    "agc_targets",
+    "agc_tempdir",
+    "agc_extract_dir",
+    "pairs_file",
+    "pairs_done",
+    "pairs_remaining",
+    "list_pairs",
+    "shuffle_pairs",
+    "shuffle_seed",
+    "max_pairs",
+    "pair_start",
+    "sparsify_pairs",
+];
+
+impl Args {
+    /// The alignment options of the commands that have them.
+    fn aln_opts_mut(&mut self) -> Option<&mut AlnOpts> {
+        match self {
+            Args::Partition { engine_cli, .. }
+            | Args::Query { engine_cli, .. }
+            | Args::Similarity { engine_cli, .. }
+            | Args::Graph { engine_cli, .. } => Some(&mut engine_cli.aln),
+            Args::Genotype {
+                command: GenotypeCommand::Cos { engine_cli, .. },
+            } => Some(&mut engine_cli.aln),
+            Args::Align { aln, .. } => Some(aln),
+            _ => None,
+        }
+    }
+}
+
+/// --fastga / --wfmash set --aligner, as in sweepga's own CLI.
+fn resolve_aligner_shorthand(sw: &mut sweepga::AlnArgs) -> Result<(), &'static str> {
+    match (sw.use_fastga, sw.use_wfmash) {
+        (true, true) => Err("Cannot specify both --wfmash and --fastga"),
+        (_, true) => {
+            sw.aligner = "wfmash".to_string();
+            Ok(())
+        }
+        (true, _) => {
+            sw.aligner = "fastga".to_string();
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn hide_unused_sweepga_args(mut cmd: clap::Command) -> clap::Command {
+    for id in UNUSED_SWEEPGA_ARGS {
+        if cmd.get_arguments().any(|a| a.get_id() == id) {
+            cmd = cmd.mut_arg(id, |a| a.hide(true));
+        }
+    }
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect();
+    for name in names {
+        cmd = cmd.mut_subcommand(name, hide_unused_sweepga_args);
+    }
+    cmd
+}
+
+fn reject_unused_sweepga_args(cmd: &mut clap::Command, matches: &clap::ArgMatches) {
+    for id in UNUSED_SWEEPGA_ARGS {
+        if matches.try_contains_id(id).unwrap_or(false)
+            && matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine)
+        {
+            let flag = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .and_then(|a| a.get_long())
+                .unwrap_or(id)
+                .to_string();
+            cmd.error(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("--{flag} is a sweepga option that impg does not use"),
+            )
+            .exit();
+        }
+    }
+    if let Some((name, sub)) = matches.subcommand() {
+        if let Some(sub_cmd) = cmd.find_subcommand_mut(name) {
+            reject_unused_sweepga_args(sub_cmd, sub);
+        }
+    }
+}
+
 fn run() -> io::Result<()> {
-    let args = Args::parse();
+    let mut cmd = hide_unused_sweepga_args(Args::command());
+    cmd.build();
+    let matches = cmd.clone().get_matches();
+    reject_unused_sweepga_args(&mut cmd, &matches);
+    let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Some(aln) = args.aln_opts_mut() {
+        if let Err(e) = resolve_aligner_shorthand(&mut aln.sw) {
+            cmd.error(clap::error::ErrorKind::ArgumentConflict, e)
+                .exit();
+        }
+    }
 
     match args {
         Args::GenomeInfer { command } => {
