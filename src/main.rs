@@ -9454,6 +9454,7 @@ fn run() -> io::Result<()> {
                 min_identity: min_identity_f64,
                 scaffold_dist: aln.sw.scaffold_dist,
                 min_map_length: aln.min_map_length,
+                map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
             };
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;

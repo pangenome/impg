@@ -49,3 +49,13 @@ fn align_min_aln_identity_ani_preset_is_an_error() {
     let (out, _) = align(dir.path(), &["--min-aln-identity", "ani50-2"]);
     assert!(!out.status.success(), "ani50-2 must be rejected by impg align");
 }
+
+/// `--map-pct-identity` reaches wfmash; it was always -p90.
+#[test]
+fn align_map_pct_identity_reaches_wfmash() {
+    let dir = tempfile::tempdir().unwrap();
+    let (out, _) = align(dir.path(), &["--aligner", "wfmash", "--map-pct-identity", "70"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("-p70"), "wfmash did not get -p70:\n{stderr}");
+}
