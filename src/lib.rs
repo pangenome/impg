@@ -6,6 +6,7 @@ pub mod agc_index;
 pub mod alignment_record;
 pub mod commands;
 pub mod faidx;
+pub mod fasta;
 pub mod forest_map;
 pub mod genome_inference;
 pub mod genotyping;
@@ -1131,106 +1132,25 @@ fn dispatch_gfa_engine_inner(
             )
         }
         GfaEngine::SyngNative => {
-            if let Some(mode) = engine_opts.syng_gfa_mode {
-                let syng_idx = impg.syng_index_ref().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "--gfa-engine syng[:raw|:blunt] requires syng-index input; use `impg query -a <prefix>.syng -o gfa --gfa-engine syng` or `impg render --engine syng`",
-                    )
-                })?;
-                validate_syng_param_assertion(syng_idx.params, engine_opts.syng_params)?;
-                return build_syng_region_gfa_from_intervals(
-                    syng_idx,
-                    impg,
-                    query_intervals,
-                    sequence_index,
-                    mode,
-                    engine_opts.syng_gfa_frequency_mask,
-                );
-            }
-            // v2.3: if we have access to the underlying syng index,
-            // re-query from the first interval as seed and use
-            // anchor-seeded gap-only BiWFA for pairs that share anchors.
-            // Otherwise fall back to the v1 full-pair path.
-            let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
-            if sequences.is_empty() {
-                return Ok(String::from("H\tVN:Z:1.0\n"));
-            }
-            let seq_pairs: Vec<(String, Vec<u8>)> = sequences
-                .iter()
-                .map(|(seq, meta)| (meta.path_name().to_string(), seq.as_bytes().to_vec()))
-                .collect();
-
-            if let Some(syng_idx) = impg.syng_index_ref() {
-                // Build Member metadata alongside sequences for the
-                // anchor-seeded driver.
-                let members: Vec<(String, Vec<u8>, syng_graph::Member)> = sequences
-                    .iter()
-                    .map(|(seq, meta)| {
-                        let (fwd_start, fwd_end) = if meta.strand == '+' {
-                            (meta.start as u64, (meta.start + meta.size) as u64)
-                        } else {
-                            (
-                                (meta.total_length as i32 - meta.start - meta.size) as u64,
-                                (meta.total_length as i32 - meta.start) as u64,
-                            )
-                        };
-                        (
-                            meta.path_name().to_string(),
-                            seq.as_bytes().to_vec(),
-                            syng_graph::Member {
-                                chrom: meta.name.clone(),
-                                fwd_start,
-                                fwd_end,
-                                strand: meta.strand,
-                            },
-                        )
-                    })
-                    .collect();
-                // Pick first interval as seed. (The partition's seed
-                // isn't tracked explicitly; using the first element
-                // matches the typical greedy-expansion order.)
-                let seed = &members[0].2;
-                let paf = syng_graph::build_paf_anchor_seeded(
-                    &members,
-                    &seed.chrom,
-                    seed.fwd_start,
-                    seed.fwd_end,
-                    syng_idx,
-                    /* syng_padding */ 120,
-                    /* max_depth */ 1,
-                    /* k_near */ 3,
-                    /* k_far */ 1,
-                    /* random_fraction */ 0.01,
-                );
-                let t_induce = std::time::Instant::now();
-                let gfa = syng_graph::build_gfa_from_paf_and_sequences(
-                    &seq_pairs,
-                    &paf,
-                    &engine_opts.pipeline,
-                )?;
-                log::info!(
-                    "syng_graph: seqwish induction {:.2}s ({} bytes PAF, {} sequences)",
-                    t_induce.elapsed().as_secs_f64(),
-                    paf.len(),
-                    seq_pairs.len(),
-                );
-                if skip_normalize {
-                    Ok(gfa)
-                } else {
-                    graph::normalize_and_sort(gfa, num_threads)
-                }
-            } else {
-                let gfa = syng_graph::build_gfa_syng_native_from_sequences(
-                    &seq_pairs,
-                    &engine_opts.pipeline,
-                )?;
-                if skip_normalize {
-                    Ok(gfa)
-                } else {
-                    graph::normalize_and_sort(gfa, num_threads)
-                }
-            }
+            // The CLI always sets a mode; library callers get its default
+            let mode = engine_opts
+                .syng_gfa_mode
+                .unwrap_or(commands::syng2gfa::SyngGfaMode::Blunt);
+            let syng_idx = impg.syng_index_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--gfa-engine syng[:raw|:blunt] requires syng-index input; use `impg query -a <prefix>.syng -o gfa --gfa-engine syng` or `impg render --engine syng`",
+                )
+            })?;
+            validate_syng_param_assertion(syng_idx.params, engine_opts.syng_params)?;
+            build_syng_region_gfa_from_intervals(
+                syng_idx,
+                impg,
+                query_intervals,
+                sequence_index,
+                mode,
+                engine_opts.syng_gfa_frequency_mask,
+            )
         }
         GfaEngine::SyngLocal => {
             let mode = engine_opts

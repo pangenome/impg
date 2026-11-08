@@ -876,33 +876,13 @@ pub fn agc_to_temp_fasta(agc_files: &[String], temp_dir: &str) -> io::Result<tem
 /// Read sequences from a FASTA file path into `(name, sequence_bytes)` pairs.
 /// Used by the pair selection path in `build_graph()`.
 fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{}': {}", path.display(), e))
-    })?;
-    let reader = BufReader::new(reader);
     let mut sequences = Vec::new();
-    let mut current_name = String::new();
-    let mut current_seq = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        if let Some(header) = line.strip_prefix('>') {
-            if !current_name.is_empty() {
-                sequences.push((
-                    std::mem::take(&mut current_name),
-                    std::mem::take(&mut current_seq),
-                ));
-            }
-            current_name = header.split_whitespace().next().unwrap_or("").to_string();
-            current_seq.clear();
-        } else {
-            current_seq.extend_from_slice(line.trim().as_bytes());
+    crate::fasta::for_each_record(path, |name, seq| {
+        if !name.is_empty() {
+            sequences.push((name, seq));
         }
-    }
-    if !current_name.is_empty() {
-        sequences.push((current_name, current_seq));
-    }
+        Ok(())
+    })?;
     // Sort by name for reproducibility (downstream pair selection assumes sorted order).
     sequences.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(sequences)
@@ -915,49 +895,16 @@ fn read_fasta_sequences(
     let mut sequences = Vec::new();
 
     for path in fasta_paths {
-        let file = File::open(path)?;
-        // Use niffler to auto-detect compression
-        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-        })?;
-        let reader = BufReader::new(reader);
-
-        let mut current_name = String::new();
-        let mut current_seq = String::new();
-
-        for line in reader.lines() {
-            let line = line?;
-            if line.starts_with('>') {
-                // Save previous sequence if any
-                if !current_name.is_empty() && !current_seq.is_empty() {
-                    let seq_len = current_seq.len();
-                    sequences.push((
-                        std::mem::take(&mut current_seq),
-                        metadata_from_fasta_header(&current_name, seq_len),
-                    ));
-                }
-                // Start new sequence
-                current_name = line
-                    .strip_prefix('>')
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                current_seq.clear();
-            } else {
-                current_seq.push_str(line.trim());
+        crate::fasta::for_each_record(Path::new(path), |name, seq| {
+            if !name.is_empty() && !seq.is_empty() {
+                let seq = String::from_utf8(seq).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("{path}: {e}"))
+                })?;
+                let seq_len = seq.len();
+                sequences.push((seq, metadata_from_fasta_header(&name, seq_len)));
             }
-        }
-
-        // Don't forget the last sequence
-        if !current_name.is_empty() && !current_seq.is_empty() {
-            let seq_len = current_seq.len();
-            sequences.push((
-                current_seq,
-                metadata_from_fasta_header(&current_name, seq_len),
-            ));
-        }
+            Ok(())
+        })?;
     }
 
     // Sort by length descending
@@ -1106,12 +1053,7 @@ pub fn align_sequences(
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for path in fasta_files {
-            let file = File::open(path)?;
-            let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-                io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-            })?;
-            let reader = BufReader::new(reader);
-            for line in reader.lines() {
+            for line in crate::fasta::open_reader(Path::new(path))?.lines() {
                 let line: String = line?;
                 if !line.starts_with('>') {
                     total_bases += line.trim().len() as u64;

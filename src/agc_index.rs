@@ -404,17 +404,7 @@ impl AgcIndex {
             ))
         })?;
 
-        // Convert from numeric encoding (0-3) to ASCII (A,C,G,T)
-        Ok(sequence
-            .iter()
-            .map(|&b| match b {
-                0 => b'A',
-                1 => b'C',
-                2 => b'G',
-                3 => b'T',
-                _ => b'N',
-            })
-            .collect())
+        Ok(numeric_to_ascii(&sequence))
     }
 
     pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
@@ -437,6 +427,19 @@ impl AgcIndex {
 
         Ok(length)
     }
+}
+
+/// AGC numeric bases (0-3) to ASCII ACGT; any other code becomes N.
+pub fn numeric_to_ascii(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .map(|&b| match b {
+            0 => b'A',
+            1 => b'C',
+            2 => b'G',
+            3 => b'T',
+            _ => b'N',
+        })
+        .collect()
 }
 
 #[cfg(test)]

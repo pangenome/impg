@@ -189,41 +189,9 @@ fn load_sequences(
     fasta_files
         .par_iter()
         .try_for_each(|path| -> io::Result<()> {
-            let file = File::open(path)?;
-            let (reader, _format) = niffler::get_reader(Box::new(file))
-                .map_err(|e| io::Error::other(format!("Failed to open {}: {}", path, e)))?;
-            let reader = BufReader::new(reader);
-
-            let mut current_name: Option<String> = None;
-            let mut current_seq = Vec::new();
-
-            for line in reader.lines() {
-                let line = line?;
-                if let Some(header) = line.strip_prefix('>') {
-                    // Process previous sequence
-                    if let Some(name) = current_name.take() {
-                        let sketch = sweepga::mash::KmerSketch::from_sequence(
-                            &current_seq,
-                            mash_params.kmer_size,
-                            mash_params.sketch_size,
-                        );
-                        sequences.lock().unwrap().push(SequenceInfo {
-                            name,
-                            path: path.clone(),
-                            sketch,
-                        });
-                    }
-                    current_name = Some(header.split_whitespace().next().unwrap_or("").to_string());
-                    current_seq.clear();
-                } else {
-                    current_seq.extend(line.trim().as_bytes());
-                }
-            }
-
-            // Don't forget last sequence
-            if let Some(name) = current_name {
+            crate::fasta::for_each_record(Path::new(path), |name, seq| {
                 let sketch = sweepga::mash::KmerSketch::from_sequence(
-                    &current_seq,
+                    &seq,
                     mash_params.kmer_size,
                     mash_params.sketch_size,
                 );
@@ -232,8 +200,8 @@ fn load_sequences(
                     path: path.clone(),
                     sketch,
                 });
-            }
-
+                Ok(())
+            })?;
             Ok(())
         })?;
 
