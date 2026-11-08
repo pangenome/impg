@@ -11827,7 +11827,8 @@ fn syng_intervals_to_adjusted(
     let Some(query_id) = seq_index.get_id(query_name) else {
         return Vec::new();
     };
-    intervals
+    let target = Interval::new(range_start, range_end, query_id);
+    let mut adjusted: Vec<AdjustedInterval> = intervals
         .iter()
         .filter_map(|iv| {
             let homolog_id = seq_index.get_id(&iv.genome)?;
@@ -11836,10 +11837,20 @@ fn syng_intervals_to_adjusted(
             } else {
                 Interval::new(iv.start as i32, iv.end as i32, homolog_id)
             };
-            let target = Interval::new(range_start, range_end, query_id);
             Some((homolog, Vec::<CigarOp>::new(), target))
         })
-        .collect()
+        .collect();
+    // The transitive walk marks the query range visited and never returns
+    // it; the alignment backend reports it first, so add it when missing.
+    let covered = adjusted.iter().any(|(h, _, _)| {
+        h.metadata == query_id
+            && h.first.min(h.last) < range_end
+            && h.first.max(h.last) > range_start
+    });
+    if !covered {
+        adjusted.insert(0, (target, Vec::new(), target));
+    }
+    adjusted
 }
 
 fn syng_intervals_to_merged_query_intervals(
@@ -13773,9 +13784,10 @@ mod tests {
             100,
             true,
         );
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].first, 10);
-        assert_eq!(merged[0].last, 220);
+        // The query range comes first, then the merged homolog
+        assert_eq!(merged.len(), 2);
+        assert_eq!((merged[0].first, merged[0].last), (0, 300));
+        assert_eq!((merged[1].first, merged[1].last), (10, 220));
 
         let unmerged = syng_intervals_to_merged_query_intervals(
             &intervals,
@@ -13786,7 +13798,7 @@ mod tests {
             10,
             true,
         );
-        assert_eq!(unmerged.len(), 2);
+        assert_eq!(unmerged.len(), 3);
     }
 
     #[test]
