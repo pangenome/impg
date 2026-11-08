@@ -67,10 +67,8 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-# 04f9edb = ddd31d3 (pansn-sparsification) + wfmash-rs 3cc6677 (vendored wfmash v0.14.1).
-# PanSN haplotype grouping + wfmash-per-hap-pair joblist live upstream;
-# this impg tree just calls them. Handles 1 _or many_ input FASTAs.
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "58bd6e09e81cb955e7ef165847aa0e4c94f2d155", default-features = false }
+# sweepga pins wfmash-rs 07ed9a3 (wfmash v0.14.1 head 9b2a738).
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "4713ce0c8a53b709f47f51bb0810cd858054acef", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "a145a311f2d341b0a7d3747c46fd197bb34177d4", default-features = false }
 
@@ -86,7 +84,7 @@ cc = "1"
 # own build-dependencies, so declare these here even though the code is unused.
 # Without them build.rs can run first and copy nothing. Revisions must match the
 # ones sweepga pins, otherwise cargo builds each crate twice.
-wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "bd04a3365beca9d7ae551b4d5c04fb61d66c60e8" }
+wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "07ed9a3f608e88ee2de0d60f5285e624073979c1" }
 fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "97a7a56299b5a565964123eb907e93c4480c9f32" }
 
 [dev-dependencies]
