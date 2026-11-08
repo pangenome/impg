@@ -9345,6 +9345,18 @@ fn run() -> io::Result<()> {
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
             let sequence_files = sequence.resolve_sequence_files()?;
             let (render_engine, syng_gfa_mode) = parse_render_engine_spec(&engine)?;
+            // Local graphs use impg graph's CLI defaults
+            let defaults = EngineCliOpts::parse_from(["impg"]);
+            let mut local_graph = build_graph_config(
+                &defaults,
+                &defaults.aln.sw.sparsify,
+                None,
+                ".",
+                common.threads.get(),
+                false,
+                None,
+            )?;
+            local_graph.temp_dir = None;
             let config = render::RenderConfig {
                 syng_prefix: &syng_prefix,
                 target_range: &target_range,
@@ -9357,6 +9369,11 @@ fn run() -> io::Result<()> {
                 emit_gfa: !no_gfa,
                 keep_existing,
                 threads: common.threads.get(),
+                local_graph,
+                poa_scoring: defaults.parse_poa_scoring()?,
+                target_poa_lengths: defaults.smooth.parse_target_poa_lengths()?,
+                max_node_length: defaults.smooth.max_node_length,
+                poa_padding_fraction: defaults.smooth.poa_padding_fraction,
             };
             render::run(&config)?;
         }
