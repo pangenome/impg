@@ -59,3 +59,21 @@ fn align_map_pct_identity_reaches_wfmash() {
     assert!(out.status.success(), "{stderr}");
     assert!(stderr.contains("-p70"), "wfmash did not get -p70:\n{stderr}");
 }
+
+/// `impg graph --debug-dir` creates the directory and writes into it.
+#[test]
+fn graph_debug_dir_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let debug = dir.path().join("dbg");
+    let output = Command::new(env!("CARGO_BIN_EXE_impg"))
+        .args(["graph", "--sequence-files"])
+        .arg(write_pair(dir.path()))
+        .args(["--gfa-engine", "seqwish", "-t", "1", "--debug-dir"])
+        .arg(&debug)
+        .arg("-g")
+        .arg(dir.path().join("out.gfa"))
+        .output()
+        .expect("run impg graph");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(debug.join("combined.fa").exists(), "no combined.fa in --debug-dir");
+}

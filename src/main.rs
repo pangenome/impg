@@ -10357,6 +10357,9 @@ fn build_graph_config(
     show_progress: bool,
     debug_dir: Option<String>,
 ) -> io::Result<graph::GraphBuildConfig> {
+    if let Some(dir) = &debug_dir {
+        std::fs::create_dir_all(dir)?;
+    }
     Ok(graph::GraphBuildConfig {
         num_threads,
         frequency_multiplier: engine_cli.aln.sw.fastga_frequency_multiplier,

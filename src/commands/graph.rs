@@ -1124,9 +1124,9 @@ pub fn align_sequences(
     };
     if let Some(ref debug_dir) = config.debug_dir {
         let dst = format!("{}/combined.fa", debug_dir);
-        let _ = std::fs::copy(combined_fasta.path(), &dst);
+        std::fs::copy(combined_fasta.path(), &dst)?;
         if let Some(seqs) = &debug_sequences {
-            let _ = crate::syng_graph::write_path_spelling_debug(Path::new(debug_dir), seqs);
+            crate::syng_graph::write_path_spelling_debug(Path::new(debug_dir), seqs)?;
         }
         info!("[graph::debug] Saved combined FASTA to {}", dst);
     }
@@ -1263,14 +1263,14 @@ pub fn align_sequences(
     // Debug: save raw PAF
     if let Some(ref debug_dir) = config.debug_dir {
         let dst = format!("{}/raw.paf", debug_dir);
-        let _ = std::fs::copy(paf_temp.path(), &dst);
+        std::fs::copy(paf_temp.path(), &dst)?;
         if let Some(seqs) = &debug_sequences {
-            let _ = crate::syng_graph::write_paf_stage_debug(
+            crate::syng_graph::write_paf_stage_debug(
                 Path::new(debug_dir),
                 "raw",
                 seqs,
                 paf_temp.path(),
-            );
+            )?;
         }
         info!("[graph::debug] Saved raw PAF to {}", dst);
     }
@@ -1281,23 +1281,23 @@ pub fn align_sequences(
     // Debug: save filtered PAF
     if let Some(ref debug_dir) = config.debug_dir {
         let dst = format!("{}/filtered.paf", debug_dir);
-        let _ = std::fs::copy(filtered_paf.path(), &dst);
+        std::fs::copy(filtered_paf.path(), &dst)?;
         let final_dst = format!("{}/final.paf", debug_dir);
-        let _ = std::fs::copy(filtered_paf.path(), &final_dst);
+        std::fs::copy(filtered_paf.path(), &final_dst)?;
         if let Some(seqs) = &debug_sequences {
             let debug_path = Path::new(debug_dir);
-            let _ = crate::syng_graph::write_paf_stage_debug(
+            crate::syng_graph::write_paf_stage_debug(
                 debug_path,
                 "filtered",
                 seqs,
                 filtered_paf.path(),
-            );
-            let _ = crate::syng_graph::write_paf_stage_debug(
+            )?;
+            crate::syng_graph::write_paf_stage_debug(
                 debug_path,
                 "final",
                 seqs,
                 filtered_paf.path(),
-            );
+            )?;
         }
         info!("[graph::debug] Saved filtered PAF to {}", dst);
     }
