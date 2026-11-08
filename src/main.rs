@@ -5839,7 +5839,8 @@ GFA engine shorthand:
         )]
         multi_level_repeat_aware_boundaries: bool,
 
-        /// Skip the final Ygs sort (the :crush pipeline stage sorts too)
+        /// Skip the final Ygs sort (the :crush pipeline stage sorts too;
+        /// --admission-only never sorts)
         #[clap(long)]
         no_sort: bool,
 
@@ -9240,7 +9241,7 @@ fn run() -> io::Result<()> {
                 resolved.stats.iterations
             );
             let mut gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
-            if !no_sort {
+            if !no_sort && !multi_level_admission_only {
                 info!(
                     "crush: sorting with {}",
                     impg::DEFAULT_SYNG_GFA_SORT_PIPELINE
