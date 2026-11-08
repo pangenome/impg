@@ -564,8 +564,7 @@ fn build_poa_unchopped_gfa(
     sequences: &[(String, crate::graph::SequenceMetadata)],
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<String> {
-    // Build SPOA graph with end-to-end alignment for whole-sequence graph induction.
-    let (mut graph, mut engine) = build_graph_poa_spoa_engine(scoring_params);
+    let (mut graph, mut engine) = crate::graph::poa_spoa_engine(scoring_params);
     let metadata: Vec<crate::graph::SequenceMetadata> =
         sequences.iter().map(|(_, m)| m.clone()).collect();
     crate::graph::feed_sequences_to_graph(
@@ -575,12 +574,6 @@ fn build_poa_unchopped_gfa(
     );
 
     crate::graph::spoa_graph_to_unchoped_gfa(graph, &metadata)
-}
-
-fn build_graph_poa_spoa_engine(
-    scoring_params: (u8, u8, u8, u8, u8, u8),
-) -> (spoa_rs::Graph, spoa_rs::AlignmentEngine) {
-    crate::graph::build_global_spoa_engine(scoring_params)
 }
 
 /// Build a pangenome graph from FASTA files with the PGGB pipeline:
@@ -1486,12 +1479,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn graph_build_poa_uses_global_spoa_alignment() {
+    fn poa_graphs_use_global_spoa_alignment() {
         let scoring = (1, 4, 6, 2, 26, 1);
         let first = "AAAACCCC";
         let second = "CCCCGGGG";
 
-        let (mut poa_graph, mut poa_engine) = build_graph_poa_spoa_engine(scoring);
+        let (mut poa_graph, mut poa_engine) = crate::graph::poa_spoa_engine(scoring);
         let (_, poa_alignment) = poa_engine.align(first, &poa_graph);
         poa_graph.add_alignment(poa_alignment, first);
         let (poa_score, _) = poa_engine.align(second, &poa_graph);
