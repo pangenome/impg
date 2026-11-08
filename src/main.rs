@@ -7207,21 +7207,24 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                 )?
                             };
-                            let mut out = find_output_stream(&target_output_prefix, "fa")?;
-                            for iv in &intervals {
-                                let sequence = seq_idx.fetch_sequence(
-                                    &iv.genome,
-                                    iv.start as i32,
-                                    iv.end as i32,
-                                )?;
-                                writeln!(
-                                    out,
-                                    ">{}:{}-{}({})",
-                                    iv.genome, iv.start, iv.end, iv.strand
-                                )?;
-                                out.write_all(&sequence)?;
-                                writeln!(out)?;
-                            }
+                            // Same merge, header and wrapping as the alignment backend
+                            let mut results = syng_intervals_to_adjusted(
+                                &intervals,
+                                target_name,
+                                *range_start,
+                                *range_end,
+                                wrapper.seq_index(),
+                            );
+                            output_results_fasta(
+                                &wrapper,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "fa")?,
+                                seq_idx,
+                                &name,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("fasta"),
+                                gfa_maf_fasta.reverse_complement,
+                            )?;
                         }
                         "gbwt" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
@@ -12449,60 +12452,9 @@ fn output_results_fasta(
     merge_strands: bool,
     reverse_complement: bool,
 ) -> io::Result<()> {
-    // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
-
-    // Parallelize sequence fetching and processing
-    let sequence_data: Vec<(String, String)> = results
-        .par_iter()
-        .map(|(query_interval, _, _)| -> io::Result<(String, String)> {
-            let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
-
-            // Determine actual start and end based on orientation
-            let (start, end, strand) = if query_interval.first <= query_interval.last {
-                (query_interval.first, query_interval.last, '+')
-            } else {
-                (query_interval.last, query_interval.first, '-')
-            };
-
-            // Fetch the sequence
-            let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
-
-            // If reverse strand and reverse complementing, reverse complement the sequence
-            let sequence = if strand == '-' && reverse_complement {
-                impg::graph::reverse_complement(&sequence)
-            } else {
-                sequence
-            };
-
-            // Create header
-            let header_suffix = if strand == '-' && reverse_complement {
-                "/rc"
-            } else {
-                ""
-            };
-            let header = format!(">{query_name}:{start}-{end}{header_suffix}");
-
-            // Convert sequence to string with line breaks every 80 characters
-            let sequence_str = String::from_utf8_lossy(&sequence);
-            let formatted_sequence = sequence_str
-                .as_bytes()
-                .chunks(80)
-                .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            Ok((header, formatted_sequence))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Output sequences sequentially to maintain order
-    for (header, sequence) in sequence_data {
-        writeln!(out, "{header}")?;
-        writeln!(out, "{sequence}")?;
-    }
-
-    Ok(())
+    let intervals: Vec<Interval<u32>> = results.iter().map(|(qi, _, _)| *qi).collect();
+    impg::graph::write_intervals_fasta(out, impg, &intervals, sequence_index, reverse_complement)
 }
 
 fn output_results_maf(

@@ -819,6 +819,46 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
     Ok(())
 }
 
+/// Write intervals as FASTA: `name:start-end`, plus `/rc` when a
+/// reverse interval is reverse-complemented; 80 bases per line.
+pub fn write_intervals_fasta(
+    out: &mut dyn Write,
+    impg: &impl ImpgIndex,
+    intervals: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    reverse_complement_reverse: bool,
+) -> io::Result<()> {
+    use rayon::prelude::*;
+    let records: Vec<(String, Vec<u8>)> = intervals
+        .par_iter()
+        .map(|iv| -> io::Result<(String, Vec<u8>)> {
+            let name = impg.seq_index().get_name(iv.metadata).unwrap();
+            let (start, end, reverse) = if iv.first <= iv.last {
+                (iv.first, iv.last, false)
+            } else {
+                (iv.last, iv.first, true)
+            };
+            let sequence = sequence_index.fetch_sequence(name, start, end)?;
+            Ok(if reverse && reverse_complement_reverse {
+                (
+                    format!("{name}:{start}-{end}/rc"),
+                    reverse_complement(&sequence),
+                )
+            } else {
+                (format!("{name}:{start}-{end}"), sequence)
+            })
+        })
+        .collect::<io::Result<_>>()?;
+    for (header, sequence) in records {
+        writeln!(out, ">{header}")?;
+        for line in sequence.chunks(80) {
+            out.write_all(line)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     let len = seq.len();
     let mut result = Vec::with_capacity(len);

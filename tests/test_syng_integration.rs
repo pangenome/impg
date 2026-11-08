@@ -5746,3 +5746,61 @@ fn test_syng_ambiguity_fasta_agc_serial_parallel() {
         }
     }
 }
+
+/// syng query -o fasta wrote `name:start-end(strand)` on one line; it
+/// now uses the alignment backend writer (no strand, 80 bases per line).
+#[test]
+fn test_syng_query_fasta_matches_alignment_backend_format() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping CLI test: impg binary not found");
+        return;
+    };
+
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join("impg_test_syng_query_fasta");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let fasta = dir.join("panel.fa");
+    let prefix = dir.join("panel.syng");
+    let mut x: u64 = 5;
+    let base: Vec<u8> = (0..3000)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            b"ACGT"[(x >> 62) as usize]
+        })
+        .collect();
+    let mut hap_b = base.clone();
+    for i in (200..2800).step_by(97) {
+        hap_b[i] = mutate_base_ascii(hap_b[i]);
+    }
+    {
+        let mut f = std::fs::File::create(&fasta).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&base).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+    }
+    let build = Command::new(&bin)
+        .args(["syng", "--fasta", fasta.to_str().unwrap(), "-o", prefix.to_str().unwrap()])
+        .args(["--position-sample-rate", "8"])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&bin)
+        .args(["query", "-a", prefix.to_str().unwrap(), "-r", "sampleA#0#chr1:100-2900"])
+        .args(["-d", "0", "-o", "fasta", "--sequence-files", fasta.to_str().unwrap()])
+        .output()
+        .expect("run impg query");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let text = String::from_utf8(run.stdout).unwrap();
+    assert!(text.lines().any(|l| l.starts_with(">sampleB#0#chr1:")), "{text}");
+    assert!(!text.contains('('), "{text}");
+    assert!(text.lines().all(|l| l.starts_with('>') || l.len() <= 80), "{text}");
+    assert!(text.lines().any(|l| l.len() == 80), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}
