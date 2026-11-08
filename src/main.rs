@@ -1949,7 +1949,11 @@ fn resolve_temp_dir(temp_dir: Option<String>) -> io::Result<String> {
             }
         }
         Some(other) => other.to_string(),
-        None => std::env::current_dir()?.to_string_lossy().into_owned(),
+        // As the --temp-dir help says: $TMPDIR, then the current directory
+        None => match std::env::var("TMPDIR") {
+            Ok(dir) if !dir.is_empty() => dir,
+            _ => std::env::current_dir()?.to_string_lossy().into_owned(),
+        },
     };
 
     // Ensure the directory exists before canonicalizing.
@@ -3955,7 +3959,8 @@ impl EngineCliOpts {
                 ),
             ));
         }
-        if !is_syng && crush_config.is_some() {
+        // :crush and :smooth rebuild the graph, so sort it again
+        if !is_syng && (crush_config.is_some() || smooth_after_crush.is_some()) {
             graph_sort_pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
         }
 
@@ -5839,6 +5844,11 @@ GFA engine shorthand:
             num_args = 0..=1
         )]
         multi_level_repeat_aware_boundaries: bool,
+
+        /// Skip the final Ygs sort (the :crush pipeline stage sorts too;
+        /// --admission-only never sorts)
+        #[clap(long)]
+        no_sort: bool,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -9125,6 +9135,7 @@ fn run() -> io::Result<()> {
             multi_level_min_objective_delta,
             multi_level_objective,
             multi_level_repeat_aware_boundaries,
+            no_sort,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -9335,7 +9346,18 @@ fn run() -> io::Result<()> {
                 resolved.stats.candidates_seen,
                 resolved.stats.iterations
             );
-            let gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
+            let mut gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
+            if !no_sort && !multi_level_admission_only {
+                info!(
+                    "crush: sorting with {}",
+                    impg::DEFAULT_SYNG_GFA_SORT_PIPELINE
+                );
+                gfa = impg::graph::sort_gfa_pipeline(
+                    &gfa,
+                    impg::DEFAULT_SYNG_GFA_SORT_PIPELINE,
+                    common.threads.get(),
+                )?;
+            }
 
             if output == "-" {
                 let stdout = io::stdout();
@@ -15348,6 +15370,44 @@ mod tests {
             }
             _ => panic!("expected query command"),
         }
+    }
+
+    #[test]
+    fn test_non_syng_smooth_stage_sorts_like_crush() {
+        for spec in ["gfa:pggb:smooth", "gfa:seqwish:smooth", "gfa:pggb:crush"] {
+            let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", spec]).unwrap();
+            let Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } = args
+            else {
+                panic!("expected query command")
+            };
+            apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+            let parsed = engine_cli.parse_engine().unwrap();
+            assert_eq!(
+                parsed.graph_sort_pipeline.as_deref(),
+                Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_temp_dir_defaults_to_tmpdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", dir.path());
+        let got = resolve_temp_dir(None);
+        match old {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        assert_eq!(
+            std::path::PathBuf::from(got.unwrap()),
+            dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
