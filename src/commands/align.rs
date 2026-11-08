@@ -362,10 +362,15 @@ fn write_fastga_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
+    // Haplotypes, not sequences, as in the PAF path
+    let haplotypes = sweepga::pansn::count_pansn_keys(
+        sequences.iter().map(|s| s.name.as_str()),
+        sweepga::pansn::PanSnLevel::Haplotype,
+    );
     let freq_arg = format!(
         "-f{}",
         config.frequency.unwrap_or(
-            (sequences.len() * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
+            (haplotypes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
         )
     );
 
@@ -504,8 +509,9 @@ fn run_alignments(
     };
 
     // Resolve wfmash mapping density from the strategy
+    // Density scales with haplotypes, as in impg graph
     let wfmash_density =
-        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
+        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, num_genomes);
 
     // When sparsified and using wfmash, write a pairs TSV so wfmash filters at L1
     // instead of running unfiltered all-vs-all per file pair.
