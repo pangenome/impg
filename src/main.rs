@@ -8853,6 +8853,14 @@ fn run() -> io::Result<()> {
                     merge_distance,
                 )?;
             } else {
+                // Same EngineOpts as query/partition, so pipeline stages run
+                let engine_opts = engine_cli.build(num_threads)?;
+                if engine_opts.pipeline.terminal_n_clip.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "cut-n= clips query intervals: use a window (ENGINE:WINDOW) or impg query/partition -o gfa",
+                    ));
+                }
                 let graph_config = build_graph_config(
                     &engine_cli,
                     &engine_cli.aln.sw.sparsify,
@@ -8863,68 +8871,31 @@ fn run() -> io::Result<()> {
                     engine_cli.debug_dir.clone(),
                 )?;
 
-                match parsed_engine {
+                let gfa = match parsed_engine {
                     GfaEngine::Poa => {
-                        let scoring = poa_scoring;
-
-                        if output == "-" {
-                            let stdout = io::stdout();
-                            let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                            graph::run_graph_build_poa(
-                                fasta_files,
-                                &mut out,
-                                scoring,
-                                &graph_config,
-                            )?;
-                        } else {
-                            let mut out =
-                                BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                            graph::run_graph_build_poa(
-                                fasta_files,
-                                &mut out,
-                                scoring,
-                                &graph_config,
-                            )?;
-                        }
+                        graph::run_graph_build_poa(&fasta_files, poa_scoring, &graph_config)?
                     }
-                    GfaEngine::Seqwish => {
-                        graph::run_graph_build(fasta_files, &output, graph_config)?;
-                    }
+                    GfaEngine::Seqwish => graph::run_graph_build(&fasta_files, &graph_config)?,
+                    GfaEngine::Pggb => graph::run_graph_build_pggb(
+                        &fasta_files,
+                        &graph_config,
+                        &engine_opts.target_poa_lengths,
+                        engine_opts.max_node_length,
+                        engine_opts.poa_padding_fraction,
+                    )?,
                     GfaEngine::SyngNative | GfaEngine::SyngLocal => {
-                        // `impg graph` is the flat whole-FASTA entry point and
-                        // doesn't produce syng partitions. Syng-native only has
-                        // a meaning inside `partition --gfa-engine syng-native`.
+                        // Syng-native only has a meaning on selected intervals
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "--gfa-engine syng/syng-local is only available under `query`/`partition` with selected intervals; use `seqwish` or `pggb` here",
                         ));
                     }
-                    GfaEngine::Pggb => {
-                        let target_poa_lengths = engine_cli.smooth.parse_target_poa_lengths()?;
-                        if output == "-" {
-                            let stdout = io::stdout();
-                            let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                            graph::run_graph_build_pggb(
-                                fasta_files,
-                                &mut out,
-                                &graph_config,
-                                target_poa_lengths,
-                                engine_cli.smooth.max_node_length,
-                                engine_cli.smooth.poa_padding_fraction,
-                            )?;
-                        } else {
-                            let mut out =
-                                BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                            graph::run_graph_build_pggb(
-                                fasta_files,
-                                &mut out,
-                                &graph_config,
-                                target_poa_lengths,
-                                engine_cli.smooth.max_node_length,
-                                engine_cli.smooth.poa_padding_fraction,
-                            )?;
-                        }
-                    }
+                };
+                let gfa = impg::apply_graph_transforms(gfa, &engine_opts)?;
+                if output == "-" {
+                    io::stdout().lock().write_all(gfa.as_bytes())?;
+                } else {
+                    std::fs::write(&output, gfa)?;
                 }
             }
         }

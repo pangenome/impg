@@ -1055,49 +1055,56 @@ pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String>
 /// Delegates to `commands::graph::build_graph()` so that query and graph
 /// subcommands use exactly the same alignment, filtering, and graph-building
 /// pipeline.
+/// Write the sequences of `results` to a temp FASTA named by path name.
+/// None when there is nothing to write.
+pub fn intervals_to_temp_fasta(
+    impg: &impl ImpgIndex,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Option<tempfile::NamedTempFile>> {
+    let sequences = prepare_sequences(impg, results, sequence_index)?;
+    if sequences.is_empty() {
+        return Ok(None);
+    }
+    let combined_fasta = tempfile::Builder::new()
+        .suffix(".fa")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
+    {
+        let mut writer = BufWriter::new(&combined_fasta);
+        for (seq, meta) in &sequences {
+            writeln!(writer, ">{}", meta.path_name())?;
+            writeln!(writer, "{}", seq)?;
+        }
+        writer.flush()?;
+    }
+    Ok(Some(combined_fasta))
+}
+
+/// UTF-8 path of a temp file, for the FASTA-path graph builders.
+pub fn temp_path_string(file: &tempfile::NamedTempFile) -> io::Result<String> {
+    file.path()
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| io::Error::other("Temp FASTA path is not valid UTF-8"))
+}
+
 pub fn generate_gfa_seqwish_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     config: &crate::commands::graph::GraphBuildConfig,
 ) -> io::Result<String> {
-    if results.is_empty() {
+    let Some(combined_fasta) = intervals_to_temp_fasta(impg, results, sequence_index)? else {
         return Ok(String::from("H\tVN:Z:1.0\n"));
-    }
-
-    // 1) Extract sequences from intervals
-    let sequences = prepare_sequences(impg, results, sequence_index)?;
-
-    if sequences.is_empty() {
-        return Ok(String::from("H\tVN:Z:1.0\n"));
-    }
-
-    // 2) Write sequences to a temp FASTA file
-    let combined_fasta = tempfile::Builder::new()
-        .suffix(".fa")
-        .tempfile()
-        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
-
-    {
-        let mut writer = BufWriter::new(&combined_fasta);
-        for (seq, meta) in &sequences {
-            let header = format!(">{}", meta.path_name());
-            writeln!(writer, "{}", header)?;
-            writeln!(writer, "{}", seq)?;
-        }
-        writer.flush()?;
-    }
-
-    // 3) Build graph using the same pipeline as `graph --gfa-engine seqwish`
-    let fasta_path = combined_fasta
-        .path()
-        .to_str()
-        .ok_or_else(|| io::Error::other("Temp FASTA path is not valid UTF-8"))?
-        .to_string();
-
+    };
+    // Same pipeline as `graph --gfa-engine seqwish`
     let mut gfa_output = Vec::new();
-    crate::commands::graph::build_graph(&[fasta_path], &mut gfa_output, config)?;
-
+    crate::commands::graph::build_graph(
+        &[temp_path_string(&combined_fasta)?],
+        &mut gfa_output,
+        config,
+    )?;
     String::from_utf8(gfa_output).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,

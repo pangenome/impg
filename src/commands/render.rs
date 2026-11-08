@@ -324,31 +324,18 @@ fn build_local_graph(engine: &str, fasta: &Path, gfa: &Path, threads: usize) -> 
     config.num_threads = threads.max(1);
     config.show_progress = false;
 
-    match engine {
-        "poa" => {
-            let mut writer = BufWriter::new(File::create(gfa)?);
-            graph::run_graph_build_poa(fasta_files, &mut writer, (5, 4, 6, 2, 24, 1), &config)
+    let text = match engine {
+        "poa" => graph::run_graph_build_poa(&fasta_files, (5, 4, 6, 2, 24, 1), &config)?,
+        "seqwish" => graph::run_graph_build(&fasta_files, &config)?,
+        "pggb" => graph::run_graph_build_pggb(&fasta_files, &config, &[700, 1100], 100, 0.001)?,
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported local graph render engine '{other}'"),
+            ))
         }
-        "seqwish" => {
-            let gfa_path = gfa.to_string_lossy().to_string();
-            graph::run_graph_build(fasta_files, &gfa_path, config)
-        }
-        "pggb" => {
-            let mut writer = BufWriter::new(File::create(gfa)?);
-            graph::run_graph_build_pggb(
-                fasta_files,
-                &mut writer,
-                &config,
-                vec![700, 1100],
-                100,
-                0.001,
-            )
-        }
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unsupported local graph render engine '{other}'"),
-        )),
-    }
+    };
+    std::fs::write(gfa, text)
 }
 
 fn collect_render_intervals(

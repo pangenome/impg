@@ -510,11 +510,7 @@ fn emit_source_sequence_gfa<W: Write>(seqidx: &SeqIndex, output: &mut W) -> io::
 }
 
 /// Run the graph building command
-pub fn run_graph_build(
-    fasta_files: Vec<String>,
-    output: &str,
-    config: GraphBuildConfig,
-) -> io::Result<()> {
+pub fn run_graph_build(fasta_files: &[String], config: &GraphBuildConfig) -> io::Result<String> {
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -526,32 +522,20 @@ pub fn run_graph_build(
 
     // Build graph, then normalize (gfaffix) and sort
     let mut gfa_buf: Vec<u8> = Vec::new();
-    build_graph(&fasta_files, &mut gfa_buf, &config)?;
+    build_graph(fasta_files, &mut gfa_buf, config)?;
     let gfa = String::from_utf8(gfa_buf)
         .map_err(|e| io::Error::other(format!("seqwish GFA is not valid UTF-8: {}", e)))?;
-    let final_gfa = crate::graph::normalize_and_sort(gfa, config.num_threads)?;
-
-    if output == "-" {
-        let stdout = io::stdout();
-        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        out.write_all(final_gfa.as_bytes())?;
-    } else {
-        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output)?);
-        out.write_all(final_gfa.as_bytes())?;
-    }
-
-    Ok(())
+    crate::graph::normalize_and_sort(gfa, config.num_threads)
 }
 
 /// Build a POA graph from FASTA sequences.
 ///
 /// Reads all sequences, runs single-pass SPOA, emits GFA, then sorts.
-pub fn run_graph_build_poa<W: Write>(
-    fasta_files: Vec<String>,
-    output: &mut W,
+pub fn run_graph_build_poa(
+    fasta_files: &[String],
     scoring_params: (u8, u8, u8, u8, u8, u8),
     config: &GraphBuildConfig,
-) -> io::Result<()> {
+) -> io::Result<String> {
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -564,20 +548,16 @@ pub fn run_graph_build_poa<W: Write>(
         fasta_files.len()
     );
 
-    let sequences = read_fasta_sequences(&fasta_files)?;
+    let sequences = read_fasta_sequences(fasta_files)?;
 
     info!("Loaded {} sequences from FASTA files", sequences.len());
 
     if sequences.is_empty() {
-        output.write_all(b"H\tVN:Z:1.0\n")?;
-        return Ok(());
+        return Ok("H\tVN:Z:1.0\n".to_string());
     }
 
     let unchopped = build_poa_unchopped_gfa(&sequences, scoring_params)?;
-    let final_gfa = crate::graph::normalize_and_sort(unchopped, config.num_threads)?;
-    output.write_all(final_gfa.as_bytes())?;
-
-    Ok(())
+    crate::graph::normalize_and_sort(unchopped, config.num_threads)
 }
 
 fn build_poa_unchopped_gfa(
@@ -603,45 +583,66 @@ fn build_graph_poa_spoa_engine(
     crate::graph::build_global_spoa_engine(scoring_params)
 }
 
-/// Build a pangenome graph using the PGGB pipeline: sweepga + seqwish + smoothxg + gfaffix.
-///
-/// Equivalent to running `--gfa-engine seqwish` followed by graph smoothing (smoothxg-style
-/// block decomposition + per-block POA) and optional gfaffix normalization.
-pub fn run_graph_build_pggb<W: Write>(
-    fasta_files: Vec<String>,
-    output: &mut W,
+/// Build a pangenome graph from FASTA files with the PGGB pipeline:
+/// sweepga + seqwish + smoothxg-style smoothing + gfaffix + sort.
+/// Path names are the FASTA record names.
+pub fn run_graph_build_pggb(
+    fasta_files: &[String],
     config: &GraphBuildConfig,
-    target_poa_lengths: Vec<usize>,
+    target_poa_lengths: &[usize],
     max_node_length: usize,
     poa_padding_fraction: f64,
-) -> io::Result<()> {
-    let start_time = Instant::now();
-
+) -> io::Result<String> {
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
-
     info!(
         "[pggb] Building graph from {} FASTA file(s)",
         fasta_files.len()
     );
+    let (_num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(fasta_files)?;
+    let gfa = pggb_from_fasta(
+        fasta_files,
+        num_genomes.max(1),
+        config,
+        target_poa_lengths,
+        max_node_length,
+        poa_padding_fraction,
+        true,
+    )?;
+    restore_direct_fasta_path_names(&gfa, fasta_files)
+}
 
-    // Count genomes to set n_haps for smoothing
-    let (_num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(&fasta_files)?;
-    let n_haps = num_genomes.max(1);
-
-    // Step 1: Run the seqwish pipeline, capturing the raw (unchoped) GFA
+/// The PGGB pipeline shared by `impg graph` and the interval engines:
+/// seqwish induction, 1D sort, smoothing, then gfaffix + sort when
+/// `normalize` (partitioned builds normalize once after lacing).
+pub fn pggb_from_fasta(
+    fasta_files: &[String],
+    n_haps: usize,
+    config: &GraphBuildConfig,
+    target_poa_lengths: &[usize],
+    max_node_length: usize,
+    poa_padding_fraction: f64,
+    normalize: bool,
+) -> io::Result<String> {
+    let start_time = Instant::now();
     let mut gfa_buffer: Vec<u8> = Vec::new();
-    build_graph(&fasta_files, &mut gfa_buffer, config)?;
+    build_graph(fasta_files, &mut gfa_buffer, config)?;
     let raw_gfa = String::from_utf8(gfa_buffer)
         .map_err(|e| io::Error::other(format!("seqwish GFA is not valid UTF-8: {}", e)))?;
 
-    // Sort for 1D layout (required by smoothxg block decomposition)
+    // seqwish emits L lines in thread-dependent order and Ygs is
+    // parse-order-sensitive: sort lines first for a stable layout
+    let raw_gfa = {
+        let mut lines: Vec<&str> = raw_gfa.lines().collect();
+        lines.sort_unstable();
+        lines.join("\n") + "\n"
+    };
+    // 1D layout, required by smoothxg block decomposition
     let raw_gfa = sort_gfa(&raw_gfa, config.num_threads)?;
-
     info!(
         "[pggb] {:.3}s Seqwish done, smoothing (n_haps={}, target_poa_lengths={:?})",
         start_time.elapsed().as_secs_f64(),
@@ -649,10 +650,8 @@ pub fn run_graph_build_pggb<W: Write>(
         target_poa_lengths
     );
 
-    // Step 2: Smooth
     let smooth_config = crate::smooth::SmoothConfig {
-        n_haps,
-        target_poa_lengths,
+        target_poa_lengths: target_poa_lengths.to_vec(),
         max_node_length,
         poa_padding_fraction,
         num_threads: config.num_threads,
@@ -661,20 +660,15 @@ pub fn run_graph_build_pggb<W: Write>(
         ..crate::smooth::SmoothConfig::new(n_haps)
     };
     let smoothed = crate::smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
-
     info!(
         "[pggb] {:.3}s Smoothing done",
         start_time.elapsed().as_secs_f64()
     );
-
-    // Step 3: gfaffix normalization + final sort
-    let sorted = crate::graph::normalize_and_sort(smoothed, config.num_threads)?;
-    let sorted = restore_direct_fasta_path_names(&sorted, &fasta_files)?;
-
-    info!("[pggb] {:.3}s Done", start_time.elapsed().as_secs_f64());
-
-    output.write_all(sorted.as_bytes())?;
-    Ok(())
+    if normalize {
+        crate::graph::normalize_and_sort(smoothed, config.num_threads)
+    } else {
+        Ok(smoothed)
+    }
 }
 
 fn restore_direct_fasta_path_names(gfa: &str, fasta_files: &[String]) -> io::Result<String> {

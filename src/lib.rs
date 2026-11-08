@@ -949,7 +949,8 @@ pub fn dispatch_gfa_engine(
     apply_graph_transforms(gfa, engine_opts)
 }
 
-fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io::Result<String> {
+/// Run the post-engine stages of `--gfa-engine`: crush, smooth, sort.
+pub fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io::Result<String> {
     if let Some(config) = &engine_opts.crush_config {
         let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
         log::info!(
@@ -1108,57 +1109,26 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::Pggb => {
-            // Step 1: seqwish graph induction (shared pipeline config)
-            let raw_gfa = graph::generate_gfa_seqwish_from_intervals(
-                impg,
-                query_intervals,
-                sequence_index,
-                &engine_opts.pipeline,
-            )?;
-
-            // Normalize seqwish line order before sort_gfa (seqwish emits
-            // L-edges in a thread-dependent order — same content, unstable
-            // ordering — and ygs_sort is parse-order-sensitive). Must
-            // match `run_graph_build_pggb` for the `query -o gfa` and
-            // `graph --sequence-files` paths to produce the same layout.
-            let raw_gfa = {
-                let mut lines: Vec<&str> = raw_gfa.lines().collect();
-                lines.sort_unstable();
-                lines.join("\n") + "\n"
+            let Some(fasta) = graph::intervals_to_temp_fasta(impg, query_intervals, sequence_index)?
+            else {
+                return Ok(String::from("H\tVN:Z:1.0\n"));
             };
-
-            // Sort for 1D layout (required by smoothxg block decomposition)
-            let raw_gfa = graph::sort_gfa(&raw_gfa, num_threads)?;
-
-            // Step 2: smooth. `n_haps` is the number of unique haplotypes
-            // in the input (distinct `SAMPLE#HAPLOTYPE` prefixes), NOT
-            // the number of query intervals. `max_block_weight` scales
-            // with this, and using the interval count (typically many
-            // multiples larger) inflates block size → different graph
-            // structure. Must match the `graph` subcommand, which counts
-            // haplotypes from the input FASTAs via the same helper.
+            // n_haps counts distinct SAMPLE#HAPLOTYPE prefixes, not intervals
             let n_haps = sweepga::pansn::count_pansn_keys(
                 query_intervals
                     .iter()
                     .filter_map(|iv| impg.seq_index().get_name(iv.metadata)),
                 sweepga::pansn::PanSnLevel::Haplotype,
             );
-            let smooth_config = smooth::SmoothConfig {
-                num_threads,
-                target_poa_lengths: engine_opts.target_poa_lengths.clone(),
-                max_node_length: engine_opts.max_node_length,
-                poa_padding_fraction: engine_opts.poa_padding_fraction,
-                pre_sorted: true,
-                ..smooth::SmoothConfig::new(n_haps)
-            };
-            let smoothed = smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
-
-            // Step 3: gfaffix + sort (skipped when partitioned — done once after lacing)
-            if skip_normalize {
-                Ok(smoothed)
-            } else {
-                graph::normalize_and_sort(smoothed, num_threads)
-            }
+            commands::graph::pggb_from_fasta(
+                &[graph::temp_path_string(&fasta)?],
+                n_haps,
+                &engine_opts.pipeline,
+                &engine_opts.target_poa_lengths,
+                engine_opts.max_node_length,
+                engine_opts.poa_padding_fraction,
+                !skip_normalize,
+            )
         }
         GfaEngine::SyngNative => {
             if let Some(mode) = engine_opts.syng_gfa_mode {
