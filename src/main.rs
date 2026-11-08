@@ -1949,7 +1949,11 @@ fn resolve_temp_dir(temp_dir: Option<String>) -> io::Result<String> {
             }
         }
         Some(other) => other.to_string(),
-        None => std::env::current_dir()?.to_string_lossy().into_owned(),
+        // As the --temp-dir help says: $TMPDIR, then the current directory
+        None => match std::env::var("TMPDIR") {
+            Ok(dir) if !dir.is_empty() => dir,
+            _ => std::env::current_dir()?.to_string_lossy().into_owned(),
+        },
     };
 
     // Ensure the directory exists before canonicalizing.
@@ -15225,6 +15229,22 @@ mod tests {
             }
             _ => panic!("expected query command"),
         }
+    }
+
+    #[test]
+    fn test_resolve_temp_dir_defaults_to_tmpdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", dir.path());
+        let got = resolve_temp_dir(None);
+        match old {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        assert_eq!(
+            std::path::PathBuf::from(got.unwrap()),
+            dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
