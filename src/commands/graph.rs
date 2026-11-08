@@ -844,6 +844,42 @@ fn reverse_complement_bases(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// Write every sequence of AGC archives to a temp FASTA in `temp_dir`.
+/// A sequence is named by its contig, or `contig@sample` when the
+/// contig name occurs in more than one sample.
+pub fn agc_to_temp_fasta(agc_files: &[String], temp_dir: &str) -> io::Result<tempfile::NamedTempFile> {
+    if let Some(other) = agc_files.iter().find(|f| !f.ends_with(".agc")) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot mix AGC and FASTA input ('{other}')"),
+        ));
+    }
+    let index = crate::agc_index::AgcIndex::build_from_files(agc_files)?;
+    let fasta = tempfile::Builder::new()
+        .prefix("impg-graph-agc")
+        .suffix(".fa")
+        .tempfile_in(temp_dir)?;
+    let mut writer = BufWriter::new(fasta.as_file());
+    let (mut count, mut bp) = (0usize, 0usize);
+    for name in index.sequence_names() {
+        let len = index.get_sequence_length(&name)?;
+        let seq = index.fetch_sequence(&name, 0, len as i32)?;
+        writeln!(writer, ">{name}")?;
+        writer.write_all(&seq)?;
+        writer.write_all(b"\n")?;
+        count += 1;
+        bp += seq.len();
+    }
+    writer.flush()?;
+    drop(writer);
+    info!(
+        "Extracted {count} sequences ({bp} bp) from {} AGC file(s) to {}",
+        agc_files.len(),
+        fasta.path().display()
+    );
+    Ok(fasta)
+}
+
 /// Read sequences from a FASTA file path into `(name, sequence_bytes)` pairs.
 /// Used by the pair selection path in `build_graph()`.
 fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {

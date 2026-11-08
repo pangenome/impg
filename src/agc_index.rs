@@ -119,6 +119,8 @@ pub struct AgcIndex {
     /// Per-contig cumulative segment boundary tables (the archive's own
     /// layout unit; built lazily from the public descriptors, cached).
     segment_layouts: Mutex<FxHashMap<String, Arc<AgcSegmentLayout>>>,
+    /// Every (sample, contig) in archive order.
+    entries: Vec<(Arc<str>, Arc<str>)>,
 }
 
 impl fmt::Debug for AgcIndex {
@@ -167,6 +169,7 @@ impl AgcIndex {
         // Sequential assembly phase
         let mut interned_strings: FxHashMap<String, Arc<str>> = FxHashMap::default();
         let mut sample_contig_to_agc: FxHashMap<String, usize> = FxHashMap::default();
+        let mut entries: Vec<(Arc<str>, Arc<str>)> = Vec::new();
         let mut contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)> =
             FxHashMap::default();
 
@@ -191,6 +194,7 @@ impl AgcIndex {
 
                 for contig in contigs {
                     let contig_arc = intern(&contig);
+                    entries.push((Arc::clone(&sample_arc), Arc::clone(&contig_arc)));
 
                     // Key: contig@sample
                     let key = format!("{contig}@{sample}");
@@ -250,6 +254,7 @@ impl AgcIndex {
             sample_contig_to_agc,
             contig_to_sample_info,
             segment_layouts: Mutex::new(FxHashMap::default()),
+            entries,
         })
     }
 
@@ -354,6 +359,25 @@ impl AgcIndex {
             ends.push(position);
         }
         Some(AgcSegmentLayout { starts, ends })
+    }
+
+    /// One fetchable name per sequence, in archive order: the contig name
+    /// when no other sample has it, else `contig@sample`.
+    pub fn sequence_names(&self) -> Vec<String> {
+        let mut contig_count: FxHashMap<&str, usize> = FxHashMap::default();
+        for (_, contig) in &self.entries {
+            *contig_count.entry(contig.as_ref()).or_default() += 1;
+        }
+        self.entries
+            .iter()
+            .map(|(sample, contig)| {
+                if contig_count[contig.as_ref()] == 1 {
+                    contig.to_string()
+                } else {
+                    format!("{contig}@{sample}")
+                }
+            })
+            .collect()
     }
 
     pub fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {

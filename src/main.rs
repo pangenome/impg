@@ -8806,15 +8806,16 @@ fn run() -> io::Result<()> {
                     "No sequence files specified. Use --sequence-files or --sequence-list",
                 ));
             }
-            if let Some(agc) = fasta_files.iter().find(|f| f.ends_with(".agc")) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "impg graph reads FASTA only, not AGC ('{agc}'): extract the sequences \
-                         (agc getset) or use impg query/partition -o gfa with --sequence-files"
-                    ),
-                ));
-            }
+            // AGC input: every sequence goes to a temp FASTA first
+            let agc_fasta = if fasta_files.iter().any(|f| f.ends_with(".agc")) {
+                Some(graph::agc_to_temp_fasta(&fasta_files, &temp_dir)?)
+            } else {
+                None
+            };
+            let fasta_files = match &agc_fasta {
+                Some(fasta) => vec![fasta.path().to_string_lossy().into_owned()],
+                None => fasta_files,
+            };
 
             // Wfmash-density sparsification only makes sense with the wfmash backend
             if matches!(
