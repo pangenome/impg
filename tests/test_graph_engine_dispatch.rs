@@ -75,12 +75,31 @@ fn graph_pggb_keeps_names_of_soft_masked_input() {
     assert_eq!(names, ["A#0#chr1:1-3000", "B#0#chr1:1-3000"]);
 }
 
-/// AGC input failed late with "stream did not contain valid UTF-8".
+/// AGC input builds the same graph as the FASTA it was made from.
 #[test]
-fn graph_rejects_agc_input_up_front() {
+fn graph_reads_agc_input() {
     let dir = tempfile::tempdir().unwrap();
-    let (out, _) = graph(dir.path(), std::path::Path::new("tests/test_data/test.agc"), "pggb");
+    let (out, gfa) = graph(dir.path(), std::path::Path::new("tests/test_data/test.agc"), "seqwish");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success());
-    assert!(stderr.contains("FASTA only"), "unclear error:\n{stderr}");
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("from 1 AGC file(s)"), "no AGC extraction log:\n{stderr}");
+    // test.agc holds a.fa, b.fa, c.fa and ref.fa; chr1 is in b and ref
+    let mut seg_len = std::collections::HashMap::new();
+    for line in gfa.lines().filter(|l| l.starts_with("S\t")) {
+        let f: Vec<&str> = line.split('\t').collect();
+        seg_len.insert(f[1].to_string(), f[2].len());
+    }
+    let mut names = Vec::new();
+    let mut path_bp = 0;
+    for line in gfa.lines().filter(|l| l.starts_with("P\t")) {
+        let f: Vec<&str> = line.split('\t').collect();
+        names.push(f[1].to_string());
+        path_bp += f[2].split(',').map(|s| seg_len[&s[..s.len() - 1]]).sum::<usize>();
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        ["1", "2", "3", "c", "chr1@b", "chr1@ref", "chr1a", "chr2", "chr3", "chr3a", "g", "seq", "t"]
+    );
+    assert_eq!(path_bp, 146, "a.fa + b.fa + c.fa + ref.fa = 146 bp");
 }
