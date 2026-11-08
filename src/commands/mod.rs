@@ -23,6 +23,16 @@ use sweepga::wfmash_integration::WfmashIntegration;
 /// the haplotype count drops every k-mer shared by all haplotypes.
 pub const MIN_FASTGA_FREQUENCY: usize = 10;
 
+/// wfmash -n for raw (unsparsified) all-vs-all: the larger side of
+/// --num-mappings, or every sequence when unbounded or unfiltered.
+pub fn wfmash_num_mappings(num_mappings: &str, no_filter: bool, sequence_count: usize) -> usize {
+    let (_, query_limit, target_limit) = sweepga::library_api::parse_filter_mode(num_mappings);
+    match (no_filter, query_limit, target_limit) {
+        (false, Some(q), Some(t)) => q.max(t).max(1),
+        _ => sequence_count.max(1),
+    }
+}
+
 /// Create an aligner backend based on the name ("wfmash" or "fastga").
 pub fn create_aligner(
     aligner_name: &str,

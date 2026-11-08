@@ -423,12 +423,6 @@ fn collect_file_pairs(
     result
 }
 
-/// Count sequences and genomes across FASTA files (for k-mer frequency calculation).
-/// Returns (num_sequences, num_genomes) using PanSN naming convention.
-fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize, usize)> {
-    crate::commands::count_sequences_and_genomes(fasta_files)
-}
-
 /// Run sweepga alignments for selected pairs and write output.
 ///
 /// For each unique file pair, runs FastGA alignment, applies filtering (unless --no-filter),
@@ -452,7 +446,7 @@ fn run_alignments(
     };
 
     // Determine k-mer frequency
-    let (_num_sequences, num_genomes) = count_sequences_and_genomes(&unique_files)?;
+    let (_num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(&unique_files)?;
     let kmer_frequency = config
         .frequency
         .unwrap_or((num_genomes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY));
