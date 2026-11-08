@@ -9426,10 +9426,9 @@ fn run() -> io::Result<()> {
                 }
             };
 
-            // `aln.sw.min_identity` is a String (preset or "ani50-2" etc); for
-            // the `impg align` config we want the numeric form — default 0.0
-            // means "let sweepga decide".
-            let min_identity_f64 = aln.sw.min_identity.parse::<f64>().unwrap_or(0.0);
+            // Same parsing as impg graph: "90" is 0.9; ANI presets need alignments
+            let min_identity_f64 = sweepga::parse_identity_value(&aln.sw.min_identity, None)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
             let config = impg::commands::align::AlignConfig {
                 num_threads: common.threads.get(),
