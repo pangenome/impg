@@ -298,6 +298,68 @@ P\tins\t1+,2+,3+\t*
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The syng transitive query never returned the query range itself, so
+/// -o gfa lacked the reference path and -o vcf found no reference.
+#[test]
+fn test_syng_query_reports_the_query_range() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping CLI test: impg binary not found");
+        return;
+    };
+
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join("impg_test_syng_query_self");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let fasta = dir.join("panel.fa");
+    let prefix = dir.join("panel.syng");
+    let mut x: u64 = 5;
+    let base: Vec<u8> = (0..3000)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            b"ACGT"[(x >> 62) as usize]
+        })
+        .collect();
+    let mut hap_b = base.clone();
+    for i in (200..2800).step_by(97) {
+        hap_b[i] = mutate_base_ascii(hap_b[i]);
+    }
+    {
+        let mut f = std::fs::File::create(&fasta).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&base).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+    }
+    let build = Command::new(&bin)
+        .args(["syng", "--fasta", fasta.to_str().unwrap(), "-o", prefix.to_str().unwrap()])
+        .args(["--position-sample-rate", "8"])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let query = |format: &str| {
+        let run = Command::new(&bin)
+            .args(["query", "-a", prefix.to_str().unwrap(), "-r", "sampleA#0#chr1:100-2900"])
+            .args(["-d", "0", "-o", format, "--sequence-files", fasta.to_str().unwrap()])
+            .args(["--gfa-engine", "seqwish"])
+            .output()
+            .expect("run impg query");
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        String::from_utf8(run.stdout).unwrap()
+    };
+    let bed = query("bed");
+    assert!(bed.lines().any(|l| l.starts_with("sampleA#0#chr1\t100\t2900\t")), "{bed}");
+    assert!(bed.lines().any(|l| l.starts_with("sampleB#0#chr1\t")), "{bed}");
+    let gfa = query("gfa");
+    assert!(gfa.lines().any(|l| l.starts_with("P\tsampleA#0#chr1:100-2900\t")), "{gfa}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn test_syng_render_bundle_preserves_source_namespace() {
     let _guard = lock_syng();
@@ -5745,4 +5807,62 @@ fn test_syng_ambiguity_fasta_agc_serial_parallel() {
             }
         }
     }
+}
+
+/// syng query -o fasta wrote `name:start-end(strand)` on one line; it
+/// now uses the alignment backend writer (no strand, 80 bases per line).
+#[test]
+fn test_syng_query_fasta_matches_alignment_backend_format() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping CLI test: impg binary not found");
+        return;
+    };
+
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join("impg_test_syng_query_fasta");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let fasta = dir.join("panel.fa");
+    let prefix = dir.join("panel.syng");
+    let mut x: u64 = 5;
+    let base: Vec<u8> = (0..3000)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            b"ACGT"[(x >> 62) as usize]
+        })
+        .collect();
+    let mut hap_b = base.clone();
+    for i in (200..2800).step_by(97) {
+        hap_b[i] = mutate_base_ascii(hap_b[i]);
+    }
+    {
+        let mut f = std::fs::File::create(&fasta).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&base).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+    }
+    let build = Command::new(&bin)
+        .args(["syng", "--fasta", fasta.to_str().unwrap(), "-o", prefix.to_str().unwrap()])
+        .args(["--position-sample-rate", "8"])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&bin)
+        .args(["query", "-a", prefix.to_str().unwrap(), "-r", "sampleA#0#chr1:100-2900"])
+        .args(["-d", "0", "-o", "fasta", "--sequence-files", fasta.to_str().unwrap()])
+        .output()
+        .expect("run impg query");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let text = String::from_utf8(run.stdout).unwrap();
+    assert!(text.lines().any(|l| l.starts_with(">sampleB#0#chr1:")), "{text}");
+    assert!(!text.contains('('), "{text}");
+    assert!(text.lines().all(|l| l.starts_with('>') || l.len() <= 80), "{text}");
+    assert!(text.lines().any(|l| l.len() == 80), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -2377,7 +2377,7 @@ fn find_core_column_range(msa: &[String], entries: &[SeqEntry]) -> (usize, usize
 /// Parse path name into (key, start_offset).
 /// If name has ":start-end" suffix, returns (key, start).
 /// Otherwise, returns (name, 0).
-fn parse_path_coords(name: &str) -> (String, usize) {
+pub(crate) fn parse_path_coords(name: &str) -> (String, usize) {
     if let Some(last_colon) = name.rfind(':') {
         let (key, range_str) = name.split_at(last_colon);
         let range_str = &range_str[1..];
