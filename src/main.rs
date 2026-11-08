@@ -4031,6 +4031,7 @@ impl EngineCliOpts {
         let mut parsed = self.parse_engine()?;
         let engine = parsed.engine;
         self.validate_engine_params(engine)?;
+        validate_aligner_args(&self.aln.sw)?;
         let crush_has_stage_scoring = engine_raw_has_crush_scoring_param(&self.engine_raw);
         if let Some(config) = parsed.crush_config.as_mut() {
             if !crush_has_stage_scoring {
@@ -8817,26 +8818,7 @@ fn run() -> io::Result<()> {
                 None => fasta_files,
             };
 
-            // Wfmash-density sparsification only makes sense with the wfmash backend
-            if matches!(
-                engine_cli.aln.sw.sparsify,
-                SparsificationStrategy::WfmashDensity(_)
-            ) && engine_cli.aln.sw.aligner != "wfmash"
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Wfmash density sparsification ({}) requires --aligner wfmash, but '{}' was specified",
-                        engine_cli.aln.sw.sparsify, engine_cli.aln.sw.aligner
-                    ),
-                ));
-            }
-            if engine_cli.aln.sw.aligner == "wfmash" && engine_cli.aln.sw.frequency.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
-                ));
-            }
+            validate_aligner_args(&engine_cli.aln.sw)?;
 
             let poa_scoring = engine_cli.parse_poa_scoring()?;
 
@@ -9389,12 +9371,7 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if aln.sw.aligner == "wfmash" && aln.sw.frequency.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
-                ));
-            }
+            validate_aligner_args(&aln.sw)?;
 
             // Parse output format
             let output_format = match format.to_lowercase().as_str() {
@@ -10331,6 +10308,27 @@ fn run() -> io::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Reject aligner options that the selected aligner ignores.
+/// One check for graph, align, query and partition.
+fn validate_aligner_args(sw: &sweepga::AlnArgs) -> io::Result<()> {
+    if matches!(sw.sparsify, SparsificationStrategy::WfmashDensity(_)) && sw.aligner != "wfmash" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Wfmash density sparsification ({}) requires --aligner wfmash, but '{}' was specified",
+                sw.sparsify, sw.aligner
+            ),
+        ));
+    }
+    if sw.aligner == "wfmash" && sw.frequency.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
+        ));
+    }
     Ok(())
 }
 
