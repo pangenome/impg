@@ -10488,7 +10488,7 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-/// Default POA scoring of the graph engines
+/// impg::graph::POA_SCORING_DEFAULT as a flag value
 const POA_SCORING_DEFAULT: &str = "5,4,6,2,24,1";
 
 /// Reject aligner options that the selected aligner ignores.
@@ -15336,6 +15336,14 @@ mod tests {
         assert_eq!(
             std::path::PathBuf::from(got.unwrap()),
             dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_poa_scoring_default_matches_lib() {
+        assert_eq!(
+            parse_poa_scoring_string(POA_SCORING_DEFAULT).unwrap(),
+            impg::graph::POA_SCORING_DEFAULT
         );
     }
 
