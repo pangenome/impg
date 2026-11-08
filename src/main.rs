@@ -2142,9 +2142,10 @@ struct EngineCliOpts {
     engine_raw: String,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
+    /// [default: 5,4,6,2,24,1; a :crush stage keeps its own 1,4,6,2,26,1 unless this is set]
     #[arg(help_heading = "Alignment options")]
-    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-    poa_scoring: String,
+    #[clap(long, value_parser)]
+    poa_scoring: Option<String>,
 
     #[clap(flatten)]
     aln: AlnOpts,
@@ -3981,7 +3982,12 @@ impl EngineCliOpts {
 
     /// Parse POA scoring parameters.
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-        parse_poa_scoring_string(&self.poa_scoring)
+        parse_poa_scoring_string(self.poa_scoring_str())
+    }
+
+    /// --poa-scoring, or the POA graph default
+    fn poa_scoring_str(&self) -> &str {
+        self.poa_scoring.as_deref().unwrap_or(POA_SCORING_DEFAULT)
     }
 
     /// Validate that CLI options are compatible with the selected engine.
@@ -4033,8 +4039,8 @@ impl EngineCliOpts {
         self.validate_engine_params(engine)?;
         let crush_has_stage_scoring = engine_raw_has_crush_scoring_param(&self.engine_raw);
         if let Some(config) = parsed.crush_config.as_mut() {
-            if !crush_has_stage_scoring {
-                config.scoring_params = self.parse_poa_scoring()?;
+            if let (false, Some(scoring)) = (crush_has_stage_scoring, &self.poa_scoring) {
+                config.scoring_params = parse_poa_scoring_string(scoring)?;
             }
         }
 
@@ -6457,7 +6463,7 @@ fn run() -> io::Result<()> {
                 };
 
                 let scoring_params = if matches!(output_format.as_str(), "gfa" | "vcf" | "maf") {
-                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                    Some(engine_cli.parse_poa_scoring()?)
                 } else {
                     None
                 };
@@ -6515,7 +6521,7 @@ fn run() -> io::Result<()> {
                     false,
                     alignment_files.as_slice(),
                     approximate,
-                    &engine_cli.poa_scoring,
+                    engine_cli.poa_scoring_str(),
                 )?;
 
                 // Build engine config (resolves temp_dir and sparsify internally)
@@ -6792,7 +6798,7 @@ fn run() -> io::Result<()> {
                 }
 
                 let scoring_params = if matches!(resolved_format, "gfa" | "vcf") {
-                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                    Some(engine_cli.parse_poa_scoring()?)
                 } else {
                     None
                 };
@@ -7495,7 +7501,7 @@ fn run() -> io::Result<()> {
                     query.original_sequence_coordinates,
                     alignment_files.as_slice(),
                     query.approximate,
-                    &engine_cli.poa_scoring,
+                    engine_cli.poa_scoring_str(),
                 )?;
 
                 // Process all target ranges in a unified loop
@@ -8038,7 +8044,7 @@ fn run() -> io::Result<()> {
                 false,
                 alignment_files.as_slice(),
                 false,
-                &engine_cli.poa_scoring,
+                engine_cli.poa_scoring_str(),
             )?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA scoring
@@ -10351,6 +10357,9 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
+/// Default POA scoring of the graph engines
+const POA_SCORING_DEFAULT: &str = "5,4,6,2,24,1";
+
 fn build_graph_config(
     engine_cli: &EngineCliOpts,
     sparsify: &SparsificationStrategy,
@@ -11938,7 +11947,7 @@ fn build_genotype_query_gfa(
     }
 
     let engine_opts = engine_cli.build(threads)?;
-    let scoring_params = Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?);
+    let scoring_params = Some(engine_cli.parse_poa_scoring()?);
     let gfa_output = impg::dispatch_gfa_engine(
         &wrapper,
         &query_intervals,
