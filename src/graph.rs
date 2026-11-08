@@ -162,7 +162,7 @@ pub fn generate_gfa_from_intervals(
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<String> {
     let (graph, sequence_metadata) =
-        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();
+        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params)?;
     spoa_graph_to_unchoped_gfa(graph, &sequence_metadata)
 }
 
@@ -416,6 +416,14 @@ pub(crate) fn build_spoa_engine(
     build_spoa_engine_with_alignment(scoring_params, SpoaAlignmentType::kSW)
 }
 
+/// The SPOA engine of every impg POA graph (impg graph -e poa and the
+/// interval gfa/maf/fasta-aln/similarity outputs): global, end to end.
+pub(crate) fn poa_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (SpoaGraph, AlignmentEngine) {
+    build_global_spoa_engine(scoring_params)
+}
+
 /// Build a global/end-to-end SPOA graph and alignment engine.
 pub(crate) fn build_global_spoa_engine(
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -468,7 +476,7 @@ pub fn prepare_poa_graph_and_sequences(
     // SPOA benefits from longest-first feeding order
     processed_sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-    let (mut graph, mut engine) = build_spoa_engine(scoring_params);
+    let (mut graph, mut engine) = poa_spoa_engine(scoring_params);
 
     // Collect metadata and feed sequences to SPOA graph (SPOA is not thread-safe)
     let sequence_metadata: Vec<SequenceMetadata> =
