@@ -3954,7 +3954,8 @@ impl EngineCliOpts {
                 ),
             ));
         }
-        if !is_syng && crush_config.is_some() {
+        // :crush and :smooth rebuild the graph, so sort it again
+        if !is_syng && (crush_config.is_some() || smooth_after_crush.is_some()) {
             graph_sort_pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
         }
 
@@ -15228,6 +15229,23 @@ mod tests {
                 assert!(parsed.crush_config.is_some());
             }
             _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_non_syng_smooth_stage_sorts_like_crush() {
+        for spec in ["gfa:pggb:smooth", "gfa:seqwish:smooth", "gfa:pggb:crush"] {
+            let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", spec]).unwrap();
+            let Args::Query { output_format, mut engine_cli, .. } = args else {
+                panic!("expected query command")
+            };
+            apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+            let parsed = engine_cli.parse_engine().unwrap();
+            assert_eq!(
+                parsed.graph_sort_pipeline.as_deref(),
+                Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE),
+                "{spec}"
+            );
         }
     }
 
