@@ -898,6 +898,15 @@ pub fn normalize_self_loop_runs(gfa: String) -> io::Result<String> {
     Ok(result.gfa)
 }
 
+static DETERMINISTIC_SORT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Run the path SGD of every graph sort on one thread. Multi-threaded
+/// SGD is Hogwild-style, so its layout changes between runs.
+pub fn set_deterministic_sort(on: bool) {
+    DETERMINISTIC_SORT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
     sort_gfa_pipeline(gfa_content, "Ygs", num_threads)
 }
@@ -937,7 +946,12 @@ pub fn sort_gfa_pipeline(
     }
 
     // Create Ygs parameters from the initial graph, matching the gfasort CLI.
-    let params = YgsParams::from_graph(&graph, 0, num_threads);
+    let sgd_threads = if DETERMINISTIC_SORT.load(std::sync::atomic::Ordering::Relaxed) {
+        1
+    } else {
+        num_threads
+    };
+    let params = YgsParams::from_graph(&graph, 0, sgd_threads);
     let sgd_params = params.path_sgd.clone();
 
     if pipeline == "Ygs" {
