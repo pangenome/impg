@@ -362,10 +362,15 @@ fn write_fastga_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
+    // Haplotypes, not sequences, as in the PAF path
+    let haplotypes = sweepga::pansn::count_pansn_keys(
+        sequences.iter().map(|s| s.name.as_str()),
+        sweepga::pansn::PanSnLevel::Haplotype,
+    );
     let freq_arg = format!(
         "-f{}",
         config.frequency.unwrap_or(
-            (sequences.len() * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
+            (haplotypes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
         )
     );
 
@@ -423,12 +428,6 @@ fn collect_file_pairs(
     result
 }
 
-/// Count sequences and genomes across FASTA files (for k-mer frequency calculation).
-/// Returns (num_sequences, num_genomes) using PanSN naming convention.
-fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize, usize)> {
-    crate::commands::count_sequences_and_genomes(fasta_files)
-}
-
 /// Run sweepga alignments for selected pairs and write output.
 ///
 /// For each unique file pair, runs FastGA alignment, applies filtering (unless --no-filter),
@@ -452,7 +451,7 @@ fn run_alignments(
     };
 
     // Determine k-mer frequency
-    let (_num_sequences, num_genomes) = count_sequences_and_genomes(&unique_files)?;
+    let (_num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(&unique_files)?;
     let kmer_frequency = config
         .frequency
         .unwrap_or((num_genomes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY));
@@ -510,8 +509,9 @@ fn run_alignments(
     };
 
     // Resolve wfmash mapping density from the strategy
+    // Density scales with haplotypes, as in impg graph
     let wfmash_density =
-        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
+        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, num_genomes);
 
     // When sparsified and using wfmash, write a pairs TSV so wfmash filters at L1
     // instead of running unfiltered all-vs-all per file pair.

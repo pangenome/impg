@@ -21,8 +21,8 @@ use crate::graph::{sort_gfa, unchop_gfa, TerminalNRunClip};
 // Import from sweepga
 use sweepga::aligner::Aligner;
 use sweepga::library_api::{
-    apply_paf_filter, create_aligner_adaptive, filter_config_from_align_cfg, parse_filter_mode,
-    sweepga_align, SweepgaAlignConfig,
+    apply_paf_filter, create_aligner_adaptive, filter_config_from_align_cfg, sweepga_align,
+    SweepgaAlignConfig,
 };
 
 // Import from seqwish
@@ -1037,14 +1037,9 @@ fn graph_wfmash_raw_num_mappings(
     config: &GraphBuildConfig,
     sequence_count: usize,
 ) -> Option<usize> {
-    if !config.aligner.eq_ignore_ascii_case("wfmash") {
-        return None;
-    }
-    let (_, query_limit, target_limit) = parse_filter_mode(&config.num_mappings);
-    if config.no_filter || query_limit.is_none() || target_limit.is_none() {
-        return Some(sequence_count.max(1));
-    }
-    Some(query_limit.unwrap().max(target_limit.unwrap()).max(1))
+    config.aligner.eq_ignore_ascii_case("wfmash").then(|| {
+        super::wfmash_num_mappings(&config.num_mappings, config.no_filter, sequence_count)
+    })
 }
 
 /// Run the alignment + filtering stages of the graph pipeline, returning
