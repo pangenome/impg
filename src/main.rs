@@ -2034,6 +2034,11 @@ struct CommonOpts {
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "1")]
     verbose: u8,
+
+    /// Sort graphs with single-threaded path SGD, so the GFA is identical
+    /// across runs and thread counts (slower: +21% sort time on yeast chrV)
+    #[clap(long, action)]
+    deterministic: bool,
 }
 
 /// Alignment options shared by all impg commands that run alignments.
@@ -10656,6 +10661,7 @@ fn initialize_threads_and_log(common: &CommonOpts) {
         .num_threads(common.threads.into())
         .build_global()
         .unwrap();
+    impg::graph::set_deterministic_sort(common.deterministic);
 }
 
 /// Determine file format from explicit format or auto-detection
