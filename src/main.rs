@@ -9241,7 +9241,10 @@ fn run() -> io::Result<()> {
             );
             let mut gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
             if !no_sort {
-                info!("crush: sorting with {}", impg::DEFAULT_SYNG_GFA_SORT_PIPELINE);
+                info!(
+                    "crush: sorting with {}",
+                    impg::DEFAULT_SYNG_GFA_SORT_PIPELINE
+                );
                 gfa = impg::graph::sort_gfa_pipeline(
                     &gfa,
                     impg::DEFAULT_SYNG_GFA_SORT_PIPELINE,
@@ -15249,7 +15252,12 @@ mod tests {
     fn test_non_syng_smooth_stage_sorts_like_crush() {
         for spec in ["gfa:pggb:smooth", "gfa:seqwish:smooth", "gfa:pggb:crush"] {
             let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", spec]).unwrap();
-            let Args::Query { output_format, mut engine_cli, .. } = args else {
+            let Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } = args
+            else {
                 panic!("expected query command")
             };
             apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
