@@ -2043,6 +2043,11 @@ struct CommonOpts {
 /// so it lives here rather than in sweepga. Field reads use `aln.sw.<field>`
 /// to avoid collisions with impg-internal configs mirror these names.
 #[derive(Parser, Debug, Clone)]
+// impg keeps many:many; sweepga's own default is 1:many.
+#[command(mut_arg("num_mappings", |a| a.default_value("many:many").help(
+    "n:m-best mappings kept in query:target dimensions. 1:1 (orthogonal), use ∞/many for \
+     unbounded. Default many:many: no mapping-axis filter before scaffolding"
+)))]
 struct AlnOpts {
     #[clap(flatten)]
     sw: sweepga::AlnArgs,
