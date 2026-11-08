@@ -14,9 +14,8 @@ use std::time::Instant;
 
 // Import sweepga for direct alignment execution
 use sweepga::aligner::Aligner;
-use sweepga::paf_filter::PafFilter;
 
-use crate::commands::create_aligner_adaptive;
+use sweepga::library_api::create_aligner_adaptive;
 
 pub use sweepga::knn_graph::SparsificationStrategy;
 
@@ -362,10 +361,15 @@ fn write_fastga_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
+    // Haplotypes, not sequences, as in the PAF path
+    let haplotypes = sweepga::pansn::count_pansn_keys(
+        sequences.iter().map(|s| s.name.as_str()),
+        sweepga::pansn::PanSnLevel::Haplotype,
+    );
     let freq_arg = format!(
         "-f{}",
         config.frequency.unwrap_or(
-            (sequences.len() * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
+            (haplotypes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY)
         )
     );
 
@@ -423,12 +427,6 @@ fn collect_file_pairs(
     result
 }
 
-/// Count sequences and genomes across FASTA files (for k-mer frequency calculation).
-/// Returns (num_sequences, num_genomes) using PanSN naming convention.
-fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize, usize)> {
-    crate::commands::count_sequences_and_genomes(fasta_files)
-}
-
 /// Run sweepga alignments for selected pairs and write output.
 ///
 /// For each unique file pair, runs FastGA alignment, applies filtering (unless --no-filter),
@@ -452,7 +450,7 @@ fn run_alignments(
     };
 
     // Determine k-mer frequency
-    let (_num_sequences, num_genomes) = count_sequences_and_genomes(&unique_files)?;
+    let (_num_sequences, num_genomes) = crate::commands::count_sequences_and_genomes(&unique_files)?;
     let kmer_frequency = config
         .frequency
         .unwrap_or((num_genomes * config.frequency_multiplier).max(super::MIN_FASTGA_FREQUENCY));
@@ -510,8 +508,9 @@ fn run_alignments(
     };
 
     // Resolve wfmash mapping density from the strategy
+    // Density scales with haplotypes, as in impg graph
     let wfmash_density =
-        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
+        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, num_genomes);
 
     // When sparsified and using wfmash, write a pairs TSV so wfmash filters at L1
     // instead of running unfiltered all-vs-all per file pair.
@@ -547,7 +546,8 @@ fn run_alignments(
         wfmash_density,
         None, // num_mappings: use wfmash default
         pairs_file_path.clone(),
-    )?;
+    )
+    .map_err(io::Error::other)?;
 
     // Run alignments for each unique file pair
     let paf_output_path = format!("{}/alignments.paf", output_dir);
@@ -693,410 +693,25 @@ fn run_alignments(
     Ok(())
 }
 
-/// Apply sweepga filtering to a PAF temp file, returning a new filtered temp file.
+/// Apply the sweepga PAF filter, as impg graph does.
 fn apply_paf_filter(
     paf_temp: tempfile::NamedTempFile,
     config: &AlignConfig,
     avg_seq_len: u64,
 ) -> io::Result<tempfile::NamedTempFile> {
-    let filter_config = super::build_filter_config(
-        &super::FilterParams {
-            num_mappings: config.num_mappings.clone(),
-            scaffold_jump: config.scaffold_jump,
-            scaffold_mass: config.scaffold_mass,
-            scaffold_filter: config.scaffold_filter.clone(),
-            overlap: config.overlap,
-            min_identity: config.min_identity,
-            scaffold_dist: config.scaffold_dist,
-            min_map_length: config.min_map_length,
-        },
-        avg_seq_len,
-    );
-
-    let filtered_paf_file = tempfile::Builder::new()
-        .suffix(".filtered.paf")
-        .tempfile()?;
-
-    let filter = PafFilter::new(filter_config).with_keep_self(false);
-    filter
-        .filter_paf(paf_temp.path(), filtered_paf_file.path())
-        .map_err(|e| io::Error::other(format!("PAF filtering failed: {}", e)))?;
-
-    Ok(filtered_paf_file)
-}
-
-/// Configuration for in-memory sweepga alignment.
-pub struct SweepgaAlignConfig {
-    /// Number of threads for alignment
-    pub num_threads: usize,
-    /// K-mer frequency for FastGA
-    pub kmer_frequency: usize,
-    /// Minimum alignment length
-    pub min_aln_length: u64,
-    /// Whether to skip filtering
-    pub no_filter: bool,
-    /// Filter: n:m-best mappings
-    pub num_mappings: String,
-    /// Filter: scaffold jump distance
-    pub scaffold_jump: u64,
-    /// Filter: minimum scaffold chain length
-    pub scaffold_mass: u64,
-    /// Filter: scaffold filter mode
-    pub scaffold_filter: String,
-    /// Filter: max overlap ratio
-    pub overlap: f64,
-    /// Filter: minimum identity
-    pub min_identity: f64,
-    /// Filter: max scaffold deviation
-    pub scaffold_dist: u64,
-    /// Filter: minimum mapping length
-    pub min_map_length: u64,
-    /// Optional temp directory
-    pub temp_dir: Option<String>,
-    /// Unified sparsification strategy (pair selection + mapping density).
-    pub sparsify: SparsificationStrategy,
-    /// Mash distance parameters for sparsification sketching.
-    pub mash_params: sweepga::knn_graph::MashParams,
-    /// Aligner backend: "wfmash" or "fastga"
-    pub aligner: String,
-    /// Minimum mapping identity for wfmash (e.g. "70"). None = wfmash auto-estimates.
-    pub map_pct_identity: Option<String>,
-    /// Batch alignment: max resource usage per batch (e.g., "2G", "500M")
-    pub batch_bytes: Option<String>,
-}
-
-impl Default for SweepgaAlignConfig {
-    fn default() -> Self {
-        SweepgaAlignConfig {
-            num_threads: 4,
-            kmer_frequency: 10,
-            min_aln_length: 0,
-            no_filter: false,
-            num_mappings: "many:many".to_string(),
-            scaffold_jump: 50_000,
-            scaffold_mass: 10_000,
-            scaffold_filter: "many:many".to_string(),
-            overlap: 0.95,
-            min_identity: 0.0,
-            scaffold_dist: 0,
-            min_map_length: 0,
-            temp_dir: None,
-            sparsify: SparsificationStrategy::None,
-            mash_params: sweepga::knn_graph::MashParams::default(),
-            aligner: "wfmash".to_string(),
-            map_pct_identity: None,
-            batch_bytes: None,
-        }
-    }
-}
-
-/// Run sweepga alignment on in-memory sequences with optional sparsification.
-///
-/// When sparsification is `None`, runs all-vs-all alignment. Otherwise,
-/// generates selected pairs using the sparsification strategy and runs
-/// pairwise alignments only for those pairs.
-///
-/// # Arguments
-/// * `sequences` - Named sequences: `(name, sequence_bytes)` pairs
-/// * `config` - Alignment, filtering, and sparsification configuration
-///
-/// # Returns
-/// A `NamedTempFile` containing the (optionally filtered) PAF alignments.
-pub fn sweepga_align(
-    sequences: &[(String, &[u8])],
-    config: &SweepgaAlignConfig,
-) -> io::Result<tempfile::NamedTempFile> {
-    if sequences.len() < 2 {
-        // Nothing to align — return empty PAF
-        let temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
-        return Ok(temp);
-    }
-    // Generate pairs based on sparsification strategy
-    let pairs = generate_pairs_for_sequences(sequences, &config.sparsify, &config.mash_params);
-    let total_possible = sequences.len() * (sequences.len() - 1) / 2;
-
-    if pairs.is_empty() {
-        let temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
-        return Ok(temp);
-    }
-
-    // If all pairs are selected (or None strategy), use fast all-vs-all
-    let paf_temp = if pairs.len() == total_possible {
-        sweepga_align_all_vs_all(sequences, config)?
-    } else {
-        log::info!(
-            "sweepga: sparsification selected {} of {} pairs ({:.1}%)",
-            pairs.len(),
-            total_possible,
-            (pairs.len() as f64 / total_possible as f64) * 100.0
-        );
-        sweepga_align_pairwise(sequences, &pairs, config)?
+    let cfg = sweepga::library_api::SweepgaAlignConfig {
+        num_mappings: config.num_mappings.clone(),
+        scaffold_jump: config.scaffold_jump,
+        scaffold_mass: config.scaffold_mass,
+        scaffold_filter: config.scaffold_filter.clone(),
+        overlap: config.overlap,
+        min_identity: config.min_identity,
+        scaffold_dist: config.scaffold_dist,
+        min_map_length: config.min_map_length,
+        ..Default::default()
     };
-
-    // Apply filtering unless disabled
-    if config.no_filter {
-        Ok(paf_temp)
-    } else {
-        let avg_seq_len = if !sequences.is_empty() {
-            sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64
-        } else {
-            0
-        };
-        let align_config = AlignConfig {
-            num_threads: config.num_threads,
-            sparsify: SparsificationStrategy::None,
-            mash_params: config.mash_params.clone(),
-            frequency_multiplier: 10,
-            frequency: Some(config.kmer_frequency),
-            min_aln_length: config.min_aln_length,
-            output_format: AlignOutputFormat::Paf,
-            show_progress: false,
-            aligner: config.aligner.clone(),
-            temp_dir: config.temp_dir.clone(),
-            batch_bytes: None,
-            no_filter: config.no_filter,
-            num_mappings: config.num_mappings.clone(),
-            scaffold_jump: config.scaffold_jump,
-            scaffold_mass: config.scaffold_mass,
-            scaffold_filter: config.scaffold_filter.clone(),
-            overlap: config.overlap,
-            min_identity: config.min_identity,
-            scaffold_dist: config.scaffold_dist,
-            min_map_length: config.min_map_length,
-            map_pct_identity: config.map_pct_identity.clone(),
-        };
-        apply_paf_filter(paf_temp, &align_config, avg_seq_len)
-    }
-}
-
-/// All-vs-all alignment: write all sequences to one FASTA, align against itself.
-fn sweepga_align_all_vs_all(
-    sequences: &[(String, &[u8])],
-    config: &SweepgaAlignConfig,
-) -> io::Result<tempfile::NamedTempFile> {
-    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
-    {
-        let mut writer = BufWriter::new(&mut combined_fasta);
-        for (name, seq) in sequences {
-            writeln!(writer, ">{}", name)?;
-            writer.write_all(seq)?;
-            writeln!(writer)?;
-        }
-        writer.flush()?;
-    }
-
-    // Create FASTA index (.fai) — required by wfmash
-    if config.aligner == "wfmash" {
-        crate::faidx::open_reader(combined_fasta.path())
-            .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
-    }
-
-    // Compute avg sequence length for adaptive wfmash parameters
-    let avg_len = if !sequences.is_empty() {
-        Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
-    } else {
-        None
-    };
-
-    // Resolve wfmash mapping density from the strategy
-    let wfmash_density =
-        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
-
-    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
-        &config.aligner,
-        config.kmer_frequency,
-        config.num_threads,
-        config.min_aln_length,
-        config.map_pct_identity.clone(),
-        config.temp_dir.clone(),
-        None, // segment_length: let sweepga adapt from avg_len
-        avg_len,
-        wfmash_density,
-        None, // num_mappings: use wfmash default (-n 1)
-        None, // pairs_file
-    )?;
-
-    // Run all-vs-all alignment, with optional batching
-    match config.batch_bytes.as_deref() {
-        None => sweepga::align_self_paf_direct(aligner.as_ref(), combined_fasta.path()),
-        Some(batch_bytes) => sweepga::align_self_paf_batched(
-            combined_fasta.path(),
-            &config.aligner,
-            config.kmer_frequency,
-            config.num_threads,
-            config.min_aln_length,
-            config.map_pct_identity.clone(),
-            config.temp_dir.clone(),
-            wfmash_density,
-            None, // pairs_file: sweepga_align_all_vs_all is unsparsified
-            batch_bytes,
-            true, // quiet
-        ),
-    }
-    .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))
-}
-
-/// Pairwise alignment: for wfmash, write all sequences to a single FASTA and
-/// use --pairs-file to restrict which pairs are aligned (single invocation).
-/// For other aligners, fall back to per-pair alignment.
-fn sweepga_align_pairwise(
-    sequences: &[(String, &[u8])],
-    pairs: &[(usize, usize)],
-    config: &SweepgaAlignConfig,
-) -> io::Result<tempfile::NamedTempFile> {
-    // Adapt wfmash parameters to input sequence sizes.
-    let avg_len = if !sequences.is_empty() {
-        Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
-    } else {
-        None
-    };
-
-    // Resolve wfmash mapping density from the strategy
-    let wfmash_density =
-        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
-
-    if config.aligner == "wfmash" {
-        // Optimized path: single wfmash invocation with --pairs-file
-        sweepga_align_pairwise_wfmash(sequences, pairs, config, avg_len, wfmash_density)
-    } else {
-        // Fallback: per-pair alignment for aligners without pairs-file support
-        sweepga_align_pairwise_generic(sequences, pairs, config, avg_len, wfmash_density)
-    }
-}
-
-/// Optimized pairwise alignment using wfmash --pairs-file:
-/// write all sequences to one FASTA, write pairs to a TSV, single wfmash call.
-fn sweepga_align_pairwise_wfmash(
-    sequences: &[(String, &[u8])],
-    pairs: &[(usize, usize)],
-    config: &SweepgaAlignConfig,
-    avg_len: Option<u64>,
-    wfmash_density: Option<f64>,
-) -> io::Result<tempfile::NamedTempFile> {
-    // 1. Write all sequences to a single combined FASTA
-    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
-    {
-        let mut writer = BufWriter::new(&mut combined_fasta);
-        for (name, seq) in sequences {
-            writeln!(writer, ">{}", name)?;
-            writer.write_all(seq)?;
-            writeln!(writer)?;
-        }
-        writer.flush()?;
-    }
-
-    // Create FASTA index (.fai) — required by wfmash
-    crate::faidx::open_reader(combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
-
-    // 2. Write pairs to a temp TSV file (both directions for bidirectional alignment)
-    let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
-    {
-        let mut writer = BufWriter::new(&mut pairs_tsv);
-        writeln!(writer, "# query_name\ttarget_name")?;
-        for &(i, j) in pairs {
-            // Write both directions so wfmash aligns A→B and B→A
-            writeln!(writer, "{}\t{}", sequences[i].0, sequences[j].0)?;
-            writeln!(writer, "{}\t{}", sequences[j].0, sequences[i].0)?;
-        }
-        writer.flush()?;
-    }
-
-    log::info!(
-        "sweepga: wfmash batch alignment: {} sequences, {} pairs, pairs file: {}",
-        sequences.len(),
-        pairs.len(),
-        pairs_tsv.path().display()
-    );
-
-    // 3. Create aligner with pairs_file set
-    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
-        &config.aligner,
-        config.kmer_frequency,
-        config.num_threads,
-        config.min_aln_length,
-        config.map_pct_identity.clone(),
-        config.temp_dir.clone(),
-        None, // segment_length: let sweepga adapt from avg_len
-        avg_len,
-        wfmash_density,
-        None, // num_mappings: use wfmash default
-        Some(pairs_tsv.path().to_path_buf()),
-    )?;
-
-    // 4. Single alignment call: combined FASTA against itself, filtered by pairs
-    aligner
-        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("wfmash batch alignment failed: {}", e)))
-}
-
-/// Fallback per-pair alignment for aligners without --pairs-file support.
-fn sweepga_align_pairwise_generic(
-    sequences: &[(String, &[u8])],
-    pairs: &[(usize, usize)],
-    config: &SweepgaAlignConfig,
-    avg_len: Option<u64>,
-    wfmash_density: Option<f64>,
-) -> io::Result<tempfile::NamedTempFile> {
-    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
-        &config.aligner,
-        config.kmer_frequency,
-        config.num_threads,
-        config.min_aln_length,
-        config.map_pct_identity.clone(),
-        config.temp_dir.clone(),
-        None,
-        avg_len,
-        wfmash_density,
-        None,
-        None, // no pairs_file
-    )?;
-
-    let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;
-
-    // Pre-write one FASTA file per unique sequence index to avoid O(pairs) temp file creation.
-    let unique_indices: std::collections::BTreeSet<usize> =
-        pairs.iter().flat_map(|&(i, j)| [i, j]).collect();
-    let mut fasta_files: std::collections::HashMap<usize, tempfile::NamedTempFile> =
-        std::collections::HashMap::new();
-    for idx in unique_indices {
-        let mut fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
-        {
-            let mut writer = BufWriter::new(&mut fasta);
-            writeln!(writer, ">{}", sequences[idx].0)?;
-            writer.write_all(sequences[idx].1)?;
-            writeln!(writer)?;
-            writer.flush()?;
-        }
-        // Create FASTA index (.fai) — required by wfmash
-        if config.aligner == "wfmash" {
-            crate::faidx::open_reader(fasta.path())
-                .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
-        }
-        fasta_files.insert(idx, fasta);
-    }
-
-    for &(i, j) in pairs {
-        // Align this pair using pre-written FASTA files
-        match aligner.align_to_temp_paf(fasta_files[&i].path(), fasta_files[&j].path()) {
-            Ok(pair_paf) => {
-                // Append this pair's PAF to the combined output
-                let contents = std::fs::read(pair_paf.path())?;
-                if !contents.is_empty() {
-                    combined_paf.write_all(&contents)?;
-                }
-            }
-            Err(e) => {
-                return Err(io::Error::other(format!(
-                    "sweepga pairwise alignment failed for {} vs {}: {}",
-                    sequences[i].0, sequences[j].0, e
-                )));
-            }
-        }
-    }
-
-    combined_paf.flush()?;
-    Ok(combined_paf)
+    let filter_config = sweepga::library_api::filter_config_from_align_cfg(&cfg, avg_seq_len);
+    sweepga::library_api::apply_paf_filter(paf_temp, filter_config).map_err(io::Error::other)
 }
 
 /// Run alignment command

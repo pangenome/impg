@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
@@ -1949,7 +1949,11 @@ fn resolve_temp_dir(temp_dir: Option<String>) -> io::Result<String> {
             }
         }
         Some(other) => other.to_string(),
-        None => std::env::current_dir()?.to_string_lossy().into_owned(),
+        // As the --temp-dir help says: $TMPDIR, then the current directory
+        None => match std::env::var("TMPDIR") {
+            Ok(dir) if !dir.is_empty() => dir,
+            _ => std::env::current_dir()?.to_string_lossy().into_owned(),
+        },
     };
 
     // Ensure the directory exists before canonicalizing.
@@ -2034,6 +2038,11 @@ struct CommonOpts {
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "1")]
     verbose: u8,
+
+    /// Sort graphs with single-threaded path SGD, so the GFA is identical
+    /// across runs and thread counts (slower: +21% sort time on yeast chrV)
+    #[clap(long, action)]
+    deterministic: bool,
 }
 
 /// Alignment options shared by all impg commands that run alignments.
@@ -3951,7 +3960,8 @@ impl EngineCliOpts {
                 ),
             ));
         }
-        if !is_syng && crush_config.is_some() {
+        // :crush and :smooth rebuild the graph, so sort it again
+        if !is_syng && (crush_config.is_some() || smooth_after_crush.is_some()) {
             graph_sort_pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
         }
 
@@ -4037,6 +4047,7 @@ impl EngineCliOpts {
         let mut parsed = self.parse_engine()?;
         let engine = parsed.engine;
         self.validate_engine_params(engine)?;
+        validate_aligner_args(&self.aln.sw)?;
         let crush_has_stage_scoring = engine_raw_has_crush_scoring_param(&self.engine_raw);
         if let Some(config) = parsed.crush_config.as_mut() {
             if let (false, Some(scoring)) = (crush_has_stage_scoring, &self.poa_scoring) {
@@ -5840,6 +5851,11 @@ GFA engine shorthand:
         )]
         multi_level_repeat_aware_boundaries: bool,
 
+        /// Skip the final Ygs sort (the :crush pipeline stage sorts too;
+        /// --admission-only never sorts)
+        #[clap(long)]
+        no_sort: bool,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -6215,8 +6231,127 @@ fn main() {
     }
 }
 
+/// sweepga options (flattened from `sweepga::AlnArgs`) that no impg
+/// command reads: hidden from help, and an error when given.
+const UNUSED_SWEEPGA_ARGS: &[&str] = &[
+    "all_pairs",
+    "batch_size",
+    "max_disk",
+    "zstd_compress",
+    "zstd_level",
+    "scoring",
+    "keep_self",
+    "group_by",
+    "scaffold_overlap",
+    "min_scaffold_identity",
+    "scaffolds_only",
+    "no_adaptive_scaffolds",
+    "joblist",
+    "joblist_output_dir",
+    "ani_method",
+    "agc_prefix",
+    "agc_samples",
+    "agc_queries",
+    "agc_targets",
+    "agc_tempdir",
+    "agc_extract_dir",
+    "pairs_file",
+    "pairs_done",
+    "pairs_remaining",
+    "list_pairs",
+    "shuffle_pairs",
+    "shuffle_seed",
+    "max_pairs",
+    "pair_start",
+    "sparsify_pairs",
+];
+
+impl Args {
+    /// The alignment options of the commands that have them.
+    fn aln_opts_mut(&mut self) -> Option<&mut AlnOpts> {
+        match self {
+            Args::Partition { engine_cli, .. }
+            | Args::Query { engine_cli, .. }
+            | Args::Similarity { engine_cli, .. }
+            | Args::Graph { engine_cli, .. } => Some(&mut engine_cli.aln),
+            Args::Genotype {
+                command: GenotypeCommand::Cos { engine_cli, .. },
+            } => Some(&mut engine_cli.aln),
+            Args::Align { aln, .. } => Some(aln),
+            _ => None,
+        }
+    }
+}
+
+/// --fastga / --wfmash set --aligner, as in sweepga's own CLI.
+fn resolve_aligner_shorthand(sw: &mut sweepga::AlnArgs) -> Result<(), &'static str> {
+    match (sw.use_fastga, sw.use_wfmash) {
+        (true, true) => Err("Cannot specify both --wfmash and --fastga"),
+        (_, true) => {
+            sw.aligner = "wfmash".to_string();
+            Ok(())
+        }
+        (true, _) => {
+            sw.aligner = "fastga".to_string();
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn hide_unused_sweepga_args(mut cmd: clap::Command) -> clap::Command {
+    for id in UNUSED_SWEEPGA_ARGS {
+        if cmd.get_arguments().any(|a| a.get_id() == id) {
+            cmd = cmd.mut_arg(id, |a| a.hide(true));
+        }
+    }
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect();
+    for name in names {
+        cmd = cmd.mut_subcommand(name, hide_unused_sweepga_args);
+    }
+    cmd
+}
+
+fn reject_unused_sweepga_args(cmd: &mut clap::Command, matches: &clap::ArgMatches) {
+    for id in UNUSED_SWEEPGA_ARGS {
+        if matches.try_contains_id(id).unwrap_or(false)
+            && matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine)
+        {
+            let flag = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .and_then(|a| a.get_long())
+                .unwrap_or(id)
+                .to_string();
+            cmd.error(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("--{flag} is a sweepga option that impg does not use"),
+            )
+            .exit();
+        }
+    }
+    if let Some((name, sub)) = matches.subcommand() {
+        if let Some(sub_cmd) = cmd.find_subcommand_mut(name) {
+            reject_unused_sweepga_args(sub_cmd, sub);
+        }
+    }
+}
+
 fn run() -> io::Result<()> {
-    let args = Args::parse();
+    let mut cmd = hide_unused_sweepga_args(Args::command());
+    cmd.build();
+    let matches = cmd.clone().get_matches();
+    reject_unused_sweepga_args(&mut cmd, &matches);
+    let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Some(aln) = args.aln_opts_mut() {
+        if let Err(e) = resolve_aligner_shorthand(&mut aln.sw) {
+            cmd.error(clap::error::ErrorKind::ArgumentConflict, e)
+                .exit();
+        }
+    }
 
     match args {
         Args::GenomeInfer { command } => {
@@ -7006,14 +7141,13 @@ fn run() -> io::Result<()> {
                                 // laces them together with a single final
                                 // gfaffix. Structurally mirrors the alignment
                                 // path's `output_results_gfa_partitioned`.
-                                let ps = partition_size as i32;
-                                let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
-                                let mut window_start = *range_start;
                                 let mut window_idx = 0usize;
-                                while window_start < *range_end {
-                                    let window_end = (window_start + ps).min(*range_end);
-                                    let intervals = if use_boundary_realign {
-                                        impg::syng_transitive::query_transitive_ext_with_seed_filter(
+                                let partitions = query_windows(
+                                    (*range_start, *range_end),
+                                    partition_size,
+                                    |window_start, window_end| {
+                                        let intervals = if use_boundary_realign {
+                                            impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                             wrapper.syng_index(),
                                             target_name,
                                             window_start as u64,
@@ -7028,38 +7162,37 @@ fn run() -> io::Result<()> {
                                             query.effective_merge_distance(),
                                             sequence_index.as_ref().unwrap(),
                                         )?
-                                    } else {
-                                        query_raw_syng(
+                                        } else {
+                                            query_raw_syng(
+                                                target_name,
+                                                window_start,
+                                                window_end,
+                                                syng_padding,
+                                                syng_extension,
+                                            )?
+                                        };
+                                        let window_intervals =
+                                            syng_intervals_to_merged_query_intervals(
+                                                &intervals,
+                                                target_name,
+                                                window_start,
+                                                window_end,
+                                                wrapper.seq_index(),
+                                                query.effective_merge_distance(),
+                                                query.merge_strands_for_output(resolved_format),
+                                            );
+                                        info!(
+                                            "  [syng sub-window {}] {}:{}-{} → {} intervals",
+                                            window_idx,
                                             target_name,
                                             window_start,
                                             window_end,
-                                            syng_padding,
-                                            syng_extension,
-                                        )?
-                                    };
-                                    let window_intervals = syng_intervals_to_merged_query_intervals(
-                                        &intervals,
-                                        target_name,
-                                        window_start,
-                                        window_end,
-                                        wrapper.seq_index(),
-                                        query.effective_merge_distance(),
-                                        query.merge_strands_for_output(resolved_format),
-                                    );
-                                    info!(
-                                        "  [syng sub-window {}] {}:{}-{} → {} intervals",
-                                        window_idx,
-                                        target_name,
-                                        window_start,
-                                        window_end,
-                                        window_intervals.len()
-                                    );
-                                    if !window_intervals.is_empty() {
-                                        partitions.push(window_intervals);
-                                    }
-                                    window_start = window_end;
-                                    window_idx += 1;
-                                }
+                                            window_intervals.len()
+                                        );
+                                        window_idx += 1;
+                                        Ok(window_intervals)
+                                    },
+                                )?;
 
                                 if partitions.is_empty() {
                                     write_graph_output_and_render(
@@ -7213,21 +7346,24 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                 )?
                             };
-                            let mut out = find_output_stream(&target_output_prefix, "fa")?;
-                            for iv in &intervals {
-                                let sequence = seq_idx.fetch_sequence(
-                                    &iv.genome,
-                                    iv.start as i32,
-                                    iv.end as i32,
-                                )?;
-                                writeln!(
-                                    out,
-                                    ">{}:{}-{}({})",
-                                    iv.genome, iv.start, iv.end, iv.strand
-                                )?;
-                                out.write_all(&sequence)?;
-                                writeln!(out)?;
-                            }
+                            // Same merge, header and wrapping as the alignment backend
+                            let mut results = syng_intervals_to_adjusted(
+                                &intervals,
+                                target_name,
+                                *range_start,
+                                *range_end,
+                                wrapper.seq_index(),
+                            );
+                            output_results_fasta(
+                                &wrapper,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "fa")?,
+                                seq_idx,
+                                &name,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("fasta"),
+                                gfa_maf_fasta.reverse_complement,
+                            )?;
                         }
                         "gbwt" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
@@ -7572,7 +7708,7 @@ fn run() -> io::Result<()> {
                             let engine_opts = engine_cli.build(common.threads.get())?;
                             if let Some(ps) = engine_opts.partition_size {
                                 // Partitioned mode: split query region into sub-windows
-                                output_results_gfa_partitioned(
+                                output_results_graph_partitioned(
                                     &impg,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
@@ -7583,10 +7719,12 @@ fn run() -> io::Result<()> {
                                     ps,
                                     &query,
                                     subset_filter.as_ref(),
+                                    "gfa",
+                                    &[],
+                                    &name,
                                     &graph_render,
                                     &graph_report,
                                     bed_graph_dir.as_deref(),
-                                    &name,
                                     common.threads.get(),
                                 )?;
                             } else {
@@ -7611,7 +7749,7 @@ fn run() -> io::Result<()> {
                             let engine_opts = engine_cli.build(common.threads.get())?;
                             let reference_names = vcf_reference_names(&name, &target_name);
                             if let Some(ps) = engine_opts.partition_size {
-                                output_results_vcf_partitioned(
+                                output_results_graph_partitioned(
                                     &impg,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
@@ -7622,6 +7760,7 @@ fn run() -> io::Result<()> {
                                     ps,
                                     &query,
                                     subset_filter.as_ref(),
+                                    "vcf",
                                     &reference_names,
                                     &name,
                                     &graph_render,
@@ -8823,26 +8962,7 @@ fn run() -> io::Result<()> {
                 None => fasta_files,
             };
 
-            // Wfmash-density sparsification only makes sense with the wfmash backend
-            if matches!(
-                engine_cli.aln.sw.sparsify,
-                SparsificationStrategy::WfmashDensity(_)
-            ) && engine_cli.aln.sw.aligner != "wfmash"
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Wfmash density sparsification ({}) requires --aligner wfmash, but '{}' was specified",
-                        engine_cli.aln.sw.sparsify, engine_cli.aln.sw.aligner
-                    ),
-                ));
-            }
-            if engine_cli.aln.sw.aligner == "wfmash" && engine_cli.aln.sw.frequency.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
-                ));
-            }
+            validate_aligner_args(&engine_cli.aln.sw)?;
 
             let poa_scoring = engine_cli.parse_poa_scoring()?;
 
@@ -9025,6 +9145,7 @@ fn run() -> io::Result<()> {
             multi_level_min_objective_delta,
             multi_level_objective,
             multi_level_repeat_aware_boundaries,
+            no_sort,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -9235,7 +9356,18 @@ fn run() -> io::Result<()> {
                 resolved.stats.candidates_seen,
                 resolved.stats.iterations
             );
-            let gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
+            let mut gfa = impg::graph::normalize_self_loop_runs(resolved.gfa)?;
+            if !no_sort && !multi_level_admission_only {
+                info!(
+                    "crush: sorting with {}",
+                    impg::DEFAULT_SYNG_GFA_SORT_PIPELINE
+                );
+                gfa = impg::graph::sort_gfa_pipeline(
+                    &gfa,
+                    impg::DEFAULT_SYNG_GFA_SORT_PIPELINE,
+                    common.threads.get(),
+                )?;
+            }
 
             if output == "-" {
                 let stdout = io::stdout();
@@ -9412,12 +9544,7 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if aln.sw.aligner == "wfmash" && aln.sw.frequency.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
-                ));
-            }
+            validate_aligner_args(&aln.sw)?;
 
             // Parse output format
             let output_format = match format.to_lowercase().as_str() {
@@ -9463,7 +9590,11 @@ fn run() -> io::Result<()> {
                 min_identity: min_identity_f64,
                 scaffold_dist: aln.sw.scaffold_dist,
                 min_map_length: aln.min_map_length,
-                map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
+                map_pct_identity: aln
+                    .sw
+                    .map_pct_identity
+                    .clone()
+                    .or_else(|| Some("90".to_string())),
             };
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;
@@ -10360,6 +10491,27 @@ fn run() -> io::Result<()> {
 /// Default POA scoring of the graph engines
 const POA_SCORING_DEFAULT: &str = "5,4,6,2,24,1";
 
+/// Reject aligner options that the selected aligner ignores.
+/// One check for graph, align, query and partition.
+fn validate_aligner_args(sw: &sweepga::AlnArgs) -> io::Result<()> {
+    if matches!(sw.sparsify, SparsificationStrategy::WfmashDensity(_)) && sw.aligner != "wfmash" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Wfmash density sparsification ({}) requires --aligner wfmash, but '{}' was specified",
+                sw.sparsify, sw.aligner
+            ),
+        ));
+    }
+    if sw.aligner == "wfmash" && sw.frequency.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
+        ));
+    }
+    Ok(())
+}
+
 fn build_graph_config(
     engine_cli: &EngineCliOpts,
     sparsify: &SparsificationStrategy,
@@ -10441,7 +10593,11 @@ fn build_engine_opts(
         sparsify,
         mash_params,
         aligner: aln.sw.aligner.clone(),
-        map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
+        map_pct_identity: aln
+            .sw
+            .map_pct_identity
+            .clone()
+            .or_else(|| Some("90".to_string())),
         num_mappings: aln.sw.num_mappings.clone(),
         scaffold_jump: aln.sw.scaffold_jump,
         scaffold_mass: aln.sw.scaffold_mass,
@@ -10682,6 +10838,7 @@ fn initialize_threads_and_log(common: &CommonOpts) {
         .num_threads(common.threads.into())
         .build_global()
         .unwrap();
+    impg::graph::set_deterministic_sort(common.deterministic);
 }
 
 /// Determine file format from explicit format or auto-detection
@@ -11853,7 +12010,8 @@ fn syng_intervals_to_adjusted(
     let Some(query_id) = seq_index.get_id(query_name) else {
         return Vec::new();
     };
-    intervals
+    let target = Interval::new(range_start, range_end, query_id);
+    let mut adjusted: Vec<AdjustedInterval> = intervals
         .iter()
         .filter_map(|iv| {
             let homolog_id = seq_index.get_id(&iv.genome)?;
@@ -11862,10 +12020,20 @@ fn syng_intervals_to_adjusted(
             } else {
                 Interval::new(iv.start as i32, iv.end as i32, homolog_id)
             };
-            let target = Interval::new(range_start, range_end, query_id);
             Some((homolog, Vec::<CigarOp>::new(), target))
         })
-        .collect()
+        .collect();
+    // The transitive walk marks the query range visited and never returns
+    // it; the alignment backend reports it first, so add it when missing.
+    let covered = adjusted.iter().any(|(h, _, _)| {
+        h.metadata == query_id
+            && h.first.min(h.last) < range_end
+            && h.first.max(h.last) > range_start
+    });
+    if !covered {
+        adjusted.insert(0, (target, Vec::new(), target));
+    }
+    adjusted
 }
 
 fn syng_intervals_to_merged_query_intervals(
@@ -12308,10 +12476,29 @@ fn output_results_vcf(
     )
 }
 
-/// Partitioned GFA output for the query command: splits the query region into
-/// sub-windows of `partition_size` bp, queries each, then runs the partitioned
-/// GFA pipeline (per-partition engine → lace → gfaffix).
-fn output_results_gfa_partitioned(
+/// Run `query_window` on each `partition_size` bp window of `range`.
+fn query_windows(
+    (start, end): (i32, i32),
+    partition_size: usize,
+    mut query_window: impl FnMut(i32, i32) -> io::Result<Vec<Interval<u32>>>,
+) -> io::Result<Vec<Vec<Interval<u32>>>> {
+    let mut partitions = Vec::new();
+    let mut window_start = start;
+    while window_start < end {
+        let window_end = (window_start + partition_size as i32).min(end);
+        let intervals = query_window(window_start, window_end)?;
+        if !intervals.is_empty() {
+            partitions.push(intervals);
+        }
+        window_start = window_end;
+    }
+    Ok(partitions)
+}
+
+/// Partitioned GFA or VCF output for the query command: queries each
+/// sub-window, then runs the partitioned GFA pipeline (per-partition
+/// engine, lace, gfaffix).
+fn output_results_graph_partitioned(
     impg: &impl ImpgIndex,
     target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
@@ -12322,23 +12509,15 @@ fn output_results_gfa_partitioned(
     partition_size: usize,
     query: &QueryOpts,
     subset_filter: Option<&SubsetFilter>,
+    output_format: &str,
+    reference_names: &[String],
+    range_name: &str,
     graph_render: &GraphRenderOpts,
     graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
-    range_name: &str,
     threads: usize,
 ) -> io::Result<()> {
-    let (start, end) = target_range;
-    let ps = partition_size as i32;
-
-    // Split into sub-windows
-    let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
-    let mut window_start = start;
-
-    while window_start < end {
-        let window_end = (window_start + ps).min(end);
-
-        // Query this sub-window
+    let partitions = query_windows(target_range, partition_size, |window_start, window_end| {
         let mut results = perform_query(
             impg,
             target_name,
@@ -12353,24 +12532,15 @@ fn output_results_gfa_partitioned(
             query.approximate,
             subset_filter,
         )?;
-
         if !results.is_empty() {
-            // Merge intervals
             merge_query_adjusted_intervals(
                 &mut results,
                 query.effective_merge_distance(),
                 query.merge_strands_for_output("gfa"),
             );
-
-            // Extract query intervals
-            let query_intervals: Vec<Interval<u32>> =
-                results.drain(..).map(|(qi, _, _)| qi).collect();
-
-            partitions.push(query_intervals);
         }
-
-        window_start = window_end;
-    }
+        Ok(results.into_iter().map(|(qi, _, _)| qi).collect())
+    })?;
 
     let gfa_output = impg::partitioned_gfa_pipeline(
         &partitions,
@@ -12381,81 +12551,9 @@ fn output_results_gfa_partitioned(
     )?;
     write_graph_output_and_render(
         &gfa_output,
-        "gfa",
+        output_format,
         target_output_prefix,
-        "gfa",
-        &[],
-        graph_render,
-        graph_report,
-        bed_graph_dir,
-        range_name,
-        threads,
-    )
-}
-
-fn output_results_vcf_partitioned(
-    impg: &impl ImpgIndex,
-    target_output_prefix: &Option<String>,
-    sequence_index: &UnifiedSequenceIndex,
-    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-    engine_opts: &EngineOpts,
-    target_name: &str,
-    target_range: (i32, i32),
-    partition_size: usize,
-    query: &QueryOpts,
-    subset_filter: Option<&SubsetFilter>,
-    reference_names: &[String],
-    range_name: &str,
-    graph_render: &GraphRenderOpts,
-    graph_report: &GraphReportCliOpts,
-    bed_graph_dir: Option<&Path>,
-    threads: usize,
-) -> io::Result<()> {
-    let (start, end) = target_range;
-    let ps = partition_size as i32;
-    let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
-    let mut window_start = start;
-    while window_start < end {
-        let window_end = (window_start + ps).min(end);
-        let mut results = perform_query(
-            impg,
-            target_name,
-            (window_start, window_end),
-            false,
-            query.min_result_identity,
-            query.min_output_length,
-            query.transitive,
-            query.transitive_opts.transitive_dfs,
-            &query.transitive_opts,
-            Some(sequence_index),
-            query.approximate,
-            subset_filter,
-        )?;
-        if !results.is_empty() {
-            merge_query_adjusted_intervals(
-                &mut results,
-                query.effective_merge_distance(),
-                query.merge_strands_for_output("gfa"),
-            );
-            let query_intervals: Vec<Interval<u32>> =
-                results.drain(..).map(|(qi, _, _)| qi).collect();
-            partitions.push(query_intervals);
-        }
-        window_start = window_end;
-    }
-
-    let gfa_output = impg::partitioned_gfa_pipeline(
-        &partitions,
-        impg,
-        sequence_index,
-        scoring_params,
-        engine_opts,
-    )?;
-    write_graph_output_and_render(
-        &gfa_output,
-        "vcf",
-        target_output_prefix,
-        "vcf",
+        output_format,
         reference_names,
         graph_render,
         graph_report,
@@ -12475,60 +12573,9 @@ fn output_results_fasta(
     merge_strands: bool,
     reverse_complement: bool,
 ) -> io::Result<()> {
-    // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
-
-    // Parallelize sequence fetching and processing
-    let sequence_data: Vec<(String, String)> = results
-        .par_iter()
-        .map(|(query_interval, _, _)| -> io::Result<(String, String)> {
-            let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
-
-            // Determine actual start and end based on orientation
-            let (start, end, strand) = if query_interval.first <= query_interval.last {
-                (query_interval.first, query_interval.last, '+')
-            } else {
-                (query_interval.last, query_interval.first, '-')
-            };
-
-            // Fetch the sequence
-            let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
-
-            // If reverse strand and reverse complementing, reverse complement the sequence
-            let sequence = if strand == '-' && reverse_complement {
-                impg::graph::reverse_complement(&sequence)
-            } else {
-                sequence
-            };
-
-            // Create header
-            let header_suffix = if strand == '-' && reverse_complement {
-                "/rc"
-            } else {
-                ""
-            };
-            let header = format!(">{query_name}:{start}-{end}{header_suffix}");
-
-            // Convert sequence to string with line breaks every 80 characters
-            let sequence_str = String::from_utf8_lossy(&sequence);
-            let formatted_sequence = sequence_str
-                .as_bytes()
-                .chunks(80)
-                .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            Ok((header, formatted_sequence))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Output sequences sequentially to maintain order
-    for (header, sequence) in sequence_data {
-        writeln!(out, "{header}")?;
-        writeln!(out, "{sequence}")?;
-    }
-
-    Ok(())
+    let intervals: Vec<Interval<u32>> = results.iter().map(|(qi, _, _)| *qi).collect();
+    impg::graph::write_intervals_fasta(out, impg, &intervals, sequence_index, reverse_complement)
 }
 
 fn output_results_maf(
@@ -13799,9 +13846,10 @@ mod tests {
             100,
             true,
         );
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].first, 10);
-        assert_eq!(merged[0].last, 220);
+        // The query range comes first, then the merged homolog
+        assert_eq!(merged.len(), 2);
+        assert_eq!((merged[0].first, merged[0].last), (0, 300));
+        assert_eq!((merged[1].first, merged[1].last), (10, 220));
 
         let unmerged = syng_intervals_to_merged_query_intervals(
             &intervals,
@@ -13812,7 +13860,7 @@ mod tests {
             10,
             true,
         );
-        assert_eq!(unmerged.len(), 2);
+        assert_eq!(unmerged.len(), 3);
     }
 
     #[test]
@@ -15251,6 +15299,44 @@ mod tests {
             }
             _ => panic!("expected query command"),
         }
+    }
+
+    #[test]
+    fn test_non_syng_smooth_stage_sorts_like_crush() {
+        for spec in ["gfa:pggb:smooth", "gfa:seqwish:smooth", "gfa:pggb:crush"] {
+            let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", spec]).unwrap();
+            let Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } = args
+            else {
+                panic!("expected query command")
+            };
+            apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+            let parsed = engine_cli.parse_engine().unwrap();
+            assert_eq!(
+                parsed.graph_sort_pipeline.as_deref(),
+                Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_temp_dir_defaults_to_tmpdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", dir.path());
+        let got = resolve_temp_dir(None);
+        match old {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        assert_eq!(
+            std::path::PathBuf::from(got.unwrap()),
+            dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]

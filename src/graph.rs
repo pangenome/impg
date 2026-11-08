@@ -819,6 +819,46 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
     Ok(())
 }
 
+/// Write intervals as FASTA: `name:start-end`, plus `/rc` when a
+/// reverse interval is reverse-complemented; 80 bases per line.
+pub fn write_intervals_fasta(
+    out: &mut dyn Write,
+    impg: &impl ImpgIndex,
+    intervals: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    reverse_complement_reverse: bool,
+) -> io::Result<()> {
+    use rayon::prelude::*;
+    let records: Vec<(String, Vec<u8>)> = intervals
+        .par_iter()
+        .map(|iv| -> io::Result<(String, Vec<u8>)> {
+            let name = impg.seq_index().get_name(iv.metadata).unwrap();
+            let (start, end, reverse) = if iv.first <= iv.last {
+                (iv.first, iv.last, false)
+            } else {
+                (iv.last, iv.first, true)
+            };
+            let sequence = sequence_index.fetch_sequence(name, start, end)?;
+            Ok(if reverse && reverse_complement_reverse {
+                (
+                    format!("{name}:{start}-{end}/rc"),
+                    reverse_complement(&sequence),
+                )
+            } else {
+                (format!("{name}:{start}-{end}"), sequence)
+            })
+        })
+        .collect::<io::Result<_>>()?;
+    for (header, sequence) in records {
+        writeln!(out, ">{header}")?;
+        for line in sequence.chunks(80) {
+            out.write_all(line)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     let len = seq.len();
     let mut result = Vec::with_capacity(len);
@@ -898,6 +938,15 @@ pub fn normalize_self_loop_runs(gfa: String) -> io::Result<String> {
     Ok(result.gfa)
 }
 
+static DETERMINISTIC_SORT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Run the path SGD of every graph sort on one thread. Multi-threaded
+/// SGD is Hogwild-style, so its layout changes between runs.
+pub fn set_deterministic_sort(on: bool) {
+    DETERMINISTIC_SORT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
     sort_gfa_pipeline(gfa_content, "Ygs", num_threads)
 }
@@ -937,7 +986,12 @@ pub fn sort_gfa_pipeline(
     }
 
     // Create Ygs parameters from the initial graph, matching the gfasort CLI.
-    let params = YgsParams::from_graph(&graph, 0, num_threads);
+    let sgd_threads = if DETERMINISTIC_SORT.load(std::sync::atomic::Ordering::Relaxed) {
+        1
+    } else {
+        num_threads
+    };
+    let params = YgsParams::from_graph(&graph, 0, sgd_threads);
     let sgd_params = params.path_sgd.clone();
 
     if pipeline == "Ygs" {

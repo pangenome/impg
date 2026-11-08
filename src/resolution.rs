@@ -9777,12 +9777,11 @@ fn local_wfmash_num_mappings(
     align_config: &sweepga::library_api::SweepgaAlignConfig,
     sequence_count: usize,
 ) -> usize {
-    let (_, query_limit, target_limit) =
-        sweepga::library_api::parse_filter_mode(&align_config.num_mappings);
-    if align_config.no_filter || query_limit.is_none() || target_limit.is_none() {
-        return sequence_count.max(1);
-    }
-    query_limit.unwrap().max(target_limit.unwrap()).max(1)
+    crate::commands::wfmash_num_mappings(
+        &align_config.num_mappings,
+        align_config.no_filter,
+        sequence_count,
+    )
 }
 
 fn sweepga_backend_min_sequence_len(aligner: &str) -> usize {

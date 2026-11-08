@@ -21,8 +21,8 @@ use crate::graph::{sort_gfa, unchop_gfa, TerminalNRunClip};
 // Import from sweepga
 use sweepga::aligner::Aligner;
 use sweepga::library_api::{
-    apply_paf_filter, create_aligner_adaptive, filter_config_from_align_cfg, parse_filter_mode,
-    sweepga_align, SweepgaAlignConfig,
+    apply_paf_filter, create_aligner_adaptive, filter_config_from_align_cfg, sweepga_align,
+    SweepgaAlignConfig,
 };
 
 // Import from seqwish
@@ -673,12 +673,11 @@ fn restore_direct_fasta_path_names(gfa: &str, fasta_files: &[String]) -> io::Res
         for (name, mut sequence) in read_sequences_from_fasta(Path::new(fasta_path))? {
             // seqwish uppercases, so soft-masked input must match uppercased
             sequence.make_ascii_uppercase();
-            if let Some((key, start, _end)) = split_numeric_path_range(&name) {
-                let generated = format!("{key}:{start}-{}", start + sequence.len());
-                exact_full_range_name
-                    .entry(generated)
-                    .or_insert_with(|| name.clone());
-            }
+            // The name smoothing gives this path, so the rule must match
+            let (key, start) = crate::smooth::parse_path_coords(&name);
+            exact_full_range_name
+                .entry(format!("{key}:{start}-{}", start + sequence.len()))
+                .or_insert_with(|| name.clone());
             names_by_sequence
                 .entry(sequence.clone())
                 .or_default()
@@ -758,14 +757,6 @@ fn restore_direct_fasta_path_names(gfa: &str, fasta_files: &[String]) -> io::Res
         rewritten.pop();
     }
     Ok(rewritten)
-}
-
-fn split_numeric_path_range(name: &str) -> Option<(&str, usize, usize)> {
-    let last_colon = name.rfind(':')?;
-    let (key, range_str) = name.split_at(last_colon);
-    let range_str = &range_str[1..];
-    let (start, end) = range_str.split_once('-')?;
-    Some((key, start.parse().ok()?, end.parse().ok()?))
 }
 
 fn gfa_path_sequences(gfa: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
@@ -1037,14 +1028,9 @@ fn graph_wfmash_raw_num_mappings(
     config: &GraphBuildConfig,
     sequence_count: usize,
 ) -> Option<usize> {
-    if !config.aligner.eq_ignore_ascii_case("wfmash") {
-        return None;
-    }
-    let (_, query_limit, target_limit) = parse_filter_mode(&config.num_mappings);
-    if config.no_filter || query_limit.is_none() || target_limit.is_none() {
-        return Some(sequence_count.max(1));
-    }
-    Some(query_limit.unwrap().max(target_limit.unwrap()).max(1))
+    config.aligner.eq_ignore_ascii_case("wfmash").then(|| {
+        super::wfmash_num_mappings(&config.num_mappings, config.no_filter, sequence_count)
+    })
 }
 
 /// Run the alignment + filtering stages of the graph pipeline, returning
@@ -1555,5 +1541,32 @@ P\tref#0#fixture:1-28\t1+\t*
 
         assert!(restored.contains("P\tref#0#fixture:1-27\t1+\t*"));
         assert!(!restored.contains("ref#0#fixture:1-28"));
+    }
+
+    /// impg render names paths "key:start-end(+)"; two of them with the
+    /// same sequence kept the smoothing name "key:start-end".
+    #[test]
+    fn restores_suffixed_and_plain_names_with_shared_sequences() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fasta_path = dir.path().join("input.fa");
+        let seq = "ACGTACGTACGTCGATTACAGATTACA";
+        std::fs::write(
+            &fasta_path,
+            format!(">a#1#c:5-32(+)\n{seq}\n>b#1#c:9-36(+)\n{seq}\n>p1\n{seq}\n>p2\n{seq}\n"),
+        )
+        .expect("write FASTA");
+        let gfa = format!(
+            "H\tVN:Z:1.0\nS\t1\t{seq}\nP\ta#1#c:5-32\t1+\t*\nP\tb#1#c:9-36\t1+\t*\nP\tp1:0-27\t1+\t*\nP\tp2:0-27\t1+\t*\n"
+        );
+        let restored = restore_direct_fasta_path_names(
+            &gfa,
+            &[fasta_path.to_str().expect("temp FASTA path is UTF-8").to_string()],
+        )
+        .expect("restore path names");
+        let names: Vec<&str> = restored
+            .lines()
+            .filter_map(|l| l.strip_prefix("P\t")?.split('\t').next())
+            .collect();
+        assert_eq!(names, ["a#1#c:5-32(+)", "b#1#c:9-36(+)", "p1", "p2"]);
     }
 }
