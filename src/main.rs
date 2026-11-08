@@ -8801,6 +8801,15 @@ fn run() -> io::Result<()> {
                     "No sequence files specified. Use --sequence-files or --sequence-list",
                 ));
             }
+            if let Some(agc) = fasta_files.iter().find(|f| f.ends_with(".agc")) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "impg graph reads FASTA only, not AGC ('{agc}'): extract the sequences \
+                         (agc getset) or use impg query/partition -o gfa with --sequence-files"
+                    ),
+                ));
+            }
 
             // Wfmash-density sparsification only makes sense with the wfmash backend
             if matches!(

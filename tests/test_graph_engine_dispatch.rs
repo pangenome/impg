@@ -74,3 +74,13 @@ fn graph_pggb_keeps_names_of_soft_masked_input() {
     names.sort();
     assert_eq!(names, ["A#0#chr1:1-3000", "B#0#chr1:1-3000"]);
 }
+
+/// AGC input failed late with "stream did not contain valid UTF-8".
+#[test]
+fn graph_rejects_agc_input_up_front() {
+    let dir = tempfile::tempdir().unwrap();
+    let (out, _) = graph(dir.path(), std::path::Path::new("tests/test_data/test.agc"), "pggb");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("FASTA only"), "unclear error:\n{stderr}");
+}
