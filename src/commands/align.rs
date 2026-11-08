@@ -46,6 +46,8 @@ pub struct AlignConfig {
     pub min_identity: f64,
     pub scaffold_dist: u64,
     pub min_map_length: u64,
+    /// wfmash -p value
+    pub map_pct_identity: Option<String>,
 }
 
 impl Default for AlignConfig {
@@ -72,6 +74,7 @@ impl Default for AlignConfig {
             min_identity: 0.0,
             scaffold_dist: 0,
             min_map_length: 0,
+            map_pct_identity: Some("90".to_string()),
         }
     }
 }
@@ -537,7 +540,7 @@ fn run_alignments(
         kmer_frequency,
         config.num_threads,
         config.min_aln_length,
-        Some("90".to_string()),
+        config.map_pct_identity.clone(),
         config.temp_dir.clone(),
         None, // segment_length: let sweepga adapt from avg_len
         avg_len,
@@ -572,7 +575,7 @@ fn run_alignments(
                 kmer_frequency,
                 config.num_threads,
                 config.min_aln_length,
-                Some("90".to_string()),
+                config.map_pct_identity.clone(),
                 config.temp_dir.clone(),
                 wfmash_density,
                 pairs_file_path.clone(),
@@ -860,6 +863,7 @@ pub fn sweepga_align(
             min_identity: config.min_identity,
             scaffold_dist: config.scaffold_dist,
             min_map_length: config.min_map_length,
+            map_pct_identity: config.map_pct_identity.clone(),
         };
         apply_paf_filter(paf_temp, &align_config, avg_seq_len)
     }

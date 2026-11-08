@@ -9431,10 +9431,9 @@ fn run() -> io::Result<()> {
                 }
             };
 
-            // `aln.sw.min_identity` is a String (preset or "ani50-2" etc); for
-            // the `impg align` config we want the numeric form — default 0.0
-            // means "let sweepga decide".
-            let min_identity_f64 = aln.sw.min_identity.parse::<f64>().unwrap_or(0.0);
+            // Same parsing as impg graph: "90" is 0.9; ANI presets need alignments
+            let min_identity_f64 = sweepga::parse_identity_value(&aln.sw.min_identity, None)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
             let config = impg::commands::align::AlignConfig {
                 num_threads: common.threads.get(),
@@ -9460,6 +9459,7 @@ fn run() -> io::Result<()> {
                 min_identity: min_identity_f64,
                 scaffold_dist: aln.sw.scaffold_dist,
                 min_map_length: aln.min_map_length,
+                map_pct_identity: aln.sw.map_pct_identity.clone().or_else(|| Some("90".to_string())),
             };
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;
@@ -10362,6 +10362,9 @@ fn build_graph_config(
     show_progress: bool,
     debug_dir: Option<String>,
 ) -> io::Result<graph::GraphBuildConfig> {
+    if let Some(dir) = &debug_dir {
+        std::fs::create_dir_all(dir)?;
+    }
     Ok(graph::GraphBuildConfig {
         num_threads,
         frequency_multiplier: engine_cli.aln.sw.fastga_frequency_multiplier,

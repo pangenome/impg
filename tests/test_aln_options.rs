@@ -1,0 +1,79 @@
+use std::process::{Command, Output};
+
+/// Two near-identical 3 kb haplotypes.
+fn write_pair(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut seq = Vec::new();
+    let mut x: u64 = 7;
+    for _ in 0..3000 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seq.push(b"ACGT"[(x >> 62) as usize]);
+    }
+    let mut other = seq.clone();
+    other[1500] = if other[1500] == b'A' { b'C' } else { b'A' };
+    let path = dir.join("pair.fa");
+    std::fs::write(&path, [b">A#0#chr1\n", &seq[..], b"\n>B#0#chr1\n", &other[..], b"\n"].concat())
+        .unwrap();
+    path
+}
+
+fn align(dir: &std::path::Path, extra: &[&str]) -> (Output, usize) {
+    let out = dir.join(format!("out{}", extra.join("_").replace(['-', ' '], "")));
+    let output = Command::new(env!("CARGO_BIN_EXE_impg"))
+        .args(["align", "--format", "paf", "--sequence-files"])
+        .arg(write_pair(dir))
+        .arg("-o")
+        .arg(&out)
+        .args(["-t", "1"])
+        .args(extra)
+        .output()
+        .expect("run impg align");
+    let lines = std::fs::read_to_string(out.join("alignments.paf"))
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    (output, lines)
+}
+
+/// `--min-aln-identity 90` means 0.9, as in impg graph; it was read as 90.0.
+#[test]
+fn align_min_aln_identity_percent_is_a_fraction() {
+    let dir = tempfile::tempdir().unwrap();
+    let (out, lines) = align(dir.path(), &["--min-aln-identity", "90"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(lines > 0, "90 must keep the 99.97% identity alignments");
+}
+
+/// ANI presets need input alignments; they were silently taken as 0.
+#[test]
+fn align_min_aln_identity_ani_preset_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (out, _) = align(dir.path(), &["--min-aln-identity", "ani50-2"]);
+    assert!(!out.status.success(), "ani50-2 must be rejected by impg align");
+}
+
+/// `--map-pct-identity` reaches wfmash; it was always -p90.
+#[test]
+fn align_map_pct_identity_reaches_wfmash() {
+    let dir = tempfile::tempdir().unwrap();
+    let (out, _) = align(dir.path(), &["--aligner", "wfmash", "--map-pct-identity", "70"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("-p70"), "wfmash did not get -p70:\n{stderr}");
+}
+
+/// `impg graph --debug-dir` creates the directory and writes into it.
+#[test]
+fn graph_debug_dir_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let debug = dir.path().join("dbg");
+    let output = Command::new(env!("CARGO_BIN_EXE_impg"))
+        .args(["graph", "--sequence-files"])
+        .arg(write_pair(dir.path()))
+        .args(["--gfa-engine", "seqwish", "-t", "1", "--debug-dir"])
+        .arg(&debug)
+        .arg("-g")
+        .arg(dir.path().join("out.gfa"))
+        .output()
+        .expect("run impg graph");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(debug.join("combined.fa").exists(), "no combined.fa in --debug-dir");
+}
