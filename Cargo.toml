@@ -75,7 +75,7 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "a145a311f2d341b0a7d3747c46fd197bb34177d4", default-features = false }
 
 # Dependencies for graph sorting
-gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
+gfasort = { git = "https://github.com/pangenome/gfasort", rev = "4a8ff0028594e87607cb267f80f9ba6d31eb45be" }
 bluntg = { git = "https://github.com/pangenome/bluntg" }
 povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "0c9f21a40e7755293f5b21f33a7e2c894dc6cb15", default-features = false }
 
