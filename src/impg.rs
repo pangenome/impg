@@ -1671,9 +1671,11 @@ impl Impg {
             (working_query_start, working_query_end)
         };
 
-        // Target coordinates: use exact requested range
-        let target_start = range_start;
-        let target_end = range_end;
+        // The target interval is the part of the requested range that this
+        // alignment actually covers. Copying the requested range here claimed
+        // homology outside the alignment.
+        let target_start = range_start.max(metadata.target_start);
+        let target_end = range_end.min(metadata.target_end);
 
         // Validate coordinates are non-negative
         if working_query_start < 0 || working_query_end < 0 {
