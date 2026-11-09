@@ -55,8 +55,11 @@ fn raw_syncmer_positions(seq: &[u8], params: SyncmerParams) -> Vec<i32> {
 
     let mut positions = Vec::new();
     unsafe {
-        let sh =
-            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
+        let sh = syng_ffi::impg_seqhashCreateSafe(
+            params.k as i32,
+            params.selection_window(),
+            params.seed as i32,
+        );
         let sit = syng_ffi::syncmerIterator(
             sh,
             seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
@@ -111,26 +114,33 @@ fn main() {
             only_rc.len()
         );
         if !only_fwd.is_empty() || !only_rc.is_empty() {
-            println!("  only_fwd (first 20): {:?}", &only_fwd[..only_fwd.len().min(20)]);
-            println!("  only_rc  (first 20): {:?}", &only_rc[..only_rc.len().min(20)]);
+            println!(
+                "  only_fwd (first 20): {:?}",
+                &only_fwd[..only_fwd.len().min(20)]
+            );
+            println!(
+                "  only_rc  (first 20): {:?}",
+                &only_rc[..only_rc.len().min(20)]
+            );
         }
         // Edge-adjacency of the disagreements (boundary vs interior).
-        let interior_only_fwd = only_fwd
-            .iter()
-            .filter(|&&p| p > 70 && p < l - 133)
-            .count();
-        let interior_only_rc = only_rc
-            .iter()
-            .filter(|&&p| p > 70 && p < l - 133)
-            .count();
-        println!("  interior-only fwd {} rc {}", interior_only_fwd, interior_only_rc);
+        let interior_only_fwd = only_fwd.iter().filter(|&&p| p > 70 && p < l - 133).count();
+        let interior_only_rc = only_rc.iter().filter(|&&p| p > 70 && p < l - 133).count();
+        println!(
+            "  interior-only fwd {} rc {}",
+            interior_only_fwd, interior_only_rc
+        );
     }
 
     // Context-sensitivity: which bases OUTSIDE the k-mer [p, p+k) influence
     // the selection of position p? (Determines whether read-edge anchors have
     // truncated-context decisions.)
     {
-        let params8 = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let params8 = SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
         let seq = make_seq(3000, 99);
         let base_positions: std::collections::BTreeSet<i32> =
             raw_syncmer_positions(&seq, params8).into_iter().collect();
@@ -152,21 +162,30 @@ fn main() {
                     let mut mutated = seq.clone();
                     mutated[index] = replacement;
                     let mutated_positions: std::collections::BTreeSet<i32> =
-                        raw_syncmer_positions(&mutated, params8).into_iter().collect();
+                        raw_syncmer_positions(&mutated, params8)
+                            .into_iter()
+                            .collect();
                     if !mutated_positions.contains(&p) {
                         influential_offsets.insert(offset);
                     }
                 }
             }
         }
-        println!("influential offsets outside the k-mer: {:?}", influential_offsets);
+        println!(
+            "influential offsets outside the k-mer: {:?}",
+            influential_offsets
+        );
     }
 
     // Edge behavior: selection of a 150bp window must equal the selection of
     // the same bases in the full sequence (content-only must hold at read
     // edges, or read anchors would disagree with panel steps).
     {
-        let params8 = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let params8 = SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
         let seq = make_seq(5000, 4242);
         let full: std::collections::BTreeSet<i32> =
             raw_syncmer_positions(&seq, params8).into_iter().collect();

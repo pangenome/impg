@@ -88,8 +88,11 @@ pub fn extract_packed_syncmers(
     let mut out = Vec::new();
     let mut validity = SyncmerWindowValidity::new(seq);
     unsafe {
-        let seqhash =
-            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
+        let seqhash = syng_ffi::impg_seqhashCreateSafe(
+            params.k as i32,
+            params.selection_window(),
+            params.seed as i32,
+        );
         if seqhash.is_null() {
             return Err(io::Error::other("seqhashCreate returned null"));
         }

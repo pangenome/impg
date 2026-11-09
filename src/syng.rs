@@ -1522,6 +1522,14 @@ impl Default for SyncmerParams {
 }
 
 impl SyncmerParams {
+    /// s-mers per closed-syncmer window: w + 1, as syng creates its seqhash
+    /// (syng.c, syngmap.c: "need the +1"). The window then spans the whole
+    /// w + k syncmer, so a sequence and its reverse complement select the
+    /// same syncmers; with w they shared 34 of 715 on a 20 kb sequence.
+    pub fn selection_window(&self) -> i32 {
+        self.w as i32 + 1
+    }
+
     /// Convert to the C-side SyncmerParams struct.
     #[cfg(test)]
     fn to_c(self) -> syng_ffi::CSyncmerParams {
@@ -1552,6 +1560,7 @@ impl SyngMetadata {
         writeln!(writer, "syncmer_k\t{}", self.params.k)?;
         writeln!(writer, "syncmer_w\t{}", self.params.w)?;
         writeln!(writer, "syncmer_seed\t{}", self.params.seed)?;
+        writeln!(writer, "syncmer_window\t{}", self.params.selection_window())?;
         writeln!(writer, "syncmer_length\t{}", self.params.k + self.params.w)?;
         writeln!(writer, "smer_length\t{}", self.params.k)?;
         writer.flush()
@@ -1577,6 +1586,7 @@ impl SyngMetadata {
         let mut syncmer_k = None;
         let mut syncmer_w = None;
         let mut syncmer_seed = None;
+        let mut syncmer_window = None;
 
         for (line_no, line) in reader.lines().enumerate() {
             let line = line?;
@@ -1604,6 +1614,9 @@ impl SyngMetadata {
                 "syncmer_k" => syncmer_k = Some(parse_metadata_u32(key, value, line_no + 1)?),
                 "syncmer_w" => syncmer_w = Some(parse_metadata_u32(key, value, line_no + 1)?),
                 "syncmer_seed" => syncmer_seed = Some(parse_metadata_u32(key, value, line_no + 1)?),
+                "syncmer_window" => {
+                    syncmer_window = Some(parse_metadata_u32(key, value, line_no + 1)?)
+                }
                 "syncmer_length" | "smer_length" => {}
                 _ => {
                     return Err(io::Error::new(
@@ -1653,6 +1666,15 @@ impl SyngMetadata {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "syng metadata syncmer_k must be greater than 0",
+            ));
+        }
+        if syncmer_window != Some(params.selection_window() as u32) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{path}: syng index built with the old syncmer selection, which is not \
+                     strand-symmetric; rebuild it with `impg syng`"
+                ),
             ));
         }
         if params.k.checked_add(params.w).is_none() {
@@ -2201,7 +2223,11 @@ impl SyngMatcher {
         let params = metadata.params;
         let kmer_hash = read_kmer_hash_from_prefix(prefix)?;
         let seqhash = unsafe {
-            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
+            syng_ffi::impg_seqhashCreateSafe(
+                params.k as i32,
+                params.selection_window(),
+                params.seed as i32,
+            )
         };
         if seqhash.is_null() {
             unsafe { syng_ffi::kmerHashDestroy(kmer_hash) };
@@ -2246,7 +2272,7 @@ impl SyngMatcher {
         let seqhash = unsafe {
             syng_ffi::impg_seqhashCreateSafe(
                 self.params.k as i32,
-                self.params.w as i32,
+                self.params.selection_window(),
                 self.params.seed as i32,
             )
         };
@@ -2360,7 +2386,11 @@ impl SyngIndex {
         let gbwt = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
         let kmer_hash = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
         let seqhash = unsafe {
-            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
+            syng_ffi::impg_seqhashCreateSafe(
+                params.k as i32,
+                params.selection_window(),
+                params.seed as i32,
+            )
         };
         Self {
             gbwt,
@@ -3021,19 +3051,17 @@ impl SyngIndex {
 
         // Read names sidecar.
         let names_path = existing_syng_sidecar_path(prefix, "names");
-        let mut name_map = match SyngNameMap::load_with_known_empty_paths(
-            &names_path,
-            metadata.version >= 2,
-        ) {
-            Ok(nm) => nm,
-            Err(e) => {
-                unsafe {
-                    syng_ffi::syngBWTdestroy(gbwt);
-                    syng_ffi::kmerHashDestroy(kmer_hash);
+        let mut name_map =
+            match SyngNameMap::load_with_known_empty_paths(&names_path, metadata.version >= 2) {
+                Ok(nm) => nm,
+                Err(e) => {
+                    unsafe {
+                        syng_ffi::syngBWTdestroy(gbwt);
+                        syng_ffi::kmerHashDestroy(kmer_hash);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         // Length alone proves that legacy too-short paths have no anchors.
         for (length, start) in name_map
@@ -3053,7 +3081,11 @@ impl SyngIndex {
 
         // Create seqhash for future use (queries, incremental adds)
         let seqhash = unsafe {
-            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
+            syng_ffi::impg_seqhashCreateSafe(
+                params.k as i32,
+                params.selection_window(),
+                params.seed as i32,
+            )
         };
 
         // Read sampled path-step sidecar.
@@ -4733,7 +4765,10 @@ impl SyngIndex {
             &mut out,
         );
         out.sort_unstable_by_key(|m| m.query_pos);
-        Ok(out.into_iter().map(|m| (m.signed_node, m.query_pos)).collect())
+        Ok(out
+            .into_iter()
+            .map(|m| (m.signed_node, m.query_pos))
+            .collect())
     }
 
     /// Return query syncmers that are present in this syng index.
@@ -5763,7 +5798,7 @@ mod tests {
         unsafe {
             let sh = syng_ffi::impg_seqhashCreateSafe(
                 params.k as i32,
-                params.w as i32,
+                params.selection_window(),
                 params.seed as i32,
             );
             let it =
@@ -6305,6 +6340,33 @@ mod tests {
     // ── 5. SyngIndex::build ─────────────────────────────────────────
 
     /// Generate a random-ish DNA sequence of the given length.
+    #[test]
+    fn reverse_complement_shares_every_syncmer() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let a = make_test_sequence(20_000, 42);
+        let d = crate::graph::reverse_complement(&a);
+        let index = SyngIndex::build(
+            params,
+            vec![("A".to_string(), a), ("D".to_string(), d)].into_iter(),
+        );
+        let start = index.name_map.path_starts[0].clone().unwrap();
+        let walk = index.walk_forward_path(&start);
+        assert!(walk.len() > 500, "{}", walk.len());
+        // Each node of A sits on A, rc(A), D and rc(D): four occurrences
+        let shared = walk
+            .iter()
+            .filter(|(node, _)| {
+                index
+                    .syncmer_node_orientation_counts(node.unsigned_abs())
+                    .unwrap()
+                    .total()
+                    == 4
+            })
+            .count();
+        assert_eq!(shared, walk.len());
+    }
+
     fn make_test_sequence(len: usize, seed: u8) -> Vec<u8> {
         let bases = [b'A', b'C', b'G', b'T'];
         let mut seq = Vec::with_capacity(len);

@@ -2312,7 +2312,7 @@ fn build_bind_scaffold(
     k: u64,
     member_rows: impl Iterator<Item = (usize, u64, u64)>,
 ) -> io::Result<Vec<BindScaffoldPathAsset>> {
-    let reach = panel.params.w as u64 - 1;
+    let reach = panel.params.selection_window() as u64 - 1;
     let mut by_path: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
     for (path, start, end) in member_rows {
         let path_len = panel.name_map.path_to_length[path];
@@ -2910,7 +2910,7 @@ impl BindScaffoldServe {
         }
         Ok(BindScaffoldServe {
             by_path,
-            reach: panel.params.w as u64 - 1,
+            reach: panel.params.selection_window() as u64 - 1,
             syncmer_len: panel.syncmer_length_bp() as u64,
             served: AtomicU64::new(0),
             fallbacks: AtomicU64::new(0),
@@ -16621,7 +16621,7 @@ mod tests {
                                     hi,
                                     position,
                                     path_len,
-                                    panel.params.w as u64 - 1,
+                                    panel.params.selection_window() as u64 - 1,
                                     panel.syncmer_length_bp() as u64,
                                 )
                             })
