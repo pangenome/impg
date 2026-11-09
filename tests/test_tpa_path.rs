@@ -341,6 +341,37 @@ fn test_tpa_approximate_query_needs_no_sequence_files() {
         "inside the alignment the tracepoint projection must give the same intervals"
     );
 
+    // A range that starts before the alignment: the target interval must be
+    // clipped to what the alignment covers, not copied from the request.
+    let approximate_rows = data_rows(
+        &query(
+            &binary,
+            work_dir,
+            &[
+                "-a", &tpa_arg, "-i", "tpa.impg", "-r", "t:0-1000", "-d", "0", "-o", "bedpe",
+                "--approximate",
+            ],
+        )
+        .stdout,
+    );
+    let exact_rows = data_rows(
+        &query(
+            &binary,
+            work_dir,
+            &[
+                "-a", &tpa_arg, "-i", "tpa.impg", "--sequence-files", "seqs.fa", "-r", "t:0-1000",
+                "-d", "0", "-o", "bedpe",
+            ],
+        )
+        .stdout,
+    );
+    assert_eq!(
+        intervals(&approximate_rows),
+        intervals(&exact_rows),
+        "the target interval must be clipped to the alignment, so a range that \
+         starts before it must not report homology there"
+    );
+
     // The identity is not the same: for a Standard TPA record the tracepoint
     // path estimates it from the trace spacing, so a perfect alignment does not
     // read 1. It is a lower bound, never higher than the CIGAR path.
