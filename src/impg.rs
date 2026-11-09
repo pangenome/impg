@@ -223,6 +223,68 @@ impl QueryMetadata {
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
+
+/// Reject inputs that would only fail later, deep inside a query or a worker.
+///
+/// Coordinates are stored as `i32`, so a sequence or a coordinate above
+/// `i32::MAX` would wrap to a negative value without any message. A PAF record
+/// without a `cg:Z` tag cannot be projected at all: the projection reads the
+/// CIGAR to place the query interval inside each segment, and the old code
+/// panicked inside a rayon worker when it reached such a record.
+fn validate_index_inputs(
+    records_by_file: &[(Vec<AlignmentRecord>, String)],
+    seq_index: &SequenceIndex,
+) -> io::Result<()> {
+    for id in 0..seq_index.len() as u32 {
+        if let Some(len) = seq_index.get_len_from_id(id) {
+            if len > i32::MAX as usize {
+                let name = seq_index.get_name(id).unwrap_or("<unknown>");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "sequence '{name}' is {len} bp, above the maximum supported length of {} bp",
+                        i32::MAX
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (records, path) in records_by_file {
+        for record in records {
+            let max_coord = record
+                .query_start
+                .max(record.query_end)
+                .max(record.target_start)
+                .max(record.target_end);
+            if max_coord > i32::MAX as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "an alignment record in '{path}' has the coordinate {max_coord}, above the maximum supported value {} bp",
+                        i32::MAX
+                    ),
+                ));
+            }
+        }
+
+        if !matches!(QueryMetadata::get_file_type(path), FileType::Paf) {
+            continue;
+        }
+        let missing = records.iter().filter(|r| r.data_bytes == 0).count();
+        if missing > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the alignment file '{path}' has {missing} PAF record(s) out of {} without a CIGAR ('cg:Z' tag). impg projects intervals through the CIGAR, so these records cannot be indexed. Re-run the alignment step so that it writes CIGAR strings.",
+                    records.len()
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1642,6 +1704,8 @@ impl Impg {
         sequence_files: Option<&[String]>,
         bidirectional: bool,
     ) -> io::Result<Self> {
+        validate_index_inputs(records_by_file, &seq_index)?;
+
         // Extract just the alignment file paths
         let alignment_files: Vec<String> = records_by_file
             .par_iter()
@@ -3292,5 +3356,85 @@ mod tests {
         // Reverse: just reversed order
         assert_eq!(inverted_reverse[0].op(), 'X');
         assert_eq!(inverted_reverse[1].op(), '=');
+    }
+
+    #[test]
+    fn test_index_rejects_paf_record_without_cigar() {
+        // A PAF record without cg:Z cannot be projected. The index must say so
+        // instead of panicking inside a worker at query time.
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data_bytes, 0, "fixture must have no CIGAR");
+
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        let err = match Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true) {
+            Ok(_) => panic!("a PAF record without cg:Z must be rejected at index time"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("without a CIGAR"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("test.paf"), "error must name the file: {msg}");
+    }
+
+    #[test]
+    fn test_index_accepts_paf_record_with_cigar() {
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true)
+            .expect("a PAF record with a CIGAR must index");
+    }
+
+    #[test]
+    fn test_index_rejects_sequence_longer_than_i32() {
+        // Coordinates are i32, so a longer sequence would wrap silently.
+        let mut seq_index = SequenceIndex::new();
+        let long = i32::MAX as usize + 1;
+        seq_index.get_or_insert_id("chrBig", Some(long));
+        seq_index.get_or_insert_id("chrSmall", Some(1000));
+
+        let err = match Impg::from_multi_alignment_records(&[], seq_index, None, true) {
+            Ok(_) => panic!("a sequence above i32::MAX bp must be rejected"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("chrBig"), "error must name the sequence: {msg}");
+        assert!(
+            msg.contains(&long.to_string()),
+            "error must give the length: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_index_rejects_coordinate_above_i32() {
+        let mut seq_index = SequenceIndex::new();
+        seq_index.get_or_insert_id("q", Some(1000));
+        seq_index.get_or_insert_id("t", Some(1000));
+
+        let record = AlignmentRecord {
+            query_id: 0,
+            query_start: 0,
+            query_end: i32::MAX as usize + 10,
+            target_id: 1,
+            target_start: 0,
+            target_end: 100,
+            strand_and_data_offset: 0,
+            data_bytes: 10,
+        };
+        let records_by_file = vec![(vec![record], "test.paf".to_string())];
+        let err = match Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true) {
+            Ok(_) => panic!("a coordinate above i32::MAX must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("above the maximum supported value"),
+            "unexpected error: {err}"
+        );
     }
 }

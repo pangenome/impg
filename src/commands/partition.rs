@@ -180,6 +180,25 @@ pub fn partition_alignments(
     engine_config: &EngineOpts,
     rehome_singletons: bool,
 ) -> io::Result<()> {
+    // Window boundaries are stored as i32, and a window of 0 bp never advances
+    // the window loop. Reject both here so library callers get an error instead
+    // of an endless loop or a silent wrap.
+    if window_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "window size must be at least 1 bp: a window of 0 bp never advances",
+        ));
+    }
+    if window_size > i32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "window size {window_size} exceeds the maximum supported value {}",
+                i32::MAX
+            ),
+        ));
+    }
+
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
     if let Some(path) = starting_sequences_file {
@@ -229,7 +248,7 @@ pub fn partition_alignments(
 
             let mut pos = start;
             while pos < end {
-                let window_end = std::cmp::min(pos + window_size as i32, end);
+                let window_end = std::cmp::min(pos.saturating_add(window_size as i32), end);
 
                 // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32
@@ -954,7 +973,7 @@ fn select_and_window_sequences(
             let mut range_windows: Vec<(u32, i32, i32)> = Vec::new();
             let mut pos = *start;
             while pos < *end {
-                let window_end = std::cmp::min(pos + window_size as i32, *end);
+                let window_end = std::cmp::min(pos.saturating_add(window_size as i32), *end);
 
                 // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32 && !range_windows.is_empty() {

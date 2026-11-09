@@ -54,6 +54,38 @@ fn parse_merge_distance(s: &str) -> Result<i32, String> {
     })
 }
 
+/// Parse a partition window size: at least 1 bp and at most `i32::MAX` bp,
+/// because window boundaries are stored as `i32` and a 0 bp window never advances.
+fn parse_window_size(s: &str) -> Result<usize, String> {
+    let value = parse_usize_size(s)?;
+    // parse_metric_number truncates fractions; refuse them
+    let t = s.trim();
+    let (num, mult) = match t.chars().last() {
+        Some('k' | 'K') => (&t[..t.len() - 1], 1e3),
+        Some('m' | 'M') => (&t[..t.len() - 1], 1e6),
+        Some('g' | 'G') => (&t[..t.len() - 1], 1e9),
+        _ => (t, 1.0),
+    };
+    let exact = num.parse::<f64>().map_err(|e| format!("invalid window size '{s}': {e}"))? * mult;
+    if (exact - exact.round()).abs() > 1e-6 {
+        return Err(format!(
+            "window size '{s}' is {exact} bp: it must be a whole number of bp"
+        ));
+    }
+    if value == 0 {
+        return Err(
+            "window size must be at least 1 bp: a window of 0 bp never advances".to_string(),
+        );
+    }
+    if value > i32::MAX as usize {
+        return Err(format!(
+            "window size {value} exceeds the maximum supported value {}",
+            i32::MAX
+        ));
+    }
+    Ok(value)
+}
+
 fn parse_usize_size(s: &str) -> Result<usize, String> {
     let value = parse_size(s)?;
     usize::try_from(value).map_err(|_| format!("size {value} exceeds usize::MAX"))
@@ -4768,9 +4800,9 @@ enum Args {
         no_rehome_singletons: bool,
 
         // --- Partition-specific ---
-        /// Window size for partitioning
+        /// Window size for partitioning (at least 1 bp)
         #[arg(help_heading = "Partition options")]
-        #[clap(short = 'w', long, value_parser)]
+        #[clap(short = 'w', long, value_parser = parse_window_size)]
         window_size: usize,
 
         /// Path to the file with sequence names to start with (one per line)
@@ -15701,6 +15733,42 @@ mod tests {
             }
             _ => panic!("expected partition command"),
         }
+    }
+
+    #[test]
+    fn test_partition_cli_rejects_zero_window_size() {
+        // A 0 bp window never advances the window loop, so it must be rejected
+        // at parse time instead of hanging the run.
+        let err = Args::try_parse_from(["impg", "partition", "-w", "0", "-d", "0"])
+            .expect_err("partition -w 0 must be rejected");
+        assert!(
+            err.to_string().contains("at least 1 bp"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_partition_cli_window_size_fractions() {
+        // A fraction of a bp used to be truncated without a message
+        for bad in ["2000.7", "0.5", "1.0001k"] {
+            let err = Args::try_parse_from(["impg", "partition", "-w", bad, "-d", "0"])
+                .expect_err("a fractional window size must be rejected");
+            assert!(err.to_string().contains("whole number"), "{bad}: {err}");
+        }
+        for (ok, bp) in [("1.5k", 1500usize), ("1.1k", 1100), ("2000", 2000), ("2000.0", 2000)] {
+            assert_eq!(parse_window_size(ok), Ok(bp), "{ok}");
+        }
+    }
+
+    #[test]
+    fn test_partition_cli_rejects_window_size_above_i32() {
+        let too_big = (i32::MAX as u64 + 1).to_string();
+        let err = Args::try_parse_from(["impg", "partition", "-w", &too_big, "-d", "0"])
+            .expect_err("partition -w above i32::MAX must be rejected");
+        assert!(
+            err.to_string().contains("exceeds the maximum supported value"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
