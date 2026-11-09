@@ -164,8 +164,8 @@ fn write_target_bed(path: &Path, windows: usize) {
 }
 
 /// Approximate mode interpolates the query interval from the tracepoint
-/// boundaries. On this fixture it gives the same rows as the CIGAR path for
-/// every window, and this test pins that.
+/// boundaries, so it is close to the CIGAR path, not always identical. This
+/// test pins how many rows match and how far the support may move.
 #[test]
 fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
     let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
@@ -265,10 +265,16 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
          max left shift {max_start_shift} bp, max support delta {max_support_delta}"
     );
 
-    // With the target clipped to the alignment, all 28 rows agree (26 before)
-    assert_eq!(
-        identical, windows,
+    // On x86-64 Linux all 28 rows agree once the target is clipped to the
+    // alignment (26 before). FastGA can align differently on another platform,
+    // so keep a margin; the partial-overlap test below pins the clip itself.
+    assert!(
+        agreed >= 85.0,
         "approximate mode agreed on only {identical}/{windows} rows ({agreed:.1}%)"
+    );
+    assert!(
+        max_support_delta <= 2,
+        "approximate mode changed the support by {max_support_delta}, more than this test allows"
     );
 }
 
