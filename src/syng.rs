@@ -6386,7 +6386,6 @@ mod tests {
 
     // ── 5. SyngIndex::build ─────────────────────────────────────────
 
-    /// Generate a random-ish DNA sequence of the given length.
     #[test]
     fn query_finds_reverse_complement_homolog() {
         let _guard = lock_syng();
@@ -6424,8 +6423,24 @@ mod tests {
             .map(|h| (h.genome, h.start, h.end, h.strand))
             .collect();
         assert!(reverse_hit(intervals) > 17_000);
+        // The CLI default walks 5-anchor seeds: the branch with the second walk
+        let walked: Vec<_> = index
+            .query_region_ext_with_seed_filter(
+                "A",
+                1_000,
+                19_000,
+                0,
+                0,
+                SyngSeedFilter { walk_anchors: 5, ..SyngSeedFilter::default() },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        assert!(reverse_hit(walked) > 17_000);
     }
 
+    /// Generate a random-ish DNA sequence of the given length.
     fn make_test_sequence(len: usize, seed: u8) -> Vec<u8> {
         let bases = [b'A', b'C', b'G', b'T'];
         let mut seq = Vec::with_capacity(len);
