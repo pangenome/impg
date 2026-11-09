@@ -74,6 +74,22 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # THE TEST SUITE RUNS BEFORE ANY COMPANION-BINARY SMOKE, and the
+      # order is deliberate: a companion smoke that fails must never hide
+      # the test suite. Measured twice on ubuntu-24.04-arm, an
+      # intermittent FastGA/GIXmake segfault failed the "Smoke test
+      # FastGA" step and the run reported "Test: skipped" - the lane went
+      # red while telling us NOTHING about the code under test.
+      - name: Test
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export LD_LIBRARY_PATH="target/release:$LD_LIBRARY_PATH"
+          else
+            export DYLD_LIBRARY_PATH="target/release:$DYLD_LIBRARY_PATH"
+          fi
+          export TMPDIR="${{ runner.temp }}"
+          cargo test --release -- --test-threads=1
+
       - name: Verify companion binaries
         run: |
           echo "Checking companion binaries in target/release/..."
@@ -111,12 +127,3 @@ jobs:
           target/release/FastGA /tmp/yeast.chrV.fa /tmp/yeast.chrV.fa > /tmp/fastga.paf
           test $(wc -l < /tmp/fastga.paf) -gt 0 && echo "FastGA OK: $(wc -l < /tmp/fastga.paf) alignments"
 
-      - name: Test
-        run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            export LD_LIBRARY_PATH="target/release:$LD_LIBRARY_PATH"
-          else
-            export DYLD_LIBRARY_PATH="target/release:$DYLD_LIBRARY_PATH"
-          fi
-          export TMPDIR="${{ runner.temp }}"
-          cargo test --release -- --test-threads=1
