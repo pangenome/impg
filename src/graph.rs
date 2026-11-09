@@ -416,6 +416,9 @@ pub(crate) fn build_spoa_engine(
     build_spoa_engine_with_alignment(scoring_params, SpoaAlignmentType::kSW)
 }
 
+/// Default POA scoring: engine graphs, render, similarity, smoothing
+pub const POA_SCORING_DEFAULT: (u8, u8, u8, u8, u8, u8) = (5, 4, 6, 2, 24, 1);
+
 /// The SPOA engine of every impg POA graph (impg graph -e poa and the
 /// interval gfa/maf/fasta-aln/similarity outputs): global, end to end.
 pub(crate) fn poa_spoa_engine(

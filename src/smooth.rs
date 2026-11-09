@@ -67,7 +67,7 @@ impl SmoothConfig {
             max_node_length: 100,
             poa_padding_fraction: 0.001,
             max_block_depth_for_padding_more: 100,
-            scoring_params: (1, 4, 6, 2, 26, 1),
+            scoring_params: crate::graph::POA_SCORING_DEFAULT,
             num_threads: 4,
             temp_dir: None,
             pre_sorted: false,

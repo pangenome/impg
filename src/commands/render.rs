@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RenderConfig<'a> {
     pub syng_prefix: &'a str,
     pub target_range: &'a str,
@@ -26,6 +26,12 @@ pub struct RenderConfig<'a> {
     pub emit_gfa: bool,
     pub keep_existing: bool,
     pub threads: usize,
+    /// Local graph options: impg graph's CLI defaults
+    pub local_graph: graph::GraphBuildConfig,
+    pub poa_scoring: (u8, u8, u8, u8, u8, u8),
+    pub target_poa_lengths: Vec<usize>,
+    pub max_node_length: usize,
+    pub poa_padding_fraction: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -152,12 +158,7 @@ fn render_local_graph(config: &RenderConfig<'_>) -> io::Result<()> {
     let index = SyngIndex::load(config.syng_prefix, syng::SyncmerParams::default())?;
     let inputs = collect_render_inputs(&index, config)?;
     write_rendered_fasta(&paths.rendered_fasta, &inputs.fetched)?;
-    build_local_graph(
-        &engine,
-        &paths.rendered_fasta,
-        &paths.graph_gfa,
-        config.threads,
-    )?;
+    build_local_graph(&engine, &paths.rendered_fasta, &paths.graph_gfa, config)?;
     let step_samples = collect_gfa_step_samples(&paths.graph_gfa, &inputs.rendered_paths)?;
 
     let tables = RenderTranslationTables {
@@ -318,16 +319,27 @@ fn write_rendered_fasta(path: &Path, sequences: &[(String, Vec<u8>)]) -> io::Res
     writer.flush()
 }
 
-fn build_local_graph(engine: &str, fasta: &Path, gfa: &Path, threads: usize) -> io::Result<()> {
+fn build_local_graph(
+    engine: &str,
+    fasta: &Path,
+    gfa: &Path,
+    render: &RenderConfig<'_>,
+) -> io::Result<()> {
     let fasta_files = vec![fasta.to_string_lossy().to_string()];
-    let mut config = graph::GraphBuildConfig::default();
-    config.num_threads = threads.max(1);
+    let mut config = render.local_graph.clone();
+    config.num_threads = render.threads.max(1);
     config.show_progress = false;
 
     let text = match engine {
-        "poa" => graph::run_graph_build_poa(&fasta_files, (5, 4, 6, 2, 24, 1), &config)?,
+        "poa" => graph::run_graph_build_poa(&fasta_files, render.poa_scoring, &config)?,
         "seqwish" => graph::run_graph_build(&fasta_files, &config)?,
-        "pggb" => graph::run_graph_build_pggb(&fasta_files, &config, &[700, 1100], 100, 0.001)?,
+        "pggb" => graph::run_graph_build_pggb(
+            &fasta_files,
+            &config,
+            &render.target_poa_lengths,
+            render.max_node_length,
+            render.poa_padding_fraction,
+        )?,
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

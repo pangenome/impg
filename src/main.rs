@@ -2111,9 +2111,10 @@ struct EngineCliOpts {
     engine_raw: String,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
+    /// [default: 5,4,6,2,24,1; a :crush stage keeps its own 1,4,6,2,26,1 unless this is set]
     #[arg(help_heading = "Alignment options")]
-    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-    poa_scoring: String,
+    #[clap(long, value_parser)]
+    poa_scoring: Option<String>,
 
     #[clap(flatten)]
     aln: AlnOpts,
@@ -3951,7 +3952,12 @@ impl EngineCliOpts {
 
     /// Parse POA scoring parameters.
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-        parse_poa_scoring_string(&self.poa_scoring)
+        parse_poa_scoring_string(self.poa_scoring_str())
+    }
+
+    /// --poa-scoring, or the POA graph default
+    fn poa_scoring_str(&self) -> &str {
+        self.poa_scoring.as_deref().unwrap_or(POA_SCORING_DEFAULT)
     }
 
     /// Validate that CLI options are compatible with the selected engine.
@@ -4004,8 +4010,8 @@ impl EngineCliOpts {
         validate_aligner_args(&self.aln.sw)?;
         let crush_has_stage_scoring = engine_raw_has_crush_scoring_param(&self.engine_raw);
         if let Some(config) = parsed.crush_config.as_mut() {
-            if !crush_has_stage_scoring {
-                config.scoring_params = self.parse_poa_scoring()?;
+            if let (false, Some(scoring)) = (crush_has_stage_scoring, &self.poa_scoring) {
+                config.scoring_params = parse_poa_scoring_string(scoring)?;
             }
         }
 
@@ -6539,7 +6545,7 @@ fn run() -> io::Result<()> {
                 };
 
                 let scoring_params = if matches!(output_format.as_str(), "gfa" | "vcf" | "maf") {
-                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                    Some(engine_cli.parse_poa_scoring()?)
                 } else {
                     None
                 };
@@ -6597,7 +6603,7 @@ fn run() -> io::Result<()> {
                     false,
                     alignment_files.as_slice(),
                     approximate,
-                    &engine_cli.poa_scoring,
+                    engine_cli.poa_scoring_str(),
                 )?;
 
                 // Build engine config (resolves temp_dir and sparsify internally)
@@ -6874,7 +6880,7 @@ fn run() -> io::Result<()> {
                 }
 
                 let scoring_params = if matches!(resolved_format, "gfa" | "vcf") {
-                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                    Some(engine_cli.parse_poa_scoring()?)
                 } else {
                     None
                 };
@@ -7578,7 +7584,7 @@ fn run() -> io::Result<()> {
                     query.original_sequence_coordinates,
                     alignment_files.as_slice(),
                     query.approximate,
-                    &engine_cli.poa_scoring,
+                    engine_cli.poa_scoring_str(),
                 )?;
 
                 // Process all target ranges in a unified loop
@@ -8124,7 +8130,7 @@ fn run() -> io::Result<()> {
                 false,
                 alignment_files.as_slice(),
                 false,
-                &engine_cli.poa_scoring,
+                engine_cli.poa_scoring_str(),
             )?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA scoring
@@ -9424,6 +9430,18 @@ fn run() -> io::Result<()> {
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
             let sequence_files = sequence.resolve_sequence_files()?;
             let (render_engine, syng_gfa_mode) = parse_render_engine_spec(&engine)?;
+            // Local graphs use impg graph's CLI defaults
+            let defaults = EngineCliOpts::parse_from(["impg"]);
+            let mut local_graph = build_graph_config(
+                &defaults,
+                &defaults.aln.sw.sparsify,
+                None,
+                ".",
+                common.threads.get(),
+                false,
+                None,
+            )?;
+            local_graph.temp_dir = None;
             let config = render::RenderConfig {
                 syng_prefix: &syng_prefix,
                 target_range: &target_range,
@@ -9436,6 +9454,11 @@ fn run() -> io::Result<()> {
                 emit_gfa: !no_gfa,
                 keep_existing,
                 threads: common.threads.get(),
+                local_graph,
+                poa_scoring: defaults.parse_poa_scoring()?,
+                target_poa_lengths: defaults.smooth.parse_target_poa_lengths()?,
+                max_node_length: defaults.smooth.max_node_length,
+                poa_padding_fraction: defaults.smooth.poa_padding_fraction,
             };
             render::run(&config)?;
         }
@@ -10402,6 +10425,9 @@ fn run() -> io::Result<()> {
 
     Ok(())
 }
+
+/// impg::graph::POA_SCORING_DEFAULT as a flag value
+const POA_SCORING_DEFAULT: &str = "5,4,6,2,24,1";
 
 /// Reject aligner options that the selected aligner ignores.
 /// One check for graph, align, query and partition.
@@ -12010,7 +12036,7 @@ fn build_genotype_query_gfa(
     }
 
     let engine_opts = engine_cli.build(threads)?;
-    let scoring_params = Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?);
+    let scoring_params = Some(engine_cli.parse_poa_scoring()?);
     let gfa_output = impg::dispatch_gfa_engine(
         &wrapper,
         &query_intervals,
@@ -15231,6 +15257,14 @@ mod tests {
         assert_eq!(
             std::path::PathBuf::from(got.unwrap()),
             dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_poa_scoring_default_matches_lib() {
+        assert_eq!(
+            parse_poa_scoring_string(POA_SCORING_DEFAULT).unwrap(),
+            impg::graph::POA_SCORING_DEFAULT
         );
     }
 
