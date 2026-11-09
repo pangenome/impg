@@ -8677,7 +8677,7 @@ fn run() -> io::Result<()> {
             } else if let Some(path) = target_bed {
                 infer::parse_target_bed(&path)?
             } else if let Some(path) = partitions {
-                infer::parse_partitions(&path)?
+                infer::parse_partitions(&path, merge_distance.unwrap_or(0).max(0) as u64)?
             } else {
                 Vec::new()
             };
