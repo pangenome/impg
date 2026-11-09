@@ -11,7 +11,7 @@ use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the tr
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
-use coitrees::{BasicCOITree, Interval, IntervalTree};
+use coitrees::{BasicCOITree, GenericInterval, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
 use onecode::OneFile;
@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracepoints::{tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar_with_aligner};
 
@@ -287,6 +288,159 @@ fn validate_index_inputs(
 }
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 
+struct CachedTree {
+    tree: Arc<BasicCOITree<QueryMetadata, u32>>,
+    bytes: usize,
+    /// Logical timestamp of the last access, for LRU eviction. Atomic so a lookup
+    /// only needs a read lock.
+    last_used: AtomicU64,
+}
+
+/// Per-target interval trees held in memory, with optional LRU eviction.
+///
+/// A query only needs the trees of the targets it touches, but a multi-target run
+/// used to keep every tree it ever loaded. Trees read from an index file can be
+/// dropped and reloaded on demand, so the cache is bounded. Indexes built in memory
+/// have no file to reload from (their forest-map offsets are placeholders), so they
+/// are never evicted.
+pub struct TreeCache {
+    /// Key: cache namespace (one per sub-index) in the high 32 bits, target id below
+    map: FxHashMap<u64, CachedTree>,
+    capacity_bytes: Option<usize>,
+    bytes: usize,
+    clock: AtomicU64,
+}
+
+impl TreeCache {
+    /// Cache for an in-memory index: holds everything, never evicts.
+    fn unbounded(trees: TreeMap) -> Self {
+        let mut cache = Self {
+            map: FxHashMap::default(),
+            capacity_bytes: None,
+            bytes: 0,
+            clock: AtomicU64::new(0),
+        };
+        for (target_id, tree) in trees {
+            cache.insert(target_id as u64, tree);
+        }
+        cache
+    }
+
+    /// Cache for a file-backed index: evicts least-recently-used trees past `capacity_bytes`.
+    pub(crate) fn bounded(capacity_bytes: usize) -> Self {
+        Self {
+            map: FxHashMap::default(),
+            capacity_bytes: Some(capacity_bytes),
+            bytes: 0,
+            clock: AtomicU64::new(0),
+        }
+    }
+
+    /// Approximate resident cost of a tree. A coitrees node holds the metadata plus
+    /// subtree_last, first, last and two child indices, so about 24 bytes of overhead
+    /// per record. This tracks the steady-state size of cached trees; the transient
+    /// peak while a tree is being decoded and built is several times larger.
+    fn estimate_bytes(tree: &BasicCOITree<QueryMetadata, u32>) -> usize {
+        tree.len() * (std::mem::size_of::<QueryMetadata>() + 24)
+    }
+
+    fn get(&self, key: u64) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+        self.map.get(&key).map(|entry| {
+            entry
+                .last_used
+                .store(self.clock.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+            Arc::clone(&entry.tree)
+        })
+    }
+
+    fn insert(&mut self, key: u64, tree: Arc<BasicCOITree<QueryMetadata, u32>>) {
+        let bytes = Self::estimate_bytes(&tree);
+        let stamp = self.clock.fetch_add(1, Ordering::Relaxed);
+        if let Some(previous) = self.map.insert(
+            key,
+            CachedTree {
+                tree,
+                bytes,
+                last_used: AtomicU64::new(stamp),
+            },
+        ) {
+            self.bytes -= previous.bytes;
+        }
+        self.bytes += bytes;
+        self.evict_to_capacity(key);
+    }
+
+    /// Drop least-recently-used entries until the cache fits. Never evicts
+    /// `keep`, the entry just inserted, so a single oversized tree still works.
+    fn evict_to_capacity(&mut self, keep: u64) {
+        let Some(capacity) = self.capacity_bytes else {
+            return;
+        };
+        if self.bytes <= capacity {
+            return;
+        }
+        // One scan and one sort per overflow, not one scan per victim
+        let mut by_age: Vec<(u64, u64)> = self
+            .map
+            .iter()
+            .filter(|(&key, _)| key != keep)
+            .map(|(&key, entry)| (entry.last_used.load(Ordering::Relaxed), key))
+            .collect();
+        by_age.sort_unstable();
+        for (_, key) in by_age {
+            if self.bytes <= capacity {
+                break;
+            }
+            if let Some(entry) = self.map.remove(&key) {
+                self.bytes -= entry.bytes;
+                debug!("tree cache: evicted {key:#x} ({} B), {} B cached", entry.bytes, self.bytes);
+            }
+        }
+    }
+
+    fn remove(&mut self, key: u64) {
+        if let Some(entry) = self.map.remove(&key) {
+            self.bytes -= entry.bytes;
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&u64, &Arc<BasicCOITree<QueryMetadata, u32>>)> {
+        self.map.iter().map(|(id, entry)| (id, &entry.tree))
+    }
+}
+
+/// Capacity for the file-backed tree cache: `IMPG_TREE_CACHE_MB` if set, else a
+/// quarter of the memory this process can use (physical RAM, or the cgroup limit
+/// when it is lower), with a 512 MB floor. Computed once per process. In per-file
+/// mode all sub-indices share one cache with this budget (`MultiImpg`).
+pub(crate) fn default_tree_cache_bytes() -> usize {
+    static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        const FLOOR: usize = 512 * 1024 * 1024;
+        if let Ok(value) = std::env::var("IMPG_TREE_CACHE_MB") {
+            match value.trim().parse::<usize>() {
+                Ok(mb) => return mb.saturating_mul(1024 * 1024),
+                Err(e) => warn!("IMPG_TREE_CACHE_MB={value:?} is not a whole number of MB ({e}); using the default"),
+            }
+        }
+        // SAFETY: sysconf only reads system configuration
+        let (pages, page_size) =
+            unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+        let physical = if pages > 0 && page_size > 0 { pages as usize * page_size as usize } else { 0 };
+        // cgroup v2, then v1; "max" or a huge v1 value means no limit
+        let cgroup = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok()?.trim().parse::<usize>().ok());
+        let usable = match cgroup {
+            Some(limit) if physical == 0 || limit < physical => limit,
+            _ => physical,
+        };
+        let bytes = (usable / 4).max(FLOOR);
+        debug!("tree cache budget {} MB (usable memory {} MB)", bytes >> 20, usable >> 20);
+        bytes
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FileType {
     Paf,
@@ -299,6 +453,20 @@ struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
+}
+
+/// Lets a decoded interval be fed straight to `BasicCOITree::new`, without first
+/// rebuilding the whole slice as `Vec<Interval<QueryMetadata>>`.
+impl GenericInterval<QueryMetadata> for SerializableInterval {
+    fn first(&self) -> i32 {
+        self.first
+    }
+    fn last(&self) -> i32 {
+        self.last
+    }
+    fn metadata(&self) -> &QueryMetadata {
+        &self.metadata
+    }
 }
 
 #[derive(Default, Clone)]
@@ -688,7 +856,9 @@ fn edge_key(interval: &Interval<QueryMetadata>) -> (u32, i32, i32, i32, i32, boo
 }
 
 pub struct Impg {
-    pub trees: RwLock<TreeMap>,
+    pub trees: Arc<RwLock<TreeCache>>,
+    /// Namespace of this index inside `trees`; 0 unless the cache is shared
+    cache_ns: u32,
     pub seq_index: SequenceIndex,
     alignment_files: Vec<String>,
     /// True when this index holds both directions of every record.
@@ -1956,7 +2126,8 @@ impl Impg {
 
         let num_files = alignment_files.len();
         Ok(Self {
-            trees: RwLock::new(trees),
+            trees: Arc::new(RwLock::new(TreeCache::unbounded(trees))),
+            cache_ns: 0,
             seq_index,
             alignment_files,
             built_bidirectional: bidirectional,
@@ -2011,7 +2182,11 @@ impl Impg {
 
         // Serialize each tree and track its offset
         let trees = self.trees.read().unwrap();
-        for (&target_id, tree) in trees.iter() {
+        for (&key, tree) in trees.iter() {
+            if (key >> 32) as u32 != self.cache_ns {
+                continue;
+            }
+            let target_id = key as u32;
             // Record the offset before serializing this tree
             forest_map.add_entry(target_id, current_offset);
 
@@ -2078,18 +2253,8 @@ impl Impg {
                 panic!("Tree mismatch: expected {target_id}, got {loaded_target_id}");
             }
 
-            // Reconstruct the tree
-            let tree = BasicCOITree::new(
-                intervals
-                    .into_iter()
-                    .map(|interval| Interval {
-                        first: interval.first,
-                        last: interval.last,
-                        metadata: interval.metadata, // Move instead of clone
-                    })
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            );
+            // Reconstruct the tree directly from the decoded records
+            let tree = BasicCOITree::new(&intervals);
 
             let arc_tree = Arc::new(tree);
 
@@ -2097,7 +2262,7 @@ impl Impg {
             self.trees
                 .write()
                 .unwrap()
-                .insert(target_id, Arc::clone(&arc_tree));
+                .insert(self.cache_key(target_id), Arc::clone(&arc_tree));
 
             Some(arc_tree)
         } else {
@@ -2106,16 +2271,28 @@ impl Impg {
     }
 
     /// Get a tree from memory or load it from disk if necessary
+    fn cache_key(&self, target_id: u32) -> u64 {
+        ((self.cache_ns as u64) << 32) | target_id as u64
+    }
+
+    /// Use `cache` instead of this index's own tree cache, under namespace `ns`.
+    /// `MultiImpg` gives every sub-index the same cache, so one budget bounds
+    /// them all and the least recently used tree of any sub-index goes first.
+    pub(crate) fn share_tree_cache(&mut self, cache: Arc<RwLock<TreeCache>>, ns: u32) {
+        self.trees = cache;
+        self.cache_ns = ns;
+    }
+
     pub fn get_or_load_tree(
         &self,
         target_id: u32,
     ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
-        // First check if the tree is already in memory
-        if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
-            // Get a clone of the Arc<tree> (incrementing the reference count, a cheap operation)
-            // We clone to avoid holding the RwLock for the duration of the operation using the tree
-
-            return Some(Arc::clone(tree));
+        // First check if the tree is already in memory.
+        // The cache hands back a clone of the Arc (cheap refcount bump) so the RwLock
+        // is not held while the tree is used, and so eviction can never invalidate a
+        // tree a caller is still holding.
+        if let Some(tree) = self.trees.read().unwrap().get(self.cache_key(target_id)) {
+            return Some(tree);
         }
 
         // Not in memory - try to load from disk
@@ -2213,7 +2390,8 @@ impl Impg {
 
         let num_files = alignment_files.len();
         Ok(Self {
-            trees: RwLock::new(FxHashMap::default()),
+            trees: Arc::new(RwLock::new(TreeCache::bounded(default_tree_cache_bytes()))),
+            cache_ns: 0,
             seq_index,
             alignment_files: alignment_files.to_vec(),
             built_bidirectional: header_info.map(|h| h.bidirectional).unwrap_or(magic_buf != MAGIC_V1),
@@ -3075,7 +3253,7 @@ impl ImpgIndex for Impg {
     }
 
     fn remove_cached_tree(&self, target_id: u32) {
-        self.trees.write().unwrap().remove(&target_id);
+        self.trees.write().unwrap().remove(self.cache_key(target_id));
     }
 
     fn num_targets(&self) -> usize {
@@ -3309,6 +3487,122 @@ fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
         0.0
     } else {
         (matches as f64) / (total as f64)
+    }
+}
+
+#[cfg(test)]
+mod tree_cache_tests {
+    use super::*;
+
+    /// Build a tree with `n` one-base intervals, so its accounted size is
+    /// predictable: n * (size_of::<QueryMetadata>() + 24).
+    fn tree_of(n: usize) -> Arc<BasicCOITree<QueryMetadata, u32>> {
+        let intervals: Vec<Interval<QueryMetadata>> = (0..n)
+            .map(|i| Interval {
+                first: i as i32,
+                last: i as i32,
+                metadata: QueryMetadata {
+                    query_id: i as u32,
+                    target_start: 0,
+                    target_end: 1,
+                    query_start: 0,
+                    query_end: 1,
+                    alignment_file_index: 0,
+                    strand_and_data_offset: 0,
+                    data_bytes: 0,
+                },
+            })
+            .collect();
+        Arc::new(BasicCOITree::new(intervals.as_slice()))
+    }
+
+    fn bytes_for(n: usize) -> usize {
+        n * (std::mem::size_of::<QueryMetadata>() + 24)
+    }
+
+    #[test]
+    fn unbounded_cache_never_evicts() {
+        let mut trees = TreeMap::default();
+        for id in 0..10u32 {
+            trees.insert(id, tree_of(50));
+        }
+        let cache = TreeCache::unbounded(trees);
+        for id in 0..10u32 {
+            assert!(cache.get(id as u64).is_some(), "target {id} was evicted");
+        }
+    }
+
+    #[test]
+    fn bounded_cache_evicts_least_recently_used() {
+        // Room for two trees of 100 intervals, not three.
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        // Touch 1 so that 2 becomes the least recently used.
+        assert!(cache.get(1).is_some());
+        cache.insert(3, tree_of(100));
+
+        assert!(cache.get(1).is_some(), "recently used tree was evicted");
+        assert!(cache.get(3).is_some(), "just-inserted tree was evicted");
+        assert!(cache.get(2).is_none(), "LRU tree should have been evicted");
+    }
+
+    #[test]
+    fn oversized_tree_is_still_served() {
+        // A single tree larger than the whole capacity must not evict itself,
+        // otherwise a big chromosome could never be loaded.
+        let mut cache = TreeCache::bounded(bytes_for(10));
+        cache.insert(7, tree_of(1000));
+        assert!(cache.get(7).is_some());
+    }
+
+    #[test]
+    fn reinserting_same_target_does_not_double_count() {
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        // Only two trees' worth of bytes are live, so nothing should be evicted.
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_some());
+    }
+
+    #[test]
+    fn remove_frees_capacity() {
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        cache.remove(1);
+        cache.insert(3, tree_of(100));
+        // Removing 1 made room, so 2 must survive.
+        assert!(cache.get(2).is_some(), "eviction happened despite free room");
+        assert!(cache.get(3).is_some());
+        assert!(cache.get(1).is_none());
+    }
+
+    #[test]
+    fn shared_cache_evicts_across_namespaces() {
+        // Two sub-indices share one budget: the LRU tree goes first, whoever owns it
+        let key = |ns: u64, target: u64| (ns << 32) | target;
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(key(0, 1), tree_of(100));
+        cache.insert(key(1, 1), tree_of(100));
+        cache.insert(key(2, 1), tree_of(100));
+        assert!(cache.get(key(0, 1)).is_none(), "the oldest tree, of another sub-index, must go");
+        assert!(cache.get(key(1, 1)).is_some());
+        assert!(cache.get(key(2, 1)).is_some());
+        assert!(cache.bytes <= bytes_for(250));
+    }
+
+    #[test]
+    fn iter_yields_every_cached_tree() {
+        let mut cache = TreeCache::bounded(bytes_for(10_000));
+        for id in 0..5u64 {
+            cache.insert(id, tree_of(10));
+        }
+        let mut ids: Vec<u64> = cache.iter().map(|(&id, _)| id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
     }
 }
 
