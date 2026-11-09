@@ -89,9 +89,6 @@ fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "97a7a56299b
 
 [dev-dependencies]
 ahash = "0.8"
-# Writing TPA fixtures in tests, so the tracepoint path is exercised from a
-# known input instead of a committed binary blob.
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "f21b0127c46646d0e73657ddd3162d0417e5c3c1" }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

@@ -84,7 +84,7 @@ fn fixture() -> Option<&'static Path> {
             );
             if !output.status.success() {
                 eprintln!(
-                    "skipping refine tests: impg align failed: {}",
+                    "refine fixture: impg align failed: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 return None;
@@ -94,7 +94,7 @@ fn fixture() -> Option<&'static Path> {
                 let paf_to_aln = binary.parent().unwrap().join("PAFtoALN");
                 if !paf_to_aln.exists() {
                     eprintln!(
-                        "skipping refine tests: {} is not next to the impg binary",
+                        "refine fixture: {} is not next to the impg binary",
                         paf_to_aln.display()
                     );
                     return None;
@@ -106,7 +106,7 @@ fn fixture() -> Option<&'static Path> {
                     .expect("failed to run PAFtoALN");
                 if !output.status.success() {
                     eprintln!(
-                        "skipping refine tests: PAFtoALN failed: {}",
+                        "refine fixture: PAFtoALN failed: {}",
                         String::from_utf8_lossy(&output.stderr)
                     );
                     return None;
@@ -116,7 +116,7 @@ fn fixture() -> Option<&'static Path> {
             if work.join("aln/alignments.1aln").exists() {
                 Some(dir)
             } else {
-                eprintln!("skipping refine tests: no .1aln was produced");
+                eprintln!("refine fixture: no .1aln was produced");
                 None
             }
         })
@@ -164,12 +164,11 @@ fn write_target_bed(path: &Path, windows: usize) {
 }
 
 /// Approximate mode interpolates the query interval from the tracepoint
-/// boundaries, so it is close to the CIGAR path, not identical to it. This test
-/// pins the agreement: how many rows match exactly, how far a coordinate may
-/// move, and how far the support may move.
+/// boundaries. On this fixture it gives the same rows as the CIGAR path for
+/// every window, and this test pins that.
 #[test]
 fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
-    let Some(fixture) = fixture() else { return };
+    let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
     let binary = get_impg_binary();
@@ -237,7 +236,6 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
         "the two modes must answer the same targets in the same order"
     );
 
-    let extension_step = 1000;
     let mut identical = 0usize;
     let mut max_start_shift = 0i64;
     let mut max_support_delta = 0i64;
@@ -256,17 +254,6 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
         max_start_shift = max_start_shift.max(start_shift);
         max_support_delta = max_support_delta.max(support_delta);
 
-        assert!(
-            start_shift <= extension_step,
-            "{}: approximate moved the left boundary by {start_shift} bp, more than one extension step ({extension_step} bp)",
-            e.name
-        );
-        assert!(
-            start_shift % extension_step == 0,
-            "{}: approximate moved the left boundary by {start_shift} bp, which is not a whole extension step",
-            e.name
-        );
-
         if *e == *a {
             identical += 1;
         }
@@ -278,20 +265,17 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
          max left shift {max_start_shift} bp, max support delta {max_support_delta}"
     );
 
-    assert!(
-        agreed >= 85.0,
+    // With the target clipped to the alignment, all 28 rows agree (26 before)
+    assert_eq!(
+        identical, windows,
         "approximate mode agreed on only {identical}/{windows} rows ({agreed:.1}%)"
-    );
-    assert!(
-        max_support_delta <= 2,
-        "approximate mode changed the support by {max_support_delta}, more than this test allows"
     );
 }
 
 /// The point of approximate mode: no sequence files and no CIGAR read.
 #[test]
 fn test_refine_approximate_needs_no_sequence_files() {
-    let Some(fixture) = fixture() else { return };
+    let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
     let binary = get_impg_binary();
@@ -374,7 +358,7 @@ fn test_refine_approximate_needs_no_sequence_files() {
 
 #[test]
 fn test_refine_approximate_with_transitive_still_works() {
-    let Some(fixture) = fixture() else { return };
+    let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
     let binary = get_impg_binary();
@@ -441,4 +425,57 @@ fn test_refine_approximate_rejects_paf_input() {
         stderr.contains("tracepoint alignment files"),
         "the error must name the accepted input: {stderr}"
     );
+}
+
+/// An alignment that covers only part of the locus is not boundary support.
+///
+/// q aligns to t:11500-30000 only. For the locus t:10000-12000 the CIGAR path
+/// sees target 11500-12000 and does not count q. Approximate mode used to copy
+/// the requested range as the target interval and counted q as support.
+#[test]
+fn test_refine_approximate_partial_overlap_is_not_support() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    let binary = get_impg_binary();
+
+    // Deterministic random bases
+    let mut state: u64 = 0x9e3779b97f4a7c15;
+    let mut bases = |n: usize| -> String {
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                b"ACGT"[(state >> 62) as usize] as char
+            })
+            .collect()
+    };
+    let t = bases(30_000);
+    let q = format!("{}{}", &t[11_500..], bases(1_500));
+    std::fs::write(dir.join("seqs.fa"), format!(">t\n{t}\n>q\n{q}\n")).unwrap();
+    std::fs::write(
+        dir.join("a.paf"),
+        "q\t20000\t0\t18500\t+\tt\t30000\t11500\t30000\t18500\t18500\t60\tcg:Z:18500=\n",
+    )
+    .unwrap();
+
+    let paf_to_aln = binary.parent().unwrap().join("PAFtoALN");
+    assert!(paf_to_aln.exists(), "{} is missing", paf_to_aln.display());
+    let output = Command::new(&paf_to_aln)
+        .current_dir(dir)
+        .args(["-T1", "a.paf", "seqs.fa"])
+        .output()
+        .expect("failed to run PAFtoALN");
+    assert!(output.status.success(), "PAFtoALN failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let refine = |extra: &[&str]| -> Vec<Row> {
+        let mut args = vec!["refine", "-a", "a.1aln", "-r", "t:10000-12000", "-d", "1000", "--span-bp", "100"];
+        args.extend_from_slice(extra);
+        let out = run(&binary, dir, &args);
+        assert!(out.status.success(), "refine {extra:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        parse_rows(&out.stdout)
+    };
+    let exact = refine(&["--sequence-files", "seqs.fa"]);
+    let approximate = refine(&["--approximate"]);
+    eprintln!("exact {exact:?}\napproximate {approximate:?}");
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact, approximate, "approximate mode must not count a partial overlap as support");
 }
