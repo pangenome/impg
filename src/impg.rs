@@ -606,7 +606,7 @@ fn describe_files_from(files: &[AlignmentFileEntry]) -> String {
 /// A reordered list is the dangerous case: every file index still resolves, so
 /// the query reads CIGARs from the wrong file and returns wrong intervals with
 /// no message.
-fn validate_alignment_file_list(
+pub(crate) fn validate_alignment_file_list(
     recorded: &[AlignmentFileEntry],
     given: &[String],
     index_file_path: &str,
@@ -630,10 +630,13 @@ fn validate_alignment_file_list(
         .enumerate()
         .find(|(_, (recorded_entry, path))| {
             let given_entry = AlignmentFileEntry::from_path(path);
+            // Compare file name and size, not the full path: `data/x.paf`,
+            // `./x.paf` from inside `data/`, an absolute path and a symlink
+            // all name the same file.
+            let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_owned());
             match (recorded_entry.size, given_entry.size) {
-                (Some(a), Some(b)) => a != b || recorded_entry.path != given_entry.path,
-                // A size that could not be read (a pipe, for example) cannot be
-                // compared, and neither can a different spelling of the path.
+                (Some(a), Some(b)) => a != b || name(&recorded_entry.path) != name(&given_entry.path),
+                // A size that could not be read (a pipe, for example) cannot be compared
                 _ => false,
             }
         });
@@ -2208,7 +2211,7 @@ impl Impg {
             trees: RwLock::new(FxHashMap::default()),
             seq_index,
             alignment_files: alignment_files.to_vec(),
-            built_bidirectional: header_info.map(|h| h.bidirectional).unwrap_or(true),
+            built_bidirectional: header_info.map(|h| h.bidirectional).unwrap_or(magic_buf != MAGIC_V1),
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
@@ -3758,9 +3761,15 @@ mod tests {
         assert_eq!(header.alignment_files[0].size, Some(100));
         assert_eq!(header.alignment_files[1].size, Some(200));
 
-        // The same list in the same order is accepted, even when one path is
+        // The same list in the same order is accepted, even when a path is
         // spelled differently.
         validate_alignment_file_list(&header.alignment_files, &names, "idx").unwrap();
+        let respelled = vec![
+            format!("{}/./a.paf", temp.path().display()),
+            temp.path().join("..").join(temp.path().file_name().unwrap()).join("b.paf").to_string_lossy().into_owned(),
+        ];
+        validate_alignment_file_list(&header.alignment_files, &respelled, "idx")
+            .expect("a different spelling of the same files must be accepted");
 
         // A reordered list must be refused: every file index still resolves, so
         // the query would read a CIGAR offset from the wrong file.

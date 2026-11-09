@@ -132,3 +132,51 @@ fn test_index_refuses_a_reordered_alignment_file_list() {
         "the error must give the recorded count"
     );
 }
+
+/// The same file named by another path is still the same file.
+///
+/// `impg index -a data/one.paf` writes `data/one.paf.impg`. Run from inside
+/// `data/`, `-a one.paf` finds that index; the recorded path differs only in
+/// spelling, so the query must load it.
+#[test]
+fn test_index_accepts_another_spelling_of_the_same_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path();
+    let binary = get_impg_binary();
+    let data = work_dir.join("data");
+    std::fs::create_dir(&data).unwrap();
+    write_fixtures(&data);
+
+    let build = run(&binary, work_dir, &["index", "-a", "data/one.paf"]);
+    assert!(build.status.success(), "index failed: {}", String::from_utf8_lossy(&build.stderr));
+    assert!(data.join("one.paf.impg").exists(), "index not at data/one.paf.impg");
+
+    let query = run(&binary, &data, &["query", "-a", "one.paf", "-r", "t1:0-1000", "-d", "0", "-o", "bed"]);
+    let stderr = String::from_utf8_lossy(&query.stderr);
+    assert!(query.status.success(), "a respelled path must load: {stderr}");
+    assert!(!stderr.contains("Rebuilding"), "the index must be reused, not rebuilt: {stderr}");
+    assert!(String::from_utf8_lossy(&query.stdout).contains("q1\t0\t1000"), "q1 missing");
+}
+
+/// A reciprocal pair split across two files gives one row in per-file mode
+/// too, as it does in a single index.
+#[test]
+fn test_per_file_mode_keeps_a_reciprocal_pair_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path();
+    let binary = get_impg_binary();
+    for (name, q, t) in [("ab.paf", "A", "B"), ("ba.paf", "B", "A")] {
+        let mut f = File::create(work_dir.join(name)).unwrap();
+        writeln!(f, "{q}\t1000\t0\t500\t+\t{t}\t1000\t0\t500\t500\t500\t60\tcg:Z:500=").unwrap();
+    }
+    for mode in ["single", "per-file"] {
+        let out = run(
+            &binary,
+            work_dir,
+            &["query", "-a", "ab.paf", "ba.paf", "--index-mode", mode, "-r", "A:0-500", "-d", "0", "-o", "bedpe"],
+        );
+        assert!(out.status.success(), "{mode}: {}", String::from_utf8_lossy(&out.stderr));
+        let rows = String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(rows, 1, "--index-mode {mode} printed {rows} rows for one edge");
+    }
+}

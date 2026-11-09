@@ -58,6 +58,20 @@ fn parse_merge_distance(s: &str) -> Result<i32, String> {
 /// because window boundaries are stored as `i32` and a 0 bp window never advances.
 fn parse_window_size(s: &str) -> Result<usize, String> {
     let value = parse_usize_size(s)?;
+    // parse_metric_number truncates fractions; refuse them
+    let t = s.trim();
+    let (num, mult) = match t.chars().last() {
+        Some('k' | 'K') => (&t[..t.len() - 1], 1e3),
+        Some('m' | 'M') => (&t[..t.len() - 1], 1e6),
+        Some('g' | 'G') => (&t[..t.len() - 1], 1e9),
+        _ => (t, 1.0),
+    };
+    let exact = num.parse::<f64>().map_err(|e| format!("invalid window size '{s}': {e}"))? * mult;
+    if (exact - exact.round()).abs() > 1e-6 {
+        return Err(format!(
+            "window size '{s}' is {exact} bp: it must be a whole number of bp"
+        ));
+    }
     if value == 0 {
         return Err(
             "window size must be at least 1 bp: a window of 0 bp never advances".to_string(),
@@ -15758,6 +15772,19 @@ mod tests {
             err.to_string().contains("at least 1 bp"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_partition_cli_window_size_fractions() {
+        // A fraction of a bp used to be truncated without a message
+        for bad in ["2000.7", "0.5", "1.0001k"] {
+            let err = Args::try_parse_from(["impg", "partition", "-w", bad, "-d", "0"])
+                .expect_err("a fractional window size must be rejected");
+            assert!(err.to_string().contains("whole number"), "{bad}: {err}");
+        }
+        for (ok, bp) in [("1.5k", 1500usize), ("1.1k", 1100), ("2000", 2000), ("2000.0", 2000)] {
+            assert_eq!(parse_window_size(ok), Ok(bp), "{ok}");
+        }
     }
 
     #[test]

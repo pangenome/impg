@@ -248,7 +248,7 @@ pub fn partition_alignments(
 
             let mut pos = start;
             while pos < end {
-                let window_end = std::cmp::min(pos + window_size as i32, end);
+                let window_end = std::cmp::min(pos.saturating_add(window_size as i32), end);
 
                 // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32
@@ -973,7 +973,7 @@ fn select_and_window_sequences(
             let mut range_windows: Vec<(u32, i32, i32)> = Vec::new();
             let mut pos = *start;
             while pos < *end {
-                let window_end = std::cmp::min(pos + window_size as i32, *end);
+                let window_end = std::cmp::min(pos.saturating_add(window_size as i32), *end);
 
                 // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32 && !range_windows.is_empty() {
