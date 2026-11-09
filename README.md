@@ -332,7 +332,7 @@ switches. The panel switches are not: see their row.
 
 | Variable | Effect |
 | --- | --- |
-| `IMPG_TREE_CACHE_MB` | Cap, in MB, for the per-target interval-tree cache of a file-backed index. Default is a quarter of the memory the process can use (physical RAM, or the cgroup limit when lower), with a 512 MB floor. In per-file index mode this budget is split across the sub-indices. An index built in memory is never capped. Raising it trades memory for fewer disk reads during a transitive walk. |
+| `IMPG_TREE_CACHE_MB` | Cap, in MB, for the per-target interval-tree cache of a file-backed index. Default is a quarter of the memory the process can use (physical RAM, or the cgroup limit when lower), with a 512 MB floor. In per-file index mode all sub-indices share this one budget. An index built in memory is never capped. Raising it trades memory for fewer disk reads during a transitive walk. |
 | `IMPG_AGC_DECOMPRESSOR_SLOTS` | Number of shared AGC decompressor sets. Default is a fixed bound, not one per thread. |
 | `IMPG_PANEL_PRECOMPUTE`, `IMPG_CLASS_SCAN_*`, `IMPG_REALIGN_*`, `IMPG_TRUTH_QV_*` | Switches of the experimental panel and genotyping paths. `IMPG_PANEL_PRECOMPUTE=off` restores the live path. Several receipts in that path need variables the CLI does not set, so a run can behave differently from the command line alone. Do not build a pipeline on them. |
 
