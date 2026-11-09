@@ -184,3 +184,30 @@ fn test_agc_empty_range() -> io::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_agc_range_past_the_contig_end_is_an_error() -> io::Result<()> {
+    let test_data_dir = "tests/test_data";
+    let agc_file = format!("{test_data_dir}/test.agc");
+    let agc_index = AgcIndex::build_from_files(&[agc_file])?;
+
+    // chr1@ref in the fixture is shorter than this range. A short fetch used to
+    // come back silently and shift every downstream coordinate.
+    let len = agc_index.get_sequence_length("chr1@ref")?;
+    let err = agc_index
+        .fetch_sequence("chr1@ref", 0, (len + 10) as i32)
+        .expect_err("a range past the end of the contig must be an error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("were requested"),
+        "the error must give both lengths: {msg}"
+    );
+
+    // A reversed range is a caller bug, not a short answer.
+    assert!(
+        agc_index.fetch_sequence("chr1@ref", 20, 10).is_err(),
+        "a reversed range must be an error"
+    );
+
+    Ok(())
+}

@@ -102,6 +102,17 @@ pub trait ImpgIndex: Send + Sync {
     /// Remove a cached tree from memory (for memory management).
     fn remove_cached_tree(&self, target_id: u32);
 
+    /// Whether `remove_cached_tree(target_id)` can be undone by loading the
+    /// tree again.
+    ///
+    /// A caller that walks every tree twice (`impg stats` does) may only evict
+    /// a tree it can get back. An index held in memory cannot: it has no file
+    /// to read the tree from.
+    fn can_reload_tree(&self, target_id: u32) -> bool {
+        let _ = target_id;
+        true
+    }
+
     /// Get number of targets with trees.
     fn num_targets(&self) -> usize {
         self.target_ids().len()
@@ -373,6 +384,15 @@ impl ImpgIndex for ImpgWrapper {
         match self {
             ImpgWrapper::Single(impg) => impg.remove_cached_tree(target_id),
             ImpgWrapper::Multi(multi) => multi.remove_cached_tree(target_id),
+        }
+    }
+
+    fn can_reload_tree(&self, target_id: u32) -> bool {
+        // This wrapper must forward every trait method it can answer more
+        // precisely than the default, or the default silently wins here.
+        match self {
+            ImpgWrapper::Single(impg) => ImpgIndex::can_reload_tree(impg, target_id),
+            ImpgWrapper::Multi(multi) => ImpgIndex::can_reload_tree(multi, target_id),
         }
     }
 
