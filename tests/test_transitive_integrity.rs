@@ -704,6 +704,38 @@ fn test_partition_window_separation() {
     assert_eq!(double, 0, "{double} bases of A are in more than one partition");
 }
 
+/// Window ends near i32::MAX must not wrap
+///
+/// A is 2,000,000,000 bp and -w is 1,500,000,000: `pos + window` reaches
+/// 3,000,000,000 on the second window. It used to wrap and cut A into windows
+/// of 205,032,704 bp. The tail is shorter than -w, so it joins the first window.
+#[test]
+fn test_partition_window_end_does_not_wrap() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path().to_path_buf();
+    create_paf_file(
+        &work_dir,
+        "big.paf",
+        &["A\t2000000000\t0\t1000\t+\tB\t5000\t0\t1000\t1000\t1000\t60\tcg:Z:1000="],
+    );
+    let output = run_impg(&work_dir, &["index", "-a", "big.paf", "-i", "big.impg"]).unwrap();
+    assert!(output.status.success(), "index failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let output = run_impg(
+        &work_dir,
+        &["partition", "-a", "big.paf", "-i", "big.impg", "-w", "1500000000", "-d", "0", "-o", "bed"],
+    )
+    .unwrap();
+    assert!(output.status.success(), "partition failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let a_rows: Vec<(i32, i32)> = read_partitions_bed(&work_dir)
+        .into_iter()
+        .filter(|r| r.0 == "A")
+        .map(|r| (r.1, r.2))
+        .collect();
+    assert_eq!(a_rows, vec![(0, 2_000_000_000)], "windows of A wrapped");
+}
+
 /// Test 9: Empty/no-result queries handled correctly
 ///
 /// Query a region with no alignments should return only the query region itself
