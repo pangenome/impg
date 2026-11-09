@@ -180,6 +180,25 @@ pub fn partition_alignments(
     engine_config: &EngineOpts,
     rehome_singletons: bool,
 ) -> io::Result<()> {
+    // Window boundaries are stored as i32, and a window of 0 bp never advances
+    // the window loop. Reject both here so library callers get an error instead
+    // of an endless loop or a silent wrap.
+    if window_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "window size must be at least 1 bp: a window of 0 bp never advances",
+        ));
+    }
+    if window_size > i32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "window size {window_size} exceeds the maximum supported value {}",
+                i32::MAX
+            ),
+        ));
+    }
+
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
     if let Some(path) = starting_sequences_file {
