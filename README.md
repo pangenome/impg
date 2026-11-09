@@ -29,8 +29,11 @@ smoothing.
 
 `impg` uses [coitrees](https://github.com/dcjones/coitrees) (cache-oblivious
 interval trees) for fast range lookup and stores, per alignment, the file it
-came from and a byte offset into it. No CIGAR and no sequence is copied into the
-index, so a projection reads only the CIGARs it needs, on demand. The result is
+came from and where the record sits in it: a byte offset for PAF, a record index
+for `.1aln` and `.tpa`. No CIGAR and no sequence is copied into the index. A
+projection reads the CIGARs it needs from PAF on demand; for `.1aln` and `.tpa` it
+rebuilds the CIGAR by realigning the sequences between tracepoints, so those
+formats need `--sequence-files` (except in `--approximate` mode). The result is
 fast, memory-efficient projection of sequence ranges through alignment networks.
 
 ## Install
@@ -105,6 +108,8 @@ SK1#1#chrI           52740   102721
 
 ## Commands
 
+Commands marked `(experimental)` in `impg --help` (`similarity`, `genotype`, `project`, `infer`, `genotype-infer`, `crush`, `render`, `map`, `read-index`, `syng2gfa`) may change their flags and output between releases without notice; do not build a pipeline on them yet.
+
 Alignment-backed commands accept `-a` (alignment files, mixed PAF/1ALN/TPA)
 or `--alignment-list` (text file, one per line). Other commands have their own
 input flags; for example, `map -a` takes a syng index. Use each command's
@@ -141,7 +146,7 @@ impg query -a aln.paf -r chr1:1000-2000 --min-result-identity 0.9 -l 5000 -d 100
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -x --subset-sequence-list seqs.txt
 
 # Fast approximate mode (.1aln and .tpa input; query with bed/bedpe output,
-# refine with any output). Interpolates from tracepoints instead of reading
+# partition with bed output, and refine). Interpolates from tracepoints instead of reading
 # CIGARs, so no --sequence-files is needed. The intervals are close to the CIGAR
 # path, not identical, and the identity it reports is a lower bound from the
 # trace spacing.
@@ -322,12 +327,12 @@ impg stats -a f1.paf f2.1aln
 
 ### Environment variables
 
-These change behaviour outside the command line. Every one of them is a
-diagnostic or tuning switch, not required input.
+These change behaviour outside the command line. The first two are tuning
+switches. The panel switches are not: see their row.
 
 | Variable | Effect |
 | --- | --- |
-| `IMPG_TREE_CACHE_MB` | Cap, in MB, for the per-target interval-tree cache of a file-backed index. Default is a quarter of RAM with a 512 MB floor. An index built in memory is never capped. Raising it trades memory for fewer disk reads during a transitive walk. |
+| `IMPG_TREE_CACHE_MB` | Cap, in MB, for the per-target interval-tree cache of a file-backed index. Default is a quarter of the memory the process can use (physical RAM, or the cgroup limit when lower), with a 512 MB floor. In per-file index mode this budget is split across the sub-indices. An index built in memory is never capped. Raising it trades memory for fewer disk reads during a transitive walk. |
 | `IMPG_AGC_DECOMPRESSOR_SLOTS` | Number of shared AGC decompressor sets. Default is a fixed bound, not one per thread. |
 | `IMPG_PANEL_PRECOMPUTE`, `IMPG_CLASS_SCAN_*`, `IMPG_REALIGN_*`, `IMPG_TRUTH_QV_*` | Switches of the experimental panel and genotyping paths. `IMPG_PANEL_PRECOMPUTE=off` restores the live path. Several receipts in that path need variables the CLI does not set, so a run can behave differently from the command line alone. Do not build a pipeline on them. |
 
@@ -583,8 +588,10 @@ impg partition -a aln.paf -w 100000 -d 100000 -o gfa --gfa-engine pggb:10000 \
                --sequence-files *.fa --output-folder results/
 ```
 
-Window size is in bp (≥ 1000). Partitioned mode builds one window at a time and
-is the recommended approach for large regions, but it does not cap peak memory:
+Window size is in bp (≥ 1000). Partitioned mode builds up to 4 windows in
+parallel (fewer with fewer threads), keeps every window graph in memory until
+they are laced, and is the recommended approach for large regions, but it does
+not cap peak memory:
 the per-window graphs are laced, normalized and sorted as one graph, so the laced
 result must fit in memory. Measure it on your data before quoting a number.
 
@@ -637,13 +644,13 @@ What the `--sparsify` rules actually do (the help text comes from the embedded
 | `none` / `all` | every pair |
 | `<frac>` / `random:<frac>` | a random fraction of pairs |
 | `tree:<near>[:<far>[:<rand>]]` / `knn:…` | k-nearest plus k-farthest plus a random fraction, on Mash distances |
-| `giant:<prob>` / `connectivity:<prob>` | **not** an Erdős–Rényi random graph. It turns `prob` into a target edge count (`n ln n / 2 · −ln prob`) and then uses it as the `k` of a k-nearest rule, with `k ≥ 2`. At `prob = 0.99` this gives `k = 2` for any cohort size. Treat the "99% connected" reading as a design target, not a guarantee. |
+| `giant:<prob>` / `connectivity:<prob>` | **not** an Erdős–Rényi random graph. It turns `prob` into a target edge count (`n ln n / 2 · −ln prob`) and then uses it as the `k` of a k-nearest rule, with `k ≥ 2`, plus 1 farthest neighbour and 1% random pairs (`tree:k:1:0.01`). At `prob = 0.99` this gives `k = 2` for any cohort size. Treat the "99% connected" reading as a design target, not a guarantee. |
 | `auto` | all pairs up to 10 samples, `giant:0.99` up to 50, then `tree:5:2:0.05` |
 
-With PanSN names the rules select haplotype pairs and then expand each selected
-pair to the full cross-product of contig pairs, keeping every pair inside one
-haplotype. Without PanSN names they run at contig level. The run logs
-`Selected N pairs out of M total (P%)`.
+In `impg graph` and `-o gfa` the rules run at contig level, and the run logs
+`sweepga: sparsification selected N of M pairs (P%)`. In `impg align` with PanSN
+names they select haplotype pairs and then expand each selected pair to the full
+cross-product of contig pairs; that path logs `Selected N pairs out of M total (P%)`.
 
 ## Common options
 

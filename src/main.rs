@@ -4359,8 +4359,8 @@ struct QueryOpts {
 
     /// Use approximate mode for faster queries with tracepoint files (.1aln or .tpa).
     /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
-    /// --sequence-files is not needed. In `query` it works with bed and bedpe output; in
-    /// `refine` it works with any output. Intervals are close to the CIGAR path, not identical,
+    /// --sequence-files is not needed. In `query` it works with bed and bedpe output; `refine`
+    /// accepts it too. Intervals are close to the CIGAR path, not identical,
     /// and the reported identity is a lower bound from the trace spacing.
     #[arg(help_heading = "Performance")]
     #[clap(long, action)]
@@ -4854,11 +4854,9 @@ enum Args {
         transitive_opts: TransitiveOpts,
 
         // --- Performance ---
-        /// Use approximate mode for faster queries with tracepoint files (.1aln or .tpa).
-    /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
-    /// --sequence-files is not needed. In `query` it works with bed and bedpe output; in
-    /// `refine` it works with any output. Intervals are close to the CIGAR path, not identical,
-    /// and the reported identity is a lower bound from the trace spacing.
+        /// Use approximate mode with tracepoint files (.1aln or .tpa), bed output only.
+        /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
+        /// --sequence-files is not needed. Intervals are close to the CIGAR path, not identical.
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
@@ -6045,7 +6043,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// (experimental) Build a GBWT syncmer index from sequences
+    /// Build a GBWT syncmer index from sequences
     Syng {
         // --- Input (one required) ---
         /// AGC archive input
@@ -6138,7 +6136,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// (experimental) Repair or create sampled positional sidecars for an existing syng index
+    /// Repair or create sampled positional sidecars for an existing syng index
     SyngRepair {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
