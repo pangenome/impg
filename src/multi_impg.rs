@@ -146,8 +146,9 @@ impl MultiImpg {
         // Load headers in parallel
         let headers: Vec<IndexHeader> = index_paths
             .par_iter()
-            .map(|path| {
-                Self::load_header(path).map_err(|e| {
+            .zip(alignment_files.par_iter())
+            .map(|(path, alignment_file)| {
+                Self::load_header(path, alignment_file).map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("Failed to load header from {:?}: {}", path, e),
@@ -371,9 +372,10 @@ impl MultiImpg {
     }
 
     /// Load only the header (seq_index + forest_map) from a single index file.
-    fn load_header(path: &Path) -> std::io::Result<IndexHeader> {
+    fn load_header(path: &Path, alignment_file: &str) -> std::io::Result<IndexHeader> {
         const MAGIC_V1: &[u8] = b"IMPGIDX1";
         const MAGIC_V2: &[u8] = b"IMPGIDX2";
+        const MAGIC_V4: &[u8] = b"IMPGIDX4";
 
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
@@ -381,7 +383,7 @@ impl MultiImpg {
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid magic bytes in {:?}", path),
@@ -392,6 +394,24 @@ impl MultiImpg {
         let mut offset_buf = [0u8; 8];
         reader.read_exact(&mut offset_buf)?;
         let forest_map_offset = u64::from_le_bytes(offset_buf);
+
+        // IMPGIDX4 records the alignment file list: check it now, not at the
+        // first lazy load in the middle of a query.
+        if magic_buf == MAGIC_V4 {
+            let info: crate::impg::IndexHeaderInfo =
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Failed to load index header from {path:?}: {e}"),
+                        )
+                    })?;
+            crate::impg::validate_alignment_file_list(
+                &info.alignment_files,
+                std::slice::from_ref(&alignment_file.to_string()),
+                &path.to_string_lossy(),
+            )?;
+        }
 
         // Read sequence index
         let seq_index: SequenceIndex =
@@ -518,13 +538,13 @@ impl MultiImpg {
         let results: Vec<Vec<AdjustedInterval>> = locations
             .par_iter()
             .filter_map(|loc| {
-                let impg = match self.get_sub_index(loc.index_idx) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        warn!("Failed to load sub-index {}: {}", loc.index_idx, e);
-                        return None;
-                    }
-                };
+                // A missing sub-index would drop homologs from the output
+                let impg = self.get_sub_index(loc.index_idx).unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to load sub-index {:?}: {e}",
+                        self.index_paths[loc.index_idx]
+                    )
+                });
 
                 // Query using local target ID
                 let local_results = impg.query(
@@ -547,9 +567,12 @@ impl MultiImpg {
             })
             .collect();
 
-        // Merge all results, but only include ONE self-interval
+        // Merge all results, but only include ONE self-interval. A reciprocal
+        // pair split across two files (A->B in one, B->A in another) gives the
+        // same edge from two sub-indices; keep it once, as one index does.
         let mut final_results = Vec::new();
         let mut seen_self = false;
+        let mut seen_edges = rustc_hash::FxHashSet::default();
 
         for result_set in results {
             for result in result_set {
@@ -565,7 +588,14 @@ impl MultiImpg {
                         seen_self = true;
                     }
                     // Skip duplicate self-intervals
-                } else {
+                } else if seen_edges.insert((
+                    result.0.metadata,
+                    result.0.first,
+                    result.0.last,
+                    result.2.metadata,
+                    result.2.first,
+                    result.2.last,
+                )) {
                     final_results.push(result);
                 }
             }

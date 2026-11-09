@@ -3,12 +3,19 @@
 //! Approximate mode interpolates the query interval from the tracepoint
 //! boundaries and never reads a CIGAR, so refine must accept it without
 //! `--sequence-files`, with and without `--transitive`.
+//!
+//! The `.1aln` fixture costs one alignment run, so all tests in this file share
+//! it through `FIXTURE_DIR`. Each test still gets its own directory for output.
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use tempfile::TempDir;
+
+/// Shared fixture directory, dropped when the test process exits.
+static FIXTURE_DIR: OnceLock<Option<TempDir>> = OnceLock::new();
 
 fn get_impg_binary() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
@@ -26,16 +33,12 @@ fn get_impg_binary() -> PathBuf {
     PathBuf::from("impg")
 }
 
-fn sibling(binary: &Path, name: &str) -> PathBuf {
-    binary.parent().unwrap().join(name)
-}
-
 fn run(binary: &Path, dir: &Path, args: &[&str]) -> Output {
     Command::new(binary)
         .current_dir(dir)
         .args(args)
         .output()
-        .unwrap_or_else(|e| panic!("failed to run {} {:?}: {e}", binary.display(), args))
+        .unwrap_or_else(|e| panic!("failed to run {:?}: {e}", args))
 }
 
 fn decompress_gz(gz_path: &Path, out_path: &Path) {
@@ -52,64 +55,75 @@ fn decompress_gz(gz_path: &Path, out_path: &Path) {
         .unwrap();
 }
 
-/// Build a `.1aln` file from the yeast chrV fixture.
+/// Build the `.1aln` fixture once: yeast chrV, 7 strains.
 ///
-/// `impg align --format 1aln` writes PAF for a single input FASTA, so the file
-/// is converted with `PAFtoALN`, which ships next to the impg binary.
-fn build_onealn(binary: &Path, dir: &Path) -> PathBuf {
-    let fasta = dir.join("seqs.fa");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/yeast.chrV.fa.gz");
-    decompress_gz(&fixture, &fasta);
+/// `impg align --format 1aln` writes PAF for a single input FASTA, so the file is
+/// converted with `PAFtoALN`, which ships next to the impg binary.
+fn fixture() -> Option<&'static Path> {
+    FIXTURE_DIR
+        .get_or_init(|| {
+            let dir = TempDir::new().ok()?;
+            let binary = get_impg_binary();
+            let work = dir.path();
 
-    let output = run(
-        binary,
-        dir,
-        &[
-            "align",
-            "--sequence-files",
-            "seqs.fa",
-            "-o",
-            "aln",
-            "--format",
-            "1aln",
-            "-t",
-            "2",
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "impg align failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+            let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/yeast.chrV.fa.gz");
+            decompress_gz(&fixture, &work.join("seqs.fa"));
 
-    // impg may write either the .1aln directly or a PAF to convert.
-    let direct = dir.join("aln/alignments.1aln");
-    if direct.exists() {
-        return direct;
-    }
+            let output = run(
+                &binary,
+                work,
+                &[
+                    "align",
+                    "--sequence-files",
+                    "seqs.fa",
+                    "-o",
+                    "aln",
+                    "--format",
+                    "1aln",
+                    "-t",
+                    "2",
+                ],
+            );
+            if !output.status.success() {
+                eprintln!(
+                    "refine fixture: impg align failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return None;
+            }
 
-    let paf = dir.join("aln/alignments.paf");
-    assert!(paf.exists(), "impg align wrote neither a .1aln nor a PAF");
+            if !work.join("aln/alignments.1aln").exists() {
+                let paf_to_aln = binary.parent().unwrap().join("PAFtoALN");
+                if !paf_to_aln.exists() {
+                    eprintln!(
+                        "refine fixture: {} is not next to the impg binary",
+                        paf_to_aln.display()
+                    );
+                    return None;
+                }
+                let output = Command::new(&paf_to_aln)
+                    .current_dir(work)
+                    .args(["-T2", "aln/alignments.paf", "seqs.fa"])
+                    .output()
+                    .expect("failed to run PAFtoALN");
+                if !output.status.success() {
+                    eprintln!(
+                        "refine fixture: PAFtoALN failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    return None;
+                }
+            }
 
-    let paf_to_aln = sibling(binary, "PAFtoALN");
-    assert!(paf_to_aln.exists(), "{} is not next to the impg binary", paf_to_aln.display());
-    let output = Command::new(&paf_to_aln)
-        .current_dir(dir)
-        .args(["-T2", "aln/alignments.paf", "seqs.fa"])
-        .output()
-        .expect("failed to run PAFtoALN");
-    assert!(
-        output.status.success(),
-        "PAFtoALN failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let converted = dir.join("aln/alignments.1aln");
-    assert!(
-        converted.exists(),
-        "PAFtoALN did not write aln/alignments.1aln"
-    );
-    converted
+            if work.join("aln/alignments.1aln").exists() {
+                Some(dir)
+            } else {
+                eprintln!("refine fixture: no .1aln was produced");
+                None
+            }
+        })
+        .as_ref()
+        .map(|dir| dir.path())
 }
 
 /// One refine output row: `#chrom start end name original.support new.support left.bp right.bp`.
@@ -120,8 +134,6 @@ struct Row {
     end: i64,
     name: String,
     new_support: i64,
-    left_bp: i64,
-    right_bp: i64,
 }
 
 fn parse_rows(stdout: &[u8]) -> Vec<Row> {
@@ -137,16 +149,13 @@ fn parse_rows(stdout: &[u8]) -> Vec<Row> {
                 end: f[2].parse().unwrap(),
                 name: f[3].to_string(),
                 new_support: f[5].parse().unwrap(),
-                left_bp: f[6].parse().unwrap(),
-                right_bp: f[7].parse().unwrap(),
             }
         })
         .collect()
 }
 
 /// Deterministic BED of windows spread over the reference, so the comparison
-/// covers interior loci, the chromosome start and both strands of the
-/// alignments that reach the reference.
+/// covers interior loci and the chromosome start.
 fn write_target_bed(path: &Path, windows: usize) {
     let mut file = File::create(path).unwrap();
     let mut start: i64 = 0;
@@ -161,16 +170,12 @@ fn write_target_bed(path: &Path, windows: usize) {
 /// test pins how many rows match and how far the support may move.
 #[test]
 fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
+    let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
     let binary = get_impg_binary();
-
-    let onealn = build_onealn(&binary, work_dir);
-    let onealn_arg = onealn
-        .strip_prefix(work_dir)
-        .unwrap_or(&onealn)
-        .to_string_lossy()
-        .into_owned();
+    let onealn = fixture.join("aln/alignments.1aln");
+    let seqs = fixture.join("seqs.fa");
 
     let windows = 28;
     write_target_bed(&work_dir.join("targets.bed"), windows);
@@ -179,8 +184,17 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
         &binary,
         work_dir,
         &[
-            "refine", "-a", &onealn_arg, "--sequence-files", "seqs.fa", "-b", "targets.bed", "-d",
-            "1000", "--span-bp", "100",
+            "refine",
+            "-a",
+            &onealn.to_string_lossy(),
+            "--sequence-files",
+            &seqs.to_string_lossy(),
+            "-b",
+            "targets.bed",
+            "-d",
+            "1000",
+            "--span-bp",
+            "100",
         ],
     );
     assert!(
@@ -193,7 +207,15 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
         &binary,
         work_dir,
         &[
-            "refine", "-a", &onealn_arg, "-b", "targets.bed", "-d", "1000", "--span-bp", "100",
+            "refine",
+            "-a",
+            &onealn.to_string_lossy(),
+            "-b",
+            "targets.bed",
+            "-d",
+            "1000",
+            "--span-bp",
+            "100",
             "--approximate",
         ],
     );
@@ -206,13 +228,7 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
     let exact_rows = parse_rows(&exact.stdout);
     let approximate_rows = parse_rows(&approximate.stdout);
 
-    // Every target is answered by both modes, in the same order.
-    assert_eq!(
-        exact_rows.len(),
-        windows,
-        "the exact run lost targets: {:?}",
-        exact_rows.len()
-    );
+    assert_eq!(exact_rows.len(), windows, "the exact run lost targets");
     assert_eq!(
         exact_rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
         approximate_rows
@@ -267,16 +283,13 @@ fn test_refine_approximate_matches_the_cigar_path_on_many_windows() {
 /// The point of approximate mode: no sequence files and no CIGAR read.
 #[test]
 fn test_refine_approximate_needs_no_sequence_files() {
+    let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
     let binary = get_impg_binary();
-
-    let onealn = build_onealn(&binary, work_dir);
-    let onealn_arg = onealn
-        .strip_prefix(work_dir)
-        .unwrap_or(&onealn)
-        .to_string_lossy()
-        .into_owned();
+    let onealn = fixture.join("aln/alignments.1aln");
+    let seqs = fixture.join("seqs.fa");
+    let target = "S288C#1#chrV:100000-101000";
 
     // The CIGAR path cannot run on tracepoint input without the sequences.
     let exact = run(
@@ -285,9 +298,9 @@ fn test_refine_approximate_needs_no_sequence_files() {
         &[
             "refine",
             "-a",
-            &onealn_arg,
+            &onealn.to_string_lossy(),
             "-r",
-            "S288C#1#chrV:100000-101000",
+            target,
             "-d",
             "1000",
             "--span-bp",
@@ -309,9 +322,9 @@ fn test_refine_approximate_needs_no_sequence_files() {
         &[
             "refine",
             "-a",
-            &onealn_arg,
+            &onealn.to_string_lossy(),
             "-r",
-            "S288C#1#chrV:100000-101000",
+            target,
             "-d",
             "1000",
             "--span-bp",
@@ -324,20 +337,40 @@ fn test_refine_approximate_needs_no_sequence_files() {
         "approximate mode must not need --sequence-files: {}",
         String::from_utf8_lossy(&approximate.stderr)
     );
+
+    // Same answer as the CIGAR path on a clean locus.
+    let exact = run(
+        &binary,
+        work_dir,
+        &[
+            "refine",
+            "-a",
+            &onealn.to_string_lossy(),
+            "--sequence-files",
+            &seqs.to_string_lossy(),
+            "-r",
+            target,
+            "-d",
+            "1000",
+            "--span-bp",
+            "100",
+        ],
+    );
+    assert!(exact.status.success(), "exact refine failed");
+    assert_eq!(
+        parse_rows(&exact.stdout),
+        parse_rows(&approximate.stdout),
+        "the two modes must agree on a clean locus"
+    );
 }
 
 #[test]
 fn test_refine_approximate_with_transitive_still_works() {
+    let fixture = fixture().expect("the .1aln fixture could not be built, see stderr");
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
     let binary = get_impg_binary();
-
-    let onealn = build_onealn(&binary, work_dir);
-    let onealn_arg = onealn
-        .strip_prefix(work_dir)
-        .unwrap_or(&onealn)
-        .to_string_lossy()
-        .into_owned();
+    let onealn = fixture.join("aln/alignments.1aln");
 
     let output = run(
         &binary,
@@ -345,7 +378,7 @@ fn test_refine_approximate_with_transitive_still_works() {
         &[
             "refine",
             "-a",
-            &onealn_arg,
+            &onealn.to_string_lossy(),
             "-r",
             "S288C#1#chrV:100000-101000",
             "-d",
@@ -379,6 +412,7 @@ fn test_refine_approximate_rejects_paf_input() {
         "q\t1000\t0\t500\t+\tt\t1000\t0\t500\t500\t500\t60\tcg:Z:500="
     )
     .unwrap();
+
     let output = run(
         &binary,
         work_dir,
@@ -431,7 +465,7 @@ fn test_refine_approximate_partial_overlap_is_not_support() {
     )
     .unwrap();
 
-    let paf_to_aln = sibling(&binary, "PAFtoALN");
+    let paf_to_aln = binary.parent().unwrap().join("PAFtoALN");
     assert!(paf_to_aln.exists(), "{} is missing", paf_to_aln.display());
     let output = Command::new(&paf_to_aln)
         .current_dir(dir)

@@ -557,10 +557,142 @@ struct SubsettingResult {
     last_segment_info: (i32, i32, i32, i32, i32, i32),
 }
 
+/// One alignment file as recorded in the index header.
+///
+/// The index stores a file index and a byte offset for every CIGAR, so the
+/// order of the file list is part of the index. Without this record, passing
+/// the same files in a different order reads CIGARs from the wrong file
+/// without any error. `size` is `None` when the size cannot be read, for
+/// example for a process-substitution path; such an entry cannot be compared.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AlignmentFileEntry {
+    pub path: String,
+    pub size: Option<u64>,
+}
+
+impl AlignmentFileEntry {
+    fn from_path(path: &str) -> Self {
+        let size = std::fs::metadata(path).ok().map(|m| m.len());
+        // Canonical, so the same file compares equal however it is spelled
+        let path = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string());
+        AlignmentFileEntry { path, size }
+    }
+}
+
+/// Header block written by the current index format.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexHeaderInfo {
+    /// Alignment files in the order the index was built from.
+    pub alignment_files: Vec<AlignmentFileEntry>,
+    /// True when the index holds both directions of every record.
+    pub bidirectional: bool,
+}
+
+/// Describe a whole recorded list for an error message.
+fn describe_files_from(files: &[AlignmentFileEntry]) -> String {
+    files
+        .iter()
+        .map(|f| match f.size {
+            Some(size) => format!("{} ({} bytes)", f.path, size),
+            None => f.path.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Refuse an index built from a different alignment file list.
+///
+/// A reordered list is the dangerous case: every file index still resolves, so
+/// the query reads CIGARs from the wrong file and returns wrong intervals with
+/// no message.
+pub(crate) fn validate_alignment_file_list(
+    recorded: &[AlignmentFileEntry],
+    given: &[String],
+    index_file_path: &str,
+) -> io::Result<()> {
+    if recorded.len() != given.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "The index '{index_file_path}' was built from {} alignment file(s) but {} were given. \
+                 The index stores CIGAR offsets into those files, so the list and its order must match. \
+                 Rebuild the index with `impg index` on this list, or pass the original one.",
+                recorded.len(),
+                given.len()
+            ),
+        ));
+    }
+
+    let mismatch = recorded
+        .iter()
+        .zip(given.iter())
+        .enumerate()
+        .find(|(_, (recorded_entry, path))| {
+            let given_entry = AlignmentFileEntry::from_path(path);
+            // Both paths are canonical, so `data/x.paf`, `./x.paf` from inside
+            // `data/`, an absolute path and a symlink compare equal. When the
+            // recorded path is gone (the files were moved), fall back to the
+            // file name.
+            let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_owned());
+            let same_path = recorded_entry.path == given_entry.path
+                || (!std::path::Path::new(&recorded_entry.path).exists()
+                    && name(&recorded_entry.path) == name(&given_entry.path));
+            match (recorded_entry.size, given_entry.size) {
+                (Some(a), Some(b)) => a != b || !same_path,
+                // A size that could not be read (a pipe, for example) cannot be compared
+                _ => false,
+            }
+        });
+
+    if let Some((position, (recorded_entry, path))) = mismatch {
+        let given_entry = AlignmentFileEntry::from_path(path);
+        let given_entries: Vec<AlignmentFileEntry> = given
+            .iter()
+            .map(|p| AlignmentFileEntry::from_path(p))
+            .collect();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "The index '{index_file_path}' was built from a different alignment file list. \
+                 Entry {position} is '{}' in the index but '{}' was given. \
+                 The index stores CIGAR offsets into those files, so a different list or a different \
+                 order reads the wrong CIGAR. \
+                 Recorded: [{}]. Given now: [{}]. \
+                 Rebuild the index with `impg index` on this list, or pass the original one.",
+                describe_files_from(std::slice::from_ref(recorded_entry)),
+                describe_files_from(std::slice::from_ref(&given_entry)),
+                describe_files_from(recorded),
+                describe_files_from(&given_entries)
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Identify one edge of the alignment graph, for deduplication.
+///
+/// Two entries with the same key project to the same interval pair.
+fn edge_key(interval: &Interval<QueryMetadata>) -> (u32, i32, i32, i32, i32, bool) {
+    let metadata = &interval.metadata;
+    (
+        metadata.query_id(),
+        metadata.target_start,
+        metadata.target_end,
+        metadata.query_start,
+        metadata.query_end,
+        metadata.strand() == Strand::Reverse,
+    )
+}
+
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
     alignment_files: Vec<String>,
+    /// True when this index holds both directions of every record.
+    built_bidirectional: bool,
     pub forest_map: ForestMap,
     index_file_path: String,
     pub sequence_files: Vec<String>,
@@ -1673,7 +1805,9 @@ impl Impg {
 
         // The target interval is the part of the requested range that this
         // alignment actually covers. Copying the requested range here claimed
-        // homology outside the alignment.
+        // homology outside the alignment: with a reverse record over target
+        // 100-900, querying 0-1000 returned target 0-1000 while the CIGAR path
+        // returned 100-900.
         let target_start = range_start.max(metadata.target_start);
         let target_end = range_end.min(metadata.target_end);
 
@@ -1792,9 +1926,20 @@ impl Impg {
                 acc
             });
 
+        // A reciprocal pair (`A -> B` and `B -> A` for the same alignment)
+        // reaches the same edge twice: once as the reversed entry of the first
+        // record and once as the forward entry of the second. Both describe the
+        // same projection, and both reached the output, so bedpe and paf
+        // printed the row twice. The released set has 1,483 such pairs.
+        //
+        // The key ignores the file index, the byte offset and the reversed
+        // flag: those say which record a projection reads its CIGAR from, not
+        // which edge this is.
         let trees: TreeMap = intervals
             .into_par_iter()
-            .map(|(target_id, interval_nodes)| {
+            .map(|(target_id, mut interval_nodes)| {
+                interval_nodes.sort_unstable_by_key(edge_key);
+                interval_nodes.dedup_by(|a, b| edge_key(a) == edge_key(b));
                 (
                     target_id,
                     Arc::new(BasicCOITree::new(interval_nodes.as_slice())),
@@ -1814,6 +1959,7 @@ impl Impg {
             trees: RwLock::new(trees),
             seq_index,
             alignment_files,
+            built_bidirectional: bidirectional,
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
@@ -1826,7 +1972,7 @@ impl Impg {
         &self,
         mut writer: W,
     ) -> std::io::Result<()> {
-        const MAGIC: &[u8] = b"IMPGIDX2";
+        const MAGIC: &[u8] = b"IMPGIDX4";
         let mut forest_map = ForestMap::new();
 
         // Write magic bytes
@@ -1835,7 +1981,24 @@ impl Impg {
         // Write placeholder for forest map offset (will be updated later)
         writer.write_all(&[0u8; 8])?;
 
-        let mut current_offset = 16u64; // Header size
+        let mut current_offset = 16u64; // Magic plus forest map offset
+
+        // Record which alignment files this index was built from, in order: the
+        // byte offsets in the trees are only valid for that list.
+        let header_info = IndexHeaderInfo {
+            alignment_files: self
+                .alignment_files
+                .iter()
+                .map(|path| AlignmentFileEntry::from_path(path))
+                .collect(),
+            bidirectional: self.built_bidirectional,
+        };
+        let header_data =
+            bincode::serde::encode_to_vec(&header_info, bincode::config::standard()).map_err(
+                |e| std::io::Error::other(format!("Failed to encode index header: {e}")),
+            )?;
+        writer.write_all(&header_data)?;
+        current_offset += header_data.len() as u64;
 
         // Serialize sequence index
         let seq_index_data =
@@ -1968,11 +2131,12 @@ impl Impg {
     ) -> std::io::Result<Self> {
         const MAGIC_V1: &[u8] = b"IMPGIDX1";
         const MAGIC_V2: &[u8] = b"IMPGIDX2";
+        const MAGIC_V4: &[u8] = b"IMPGIDX4";
 
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -1991,6 +2155,40 @@ impl Impg {
         let mut offset_buf = [0u8; 8];
         reader.read_exact(&mut offset_buf)?;
         let forest_map_offset = u64::from_le_bytes(offset_buf);
+
+        // From IMPGIDX4 the header records the alignment file list. Older files
+        // do not, so the check below is skipped for them.
+        let header_info: Option<IndexHeaderInfo> = if magic_buf == MAGIC_V4 {
+            Some(
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Failed to load index header: {e}"),
+                        )
+                    })?,
+            )
+        } else {
+            warn!(
+                "The index '{}' does not record its alignment file list, so impg cannot check that the files given now are the ones it was built from. Rebuild the index to enable the check.",
+                index_file_path
+            );
+            None
+        };
+
+        if let Some(header) = &header_info {
+            validate_alignment_file_list(&header.alignment_files, alignment_files, &index_file_path)?;
+            debug!(
+                "Index '{}' was built {} from {} alignment file(s)",
+                index_file_path,
+                if header.bidirectional {
+                    "bidirectionally"
+                } else {
+                    "unidirectionally"
+                },
+                header.alignment_files.len()
+            );
+        }
 
         // Read sequence index
         let seq_index: SequenceIndex =
@@ -2018,6 +2216,7 @@ impl Impg {
             trees: RwLock::new(FxHashMap::default()),
             seq_index,
             alignment_files: alignment_files.to_vec(),
+            built_bidirectional: header_info.map(|h| h.bidirectional).unwrap_or(magic_buf != MAGIC_V1),
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
@@ -3546,5 +3745,149 @@ mod tests {
             second_walk, first_walk,
             "the second walk must see the same intervals as the first"
         );
+    }
+
+    #[test]
+    fn index_header_records_the_alignment_file_list() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let a = temp.path().join("a.paf");
+        let b = temp.path().join("b.paf");
+        std::fs::write(&a, "x".repeat(100)).unwrap();
+        std::fs::write(&b, "y".repeat(200)).unwrap();
+        let names = vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()];
+
+        let header = IndexHeaderInfo {
+            alignment_files: names
+                .iter()
+                .map(|p| AlignmentFileEntry::from_path(p))
+                .collect(),
+            bidirectional: true,
+        };
+        assert_eq!(header.alignment_files[0].size, Some(100));
+        assert_eq!(header.alignment_files[1].size, Some(200));
+
+        // The same list in the same order is accepted, even when a path is
+        // spelled differently.
+        validate_alignment_file_list(&header.alignment_files, &names, "idx").unwrap();
+        let respelled = vec![
+            format!("{}/./a.paf", temp.path().display()),
+            temp.path().join("..").join(temp.path().file_name().unwrap()).join("b.paf").to_string_lossy().into_owned(),
+        ];
+        validate_alignment_file_list(&header.alignment_files, &respelled, "idx")
+            .expect("a different spelling of the same files must be accepted");
+
+        // A reordered list must be refused: every file index still resolves, so
+        // the query would read a CIGAR offset from the wrong file.
+        let mut reordered = names.clone();
+        reordered.reverse();
+        let err = validate_alignment_file_list(&header.alignment_files, &reordered, "idx")
+            .expect_err("a reordered file list must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("different alignment file list"), "{msg}");
+        assert!(msg.contains("Entry 0"), "{msg}");
+
+        // A different list length must be refused too.
+        let err = validate_alignment_file_list(&header.alignment_files, &names[..1], "idx")
+            .expect_err("a shorter file list must be refused");
+        assert!(err.to_string().contains("was built from 2"), "{err}");
+
+        // A file of a different size in the same position must be refused.
+        std::fs::write(&a, "z".repeat(101)).unwrap();
+        assert!(
+            validate_alignment_file_list(&header.alignment_files, &names, "idx").is_err(),
+            "a file that changed size must be refused"
+        );
+    }
+
+    #[test]
+    fn serialized_index_carries_the_file_list_and_refuses_a_mismatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paf = temp.path().join("a.paf");
+        std::fs::write(
+            &paf,
+            "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n",
+        )
+        .unwrap();
+        let files = vec![paf.to_string_lossy().into_owned()];
+
+        let mut seq_index = SequenceIndex::new();
+        let content = std::fs::read_to_string(&paf).unwrap();
+        let records = parse_paf(BufReader::new(content.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, files[0].clone())], seq_index, None, true)
+                .unwrap();
+
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        impg.serialize_with_forest_map(&mut buffer).unwrap();
+        let bytes = buffer.into_inner();
+
+        // The same list loads.
+        let loaded = Impg::load_from_file(
+            std::io::Cursor::new(bytes.clone()),
+            &files,
+            "idx".to_string(),
+            None,
+        )
+        .expect("the same file list must load");
+        assert!(loaded.built_bidirectional);
+
+        // A different file list is refused rather than reading wrong offsets.
+        let mut other = files.clone();
+        other.push(temp.path().join("b.paf").to_string_lossy().into_owned());
+        std::fs::write(&other[1], "q\n").unwrap();
+        let err = match Impg::load_from_file(
+            std::io::Cursor::new(bytes),
+            &other,
+            "idx".to_string(),
+            None,
+        ) {
+            Ok(_) => panic!("a different file list must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("different alignment file list")
+                || err.to_string().contains("was built from 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reciprocal_records_collapse_to_one_edge() {
+        // The same alignment written in both directions describes one edge. It
+        // used to be indexed twice, so every projection appeared twice.
+        let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
+                   B\t1000\t0\t500\t+\tA\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n"
+            .to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
+                .unwrap();
+
+        let mut total = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                total += tree.len();
+            }
+        }
+        assert_eq!(
+            total, 2,
+            "one edge between A and B must be indexed once per direction, not twice"
+        );
+
+        // A single record still indexes both directions.
+        let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
+                .unwrap();
+        let mut total = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                total += tree.len();
+            }
+        }
+        assert_eq!(total, 2, "one record must keep both directions");
     }
 }
