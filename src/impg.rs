@@ -664,6 +664,21 @@ fn validate_alignment_file_list(
     Ok(())
 }
 
+/// Identify one edge of the alignment graph, for deduplication.
+///
+/// Two entries with the same key project to the same interval pair.
+fn edge_key(interval: &Interval<QueryMetadata>) -> (u32, i32, i32, i32, i32, bool) {
+    let metadata = &interval.metadata;
+    (
+        metadata.query_id(),
+        metadata.target_start,
+        metadata.target_end,
+        metadata.query_start,
+        metadata.query_end,
+        metadata.strand() == Strand::Reverse,
+    )
+}
+
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
@@ -1899,9 +1914,20 @@ impl Impg {
                 acc
             });
 
+        // A reciprocal pair (`A -> B` and `B -> A` for the same alignment)
+        // reaches the same edge twice: once as the reversed entry of the first
+        // record and once as the forward entry of the second. Both describe the
+        // same projection, and both reached the output, so bedpe and paf
+        // printed the row twice. The released set has 1,483 such pairs.
+        //
+        // The key ignores the file index, the byte offset and the reversed
+        // flag: those say which record a projection reads its CIGAR from, not
+        // which edge this is.
         let trees: TreeMap = intervals
             .into_par_iter()
-            .map(|(target_id, interval_nodes)| {
+            .map(|(target_id, mut interval_nodes)| {
+                interval_nodes.sort_unstable_by_key(edge_key);
+                interval_nodes.dedup_by(|a, b| edge_key(a) == edge_key(b));
                 (
                     target_id,
                     Arc::new(BasicCOITree::new(interval_nodes.as_slice())),
@@ -3805,5 +3831,45 @@ mod tests {
                 || err.to_string().contains("was built from 1"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn reciprocal_records_collapse_to_one_edge() {
+        // The same alignment written in both directions describes one edge. It
+        // used to be indexed twice, so every projection appeared twice.
+        let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
+                   B\t1000\t0\t500\t+\tA\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n"
+            .to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
+                .unwrap();
+
+        let mut total = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                total += tree.len();
+            }
+        }
+        assert_eq!(
+            total, 2,
+            "one edge between A and B must be indexed once per direction, not twice"
+        );
+
+        // A single record still indexes both directions.
+        let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
+                .unwrap();
+        let mut total = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                total += tree.len();
+            }
+        }
+        assert_eq!(total, 2, "one record must keep both directions");
     }
 }

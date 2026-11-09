@@ -250,11 +250,10 @@ fn test_query_outputs_reject_a_range_below_min_transitive_len() {
 /// print the row twice. Any script that counts rows, sums block lengths or
 /// builds a BEDPE of projected intervals sees double.
 ///
-/// The test is ignored because the fix needs a decision: drop the duplicate at
-/// index time (costs a set of seen edges over 389 million records in the
-/// release), or keep the index as it is and deduplicate at output time.
+/// The duplicate is dropped at index time: each target's interval list is
+/// sorted and deduplicated on the edge it describes, which costs no global set
+/// over the 389 million records of the release.
 #[test]
-#[ignore = "C8: reciprocal records produce duplicate bedpe and paf rows"]
 fn test_reciprocal_records_do_not_duplicate_rows() {
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path();
