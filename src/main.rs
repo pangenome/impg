@@ -13311,13 +13311,18 @@ fn print_stats(impg: &impl ImpgIndex) {
     let target_ids: Vec<u32> = impg.target_ids();
 
     // Process trees in parallel, computing stats without keeping them in memory
+    // when the index can load them back. A tree is evicted only when the index
+    // can reload it: `stats` walks every tree twice, and an in-memory tree that
+    // is evicted is gone.
     let results: Vec<(u32, usize)> = target_ids
         .par_iter()
         .map(|&target_id| {
             // Get tree and count, removing it from memory for efficiency
             let count = if let Some(tree) = impg.get_or_load_tree(target_id) {
                 let len = tree.len();
-                impg.remove_cached_tree(target_id);
+                if impg.can_reload_tree(target_id) {
+                    impg.remove_cached_tree(target_id);
+                }
                 len
             } else {
                 0
@@ -13389,7 +13394,9 @@ fn print_stats(impg: &impl ImpgIndex) {
                     .iter()
                     .map(|interval| interval.metadata.query_id())
                     .collect();
-                impg.remove_cached_tree(target_id);
+                if impg.can_reload_tree(target_id) {
+                    impg.remove_cached_tree(target_id);
+                }
                 ids
             } else {
                 Vec::new()

@@ -1890,6 +1890,12 @@ impl Impg {
 
     /// Load a specific tree from disk using the forest map
     fn load_tree_from_disk(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+        // An in-memory index has no file to reload from. Callers can evict a
+        // tree and ask for it again (`impg stats` does), so return nothing
+        // instead of opening an empty path.
+        if self.index_file_path.is_empty() {
+            return None;
+        }
         if let Some(tree_offset) = self.forest_map.get_tree_offset(target_id) {
             let mut file = File::open(&self.index_file_path).expect("Failed to open index file");
             file.seek(std::io::SeekFrom::Start(tree_offset))
@@ -2850,6 +2856,16 @@ impl ImpgIndex for Impg {
     fn sequence_files(&self) -> &[String] {
         &self.sequence_files
     }
+
+    fn can_reload_tree(&self, target_id: u32) -> bool {
+        // Offset 0 marks a tree that only exists in memory (see
+        // `from_multi_alignment_records`), so there is nothing to read back.
+        !self.index_file_path.is_empty()
+            && self
+                .forest_map
+                .get_tree_offset(target_id)
+                .is_some_and(|offset| offset > 0)
+    }
 }
 
 fn project_target_range_through_alignment(
@@ -3435,6 +3451,70 @@ mod tests {
         assert!(
             err.to_string().contains("above the maximum supported value"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_in_memory_index_does_not_reload_trees_from_disk() {
+        // `impg stats` walks every tree twice and evicts as it goes. An
+        // in-memory index has no file to load a tree back from, so the second
+        // walk must not try to open an empty path.
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        let impg =
+            Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true).unwrap();
+
+        let target_id = *impg.target_ids().first().expect("one target sequence");
+        assert!(
+            !impg.can_reload_tree(target_id),
+            "an in-memory index must report that its trees cannot be reloaded"
+        );
+        assert!(impg.get_or_load_tree(target_id).is_some());
+        impg.remove_cached_tree(target_id);
+        assert!(
+            impg.get_or_load_tree(target_id).is_none(),
+            "a tree evicted from an in-memory index must come back as None, not as a panic"
+        );
+    }
+
+    #[test]
+    fn in_memory_index_serves_two_walks_when_trees_are_not_evicted() {
+        // The behaviour `impg stats` needs: when the index cannot reload a
+        // tree, both walks must still see every interval.
+        let paf = "q\t1000\t0\t500\t+\tt\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
+                   t\t1000\t100\t600\t+\tr\t1000\t100\t600\t500\t500\t60\tcg:Z:500=\n"
+            .to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        let impg =
+            Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true).unwrap();
+
+        let mut first_walk = 0usize;
+        let mut second_walk = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                first_walk += tree.len();
+                if impg.can_reload_tree(id) {
+                    impg.remove_cached_tree(id);
+                }
+            }
+        }
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                second_walk += tree.iter().count();
+                if impg.can_reload_tree(id) {
+                    impg.remove_cached_tree(id);
+                }
+            }
+        }
+
+        assert_eq!(first_walk, 4, "two PAF records indexed bidirectionally");
+        assert_eq!(
+            second_walk, first_walk,
+            "the second walk must see the same intervals as the first"
         );
     }
 }
