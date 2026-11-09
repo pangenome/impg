@@ -3829,8 +3829,9 @@ impl SyngIndex {
         let cap = Self::interval_locate_cap();
 
         self.prepare_locate_checkpoint_lookup()?;
-        // (path_idx, node, strand) -> (min padded start, max padded end)
-        type SpanBuckets = FxHashMap<(usize, u32, char), (u64, u64)>;
+        // (path_idx, strand) -> padded span of every located occurrence; a
+        // node that occurs at two loci of one path gives two spans
+        type SpanBuckets = FxHashMap<(usize, char), Vec<(u64, u64)>>;
         let span_results: Vec<io::Result<SpanBuckets>> = query_node_positions
             .into_par_iter()
             .map(|(query_node, query_positions)| {
@@ -3862,11 +3863,10 @@ impl SyngIndex {
                         } else {
                             '-'
                         };
-                        let entry = per_node
-                            .entry((hit.path_idx, query_node, strand))
-                            .or_insert((padded_start, padded_end));
-                        entry.0 = entry.0.min(padded_start);
-                        entry.1 = entry.1.max(padded_end);
+                        per_node
+                            .entry((hit.path_idx, strand))
+                            .or_default()
+                            .push((padded_start, padded_end));
                     }
                 }
                 Ok(per_node)
@@ -3875,26 +3875,24 @@ impl SyngIndex {
 
         let mut per_node_sampled: SpanBuckets = FxHashMap::default();
         for result in span_results {
-            for (key, (start, end)) in result? {
-                let entry = per_node_sampled.entry(key).or_insert((start, end));
-                entry.0 = entry.0.min(start);
-                entry.1 = entry.1.max(end);
+            for (key, spans) in result? {
+                per_node_sampled.entry(key).or_default().extend(spans);
             }
         }
 
         let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
             FxHashMap::default();
-        for ((genome_idx, _node, strand), (start, end)) in per_node_sampled {
-            per_path
-                .entry((genome_idx, strand))
-                .or_default()
-                .push(HomologousIntervalWithAnchors {
+        for ((genome_idx, strand), spans) in per_node_sampled {
+            let group = per_path.entry((genome_idx, strand)).or_default();
+            for (start, end) in spans {
+                group.push(HomologousIntervalWithAnchors {
                     genome: self.name_map.path_to_name[genome_idx].clone(),
                     start,
                     end,
                     strand,
                     anchors: Vec::new(),
                 });
+            }
         }
 
         let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::new();
@@ -5514,7 +5512,8 @@ impl SyngIndex {
 
         let locate_start = std::time::Instant::now();
         self.prepare_locate_checkpoint_lookup()?;
-        type LocatedSeedBuckets = FxHashMap<(usize, u32, char), (u64, u64, FxHashMap<i64, Anchor>)>;
+        // (path_idx, strand) -> one padded span per located occurrence
+        type LocatedSeedBuckets = FxHashMap<(usize, char), Vec<(u64, u64, FxHashMap<i64, Anchor>)>>;
         let locate_results: Vec<io::Result<(u64, u64, LocatedSeedBuckets)>> = unvisited
             .into_par_iter()
             .map(|(query_node, query_positions)| {
@@ -5531,28 +5530,30 @@ impl SyngIndex {
                     let hit_end = hit.target_pos + syncmer_len;
                     let padded_start = hit.target_pos.saturating_sub(padding);
                     let padded_end = (hit_end + padding).min(genome_len);
+                    let mut by_strand: [FxHashMap<i64, Anchor>; 2] = Default::default();
                     for &(qp, q_orient) in &query_positions {
-                        let strand = if q_orient == hit.target_orient {
-                            '+'
-                        } else {
-                            '-'
-                        };
-                        let sig: i64 = if strand == '+' {
+                        let forward = q_orient == hit.target_orient;
+                        let sig: i64 = if forward {
                             hit.target_pos as i64 - qp as i64
                         } else {
                             hit.target_pos as i64 + qp as i64
                         };
-                        let entry = per_node_sampled
-                            .entry((hit.path_idx, query_node, strand))
-                            .or_insert_with(|| (padded_start, padded_end, FxHashMap::default()));
-                        entry.0 = entry.0.min(padded_start);
-                        entry.1 = entry.1.max(padded_end);
-                        entry.2.entry(sig).or_insert(Anchor {
-                            query_pos: qp,
-                            target_pos: hit.target_pos,
-                            node_id: query_node,
-                        });
+                        by_strand[usize::from(!forward)]
+                            .entry(sig)
+                            .or_insert(Anchor {
+                                query_pos: qp,
+                                target_pos: hit.target_pos,
+                                node_id: query_node,
+                            });
                         emitted_anchors += 1;
+                    }
+                    for (anchors, strand) in by_strand.into_iter().zip(['+', '-']) {
+                        if !anchors.is_empty() {
+                            per_node_sampled
+                                .entry((hit.path_idx, strand))
+                                .or_default()
+                                .push((padded_start, padded_end, anchors));
+                        }
                     }
                 }
                 Ok((located_hits, emitted_anchors, per_node_sampled))
@@ -5566,31 +5567,22 @@ impl SyngIndex {
             let (local_located_hits, local_emitted_anchors, local_buckets) = result?;
             located_hits += local_located_hits;
             emitted_anchors += local_emitted_anchors;
-            for (key, (start, end, anchors_by_signature)) in local_buckets {
-                let entry = per_node_sampled
-                    .entry(key)
-                    .or_insert_with(|| (start, end, FxHashMap::default()));
-                entry.0 = entry.0.min(start);
-                entry.1 = entry.1.max(end);
-                entry.2.extend(anchors_by_signature);
+            for (key, spans) in local_buckets {
+                per_node_sampled.entry(key).or_default().extend(spans);
             }
         }
         let locate_elapsed = locate_start.elapsed();
-        for ((genome_idx, _node, strand), (start, end, sig_map)) in per_node_sampled {
-            if sig_map.is_empty() {
-                continue;
-            }
-            let anchors: Vec<Anchor> = sig_map.into_values().collect();
-            per_path
-                .entry((genome_idx, strand))
-                .or_default()
-                .push(HomologousIntervalWithAnchors {
+        for ((genome_idx, strand), spans) in per_node_sampled {
+            let group = per_path.entry((genome_idx, strand)).or_default();
+            for (start, end, sig_map) in spans {
+                group.push(HomologousIntervalWithAnchors {
                     genome: self.name_map.path_to_name[genome_idx].clone(),
                     start,
                     end,
                     strand,
-                    anchors,
+                    anchors: sig_map.into_values().collect(),
                 });
+            }
         }
 
         // 3. Merge per (target, strand); different strands stay separate.
