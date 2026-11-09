@@ -166,11 +166,14 @@ struct MosaicPath {
     steps: Vec<MosaicStep>,
 }
 
-fn parse_bed_like(path: &str, group_partitions: bool) -> io::Result<Vec<InferTarget>> {
+/// `join_gap`: group rows by partition (BED column 4); each run of rows
+/// on the partition's first sequence, gaps at most `join_gap`, is a target.
+fn parse_bed_like(path: &str, join_gap: Option<u64>) -> io::Result<Vec<InferTarget>> {
+    let group_partitions = join_gap.is_some();
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut targets = Vec::new();
-    let mut first_by_partition: BTreeMap<String, InferTarget> = BTreeMap::new();
+    let mut rows_by_partition: BTreeMap<String, Vec<InferTarget>> = BTreeMap::new();
 
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
@@ -227,14 +230,39 @@ fn parse_bed_like(path: &str, group_partitions: bool) -> io::Result<Vec<InferTar
             name,
         };
         if group_partitions {
-            first_by_partition.entry(partition).or_insert(target);
+            rows_by_partition.entry(partition).or_default().push(target);
         } else {
             targets.push(target);
         }
     }
 
+    let gap = join_gap.unwrap_or(0);
+    for (partition, rows) in rows_by_partition {
+        let chrom = rows[0].chrom.clone();
+        let mut on_chrom: Vec<InferTarget> =
+            rows.into_iter().filter(|r| r.chrom == chrom).collect();
+        on_chrom.sort_by_key(|r| r.start);
+        let mut blocks: Vec<InferTarget> = Vec::new();
+        for row in on_chrom {
+            match blocks.last_mut() {
+                Some(last) if row.start as u64 <= last.end as u64 + gap => {
+                    last.end = last.end.max(row.end);
+                }
+                _ => blocks.push(row),
+            }
+        }
+        let n = blocks.len();
+        for (i, mut block) in blocks.into_iter().enumerate() {
+            if n > 1 {
+                block.partition = format!("{partition}#part{i}");
+                block.name = format!("{}#part{i}", block.name);
+            }
+            targets.push(block);
+        }
+    }
     if group_partitions {
-        targets.extend(first_by_partition.into_values());
+        // Stitch adjacent windows: order by position, not partition label
+        targets.sort_by(|a, b| a.chrom.cmp(&b.chrom).then(a.start.cmp(&b.start)));
     }
     Ok(targets)
 }
@@ -251,11 +279,11 @@ pub fn parse_target_range(target_range: &str) -> io::Result<InferTarget> {
 }
 
 pub fn parse_target_bed(path: &str) -> io::Result<Vec<InferTarget>> {
-    parse_bed_like(path, false)
+    parse_bed_like(path, None)
 }
 
-pub fn parse_partitions(path: &str) -> io::Result<Vec<InferTarget>> {
-    parse_bed_like(path, true)
+pub fn parse_partitions(path: &str, join_gap: u64) -> io::Result<Vec<InferTarget>> {
+    parse_bed_like(path, Some(join_gap))
 }
 
 fn temp_partition_dir() -> io::Result<PathBuf> {
@@ -335,9 +363,12 @@ fn discover_partitions(
     )?;
 
     let partitions_path = temp_dir.join("partitions.bed");
-    let result = parse_partitions(partitions_path.to_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "temporary path is not UTF-8")
-    })?);
+    let result = parse_partitions(
+        partitions_path.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "temporary path is not UTF-8")
+        })?,
+        discovery.merge_distance.max(0) as u64,
+    );
     fs::remove_dir_all(&temp_dir).ok();
     result
 }
@@ -428,6 +459,11 @@ fn compute_local_call_sets(
             syng_extension: config.syng_extension,
             min_anchors: config.min_anchors,
             min_span_fraction: config.min_span_fraction,
+            // -d: the largest gap or SV absorbed inside one interval
+            max_copy_gap: config
+                .discovery
+                .as_ref()
+                .map_or(0, |d| d.merge_distance.max(0) as u64),
         };
         match genotype::compute_syng_cosigt(syng_index, coverage, &query) {
             Ok(output) => call_sets.push(LocalCallSet {
@@ -1520,4 +1556,30 @@ pub fn run_syng_pack_infer<W: Write>(out: &mut W, config: &InferConfig<'_>) -> i
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partition_target_joins_nearby_rows_on_its_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let bed = dir.path().join("partitions.bed");
+        let rows = "A\t100173\t135808\t1\nA\t136111\t200165\t1\nA\t431998\t455026\t1\n";
+        std::fs::write(&bed, format!("{rows}B\t0\t9\t1\n")).unwrap();
+        let spans = |gap| -> Vec<(String, i32, i32)> {
+            let targets = parse_partitions(bed.to_str().unwrap(), gap).unwrap();
+            targets
+                .into_iter()
+                .map(|t| (t.partition, t.start, t.end))
+                .collect()
+        };
+        let joined = [
+            ("1#part0".into(), 100173, 200165),
+            ("1#part1".into(), 431998, 455026),
+        ];
+        assert_eq!(spans(20_000), joined);
+        assert_eq!(spans(0).len(), 3);
+    }
 }

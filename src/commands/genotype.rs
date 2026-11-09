@@ -44,6 +44,44 @@ struct SyngCandidateGroup {
     anchors: Vec<syng::Anchor>,
 }
 
+/// Hits on one path and strand more than `max_gap` bp apart are distinct
+/// copies (paralogs, repeats): keep the run with the most distinct anchors.
+/// Tandem copies stay together, so a duplicated haplotype keeps its count.
+fn best_spanning_copy(
+    mut hits: Vec<(u64, u64, Vec<syng::Anchor>)>,
+    max_gap: u64,
+) -> SyngCandidateGroup {
+    hits.sort_by_key(|&(start, end, _)| (start, end));
+    let mut copies: Vec<SyngCandidateGroup> = Vec::new();
+    for (start, end, anchors) in hits {
+        match copies.last_mut() {
+            Some(copy) if start <= copy.end.saturating_add(max_gap) => {
+                copy.end = copy.end.max(end);
+                copy.anchors.extend(anchors);
+            }
+            _ => copies.push(SyngCandidateGroup {
+                start,
+                end,
+                anchors,
+            }),
+        }
+    }
+    for copy in &mut copies {
+        copy.anchors.sort_by(|a, b| {
+            a.query_pos
+                .cmp(&b.query_pos)
+                .then(a.target_pos.cmp(&b.target_pos))
+        });
+        copy.anchors.dedup_by(|a, b| {
+            a.query_pos == b.query_pos && a.target_pos == b.target_pos && a.node_id == b.node_id
+        });
+    }
+    copies
+        .into_iter()
+        .max_by_key(|copy| (copy.anchors.len(), copy.end - copy.start))
+        .expect("at least one hit per path")
+}
+
 pub type CosigtResult = genotyping::CombinationScore;
 
 pub struct SyngCosigtConfig<'a> {
@@ -73,6 +111,9 @@ pub struct SyngCosigtQuery<'a> {
     pub syng_extension: u64,
     pub min_anchors: usize,
     pub min_span_fraction: f64,
+    /// Largest gap between hits of one candidate copy, at most the region
+    /// length; 0 = the region length.
+    pub max_copy_gap: u64,
 }
 
 #[derive(Debug)]
@@ -313,6 +354,7 @@ fn collect_syng_candidates(
     mode: CandidateMode,
     min_anchors: usize,
     min_span_fraction: f64,
+    max_copy_gap: u64,
 ) -> io::Result<Vec<HaplotypeCandidate>> {
     let syncmer_len = syng_index.syncmer_length_bp() as u64;
     let hits = syng_index.query_region_with_anchors_ext(
@@ -351,35 +393,25 @@ fn collect_syng_candidates(
             }
         }
         CandidateMode::Spanning => {
-            let mut groups: BTreeMap<(String, char), SyngCandidateGroup> = BTreeMap::new();
+            let mut by_path: BTreeMap<(String, char), Vec<(u64, u64, Vec<syng::Anchor>)>> =
+                BTreeMap::new();
             for hit in hits {
-                if hit.end <= hit.start {
-                    continue;
+                if hit.end > hit.start {
+                    by_path.entry((hit.genome, hit.strand)).or_default().push((
+                        hit.start,
+                        hit.end,
+                        hit.anchors,
+                    ));
                 }
-                let entry =
-                    groups
-                        .entry((hit.genome, hit.strand))
-                        .or_insert_with(|| SyngCandidateGroup {
-                            start: u64::MAX,
-                            end: 0,
-                            anchors: Vec::new(),
-                        });
-                entry.start = entry.start.min(hit.start);
-                entry.end = entry.end.max(hit.end);
-                entry.anchors.extend(hit.anchors);
             }
+            let region_len = region_end.saturating_sub(region_start).max(1);
+            let max_gap = match max_copy_gap {
+                0 => region_len,
+                gap => gap.min(region_len),
+            };
 
-            for ((path_name, strand), mut group) in groups {
-                group.anchors.sort_by(|a, b| {
-                    a.query_pos
-                        .cmp(&b.query_pos)
-                        .then(a.target_pos.cmp(&b.target_pos))
-                });
-                group.anchors.dedup_by(|a, b| {
-                    a.query_pos == b.query_pos
-                        && a.target_pos == b.target_pos
-                        && a.node_id == b.node_id
-                });
+            for ((path_name, strand), path_hits) in by_path {
+                let group = best_spanning_copy(path_hits, max_gap);
                 let query_span_fraction =
                     anchor_span_fraction(&group.anchors, region_start, region_end, syncmer_len);
                 if group.anchors.len() < min_anchors || query_span_fraction < min_span_fraction {
@@ -830,6 +862,7 @@ pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> 
         syng_extension: config.syng_extension,
         min_anchors: config.min_anchors,
         min_span_fraction: config.min_span_fraction,
+        max_copy_gap: 0,
     };
     let result = compute_syng_cosigt(&syng_index, &coverage, &query)?;
     write_syng_cosigt_output(out, &result)?;
@@ -889,6 +922,7 @@ pub fn compute_syng_cosigt(
         query.candidate_mode,
         query.min_anchors,
         query.min_span_fraction,
+        query.max_copy_gap,
     )?;
     if candidates.is_empty() {
         return Err(io::Error::new(
@@ -2467,6 +2501,27 @@ pub fn write_graph_cosigt_report<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spanning_candidate_keeps_one_copy_per_path() {
+        let anchor = |q, t| syng::Anchor {
+            query_pos: q,
+            target_pos: t,
+            node_id: (q + t) as u32,
+        };
+        // A 10 kb region: tandem hits at 1-6 kb and 7-11 kb are one run;
+        // a hit 489 kb further is a paralog
+        let hits = vec![
+            (500_000, 501_000, vec![anchor(100, 500_000)]),
+            (1_000, 6_000, vec![anchor(0, 1_000), anchor(4_000, 5_000)]),
+            (7_000, 11_000, vec![anchor(0, 7_000), anchor(4_000, 10_000)]),
+        ];
+        let copy = best_spanning_copy(hits, 10_000);
+        assert_eq!(
+            (copy.start, copy.end, copy.anchors.len()),
+            (1_000, 11_000, 4)
+        );
+    }
 
     const TWO_HAP_GFA: &str = "\
 H\tVN:Z:1.0
