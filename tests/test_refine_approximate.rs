@@ -42,11 +42,13 @@ fn run(binary: &Path, dir: &Path, args: &[&str]) -> Output {
 }
 
 fn decompress_gz(gz_path: &Path, out_path: &Path) {
-    let output = Command::new("zcat")
+    // `gzip -dc`, not `zcat`: BSD zcat on macOS only reads `.Z` files
+    let output = Command::new("gzip")
+        .arg("-dc")
         .arg(gz_path)
         .output()
-        .expect("zcat is required to unpack the test FASTA");
-    assert!(output.status.success(), "zcat failed on {gz_path:?}");
+        .expect("gzip is required to unpack the test FASTA");
+    assert!(output.status.success(), "gzip -dc failed on {gz_path:?}");
     File::create(out_path)
         .unwrap()
         .write_all(&output.stdout)
