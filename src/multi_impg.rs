@@ -374,6 +374,7 @@ impl MultiImpg {
     fn load_header(path: &Path) -> std::io::Result<IndexHeader> {
         const MAGIC_V1: &[u8] = b"IMPGIDX1";
         const MAGIC_V2: &[u8] = b"IMPGIDX2";
+        const MAGIC_V4: &[u8] = b"IMPGIDX4";
 
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
@@ -381,7 +382,7 @@ impl MultiImpg {
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid magic bytes in {:?}", path),
@@ -392,6 +393,19 @@ impl MultiImpg {
         let mut offset_buf = [0u8; 8];
         reader.read_exact(&mut offset_buf)?;
         let forest_map_offset = u64::from_le_bytes(offset_buf);
+
+        // IMPGIDX4 records the alignment file list in the header. Only the
+        // header offsets matter here, so decode it and drop it.
+        if magic_buf == MAGIC_V4 {
+            let _: crate::impg::IndexHeaderInfo =
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Failed to load index header from {path:?}: {e}"),
+                        )
+                    })?;
+        }
 
         // Read sequence index
         let seq_index: SequenceIndex =
