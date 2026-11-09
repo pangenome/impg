@@ -741,10 +741,11 @@ pub struct AlignmentFileEntry {
 impl AlignmentFileEntry {
     fn from_path(path: &str) -> Self {
         let size = std::fs::metadata(path).ok().map(|m| m.len());
-        AlignmentFileEntry {
-            path: path.to_string(),
-            size,
-        }
+        // Canonical, so the same file compares equal however it is spelled
+        let path = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string());
+        AlignmentFileEntry { path, size }
     }
 }
 
@@ -798,12 +799,16 @@ pub(crate) fn validate_alignment_file_list(
         .enumerate()
         .find(|(_, (recorded_entry, path))| {
             let given_entry = AlignmentFileEntry::from_path(path);
-            // Compare file name and size, not the full path: `data/x.paf`,
-            // `./x.paf` from inside `data/`, an absolute path and a symlink
-            // all name the same file.
+            // Both paths are canonical, so `data/x.paf`, `./x.paf` from inside
+            // `data/`, an absolute path and a symlink compare equal. When the
+            // recorded path is gone (the files were moved), fall back to the
+            // file name.
             let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_owned());
+            let same_path = recorded_entry.path == given_entry.path
+                || (!std::path::Path::new(&recorded_entry.path).exists()
+                    && name(&recorded_entry.path) == name(&given_entry.path));
             match (recorded_entry.size, given_entry.size) {
-                (Some(a), Some(b)) => a != b || name(&recorded_entry.path) != name(&given_entry.path),
+                (Some(a), Some(b)) => a != b || !same_path,
                 // A size that could not be read (a pipe, for example) cannot be compared
                 _ => false,
             }

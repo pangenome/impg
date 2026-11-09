@@ -180,3 +180,31 @@ fn test_per_file_mode_keeps_a_reciprocal_pair_once() {
         assert_eq!(rows, 1, "--index-mode {mode} printed {rows} rows for one edge");
     }
 }
+
+/// Two files with the same name and the same size in two directories are still
+/// two files: swapping them must be refused.
+#[test]
+fn test_index_refuses_swapped_files_of_equal_name_and_size() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path();
+    let binary = get_impg_binary();
+    for (dir, q, t) in [("a", "q1", "t1"), ("b", "q2", "t2")] {
+        std::fs::create_dir(work_dir.join(dir)).unwrap();
+        let mut f = File::create(work_dir.join(dir).join("x.paf")).unwrap();
+        writeln!(f, "{q}\t2000\t0\t1000\t+\t{t}\t2000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=").unwrap();
+    }
+    let build = run(&binary, work_dir, &["index", "-a", "a/x.paf", "b/x.paf", "-i", "idx.impg"]);
+    assert!(build.status.success(), "index failed: {}", String::from_utf8_lossy(&build.stderr));
+
+    let args = |first: &'static str, second: &'static str| {
+        vec!["query", "-a", first, second, "-i", "idx.impg", "-r", "t1:0-1000", "-d", "0", "-o", "bed"]
+    };
+    let same = run(&binary, work_dir, &args("a/x.paf", "b/x.paf"));
+    assert!(same.status.success(), "the original order must load: {}", String::from_utf8_lossy(&same.stderr));
+    let swapped = run(&binary, work_dir, &args("b/x.paf", "a/x.paf"));
+    assert!(!swapped.status.success(), "swapped files of equal name and size must be refused");
+    assert!(
+        String::from_utf8_lossy(&swapped.stderr).contains("different alignment file list"),
+        "the error must say the list changed"
+    );
+}
