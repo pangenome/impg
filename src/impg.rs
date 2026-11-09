@@ -2121,6 +2121,13 @@ impl Impg {
         }
     }
 
+    /// Query a range, reusing CIGARs from `cigar_cache` instead of reading them
+    /// again.
+    ///
+    /// With `approximate_mode`, the projection interpolates the query interval
+    /// from the segment boundaries and never reads a CIGAR or a sequence, so
+    /// `cigar_cache` and `sequence_index` are not used.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_with_cache(
         &self,
         target_id: u32,
@@ -2130,6 +2137,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         results.push((
@@ -2153,6 +2161,24 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
+
+                if approximate_mode {
+                    // Fast path: no CIGAR and no sequence I/O.
+                    if let Some((query_interval, cigar_ops, target_interval)) = self
+                        .project_overlapping_interval_fast(
+                            metadata,
+                            target_id,
+                            range_start,
+                            range_end,
+                            min_gap_compressed_identity,
+                        )
+                    {
+                        let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                        results.push((query_interval, cigar_vec, target_interval));
+                    }
+                    return;
+                }
+
                 let cache_key = (metadata.alignment_file_index, metadata.data_offset());
                 let cigar_ops = cigar_cache
                     .get(&cache_key)
@@ -2736,6 +2762,7 @@ impl ImpgIndex for Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         Ok(Impg::query_with_cache(
             self,
@@ -2746,6 +2773,7 @@ impl ImpgIndex for Impg {
             min_gap_compressed_identity,
             sequence_index,
             cigar_cache,
+            approximate_mode,
         ))
     }
 

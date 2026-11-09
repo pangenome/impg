@@ -161,6 +161,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
+        _: bool,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         Ok(Vec::new())
     }
@@ -543,6 +544,7 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
+        _: bool,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         self.query_via_syng(target_id, range_start, range_end)
     }

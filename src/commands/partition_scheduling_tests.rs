@@ -90,6 +90,7 @@ impl ImpgIndex for CountingIndex {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         unreachable!("partition must use transitive dispatch")
     }

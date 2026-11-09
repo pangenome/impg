@@ -201,9 +201,10 @@ fn refine_single_range(
         None
     };
 
-    // Pre-populate CIGAR cache for max interval (if not using transitive queries)
+    // Pre-populate CIGAR cache for max interval (if not using transitive queries).
+    // Approximate mode never reads a CIGAR, so the cache stays empty.
     let mut cigar_cache: FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>> = FxHashMap::default();
-    if !config.use_transitive_bfs && !config.use_transitive_dfs {
+    if !config.use_transitive_bfs && !config.use_transitive_dfs && !config.approximate_mode {
         let max_start = orig_start.saturating_sub(max_extension_bp).max(0);
         let max_end = orig_end.saturating_add(max_extension_bp).min(seq_len);
         debug!(
@@ -532,6 +533,7 @@ fn query_overlaps(
             config.min_identity,
             sequence_index,
             cigar_cache,
+            config.approximate_mode,
         )?;
 
         // Apply subset filter for non-transitive queries (transitive queries filter during exploration)

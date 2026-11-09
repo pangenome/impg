@@ -657,6 +657,7 @@ impl ImpgIndex for MultiImpg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         _cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         // For MultiImpg, we don't use the shared cache since each sub-index
         // has its own file offsets. Just do a normal query.
@@ -667,7 +668,7 @@ impl ImpgIndex for MultiImpg {
             store_cigar,
             min_gap_compressed_identity,
             sequence_index,
-            false, // approximate_mode
+            approximate_mode,
         )
     }
 

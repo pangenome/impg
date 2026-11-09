@@ -4463,7 +4463,7 @@ impl RefineOpts {
         if self.query.approximate {
             validate_approximate_mode_min_length(
                 self.query.transitive_opts.min_transitive_len,
-                self.query.transitive,
+                self.query.transitive || self.query.transitive_opts.transitive_dfs,
             )?;
         }
 
@@ -7887,13 +7887,33 @@ fn run() -> io::Result<()> {
             let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = refine.sequence.resolve_sequence_files()?;
 
-            // Check if we have .1aln files and validate sequence files are provided
-            let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
-            if has_onealn_files && sequence_files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Sequence files (FASTA or AGC) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list".to_string(),
-                ));
+            if refine.query.approximate {
+                // Approximate mode interpolates from the tracepoint boundaries
+                // and never reads a CIGAR, so it needs tracepoint input and no
+                // sequence files.
+                let non_tracepoint_files: Vec<&String> = alignment_files
+                    .iter()
+                    .filter(|f| !f.ends_with(".1aln") && !f.ends_with(".tpa"))
+                    .collect();
+                if !non_tracepoint_files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode only works with tracepoint alignment files (.1aln or .tpa), found {} incompatible files in refine.",
+                            non_tracepoint_files.len()
+                        ),
+                    ));
+                }
+            } else {
+                // Check if we have .1aln files and validate sequence files are provided
+                let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
+                if has_onealn_files && sequence_files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Sequence files (FASTA or AGC) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list"
+                            .to_string(),
+                    ));
+                }
             }
 
             let impg = initialize_index(
@@ -15749,6 +15769,49 @@ mod tests {
             err.to_string().contains("exceeds the maximum supported value"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_refine_cli_accepts_approximate_without_transitive() {
+        // The non-transitive path projects tracepoints itself, so
+        // --approximate works without --transitive.
+        let args = Args::try_parse_from([
+            "impg", "refine", "-a", "idx.impg", "-r", "A:1-1000", "-d", "0", "--approximate",
+        ])
+        .unwrap();
+        match args {
+            Args::Refine { refine, .. } => refine
+                .validate()
+                .expect("--approximate without --transitive must be accepted"),
+            _ => panic!("expected refine command"),
+        }
+    }
+
+    #[test]
+    fn test_refine_cli_accepts_approximate_with_transitive() {
+        for transitive_flag in ["--transitive", "--transitive-dfs"] {
+            let args = Args::try_parse_from([
+                "impg",
+                "refine",
+                "-a",
+                "idx.impg",
+                "-r",
+                "A:1-1000",
+                "-d",
+                "0",
+                "--approximate",
+                transitive_flag,
+            ])
+            .unwrap();
+            match args {
+                Args::Refine { refine, .. } => {
+                    refine.validate().unwrap_or_else(|e| {
+                        panic!("--approximate with {transitive_flag} must be accepted: {e}")
+                    });
+                }
+                _ => panic!("expected refine command"),
+            }
+        }
     }
 
     #[test]
