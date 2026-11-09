@@ -260,54 +260,14 @@ fn syng_sequence_name(sample: &str, contig: &str) -> String {
     }
 }
 
-fn ragc_numeric_to_ascii(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .map(|&b| match b {
-            0 => b'A',
-            1 => b'C',
-            2 => b'G',
-            3 => b'T',
-            _ => b'N',
-        })
-        .collect()
-}
-
 fn read_syng_fasta_sequences(fasta_path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-    let file = File::open(fasta_path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{}': {}", fasta_path, e))
-    })?;
-    let reader = BufReader::new(reader);
-
     let mut sequences = Vec::new();
-    let mut current_name = String::new();
-    let mut current_seq = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.starts_with('>') {
-            if !current_name.is_empty() && !current_seq.is_empty() {
-                sequences.push((
-                    std::mem::take(&mut current_name),
-                    std::mem::take(&mut current_seq),
-                ));
-            }
-            current_name = line
-                .strip_prefix('>')
-                .unwrap_or("")
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
-            current_seq.clear();
-        } else {
-            current_seq.extend(line.trim().as_bytes());
+    impg::fasta::for_each_record(Path::new(fasta_path), |name, seq| {
+        if !name.is_empty() && !seq.is_empty() {
+            sequences.push((name, seq));
         }
-    }
-    if !current_name.is_empty() && !current_seq.is_empty() {
-        sequences.push((current_name, current_seq));
-    }
-
+        Ok(())
+    })?;
     Ok(sequences)
 }
 
@@ -364,7 +324,7 @@ fn read_syng_agc_record(
                 ),
             )
         })?;
-    Ok(ragc_numeric_to_ascii(&contig_data))
+    Ok(impg::agc_index::numeric_to_ascii(&contig_data))
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -4144,20 +4104,7 @@ impl SequenceOpts {
             // Handle --sequence-files option
             (Some(files), None) => Ok(files.clone()),
             // Handle --sequence-list option
-            (None, Some(list_file)) => {
-                let content = std::fs::read_to_string(list_file).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Failed to read sequence list file '{list_file}': {e}"),
-                    )
-                })?;
-
-                Ok(content
-                    .lines()
-                    .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                    .map(|line| line.trim().to_string())
-                    .collect())
-            }
+            (None, Some(list_file)) => impg::commands::read_list_file(list_file),
             (None, None) => Ok(Vec::new()),
             (Some(_), Some(_)) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -10073,16 +10020,7 @@ fn run() -> io::Result<()> {
                                     )
                                 })?;
 
-                            let seq: Vec<u8> = contig_data
-                                .iter()
-                                .map(|&b| match b {
-                                    0 => b'A',
-                                    1 => b'C',
-                                    2 => b'G',
-                                    3 => b'T',
-                                    _ => b'N',
-                                })
-                                .collect();
+                            let seq = impg::agc_index::numeric_to_ascii(&contig_data);
 
                             // Use the primary FASTA/AGC contig token as the syng
                             // path name. AGC may retain the full FASTA defline
@@ -10828,20 +10766,15 @@ fn determine_file_format(
     // Auto-detect from first file
     let first_file = match (files, file_list) {
         (Some(files), _) if !files.is_empty() => files[0].clone(),
-        (_, Some(list_file)) => {
-            // Read first line from list file
-            let content = std::fs::read_to_string(list_file)?;
-            let first_line = content
-                .lines()
-                .find(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "No valid files found in list file",
-                    )
-                })?;
-            first_line.trim().to_string()
-        }
+        (_, Some(list_file)) => impg::commands::read_list_file(list_file)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "No valid files found in list file",
+                )
+            })?,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -11500,19 +11433,7 @@ fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>>
     let alignment_files = if !alignment.alignment_files.is_empty() {
         alignment.alignment_files.clone()
     } else if let Some(alignment_list_file) = &alignment.alignment_list {
-        // Read alignment files from the list file
-        let file = File::open(alignment_list_file)?;
-        let reader = BufReader::new(file);
-        let mut files = Vec::new();
-
-        for line in reader.lines() {
-            let line = line?;
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                files.push(trimmed.to_string());
-            }
-        }
-
+        let files = impg::commands::read_list_file(alignment_list_file)?;
         if files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

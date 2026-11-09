@@ -10,7 +10,7 @@ pub mod render;
 pub mod similarity;
 pub mod syng2gfa;
 
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead};
 use std::path::Path;
 
 /// Floor for the haplotype-derived FastGA seed frequency, as the sweepga
@@ -26,6 +26,18 @@ pub fn wfmash_num_mappings(num_mappings: &str, no_filter: bool, sequence_count: 
         (false, Some(q), Some(t)) => q.max(t).max(1),
         _ => sequence_count.max(1),
     }
+}
+
+/// Paths in a list file: trimmed lines, skipping blank and `#` lines.
+pub fn read_list_file(path: &str) -> io::Result<Vec<String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("failed to read list file '{path}': {e}")))?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect())
 }
 
 /// Resolve a list of files from either a direct `Vec` or a list file.
@@ -54,21 +66,12 @@ pub fn resolve_file_list(
             Ok(files)
         }
         (true, Some(list_file)) => {
-            let f = std::fs::File::open(&list_file)?;
-            let reader = BufReader::new(f);
-            let mut out = Vec::new();
-            for line in reader.lines() {
-                let line = line?;
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    if !Path::new(trimmed).exists() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("{label} file '{trimmed}' not found"),
-                        ));
-                    }
-                    out.push(trimmed.to_string());
-                }
+            let out = read_list_file(&list_file)?;
+            if let Some(missing) = out.iter().find(|f| !Path::new(f).exists()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{label} file '{missing}' not found"),
+                ));
             }
             if out.is_empty() {
                 return Err(io::Error::new(
@@ -97,20 +100,13 @@ pub fn resolve_file_list(
 
 /// Count sequences and genomes across FASTA files (for k-mer frequency calculation).
 pub fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize, usize)> {
-    use std::fs::File;
-
     let paths: Vec<&Path> = fasta_files.iter().map(Path::new).collect();
     let genome_count = sweepga::pansn::count_haplotypes(&paths)
         .map_err(|e| io::Error::other(format!("PanSN haplotype count failed: {e}")))?;
 
     let mut seq_count = 0usize;
     for path in fasta_files {
-        let file = File::open(path)?;
-        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-        })?;
-        let reader = BufReader::new(reader);
-        for line in reader.lines() {
+        for line in crate::fasta::open_reader(Path::new(path))?.lines() {
             let line: String = line?;
             if line.starts_with('>') {
                 seq_count += 1;
@@ -119,4 +115,20 @@ pub fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize,
     }
 
     Ok((seq_count, genome_count))
+}
+
+#[cfg(test)]
+mod list_file_tests {
+    #[test]
+    fn read_list_file_skips_blank_and_comment_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("files.txt");
+        std::fs::write(&list, "  a.fa  \n\n# note\nb.fa\n   \n").unwrap();
+        assert_eq!(
+            super::read_list_file(list.to_str().unwrap()).unwrap(),
+            ["a.fa", "b.fa"]
+        );
+        let err = super::read_list_file("/nonexistent/list.txt").unwrap_err();
+        assert!(err.to_string().contains("/nonexistent/list.txt"), "{err}");
+    }
 }
