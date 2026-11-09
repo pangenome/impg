@@ -4371,7 +4371,11 @@ struct QueryOpts {
     #[clap(long, action)]
     original_sequence_coordinates: bool,
 
-    /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
+    /// Use approximate mode for faster queries with tracepoint files (.1aln or .tpa).
+    /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
+    /// --sequence-files is not needed. In `query` it works with bed and bedpe output; `refine`
+    /// accepts it too. Intervals are close to the CIGAR path, not identical,
+    /// and the reported identity is a lower bound from the trace spacing.
     #[arg(help_heading = "Performance")]
     #[clap(long, action)]
     approximate: bool,
@@ -4864,7 +4868,9 @@ enum Args {
         transitive_opts: TransitiveOpts,
 
         // --- Performance ---
-        /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
+        /// Use approximate mode with tracepoint files (.1aln or .tpa), bed output only.
+        /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
+        /// --sequence-files is not needed. Intervals are close to the CIGAR path, not identical.
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
@@ -5109,7 +5115,7 @@ GFA engine shorthand:
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Compute pairwise similarity between sequences in a region
+    /// (experimental) Compute pairwise similarity between sequences in a region
     Similarity {
         // --- Input ---
         #[clap(flatten)]
@@ -5203,14 +5209,14 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Genotype a locus from graph-derived sample evidence
+    /// (experimental) Genotype a locus from graph-derived sample evidence
     #[command(alias = "gt")]
     Genotype {
         #[command(subcommand)]
         command: GenotypeCommand,
     },
 
-    /// Project graph alignments into typed GFA genotype evidence
+    /// (experimental) Project graph alignments into typed GFA genotype evidence
     #[command(alias = "projection")]
     Project {
         /// GFA graph whose S-line segment names appear in the GAF path walks
@@ -5246,15 +5252,16 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Genotype from a syncmer panel: the three-step surface (partition -> map -> call),
-    /// the product call, the panel-side precomputes and the diplotype emission path.
+    /// (experimental) Genotype from a syncmer panel in three steps: partition the panel, map each
+    /// sample onto it, then call a diplotype per locus. The subcommand descriptions are internal
+    /// working notes. Needs a syng panel and is not ready for third-party use.
     #[command(name = "infer", alias = "genome-infer")]
     GenomeInfer {
         #[command(subcommand)]
         command: impg::commands::genome_infer::Command,
     },
 
-    /// Infer allele calls across ranges or partitions from graph-derived evidence
+    /// (experimental) Infer allele calls across ranges or partitions from graph-derived evidence
     /// (the graph-evidence path; the syncmer-panel pipeline is `impg infer`)
     #[command(name = "genotype-infer")]
     Infer {
@@ -5505,7 +5512,7 @@ GFA engine shorthand:
         report: Option<String>,
     },
 
-    /// Resolve bounded bubbles in an existing blunt GFA
+    /// (experimental) Resolve bounded bubbles in an existing blunt GFA
     Crush {
         /// Input blunt GFA path, or '-' for stdin
         #[clap(short = 'g', long, value_parser)]
@@ -5902,7 +5909,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Render a syng-backed source-coordinate region into a GBZ-style bundle
+    /// (experimental) Render a syng-backed source-coordinate region into a GBZ-style bundle
     Render {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
@@ -5980,7 +5987,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Map sequences to a syng index using exact shared syncmers
+    /// (experimental) Map sequences to a syng index using exact shared syncmers
     Map {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
@@ -6023,7 +6030,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Build a compact read-to-syncmer inverted index
+    /// (experimental) Build a compact read-to-syncmer inverted index
     ReadIndex {
         /// Syng index prefix or .1khash/.meta path
         #[clap(short = 'a', long, value_parser)]
@@ -6107,7 +6114,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
+    /// (experimental) Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
     ///
     /// Loads `<prefix>.1khash`, `<prefix>.1gbwt`, `<prefix>.syng.names`,
     /// `<prefix>.syng.meta` (and `.syng.spos`) and writes a GFA with one

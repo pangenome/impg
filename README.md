@@ -28,9 +28,13 @@ smoothing.
 ## How does it work?
 
 `impg` uses [coitrees](https://github.com/dcjones/coitrees) (cache-oblivious
-interval trees) for fast range lookup, and stores CIGAR strings as
-compact deltas. The result is fast, memory-efficient projection of
-sequence ranges through alignment networks.
+interval trees) for fast range lookup and stores, per alignment, the file it
+came from and where the record sits in it: a byte offset for PAF, a record index
+for `.1aln` and `.tpa`. No CIGAR and no sequence is copied into the index. A
+projection reads the CIGARs it needs from PAF on demand; for `.1aln` and `.tpa` it
+rebuilds the CIGAR by realigning the sequences between tracepoints, so those
+formats need `--sequence-files` (except in `--approximate` mode). The result is
+fast, memory-efficient projection of sequence ranges through alignment networks.
 
 ## Install
 
@@ -104,6 +108,8 @@ SK1#1#chrI           52740   102721
 
 ## Commands
 
+Commands marked `(experimental)` in `impg --help` (`similarity`, `genotype`, `project`, `infer`, `genotype-infer`, `crush`, `render`, `map`, `read-index`, `syng2gfa`) may change their flags and output between releases without notice; do not build a pipeline on them yet.
+
 Alignment-backed commands accept `-a` (alignment files, mixed PAF/1ALN/TPA)
 or `--alignment-list` (text file, one per line). Other commands have their own
 input flags; for example, `map -a` takes a syng index. Use each command's
@@ -134,12 +140,16 @@ impg query -a aln.1aln -r chr1:1000-2000 -d 100 -o fasta --sequence-files *.fa \
            --reverse-complement
 
 # Filter / shape the result
-impg query -a aln.paf -r chr1:1000-2000 --min-identity 0.9 -l 5000 -d 1000
+impg query -a aln.paf -r chr1:1000-2000 --min-result-identity 0.9 -l 5000 -d 1000
 
 # Restrict to a sequence whitelist (also filters transitive intermediates)
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -x --subset-sequence-list seqs.txt
 
-# Fast approximate mode (.1aln only; bed/bedpe output)
+# Fast approximate mode (.1aln and .tpa input; query with bed/bedpe output,
+# partition with bed output, and refine). Interpolates from tracepoints instead of reading
+# CIGARs, so no --sequence-files is needed. The intervals are close to the CIGAR
+# path, not identical, and the identity it reports is a lower bound from the
+# trace spacing.
 impg query -a aln.1aln -r chr1:1000-2000 -d 100 --approximate
 
 # Alignment-free path: -a accepts a syng index prefix (see `syng` below)
@@ -211,19 +221,23 @@ haplotypes fully spanning it. Useful for anchoring loci outside
 structural variants.
 
 ```bash
-impg refine -a aln.paf -r chr1:1000-2000
+# -d is required: it is the largest gap a one-hop query absorbs
+impg refine -a aln.paf -r chr1:1000-2000 -d 100k
 impg refine -a aln.paf -b loci.bed --span-bp 2000 -d 200000
 
 # Maximize PanSN samples / haplotypes instead of raw sequence count
-impg refine -a aln.paf -r chr1:1000-2000 --pansn-mode sample
-impg refine -a aln.paf -r chr1:1000-2000 --pansn-mode haplotype
+impg refine -a aln.paf -r chr1:1000-2000 -d 100k --pansn-mode sample
+impg refine -a aln.paf -r chr1:1000-2000 -d 100k --pansn-mode haplotype
 
 # Cap expansion distance
-impg refine -a aln.paf -r chr1:1000-2000 --max-extension 0.90    # 90% of locus
-impg refine -a aln.paf -r chr1:1000-2000 --max-extension 50000   # 50kb absolute
+impg refine -a aln.paf -r chr1:1000-2000 -d 100k --max-extension 0.90    # 90% of locus
+impg refine -a aln.paf -r chr1:1000-2000 -d 100k --max-extension 50000   # 50kb absolute
 
 # Emit the spanning-entity list alongside the refined BED
-impg refine -a aln.paf -r chr1:1000-2000 --support-output support.bed
+impg refine -a aln.paf -r chr1:1000-2000 -d 100k --support-output support.bed
+
+# Approximate mode: tracepoint input, no sequence files, CIGARs never read
+impg refine -a aln.1aln -r chr1:1000-2000 -d 100k --approximate
 ```
 
 ### `similarity` — pairwise similarity / distance within a region
@@ -294,6 +308,12 @@ impg index --alignment-list files.txt --index-mode per-file
 listed, single otherwise. impg warns when the index is older than its
 input alignments; `-f/--force-reindex` rebuilds.
 
+The index records the alignment file list it was built from, in order, with each
+file's size, and refuses to load with a different list or order: a reordered
+list would read CIGAR offsets from the wrong file. Indexes written by impg
+before this check carry no list and load with a warning. The format is
+`IMPGIDX4`.
+
 Bgzipped PAFs work natively (`impg` reads `.paf.gz`); optionally
 `bgzip -r alignments.paf.gz` creates a `.gzi` sidecar to speed up the
 first read.
@@ -303,6 +323,23 @@ first read.
 ```bash
 impg stats -a aln.paf
 impg stats -a f1.paf f2.1aln
+```
+
+### Environment variables
+
+These change behaviour outside the command line. The first two are tuning
+switches. The panel switches are not: see their row.
+
+| Variable | Effect |
+| --- | --- |
+| `IMPG_TREE_CACHE_MB` | Cap, in MB, for the per-target interval-tree cache of a file-backed index. Default is a quarter of the memory the process can use (physical RAM, or the cgroup limit when lower), with a 512 MB floor. In per-file index mode all sub-indices share this one budget. An index built in memory is never capped. Raising it trades memory for fewer disk reads during a transitive walk. |
+| `IMPG_AGC_DECOMPRESSOR_SLOTS` | Number of shared AGC decompressor sets. Default is a fixed bound, not one per thread. |
+| `IMPG_PANEL_PRECOMPUTE`, `IMPG_CLASS_SCAN_*`, `IMPG_REALIGN_*`, `IMPG_TRUTH_QV_*` | Switches of the experimental panel and genotyping paths. `IMPG_PANEL_PRECOMPUTE=off` restores the live path. Several receipts in that path need variables the CLI does not set, so a run can behave differently from the command line alone. Do not build a pipeline on them. |
+
+To see the full list in a checkout, run:
+
+```bash
+grep -rhoE "IMPG_[A-Z_]+" src/ --include=*.rs | sort -u
 ```
 
 ### `syng` and `map` — alignment-free syncmer backend
@@ -431,8 +468,9 @@ Default query mode runs BiWFA boundary refinement and so requires
 pass-through. Tune via `--syng-padding`, `--syng-min-chain-anchors`
 (lower -> more paralog hits; default is an adaptive cap derived from
 query length, syncmer density, and expected exact-syncmer survival at
-95% identity), `--syng-min-chain-fraction` (default `0.5`; set `0` for
-exploratory local-chain discovery), and the seed-frequency filters
+95% identity), `--syng-min-chain-fraction` (default `0.0`, which disables the extent
+filter; raise it to require a chain to cover that fraction of the query
+window), and the seed-frequency filters
 `--syng-seed-max-occurrences` / `--syng-seed-drop-top-fraction`.
 By default syng query drops the top 0.05% most frequent query-local seed
 syncmers, seeds ranges from bounded exact GBWT walk seeds of five
@@ -550,9 +588,12 @@ impg partition -a aln.paf -w 100000 -d 100000 -o gfa --gfa-engine pggb:10000 \
                --sequence-files *.fa --output-folder results/
 ```
 
-Window size is in bp (≥ 1000). Partitioned mode is the recommended
-approach for large regions — it caps peak memory and runs one final
-gfaffix pass over the laced graph.
+Window size is in bp (≥ 1000). Partitioned mode builds up to 4 windows in
+parallel (fewer with fewer threads), keeps every window graph in memory until
+they are laced, and is the recommended approach for large regions, but it does
+not cap peak memory:
+the per-window graphs are laced, normalized and sorted as one graph, so the laced
+result must fit in memory. Measure it on your data before quoting a number.
 
 ### Tuning
 
@@ -594,6 +635,22 @@ doesn't meet your need.
 
 Combining `--aligner fastga` with `--sparsify` or `--aligner wfmash`
 with `--fastga-frequency` is rejected at parse time.
+
+What the `--sparsify` rules actually do (the help text comes from the embedded
+`sweepga` crate):
+
+| Value | Behaviour |
+| --- | --- |
+| `none` / `all` | every pair |
+| `<frac>` / `random:<frac>` | a random fraction of pairs |
+| `tree:<near>[:<far>[:<rand>]]` / `knn:…` | k-nearest plus k-farthest plus a random fraction, on Mash distances |
+| `giant:<prob>` / `connectivity:<prob>` | **not** an Erdős–Rényi random graph. It turns `prob` into a target edge count (`n ln n / 2 · −ln prob`) and then uses it as the `k` of a k-nearest rule, with `k ≥ 2`, plus 1 farthest neighbour and 1% random pairs (`tree:k:1:0.01`). At `prob = 0.99` this gives `k = 2` for any cohort size. Treat the "99% connected" reading as a design target, not a guarantee. |
+| `auto` | all pairs up to 10 samples, `giant:0.99` up to 50, then `tree:5:2:0.05` |
+
+In `impg graph` and `-o gfa` the rules run at contig level, and the run logs
+`sweepga: sparsification selected N of M pairs (P%)`. In `impg align` with PanSN
+names they select haplotype pairs and then expand each selected pair to the full
+cross-product of contig pairs; that path logs `Selected N pairs out of M total (P%)`.
 
 ## Common options
 
