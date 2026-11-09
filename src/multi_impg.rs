@@ -130,6 +130,8 @@ pub struct MultiImpg {
 
     /// Lazily-loaded sub-indices (only loaded when tree data is needed)
     sub_indices: RwLock<Vec<Option<Arc<Impg>>>>,
+    /// Tree cache shared by all sub-indices
+    tree_cache: Arc<RwLock<crate::impg::TreeCache>>,
 }
 
 impl MultiImpg {
@@ -213,6 +215,9 @@ impl MultiImpg {
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
+            tree_cache: Arc::new(RwLock::new(crate::impg::TreeCache::bounded(
+                crate::impg::default_tree_cache_bytes(),
+            ))),
         })
     }
 
@@ -321,6 +326,9 @@ impl MultiImpg {
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             local_to_unified: cache.local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
+            tree_cache: Arc::new(RwLock::new(crate::impg::TreeCache::bounded(
+                crate::impg::default_tree_cache_bytes(),
+            ))),
         })
     }
 
@@ -467,6 +475,9 @@ impl MultiImpg {
             path.to_string_lossy().to_string(),
             seq_files,
         )?;
+        // One cache for all sub-indices, not one budget per file
+        let mut impg = impg;
+        impg.share_tree_cache(Arc::clone(&self.tree_cache), index_idx as u32);
         let impg = Arc::new(impg);
 
         // Store in cache
