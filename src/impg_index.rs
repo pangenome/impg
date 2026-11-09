@@ -35,6 +35,10 @@ pub trait ImpgIndex: Send + Sync {
     ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Query with pre-populated CIGAR cache for efficiency.
+    /// Query a range, reusing cached CIGARs. With `approximate_mode` the
+    /// projection interpolates from the segment boundaries instead, and no
+    /// CIGAR or sequence is read.
+    #[allow(clippy::too_many_arguments)]
     fn query_with_cache(
         &self,
         target_id: u32,
@@ -44,6 +48,7 @@ pub trait ImpgIndex: Send + Sync {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Populate CIGAR cache for a region.
@@ -211,6 +216,7 @@ impl ImpgIndex for ImpgWrapper {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
             ImpgWrapper::Single(impg) => Ok(impg.query_with_cache(
@@ -221,6 +227,7 @@ impl ImpgIndex for ImpgWrapper {
                 min_gap_compressed_identity,
                 sequence_index,
                 cigar_cache,
+                approximate_mode,
             )),
             ImpgWrapper::Multi(multi) => ImpgIndex::query_with_cache(
                 multi,
@@ -231,6 +238,7 @@ impl ImpgIndex for ImpgWrapper {
                 min_gap_compressed_identity,
                 sequence_index,
                 cigar_cache,
+                approximate_mode,
             ),
         }
     }
