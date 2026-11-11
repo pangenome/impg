@@ -395,3 +395,106 @@ fn test_tpa_approximate_query_needs_no_sequence_files() {
     }
 }
 
+
+/// Bases a CIGAR consumes on each axis and its indel totals.
+fn cigar_content(cg: &str) -> String {
+    let (mut query, mut target, mut ins, mut del, mut len) = (0, 0, 0, 0, 0u64);
+    for c in cg.chars() {
+        match c.to_digit(10) {
+            Some(d) => len = len * 10 + u64::from(d),
+            None => {
+                match c {
+                    '=' | 'X' | 'M' => (query, target) = (query + len, target + len),
+                    'I' => (query, ins) = (query + len, ins + len),
+                    'D' => (target, del) = (target + len, del + len),
+                    other => panic!("unexpected CIGAR op {other} in {cg}"),
+                }
+                len = 0;
+            }
+        }
+    }
+    format!("cg:query={query},target={target},I={ins},D={del}")
+}
+
+/// Every tracepoint type must project like the PAF it was converted from.
+///
+/// Before the fix `FastgaNoDiff` records panicked on `query_deltas[idx]`, and
+/// `Variable` put the query axis into the target vector, so any record with
+/// an indel projected wrong. `q3` has a 50 bp deletion and a 10 bp insertion,
+/// so `Variable` carries both `(len, None)` and `(a, Some(b))` entries.
+#[test]
+fn test_every_tracepoint_type_matches_the_paf_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    let binary = get_impg_binary();
+
+    let t = dna(1200, 42);
+    let q3: Vec<u8> = t[..300]
+        .iter()
+        .chain(&t[350..700])
+        .chain(b"ACGTTGCAAC".iter())
+        .chain(&t[700..])
+        .copied()
+        .collect();
+    let mut fasta = File::create(dir.join("seqs.fa")).unwrap();
+    for (name, seq) in [("q3", &q3), ("t", &t)] {
+        writeln!(fasta, ">{name}\n{}", String::from_utf8_lossy(seq)).unwrap();
+    }
+    drop(fasta);
+    std::fs::write(
+        dir.join("a.paf"),
+        "q3\t1160\t0\t1160\t+\tt\t1200\t0\t1200\t1150\t1210\t60\tcg:Z:300=50D350=10I500=\n",
+    )
+    .unwrap();
+    index_file(&binary, dir, "a.paf", "paf.impg");
+
+    let rows = |aln: &str, idx: &str, region: &str, fmt: &str| -> Vec<String> {
+        let out = query(
+            &binary,
+            dir,
+            &["-a", aln, "-i", idx, "--sequence-files", "seqs.fa", "-r", region, "-d", "0", "-o", fmt],
+        );
+        assert!(out.status.success(), "{aln} {region}: {}", String::from_utf8_lossy(&out.stderr));
+        // Drop gi:f/bi:f (TPA takes them from record metadata) and replace the
+        // CIGAR by its content: with edit distance, FastGA reconstruction
+        // always, an indel can sit anywhere in an equal-score run
+        data_rows(&out.stdout)
+            .iter()
+            .map(|r| {
+                r.split('\t')
+                    .filter(|f| !f.starts_with("gi:f:") && !f.starts_with("bi:f:"))
+                    .map(|f| match f.strip_prefix("cg:Z:") {
+                        Some(cg) => cigar_content(cg),
+                        None => f.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect()
+    };
+
+    use tpa::TracepointType as T;
+    for tp_type in [T::Standard, T::Variable, T::Mixed, T::Fastga, T::FastgaNoDiff] {
+        let name = format!("{tp_type:?}").to_lowercase();
+        let tpa_file = format!("{name}.tpa");
+        tpa::paf_to_tpa(
+            dir.join("a.paf").to_str().unwrap(),
+            dir.join(&tpa_file).to_str().unwrap(),
+            tpa::CompressionConfig { tp_type, max_complexity: 100, ..tpa::CompressionConfig::default() },
+        )
+        .unwrap_or_else(|e| panic!("{name}: PAF to TPA failed: {e}"));
+        index_file(&binary, dir, &tpa_file, &format!("{name}.impg"));
+        // Region ends away from the indels, whose placement is not unique
+        for region in ["t:0-1200", "t:100-250", "t:400-650", "t:800-1100", "q3:100-1100"] {
+            for fmt in ["bedpe", "paf"] {
+                let expected = rows("a.paf", "paf.impg", region, fmt);
+                assert!(!expected.is_empty(), "{region}: the PAF path printed no row");
+                assert_eq!(
+                    rows(&tpa_file, &format!("{name}.impg"), region, fmt),
+                    expected,
+                    "{name} {region} -o {fmt}: TPA and PAF disagree"
+                );
+            }
+        }
+    }
+}
