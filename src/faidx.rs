@@ -234,6 +234,19 @@ impl FastaIndex {
             .fetch_seq(seq_name, start as usize, (end - 1) as usize)
             .map_err(|e| io::Error::other(format!("Failed to fetch sequence for {seq_name}: {e}")))?
             .to_vec();
+        // htslib clamps a range past the contig end; as in the AGC backend a
+        // short fetch shifts every downstream coordinate, so it is an error
+        let requested = (end - start) as usize;
+        if seq_vec.len() != requested {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "FASTA returned {} bases for '{seq_name}:{start}-{end}', but {requested} were requested: \
+                     the range goes past the end of the sequence",
+                    seq_vec.len()
+                ),
+            ));
+        }
         seq_vec
             .iter_mut()
             .for_each(|byte| *byte = byte.to_ascii_uppercase());
@@ -294,6 +307,10 @@ mod fetch_tests {
         let err = idx.fetch_sequence("chr1a", 5, 2).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
         assert!(idx.fetch_sequence("chr1a", -1, 2).is_err());
+        // chr1a is 13 bp: the whole contig is fine, one base past it is not
+        assert_eq!(idx.fetch_sequence("chr1a", 0, 13).unwrap(), b"CTGAGCTGACTGA");
+        let err = idx.fetch_sequence("chr1a", 10, 14).unwrap_err();
+        assert!(err.to_string().contains("3 bases") && err.to_string().contains("4 were requested"), "{err}");
     }
 
     #[test]
