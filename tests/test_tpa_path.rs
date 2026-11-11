@@ -396,6 +396,62 @@ fn test_tpa_approximate_query_needs_no_sequence_files() {
 }
 
 
+/// Per-file mode: two files whose targets share a local id and coordinates.
+///
+/// `t1` in `a.tpa` and `y` in `b.tpa` are both local id 1 over 0-1000, with
+/// unrelated bases (the names are chosen so the ids match). The thread-local
+/// target-sequence cache was keyed on `(id, start, end, strand)` only, so the
+/// second query rebuilt `y`'s CIGAR from `t1`'s bases. Each query has its 100 bp deletion in a different place,
+/// so the CIGAR in the PAF output shows which bases were used.
+#[test]
+fn test_per_file_target_cache_does_not_cross_files() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    let binary = get_impg_binary();
+
+    let t1 = dna(1000, 7);
+    let q1: Vec<u8> = t1[..200].iter().chain(&t1[300..]).copied().collect();
+    let t2 = dna(1000, 11);
+    let q2: Vec<u8> = t2[..500].iter().chain(&t2[600..]).copied().collect();
+    let mut fasta = File::create(dir.join("seqs.fa")).unwrap();
+    for (name, seq) in [("q1", &q1), ("t1", &t1), ("x", &q2), ("y", &t2)] {
+        writeln!(fasta, ">{name}\n{}", String::from_utf8_lossy(seq)).unwrap();
+    }
+    drop(fasta);
+    for (name, line) in [
+        ("a", "q1\t900\t0\t900\t+\tt1\t1000\t0\t1000\t900\t1000\t60\tcg:Z:200=100D700="),
+        ("b", "x\t900\t0\t900\t+\ty\t1000\t0\t1000\t900\t1000\t60\tcg:Z:500=100D400="),
+    ] {
+        std::fs::write(dir.join(format!("{name}.paf")), format!("{line}\n")).unwrap();
+        tpa::paf_to_tpa(
+            dir.join(format!("{name}.paf")).to_str().unwrap(),
+            dir.join(format!("{name}.tpa")).to_str().unwrap(),
+            tpa::CompressionConfig::default(),
+        )
+        .expect("PAF to TPA conversion failed");
+    }
+    std::fs::write(dir.join("r.bed"), "t1\t0\t1000\ny\t0\t1000\n").unwrap();
+
+    let out = query(
+        &binary,
+        dir,
+        &[
+            "-a", "a.tpa", "b.tpa", "--index-mode", "per-file", "--sequence-files", "seqs.fa",
+            "-b", "r.bed", "-d", "0", "-o", "paf", "-t", "1",
+        ],
+    );
+    for l in String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.contains("PROBE") || l.contains("WARN")) { eprintln!("{l}"); }
+    eprintln!("{}", String::from_utf8_lossy(&out.stdout));
+    assert!(out.status.success(), "query failed: {}", String::from_utf8_lossy(&out.stderr));
+    let rows = data_rows(&out.stdout);
+    let cigar = |q: &str| -> String {
+        let row = rows.iter().find(|r| r.starts_with(&format!("{q}\t"))).unwrap_or_else(|| panic!("no {q} row: {rows:?}"));
+        row.split('\t').find_map(|f| f.strip_prefix("cg:Z:")).unwrap_or_else(|| panic!("no cg:Z in {row}")).to_string()
+    };
+    assert_eq!(cigar("q1"), "200=100D700=", "{rows:?}");
+    assert_eq!(cigar("x"), "500=100D400=", "y rebuilt from another file's bases: {rows:?}");
+}
+
 /// Bases a CIGAR consumes on each axis and its indel totals.
 fn cigar_content(cg: &str) -> String {
     let (mut query, mut target, mut ins, mut del, mut len) = (0, 0, 0, 0, 0u64);
