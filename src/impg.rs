@@ -49,7 +49,32 @@ thread_local! {
     static PAF_HANDLE: RefCell<Option<(String, std::fs::File)>> = const { RefCell::new(None) };
     static PAF_CIGAR_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static TPA_HANDLE: RefCell<Option<(String, tpa::TpaReader)>> = const { RefCell::new(None) };
-    static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
+    /// Last target sequence fetched on this thread.
+    ///
+    /// The key must include the sequence name, not only its numeric id:
+    /// `MultiImpg` sub-indices use dense per-file ids, so `(id, start, end,
+    /// reverse)` alone collides across genomes and would serve another
+    /// sample's DNA to CIGAR reconstruction.
+    static TARGET_SEQ_CACHE: RefCell<Option<TargetSeqCacheEntry>> = const { RefCell::new(None) };
+}
+
+struct TargetSeqCacheEntry {
+    name: String,
+    target_id: u32,
+    start: i32,
+    end: i32,
+    is_reverse: bool,
+    seq: Vec<u8>,
+}
+
+impl TargetSeqCacheEntry {
+    fn matches(&self, name: &str, target_id: u32, start: i32, end: i32, is_reverse: bool) -> bool {
+        self.target_id == target_id
+            && self.start == start
+            && self.end == end
+            && self.is_reverse == is_reverse
+            && self.name == name
+    }
 }
 
 /// Execute a closure with a thread-local aligner matched to the given distance metric
@@ -522,14 +547,24 @@ impl SortedRanges {
             Err(pos) => pos,
         };
 
-        // Check previous range
-        if i > 0 && (start - self.ranges[i - 1].1).abs() < min_distance {
-            start = self.ranges[i - 1].1;
+        // Snap `start` back onto the previous range's end when the gap is small.
+        // Only ever extend: never pull `start` forward over novel territory.
+        if i > 0 {
+            let prev_end = self.ranges[i - 1].1;
+            if start > prev_end && start - prev_end < min_distance {
+                start = prev_end;
+            }
         }
 
-        // Check next range
-        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < min_distance {
-            end = self.ranges[i].0;
+        // Snap `end` forward onto the next range's start when the gap is small.
+        // The successor must be searched from `end`: `ranges[i]` can start inside
+        // the range being inserted, and `end` may only ever grow. Using
+        // `(ranges[i].0 - end).abs()` truncated `end` and silently dropped the
+        // novel tail of the inserted range.
+        if let Some(&(next_start, _)) = self.ranges[i..].iter().find(|(s, _)| *s >= end) {
+            if next_start > end && next_start - end < min_distance {
+                end = next_start;
+            }
         }
 
         // Return regions that don't overlap with existing ranges
@@ -609,22 +644,29 @@ impl SortedRanges {
         };
 
         // Find nearby ranges to potentially merge with
-        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+        let i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
 
-        // Check previous range
-        if i > 0 && (start - self.ranges[i - 1].1).abs() < self.min_distance {
-            start = self.ranges[i - 1].1;
-            i -= 1;
+        // Snap `start` back onto the previous range's end when the gap is small.
+        // Only ever extend: never pull `start` forward over novel territory.
+        if i > 0 {
+            let prev_end = self.ranges[i - 1].1;
+            if start > prev_end && start - prev_end < self.min_distance {
+                start = prev_end;
+            }
         } else if self.sequence_length > 0 && start < self.min_distance {
             start = 0;
         }
 
-        // Check next range
-        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < self.min_distance {
-            end = self.ranges[i].0;
+        // Snap `end` forward onto the next range's start when the gap is small.
+        // The successor must be searched from `end`: `ranges[i]` can start inside
+        // the range being inserted, and `end` may only ever grow.
+        if let Some(&(next_start, _)) = self.ranges[i..].iter().find(|(s, _)| *s >= end) {
+            if next_start > end && next_start - end < self.min_distance {
+                end = next_start;
+            }
         } else if self.sequence_length > 0 && end > (self.sequence_length - self.min_distance) {
             end = self.sequence_length;
         }
@@ -936,12 +978,11 @@ impl Impg {
         end: i32,
         is_reverse: bool,
     ) -> Vec<u8> {
-        let key = (target_id, start, end, is_reverse);
         TARGET_SEQ_CACHE.with(|cache_cell| {
             let mut slot = cache_cell.borrow_mut();
-            if let Some((cached_key, cached_seq)) = slot.as_mut() {
-                if *cached_key == key {
-                    return cached_seq.clone();
+            if let Some(entry) = slot.as_ref() {
+                if entry.matches(target_name, target_id, start, end, is_reverse) {
+                    return entry.seq.clone();
                 }
             }
 
@@ -954,7 +995,14 @@ impl Impg {
                 seq
             };
 
-            *slot = Some((key, seq.clone()));
+            *slot = Some(TargetSeqCacheEntry {
+                name: target_name.to_string(),
+                target_id,
+                start,
+                end,
+                is_reverse,
+                seq: seq.clone(),
+            });
             seq
         })
     }
@@ -4183,5 +4231,57 @@ mod tests {
             }
         }
         assert_eq!(total, 2, "one record must keep both directions");
+    }
+    #[test]
+    fn sorted_ranges_snap_keeps_novel_tail_past_an_inner_range() {
+        // Regression: snapping `end` onto `ranges[i].0` truncated the inserted
+        // range and silently dropped `110..140`.
+        let mut ranges = SortedRanges::with_distance(1000, 50);
+        ranges.insert((105, 110));
+
+        let novel = ranges.insert_with_boundary_snap((10, 140), 50);
+
+        assert_eq!(
+            novel,
+            vec![(10, 105), (110, 140)],
+            "the tail of the inserted range must survive"
+        );
+        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(10, 140)]);
+    }
+
+    #[test]
+    fn sorted_ranges_snap_never_shrinks_the_inserted_range() {
+        let mut ranges = SortedRanges::with_distance(1000, 10);
+        ranges.insert((105, 110));
+
+        let novel = ranges.insert_with_boundary_snap((50, 200), 10);
+
+        assert_eq!(novel, vec![(50, 105), (110, 200)]);
+        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(50, 200)]);
+    }
+
+    #[test]
+    fn sorted_ranges_snap_still_closes_small_gaps() {
+        let mut ranges = SortedRanges::with_distance(1000, 20);
+        ranges.insert((100, 200));
+
+        // 5 bp gap on the left: `start` snaps onto the previous end, so the
+        // jitter is absorbed but the novel tail stays novel.
+        let novel = ranges.insert_with_boundary_snap((205, 300), 20);
+
+        assert_eq!(novel, vec![(200, 300)]);
+        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(100, 300)]);
+    }
+
+    #[test]
+    fn sorted_ranges_plain_insert_ignores_snapping() {
+        // `insert` is used for user-requested ranges: `SortedRanges::new()`
+        // carries `min_distance == 0`, so nothing is ever absorbed.
+        let mut ranges = SortedRanges::new();
+        ranges.insert((0, 5));
+
+        let novel = ranges.insert((10, 40));
+
+        assert_eq!(novel, vec![(10, 40)]);
     }
 }
