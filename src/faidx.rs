@@ -201,9 +201,16 @@ impl FastaIndex {
             )
         })?;
 
-        // Empty or inverted requests are not an error, and `(end - 1) as usize`
-        // underflowed to `usize::MAX` when `end == 0`.
-        if end <= start {
+        // Same rules as the AGC backend: a negative start or an inverted range
+        // is a caller bug, an empty range is empty. `(end - 1) as usize` used to
+        // underflow to `usize::MAX` when `end == 0`.
+        if start < 0 || end < start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid range {start}-{end} for '{seq_name}' in the FASTA input"),
+            ));
+        }
+        if end == start {
             return Ok(Vec::new());
         }
 
@@ -265,5 +272,41 @@ mod open_reader_tests {
         let plain = dir.path().join("x.fa");
         std::fs::write(&plain, b">s\nACGTACGT\n").unwrap();
         assert_eq!(open_reader(&plain).unwrap().n_seqs(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::FastaIndex;
+
+    fn index() -> FastaIndex {
+        let a = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_data/a.fa").to_string();
+        FastaIndex::build_from_files(&[a]).unwrap()
+    }
+
+    #[test]
+    fn ranges_follow_the_agc_rules() {
+        let idx = index();
+        assert_eq!(idx.fetch_sequence("chr1a", 0, 4).unwrap(), b"CTGA");
+        assert!(idx.fetch_sequence("chr1a", 3, 3).unwrap().is_empty());
+        // `(end - 1) as usize` used to wrap to usize::MAX here
+        assert!(idx.fetch_sequence("chr1a", 0, 0).unwrap().is_empty());
+        let err = idx.fetch_sequence("chr1a", 5, 2).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        assert!(idx.fetch_sequence("chr1a", -1, 2).is_err());
+    }
+
+    #[test]
+    fn fetch_from_a_larger_pool_than_the_build_pool() {
+        // Built in a 1-thread pool, fetched from 8 threads: thread index 7 used
+        // to index past `thread_readers`
+        let small = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let idx = small.install(index);
+        let large = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+        let seqs: Vec<Vec<u8>> = large.install(|| {
+            use rayon::prelude::*;
+            (0..64).into_par_iter().map(|_| idx.fetch_sequence("chr3a", 0, 9).unwrap()).collect()
+        });
+        assert!(seqs.iter().all(|s| s == b"AGTTTAGCT"));
     }
 }
