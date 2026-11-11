@@ -152,9 +152,22 @@ impl FastaIndex {
                 if fields.len() >= 2 {
                     let seq_name = fields[0];
                     if !seq_name.is_empty() {
-                        index
+                        if let Some(previous) = index
                             .path_key_to_fasta
-                            .insert(seq_name.to_string(), fasta_idx);
+                            .insert(seq_name.to_string(), fasta_idx)
+                        {
+                            if previous != fasta_idx {
+                                // Later files silently won the lookup, so queries
+                                // against this contig could read another sample's
+                                // sequence.
+                                log::warn!(
+                                    "duplicate sequence name '{}' in '{}'; it shadows the record in '{}'",
+                                    seq_name,
+                                    fasta_path,
+                                    index.fasta_paths[previous]
+                                );
+                            }
+                        }
 
                         // Parse sequence length (second field in .fai file)
                         if let Ok(length) = fields[1].parse::<usize>() {
@@ -188,9 +201,22 @@ impl FastaIndex {
             )
         })?;
 
+        // Empty or inverted requests are not an error, and `(end - 1) as usize`
+        // underflowed to `usize::MAX` when `end == 0`.
+        if end <= start {
+            return Ok(Vec::new());
+        }
+
         let fasta_path = Path::new(&self.fasta_paths[fasta_idx]);
 
-        let thread_idx = rayon::current_thread_index().unwrap_or(self.thread_readers.len() - 1);
+        // `thread_readers` is sized at build time from `rayon::current_num_threads()`.
+        // Fetching from a later, larger pool gives a higher thread index, which used
+        // to index out of bounds. Clamp into the last slot: sharing a slot only costs
+        // some mutex contention, never correctness.
+        let last_slot = self.thread_readers.len().saturating_sub(1);
+        let thread_idx = rayon::current_thread_index()
+            .map(|i| i.min(last_slot))
+            .unwrap_or(last_slot);
         let mut slot = self.thread_readers[thread_idx].lock().unwrap();
         let cache = slot.get_or_insert_with(|| ReaderCache::new(self.readers_per_thread));
         let reader = cache.get_or_open(fasta_idx, fasta_path);
