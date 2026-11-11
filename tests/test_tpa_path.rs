@@ -395,14 +395,14 @@ fn test_tpa_approximate_query_needs_no_sequence_files() {
     }
 }
 
-
 /// Per-file mode: two files whose targets share a local id and coordinates.
 ///
 /// `t1` in `a.tpa` and `y` in `b.tpa` are both local id 1 over 0-1000, with
 /// unrelated bases (the names are chosen so the ids match). The thread-local
 /// target-sequence cache was keyed on `(id, start, end, strand)` only, so the
-/// second query rebuilt `y`'s CIGAR from `t1`'s bases. Each query has its 100 bp deletion in a different place,
-/// so the CIGAR in the PAF output shows which bases were used.
+/// second query rebuilt `y`'s CIGAR from `t1`'s bases. Each query has its
+/// 100 bp deletion in a different place, so the CIGAR in the PAF output shows
+/// which bases were used.
 #[test]
 fn test_per_file_target_cache_does_not_cross_files() {
     let temp_dir = TempDir::new().unwrap();
@@ -440,8 +440,6 @@ fn test_per_file_target_cache_does_not_cross_files() {
             "-b", "r.bed", "-d", "0", "-o", "paf", "-t", "1",
         ],
     );
-    for l in String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.contains("PROBE") || l.contains("WARN")) { eprintln!("{l}"); }
-    eprintln!("{}", String::from_utf8_lossy(&out.stdout));
     assert!(out.status.success(), "query failed: {}", String::from_utf8_lossy(&out.stderr));
     let rows = data_rows(&out.stdout);
     let cigar = |q: &str| -> String {

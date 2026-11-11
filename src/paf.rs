@@ -17,7 +17,6 @@ pub enum ParseErr {
     IoError(IoError),
     InvalidField(ParseIntError),
     InvalidStrand,
-    InvalidCigarFormat,
     UnsupportedCigarOperation,
     InvalidFormat(String),
 }
@@ -29,7 +28,6 @@ impl std::fmt::Display for ParseErr {
             ParseErr::IoError(e) => write!(f, "IO error: {}", e),
             ParseErr::InvalidField(e) => write!(f, "Invalid field: {}", e),
             ParseErr::InvalidStrand => write!(f, "Invalid strand"),
-            ParseErr::InvalidCigarFormat => write!(f, "Invalid CIGAR format"),
             ParseErr::UnsupportedCigarOperation => write!(f, "Unsupported CIGAR operation"),
             ParseErr::InvalidFormat(msg) => write!(f, "{}", msg),
         }
@@ -530,6 +528,32 @@ mod tests {
         for bad in ["", "=", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
             assert!(validate_cigar_tag(bad).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn test_validate_cigar_tag_fast_path_agrees_with_the_exact_check() {
+        // The fast path only decides when to run `describe_cigar_error`; a
+        // CIGAR it lets through unchecked must be valid. 200,000 random
+        // strings over digits and ops, lengths 0-14, many near the 29-bit limit
+        let alphabet = b"0123456789=XIDMSN";
+        let mut x: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut rejected = 0;
+        for _ in 0..200_000 {
+            let len = (next() % 15) as usize;
+            let s: String = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize] as char)
+                .collect();
+            let exact_ok = describe_cigar_error(s.as_bytes()).is_empty();
+            assert_eq!(validate_cigar_tag(&s).is_ok(), exact_ok, "{s:?}");
+            rejected += usize::from(!exact_ok);
+        }
+        assert!(rejected > 0 && rejected < 200_000, "{rejected} rejected");
     }
 
     #[test]
