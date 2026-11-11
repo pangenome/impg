@@ -113,6 +113,49 @@ pub fn read_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
     }
 }
 
+/// Validate the payload of a `cg:Z` tag and return its byte length.
+///
+/// impg re-reads the CIGAR out of the file on every query. Without this check a
+/// malformed CIGAR was only discovered inside a rayon worker, where
+/// `CigarOp::new` panics on an unknown operation and the run dies without
+/// naming the offending file or record.
+fn validate_cigar_tag(cigar: &str) -> Result<usize, ParseErr> {
+    if cigar.is_empty() {
+        return Err(ParseErr::InvalidCigarFormat);
+    }
+
+    // `CigarOp` packs the length into 29 bits.
+    const MAX_OP_LEN: u64 = 1 << 29;
+
+    let mut len: u64 = 0;
+    let mut has_digits = false;
+    let mut saw_op = false;
+    for byte in cigar.bytes() {
+        if byte.is_ascii_digit() {
+            len = len * 10 + u64::from(byte - b'0');
+            if len >= MAX_OP_LEN {
+                return Err(ParseErr::InvalidCigarFormat);
+            }
+            has_digits = true;
+        } else {
+            if !has_digits || !matches!(byte, b'=' | b'X' | b'I' | b'D' | b'M') {
+                return Err(ParseErr::InvalidCigarFormat);
+            }
+            has_digits = false;
+            len = 0;
+            saw_op = true;
+        }
+    }
+
+    // A trailing digit run means an operation without a length or a length
+    // without an operation.
+    if !saw_op || has_digits {
+        return Err(ParseErr::InvalidCigarFormat);
+    }
+
+    Ok(cigar.len())
+}
+
 /// Parse a single PAF line into an AlignmentRecord
 /// This is PAF-format specific parsing logic
 fn parse_paf_line(
@@ -151,9 +194,9 @@ fn parse_paf_line(
     let mut cigar_bytes: usize = 0;
 
     for tag_str in fields.iter() {
-        if tag_str.starts_with("cg:Z:") {
+        if let Some(cigar) = tag_str.strip_prefix("cg:Z:") {
             cigar_offset += 5;
-            cigar_bytes = tag_str.len() - 5;
+            cigar_bytes = validate_cigar_tag(cigar)?;
             break;
         } else {
             cigar_offset += (tag_str.len() + 1) as u64;
@@ -177,18 +220,27 @@ fn parse_paf_line(
 }
 
 pub fn parse_paf<R: BufRead>(
-    reader: R,
+    mut reader: R,
     seq_index: &mut SequenceIndex,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
     let mut bytes_read: u64 = 0;
     let mut records = Vec::new();
-    for line_result in reader.lines() {
-        let line = line_result.map_err(ParseErr::IoError)?;
-        let record = parse_paf_line(&line, bytes_read, seq_index)?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let line_bytes = reader.read_line(&mut line).map_err(ParseErr::IoError)?;
+        if line_bytes == 0 {
+            break; // EOF
+        }
+
+        // `read_line` keeps the terminator. Strip it before parsing, but advance
+        // `bytes_read` by the raw byte count: the stored CIGAR offsets are
+        // absolute file positions, so a CRLF file must not lose one byte per line.
+        let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
+        let record = parse_paf_line(trimmed, bytes_read, seq_index)?;
         records.push(record);
 
-        // Size of line plus newline
-        bytes_read += (line.len() + 1) as u64;
+        bytes_read += line_bytes as u64;
     }
     Ok(records)
 }
@@ -217,11 +269,16 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
             break; // EOF
         }
 
-        // Convert to string for parsing (excluding newline)
+        // Convert to string for parsing (excluding the terminator)
         let line_len = if line_bytes.ends_with(b"\n") {
             line_bytes.len() - 1
         } else {
             line_bytes.len()
+        };
+        let line_len = if line_bytes[..line_len].ends_with(b"\r") {
+            line_len - 1
+        } else {
+            line_len
         };
         let line = std::str::from_utf8(&line_bytes[..line_len])
             .map_err(|_| ParseErr::InvalidFormat("Invalid UTF-8".to_string()))?;
@@ -408,9 +465,45 @@ mod tests {
 
     #[test]
     fn test_parse_paf_cigar_invalid() {
-        // it's got Q in the CIGAR string
-        let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
+        // it's got Q in the CIGAR string (all other fields are valid)
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10Q";
+        let mut seq_index = SequenceIndex::new();
+        let err = parse_paf_line(line, 0, &mut seq_index);
+        assert!(err.is_err(), "invalid CIGAR op must be rejected");
+    }
+
+    #[test]
+    fn test_parse_paf_cigar_with_clip_is_rejected() {
+        // impg cannot project soft/hard clips (`CigarOp::new` panics); reject
+        // them at index time instead of inside a query worker.
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10S90=";
         let mut seq_index = SequenceIndex::new();
         assert!(parse_paf_line(line, 0, &mut seq_index).is_err());
+    }
+
+    #[test]
+    fn test_parse_paf_cigar_without_op_is_rejected() {
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:100";
+        let mut seq_index = SequenceIndex::new();
+        assert!(parse_paf_line(line, 0, &mut seq_index).is_err());
+    }
+
+    #[test]
+    fn test_parse_paf_crlf_offsets_stay_absolute() {
+        // Regression: `BufRead::lines()` strips `\r\n`, so advancing by
+        // `len + 1` drifted every following CIGAR offset by one byte per line
+        // and read the wrong bytes back out of the file.
+        let paf = "seq1\t100\t0\t50\t+\tseq2\t100\t0\t50\t50\t50\t60\tcg:Z:50=\r\n\
+seq1\t100\t50\t100\t+\tseq2\t100\t50\t100\t50\t50\t60\tcg:Z:50=\r\n";
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(std::io::BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        assert_eq!(records.len(), 2);
+
+        let second_offset = records[1].data_offset();
+        let expected = paf.match_indices("cg:Z:").nth(1).unwrap().0 + 5;
+        assert_eq!(
+            second_offset, expected as u64,
+            "second CIGAR offset must point at its own `cg:Z:` field"
+        );
     }
 }
