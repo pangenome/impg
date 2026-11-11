@@ -119,4 +119,5 @@ jobs:
             export DYLD_LIBRARY_PATH="target/release:$DYLD_LIBRARY_PATH"
           fi
           export TMPDIR="${{ runner.temp }}"
-          cargo test --release -- --test-threads=1
+          # Overflow checks, impg crate only
+          cargo test --release --config 'profile.release.package.impg.overflow-checks=true' -- --test-threads=1

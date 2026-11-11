@@ -1242,12 +1242,16 @@ fn physical_forward(orientation: u8, mirror: bool) -> bool {
     (orientation == 0) != mirror
 }
 
-/// The anchor window start under one placement (slice A, verbatim).
-fn anchor_window_start(canonical_pos: u64, start: u64, span: u64, k: u64, orientation: u8) -> u64 {
+/// The anchor window start under one placement (slice A).
+///
+/// Signed: an occurrence on the first base with origin shift -1 has
+/// `start == -1`, and `-1 as u64` overflowed here. A window that starts
+/// before the path is negative and fails the caller's bounds check.
+fn anchor_window_start(canonical_pos: u64, start: i64, span: u64, k: u64, orientation: u8) -> i64 {
     if orientation == 0 {
-        start + canonical_pos
+        start + canonical_pos as i64
     } else {
-        start + span - k - canonical_pos
+        start + span as i64 - k as i64 - canonical_pos as i64
     }
 }
 
@@ -1303,8 +1307,8 @@ fn verify_key_at(
     for (j, &(node, canonical_pos)) in shape.canonical.iter().enumerate() {
         let _ = node;
         let window_lo =
-            anchor_window_start(canonical_pos, origin as u64, shape.span, k, occ.orientation);
-        let rel_lo = window_lo as i64 - lo as i64;
+            anchor_window_start(canonical_pos, origin, shape.span, k, occ.orientation);
+        let rel_lo = window_lo - lo as i64;
         if rel_lo < 0 || rel_lo + k as i64 > seq.len() as i64 {
             return false;
         }
@@ -13555,8 +13559,8 @@ mod tests {
         for (j, &(node, canonical_pos)) in shape.canonical.iter().enumerate() {
             let _ = node;
             let window_lo =
-                anchor_window_start(canonical_pos, origin as u64, shape.span, k, occ.orientation);
-            let rel_lo = window_lo as i64 - lo as i64;
+                anchor_window_start(canonical_pos, origin, shape.span, k, occ.orientation);
+            let rel_lo = window_lo - lo as i64;
             if rel_lo < 0 || rel_lo + k as i64 > seq.len() as i64 {
                 return false;
             }
