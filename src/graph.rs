@@ -1128,6 +1128,14 @@ pub fn intervals_to_temp_fasta(
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Option<tempfile::NamedTempFile>> {
     let sequences = prepare_sequences(impg, results, sequence_index)?;
+    sequences_to_temp_fasta(&sequences)
+}
+
+/// Write already-prepared sequences to a temp FASTA named by path name.
+/// None when there is nothing to write.
+pub fn sequences_to_temp_fasta(
+    sequences: &[(String, SequenceMetadata)],
+) -> io::Result<Option<tempfile::NamedTempFile>> {
     if sequences.is_empty() {
         return Ok(None);
     }
@@ -1137,13 +1145,18 @@ pub fn intervals_to_temp_fasta(
         .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
     {
         let mut writer = BufWriter::new(&combined_fasta);
-        for (seq, meta) in &sequences {
+        for (seq, meta) in sequences {
             writeln!(writer, ">{}", meta.path_name())?;
             writeln!(writer, "{}", seq)?;
         }
         writer.flush()?;
     }
     Ok(Some(combined_fasta))
+}
+
+/// Collect the metadata of prepared sequences, for strand post-processing.
+pub fn sequence_metadata(sequences: &[(String, SequenceMetadata)]) -> Vec<SequenceMetadata> {
+    sequences.iter().map(|(_, meta)| meta.clone()).collect()
 }
 
 /// UTF-8 path of a temp file, for the FASTA-path graph builders.
@@ -1160,7 +1173,8 @@ pub fn generate_gfa_seqwish_from_intervals(
     sequence_index: &UnifiedSequenceIndex,
     config: &crate::commands::graph::GraphBuildConfig,
 ) -> io::Result<String> {
-    let Some(combined_fasta) = intervals_to_temp_fasta(impg, results, sequence_index)? else {
+    let sequences = prepare_sequences(impg, results, sequence_index)?;
+    let Some(combined_fasta) = sequences_to_temp_fasta(&sequences)? else {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     };
     // Same pipeline as `graph --gfa-engine seqwish`
@@ -1170,12 +1184,18 @@ pub fn generate_gfa_seqwish_from_intervals(
         &mut gfa_output,
         config,
     )?;
-    String::from_utf8(gfa_output).map_err(|e| {
+    let gfa = String::from_utf8(gfa_output).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Invalid UTF-8 in GFA: {}", e),
         )
-    })
+    })?;
+    // `prepare_sequences` reverse-complements `-` intervals, so their steps must
+    // be emitted in reverse order with flipped orientations.
+    Ok(post_process_gfa_for_strands(
+        gfa,
+        &sequence_metadata(&sequences),
+    ))
 }
 
 #[cfg(test)]

@@ -370,8 +370,7 @@ impl SyngImpgWrapper {
             .into_iter()
             .filter_map(|iv| {
                 let id = self.seq_index.get_id(&iv.genome)?;
-                let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
-                Some((interval, vec![], interval))
+                Some(syng_homolog(iv.start, iv.end, iv.strand, id))
             })
             .collect())
     }
@@ -411,8 +410,7 @@ impl SyngImpgWrapper {
             .into_iter()
             .filter_map(|iv| {
                 let id = self.seq_index.get_id(&iv.genome)?;
-                let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
-                Some((interval, vec![], interval))
+                Some(syng_homolog(iv.start, iv.end, iv.strand, id))
             })
             .collect())
     }
@@ -501,8 +499,7 @@ impl SyngImpgWrapper {
                 // target (homolog) interval. partition uses the first element
                 // as "the other genome's region that belongs in this
                 // partition" — which is the homolog, not the query region.
-                let t_iv = coitrees::Interval::new(c.start as i32, c.end as i32, tid);
-                Some((t_iv, Vec::<impg::CigarOp>::new(), t_iv))
+                Some(syng_homolog(c.start, c.end, c.strand, tid))
             })
             .collect();
         if let Some(mut metrics) = metrics {
@@ -511,6 +508,24 @@ impl SyngImpgWrapper {
         }
         Ok(result)
     }
+}
+
+/// A syng homolog as an `AdjustedInterval`: the homolog with its strand, and
+/// the same homolog forward in the target slot.
+///
+/// impg encodes reverse orientation as `first > last`, like
+/// `syng_intervals_to_adjusted` in `main.rs`. Building the homolog as
+/// `(start, end)` dropped the strand, so reverse-strand homologs were reported
+/// forward and never reverse-complemented. The target slot stays forward
+/// because partition scales it with `last - first` (`mask_and_update_regions`).
+fn syng_homolog(start: u64, end: u64, strand: char, id: u32) -> impg::AdjustedInterval {
+    let forward = coitrees::Interval::new(start as i32, end as i32, id);
+    let homolog = if strand == '-' {
+        coitrees::Interval::new(end as i32, start as i32, id)
+    } else {
+        forward
+    };
+    (homolog, Vec::new(), forward)
 }
 
 impl impg_index::ImpgIndex for SyngImpgWrapper {
@@ -843,12 +858,18 @@ fn build_syng_local_region_gfa_from_intervals(
         mode,
         frequency_mask,
     )?;
-    String::from_utf8(out).map_err(|e| {
+    let gfa = String::from_utf8(out).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("local syng GFA is not UTF-8: {e}"),
         )
-    })
+    })?;
+    // `prepare_sequences` reverse-complements `-` intervals; without this their
+    // P lines spelled the reverse complement in forward order.
+    Ok(graph::post_process_gfa_for_strands(
+        gfa,
+        &graph::sequence_metadata(&sequences),
+    ))
 }
 
 fn build_syng_region_gfa_from_intervals(
@@ -1112,8 +1133,8 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::Pggb => {
-            let Some(fasta) = graph::intervals_to_temp_fasta(impg, query_intervals, sequence_index)?
-            else {
+            let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
+            let Some(fasta) = graph::sequences_to_temp_fasta(&sequences)? else {
                 return Ok(String::from("H\tVN:Z:1.0\n"));
             };
             // n_haps counts distinct SAMPLE#HAPLOTYPE prefixes, not intervals
@@ -1123,7 +1144,7 @@ fn dispatch_gfa_engine_inner(
                     .filter_map(|iv| impg.seq_index().get_name(iv.metadata)),
                 sweepga::pansn::PanSnLevel::Haplotype,
             );
-            commands::graph::pggb_from_fasta(
+            let gfa = commands::graph::pggb_from_fasta(
                 &[graph::temp_path_string(&fasta)?],
                 n_haps,
                 &engine_opts.pipeline,
@@ -1131,7 +1152,13 @@ fn dispatch_gfa_engine_inner(
                 engine_opts.max_node_length,
                 engine_opts.poa_padding_fraction,
                 !skip_normalize,
-            )
+            )?;
+            // `prepare_sequences` reverse-complements `-` intervals; without this
+            // their P lines spelled the reverse complement in forward order.
+            Ok(graph::post_process_gfa_for_strands(
+                gfa,
+                &graph::sequence_metadata(&sequences),
+            ))
         }
         GfaEngine::SyngNative => {
             // The CLI always sets a mode; library callers get its default
@@ -1515,6 +1542,35 @@ mod tests {
             );
             assert_eq!(iv.last, target_iv.last);
             assert_eq!(iv.metadata, target_iv.metadata);
+        }
+    }
+
+    #[test]
+    fn test_syng_impg_wrapper_keeps_the_reverse_strand() {
+        // D is the reverse complement of A: its homologs must come back with
+        // first > last, the target slot forward over the same span
+        let _guard = lock_syng();
+        let a = make_test_sequence(20_000, 42);
+        let d = graph::reverse_complement(&a);
+        for min_chain_anchors in [None, Some(1)] {
+            let index = syng::SyngIndex::build(
+                syng::SyncmerParams::default(),
+                vec![("A".to_string(), a.clone()), ("D".to_string(), d.clone())].into_iter(),
+            );
+            let seq_index = index.build_seq_index();
+            let mut wrapper = SyngImpgWrapper::new(index, seq_index, 0);
+            wrapper.min_chain_anchors = min_chain_anchors;
+            let a_id = wrapper.seq_index().get_id("A").unwrap();
+            let d_id = wrapper.seq_index().get_id("D").unwrap();
+            let results = wrapper
+                .query_transitive_dfs(a_id, 1_000, 19_000, None, 1, 0, 0, None, false, None, None, false, None)
+                .unwrap();
+            let d_hits: Vec<_> = results.iter().filter(|(iv, _, _)| iv.metadata == d_id).collect();
+            assert!(!d_hits.is_empty(), "{min_chain_anchors:?}: no hit on D");
+            for (iv, _, target) in d_hits {
+                assert!(iv.first > iv.last, "{min_chain_anchors:?}: D hit {iv:?} is not reverse");
+                assert_eq!((target.first, target.last), (iv.last, iv.first), "{min_chain_anchors:?}");
+            }
         }
     }
 
