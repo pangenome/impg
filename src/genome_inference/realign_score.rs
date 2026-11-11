@@ -329,26 +329,13 @@ use std::time::Instant;
 /// uniformly trimmed length). Derived from the derive cache's own
 /// uniform read length at load (the cache is a pure function of the
 /// FASTQ and the panel).
-/// THE FRESH-PROCESS READ LENGTH (the committed initial value of
-/// the read length in every standalone run): every committed receipt
-/// computes the elsewhere branch E BEFORE the derive cache states the
-/// cache's own declared read length, so E is measured at THIS value
-/// in every standalone run.
-/// THE CONCURRENT-CALLS AMENDMENT: the read length is now PER-CALL
-/// state (a local in `run_injected`), not a process-global — under
-/// the combined process's CONCURRENT calls a process-global would
-/// race across calls (one call's derive-cache store landing before
-/// another call's E read, the exact divergence class the serial
-/// combined process's first gate receipted at the stale 148). The
-/// per-call local reproduces the fresh-process trajectory BY
-/// CONSTRUCTION at any call concurrency: initialized here, read at E
-/// before the derive load stores the declared length, and shared
-/// immutably with the seam threads afterwards.
+/// The read length is per-call state (a local in `run_injected`), set
+/// from the derive cache before the elsewhere branch E is computed.
+/// Receipts committed before 2026-11-11 computed E at a fixed 150
+/// before the cache declared its length; for reads of another length
+/// (the HG002 pilot's 148) their E differs from the current one.
+#[cfg(test)]
 const READ_LENGTH_FRESH: usize = 150;
-#[inline]
-fn read_len() -> usize {
-    READ_LENGTH_FRESH
-}
 
 // ---------------------------------------------------------------------------
 // Options and small utilities (the slice A runner conventions).
@@ -7718,24 +7705,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         .sum::<f64>()
         / strain_totals.len() as f64;
     let genome_diploid_bp = 2.0 * panel_mean_haploid_bp;
-    let elsewhere = elsewhere_log_prob(read_len(), scoring.a, genome_diploid_bp);
     let strain_list: Vec<serde_json::Value> = strain_totals
         .iter()
         .map(|(strain, &(paths, bp))| json!({"strain": strain, "paths": paths, "bp": bp}))
         .collect();
-    eprintln!(
-        "[score] elsewhere branch: E = {elsewhere:.6} \
-         (panel strains {}, mean haploid {panel_mean_haploid_bp:.1} bp, \
-         diploid {genome_diploid_bp:.1} bp{})",
-        strain_totals.len(),
-        if territory_frame.is_some() {
-            "; the territory's RECORD context (the committed local panel's \
-             own record set; the global panel's whole-chromosome context is \
-             the named native-profile alternative)"
-        } else {
-            ""
-        },
-    );
     eprintln!(
         "[score] phase elsewhere: E derivation over {} haplotype sets \
          [{:.3}s]",
@@ -7769,6 +7742,23 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         "[score] derive cache loaded: {} reads, {} keys ({derive_seconds:.1}s)",
         reads.len(),
         key_tokens.len(),
+    );
+    // E at the reads' own length, the one the local likelihoods use. It
+    // was computed at a fixed 150 before the cache declared the length,
+    // so reads of any other length compared E(150) with local L terms.
+    let elsewhere = elsewhere_log_prob(read_length, scoring.a, genome_diploid_bp);
+    eprintln!(
+        "[score] elsewhere branch: E = {elsewhere:.6} at read length {read_length} \
+         (panel strains {}, mean haploid {panel_mean_haploid_bp:.1} bp, \
+         diploid {genome_diploid_bp:.1} bp{})",
+        strain_totals.len(),
+        if territory_frame.is_some() {
+            "; the territory's RECORD context (the committed local panel's \
+             own record set; the global panel's whole-chromosome context is \
+             the named native-profile alternative)"
+        } else {
+            ""
+        },
     );
     struct ReadRecord {
         key: u32,
