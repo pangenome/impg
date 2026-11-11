@@ -2222,6 +2222,19 @@ mod tests {
                 vec![(0, 50), (10, 200)],
                 "Overlap kept when the next range ends inside it",
             ),
+            // The neighbours touch (100 == 100): lacing links them, so the
+            // middle range is redundant. The old rule kept it.
+            (
+                vec![(0, 100), (50, 200), (100, 300)],
+                vec![(0, 100), (100, 300)],
+                "Middle range dropped when its neighbours touch and cover it",
+            ),
+            // A chain where each next range covers the current tail
+            (
+                vec![(0, 100), (50, 150), (90, 250), (140, 400)],
+                vec![(0, 100), (90, 250), (140, 400)],
+                "Covered middle ranges dropped along a chain",
+            ),
         ];
 
         // Run each test case
