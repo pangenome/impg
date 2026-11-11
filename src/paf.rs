@@ -119,41 +119,59 @@ pub fn read_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
 /// malformed CIGAR was only discovered inside a rayon worker, where
 /// `CigarOp::new` panics on an unknown operation and the run dies without
 /// naming the offending file or record.
-fn validate_cigar_tag(cigar: &str) -> Result<usize, ParseErr> {
-    if cigar.is_empty() {
-        return Err(ParseErr::InvalidCigarFormat);
-    }
-
-    // `CigarOp` packs the length into 29 bits.
-    const MAX_OP_LEN: u64 = 1 << 29;
-
-    let mut len: u64 = 0;
-    let mut has_digits = false;
-    let mut saw_op = false;
-    for byte in cigar.bytes() {
-        if byte.is_ascii_digit() {
-            len = len * 10 + u64::from(byte - b'0');
-            if len >= MAX_OP_LEN {
-                return Err(ParseErr::InvalidCigarFormat);
-            }
-            has_digits = true;
-        } else {
-            if !has_digits || !matches!(byte, b'=' | b'X' | b'I' | b'D' | b'M') {
-                return Err(ParseErr::InvalidCigarFormat);
-            }
-            has_digits = false;
-            len = 0;
-            saw_op = true;
+fn validate_cigar_tag(cigar: &str) -> Result<usize, String> {
+    let b = cigar.as_bytes();
+    let digit = |c: u8| c.wrapping_sub(b'0') < 10;
+    let op = |c: u8| matches!(c, b'=' | b'X' | b'I' | b'D' | b'M');
+    // Independent per-byte checks, no early exit, so they vectorize
+    let bad = b.iter().fold(false, |acc, &c| acc | !(digit(c) | op(c)));
+    let op_after_op = b.windows(2).fold(false, |acc, w| acc | (!digit(w[0]) & !digit(w[1])));
+    // 9+ digits may not fit the 29 packed bits: check exactly below
+    let long = b
+        .windows(9)
+        .fold(false, |acc, w| acc | w.iter().fold(true, |all, &c| all & digit(c)));
+    let ends_ok = b.first().is_some_and(|&c| digit(c)) && b.last().is_some_and(|&c| op(c));
+    if bad | op_after_op | long | !ends_ok {
+        let reason = describe_cigar_error(b);
+        if !reason.is_empty() {
+            return Err(reason);
         }
     }
-
-    // A trailing digit run means an operation without a length or a length
-    // without an operation.
-    if !saw_op || has_digits {
-        return Err(ParseErr::InvalidCigarFormat);
-    }
-
     Ok(cigar.len())
+}
+
+/// Reason a CIGAR fails, or an empty string when it is valid.
+fn describe_cigar_error(bytes: &[u8]) -> String {
+    // `CigarOp` packs the length into 29 bits
+    const MAX_OP_LEN: u64 = 1 << 29;
+    if bytes.is_empty() {
+        return "it is empty".to_string();
+    }
+    let mut run_start = 0;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_digit() {
+            continue;
+        }
+        let digits = &bytes[run_start..i];
+        if digits.is_empty() {
+            return format!("operation '{}' has no length", byte as char);
+        }
+        if !matches!(byte, b'=' | b'X' | b'I' | b'D' | b'M') {
+            return format!(
+                "operation '{}' is not one of =XIDM (S/H clips, N and P are unsupported)",
+                byte as char
+            );
+        }
+        let len = digits.iter().fold(0u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d - b'0')));
+        if len >= MAX_OP_LEN {
+            return format!("an operation length reaches {MAX_OP_LEN}, the packed maximum");
+        }
+        run_start = i + 1;
+    }
+    if run_start < bytes.len() {
+        return "it ends with a length and no operation".to_string();
+    }
+    String::new()
 }
 
 /// Parse a single PAF line into an AlignmentRecord
@@ -196,7 +214,12 @@ fn parse_paf_line(
     for tag_str in fields.iter() {
         if let Some(cigar) = tag_str.strip_prefix("cg:Z:") {
             cigar_offset += 5;
-            cigar_bytes = validate_cigar_tag(cigar)?;
+            cigar_bytes = validate_cigar_tag(cigar).map_err(|reason| {
+                ParseErr::InvalidFormat(format!(
+                    "invalid cg:Z CIGAR in record {query_name}:{query_start}-{query_end} -> \
+                     {target_name}:{target_start}-{target_end}: {reason}"
+                ))
+            })?;
             break;
         } else {
             cigar_offset += (tag_str.len() + 1) as u64;
@@ -468,8 +491,25 @@ mod tests {
         // it's got Q in the CIGAR string (all other fields are valid)
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10Q";
         let mut seq_index = SequenceIndex::new();
-        let err = parse_paf_line(line, 0, &mut seq_index);
-        assert!(err.is_err(), "invalid CIGAR op must be rejected");
+        let err = parse_paf_line(line, 0, &mut seq_index).unwrap_err().to_string();
+        assert!(err.contains("'Q'") && err.contains("seq1:0-100 -> seq2:0-100"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_paf_bgzf_crlf() {
+        // The BGZF reader kept the `\r`, so the CIGAR ended in `\r` and was rejected
+        let paf = "seq1\t100\t0\t50\t+\tseq2\t100\t0\t50\t50\t50\t60\tcg:Z:50=\r\n";
+        let mut buf = Vec::new();
+        {
+            let mut writer = noodles::bgzf::io::Writer::new(&mut buf);
+            std::io::Write::write_all(&mut writer, paf.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        let mut seq_index = SequenceIndex::new();
+        let reader = noodles::bgzf::io::Reader::new(std::io::Cursor::new(buf));
+        let records = parse_paf_bgzf(reader, &mut seq_index).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data_bytes, 3, "the CIGAR is `50=` without the `\\r`");
     }
 
     #[test]
@@ -478,7 +518,18 @@ mod tests {
         // them at index time instead of inside a query worker.
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10S90=";
         let mut seq_index = SequenceIndex::new();
-        assert!(parse_paf_line(line, 0, &mut seq_index).is_err());
+        let err = parse_paf_line(line, 0, &mut seq_index).unwrap_err().to_string();
+        assert!(err.contains("'S'") && err.contains("clips"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_cigar_tag_edges() {
+        for ok in ["10=20X3I4D5M", "536870911=", "0000000001=", "1="] {
+            assert_eq!(validate_cigar_tag(ok), Ok(ok.len()), "{ok}");
+        }
+        for bad in ["", "=", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
+            assert!(validate_cigar_tag(bad).is_err(), "{bad:?} must be rejected");
+        }
     }
 
     #[test]
