@@ -594,74 +594,39 @@ pub(crate) fn split_path_name(path_name: &str) -> Option<(String, usize, usize)>
 }
 
 pub(crate) fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
-    // Sort ranges by start position
-    ranges.sort_by_key(|r| (r.start, r.end));
+    // Sort by start, then longest first, so a containing range always precedes
+    // the ranges nested inside it.
+    ranges.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
 
     debug!("  Removing redundant ranges");
 
-    // Remove ranges that are contained within other ranges
+    // Drop exact duplicates and ranges fully contained in the range already
+    // kept. Also drop a range that its two neighbours together cover, but only
+    // when they really cover it: the previous heuristic compared overlap lengths
+    // and dropped the middle range even when the neighbours left a hole, losing
+    // the tail. `[(0,100), (50,200), (60,70)]` lost `100..200` that way.
     let mut write_idx = 0;
     for read_idx in 1..ranges.len() {
         let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
         let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
 
-        if curr_start == prev_start && curr_end == prev_end {
-            // Skip duplicate range
-            // Current range is a duplicate of the previous range, skip it
-            // debug!(
-            //     "    Duplicate range detected: Range [start={curr_start}, end={curr_end}] is identical to previous range and will be removed."
-            // );
-
+        // Duplicate or fully contained in the range already kept.
+        if curr_start >= prev_start && curr_end <= prev_end {
             continue;
-        } else if curr_start >= prev_start && curr_end <= prev_end {
-            // Skip range that is fully contained within previous range
-            // debug!(
-            //     "    Contained range detected: Range [start={curr_start}, end={curr_end}] is fully contained within previous range [start={prev_start}, end={prev_end}] and will be removed."
-            // );
+        }
 
-            continue;
-        } else if prev_start >= curr_start && prev_end <= curr_end {
-            // Previous range is fully contained within current range
-            // debug!(
-            //     "    Containing range detected: Previous range [start={prev_start}, end={prev_end}] is fully contained within current range [start={curr_start}, end={curr_end}] and will be removed."
-            // );
+        // The next range, plus everything kept so far, covers this one:
+        // no gap between them (`next_start <= prev_end`) and the next range
+        // reaches at least as far as this one (`next_end >= curr_end`).
+        if let Some(next) = ranges.get(read_idx + 1) {
+            if next.start <= prev_end && next.end >= curr_end {
+                continue;
+            }
+        }
 
+        write_idx += 1;
+        if write_idx != read_idx {
             ranges.swap(write_idx, read_idx);
-        } else if curr_start < prev_end {
-            // Handle overlapping ranges - check both previous and next ranges
-            let mut should_skip = false;
-
-            if read_idx < ranges.len() - 1 {
-                let next_start = ranges[read_idx + 1].start;
-
-                // Check if current range is significantly overlapped by both neighbors
-                if curr_start > prev_start && next_start < curr_end {
-                    let overlap_with_prev = prev_end - curr_start;
-                    let overlap_with_next = curr_end - next_start;
-                    let range_length = curr_end - curr_start;
-
-                    // Skip if the range is mostly covered by its neighbors
-                    if overlap_with_prev + overlap_with_next > range_length {
-                        should_skip = true;
-                    }
-                }
-            }
-
-            if !should_skip {
-                debug!(
-                    "    Overlapping range detected: Range [start={curr_start}, end={curr_end}] overlaps with previous range [start={prev_start}, end={prev_end}] and will be kept."
-                );
-                write_idx += 1;
-                if write_idx != read_idx {
-                    ranges.swap(write_idx, read_idx);
-                }
-            }
-        } else {
-            // No overlap - keep both ranges
-            write_idx += 1;
-            if write_idx != read_idx {
-                ranges.swap(write_idx, read_idx);
-            }
         }
     }
     ranges.truncate(write_idx + 1);
@@ -2245,6 +2210,31 @@ mod tests {
                 vec![(8000, 11000), (10908, 13908)],
                 "Overlapping ranges",
             ),
+            // Regression: the middle range is NOT covered by its neighbours
+            // (the next one ends inside it), so its tail must survive.
+            (
+                vec![(0, 100), (50, 200), (60, 70)],
+                vec![(0, 100), (50, 200)],
+                "Middle range tail must not be dropped",
+            ),
+            (
+                vec![(0, 50), (10, 200), (20, 30)],
+                vec![(0, 50), (10, 200)],
+                "Overlap kept when the next range ends inside it",
+            ),
+            // The neighbours touch (100 == 100): lacing links them, so the
+            // middle range is redundant. The old rule kept it.
+            (
+                vec![(0, 100), (50, 200), (100, 300)],
+                vec![(0, 100), (100, 300)],
+                "Middle range dropped when its neighbours touch and cover it",
+            ),
+            // A chain where each next range covers the current tail
+            (
+                vec![(0, 100), (50, 150), (90, 250), (140, 400)],
+                vec![(0, 100), (90, 250), (140, 400)],
+                "Covered middle ranges dropped along a chain",
+            ),
         ];
 
         // Run each test case
@@ -2259,58 +2249,7 @@ mod tests {
                 .map(|(start, end)| create_range_info(*start, *end))
                 .collect();
 
-            // Sort ranges by start position
-            ranges.sort_by_key(|r| (r.start, r.end));
-
-            let mut write_idx = 0;
-            for read_idx in 1..ranges.len() {
-                let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
-                let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
-
-                if curr_start == prev_start && curr_end == prev_end {
-                    // Skip duplicate range
-                    continue;
-                } else if curr_start >= prev_start && curr_end <= prev_end {
-                    // Skip range that is fully contained within previous range
-                    continue;
-                } else if prev_start >= curr_start && prev_end <= curr_end {
-                    // Previous range is fully contained within current range
-                    ranges.swap(write_idx, read_idx);
-                } else if curr_start < prev_end {
-                    // Handle overlapping ranges - check both previous and next ranges
-                    let mut should_skip = false;
-
-                    if read_idx < ranges.len() - 1 {
-                        let next_start = ranges[read_idx + 1].start;
-
-                        // Check if current range is significantly overlapped by both neighbors
-                        if curr_start > prev_start && next_start < curr_end {
-                            let overlap_with_prev = prev_end - curr_start;
-                            let overlap_with_next = curr_end - next_start;
-                            let range_length = curr_end - curr_start;
-
-                            // Skip if the range is mostly covered by its neighbors
-                            if overlap_with_prev + overlap_with_next > range_length {
-                                should_skip = true;
-                            }
-                        }
-                    }
-
-                    if !should_skip {
-                        write_idx += 1;
-                        if write_idx != read_idx {
-                            ranges.swap(write_idx, read_idx);
-                        }
-                    }
-                } else {
-                    // No overlap - keep both ranges
-                    write_idx += 1;
-                    if write_idx != read_idx {
-                        ranges.swap(write_idx, read_idx);
-                    }
-                }
-            }
-            ranges.truncate(write_idx + 1);
+            sort_and_filter_ranges(&mut ranges);
 
             // Create expected ranges
             let expected: Vec<RangeInfo> = expected_ranges
