@@ -370,7 +370,7 @@ impl SyngImpgWrapper {
             .into_iter()
             .filter_map(|iv| {
                 let id = self.seq_index.get_id(&iv.genome)?;
-                let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
+                let interval = syng_homolog_interval(iv.start, iv.end, iv.strand, id);
                 Some((interval, vec![], interval))
             })
             .collect())
@@ -411,7 +411,7 @@ impl SyngImpgWrapper {
             .into_iter()
             .filter_map(|iv| {
                 let id = self.seq_index.get_id(&iv.genome)?;
-                let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
+                let interval = syng_homolog_interval(iv.start, iv.end, iv.strand, id);
                 Some((interval, vec![], interval))
             })
             .collect())
@@ -501,7 +501,7 @@ impl SyngImpgWrapper {
                 // target (homolog) interval. partition uses the first element
                 // as "the other genome's region that belongs in this
                 // partition" — which is the homolog, not the query region.
-                let t_iv = coitrees::Interval::new(c.start as i32, c.end as i32, tid);
+                let t_iv = syng_homolog_interval(c.start, c.end, c.strand, tid);
                 Some((t_iv, Vec::<impg::CigarOp>::new(), t_iv))
             })
             .collect();
@@ -510,6 +510,20 @@ impl SyngImpgWrapper {
             partition_profile::record_backend(metrics);
         }
         Ok(result)
+    }
+}
+
+/// Map a syng homolog interval into impg's coordinate convention.
+///
+/// impg encodes reverse orientation as `first > last`, exactly like
+/// `syng_intervals_to_adjusted` in `main.rs`. Building every interval as
+/// `(start, end)` dropped the strand, so homolog regions found on the reverse
+/// strand were reported as forward and never reverse-complemented.
+fn syng_homolog_interval(start: u64, end: u64, strand: char, id: u32) -> coitrees::Interval<u32> {
+    if strand == '-' {
+        coitrees::Interval::new(end as i32, start as i32, id)
+    } else {
+        coitrees::Interval::new(start as i32, end as i32, id)
     }
 }
 
