@@ -152,9 +152,22 @@ impl FastaIndex {
                 if fields.len() >= 2 {
                     let seq_name = fields[0];
                     if !seq_name.is_empty() {
-                        index
+                        if let Some(previous) = index
                             .path_key_to_fasta
-                            .insert(seq_name.to_string(), fasta_idx);
+                            .insert(seq_name.to_string(), fasta_idx)
+                        {
+                            if previous != fasta_idx {
+                                // Later files silently won the lookup, so queries
+                                // against this contig could read another sample's
+                                // sequence.
+                                log::warn!(
+                                    "duplicate sequence name '{}' in '{}'; it shadows the record in '{}'",
+                                    seq_name,
+                                    fasta_path,
+                                    index.fasta_paths[previous]
+                                );
+                            }
+                        }
 
                         // Parse sequence length (second field in .fai file)
                         if let Ok(length) = fields[1].parse::<usize>() {
@@ -188,9 +201,29 @@ impl FastaIndex {
             )
         })?;
 
+        // Same rules as the AGC backend: a negative start or an inverted range
+        // is a caller bug, an empty range is empty. `(end - 1) as usize` used to
+        // underflow to `usize::MAX` when `end == 0`.
+        if start < 0 || end < start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid range {start}-{end} for '{seq_name}' in the FASTA input"),
+            ));
+        }
+        if end == start {
+            return Ok(Vec::new());
+        }
+
         let fasta_path = Path::new(&self.fasta_paths[fasta_idx]);
 
-        let thread_idx = rayon::current_thread_index().unwrap_or(self.thread_readers.len() - 1);
+        // `thread_readers` is sized at build time from `rayon::current_num_threads()`.
+        // Fetching from a later, larger pool gives a higher thread index, which used
+        // to index out of bounds. Clamp into the last slot: sharing a slot only costs
+        // some mutex contention, never correctness.
+        let last_slot = self.thread_readers.len().saturating_sub(1);
+        let thread_idx = rayon::current_thread_index()
+            .map(|i| i.min(last_slot))
+            .unwrap_or(last_slot);
         let mut slot = self.thread_readers[thread_idx].lock().unwrap();
         let cache = slot.get_or_insert_with(|| ReaderCache::new(self.readers_per_thread));
         let reader = cache.get_or_open(fasta_idx, fasta_path);
@@ -239,5 +272,41 @@ mod open_reader_tests {
         let plain = dir.path().join("x.fa");
         std::fs::write(&plain, b">s\nACGTACGT\n").unwrap();
         assert_eq!(open_reader(&plain).unwrap().n_seqs(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::FastaIndex;
+
+    fn index() -> FastaIndex {
+        let a = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_data/a.fa").to_string();
+        FastaIndex::build_from_files(&[a]).unwrap()
+    }
+
+    #[test]
+    fn ranges_follow_the_agc_rules() {
+        let idx = index();
+        assert_eq!(idx.fetch_sequence("chr1a", 0, 4).unwrap(), b"CTGA");
+        assert!(idx.fetch_sequence("chr1a", 3, 3).unwrap().is_empty());
+        // `(end - 1) as usize` used to wrap to usize::MAX here
+        assert!(idx.fetch_sequence("chr1a", 0, 0).unwrap().is_empty());
+        let err = idx.fetch_sequence("chr1a", 5, 2).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        assert!(idx.fetch_sequence("chr1a", -1, 2).is_err());
+    }
+
+    #[test]
+    fn fetch_from_a_larger_pool_than_the_build_pool() {
+        // Built in a 1-thread pool, fetched from 8 threads: thread index 7 used
+        // to index past `thread_readers`
+        let small = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let idx = small.install(index);
+        let large = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+        let seqs: Vec<Vec<u8>> = large.install(|| {
+            use rayon::prelude::*;
+            (0..64).into_par_iter().map(|_| idx.fetch_sequence("chr3a", 0, 9).unwrap()).collect()
+        });
+        assert!(seqs.iter().all(|s| s == b"AGTTTAGCT"));
     }
 }
