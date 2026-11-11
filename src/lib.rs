@@ -843,12 +843,18 @@ fn build_syng_local_region_gfa_from_intervals(
         mode,
         frequency_mask,
     )?;
-    String::from_utf8(out).map_err(|e| {
+    let gfa = String::from_utf8(out).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("local syng GFA is not UTF-8: {e}"),
         )
-    })
+    })?;
+    // `prepare_sequences` reverse-complements `-` intervals; without this their
+    // P lines spelled the reverse complement in forward order.
+    Ok(graph::post_process_gfa_for_strands(
+        gfa,
+        &graph::sequence_metadata(&sequences),
+    ))
 }
 
 fn build_syng_region_gfa_from_intervals(
@@ -1112,8 +1118,8 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::Pggb => {
-            let Some(fasta) = graph::intervals_to_temp_fasta(impg, query_intervals, sequence_index)?
-            else {
+            let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
+            let Some(fasta) = graph::sequences_to_temp_fasta(&sequences)? else {
                 return Ok(String::from("H\tVN:Z:1.0\n"));
             };
             // n_haps counts distinct SAMPLE#HAPLOTYPE prefixes, not intervals
@@ -1123,7 +1129,7 @@ fn dispatch_gfa_engine_inner(
                     .filter_map(|iv| impg.seq_index().get_name(iv.metadata)),
                 sweepga::pansn::PanSnLevel::Haplotype,
             );
-            commands::graph::pggb_from_fasta(
+            let gfa = commands::graph::pggb_from_fasta(
                 &[graph::temp_path_string(&fasta)?],
                 n_haps,
                 &engine_opts.pipeline,
@@ -1131,7 +1137,13 @@ fn dispatch_gfa_engine_inner(
                 engine_opts.max_node_length,
                 engine_opts.poa_padding_fraction,
                 !skip_normalize,
-            )
+            )?;
+            // `prepare_sequences` reverse-complements `-` intervals; without this
+            // their P lines spelled the reverse complement in forward order.
+            Ok(graph::post_process_gfa_for_strands(
+                gfa,
+                &graph::sequence_metadata(&sequences),
+            ))
         }
         GfaEngine::SyngNative => {
             // The CLI always sets a mode; library callers get its default
