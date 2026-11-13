@@ -10,6 +10,22 @@ pub trait SequenceIndex {
     fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize>;
 }
 
+/// Validate a 0-based half-open sequence range and return the number of bases requested.
+pub(crate) fn checked_range_len(
+    seq_name: &str,
+    start: i32,
+    end: i32,
+    source: &str,
+) -> io::Result<usize> {
+    if start < 0 || end < start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid range {start}-{end} for '{seq_name}' in {source}"),
+        ));
+    }
+    Ok((end - start) as usize)
+}
+
 // Enum to hold either FASTA or AGC index
 #[derive(Debug)]
 pub enum UnifiedSequenceIndex {

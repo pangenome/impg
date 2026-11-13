@@ -204,13 +204,13 @@ impl FastaIndex {
         // Same rules as the AGC backend: a negative start or an inverted range
         // is a caller bug, an empty range is empty. `(end - 1) as usize` used to
         // underflow to `usize::MAX` when `end == 0`.
-        if start < 0 || end < start {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid range {start}-{end} for '{seq_name}' in the FASTA input"),
-            ));
-        }
-        if end == start {
+        let requested = crate::sequence_index::checked_range_len(
+            seq_name,
+            start,
+            end,
+            "the FASTA input",
+        )?;
+        if requested == 0 {
             return Ok(Vec::new());
         }
 
