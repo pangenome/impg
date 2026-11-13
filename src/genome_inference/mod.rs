@@ -28,14 +28,16 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const MODEL: &str = "presence-compatibility";
 pub const COUNT_POLICY: &str = "alternating-node-gap-v1;best-query-orientation-both-inputs;content-subwalk-maximal;canonical-records;rc-orbit-occurrences";
 
+pub(crate) const FNV1A64_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+
 /// Stable FNV-1a content checksum. Detects accidental corruption/identity changes;
 /// not an adversarial authenticity or cryptographic digest contract.
 pub fn checksum(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325;
+    let mut hash = FNV1A64_OFFSET_BASIS;
     hash_update(&mut hash, bytes);
     hash
 }
-fn hash_update(hash: &mut u64, bytes: &[u8]) {
+pub(crate) fn hash_update(hash: &mut u64, bytes: &[u8]) {
     for b in bytes {
         *hash = (*hash ^ *b as u64).wrapping_mul(0x100000001b3);
     }
@@ -54,19 +56,19 @@ impl PanelIdentity {
         let mut sidecars = Vec::new();
         let mut buffer = [0u8; 65536];
         for suffix in ["1gbwt", "1khash", "names", "meta", "spos", "pstep"] {
-            let primary = if suffix.starts_with('1') || prefix.ends_with(".syng") {
-                format!("{prefix}.{suffix}")
-            } else {
-                format!("{prefix}.syng.{suffix}")
-            };
             // Match SyngIndex's primary/legacy resolution exactly.
-            let path = if Path::new(&primary).exists() {
-                primary
+            let path = if suffix.starts_with('1') {
+                let primary = format!("{prefix}.{suffix}");
+                if Path::new(&primary).exists() {
+                    primary
+                } else {
+                    format!("{prefix}.syng.{suffix}")
+                }
             } else {
-                format!("{prefix}.syng.{suffix}")
+                crate::syng::existing_syng_sidecar_path(prefix, suffix)
             };
             let mut file = File::open(&path)?;
-            let mut hash = 0xcbf29ce484222325;
+            let mut hash = FNV1A64_OFFSET_BASIS;
             let mut size = 0;
             loop {
                 let n = file.read(&mut buffer)?;
@@ -128,12 +130,7 @@ fn parse_meta_version(meta_text: &str) -> u32 {
 }
 
 fn resolve_meta_path_and_version(prefix: &str) -> io::Result<(String, u32)> {
-    let primary_meta = crate::syng::syng_meta_path(prefix);
-    let meta_path = if Path::new(&primary_meta).exists() {
-        primary_meta
-    } else {
-        format!("{prefix}.syng.meta")
-    };
+    let meta_path = crate::syng::existing_syng_sidecar_path(prefix, "meta");
     let meta_text = fs::read_to_string(&meta_path)?;
     let version = parse_meta_version(&meta_text);
     Ok((meta_path, version))
@@ -272,10 +269,23 @@ pub(crate) fn is_valid_iupac_base(b: u8) -> bool {
     IUPAC_BASE_TABLE[b as usize]
 }
 
+/// Reads `(VmRSS, VmHWM)` in kB from `/proc/self/status`.
+pub(crate) fn read_proc_status_kb() -> io::Result<(u64, u64)> {
+    let text = fs::read_to_string("/proc/self/status")?;
+    let field_kb = |prefix: &str| -> u64 {
+        text.lines()
+            .find(|l| l.starts_with(prefix))
+            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
+            .unwrap_or(0)
+    };
+    Ok((field_kb("VmRSS:"), field_kb("VmHWM:")))
+}
+
 /// Resident-set memory budget monitor reading `/proc/self/status`.
 pub(crate) struct RssGuard {
     tag: &'static str,
     budget_bytes: Option<u64>,
+    log_peak: bool,
 }
 
 impl RssGuard {
@@ -284,16 +294,19 @@ impl RssGuard {
             tag,
             budget_bytes: (budget_gib > 0.0)
                 .then(|| (budget_gib * (1u64 << 30) as f64) as u64),
+            log_peak: false,
+        }
+    }
+
+    pub(crate) fn with_peak(tag: &'static str, budget_gib: f64) -> Self {
+        Self {
+            log_peak: true,
+            ..Self::new(tag, budget_gib)
         }
     }
 
     pub(crate) fn probe(&self, stage: &str) -> io::Result<u64> {
-        let text = fs::read_to_string("/proc/self/status")?;
-        let rss_kb = text
-            .lines()
-            .find(|l| l.starts_with("VmRSS:"))
-            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-            .unwrap_or(0);
+        let (rss_kb, hwm_kb) = read_proc_status_kb()?;
         if let Some(budget) = self.budget_bytes {
             if rss_kb.saturating_mul(1024) > budget {
                 return Err(invalid(format!(
@@ -301,7 +314,11 @@ impl RssGuard {
                 )));
             }
         }
-        eprintln!("[{}] rss {stage}: {rss_kb} kB", self.tag);
+        if self.log_peak {
+            eprintln!("[{}] rss {stage}: {rss_kb} kB peak {hwm_kb} kB", self.tag);
+        } else {
+            eprintln!("[{}] rss {stage}: {rss_kb} kB", self.tag);
+        }
         Ok(rss_kb)
     }
 }
@@ -371,5 +388,14 @@ mod tests {
         .unwrap();
         let rows = load_component_axis_rows(dir.path(), "A#0#chr").unwrap();
         assert_eq!(rows, vec![(3, 0, 100), (7, 200, 300)]);
+    }
+
+    #[test]
+    fn shared_checksum_and_rss_guard_helpers_match_contracts() {
+        assert_eq!(realign_score::fnv1a64(b""), FNV1A64_OFFSET_BASIS);
+        assert_eq!(realign_score::fnv1a64(b"ACGT"), checksum(b"ACGT"));
+        let (rss_kb, hwm_kb) = read_proc_status_kb().unwrap();
+        assert!(rss_kb > 0 && hwm_kb >= rss_kb);
+        assert!(RssGuard::with_peak("test", 0.0).probe("zero").is_ok());
     }
 }

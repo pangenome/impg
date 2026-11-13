@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 
 pub const BINARY_MAGIC: &[u8; 8] = b"IMPGPKB1";
 pub const BINARY_VERSION: u32 = 1;
@@ -431,10 +431,9 @@ fn read_binary(mut file: File) -> io::Result<Coverage> {
 }
 
 fn auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
-    Ok(Box::new(BufReader::new(reader)))
+    Ok(Box::new(crate::fasta::open_reader(std::path::Path::new(
+        path,
+    ))?))
 }
 
 #[cfg(test)]

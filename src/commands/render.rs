@@ -310,11 +310,7 @@ fn collect_render_inputs(index: &SyngIndex, config: &RenderConfig<'_>) -> io::Re
 fn write_rendered_fasta(path: &Path, sequences: &[(String, Vec<u8>)]) -> io::Result<()> {
     let mut writer = BufWriter::new(File::create(path)?);
     for (name, seq) in sequences {
-        writeln!(writer, ">{name}")?;
-        for chunk in seq.chunks(80) {
-            writer.write_all(chunk)?;
-            writer.write_all(b"\n")?;
-        }
+        crate::fasta::write_wrapped_fasta(&mut writer, name, seq)?;
     }
     writer.flush()
 }

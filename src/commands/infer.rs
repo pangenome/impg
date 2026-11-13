@@ -1482,12 +1482,7 @@ fn fetch_candidate_sequence(
 }
 
 fn write_wrapped_fasta<W: Write>(out: &mut W, name: &str, seq: &[u8]) -> io::Result<()> {
-    writeln!(out, ">{name}")?;
-    for chunk in seq.chunks(80) {
-        out.write_all(chunk)?;
-        out.write_all(b"\n")?;
-    }
-    Ok(())
+    crate::fasta::write_wrapped_fasta(out, name, seq)
 }
 
 fn check_strict_join(

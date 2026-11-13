@@ -484,11 +484,7 @@ pub fn reconstruct(
         };
         let bridge = sequence.len() as u64 - directly_supported;
         let id = format!("block{:06}", records.len() + 1);
-        fasta.extend(format!(">{id}\n").bytes());
-        for chunk in sequence.chunks(80) {
-            fasta.extend(chunk);
-            fasta.push(b'\n');
-        }
+        crate::fasta::write_wrapped_fasta(&mut fasta, &id, &sequence)?;
         records.push(json!({"id":id,"kind":if equivalent {"sequence-equivalent-unphased-fragment"} else {"selected-source-block"},
             "sequence_fnv1a64":format!("{:016x}",checksum(&sequence)),"emitted_bp":sequence.len(),
             "scored_source_union_bp":directly_supported,"source_bridged_imputed_bp":bridge,"dp_block":dp_block,

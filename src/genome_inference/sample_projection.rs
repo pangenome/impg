@@ -44,9 +44,12 @@
 use clap::Parser;
 use crate::agc_index::AgcIndex;
 use crate::genome_inference::realign_score::{
-    self, decode_record_tokens as decode_tokens, fnv1a64, merge_windows, read_proc_status_kb,
+    self, decode_record_tokens as decode_tokens, merge_windows,
 };
-use crate::genome_inference::{mem_records, territory_frame};
+use crate::genome_inference::{
+    checksum as fnv1a64, hash_update, mem_records, read_proc_status_kb, territory_frame,
+    FNV1A64_OFFSET_BASIS,
+};
 use crate::sample_mem_bwt::{canonical, encode_walk};
 use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
@@ -938,12 +941,9 @@ fn run_dedup(out_dir: &Path, occurrences: &Path, partitions: usize) -> io::Resul
         let file = std::fs::File::open(path)?;
         let mut reader = io::BufReader::with_capacity(1 << 20, file);
         while let Some((tokens, mult)) = read_occ_entry(&mut reader)? {
-            let mut hash = 0xcbf29ce484222325u64;
+            let mut hash = FNV1A64_OFFSET_BASIS;
             for t in &tokens {
-                for b in t.to_le_bytes() {
-                    hash ^= b as u64;
-                    hash = hash.wrapping_mul(0x100000001b3);
-                }
+                hash_update(&mut hash, &t.to_le_bytes());
             }
             let bin = (hash as usize) % partitions;
             write_occ_entry(&mut bins[bin], &tokens, mult)?;

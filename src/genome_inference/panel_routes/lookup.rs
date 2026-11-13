@@ -133,9 +133,7 @@ pub fn lookup(
     let mut census_partitions: rustc_hash::FxHashSet<u32> = Default::default();
     let mut census_paths: rustc_hash::FxHashSet<usize> = Default::default();
     {
-        let (reader, _) =
-            niffler::get_reader(Box::new(File::open(census)?)).map_err(io::Error::other)?;
-        let mut reader = BufReader::new(reader);
+        let mut reader = crate::fasta::open_reader(census)?;
         let mut line = String::new();
         loop {
             line.clear();

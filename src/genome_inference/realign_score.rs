@@ -983,13 +983,9 @@ fn ensure(ok: bool, s: &str) -> io::Result<()> {
     }
 }
 
+#[inline]
 pub(super) fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+    super::checksum(bytes)
 }
 
 fn revcomp(seq: &[u8]) -> Vec<u8> {
@@ -1018,44 +1014,6 @@ fn revcomp_eq(window: &[u8], kmer: &[u8]) -> bool {
             .rev()
             .zip(kmer)
             .all(|(&base, &expected)| complement(base) == expected)
-}
-
-/// Reads `(VmRSS, VmHWM)` in kB from `/proc/self/status`.
-pub(super) fn read_proc_status_kb() -> io::Result<(u64, u64)> {
-    let text = std::fs::read_to_string("/proc/self/status")?;
-    let field_kb = |prefix: &str| -> u64 {
-        text.lines()
-            .find(|l| l.starts_with(prefix))
-            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-            .unwrap_or(0)
-    };
-    Ok((field_kb("VmRSS:"), field_kb("VmHWM:")))
-}
-
-struct RssGuard {
-    budget_bytes: Option<u64>,
-}
-
-impl RssGuard {
-    fn new(budget_gib: f64) -> Self {
-        RssGuard {
-            budget_bytes: (budget_gib > 0.0).then(|| (budget_gib * (1u64 << 30) as f64) as u64),
-        }
-    }
-    fn probe(&self, stage: &str) -> io::Result<u64> {
-        // VmHWM is the monotone high-water mark: VmRSS samples instants,
-        // so a short-lived spike inside a phase (the tie certificate's
-        // Value tree is one) can be missed entirely between two probes.
-        let (rss_kb, hwm_kb) = read_proc_status_kb()?;
-        if let Some(budget) = self.budget_bytes {
-            ensure(
-                rss_kb * 1024 <= budget,
-                &format!("RSS guard exceeded at {stage}: {rss_kb} kB"),
-            )?;
-        }
-        eprintln!("[score] rss {stage}: {rss_kb} kB peak {hwm_kb} kB");
-        Ok(rss_kb)
-    }
 }
 
 /// THE RECEIPT WRITER WITH THE TIE CERTIFICATE SPLICED IN.
@@ -1548,8 +1506,7 @@ fn stream_fastq(
     path: &PathBuf,
     mut visit: impl FnMut(&[u8], &[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
-    let (reader, _) = niffler::get_reader(Box::new(File::open(path)?)).map_err(io::Error::other)?;
-    let mut lines = BufReader::new(reader).lines();
+    let mut lines = crate::fasta::open_reader(path)?.lines();
     let mut current = lines
         .next()
         .transpose()?
@@ -2382,12 +2339,12 @@ fn partition_maps_digest(dir: &Path) -> io::Result<u64> {
         }
     }
     names.sort();
-    let mut digest = fnv1a64(b"");
+    let mut digest = super::FNV1A64_OFFSET_BASIS;
     for name in &names {
         let bytes = std::fs::read(dir.join(name))?;
-        hash_bytes(&mut digest, name.as_bytes());
-        hash_bytes(&mut digest, &[0xFF]);
-        hash_bytes(&mut digest, &bytes);
+        super::hash_update(&mut digest, name.as_bytes());
+        super::hash_update(&mut digest, &[0xFF]);
+        super::hash_update(&mut digest, &bytes);
     }
     Ok(digest)
 }
@@ -2395,13 +2352,6 @@ fn partition_maps_digest(dir: &Path) -> io::Result<u64> {
 fn routes_graph_digest(path: &Path) -> io::Result<u64> {
     let bytes = std::fs::read(path)?;
     Ok(fnv1a64(&bytes))
-}
-
-fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
-    for &byte in bytes {
-        *hash ^= byte as u64;
-        *hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -4379,18 +4329,14 @@ where
         })
         .collect();
     let canonical = |first: usize, second: usize| -> u64 {
-        let mut hash = 0xcbf29ce484222325u64;
+        let mut hash = super::FNV1A64_OFFSET_BASIS;
         for (key, count) in MergedMultisetIter::new(&folds[first].nodes, &folds[second].nodes) {
-            for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
-                hash ^= *byte as u64;
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
+            super::hash_update(&mut hash, &key.to_le_bytes());
+            super::hash_update(&mut hash, &count.to_le_bytes());
         }
         for (key, count) in MergedMultisetIter::new(&folds[first].edges, &folds[second].edges) {
-            for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
-                hash ^= *byte as u64;
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
+            super::hash_update(&mut hash, &key.to_le_bytes());
+            super::hash_update(&mut hash, &count.to_le_bytes());
         }
         hash
     };
@@ -4888,7 +4834,7 @@ pub fn component_axis_rows(
     partition_graphs: &std::path::Path,
     component: &str,
 ) -> io::Result<Vec<(u64, u64)>> {
-    let (_maps, rows) = load_partition_maps_and_axis(partition_graphs, component)?;
+    let rows = super::load_component_axis_rows(partition_graphs, component)?;
     ensure(
         !rows.is_empty(),
         &format!(
@@ -7053,7 +6999,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // value.)
     let read_length;
     let started = Instant::now();
-    let rss = RssGuard::new(options.rss_budget_gib);
+    let rss = super::RssGuard::with_peak("score", options.rss_budget_gib);
     // (THE RECORD-ORIGIN GATE: the content-origin parameter belongs to
     // the GLOBAL frame alone — the committed local frame is a closed
     // frame that derives the substrate's content convention itself,
@@ -7376,9 +7322,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     let mut census_records: Vec<CensusRecordLine> = Vec::new();
     if !options.frame_audit_only {
         {
-            let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
-                .map_err(io::Error::other)?;
-            for line in BufReader::new(reader).lines() {
+            for line in crate::fasta::open_reader(&options.census)?.lines() {
                 census_records.push(serde_json::from_str(&line?)?);
             }
         }
@@ -14059,7 +14003,9 @@ mod tests {
         // /proc/self/status — the memory bound receipt. The dense
         // form's 13 B/pair (30.7GB) is exact arithmetic, never built.
         fn vm_rss_kb() -> u64 {
-            read_proc_status_kb().map(|(rss, _)| rss).unwrap_or(0)
+            crate::genome_inference::read_proc_status_kb()
+                .map(|(rss, _)| rss)
+                .unwrap_or(0)
         }
         let (n_folds, n_units, pinned_stride) = (532usize, 4_438_575usize, 48usize);
         let elsewhere = -14.418156f64;

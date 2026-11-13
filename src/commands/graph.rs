@@ -1332,14 +1332,7 @@ pub fn run_graph_build_partitioned(
     };
 
     // 6. Write output
-    if output == "-" {
-        let stdout = io::stdout();
-        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        out.write_all(final_gfa.as_bytes())?;
-    } else {
-        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output)?);
-        out.write_all(final_gfa.as_bytes())?;
-    }
+    crate::commands::write_text_to_path_or_stdout(output, &final_gfa, false)?;
 
     info!("[partitioned-graph] Done");
     Ok(())

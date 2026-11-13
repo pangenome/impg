@@ -3,8 +3,8 @@ use crate::sample_mem_bwt::{canonical, encode_walk, invalid, WeightedBwt};
 use crate::syng::{SyngIndex, SyngWalkStep};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::fs;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -235,8 +235,7 @@ impl SampleIndex {
 /// Streaming FASTA or strict four-line FASTQ, optionally compressed by niffler.
 /// Names and quality strings are validated transiently and never retained.
 fn stream_reads(path: &Path, mut visit: impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<()> {
-    let (reader, _) = niffler::get_reader(Box::new(File::open(path)?)).map_err(io::Error::other)?;
-    let mut lines = BufReader::new(reader).lines();
+    let mut lines = crate::fasta::open_reader(path)?.lines();
     let first = lines
         .next()
         .transpose()?
