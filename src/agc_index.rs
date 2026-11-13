@@ -434,13 +434,7 @@ impl AgcIndex {
 
 /// Validate an AGC range and return the number of bases it asks for.
 fn checked_range_len(seq_name: &str, start: i32, end: i32) -> io::Result<usize> {
-    if start < 0 || end < start {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid range {start}-{end} for '{seq_name}' in the AGC archive"),
-        ));
-    }
-    Ok((end - start) as usize)
+    crate::sequence_index::checked_range_len(seq_name, start, end, "the AGC archive")
 }
 
 /// AGC returns a short sequence when the requested range runs past the end of

@@ -70,7 +70,7 @@ fn write_sequences(path: &Path) {
     let target = dna(1200, 42);
     let query = target[..1000].to_vec();
     let mut query2 = revcomp(&target[100..900]);
-    query2[400] = if query2[400] == b'A' { b'C' } else { b'A' };
+    query2[399] = if query2[399] == b'A' { b'C' } else { b'A' };
 
     let mut file = File::create(path).unwrap();
     for (name, seq) in [("q", query), ("t", target), ("q2", query2)] {

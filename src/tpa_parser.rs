@@ -272,7 +272,9 @@ impl TpaParser {
             target_contig_offset: 0,
             target_contig_len: 0,
             strand,
-            differences: (compact.alignment_block_len - compact.residue_matches) as i64,
+            differences: compact
+                .alignment_block_len
+                .saturating_sub(compact.residue_matches) as i64,
             tracepoints,
             mode_data,
         })
