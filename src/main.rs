@@ -2516,143 +2516,82 @@ fn set_terminal_n_clip(
     Ok(())
 }
 
-fn parse_syng_mask_stage(
+fn apply_common_syng_mask_param(
     raw: &str,
-    stage: &GraphPipelineStage,
-    mut mask: SyngGfaFrequencyMask,
-) -> io::Result<SyngGfaFrequencyMask> {
-    if stage.params.is_empty()
-        && matches!(
-            stage.name.as_str(),
-            "nomask" | "no-mask" | "unmask" | "nofilter" | "no-filter" | "unfilter"
-        )
-    {
-        return Ok(SyngGfaFrequencyMask::disabled());
-    }
-    if matches!(
-        stage.name.as_str(),
-        "mask" | "frequency-mask" | "freq-mask" | "filter" | "frequency-filter" | "freq-filter"
-    ) && !mask.enabled()
-    {
-        mask = SyngGfaFrequencyMask::local_default();
-    }
-    if stage.params.is_empty() {
-        return Ok(mask);
-    }
-    for param in &stage.params {
-        match param.key.as_str() {
-            "top" | "drop-top" | "drop-top-fraction" | "top-fraction" | "fraction" => {
-                mask.drop_top_fraction = parse_f64_engine_param(raw, &param.key, &param.value)?;
-            }
-            "max-occurrences" | "max-occurrence" | "max-occ" => {
-                let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
-                mask.max_occurrences = (value > 0).then_some(value);
-            }
-            "freq-run"
-            | "frequency-run"
-            | "freq-min-run"
-            | "high-freq-run"
-            | "high-frequency-run"
-            | "high-freq-min-run"
-            | "high-frequency-min-run" => {
-                mask.high_freq_min_run =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "freq-span"
-            | "frequency-span"
-            | "freq-sequence-span"
-            | "freq-seq-span"
-            | "freq-seq-k"
-            | "high-freq-span"
-            | "high-frequency-span"
-            | "high-freq-sequence-span"
-            | "high-frequency-sequence-span"
-            | "high-freq-seq-k" => {
-                mask.high_freq_min_sequence_span_bp =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "freq-run-aware"
-            | "frequency-run-aware"
-            | "high-freq-run-aware"
-            | "high-frequency-run-aware"
-            | "run-aware-freq"
-            | "run-aware-frequency"
-            | "freq-occurrence"
-            | "frequency-occurrence"
-            | "high-freq-occurrence"
-            | "high-frequency-occurrence" => {
-                mask.run_aware_frequency_mask =
-                    parse_bool_engine_param(raw, &param.key, &param.value)?;
-            }
-            "legacy-freq-mask"
-            | "legacy-frequency-mask"
-            | "node-freq-mask"
-            | "node-frequency-mask" => {
-                mask.run_aware_frequency_mask =
-                    !parse_bool_engine_param(raw, &param.key, &param.value)?;
-            }
-            "min-shared-run"
-            | "min-run"
-            | "run"
-            | "shared-run"
-            | "mask-min-shared-run"
-            | "mask-min-run" => {
-                mask.min_shared_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "sequence-k"
-            | "seq-k"
-            | "sequence-span"
-            | "sequence-context"
-            | "min-sequence-span"
-            | "min-sequence-context"
-            | "min-sequence-bp"
-            | "mask-sequence-k"
-            | "mask-seq-k" => {
-                mask.min_sequence_span_bp =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "repeat-minor"
-            | "repeat-max-minor"
-            | "local-repeat-minor"
-            | "local-repeat-max-minor"
-            | "context-minor"
-            | "context-max-minor" => {
-                mask.local_repeat_max_minor =
-                    parse_u32_engine_param(raw, &param.key, &param.value)?;
-            }
-            "repeat-dominance"
-            | "local-repeat-dominance"
-            | "context-dominance"
-            | "min-dominance" => {
-                mask.local_repeat_min_dominant_fraction =
-                    parse_f64_engine_param(raw, &param.key, &param.value)?;
-            }
-            "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps" => {
-                mask.cut_n_gaps = parse_bool_engine_param(raw, &param.key, &param.value)?;
-            }
-            "cut-n-min-run" | "cut-n-min-len" | "n-cut-min-run" | "n-cut-min-len" => {
-                mask.cut_n_min_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "enabled" | "enable" => {
-                if parse_bool_engine_param(raw, &param.key, &param.value)? {
-                    if !mask.enabled() {
-                        mask = SyngGfaFrequencyMask::local_default();
-                    }
-                } else {
-                    mask = SyngGfaFrequencyMask::disabled();
-                }
-            }
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Invalid --gfa-engine '{}': unknown syng mask parameter '{}'",
-                        raw, other
-                    ),
-                ));
-            }
+    key: &str,
+    value: &str,
+    mask: &mut SyngGfaFrequencyMask,
+) -> io::Result<bool> {
+    match key {
+        "freq-run"
+        | "frequency-run"
+        | "freq-min-run"
+        | "high-freq-run"
+        | "high-frequency-run"
+        | "high-freq-min-run"
+        | "high-frequency-min-run" => {
+            mask.high_freq_min_run = parse_usize_size_engine_param(raw, key, value)?;
         }
+        "freq-span"
+        | "frequency-span"
+        | "freq-sequence-span"
+        | "freq-seq-span"
+        | "freq-seq-k"
+        | "high-freq-span"
+        | "high-frequency-span"
+        | "high-freq-sequence-span"
+        | "high-frequency-sequence-span"
+        | "high-freq-seq-k" => {
+            mask.high_freq_min_sequence_span_bp = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        "freq-run-aware"
+        | "frequency-run-aware"
+        | "high-freq-run-aware"
+        | "high-frequency-run-aware"
+        | "run-aware-freq"
+        | "run-aware-frequency"
+        | "freq-occurrence"
+        | "frequency-occurrence"
+        | "high-freq-occurrence"
+        | "high-frequency-occurrence" => {
+            mask.run_aware_frequency_mask = parse_bool_engine_param(raw, key, value)?;
+        }
+        "legacy-freq-mask"
+        | "legacy-frequency-mask"
+        | "node-freq-mask"
+        | "node-frequency-mask" => {
+            mask.run_aware_frequency_mask = !parse_bool_engine_param(raw, key, value)?;
+        }
+        "min-shared-run"
+        | "min-run"
+        | "shared-run"
+        | "mask-min-shared-run"
+        | "mask-min-run" => {
+            mask.min_shared_run = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        "sequence-k"
+        | "seq-k"
+        | "sequence-span"
+        | "sequence-context"
+        | "min-sequence-span"
+        | "min-sequence-context"
+        | "min-sequence-bp"
+        | "mask-sequence-k"
+        | "mask-seq-k" => {
+            mask.min_sequence_span_bp = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps" => {
+            mask.cut_n_gaps = parse_bool_engine_param(raw, key, value)?;
+        }
+        "cut-n-min-run" | "cut-n-min-len" | "n-cut-min-run" | "n-cut-min-len" => {
+            mask.cut_n_min_run = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        _ => return Ok(false),
     }
+    Ok(true)
+}
+
+fn validate_syng_mask(raw: &str, mask: &SyngGfaFrequencyMask) -> io::Result<()> {
     if !mask.drop_top_fraction.is_finite() || !(0.0..1.0).contains(&mask.drop_top_fraction) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -2691,6 +2630,84 @@ fn parse_syng_mask_stage(
             ),
         ));
     }
+    Ok(())
+}
+
+fn parse_syng_mask_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+    mut mask: SyngGfaFrequencyMask,
+) -> io::Result<SyngGfaFrequencyMask> {
+    if stage.params.is_empty()
+        && matches!(
+            stage.name.as_str(),
+            "nomask" | "no-mask" | "unmask" | "nofilter" | "no-filter" | "unfilter"
+        )
+    {
+        return Ok(SyngGfaFrequencyMask::disabled());
+    }
+    if matches!(
+        stage.name.as_str(),
+        "mask" | "frequency-mask" | "freq-mask" | "filter" | "frequency-filter" | "freq-filter"
+    ) && !mask.enabled()
+    {
+        mask = SyngGfaFrequencyMask::local_default();
+    }
+    if stage.params.is_empty() {
+        return Ok(mask);
+    }
+    for param in &stage.params {
+        if apply_common_syng_mask_param(raw, &param.key, &param.value, &mut mask)? {
+            continue;
+        }
+        match param.key.as_str() {
+            "top" | "drop-top" | "drop-top-fraction" | "top-fraction" | "fraction" => {
+                mask.drop_top_fraction = parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-occurrences" | "max-occurrence" | "max-occ" => {
+                let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
+                mask.max_occurrences = (value > 0).then_some(value);
+            }
+            "run" => {
+                mask.min_shared_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "repeat-minor"
+            | "repeat-max-minor"
+            | "local-repeat-minor"
+            | "local-repeat-max-minor"
+            | "context-minor"
+            | "context-max-minor" => {
+                mask.local_repeat_max_minor =
+                    parse_u32_engine_param(raw, &param.key, &param.value)?;
+            }
+            "repeat-dominance"
+            | "local-repeat-dominance"
+            | "context-dominance"
+            | "min-dominance" => {
+                mask.local_repeat_min_dominant_fraction =
+                    parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "enabled" | "enable" => {
+                if parse_bool_engine_param(raw, &param.key, &param.value)? {
+                    if !mask.enabled() {
+                        mask = SyngGfaFrequencyMask::local_default();
+                    }
+                } else {
+                    mask = SyngGfaFrequencyMask::disabled();
+                }
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown syng mask parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+    validate_syng_mask(raw, &mask)?;
     Ok(mask)
 }
 
@@ -3498,6 +3515,10 @@ where
             params: Vec::new(),
         };
         for param in &stage.params {
+            if apply_common_syng_mask_param(raw, &param.key, &param.value, syng_gfa_frequency_mask)?
+            {
+                continue;
+            }
             match param.key.as_str() {
                 "mode" => {
                     set_syng_gfa_mode(raw, syng_gfa_mode, SyngGfaMode::parse(&param.value)?)?;
@@ -3519,14 +3540,7 @@ where
                 | "mask-high-freq-run"
                 | "mask-high-frequency-run"
                 | "mask-high-freq-min-run"
-                | "mask-high-frequency-min-run"
-                | "freq-run"
-                | "frequency-run"
-                | "freq-min-run"
-                | "high-freq-run"
-                | "high-frequency-run"
-                | "high-freq-min-run"
-                | "high-frequency-min-run" => {
+                | "mask-high-frequency-min-run" => {
                     syng_gfa_frequency_mask.high_freq_min_run =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
@@ -3539,17 +3553,7 @@ where
                 | "mask-high-frequency-span"
                 | "mask-high-freq-sequence-span"
                 | "mask-high-frequency-sequence-span"
-                | "mask-high-freq-seq-k"
-                | "freq-span"
-                | "frequency-span"
-                | "freq-sequence-span"
-                | "freq-seq-span"
-                | "freq-seq-k"
-                | "high-freq-span"
-                | "high-frequency-span"
-                | "high-freq-sequence-span"
-                | "high-frequency-sequence-span"
-                | "high-freq-seq-k" => {
+                | "mask-high-freq-seq-k" => {
                     syng_gfa_frequency_mask.high_freq_min_sequence_span_bp =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
@@ -3562,50 +3566,16 @@ where
                 | "mask-freq-occurrence"
                 | "mask-frequency-occurrence"
                 | "mask-high-freq-occurrence"
-                | "mask-high-frequency-occurrence"
-                | "freq-run-aware"
-                | "frequency-run-aware"
-                | "high-freq-run-aware"
-                | "high-frequency-run-aware"
-                | "run-aware-freq"
-                | "run-aware-frequency"
-                | "freq-occurrence"
-                | "frequency-occurrence"
-                | "high-freq-occurrence"
-                | "high-frequency-occurrence" => {
+                | "mask-high-frequency-occurrence" => {
                     syng_gfa_frequency_mask.run_aware_frequency_mask =
                         parse_bool_engine_param(raw, &param.key, &param.value)?;
                 }
                 "mask-legacy-freq-mask"
                 | "mask-legacy-frequency-mask"
                 | "mask-node-freq-mask"
-                | "mask-node-frequency-mask"
-                | "legacy-freq-mask"
-                | "legacy-frequency-mask"
-                | "node-freq-mask"
-                | "node-frequency-mask" => {
+                | "mask-node-frequency-mask" => {
                     syng_gfa_frequency_mask.run_aware_frequency_mask =
                         !parse_bool_engine_param(raw, &param.key, &param.value)?;
-                }
-                "mask-min-shared-run"
-                | "mask-min-run"
-                | "min-shared-run"
-                | "min-run"
-                | "shared-run" => {
-                    syng_gfa_frequency_mask.min_shared_run =
-                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-                }
-                "sequence-k"
-                | "seq-k"
-                | "sequence-span"
-                | "sequence-context"
-                | "min-sequence-span"
-                | "min-sequence-context"
-                | "min-sequence-bp"
-                | "mask-sequence-k"
-                | "mask-seq-k" => {
-                    syng_gfa_frequency_mask.min_sequence_span_bp =
-                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
                 "mask-repeat-minor"
                 | "mask-repeat-max-minor"
@@ -3623,17 +3593,11 @@ where
                     syng_gfa_frequency_mask.local_repeat_min_dominant_fraction =
                         parse_f64_engine_param(raw, &param.key, &param.value)?;
                 }
-                "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps"
-                | "mask-cut-ns" | "mask-cut-n" | "filter-cut-ns" => {
+                "mask-cut-ns" | "mask-cut-n" | "filter-cut-ns" => {
                     syng_gfa_frequency_mask.cut_n_gaps =
                         parse_bool_engine_param(raw, &param.key, &param.value)?;
                 }
-                "cut-n-min-run"
-                | "cut-n-min-len"
-                | "n-cut-min-run"
-                | "n-cut-min-len"
-                | "mask-cut-n-min-run"
-                | "filter-cut-n-min-run" => {
+                "mask-cut-n-min-run" | "filter-cut-n-min-run" => {
                     syng_gfa_frequency_mask.cut_n_min_run =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
@@ -3672,48 +3636,7 @@ where
             syncmer_seed,
             saw_syng_param,
         )?;
-        if !syng_gfa_frequency_mask.drop_top_fraction.is_finite()
-            || !(0.0..1.0).contains(&syng_gfa_frequency_mask.drop_top_fraction)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng mask top fraction must be finite and in [0, 1)",
-                    raw
-                ),
-            ));
-        }
-        if !syng_gfa_frequency_mask
-            .local_repeat_min_dominant_fraction
-            .is_finite()
-            || !(0.0..=1.0).contains(&syng_gfa_frequency_mask.local_repeat_min_dominant_fraction)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng local repeat dominance must be finite and in [0, 1]",
-                    raw
-                ),
-            ));
-        }
-        if syng_gfa_frequency_mask.min_shared_run == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng mask min-shared-run must be > 0",
-                    raw
-                ),
-            ));
-        }
-        if syng_gfa_frequency_mask.cut_n_min_run == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng N-cut minimum run length must be > 0",
-                    raw
-                ),
-            ));
-        }
+        validate_syng_mask(raw, syng_gfa_frequency_mask)?;
         Ok(())
     } else {
         for param in &stage.params {
@@ -7714,11 +7637,13 @@ fn run() -> io::Result<()> {
                                     common.threads.get(),
                                 )?;
                             } else {
-                                output_results_gfa(
+                                output_results_graph(
                                     &impg,
                                     &mut results,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
+                                    "gfa",
+                                    &[],
                                     &name,
                                     query.effective_merge_distance(),
                                     query.merge_strands_for_output("gfa"),
@@ -7755,11 +7680,12 @@ fn run() -> io::Result<()> {
                                     common.threads.get(),
                                 )?;
                             } else {
-                                output_results_vcf(
+                                output_results_graph(
                                     &impg,
                                     &mut results,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
+                                    "vcf",
                                     &reference_names,
                                     &name,
                                     query.effective_merge_distance(),
@@ -9052,12 +8978,7 @@ fn run() -> io::Result<()> {
             max_unit_len,
             report,
         } => {
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
             let result = impg::gfa_self_loops::normalize_repeat_self_loops(
                 &gfa_text,
                 &impg::gfa_self_loops::NormalizeSelfLoopsConfig { max_unit_len },
@@ -9082,16 +9003,7 @@ fn run() -> io::Result<()> {
                 out.flush()?;
             }
 
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(result.gfa.as_bytes())?;
-                out.flush()?;
-            } else {
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                out.write_all(result.gfa.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &result.gfa, false)?;
         }
         Args::Crush {
             gfa,
@@ -9289,12 +9201,7 @@ fn run() -> io::Result<()> {
                         "--replacement-scaffold-filter must be like 1:1, 1:many, 1-many, 1-to-many, or many:many",
                     )
                 })?;
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
 
             let config = impg::resolution::ResolutionConfig {
                 max_iterations,
@@ -9375,16 +9282,7 @@ fn run() -> io::Result<()> {
                 )?;
             }
 
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(gfa.as_bytes())?;
-                out.flush()?;
-            } else {
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                out.write_all(gfa.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &gfa, false)?;
         }
         Args::Gfa2vcf {
             gfa,
@@ -9393,26 +9291,10 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
 
             let vcf = impg::gfa_to_vcf_string(&gfa_text, &reference_names)?;
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(vcf.as_bytes())?;
-                out.flush()?;
-            } else {
-                let output_path = Path::new(&output);
-                ensure_parent_dir(output_path)?;
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
-                out.write_all(vcf.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &vcf, true)?;
         }
         Args::GraphReport {
             gfa,
@@ -9426,12 +9308,7 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
             let options = impg::graph_report::GraphReportOptions {
                 top_n: top.max(1),
                 include_povu: povu,
@@ -9440,18 +9317,7 @@ fn run() -> io::Result<()> {
             };
             let report = impg::graph_report::describe_gfa(&gfa, &gfa_text, &options)?;
             let text = impg::graph_report::format_report(&report, &format)?;
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(text.as_bytes())?;
-                out.flush()?;
-            } else {
-                let output_path = Path::new(&output);
-                ensure_parent_dir(output_path)?;
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
-                out.write_all(text.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &text, true)?;
             if let Some(flubble_path_gfa) = flubble_path_gfa {
                 let (annotated_gfa, stats) = impg::graph_report::gfa_with_flubble_paths(
                     &gfa_text,
@@ -11788,8 +11654,11 @@ fn build_single_index(
 
     // Create a deterministic global SequenceIndex
     let mut seq_index = SequenceIndex::new();
-    for (name, id) in &tmp_union_index.name_to_id {
-        let length = tmp_union_index.get_len_from_id(*id).unwrap_or(0);
+    for name in &sequence_names {
+        let length = tmp_union_index
+            .get_id(name)
+            .and_then(|id| tmp_union_index.get_len_from_id(id))
+            .unwrap_or(0);
         seq_index.get_or_insert_id(name, Some(length));
     }
 
@@ -12367,12 +12236,42 @@ fn output_results_paf(
     Ok(())
 }
 
-fn output_results_gfa(
+fn read_text_from_path_or_stdin(input: &str) -> io::Result<String> {
+    let mut text = String::new();
+    if input == "-" {
+        io::stdin().read_to_string(&mut text)?;
+    } else {
+        File::open(input)?.read_to_string(&mut text)?;
+    }
+    Ok(text)
+}
+
+fn write_text_to_path_or_stdout(output: &str, text: &str, create_parent: bool) -> io::Result<()> {
+    if output == "-" {
+        let stdout = io::stdout();
+        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+        out.write_all(text.as_bytes())?;
+        out.flush()?;
+    } else {
+        let output_path = Path::new(output);
+        if create_parent {
+            ensure_parent_dir(output_path)?;
+        }
+        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
+        out.write_all(text.as_bytes())?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
+fn output_results_graph(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
-    name: &str,
+    output_format: &str,
+    reference_names: &[String],
+    range_name: &str,
     merge_distance: i32,
     merge_strands: bool,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
@@ -12400,53 +12299,9 @@ fn output_results_gfa(
     )?;
     write_graph_output_and_render(
         &gfa_output,
-        "gfa",
+        output_format,
         target_output_prefix,
-        "gfa",
-        &[],
-        graph_render,
-        graph_report,
-        bed_graph_dir,
-        name,
-        threads,
-    )
-}
-
-fn output_results_vcf(
-    impg: &impl ImpgIndex,
-    results: &mut Vec<AdjustedInterval>,
-    target_output_prefix: &Option<String>,
-    sequence_index: &UnifiedSequenceIndex,
-    reference_names: &[String],
-    range_name: &str,
-    merge_distance: i32,
-    merge_strands: bool,
-    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-    engine_opts: &EngineOpts,
-    graph_render: &GraphRenderOpts,
-    graph_report: &GraphReportCliOpts,
-    bed_graph_dir: Option<&Path>,
-    threads: usize,
-) -> io::Result<()> {
-    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
-
-    let query_intervals: Vec<Interval<u32>> = results
-        .drain(..)
-        .map(|(query_interval, _, _)| query_interval)
-        .collect();
-
-    let gfa_output = impg::dispatch_gfa_engine(
-        impg,
-        &query_intervals,
-        sequence_index,
-        scoring_params,
-        engine_opts,
-    )?;
-    write_graph_output_and_render(
-        &gfa_output,
-        "vcf",
-        target_output_prefix,
-        "vcf",
+        output_format,
         reference_names,
         graph_render,
         graph_report,
