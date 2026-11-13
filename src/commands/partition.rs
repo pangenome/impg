@@ -449,7 +449,7 @@ pub fn partition_alignments(
                 &mut masked_regions,
                 &mut missing_regions,
                 min_missing_size,
-            );
+            )?;
             let mask_time = mask_start.map(|s| s.elapsed()).unwrap_or_default();
             let mut post_time = post_start.map(|s| s.elapsed()).unwrap_or_default();
 
@@ -476,6 +476,7 @@ pub fn partition_alignments(
                 total_partitioned_length += current_partition_length;
 
                 // Calculate percentages
+                // Empty index: log 0%, not NaN
                 let (current_percentage, total_percentage) = if total_sequence_length == 0 {
                     (0.0, 0.0)
                 } else {
@@ -739,6 +740,7 @@ pub fn partition_alignments(
     }
 
     // Calculate final percentage
+    // Empty index: log 0%, not NaN
     let final_percentage = if total_sequence_length == 0 {
         0.0
     } else {
@@ -1002,6 +1004,7 @@ fn merge_overlaps(
             let next_max = std::cmp::max(next_interval.first, next_interval.last);
 
             if curr_interval.metadata != next_interval.metadata
+                // Saturation keeps the comparison exact
                 || next_min > curr_max.saturating_add(merge_distance)
             {
                 write_idx += 1;
@@ -1030,9 +1033,7 @@ fn push_unmasked_segment(
     seg_start: i32,
     seg_end: i32,
 ) {
-    if seg_start >= seg_end || start >= end {
-        return;
-    }
+    debug_assert!(start <= seg_start && seg_start < seg_end && seg_end <= end);
     let total_span = (end - start) as f64;
     let target_span = (target_interval.last - target_interval.first) as f64;
     let segment_ratio = (seg_end - seg_start) as f64 / total_span;
@@ -1067,7 +1068,7 @@ fn mask_and_update_regions(
     masked_regions: &mut FxHashMap<u32, SortedRanges>,
     missing_regions: &mut FxHashMap<u32, SortedRanges>,
     min_fragment_size: i32,
-) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+) -> io::Result<Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>> {
     fn process_sequence_overlaps(
         seq_id: u32,
         seq_overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
@@ -1077,9 +1078,9 @@ fn mask_and_update_regions(
         result: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
         extensions: &mut Vec<(i32, i32)>,
         mask_buffer: &mut Vec<(i32, i32)>,
-    ) {
+    ) -> io::Result<()> {
         if seq_overlaps.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Step 1: Collect all potential extensions in one pass
@@ -1199,10 +1200,19 @@ fn mask_and_update_regions(
                 adjusted_query.first - adjusted_query.last
             } as f64;
 
-            let scale = if original_span == 0.0 {
+            let scale = if original_span > 0.0 {
+                new_span / original_span
+            } else if new_span == 0.0 {
+                // Unextended empty interval: target unchanged
                 1.0
             } else {
-                new_span / original_span
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "cannot scale the target of zero-length query interval {}:{}-{} extended to {}-{}",
+                        seq_id, query_interval.first, query_interval.last, start, end
+                    ),
+                ));
             };
             let target_span = (target_interval.last - target_interval.first) as f64;
 
@@ -1323,10 +1333,11 @@ fn mask_and_update_regions(
                 }
             }
         }
+        Ok(())
     }
 
     if overlaps.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     debug_assert!(overlaps
@@ -1351,7 +1362,7 @@ fn mask_and_update_regions(
                 &mut result,
                 &mut extensions,
                 &mut mask_buffer,
-            );
+            )?;
             seq_overlaps.clear();
             current_seq = interval.metadata;
         }
@@ -1367,9 +1378,9 @@ fn mask_and_update_regions(
         &mut result,
         &mut extensions,
         &mut mask_buffer,
-    );
+    )?;
 
-    result
+    Ok(result)
 }
 
 // Function to extend intervals that are close to sequence boundaries
@@ -1782,7 +1793,7 @@ mod tests {
         let mut overlaps = Vec::new();
         retain_seed_occurrence(&mut overlaps, 0, 0, 10_000);
         merge_overlaps(&mut overlaps, 1000);
-        let out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0);
+        let out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(
             (out[0].0.metadata, out[0].0.first, out[0].0.last),
@@ -1824,7 +1835,8 @@ mod tests {
             let mut overlaps = vec![(self_hit, Vec::new(), self_hit), (other, Vec::new(), other)];
             retain_seed_occurrence(&mut overlaps, 1, 0, 1000);
             merge_overlaps(&mut overlaps, merge_distance);
-            let mut out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0);
+            let mut out =
+                mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0).unwrap();
             merge_overlaps(&mut out, 0);
             let seed_parts: Vec<_> = out
                 .iter()
@@ -1836,7 +1848,9 @@ mod tests {
             // Reprocessing an already claimed seed emits nothing.
             retain_seed_occurrence(&mut overlaps, 1, 0, 1000);
             assert!(
-                mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0).is_empty()
+                mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0)
+                    .unwrap()
+                    .is_empty()
             );
         }
     }
@@ -1874,9 +1888,19 @@ mod tests {
         let mut overlaps = vec![(zero_span, Vec::new(), target)];
         let mut masked = FxHashMap::default();
         let mut missing = FxHashMap::default();
-        let out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0);
+        let out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].2.first, out[0].2.last), (10, 10));
+
+        // Extension of an empty interval errors
+        let mut ranges = SortedRanges::with_distance(1_000, 0);
+        ranges.insert((40, 60));
+        let mut missing = FxHashMap::default();
+        missing.insert(0, ranges);
+        let mut overlaps = vec![(zero_span, Vec::new(), target)];
+        let err = mask_and_update_regions(&mut overlaps, &mut FxHashMap::default(), &mut missing, 20)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
 

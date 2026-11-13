@@ -245,6 +245,7 @@ fn parse_bed_like(path: &str, join_gap: Option<u64>) -> io::Result<Vec<InferTarg
         let mut blocks: Vec<InferTarget> = Vec::new();
         for row in on_chrom {
             match blocks.last_mut() {
+                // Saturation keeps the comparison exact
                 Some(last) if (row.start as u64) <= (last.end as u64).saturating_add(gap) => {
                     last.end = last.end.max(row.end);
                 }
@@ -1305,8 +1306,11 @@ fn stitch_mosaic(
     initial.sort_by(|a, b| b.0.total_cmp(&a.0));
     initial.truncate(config.stitch_beam);
 
-    let mut arena: Vec<BeamArenaNode> = Vec::with_capacity(indexed_states.len() * config.stitch_beam);
-    let mut beam: Vec<(f64, usize)> = Vec::with_capacity(config.stitch_beam);
+    // Capacity is a hint; cap it
+    let beam_cap = config.stitch_beam.min(1 << 20);
+    let mut arena: Vec<BeamArenaNode> =
+        Vec::with_capacity(indexed_states.len().saturating_mul(beam_cap).min(1 << 20));
+    let mut beam: Vec<(f64, usize)> = Vec::with_capacity(beam_cap);
     for (score, state_idx) in initial {
         let state = &first_states[state_idx];
         let arena_idx = arena.len();
@@ -1322,7 +1326,7 @@ fn stitch_mosaic(
     }
 
     let mut next_candidates: Vec<BeamCandidate> = Vec::new();
-    let mut next_beam: Vec<(f64, usize)> = Vec::with_capacity(config.stitch_beam);
+    let mut next_beam: Vec<(f64, usize)> = Vec::with_capacity(beam_cap);
     for (call_idx, states) in indexed_states.iter().skip(1) {
         next_candidates.clear();
         for &(prev_score, prev_arena_idx) in &beam {

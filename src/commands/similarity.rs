@@ -320,7 +320,7 @@ pub fn compute_and_output_similarities(
             let mut polarization_window: Vec<PolarizationData> = Vec::new();
 
             for pca_result in pca_results.iter_mut() {
-                let polarization_data = polarize_pca_result(pca_result, &polarization_window);
+                let polarization_data = polarize_pca_result(pca_result, &polarization_window)?;
                 polarization_window.push(polarization_data);
                 if polarization_window.len() > polarize_n_prev {
                     polarization_window.remove(0);
@@ -557,7 +557,7 @@ fn prepare_groups_and_signatures(
             //    does the cap kick in. Sampling too aggressively on small regions was hiding
             //    real pair-to-pair variation under Jaccard estimator noise — observed on chr6
             //    1-5 kb runs where POA disagreed with a highly-quantized sketch identity.
-            let k_minus_1 = kmer_k.saturating_sub(1);
+            let k_minus_1 = kmer_k - 1;
             let mut group_num_kmers: Vec<usize> = groups
                 .iter()
                 .map(|g| {
@@ -1077,10 +1077,34 @@ pub struct PolarizationData {
     pub polarizer_signs: Vec<bool>,    // One per PC component
 }
 
+fn check_pca_finite(pca_result: &PcaResult) -> io::Result<()> {
+    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
+    if pca_result.sample_labels.len() != pca_result.coordinates.len() {
+        return Err(invalid(format!(
+            "PCA result has {} sample labels but {} coordinate rows",
+            pca_result.sample_labels.len(),
+            pca_result.coordinates.len()
+        )));
+    }
+    for (sample_idx, coords) in pca_result.coordinates.iter().enumerate() {
+        if let Some(pc_idx) = coords.iter().position(|v| !v.is_finite()) {
+            return Err(invalid(format!(
+                "PCA coordinate is not finite ({}) for sample '{}' (index {}) on PC{}",
+                coords[pc_idx],
+                pca_result.sample_labels[sample_idx],
+                sample_idx,
+                pc_idx + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn polarize_pca_result(
     pca_result: &mut PcaResult,
     polarization_window: &[PolarizationData],
-) -> PolarizationData {
+) -> io::Result<PolarizationData> {
+    check_pca_finite(pca_result)?;
     let mut polarizer_indices = Vec::new();
     let mut polarizer_signs = Vec::new();
 
@@ -1093,25 +1117,25 @@ fn polarize_pca_result(
             .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
             .collect();
 
-        if pc_values.is_empty() {
-            continue;
-        }
-
-        // Find current polarizer
+        // Find current polarizer; values are finite
         let (current_polarizer_idx, _) = pc_values
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
-            .expect("pc_values checked non-empty");
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "PCA result has {} components but no samples",
+                        pca_result.n_components
+                    ),
+                )
+            })?;
 
         debug!(
             "Current polarizer: [{}] {} (value: {:.3})",
             current_polarizer_idx,
-            pca_result
-                .sample_labels
-                .get(current_polarizer_idx)
-                .map(String::as_str)
-                .unwrap_or(""),
+            pca_result.sample_labels[current_polarizer_idx],
             pc_values[current_polarizer_idx]
         );
 
@@ -1189,16 +1213,22 @@ fn polarize_pca_result(
         }
     }
 
-    PolarizationData {
+    Ok(PolarizationData {
         polarizer_indices,
         polarizer_signs,
-    }
+    })
 }
 
 fn polarize_pca_result_with_guides(
     pca_results: &mut [PcaResult],
     guide_samples: &[String],
 ) -> io::Result<()> {
+    for (window_idx, result) in pca_results.iter().enumerate() {
+        check_pca_finite(result).map_err(|e| {
+            io::Error::new(e.kind(), format!("window {}: {e}", window_idx + 1))
+        })?;
+    }
+
     // Find guide sample indices
     let mut guide_indices: Vec<Vec<Option<usize>>> = Vec::new();
 
@@ -1225,6 +1255,7 @@ fn polarize_pca_result_with_guides(
     }
 
     // Process each PC component
+    // No windows means no components
     let n_components = pca_results.iter().map(|r| r.n_components).max().unwrap_or(0);
 
     for pc_idx in 0..n_components {
@@ -1522,7 +1553,13 @@ mod tests {
             sample_labels: Vec::new(),
             n_components: 1,
         };
-        let _ = polarize_pca_result(&mut empty, &[]);
+        let err = polarize_pca_result(&mut empty, &[]).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        empty.n_components = 0;
+        assert!(polarize_pca_result(&mut empty, &[])
+            .unwrap()
+            .polarizer_indices
+            .is_empty());
         polarize_pca_result_with_guides(&mut [], &[]).unwrap();
 
         let mut with_nan = PcaResult {
@@ -1532,7 +1569,14 @@ mod tests {
             sample_labels: vec!["s0".into(), "s1".into()],
             n_components: 1,
         };
-        let p = polarize_pca_result(&mut with_nan, &[]);
-        assert_eq!(p.polarizer_indices, vec![0]); // total_cmp orders NaN at top deterministically
+        let err = polarize_pca_result(&mut with_nan, &[]).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("sample 's0'"), "{err}");
+        assert!(err.to_string().contains("PC1"), "{err}");
+        let err = polarize_pca_result_with_guides(std::slice::from_mut(&mut with_nan), &[])
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        with_nan.coordinates[0][0] = f32::INFINITY;
+        assert!(polarize_pca_result(&mut with_nan, &[]).is_err());
     }
 }
