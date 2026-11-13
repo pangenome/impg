@@ -143,6 +143,7 @@ fn paf_line_max_exact_match_run(
     let q_step: isize = if query_is_rev { -1 } else { 1 };
     let mut t_pos = tstart;
     let mut digits = 0u64;
+    let mut has_len = false;
     let mut saw_op = false;
     let mut run = 0u64;
     let mut max_run = 0u64;
@@ -150,12 +151,18 @@ fn paf_line_max_exact_match_run(
     for op in cigar.bytes() {
         if op.is_ascii_digit() {
             digits = digits.saturating_mul(10).saturating_add((op - b'0') as u64);
+            has_len = true;
             continue;
         }
-        if digits == 0 {
+        if !has_len {
             return None;
         }
+        has_len = false;
         saw_op = true;
+        // Zero-length operation: no-op
+        if digits == 0 {
+            continue;
+        }
         let len = digits as usize;
         digits = 0;
         match op {
@@ -199,7 +206,7 @@ fn paf_line_max_exact_match_run(
             }
         }
     }
-    if digits != 0 || !saw_op {
+    if has_len || !saw_op {
         return None;
     }
     Some((max_run, true))

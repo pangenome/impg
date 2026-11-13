@@ -218,6 +218,10 @@ impl TpaParser {
                                     )));
                                 }
                             };
+                            // Zero-length operation: no-op
+                            if len == 0 {
+                                continue;
+                            }
                             query_deltas.push(query_advance as i64);
                             tracepoints.push(target_advance as i64);
                         }
@@ -274,7 +278,13 @@ impl TpaParser {
             strand,
             differences: compact
                 .alignment_block_len
-                .saturating_sub(compact.residue_matches) as i64,
+                .checked_sub(compact.residue_matches)
+                .ok_or_else(|| {
+                    ParseErr::InvalidFormat(format!(
+                        "TPA record {}: {} residue matches exceed alignment block length {}",
+                        record_id, compact.residue_matches, compact.alignment_block_len
+                    ))
+                })? as i64,
             tracepoints,
             mode_data,
         })

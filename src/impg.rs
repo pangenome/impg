@@ -3439,9 +3439,11 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     const MAX_CIGAR_OP_LEN: i32 = (1 << 29) - 1;
     let mut ops = Vec::new();
     let mut len: i32 = 0;
+    let mut has_len = false;
 
     for &c in cigar.as_bytes() {
         if c.is_ascii_digit() {
+            has_len = true;
             let next_len = len
                 .checked_mul(10)
                 .and_then(|v| v.checked_add((c - b'0') as i32))
@@ -3466,18 +3468,22 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
                     op, cigar
                 )));
             }
-            if len == 0 {
+            if !has_len {
                 return Err(OneAlnParseErr::InvalidFormat(format!(
-                    "Missing or zero CIGAR operation length before '{}' in '{}'",
+                    "Missing CIGAR operation length before '{}' in '{}'",
                     op, cigar
                 )));
             }
-            ops.push(CigarOp::new(len, op));
+            // Zero-length operation: no-op
+            if len != 0 {
+                ops.push(CigarOp::new(len, op));
+            }
             len = 0;
+            has_len = false;
         }
     }
 
-    if len != 0 {
+    if has_len {
         return Err(OneAlnParseErr::InvalidFormat(format!(
             "Trailing CIGAR digits without operation in '{}'",
             cigar
@@ -3822,9 +3828,35 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_length_cigar_op_is_ignored() {
+        let ops = parse_cigar_to_delta("10=0I5=").unwrap();
+        // No merge: adjacent runs stay separate
+        assert_eq!(ops, vec![CigarOp::new(10, '='), CigarOp::new(5, '=')]);
+        assert_eq!(ops, parse_cigar_to_delta("10=5=").unwrap());
+        assert_eq!(parse_cigar_to_delta("0D10=0X5=0I").unwrap(), ops);
+        assert!(parse_cigar_to_delta("0=0I").unwrap().is_empty());
+        assert!(parse_cigar_to_delta("10=0").is_err()); // trailing digits
+        assert!(parse_cigar_to_delta("10=0Q").is_err()); // invalid op
+
+        let plain = parse_cigar_to_delta("10=5=").unwrap();
+        assert_eq!(
+            calculate_gap_compressed_identity(&ops),
+            calculate_gap_compressed_identity(&plain)
+        );
+        assert_eq!(calculate_gap_compressed_identity(&ops), 1.0);
+        let record = (0, 15, 0, 15, Strand::Forward);
+        for range in [(0, 15), (3, 12), (9, 11)] {
+            assert_eq!(
+                project_target_range_through_alignment(range, record, &ops),
+                project_target_range_through_alignment(range, record, &plain),
+                "{range:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_cigar_to_delta_invalid() {
         assert!(parse_cigar_to_delta("10=5Q").is_err()); // Q is not a valid CIGAR operation
-        assert!(parse_cigar_to_delta("10=0I").is_err()); // zero length
         assert!(parse_cigar_to_delta("=5M").is_err()); // missing length
         assert!(parse_cigar_to_delta("10=5").is_err()); // trailing digits
         assert!(parse_cigar_to_delta("600000000=").is_err()); // > 29-bit max length
