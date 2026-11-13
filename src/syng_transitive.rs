@@ -380,13 +380,12 @@ fn refine_by_linear_projection(
     syncmer_len: u64,
     target_len: u64,
 ) -> (u64, u64) {
-    if homolog.anchors.is_empty() {
+    let (Some(&leftmost), Some(&rightmost)) = (
+        homolog.anchors.iter().min_by_key(|a| a.query_pos),
+        homolog.anchors.iter().max_by_key(|a| a.query_pos),
+    ) else {
         return (homolog.start, homolog.end);
-    }
-    let mut anchors = homolog.anchors.clone();
-    anchors.sort_by_key(|a| a.query_pos);
-    let leftmost = anchors[0];
-    let rightmost = *anchors.last().unwrap();
+    };
     let t_for_qs = project_query_to_target(
         query_start,
         leftmost,
@@ -619,18 +618,24 @@ fn refine_ends_only(
         .query_pos
         .saturating_sub(biwfa_back_gap)
         .max(query_region_start);
-    let back_biwfa_q_hi = (a_first.query_pos + syncmer_len).min(query_region_end);
+    let back_biwfa_q_hi = a_first
+        .query_pos
+        .saturating_add(syncmer_len)
+        .min(query_region_end);
     // Shift backward_bounds to be centered on biwfa_back_gap rather
     // than the full back_query_gap.
     let backward_bounds_bwg = |span: u64| -> (u64, u64) {
         match hit.strand {
             '+' => (
                 a_first.target_pos.saturating_sub(span).max(prev_target_end),
-                (a_first.target_pos + syncmer_len).min(target_len),
+                a_first.target_pos.saturating_add(syncmer_len).min(target_len),
             ),
             '-' => (
                 a_first.target_pos.min(target_len),
-                (a_first.target_pos + syncmer_len + span)
+                a_first
+                    .target_pos
+                    .saturating_add(syncmer_len)
+                    .saturating_add(span)
                     .min(next_target_start)
                     .min(target_len),
             ),
@@ -644,7 +649,8 @@ fn refine_ends_only(
             '+' => anchor_t
                 .saturating_sub(linear_back_ext)
                 .max(prev_target_end),
-            '-' => (anchor_t + linear_back_ext)
+            '-' => anchor_t
+                .saturating_add(linear_back_ext)
                 .min(next_target_start)
                 .min(target_len),
             _ => anchor_t,
@@ -694,8 +700,8 @@ fn refine_ends_only(
     let back_result = try_back(small_slop(biwfa_back_gap)).or_else(|| try_back(extend_budget));
 
     // ── Forward projection ──
-    let fwd_query_gap =
-        query_region_end.saturating_sub((a_last.query_pos + syncmer_len).min(query_region_end));
+    let fwd_query_gap = query_region_end
+        .saturating_sub(a_last.query_pos.saturating_add(syncmer_len).min(query_region_end));
     let fwd_outer = match hit.strand {
         '+' => Outer::Right,
         '-' => Outer::Left,
@@ -704,25 +710,33 @@ fn refine_ends_only(
     let biwfa_fwd_gap = fwd_query_gap.min(extend_budget);
     let linear_fwd_ext = fwd_query_gap - biwfa_fwd_gap;
     let fwd_biwfa_q_lo = a_last.query_pos.max(query_region_start);
-    let fwd_biwfa_q_hi = (a_last.query_pos + syncmer_len + biwfa_fwd_gap).min(query_region_end);
+    let fwd_biwfa_q_hi = a_last
+        .query_pos
+        .saturating_add(syncmer_len)
+        .saturating_add(biwfa_fwd_gap)
+        .min(query_region_end);
     let forward_bounds_bwg = |span: u64| -> (u64, u64) {
         match hit.strand {
             '+' => (
                 a_last.target_pos.min(target_len),
-                (a_last.target_pos + syncmer_len + span)
+                a_last
+                    .target_pos
+                    .saturating_add(syncmer_len)
+                    .saturating_add(span)
                     .min(next_target_start)
                     .min(target_len),
             ),
             '-' => (
                 a_last.target_pos.saturating_sub(span).max(prev_target_end),
-                (a_last.target_pos + syncmer_len).min(target_len),
+                a_last.target_pos.saturating_add(syncmer_len).min(target_len),
             ),
             _ => (0, 0),
         }
     };
     let linear_fwd_from = |anchor_t: u64| -> u64 {
         match hit.strand {
-            '+' => (anchor_t + linear_fwd_ext)
+            '+' => anchor_t
+                .saturating_add(linear_fwd_ext)
                 .min(next_target_start)
                 .min(target_len),
             '-' => anchor_t.saturating_sub(linear_fwd_ext).max(prev_target_end),
@@ -778,11 +792,11 @@ fn refine_ends_only(
     let (refined_ts, refined_te) = match hit.strand {
         '+' => (
             back_result.unwrap_or(a_first.target_pos),
-            fwd_result.unwrap_or((a_last.target_pos + syncmer_len).min(target_len)),
+            fwd_result.unwrap_or(a_last.target_pos.saturating_add(syncmer_len).min(target_len)),
         ),
         '-' => (
             fwd_result.unwrap_or(a_last.target_pos),
-            back_result.unwrap_or((a_first.target_pos + syncmer_len).min(target_len)),
+            back_result.unwrap_or(a_first.target_pos.saturating_add(syncmer_len).min(target_len)),
         ),
         _ => return None,
     };
@@ -810,8 +824,8 @@ fn dedupe_strand_overlaps(
     if hits.len() <= 1 {
         return hits;
     }
-    use std::collections::HashMap;
-    let mut by_genome: HashMap<String, Vec<HomologousIntervalWithAnchors>> = HashMap::new();
+    use std::collections::BTreeMap;
+    let mut by_genome: BTreeMap<String, Vec<HomologousIntervalWithAnchors>> = BTreeMap::new();
     for h in hits {
         by_genome.entry(h.genome.clone()).or_default().push(h);
     }
@@ -1217,8 +1231,8 @@ pub fn one_hop_ext_visited_with_seed_filter(
 fn attach_target_neighbors(
     hits: Vec<HomologousIntervalWithAnchors>,
 ) -> Vec<(HomologousIntervalWithAnchors, u64, u64)> {
-    use std::collections::HashMap;
-    let mut groups: HashMap<(String, char), Vec<HomologousIntervalWithAnchors>> = HashMap::new();
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(String, char), Vec<HomologousIntervalWithAnchors>> = BTreeMap::new();
     for h in hits {
         groups
             .entry((h.genome.clone(), h.strand))
