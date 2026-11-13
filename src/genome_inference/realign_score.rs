@@ -983,7 +983,7 @@ fn ensure(ok: bool, s: &str) -> io::Result<()> {
     }
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(super) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for &b in bytes {
         hash ^= b as u64;
@@ -995,17 +995,11 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 fn revcomp(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
-        .map(|&b| match b {
-            b'A' => b'T',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'T' => b'A',
-            other => other,
-        })
+        .map(|&b| complement(b))
         .collect()
 }
 
-fn complement(base: u8) -> u8 {
+pub(super) fn complement(base: u8) -> u8 {
     match base {
         b'A' => b'T',
         b'C' => b'G',
@@ -1015,28 +1009,44 @@ fn complement(base: u8) -> u8 {
     }
 }
 
+/// Zero-allocation equality check between `revcomp(window)` and `kmer`.
+#[inline]
+fn revcomp_eq(window: &[u8], kmer: &[u8]) -> bool {
+    window.len() == kmer.len()
+        && window
+            .iter()
+            .rev()
+            .zip(kmer)
+            .all(|(&base, &expected)| complement(base) == expected)
+}
+
+/// Reads `(VmRSS, VmHWM)` in kB from `/proc/self/status`.
+pub(super) fn read_proc_status_kb() -> io::Result<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/self/status")?;
+    let field_kb = |prefix: &str| -> u64 {
+        text.lines()
+            .find(|l| l.starts_with(prefix))
+            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
+            .unwrap_or(0)
+    };
+    Ok((field_kb("VmRSS:"), field_kb("VmHWM:")))
+}
+
 struct RssGuard {
     budget_bytes: Option<u64>,
 }
 
-impl RssGuard {    fn new(budget_gib: f64) -> Self {
+impl RssGuard {
+    fn new(budget_gib: f64) -> Self {
         RssGuard {
             budget_bytes: (budget_gib > 0.0).then(|| (budget_gib * (1u64 << 30) as f64) as u64),
         }
     }
     fn probe(&self, stage: &str) -> io::Result<u64> {
-        let text = std::fs::read_to_string("/proc/self/status")?;
-        let field_kb = |prefix: &str| -> u64 {
-            text.lines()
-                .find(|l| l.starts_with(prefix))
-                .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-                .unwrap_or(0)
-        };
-        let rss_kb = field_kb("VmRSS:");
         // VmHWM is the monotone high-water mark: VmRSS samples instants,
         // so a short-lived spike inside a phase (the tie certificate's
         // Value tree is one) can be missed entirely between two probes.
-        let hwm_kb = field_kb("VmHWM:");
+        let (rss_kb, hwm_kb) = read_proc_status_kb()?;
         if let Some(budget) = self.budget_bytes {
             ensure(
                 rss_kb * 1024 <= budget,
@@ -1188,7 +1198,7 @@ struct PartitionMap {
 
 /// The canonical decoded walk of a record's token pattern: anchors
 /// (signed node, canonical position), first anchor at position 0.
-fn decode_record_tokens(tokens: &[u64]) -> io::Result<Vec<(i32, u64)>> {
+pub(super) fn decode_record_tokens(tokens: &[u64]) -> io::Result<Vec<(i32, u64)>> {
     ensure(!tokens.is_empty() && tokens.len() % 2 == 1, "invalid record tokens")?;
     let mut anchors = Vec::with_capacity(tokens.len() / 2 + 1);
     let mut position = 0u64;
@@ -1205,7 +1215,9 @@ fn decode_record_tokens(tokens: &[u64]) -> io::Result<Vec<(i32, u64)>> {
                 .checked_sub(1)
                 .ok_or_else(|| invalid("record gap token"))?
                 / 2;
-            position += gap;
+            position = position
+                .checked_add(gap)
+                .ok_or_else(|| invalid("record position overflow"))?;
         }
     }
     Ok(anchors)
@@ -1318,7 +1330,7 @@ fn verify_key_at(
         let ok = if forward {
             window == kmer
         } else {
-            revcomp(window) == kmer
+            revcomp_eq(window, kmer)
         };
         if !ok {
             return false;
@@ -1329,7 +1341,7 @@ fn verify_key_at(
 
 /// Merge windows (lo, hi): overlapping and exactly-abutting windows
 /// merge; a positive gap splits. Returns the merged intervals.
-fn merge_windows(mut windows: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+pub(super) fn merge_windows(mut windows: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     windows.sort_unstable();
     let mut merged: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
     for (lo, hi) in windows {
@@ -1381,10 +1393,10 @@ fn required_sign(node: i32, orientation: u8) -> i32 {
 /// position is PINNED iff it is identical across ALL monotone
 /// assignments, otherwise it is AMBIGUOUS (None, named). Anchors
 /// absent from the row are None but not ambiguous.
-fn anchor_correspondence(
+fn anchor_correspondence<'a>(
     canonical: &[(i32, u64)],
     orientation: u8,
-    row_positions: &dyn Fn(u32) -> Vec<(u64, i32)>,
+    row_positions: &dyn Fn(u32) -> &'a [(u64, i32)],
 ) -> (Vec<Option<u64>>, Vec<usize>) {
     let m = canonical.len();
     let mut candidates: Vec<Vec<u64>> = Vec::with_capacity(m);
@@ -1661,6 +1673,12 @@ fn read_derive_cache(
 // either orientation.
 // ---------------------------------------------------------------------------
 
+fn window_slice_at<'a>(seq: &'a [u8], seq_lo: u64, bp: u64, k: u64) -> Option<&'a [u8]> {
+    let rel = usize::try_from(bp.checked_sub(seq_lo)?).ok()?;
+    let end = rel.checked_add(usize::try_from(k).ok()?)?;
+    seq.get(rel..end)
+}
+
 /// The per-position canonical-scheme selection over the two frames'
 /// step maps (positions absolute bp, step nodes signed). Frame tag:
 /// 0 = the stored forward frame's selection, 1 = the rc frame's
@@ -1676,12 +1694,8 @@ fn canonical_scheme_steps(
     positions.extend(reverse_map.keys().copied());
     let mut steps = Vec::with_capacity(positions.len());
     for bp in positions {
-        let rel = (bp - seq_lo) as usize;
-        let canonical_forward = seq
-            .get(rel..rel + k as usize)
-            .map(|window| {
-                crate::genome_inference::mem_records::window_is_canonical_forward(window)
-            })
+        let canonical_forward = window_slice_at(seq, seq_lo, bp, k)
+            .map(crate::genome_inference::mem_records::window_is_canonical_forward)
             .unwrap_or(false);
         let chosen = if canonical_forward {
             forward_map.get(&bp)
@@ -1694,6 +1708,28 @@ fn canonical_scheme_steps(
         }
     }
     steps
+}
+
+fn reverse_matched_steps(
+    panel: &SyngIndex,
+    seq: &[u8],
+    seq_lo: u64,
+    k: u64,
+) -> io::Result<Vec<(u64, i32)>> {
+    let seq_len = seq.len() as u64;
+    let Some(max_q) = seq_len.checked_sub(k) else {
+        return Ok(Vec::new());
+    };
+    let rc_seq = revcomp(seq);
+    Ok(
+        crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
+            .into_iter()
+            .filter_map(|(signed, q)| {
+                let bp = seq_lo.checked_add(max_q.checked_sub(q)?)?;
+                Some((bp, -signed))
+            })
+            .collect(),
+    )
 }
 
 /// The canonical-scheme steps overlapping one row range [start, end)
@@ -1729,12 +1765,7 @@ fn canonical_steps_overlapping(
     let seq_lo = start.saturating_sub(k);
     let seq_hi = end + k;
     let seq = fetch(path_name, seq_lo, seq_hi)?;
-    let rc_seq = revcomp(&seq);
-    let reverse: Vec<(u64, i32)> =
-        crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
-            .into_iter()
-            .map(|(signed, q)| (seq_lo + seq.len() as u64 - k - q, -signed))
-            .collect();
+    let reverse = reverse_matched_steps(panel, &seq, seq_lo, k)?;
     // Both frames' selections restricted to the stored walk's own
     // domain: steps whose windows overlap [start, end).
     let keep = |bp: u64| bp + k > start && bp < end;
@@ -1750,8 +1781,11 @@ fn canonical_steps_overlapping(
     let mut added = 0u64;
     let mut replaced = 0u64;
     for &(bp, node, frame) in &steps {
-        let rel = (bp - seq_lo) as usize;
-        let window = &seq[rel..rel + k as usize];
+        let window = window_slice_at(&seq, seq_lo, bp, k).ok_or_else(|| {
+            invalid(&format!(
+                "canonical-scheme step window out of range: {path_name} bp {bp}"
+            ))
+        })?;
         let mut interned = panel.syncmer_seq(node);
         // The syng's kmerHashSeq may return lowercase bases; the GFA
         // writer's own convention uppercases them (write_segment's
@@ -1780,12 +1814,8 @@ fn canonical_steps_overlapping(
     // Completeness of the forward part: every stored step at a
     // canonical-forward position must survive with the stored node.
     for (&bp, &node) in forward_map.iter() {
-        let rel = (bp - seq_lo) as usize;
-        let canonical_forward = seq
-            .get(rel..rel + k as usize)
-            .map(|window| {
-                crate::genome_inference::mem_records::window_is_canonical_forward(window)
-            })
+        let canonical_forward = window_slice_at(&seq, seq_lo, bp, k)
+            .map(crate::genome_inference::mem_records::window_is_canonical_forward)
             .unwrap_or(false);
         if canonical_forward {
             ensure(
@@ -2173,17 +2203,7 @@ fn build_window_folds_live(
         let relative = contained_relative_walk(row, k);
         let key = (row.seq.clone(), relative.clone());
         let index = *fold_map.entry(key).or_insert_with(|| {
-            let node_positions = fold_node_positions(row, k);
-            let (nodes, edges) = fold_multisets(&relative);
-            folds.push(Fold {
-                seq: row.seq.clone(),
-                len: (row.end - row.start) as u64,
-                walk: relative.clone(),
-                node_positions,
-                members: Vec::new(),
-                nodes,
-                edges,
-            });
+            folds.push(Fold::from_row(row, row.seq.clone(), relative, k));
             fold_rep_rows.push(row_index);
             folds.len() - 1
         });
@@ -2239,39 +2259,13 @@ fn canonical_steps_over_range(
     let seq_lo = lo.saturating_sub(k);
     let seq_hi = hi + k;
     let seq = fetch_seq(&panel.name_map.path_to_name[path], seq_lo, seq_hi)?;
-    let rc_seq = revcomp(&seq);
-    let reverse: Vec<(u64, i32)> =
-        crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
-            .into_iter()
-            .map(|(signed, q)| {
-                (
-                    seq_lo + seq.len() as u64 - k - q,
-                    -signed,
-                )
-            })
-            .collect();
+    let reverse = reverse_matched_steps(panel, &seq, seq_lo, k)?;
     let forward_map: BTreeMap<u64, i32> = forward.into_iter().collect();
     let reverse_map: BTreeMap<u64, i32> = reverse.into_iter().collect();
-    let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
-    positions.extend(reverse_map.keys().copied());
-    let mut steps = Vec::with_capacity(positions.len());
-    for bp in positions {
-        let rel = (bp - seq_lo) as usize;
-        let canonical_forward = seq
-            .get(rel..rel + k as usize)
-            .map(|window| {
-                crate::genome_inference::mem_records::window_is_canonical_forward(window)
-            })
-            .unwrap_or(false);
-        let chosen = if canonical_forward {
-            forward_map.get(&bp)
-        } else {
-            reverse_map.get(&bp)
-        };
-        if let Some(&node) = chosen {
-            steps.push((bp, node));
-        }
-    }
+    let steps = canonical_scheme_steps(&forward_map, &reverse_map, &seq, seq_lo, k)
+        .into_iter()
+        .map(|(bp, node, _frame)| (bp, node))
+        .collect();
     Ok(steps)
 }
 
@@ -2536,12 +2530,13 @@ impl<'a> AssetReader<'a> {
         AssetReader { buf, pos: 0 }
     }
     fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
-        ensure(
-            self.pos + n <= self.buf.len(),
-            "the panel-precompute asset is truncated",
-        )?;
-        let slice = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|&end| end <= self.buf.len())
+            .ok_or_else(|| invalid("the panel-precompute asset is truncated"))?;
+        let slice = &self.buf[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
     fn u64(&mut self) -> io::Result<u64> {
@@ -3063,17 +3058,7 @@ impl PrecomputeServe {
                         .ok_or_else(|| invalid("the panel-precompute asset names an absent row"))?;
                     let seq = self.seq_of(rep_row, rows, fetch, path_names)?;
                     let relative = contained_relative_walk(row, k);
-                    let node_positions = fold_node_positions(row, k);
-                    let (nodes, edges) = fold_multisets(&relative);
-                    folds.push(Fold {
-                        seq: (*seq).clone(),
-                        len: (row.end - row.start) as u64,
-                        walk: relative,
-                        node_positions,
-                        members: Vec::new(),
-                        nodes,
-                        edges,
-                    });
+                    folds.push(Fold::from_row(row, (*seq).clone(), relative, k));
                     let index = folds.len() - 1;
                     served_to_live[served_fold] = Some(index);
                     index
@@ -3165,34 +3150,7 @@ pub fn precompute_panel_loci(
     // resolution, mirrored (the DERIVATIONS below are the one-spelling
     // functions; this resolution is I/O plumbing and states itself).
     let maps_digest = partition_maps_digest(partition_graphs)?;
-    let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
-    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
-    let mut names: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(partition_graphs)? {
-        let path = entry?.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        if name.ends_with(".gfa.map.json") {
-            names.push(name);
-        }
-    }
-    names.sort();
-    for name in &names {
-        let text = std::fs::read_to_string(partition_graphs.join(name))?;
-        let map: PartitionMap = serde_json::from_str(&text)?;
-        for axis in map
-            .members
-            .iter()
-            .filter(|m| m.path_name == component)
-        {
-            axis_rows.push((map.partition, axis.start, axis.end));
-        }
-        maps.insert(map.partition, map);
-    }
-    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    let (mut maps, mut axis_rows) = load_partition_maps_and_axis(partition_graphs, component)?;
     let panel_component: String = if global_frame {
         let frame = territory_frame::TerritoryFrame::from_local_names(
             maps
@@ -3393,29 +3351,102 @@ fn multiset_overlap(left: &[(u64, u32)], right: &[(u64, u32)]) -> f64 {
     total as f64
 }
 
+struct MergedMultisetIter<'a> {
+    left: &'a [(u64, u32)],
+    right: &'a [(u64, u32)],
+    i: usize,
+    j: usize,
+}
+
+impl<'a> MergedMultisetIter<'a> {
+    fn new(left: &'a [(u64, u32)], right: &'a [(u64, u32)]) -> Self {
+        Self {
+            left,
+            right,
+            i: 0,
+            j: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for MergedMultisetIter<'a> {
+    type Item = (u64, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.left.get(self.i), self.right.get(self.j)) {
+            (Some(&l), Some(&r)) => match l.0.cmp(&r.0) {
+                std::cmp::Ordering::Less => {
+                    self.i += 1;
+                    Some(l)
+                }
+                std::cmp::Ordering::Greater => {
+                    self.j += 1;
+                    Some(r)
+                }
+                std::cmp::Ordering::Equal => {
+                    self.i += 1;
+                    self.j += 1;
+                    Some((l.0, l.1 + r.1))
+                }
+            },
+            (Some(&l), None) => {
+                self.i += 1;
+                Some(l)
+            }
+            (None, Some(&r)) => {
+                self.j += 1;
+                Some(r)
+            }
+            (None, None) => None,
+        }
+    }
+}
+
 fn merged_multiset(left: &[(u64, u32)], right: &[(u64, u32)]) -> Vec<(u64, u32)> {
-    let (mut i, mut j) = (0usize, 0usize);
-    let mut merged: Vec<(u64, u32)> = Vec::with_capacity(left.len() + right.len());
-    while i < left.len() && j < right.len() {
-        match left[i].0.cmp(&right[j].0) {
+    MergedMultisetIter::new(left, right).collect()
+}
+
+fn differing_observed_mass_iter<I1, I2>(
+    mut left: I1,
+    mut right: I2,
+    observed: &dyn Fn(u64) -> f64,
+) -> f64
+where
+    I1: Iterator<Item = (u64, u32)>,
+    I2: Iterator<Item = (u64, u32)>,
+{
+    let mut l_next = left.next();
+    let mut r_next = right.next();
+    let mut total = 0.0f64;
+    while let (Some(l), Some(r)) = (l_next, r_next) {
+        match l.0.cmp(&r.0) {
             std::cmp::Ordering::Less => {
-                merged.push(left[i]);
-                i += 1;
+                total += observed(l.0) * l.1 as f64;
+                l_next = left.next();
             }
             std::cmp::Ordering::Greater => {
-                merged.push(right[j]);
-                j += 1;
+                total += observed(r.0) * r.1 as f64;
+                r_next = right.next();
             }
             std::cmp::Ordering::Equal => {
-                merged.push((left[i].0, left[i].1 + right[j].1));
-                i += 1;
-                j += 1;
+                let delta = (l.1 as i64 - r.1 as i64).unsigned_abs();
+                if delta > 0 {
+                    total += observed(l.0) * delta as f64;
+                }
+                l_next = left.next();
+                r_next = right.next();
             }
         }
     }
-    merged.extend_from_slice(&left[i..]);
-    merged.extend_from_slice(&right[j..]);
-    merged
+    while let Some(l) = l_next {
+        total += observed(l.0) * l.1 as f64;
+        l_next = left.next();
+    }
+    while let Some(r) = r_next {
+        total += observed(r.0) * r.1 as f64;
+        r_next = right.next();
+    }
+    total
 }
 
 fn differing_observed_mass(
@@ -3423,36 +3454,33 @@ fn differing_observed_mass(
     right: &[(u64, u32)],
     observed: &dyn Fn(u64) -> f64,
 ) -> f64 {
-    let (mut i, mut j, mut total) = (0usize, 0usize, 0.0f64);
-    while i < left.len() && j < right.len() {
-        match left[i].0.cmp(&right[j].0) {
-            std::cmp::Ordering::Less => {
-                total += observed(left[i].0) * left[i].1 as f64;
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                total += observed(right[j].0) * right[j].1 as f64;
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                let delta = (left[i].1 as i64 - right[j].1 as i64).unsigned_abs();
-                if delta > 0 {
-                    total += observed(left[i].0) * delta as f64;
-                }
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    while i < left.len() {
-        total += observed(left[i].0) * left[i].1 as f64;
-        i += 1;
-    }
-    while j < right.len() {
-        total += observed(right[j].0) * right[j].1 as f64;
-        j += 1;
-    }
-    total
+    differing_observed_mass_iter(left.iter().copied(), right.iter().copied(), observed)
+}
+
+fn fold_observed_masses(
+    folds: &[Fold],
+    observed_node: &(dyn Fn(u64) -> f64 + Sync),
+    observed_edge: &(dyn Fn(u64) -> f64 + Sync),
+) -> (Vec<f64>, Vec<f64>) {
+    let node_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.nodes
+                .iter()
+                .map(|&(key, count)| observed_node(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    let edge_mass: Vec<f64> = folds
+        .iter()
+        .map(|fold| {
+            fold.edges
+                .iter()
+                .map(|&(key, count)| observed_edge(key) * count as f64)
+                .sum()
+        })
+        .collect();
+    (node_mass, edge_mass)
 }
 
 // ---------------------------------------------------------------------------
@@ -4338,24 +4366,7 @@ where
     for (position, &(_, _, _, first, second, _)) in spectrum.iter().enumerate() {
         position_of.insert((first, second), position);
     }
-    let node_mass: Vec<f64> = folds
-        .iter()
-        .map(|fold| {
-            fold.nodes
-                .iter()
-                .map(|&(key, count)| observed_node(key) * count as f64)
-                .sum()
-        })
-        .collect();
-    let edge_mass: Vec<f64> = folds
-        .iter()
-        .map(|fold| {
-            fold.edges
-                .iter()
-                .map(|&(key, count)| observed_edge(key) * count as f64)
-                .sum()
-        })
-        .collect();
+    let (node_mass, edge_mass) = fold_observed_masses(folds, observed_node, observed_edge);
     let entries: Vec<(usize, usize, f64, f64)> = spectrum
         .iter()
         .map(|&(_, _, _, first, second, _)| {
@@ -4367,25 +4378,15 @@ where
             )
         })
         .collect();
-    // THE CERTIFICATE IS COMPUTED ONCE PER DISTINCT CLASS SHAPE (the
-    // receipts-phase census's finding): a tied class's predicate set is a
-    // pure function of its MERGED multisets and mass signatures, so two
-    // tied classes with identical merged (nodes, edges) produce identical
-    // lists BY CONSTRUCTION. The degenerate locus makes this the whole
-    // cost: 7,749 tied classes over 7,749 spectrum entries = 46.5M
-    // entries computed 7,749 times, 17.55 s, when ONE list would do
-    // (measured: T00048 locus 3, distinct_rows=1, folds=124). Group by a
-    // canonical hash of the merged multisets and verify the group on
-    // match, so a hash collision can never merge two different shapes.
     let canonical = |first: usize, second: usize| -> u64 {
         let mut hash = 0xcbf29ce484222325u64;
-        for &(key, count) in merged_multiset(&folds[first].nodes, &folds[second].nodes).iter() {
+        for (key, count) in MergedMultisetIter::new(&folds[first].nodes, &folds[second].nodes) {
             for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
                 hash ^= *byte as u64;
                 hash = hash.wrapping_mul(0x100000001b3);
             }
         }
-        for &(key, count) in merged_multiset(&folds[first].edges, &folds[second].edges).iter() {
+        for (key, count) in MergedMultisetIter::new(&folds[first].edges, &folds[second].edges) {
             for byte in key.to_le_bytes().iter().chain(count.to_le_bytes().iter()) {
                 hash ^= *byte as u64;
                 hash = hash.wrapping_mul(0x100000001b3);
@@ -4393,12 +4394,27 @@ where
         }
         hash
     };
-    // (representative per distinct shape, in called order)
-    let mut representative_of: HashMap<u64, usize> = HashMap::new();
+    let same_merged_shape = |a: (usize, usize), b: (usize, usize)| -> bool {
+        MergedMultisetIter::new(&folds[a.0].nodes, &folds[a.1].nodes)
+            .eq(MergedMultisetIter::new(&folds[b.0].nodes, &folds[b.1].nodes))
+            && MergedMultisetIter::new(&folds[a.0].edges, &folds[a.1].edges)
+                .eq(MergedMultisetIter::new(&folds[b.0].edges, &folds[b.1].edges))
+    };
+    // (representatives per distinct shape, bucketed by hash and verified for exact multiset equality)
+    let mut buckets: HashMap<u64, Vec<(usize, usize, usize)>> = HashMap::new();
     let mut shape_of: Vec<usize> = Vec::with_capacity(called.len().saturating_sub(1));
     for (ordinal, &(first, second)) in called[1..].iter().enumerate() {
         let key = canonical(first, second);
-        let slot = *representative_of.entry(key).or_insert(ordinal);
+        let bucket = buckets.entry(key).or_default();
+        let slot = if let Some(&(rep_ordinal, _, _)) = bucket
+            .iter()
+            .find(|&&(_, rep_first, rep_second)| same_merged_shape((first, second), (rep_first, rep_second)))
+        {
+            rep_ordinal
+        } else {
+            bucket.push((ordinal, first, second));
+            ordinal
+        };
         shape_of.push(slot);
     }
     let distinct: Vec<bool> = {
@@ -4439,12 +4455,15 @@ where
                     list.insert(position);
                     continue;
                 }
-                let other_nodes =
-                    merged_multiset(&folds[other_first].nodes, &folds[other_second].nodes);
-                let other_edges =
-                    merged_multiset(&folds[other_first].edges, &folds[other_second].edges);
-                let distance = differing_observed_mass(&nodes, &other_nodes, &node_lookup)
-                    + differing_observed_mass(&edges, &other_edges, &edge_lookup);
+                let distance = differing_observed_mass_iter(
+                    nodes.iter().copied(),
+                    MergedMultisetIter::new(&folds[other_first].nodes, &folds[other_second].nodes),
+                    &node_lookup,
+                ) + differing_observed_mass_iter(
+                    edges.iter().copied(),
+                    MergedMultisetIter::new(&folds[other_first].edges, &folds[other_second].edges),
+                    &edge_lookup,
+                );
                 if distance <= cut {
                     list.insert(position);
                 }
@@ -4528,24 +4547,7 @@ where
             band += 1;
         }
     }
-    let node_mass: Vec<f64> = folds
-        .iter()
-        .map(|fold| {
-            fold.nodes
-                .iter()
-                .map(|&(key, count)| observed_node(key) * count as f64)
-                .sum()
-        })
-        .collect();
-    let edge_mass: Vec<f64> = folds
-        .iter()
-        .map(|fold| {
-            fold.edges
-                .iter()
-                .map(|&(key, count)| observed_edge(key) * count as f64)
-                .sum()
-        })
-        .collect();
+    let (node_mass, edge_mass) = fold_observed_masses(folds, observed_node, observed_edge);
     // the spectrum's own per-pair mass signatures (no multisets yet)
     let signatures: Vec<(f64, f64)> = spectrum
         .iter()
@@ -4851,23 +4853,42 @@ pub fn path_matches_glob(path_name: &str, pattern: &str) -> bool {
 /// path derives from --partition-graphs (the axis intervals of the
 /// component lane, sorted by start). One spelling of the axis for
 /// every region-resolution site.
+fn load_partition_maps_and_axis(
+    partition_graphs: &std::path::Path,
+    component: &str,
+) -> io::Result<(BTreeMap<u32, PartitionMap>, Vec<(u32, u64, u64)>)> {
+    let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
+    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(partition_graphs)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.ends_with(".gfa.map.json") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    for name in &names {
+        let text = std::fs::read_to_string(partition_graphs.join(name))?;
+        let map: PartitionMap = serde_json::from_str(&text)?;
+        for axis in map.members.iter().filter(|m| m.path_name == component) {
+            axis_rows.push((map.partition, axis.start, axis.end));
+        }
+        maps.insert(map.partition, map);
+    }
+    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    Ok((maps, axis_rows))
+}
+
 pub fn component_axis_rows(
     partition_graphs: &std::path::Path,
     component: &str,
 ) -> io::Result<Vec<(u64, u64)>> {
-    let mut rows: Vec<(u64, u64, u32)> = Vec::new();
-    for entry in std::fs::read_dir(partition_graphs)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".gfa.map.json") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)?;
-        let map: PartitionMap = serde_json::from_str(&text)?;
-        for axis in map.members.iter().filter(|m| m.path_name == component) {
-            rows.push((axis.start, axis.end, map.partition));
-        }
-    }
+    let (_maps, rows) = load_partition_maps_and_axis(partition_graphs, component)?;
     ensure(
         !rows.is_empty(),
         &format!(
@@ -4875,8 +4896,7 @@ pub fn component_axis_rows(
             partition_graphs
         ),
     )?;
-    rows.sort_by_key(|&(start, end, partition)| (start, end, partition));
-    Ok(rows.into_iter().map(|(start, end, _)| (start, end)).collect())
+    Ok(rows.into_iter().map(|(_, start, end)| (start, end)).collect())
 }
 
 /// THE REGION-AS-INTERFACE RESOLVER (the owner's ruling: the CLI's
@@ -4900,7 +4920,7 @@ pub fn resolve_region_loci(
     let (lo, hi) = bounds.split_once('-').ok_or_else(invalid_region)?;
     let (lo, hi): (u64, u64) = (lo.parse().map_err(|_| invalid_region())?,
         hi.parse().map_err(|_| invalid_region())?);
-    ensure(lo < hi, "the region is empty: {region:?}")?;
+    ensure(lo < hi, &format!("the region is empty: {region:?}"))?;
     // the component's own path frame: its name ends chr:start-end
     let (name, interval) = component
         .rsplit_once(':')
@@ -4912,14 +4932,14 @@ pub fn resolve_region_loci(
         .ok_or_else(|| invalid(&format!(
             "the component name carries no chromosome: {component:?}")))?;
     ensure(component_chrom == chrom,
-        "the region's chromosome {chrom:?} is not the axis frame {component_chrom:?}")?;
+        &format!("the region's chromosome {chrom:?} is not the axis frame {component_chrom:?}"))?;
     let (offset, end): (u64, u64) = interval
         .split_once('-')
         .and_then(|(s, e)| Some((s.parse().ok()?, e.parse().ok()?)))
         .ok_or_else(|| invalid(&format!(
             "the component name carries no interval: {component:?}")))?;
     ensure(lo >= offset && hi <= end,
-        "the region {region:?} is outside the axis frame {component:?}")?;
+        &format!("the region {region:?} is outside the axis frame {component:?}"))?;
     let (lo, hi) = (lo - offset, hi - offset);
     let mut loci = Vec::new();
     for (index, (start, end)) in axis_rows.iter().enumerate() {
@@ -4928,7 +4948,7 @@ pub fn resolve_region_loci(
         }
     }
     ensure(!loci.is_empty(),
-        "the region {region:?} covers no axis window (frame {component:?})")?;
+        &format!("the region {region:?} covers no axis window (frame {component:?})"))?;
     Ok(loci)
 }
 
@@ -5082,11 +5102,25 @@ struct Fold {
 }
 
 impl Fold {
-    fn positions_of(&self, node_abs: u32) -> Vec<(u64, i32)> {
+    fn from_row(row: &RowFold, seq: Vec<u8>, relative: Vec<(u64, i32)>, k: u64) -> Self {
+        let node_positions = fold_node_positions(row, k);
+        let (nodes, edges) = fold_multisets(&relative);
+        Self {
+            seq,
+            len: row.end.saturating_sub(row.start) as u64,
+            walk: relative,
+            node_positions,
+            members: Vec::new(),
+            nodes,
+            edges,
+        }
+    }
+
+    fn positions_of(&self, node_abs: u32) -> &[(u64, i32)] {
         self.node_positions
             .get(&node_abs)
-            .cloned()
-            .unwrap_or_default()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 
@@ -5144,6 +5178,24 @@ fn serving_anchor(pinned: &[Option<i64>], own_hull: &[u64], d: i64) -> Option<(u
 /// the uniform placement prior's support requires the read fully
 /// inside it).
 #[allow(clippy::too_many_arguments)]
+#[inline]
+fn projected_coord(origin: i64, d: i64, own_pos: i64, span: u64, forward: bool) -> i64 {
+    if forward {
+        origin + (d - own_pos)
+    } else {
+        origin + (own_pos + span as i64 - 1 - d)
+    }
+}
+
+#[inline]
+fn oriented_base(base: u8, forward: bool) -> u8 {
+    if forward {
+        base
+    } else {
+        complement(base)
+    }
+}
+
 fn placement_score(
     unit: &Unit,
     canonical: &[(i32, u64)],
@@ -5167,20 +5219,12 @@ fn placement_score(
             let d = i as i64 - unit.w_lo as i64;
             let (index, own_pos) = serving_anchor(&pin.pinned, &own_hull, d)?;
             let r = pin.pinned[index].unwrap();
-            let coord = if forward {
-                r + (d - own_pos)
-            } else {
-                r + (own_pos + k as i64 - 1 - d)
-            };
+            let coord = projected_coord(r, d, own_pos, k, forward);
             if coord < img_lo || coord >= img_hi {
                 return None;
             }
             let base = fold_seq[coord as usize];
-            let read_base = if forward {
-                read[i as usize]
-            } else {
-                complement(read[i as usize])
-            };
+            let read_base = oriented_base(read[i as usize], forward);
             if read_base == base {
                 matches += 1;
             } else {
@@ -5245,11 +5289,7 @@ fn direct_score(
             let r = pin.pinned[j].unwrap();
             let t = d - own_hull[j];
             let read_i = unit.w_lo as usize + d as usize;
-            let read_base = if forward {
-                read[read_i]
-            } else {
-                complement(read[read_i])
-            };
+            let read_base = oriented_base(read[read_i], forward);
             let coord = if forward {
                 r + t as i64
             } else {
@@ -5274,21 +5314,13 @@ fn direct_score(
             let (index, own_pos) = serving_anchor(&pin.pinned, &own_hull, d)
                 .ok_or_else(|| invalid("direct vote without a serving anchor"))?;
             let r = pin.pinned[index].unwrap();
-            let coord = if forward {
-                r + (d - own_pos)
-            } else {
-                r + (own_pos + k as i64 - 1 - d)
-            };
+            let coord = projected_coord(r, d, own_pos, k, forward);
             ensure(
                 coord >= 0 && coord < fold_len as i64,
                 "direct vote outside the fold",
             )?;
             let base = fold_seq[coord as usize];
-            let read_base = if forward {
-                read[i as usize]
-            } else {
-                complement(read[i as usize])
-            };
+            let read_base = oriented_base(read[i as usize], forward);
             if read_base == base {
                 matches += 1;
             } else {
@@ -5473,21 +5505,13 @@ impl ScoreRow {
     /// .filter(pinned)` in the same order).
     fn pinned_units(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
         match self {
-            ScoreRow::Dense(dense) => dense
-                .pinned
-                .iter()
-                .enumerate()
-                .filter(|(_, &is_pinned)| is_pinned)
-                .map(|(unit, _)| (unit, dense.mismatches[unit]))
-                .collect::<Vec<_>>()
-                .into_iter(),
-            ScoreRow::Sparse(sparse) => sparse
-                .units
-                .iter()
-                .zip(&sparse.mismatches)
-                .map(|(&unit, &m)| (unit as usize, m))
-                .collect::<Vec<_>>()
-                .into_iter(),
+            ScoreRow::Dense(dense) => PinnedUnitsIter::Dense {
+                pinned: dense.pinned.iter().enumerate(),
+                mismatches: &dense.mismatches,
+            },
+            ScoreRow::Sparse(sparse) => {
+                PinnedUnitsIter::Sparse(sparse.units.iter().zip(&sparse.mismatches))
+            }
         }
     }
 
@@ -5567,6 +5591,33 @@ impl ScoreRow {
 struct RowCursor<'a> {
     row: &'a ScoreRow,
     index: usize,
+}
+
+enum PinnedUnitsIter<'a> {
+    Dense {
+        pinned: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
+        mismatches: &'a [u32],
+    },
+    Sparse(std::iter::Zip<std::slice::Iter<'a, u32>, std::slice::Iter<'a, u32>>),
+}
+
+impl Iterator for PinnedUnitsIter<'_> {
+    type Item = (usize, u32);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PinnedUnitsIter::Dense { pinned, mismatches } => {
+                for (unit, &is_pinned) in pinned {
+                    if is_pinned {
+                        return Some((unit, mismatches[unit]));
+                    }
+                }
+                None
+            }
+            PinnedUnitsIter::Sparse(zip) => zip.next().map(|(&unit, &m)| (unit as usize, m)),
+        }
+    }
 }
 impl<'a> RowCursor<'a> {
     fn new(row: &'a ScoreRow) -> RowCursor<'a> {
@@ -6674,21 +6725,13 @@ fn single_offset_score(
     let mut out_of_extent = 0u32;
     for i in 0..read.len() as i64 {
         let d = i - unit.w_lo as i64;
-        let coord = if forward {
-            offset_const + d
-        } else {
-            offset_const + k as i64 - 1 - d
-        };
+        let coord = projected_coord(offset_const, d, 0, k, forward);
         if coord < 0 || coord >= fold_len as i64 {
             out_of_extent += 1;
             continue;
         }
         let base = fold_seq[coord as usize];
-        let read_base = if forward {
-            read[i as usize]
-        } else {
-            complement(read[i as usize])
-        };
+        let read_base = oriented_base(read[i as usize], forward);
         if read_base == base {
             matches += 1;
         } else {
@@ -7356,26 +7399,8 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // window->partition map may repeat a partition and every window
     // keeps its OWN axis row, which the truth-fold derivation below
     // matches exactly).
-    let mut maps: BTreeMap<u32, PartitionMap> = BTreeMap::new();
-    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
-    for entry in std::fs::read_dir(&options.partition_graphs)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".gfa.map.json") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)?;
-        let map: PartitionMap = serde_json::from_str(&text)?;
-        for axis in map
-            .members
-            .iter()
-            .filter(|m| m.path_name == options.component)
-        {
-            axis_rows.push((map.partition, axis.start, axis.end));
-        }
-        maps.insert(map.partition, map);
-    }
-    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    let (mut maps, mut axis_rows) =
+        load_partition_maps_and_axis(&options.partition_graphs, &options.component)?;
     let n_windows = if options.frame_audit_only {
         axis_rows.len()
     } else {
@@ -7630,6 +7655,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     let mut base_count = 0u64;
     let mut error_sum = 0.0f64;
     for (&q, &count) in quality_counts.iter() {
+        ensure(
+            q >= b'!',
+            &format!("invalid FASTQ quality byte {q} (< '!')"),
+        )?;
         base_count += count;
         error_sum += count as f64 * 10f64.powf(-((q - b'!') as f64) / 10.0);
     }
@@ -8111,11 +8140,11 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let read = *key_reads[key as usize]
             .first()
             .ok_or_else(|| invalid("record key has no reads"))?;
-        let own = read_records[read]
+        let own = &read_records[read]
             .iter()
             .find(|record| record.key == key)
-            .map(|record| record.walk.clone())
-            .ok_or_else(|| invalid("read record mismatch"))?;
+            .ok_or_else(|| invalid("read record mismatch"))?
+            .walk;
         let encoded = crate::sample_mem_bwt::encode_walk(
             &own
                 .iter()
@@ -8456,8 +8485,10 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         w_lo: u64,
         count: u64,
     }
+    let read_fnvs: Vec<u64> = reads.iter().map(|read| fnv1a64(read)).collect();
     let mut record_variants: HashMap<usize, Vec<ReadVariant>> = HashMap::new();
     let variants_started = Instant::now();
+    let mut walk_buf: Vec<(i32, u64)> = Vec::new();
     for &record in &pilot_records {
         let line = &census_records[record];
         let key = census_key[record].unwrap();
@@ -8474,15 +8505,12 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 .ok_or_else(|| invalid("key_reads entry without a matching record"))?;
             *cursor += 1;
             let own = &entry.walk;
-            let encoded = crate::sample_mem_bwt::encode_walk(
-                &own
-                    .iter()
-                    .map(|&(node, pos)| (node, pos as u64))
-                    .collect::<Vec<_>>(),
-            )?;
+            walk_buf.clear();
+            walk_buf.extend(own.iter().map(|&(node, pos)| (node, pos as u64)));
+            let encoded = crate::sample_mem_bwt::encode_walk(&walk_buf)?;
             let mirrored = encoded != key_tokens[key as usize].as_slice();
             let w_lo = own.first().map(|&(_, p)| p as u64).unwrap_or(0);
-            let vkey = (mirrored, w_lo, fnv1a64(&reads[read]));
+            let vkey = (mirrored, w_lo, read_fnvs[read]);
             let weight = read_multiplicity[read] as u64;
             match variants.get_mut(&vkey) {
                 Some(variant) => variant.count += weight,
@@ -8795,6 +8823,25 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
     // read-only shared state (the window groupings, the rows' content
     // keys, the Mutex-guarded sequence cache), Sync by construction.)
     let served_precompute = served.as_ref();
+    let mut key_span_cache: Vec<Option<u64>> = vec![None; key_tokens.len()];
+    let mut record_span: Vec<u64> = vec![0; census_records.len()];
+    for &record in &pilot_records {
+        let key = census_key[record].unwrap();
+        let span = match key_span_cache[key as usize] {
+            Some(span) => span,
+            None => {
+                let span = walk_span(
+                    &key_shape(key, &key_tokens, &key_reads, &read_records, k)?.canonical,
+                    k,
+                );
+                key_span_cache[key as usize] = Some(span);
+                span
+            }
+        };
+        record_span[record] = span;
+    }
+    let record_span = &record_span;
+    let read_fnvs = &read_fnvs;
     let compute_locus = |locus: u32| -> io::Result<LocusOutput> {
         let locus_started = Instant::now();
         let mut skeleton_buf: Vec<u8> = Vec::new();
@@ -9052,17 +9099,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let mut locus_records: Vec<usize> = Vec::new();
         for &record in &pilot_records {
             let line = &census_records[record];
-            let span = walk_span(
-                &key_shape(
-                    census_key[record].unwrap(),
-                    &key_tokens,
-                    &key_reads,
-                    &read_records,
-                    k,
-                )?
-                .canonical,
-                k,
-            );
+            let span = record_span[record];
             let shifts = &record_shifts[record];
             if line
                 .occurrences
@@ -9091,17 +9128,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
         let mut locality_examples: Vec<serde_json::Value> = Vec::new();
         for &record in &locus_records {
             let line = &census_records[record];
-            let span = walk_span(
-                &key_shape(
-                    census_key[record].unwrap(),
-                    &key_tokens,
-                    &key_reads,
-                    &read_records,
-                    k,
-                )?
-                .canonical,
-                k,
-            );
+            let span = record_span[record];
             let shifts = &record_shifts[record];
             let mut data = TouchingData {
                 orientations: BTreeSet::new(),
@@ -9366,8 +9393,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         let windows: Vec<(u64, u64)> = pinned
                             .iter()
                             .enumerate()
-                            .filter_map(|(j, &p)| p.map(|r| (own_flat[j], r as u64)))
-                            .map(|(p, _)| (p, p + k))
+                            .filter_map(|(j, &p)| p.map(|_| (own_flat[j], own_flat[j] + k)))
                             .collect();
                         let backbone_bp: u64 =
                             merge_windows(windows).iter().map(|&(lo, hi)| hi - lo).sum();
@@ -9966,14 +9992,11 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
             // chrMT/chrI/chrIV never hit the ambiguous case (their
             // single-window partitions carry at most one SK1 fold —
             // the identity gates prove the change is a no-op there.)
+            let sk1_path = format!("SK1#0#{contig}");
             let hits: Vec<usize> = folds
                 .iter()
                 .enumerate()
-                .filter(|(_, fold)| {
-                    fold.members
-                        .iter()
-                        .any(|m| m.path_name == format!("SK1#0#{contig}"))
-                })
+                .filter(|(_, fold)| fold.members.iter().any(|m| m.path_name == sk1_path))
                 .map(|(index, _)| index)
                 .collect();
             (
@@ -10796,8 +10819,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                 let windows: Vec<(u64, u64)> = pinned
                     .iter()
                     .enumerate()
-                    .filter_map(|(j, &p)| p.map(|r| (own_flat[j], r as u64)))
-                    .map(|(p, _)| (p, p + k))
+                    .filter_map(|(j, &p)| p.map(|_| (own_flat[j], own_flat[j] + k)))
                     .collect();
                 let backbone_bp: u64 =
                     merge_windows(windows).iter().map(|&(lo, hi)| hi - lo).sum();
@@ -10827,17 +10849,9 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         let (index, own_pos) =
                             serving_anchor(&pin.pinned, &own_hull, d).expect("serving anchor");
                         let r = pin.pinned[index].unwrap();
-                        let coord = if forward {
-                            r + (d - own_pos)
-                        } else {
-                            r + (own_pos + k as i64 - 1 - d)
-                        };
+                        let coord = projected_coord(r, d, own_pos, k, forward);
                         let base = fold.seq[coord as usize];
-                        let read_base = if forward {
-                            reads[unit.read][i as usize]
-                        } else {
-                            complement(reads[unit.read][i as usize])
-                        };
+                        let read_base = oriented_base(reads[unit.read][i as usize], forward);
                         votes.push(json!([i, coord, if read_base == base { 1 } else { 0 }]));
                     }
                 }
@@ -10863,7 +10877,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     "mirror": if unit.mirror { 1 } else { 0 },
                     "w_lo": unit.w_lo,
                     "count": unit.count,
-                    "read_fnv": fnv1a64(read),
+                    "read_fnv": read_fnvs[unit.read],
                     "read": String::from_utf8(read.clone()).unwrap(),
                     "fold": fold_index,
                     "ll": matrix.ll(fold_index, unit_index),
@@ -10958,11 +10972,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                     let mut full_oob = 0u32;
                     for i in 0..read.len() as i64 {
                         let d = i - unit.w_lo as i64;
-                        let coord = if forward {
-                            origin as i64 + d
-                        } else {
-                            origin as i64 + span as i64 - 1 - d
-                        };
+                        let coord = projected_coord(origin as i64, d, 0, span, forward);
                         if coord < 0
                             || coord >= path_len as i64
                             || (coord as u64) < lo
@@ -10972,11 +10982,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                             continue;
                         }
                         let base = seq[(coord - lo as i64) as usize];
-                        let read_base = if forward {
-                            read[i as usize]
-                        } else {
-                            complement(read[i as usize])
-                        };
+                        let read_base = oriented_base(read[i as usize], forward);
                         if read_base == base {
                             full_m += 1;
                         } else {
@@ -11045,8 +11051,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         let backbone_windows: Vec<(u64, u64)> = pinned_vec
                             .iter()
                             .enumerate()
-                            .filter_map(|(j, &r)| r.map(|r2| (own_flat[j], r2)))
-                            .map(|(p, _)| (p, p + k))
+                            .filter_map(|(j, &r)| r.map(|_| (own_flat[j], own_flat[j] + k)))
                             .collect();
                         let backbone_bp: u64 =
                             merge_windows(backbone_windows).iter().map(|&(lo, hi)| hi - lo).sum();
@@ -11110,21 +11115,14 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                                             Some(r) => r,
                                             None => continue,
                                         };
-                                        let coord = if forward {
-                                            r + (d - own_pos)
-                                        } else {
-                                            r + (own_pos + k as i64 - 1 - d)
-                                        };
+                                        let coord = projected_coord(r, d, own_pos, k, forward);
                                         if coord < 0 || coord >= fold.len as i64 {
                                             votes.push(json!([i, -1, 0]));
                                             continue;
                                         }
                                         let base = fold.seq[coord as usize];
-                                        let read_base = if forward {
-                                            reads[unit.read][i as usize]
-                                        } else {
-                                            complement(reads[unit.read][i as usize])
-                                        };
+                                        let read_base =
+                                            oriented_base(reads[unit.read][i as usize], forward);
                                         votes.push(json!([
                                             i,
                                             coord,
@@ -11164,7 +11162,7 @@ pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io:
                         "mirror": if unit.mirror { 1 } else { 0 },
                         "w_lo": unit.w_lo,
                         "count": unit.count,
-                        "read_fnv": fnv1a64(read),
+                        "read_fnv": read_fnvs[unit.read],
                         "read": String::from_utf8(read.clone()).unwrap(),
                         "class": class,
                         "pinning_folds": pinning_folds,
@@ -13669,10 +13667,10 @@ mod tests {
     /// copied verbatim for the equivalence proof — it descends every
     /// monotone assignment; exponential on repeat-dense rows, which
     /// is exactly why the DP replaces it at chrIV scale).
-    fn enumerate_correspondence(
+    fn enumerate_correspondence<'a>(
         canonical: &[(i32, u64)],
         orientation: u8,
-        row_positions: &dyn Fn(u32) -> Vec<(u64, i32)>,
+        row_positions: &dyn Fn(u32) -> &'a [(u64, i32)],
     ) -> (Vec<Option<u64>>, Vec<usize>) {
         let m = canonical.len();
         let mut candidates: Vec<Vec<u64>> = Vec::with_capacity(m);
@@ -13789,7 +13787,8 @@ mod tests {
                 }
                 row.insert(node, positions);
             }
-            let positions_of = move |node: u32| row.get(&node).cloned().unwrap_or_default();
+            let row_ref = &row;
+            let positions_of = |node: u32| row_ref.get(&node).map(Vec::as_slice).unwrap_or(&[]);
             for orientation in [0u8, 1u8] {
                 let expected = enumerate_correspondence(&canonical, orientation, &positions_of);
                 let actual = anchor_correspondence(&canonical, orientation, &positions_of);
@@ -14060,14 +14059,7 @@ mod tests {
         // /proc/self/status — the memory bound receipt. The dense
         // form's 13 B/pair (30.7GB) is exact arithmetic, never built.
         fn vm_rss_kb() -> u64 {
-            std::fs::read_to_string("/proc/self/status")
-                .unwrap()
-                .lines()
-                .find(|line| line.starts_with("VmRSS:"))
-                .and_then(|line| {
-                    line.split_whitespace().nth(1).and_then(|n| n.parse().ok())
-                })
-                .unwrap_or(0)
+            read_proc_status_kb().map(|(rss, _)| rss).unwrap_or(0)
         }
         let (n_folds, n_units, pinned_stride) = (532usize, 4_438_575usize, 48usize);
         let elsewhere = -14.418156f64;
@@ -16877,5 +16869,156 @@ mod tests {
             String::from_utf8(reference).unwrap(),
             "the streamed certificate must emit the value tree's own bytes"
         );
+    }
+
+    #[test]
+    fn asset_reader_take_rejects_overflowing_length_without_panic() {
+        let mut reader = AssetReader::new(&[1u8, 2, 3]);
+        assert_eq!(reader.take(2).unwrap(), &[1, 2]);
+        let err = reader.take(usize::MAX).unwrap_err();
+        assert!(err.to_string().contains("truncated"));
+    }
+
+    #[test]
+    fn canonical_scheme_steps_guards_bp_before_seq_lo() {
+        let mut forward = BTreeMap::new();
+        forward.insert(3, 11);
+        let reverse = BTreeMap::new();
+        let seq = b"ACGTACGTACGTACGTACGT";
+        let steps = canonical_scheme_steps(&forward, &reverse, seq, 10, 5);
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn merged_multiset_iter_and_differing_mass_match_materialized() {
+        let a = [(1, 2), (3, 1), (7, 4)];
+        let b = [(2, 5), (3, 3), (9, 1)];
+        let c = [(1, 2), (2, 2), (4, 1), (7, 4)];
+        let d = [(3, 2), (8, 3)];
+        let iter_ab: Vec<(u64, u32)> = MergedMultisetIter::new(&a, &b).collect();
+        let mat_ab = merged_multiset(&a, &b);
+        assert_eq!(iter_ab, mat_ab);
+
+        let mat_cd = merged_multiset(&c, &d);
+        let observed = |k: u64| (k as f64) * 1.5 + 0.25;
+        let expected = differing_observed_mass(&mat_ab, &mat_cd, &observed);
+        let actual = differing_observed_mass_iter(
+            MergedMultisetIter::new(&a, &b),
+            MergedMultisetIter::new(&c, &d),
+            &observed,
+        );
+        assert!((actual - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tied_class_cut_lists_groups_equal_shapes_and_separates_distinct_ones() {
+        let mk_fold = |nodes: Vec<(u64, u32)>, edges: Vec<(u64, u32)>| Fold {
+            seq: Vec::new(),
+            len: 0,
+            walk: Vec::new(),
+            node_positions: HashMap::new(),
+            members: Vec::new(),
+            nodes,
+            edges,
+        };
+        let folds = vec![
+            mk_fold(vec![(1, 1)], vec![]),
+            mk_fold(vec![(2, 1)], vec![]),
+            mk_fold(vec![(1, 1), (2, 1)], vec![]),
+            mk_fold(vec![], vec![]),
+            mk_fold(vec![(3, 1)], vec![]),
+        ];
+        // Pair (0,1) and pair (2,3) have identical merged nodes [(1,1),(2,1)]!
+        // Pair (2,4) has distinct merged nodes [(1,1),(2,1),(3,1)].
+        let spectrum = vec![
+            (0.0, 0.0, 0.0, 0, 1, 0),
+            (0.0, 0.0, 0.0, 2, 3, 1),
+            (0.0, 0.0, 0.0, 2, 4, 2),
+        ];
+        let called = vec![(0, 1), (2, 3), (2, 4)];
+        let obs = |k: u64| k as f64;
+        let lists = tied_class_cut_lists(&folds, &called, &spectrum, &obs, &obs, 2.0);
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0].0, 1);
+        assert_eq!(lists[0].1, CutSet::from_ascending([0, 1]));
+        assert_eq!(lists[1].0, 2);
+        assert_eq!(lists[1].1, CutSet::from_ascending([2]));
+    }
+
+    #[test]
+    fn decode_record_tokens_rejects_position_overflow() {
+        // Alternating [node, gap, node, gap, ...]; three gaps of (u64::MAX - 1)/2 overflow u64.
+        let huge_gap = u64::MAX; // gap = 2^63 - 1
+        let tokens = [2, huge_gap, 2, huge_gap, 2, huge_gap, 4];
+        let err = decode_record_tokens(&tokens).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn resolve_region_loci_formats_error_context_values() {
+        let component = "S288C#0#chrI:100-500";
+        let axis = &[(0, 200), (200, 400)];
+
+        let empty_err = resolve_region_loci(component, axis, "chrI:250-250")
+            .unwrap_err()
+            .to_string();
+        assert!(empty_err.contains("chrI:250-250"));
+        assert!(!empty_err.contains("{region"));
+
+        let chrom_err = resolve_region_loci(component, axis, "chrII:100-200")
+            .unwrap_err()
+            .to_string();
+        assert!(chrom_err.contains("chrII"));
+        assert!(chrom_err.contains("chrI"));
+        assert!(!chrom_err.contains("{chrom"));
+
+        let bounds_err = resolve_region_loci(component, axis, "chrI:50-150")
+            .unwrap_err()
+            .to_string();
+        assert!(bounds_err.contains("chrI:50-150"));
+        assert!(bounds_err.contains(component));
+        assert!(!bounds_err.contains("{component"));
+
+        let none_err = resolve_region_loci(component, &[(100, 200)], "chrI:110-150")
+            .unwrap_err()
+            .to_string();
+        assert!(none_err.contains("chrI:110-150"));
+        assert!(none_err.contains(component));
+        assert!(!none_err.contains("{region"));
+    }
+
+    #[test]
+    fn revcomp_eq_matches_revcomp_slice_equality() {
+        let a = b"ACGTNACT";
+        let rc = revcomp(a);
+        assert!(revcomp_eq(a, &rc));
+        assert!(!revcomp_eq(a, a));
+        assert!(!revcomp_eq(a, b"ACG"));
+        assert!(revcomp_eq(b"", b""));
+    }
+
+    #[test]
+    fn reverse_matched_steps_handles_short_sequence_without_underflow() {
+        assert!(window_slice_at(b"ACGT", 10, 5, 2).is_none());
+        assert!(window_slice_at(b"ACGT", 10, 12, 5).is_none());
+        assert!(window_slice_at(b"ACGT", 10, u64::MAX, 4).is_none());
+        assert_eq!(window_slice_at(b"ACGT", 10, 11, 2), Some(&b"CG"[..]));
+    }
+
+    #[test]
+    fn pinned_units_dense_and_sparse_match_without_allocation() {
+        let dense = ScoreRow::Dense(ScoreRowDense {
+            ll: vec![-1.0, -5.0, -2.0, -5.0, -3.0],
+            pinned: vec![true, false, true, false, true],
+            mismatches: vec![0, 99, 2, 88, 1],
+        });
+        let sparse = ScoreRow::Sparse(ScoreRowSparse {
+            units: vec![0, 2, 4],
+            lls: vec![-1.0, -2.0, -3.0],
+            mismatches: vec![0, 2, 1],
+        });
+        let expected = vec![(0usize, 0u32), (2, 2), (4, 1)];
+        assert_eq!(dense.pinned_units().collect::<Vec<_>>(), expected);
+        assert_eq!(sparse.pinned_units().collect::<Vec<_>>(), expected);
     }
 }
