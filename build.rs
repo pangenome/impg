@@ -7,49 +7,99 @@ fn main() {
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
-    // Derive the profile directory (e.g. target/release/) from OUT_DIR.
-    // OUT_DIR is typically: target/release/build/<crate>-<hash>/out
-    let profile_dir = PathBuf::from(&out_dir)
+    // OUT_DIR is <profile>/build/<crate>-<hash>/out (cargo < 1.100)
+    // or <profile>/build/<crate>/<hash>/out (cargo >= 1.100).
+    let build_dir = PathBuf::from(&out_dir)
         .ancestors()
-        .nth(3)
-        .expect("cannot derive profile dir from OUT_DIR")
+        .find(|p| p.file_name().is_some_and(|n| n == "build"))
+        .unwrap_or_else(|| panic!("no build directory above OUT_DIR {out_dir}"))
+        .to_path_buf();
+    let profile_dir = build_dir
+        .parent()
+        .unwrap_or_else(|| panic!("no profile directory above {}", build_dir.display()))
         .to_path_buf();
 
-    let build_dir = profile_dir.join("build");
-
-    // Copy wfmash binary
-    copy_dep_binary(&build_dir, "wfmash-rs-", "wfmash", &profile_dir);
+    // Copy wfmash binary (required at runtime)
+    copy_dep_binary(&build_dir, "wfmash-rs", "wfmash", &profile_dir, true);
 
     // Copy wfmash's WFA2 shared libraries (needed at runtime)
-    copy_dep_shared_libs(&build_dir, "wfmash-rs-", &profile_dir);
+    copy_dep_shared_libs(&build_dir, "wfmash-rs", &profile_dir);
 
     // Copy FastGA binaries
     let fastga_binaries = [
         "FastGA", "FAtoGDB", "GIXmake", "GIXrm", "ALNtoPAF", "PAFtoALN", "ONEview",
     ];
     for name in &fastga_binaries {
-        copy_dep_binary(&build_dir, "fastga-rs-", name, &profile_dir);
+        copy_dep_binary(&build_dir, "fastga-rs", name, &profile_dir, false);
     }
 }
 
-/// Scan `build_dir` for a subdirectory matching `prefix*/out/<binary_name>`,
-/// and copy it to `dest_dir`. Also copies to `$CARGO_HOME/bin/` if it exists
-/// (handles `cargo install` case).
-fn copy_dep_binary(build_dir: &Path, prefix: &str, binary_name: &str, dest_dir: &Path) {
-    let Some(src) = find_binary_in_build(build_dir, prefix, binary_name) else {
-        return; // silently skip if not found
+/// List the `out/` directories of the build-script runs of `krate`, in both
+/// cargo layouts: `<krate>-<hash>/out` and `<krate>/<hash>/out`.
+fn dep_out_dirs(build_dir: &Path, krate: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let entries = fs::read_dir(build_dir)
+        .unwrap_or_else(|e| panic!("cannot read build directory {}: {e}", build_dir.display()));
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.strip_prefix(krate).is_some_and(|rest| rest.starts_with('-')) {
+            dirs.push(entry.path().join("out"));
+        } else if name == krate {
+            let runs = fs::read_dir(entry.path())
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", entry.path().display()));
+            dirs.extend(runs.flatten().map(|run| run.path().join("out")));
+        }
+    }
+    dirs.retain(|d| d.is_dir());
+    dirs
+}
+
+/// Find `<binary_name>` in the build output of `krate` and copy it to
+/// `dest_dir`. Also copies to `$CARGO_HOME/bin/` if it exists (handles
+/// `cargo install`). A missing binary fails the build if `required`, else it
+/// is reported as a cargo warning.
+fn copy_dep_binary(
+    build_dir: &Path,
+    krate: &str,
+    binary_name: &str,
+    dest_dir: &Path,
+    required: bool,
+) {
+    let Some(src) = find_binary_in_build(build_dir, krate, binary_name) else {
+        let msg = format!(
+            "{binary_name} not found in the {krate} build output under {}",
+            build_dir.display()
+        );
+        if required {
+            panic!("{msg}");
+        }
+        println!("cargo:warning={msg}");
+        return;
     };
 
     // Copy to profile dir (e.g. target/release/). Always overwrite: a stale
     // copy from an older dependency revision must not survive a version bump.
     let dest = dest_dir.join(binary_name);
     if let Err(e) = fs::copy(&src, &dest) {
-        eprintln!(
+        println!(
             "cargo:warning=Failed to copy {binary_name} to {}: {e}",
             dest.display()
         );
     } else {
         set_executable(&dest);
+    }
+
+    // cargo sets OUT_DIR when it runs tests, and fastga-rs looks there. Test
+    // executables are not siblings of the copy above, so they need this one.
+    let out_dest = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set")).join(binary_name);
+    if let Err(e) = fs::copy(&src, &out_dest) {
+        println!(
+            "cargo:warning=Failed to copy {binary_name} to {}: {e}",
+            out_dest.display()
+        );
+    } else {
+        set_executable(&out_dest);
     }
 
     // Copy to CARGO_HOME/bin/ if it exists (for `cargo install`)
@@ -58,7 +108,7 @@ fn copy_dep_binary(build_dir: &Path, prefix: &str, binary_name: &str, dest_dir: 
         if cargo_bin.is_dir() {
             let cargo_dest = cargo_bin.join(binary_name);
             if let Err(e) = fs::copy(&src, &cargo_dest) {
-                eprintln!(
+                println!(
                     "cargo:warning=Failed to copy {binary_name} to {}: {e}",
                     cargo_dest.display()
                 );
@@ -69,55 +119,27 @@ fn copy_dep_binary(build_dir: &Path, prefix: &str, binary_name: &str, dest_dir: 
     }
 }
 
-/// Search `build_dir` for `<prefix><hash>/out/<binary_name>`.
+/// Search the build output of `krate` for `<binary_name>`.
 ///
 /// Several hash directories can coexist, one per dependency revision. Take the
 /// most recently modified one, otherwise a bumped revision keeps losing to a
 /// leftover build of the old one.
-fn find_binary_in_build(build_dir: &Path, prefix: &str, binary_name: &str) -> Option<PathBuf> {
-    let entries = fs::read_dir(build_dir).ok()?;
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.starts_with(prefix) {
-            continue;
-        }
-        let candidate = entry.path().join("out").join(binary_name);
-        if !candidate.is_file() {
-            continue;
-        }
-        let mtime = fs::metadata(&candidate)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().is_none_or(|(best, _)| mtime > *best) {
-            newest = Some((mtime, candidate));
-        }
-    }
-    newest.map(|(_, path)| path)
+fn find_binary_in_build(build_dir: &Path, krate: &str, binary_name: &str) -> Option<PathBuf> {
+    dep_out_dirs(build_dir, krate)
+        .into_iter()
+        .map(|out| out.join(binary_name))
+        .filter(|candidate| candidate.is_file())
+        .max_by_key(|candidate| {
+            fs::metadata(candidate)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
 }
 
-/// Copy shared libraries (*.so*, *.dylib) from `<prefix><hash>/out/` subdirectories
+/// Copy shared libraries (*.so*, *.dylib) from the build output of `krate`
 /// to `dest_dir` and `$CARGO_HOME/lib/`. This handles wfmash's WFA2 runtime deps.
-fn copy_dep_shared_libs(build_dir: &Path, prefix: &str, dest_dir: &Path) {
-    let entries = match fs::read_dir(build_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.starts_with(prefix) {
-            continue;
-        }
-
-        // Search recursively under out/ for shared libraries
-        let out_dir = entry.path().join("out");
-        if !out_dir.is_dir() {
-            continue;
-        }
-
+fn copy_dep_shared_libs(build_dir: &Path, krate: &str, dest_dir: &Path) {
+    for out_dir in dep_out_dirs(build_dir, krate) {
         collect_shared_libs(&out_dir, dest_dir);
     }
 }
@@ -148,7 +170,7 @@ fn collect_shared_libs(dir: &Path, dest_dir: &Path) {
         // Copy to profile dir, overwriting any stale copy
         let dest = dest_dir.join(&fname);
         if let Err(e) = fs::copy(&path, &dest) {
-            eprintln!(
+            println!(
                 "cargo:warning=Failed to copy {} to {}: {e}",
                 fname_str,
                 dest.display()
@@ -161,7 +183,7 @@ fn collect_shared_libs(dir: &Path, dest_dir: &Path) {
             let _ = fs::create_dir_all(&cargo_lib);
             let cargo_dest = cargo_lib.join(&fname);
             if let Err(e) = fs::copy(&path, &cargo_dest) {
-                eprintln!(
+                println!(
                     "cargo:warning=Failed to copy {} to {}: {e}",
                     fname_str,
                     cargo_dest.display()
