@@ -118,20 +118,22 @@ fn shift_indel_run_left(
         // axis that the run consumes, against the last base of the run.
         let (swap_base, run_tail_base) = match op {
             b'I' => {
-                let (Some(&prev_b), Some(&tail_b)) =
-                    (query.get(*q_pos - 1), query.get(*q_pos + run_len - 1))
-                else {
-                    return run_start;
-                };
-                (prev_b, tail_b)
+                assert!(
+                    *q_pos + run_len <= query.len(),
+                    "left_align_indels: CIGAR exceeds query length {} (insertion ends at {})",
+                    query.len(),
+                    *q_pos + run_len
+                );
+                (query[*q_pos - 1], query[*q_pos + run_len - 1])
             }
             b'D' => {
-                let (Some(&prev_b), Some(&tail_b)) =
-                    (target.get(*t_pos - 1), target.get(*t_pos + run_len - 1))
-                else {
-                    return run_start;
-                };
-                (prev_b, tail_b)
+                assert!(
+                    *t_pos + run_len <= target.len(),
+                    "left_align_indels: CIGAR exceeds target length {} (deletion ends at {})",
+                    target.len(),
+                    *t_pos + run_len
+                );
+                (target[*t_pos - 1], target[*t_pos + run_len - 1])
             }
             _ => return run_start,
         };
@@ -298,12 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_indels_track_coordinates_and_ignore_overlong_cigar() {
-        // target: GACAAAATCCCCT
-        // query:  GAAAAAAATCCCCT -> insertion of A and deletion of C?
-        // Easier verified example:
-        //   target: ACAAAATTTTTG (len 12)
-        //   query:  ACAAAAATTTTGG? No, let's do:
+    fn multiple_indels_track_coordinates() {
         //   target: ACAAAATGGG  (len 10)
         //   query:  ACAAAAATGGGG (len 12): extra A + extra G
         //   raw:    MMMMMMIMMMMI (len 12: q=6+1+4+1=12, t=6+4=10)
@@ -312,10 +309,18 @@ mod tests {
         let cig = b"MMMMMMIMMMMI";
         let out = left_align_indels(cig, query, target);
         assert_eq!(out, b"MMIMMMMMIMMM");
+    }
 
-        // Malformed CIGAR shorter than sequences shouldn't panic on bounds.
-        let malformed = b"MMMI";
-        assert_eq!(left_align_indels(malformed, b"AA", b"AA"), b"MMMI");
+    #[test]
+    #[should_panic(expected = "CIGAR exceeds query length")]
+    fn overlong_insertion_cigar_panics() {
+        left_align_indels(b"MMMI", b"AA", b"AA");
+    }
+
+    #[test]
+    #[should_panic(expected = "CIGAR exceeds target length")]
+    fn overlong_deletion_cigar_panics() {
+        left_align_indels(b"MMMD", b"AA", b"AA");
     }
 
     #[test]
