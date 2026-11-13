@@ -85,10 +85,13 @@
 //!    columns) are reported side by side, NEVER conflated — the
 //!    owner's evaluation ruling since the haploid era.
 
-use crate::genome_inference::{panel_routes as routes, read_json, PanelIdentity};
+use crate::genome_inference::{
+    load_component_axis_rows, panel_routes as routes, read_json, PanelIdentity, RssGuard,
+};
 use crate::syng::{SyncmerParams, SyngIndex};
+use rustc_hash::FxHashSet;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -132,34 +135,6 @@ fn ensure(ok: bool, s: &str) -> io::Result<()> {
         Ok(())
     } else {
         Err(invalid(s))
-    }
-}
-
-struct RssGuard {
-    budget_bytes: Option<u64>,
-}
-
-impl RssGuard {
-    fn new(budget_gib: f64) -> Self {
-        RssGuard {
-            budget_bytes: (budget_gib > 0.0).then(|| (budget_gib * (1u64 << 30) as f64) as u64),
-        }
-    }
-    fn probe(&self, stage: &str) -> io::Result<u64> {
-        let text = std::fs::read_to_string("/proc/self/status")?;
-        let rss_kb = text
-            .lines()
-            .find(|l| l.starts_with("VmRSS:"))
-            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-            .unwrap_or(0);
-        if let Some(budget) = self.budget_bytes {
-            ensure(
-                rss_kb * 1024 <= budget,
-                &format!("RSS guard exceeded at {stage}: {rss_kb} kB"),
-            )?;
-        }
-        eprintln!("[chain] rss {stage}: {rss_kb} kB");
-        Ok(rss_kb)
     }
 }
 
@@ -275,16 +250,23 @@ fn fold_pair_adjacency(a: &[(usize, u64, u64)], b: &[(usize, u64, u64)]) -> (u64
     (touches, overlap_bp)
 }
 
-/// Does any row contain (overlap) any material window?
-fn rows_touch_material(rows: &[(u64, u64)], windows: &[(u64, u64)]) -> bool {
-    for &(row_start, row_end) in rows {
-        for &(window_lo, window_hi) in windows {
-            if row_start < window_hi && row_end > window_lo {
-                return true;
-            }
-        }
-    }
-    false
+#[inline]
+fn span_touches_windows(start: u64, end: u64, windows: &[(u64, u64)]) -> bool {
+    windows
+        .iter()
+        .any(|&(window_lo, window_hi)| start < window_hi && end > window_lo)
+}
+
+/// Zero-allocation filter checking whether any `(path, start, end)` row matching `path` overlaps `windows`.
+fn fold_rows_touch_material(
+    rows: &[(usize, u64, u64)],
+    path: usize,
+    windows: &[(u64, u64)],
+) -> bool {
+    rows.iter()
+        .any(|&(row_path, row_start, row_end)| {
+            row_path == path && span_touches_windows(row_start, row_end, windows)
+        })
 }
 
 /// THE BOUNDARY DECISION (the stated lexicographic rule): returns
@@ -421,7 +403,7 @@ fn truth_assignment(record: &TruthQvRecord) -> TruthAssignment {
 
 pub fn run(options: Options) -> io::Result<()> {
     let started = Instant::now();
-    let rss = RssGuard::new(options.rss_budget_gib);
+    let rss = RssGuard::new("chain", options.rss_budget_gib);
 
     // ------------------------------------------------------- the closed calls
     let calls_started = Instant::now();
@@ -488,30 +470,7 @@ pub fn run(options: Options) -> io::Result<()> {
     // the component's own member rows ranked by start map to the
     // window ids in order — slice A's derivation, one window per axis
     // row).
-    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
-    for entry in std::fs::read_dir(&options.partition_graphs)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".gfa.map.json") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)?;
-        #[derive(Deserialize)]
-        struct PartitionMap {
-            #[allow(dead_code)]
-            partition: u32,
-            members: Vec<MemberRow>,
-        }
-        let map: PartitionMap = serde_json::from_str(&text)?;
-        for axis in map
-            .members
-            .iter()
-            .filter(|m| m.path_name == component)
-        {
-            axis_rows.push((map.partition, axis.start, axis.end));
-        }
-    }
-    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    let axis_rows = load_component_axis_rows(&options.partition_graphs, &component)?;
     let window_axis: Vec<(u64, u64)> = axis_rows
         .iter()
         .map(|&(_, start, end)| (start, end))
@@ -617,8 +576,15 @@ pub fn run(options: Options) -> io::Result<()> {
     let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
         .map_err(io::Error::other)?;
     let mut census_records = 0u64;
-    for line in BufReader::new(reader).lines() {
-        let line = line?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    let mut nodes_buf: FxHashSet<u32> = FxHashSet::default();
+    let mut material_buf: Vec<(u64, u64)> = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
         let record: CensusRecordLine = serde_json::from_str(&line)?;
         census_records += 1;
         // The record's crossing occurrences, grouped by boundary
@@ -645,25 +611,25 @@ pub fn run(options: Options) -> io::Result<()> {
                 // contained node windows on its own path (the walk
                 // over the read-length hull; the census's own
                 // containment rule guarantees the windows lie inside).
-                let mut material: Vec<(u64, u64)> = Vec::new();
+                material_buf.clear();
                 if !occurrence.intervals.is_empty() {
-                    let nodes: HashSet<u32> =
-                        occurrence.intervals.iter().flatten().copied().collect();
-                    if !nodes.is_empty() {
+                    nodes_buf.clear();
+                    nodes_buf.extend(occurrence.intervals.iter().flatten().copied());
+                    if !nodes_buf.is_empty() {
                         for (signed_node, bp) in panel.walk_path_range(
                             occurrence.path,
                             occurrence.start,
-                            occurrence.start + READ_LENGTH,
+                            occurrence.start.saturating_add(READ_LENGTH),
                         )? {
-                            if nodes.contains(&signed_node.unsigned_abs()) {
-                                material.push((bp, bp + k));
+                            if nodes_buf.contains(&signed_node.unsigned_abs()) {
+                                material_buf.push((bp, bp + k));
                             }
                         }
-                        material.sort_unstable();
-                        material.dedup();
+                        material_buf.sort_unstable();
+                        material_buf.dedup();
                     }
                 }
-                if material.is_empty() {
+                if material_buf.is_empty() {
                     slot.unattributed_occurrences += 1;
                     continue;
                 }
@@ -673,12 +639,11 @@ pub fn run(options: Options) -> io::Result<()> {
                 let attributed = |locus: &LocusCall| -> usize {
                     let mut mask = 0usize;
                     for side in 0..2 {
-                        let rows: Vec<(u64, u64)> = locus.fold_rows[side]
-                            .iter()
-                            .filter(|&&(path, _, _)| path == occurrence.path)
-                            .map(|&(_, start, end)| (start, end))
-                            .collect();
-                        if rows_touch_material(&rows, &material) {
+                        if fold_rows_touch_material(
+                            &locus.fold_rows[side],
+                            occurrence.path,
+                            &material_buf,
+                        ) {
                             mask |= 1 << side;
                         }
                     }
@@ -927,21 +892,12 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut brackets: BTreeMap<&'static str, u64> = BTreeMap::new();
         let mut truth_lines: Vec<serde_json::Value> = Vec::new();
         for decision in &decisions {
-            let left = &assignments[&decision.locus_left];
-            let right = &assignments[&decision.locus_right];
             let chain_swap = decision.swap;
-            let (truth_swap, bracket) = match (left, right) {
-                (TruthAssignment::Swapped(a), TruthAssignment::Swapped(b)) => {
-                    (a != b, None)
-                }
-                (TruthAssignment::Bracket(reason), TruthAssignment::Swapped(_))
-                | (TruthAssignment::Swapped(_), TruthAssignment::Bracket(reason)) => {
-                    (false, Some(*reason))
-                }
-                (TruthAssignment::Bracket(a), TruthAssignment::Bracket(b)) => {
-                    (false, Some(if a == b { *a } else { "truth_pair_not_expressible" }))
-                }
-            };
+            let (truth_swap, bracket) = evaluate_truth_decision(
+                &assignments,
+                decision.locus_left,
+                decision.locus_right,
+            )?;
             let switch_error = bracket.is_none() && chain_swap != truth_swap;
             if let Some(reason) = bracket {
                 *brackets.entry(reason).or_insert(0) += 1;
@@ -1044,6 +1000,32 @@ fn accuracy_columns(record: Option<&TruthQvRecord>) -> serde_json::Value {
     }
 }
 
+fn evaluate_truth_decision(
+    assignments: &BTreeMap<u32, TruthAssignment>,
+    locus_left: u32,
+    locus_right: u32,
+) -> io::Result<(bool, Option<&'static str>)> {
+    let left = assignments
+        .get(&locus_left)
+        .ok_or_else(|| invalid(&format!("truth-qv artifact omits locus {locus_left}")))?;
+    let right = assignments
+        .get(&locus_right)
+        .ok_or_else(|| invalid(&format!("truth-qv artifact omits locus {locus_right}")))?;
+    Ok(match (left, right) {
+        (TruthAssignment::Swapped(a), TruthAssignment::Swapped(b)) => (a != b, None),
+        (TruthAssignment::Bracket(reason), TruthAssignment::Swapped(_))
+        | (TruthAssignment::Swapped(_), TruthAssignment::Bracket(reason)) => (false, Some(*reason)),
+        (TruthAssignment::Bracket(a), TruthAssignment::Bracket(b)) => (
+            false,
+            Some(if a == b {
+                *a
+            } else {
+                "truth_pair_not_expressible"
+            }),
+        ),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests (source-named, the pure core).
 // ---------------------------------------------------------------------------
@@ -1071,10 +1053,19 @@ mod tests {
 
     #[test]
     fn rows_touch_material_overlaps_any_window() {
+        let rows_touch_material = |rows: &[(u64, u64)], windows: &[(u64, u64)]| {
+            rows.iter()
+                .any(|&(start, end)| span_touches_windows(start, end, windows))
+        };
         let rows = [(100u64, 200u64)];
         assert!(rows_touch_material(&rows, &[(150, 213)]));
         assert!(!rows_touch_material(&rows, &[(200, 260)]));
         assert!(rows_touch_material(&rows, &[(199, 262)]));
+
+        let tagged = vec![(0usize, 100, 200), (1usize, 300, 400)];
+        assert!(fold_rows_touch_material(&tagged, 0, &[(150, 213)]));
+        assert!(!fold_rows_touch_material(&tagged, 1, &[(150, 213)]));
+        assert!(fold_rows_touch_material(&tagged, 1, &[(350, 360)]));
     }
 
     #[test]
@@ -1157,5 +1148,17 @@ mod tests {
             truth_assignment(&base(true, Some("direct".into()), tied, 10, 10)),
             TruthAssignment::Bracket("truth_assignment_tied")
         ));
+    }
+
+    #[test]
+    fn missing_truth_assignment_returns_invalid_input_error() {
+        let mut assignments = BTreeMap::new();
+        assignments.insert(0u32, TruthAssignment::Swapped(false));
+        assignments.insert(1u32, TruthAssignment::Swapped(true));
+
+        assert_eq!(evaluate_truth_decision(&assignments, 0, 1).unwrap(), (true, None));
+        let err = evaluate_truth_decision(&assignments, 0, 99).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("99"));
     }
 }

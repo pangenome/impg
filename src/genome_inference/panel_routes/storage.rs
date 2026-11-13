@@ -9,10 +9,10 @@ pub struct Seal {
 }
 impl Seal {
     pub fn create(root: &Path, path: &str) -> io::Result<Self> {
-        let mut reader = BufReader::new(File::open(root.join(path))?);
+        let mut reader = File::open(root.join(path))?;
         let mut hash = 0xcbf29ce484222325;
         let mut bytes = 0;
-        let mut buf = vec![0; 1048576];
+        let mut buf = [0u8; 65536];
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {

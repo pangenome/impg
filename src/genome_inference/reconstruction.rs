@@ -400,7 +400,7 @@ fn extract(index: &impl SequenceIndex, interval: &Interval, strand: &str) -> io:
         index.fetch_sequence(&interval.path, interval.start as i32, interval.end as i32)?;
     seq.make_ascii_uppercase();
     if seq.len() as u64 != interval.end - interval.start
-        || seq.iter().any(|b| !b"ACGTRYSWKMBDHVN".contains(b))
+        || seq.iter().any(|&b| !super::is_valid_iupac_base(b))
     {
         return Err(invalid("source extraction length/alphabet mismatch"));
     }

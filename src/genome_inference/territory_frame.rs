@@ -31,11 +31,7 @@ use crate::sample_mem_bwt::invalid;
 use std::collections::HashMap;
 use std::io;
 
-/// Split a territory-local record name `path:start-end` into the
-/// global panel path name and the record's interval origin. The final
-/// `:` is the separator (the committed convention: contig names never
-/// carry one; `parse_locus_header` splits the same way).
-pub fn split_local_name(name: &str) -> io::Result<(&str, u64)> {
+fn split_local_name_bounds(name: &str) -> io::Result<(&str, u64, u64)> {
     let (path, interval) = name
         .rsplit_once(':')
         .ok_or_else(|| invalid(&format!("the territory-local name carries no interval: {name:?}")))?;
@@ -48,6 +44,15 @@ pub fn split_local_name(name: &str) -> io::Result<(&str, u64)> {
             "the territory-local record interval is empty: {name:?}"
         )));
     }
+    Ok((path, start, end))
+}
+
+/// Split a territory-local record name `path:start-end` into the
+/// global panel path name and the record's interval origin. The final
+/// `:` is the separator (the committed convention: contig names never
+/// carry one; `parse_locus_header` splits the same way).
+pub fn split_local_name(name: &str) -> io::Result<(&str, u64)> {
+    let (path, start, _) = split_local_name_bounds(name)?;
     Ok((path, start))
 }
 
@@ -130,21 +135,8 @@ impl TerritoryFrame {
             ..TerritoryFrame::default()
         };
         for name in names {
-            let (path, origin) = split_local_name(name)?;
-            let (path, origin) = (path.to_string(), origin);
-            let end = match name.rsplit_once(':').and_then(|(_, interval)| {
-                interval
-                    .split_once('-')
-                    .and_then(|(_, e)| e.parse::<u64>().ok())
-            }) {
-                Some(end) => end,
-                None => {
-                    return Err(invalid(&format!(
-                        "the territory-local name carries no interval: {name:?}"
-                    )))
-                }
-            };
-            let intervals = frame.records.entry(path).or_default();
+            let (path, origin, end) = split_local_name_bounds(name)?;
+            let intervals = frame.records.entry(path.to_string()).or_default();
             if !intervals.iter().any(|&(lo, hi)| lo == origin && hi == end) {
                 // The overlap test is origin-independent (the uniform d
                 // shifts both records alike, so it cancels).
