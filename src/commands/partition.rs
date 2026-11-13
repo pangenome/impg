@@ -71,18 +71,17 @@ pub fn rehome_singleton_slivers(collected_partitions: &mut Vec<(usize, Vec<Inter
     }
 
     let mut pass = 0;
+    let mut is_singleton = vec![false; counts.len()];
+    let mut pending: Vec<(usize, usize)> = Vec::new();
     loop {
         pass += 1;
-        let singletons: std::collections::HashSet<usize> = counts
-            .iter()
-            .enumerate()
-            .filter(|(_, &c)| c == 1)
-            .map(|(i, _)| i)
-            .collect();
-        let mut pending: Vec<(usize, usize)> = Vec::new();
+        for (slot, &c) in is_singleton.iter_mut().zip(&counts) {
+            *slot = c == 1;
+        }
+        pending.clear();
         for i in 0..rows.len() {
             let (c, s, e, pidx, _) = rows[i];
-            if !singletons.contains(&pidx) {
+            if !is_singleton[pidx] {
                 continue;
             }
             let left = if i > 0 && rows[i - 1].0 == c && rows[i - 1].2 == s {
@@ -95,8 +94,8 @@ pub fn rehome_singleton_slivers(collected_partitions: &mut Vec<(usize, Vec<Inter
             } else {
                 None
             };
-            let ls = left.map(|p| !singletons.contains(&p)).unwrap_or(false);
-            let rs = right.map(|p| !singletons.contains(&p)).unwrap_or(false);
+            let ls = left.is_some_and(|p| !is_singleton[p]);
+            let rs = right.is_some_and(|p| !is_singleton[p]);
             let target = if ls && rs {
                 let lp = left.unwrap();
                 let rp = right.unwrap();
@@ -119,11 +118,11 @@ pub fn rehome_singleton_slivers(collected_partitions: &mut Vec<(usize, Vec<Inter
         if pending.is_empty() || pass > 100 {
             break;
         }
-        for (row_idx, new_pidx) in &pending {
-            let old_pidx = rows[*row_idx].3;
+        for &(row_idx, new_pidx) in &pending {
+            let old_pidx = rows[row_idx].3;
             counts[old_pidx] -= 1;
-            counts[*new_pidx] += 1;
-            rows[*row_idx].3 = *new_pidx;
+            counts[new_pidx] += 1;
+            rows[row_idx].3 = new_pidx;
         }
     }
     let remaining = counts.iter().filter(|&&c| c == 1).count();
@@ -135,9 +134,7 @@ pub fn rehome_singleton_slivers(collected_partitions: &mut Vec<(usize, Vec<Inter
         pass
     );
 
-    let mut new_intervals: Vec<Vec<Interval<u32>>> = (0..collected_partitions.len())
-        .map(|_| Vec::new())
-        .collect();
+    let mut new_intervals: Vec<Vec<Interval<u32>>> = vec![Vec::new(); collected_partitions.len()];
     for (_, _, _, pidx, iv) in rows.drain(..) {
         new_intervals[pidx].push(iv);
     }
@@ -246,23 +243,7 @@ pub fn partition_alignments(
                 end - start
             );
 
-            let mut pos = start;
-            while pos < end {
-                let window_end = std::cmp::min(pos.saturating_add(window_size as i32), end);
-
-                // If this tail-window is too small, merge it into the last one
-                if window_end - pos < window_size as i32
-                    && !windows.is_empty()
-                    && windows.last().unwrap().0 == seq_id
-                {
-                    let last = windows.last_mut().unwrap();
-                    last.2 = end;
-                    break;
-                }
-
-                windows.push((seq_id, pos, window_end));
-                pos = window_end;
-            }
+            append_windows_for_range(&mut windows, seq_id, start, end, window_size);
         }
     }
 
@@ -495,10 +476,14 @@ pub fn partition_alignments(
                 total_partitioned_length += current_partition_length;
 
                 // Calculate percentages
-                let current_percentage =
-                    (current_partition_length as f64 / total_sequence_length as f64) * 100.0;
-                let total_percentage =
-                    (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
+                let (current_percentage, total_percentage) = if total_sequence_length == 0 {
+                    (0.0, 0.0)
+                } else {
+                    (
+                        (current_partition_length as f64 / total_sequence_length as f64) * 100.0,
+                        (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0,
+                    )
+                };
                 // Create formatted percentage strings with conditional scientific notation
                 let current_percentage_str = if current_percentage < 0.0001 {
                     format!("{current_percentage:.4e}%")
@@ -566,11 +551,11 @@ pub fn partition_alignments(
                     match output_format {
                         "bed" => {
                             // Collect BED partitions
-                            collected_partitions.push((partition_num, query_intervals.clone()));
+                            collected_partitions.push((partition_num, query_intervals));
                         }
                         "gfa" | "vcf" if engine_config.partition_size.is_some() => {
                             // Partitioned GFA mode: collect intervals for later pipeline
-                            collected_partitions.push((partition_num, query_intervals.clone()));
+                            collected_partitions.push((partition_num, query_intervals));
                         }
                         "gfa" | "vcf" | "maf" | "fasta" => {
                             return Err(io::Error::new(
@@ -754,7 +739,11 @@ pub fn partition_alignments(
     }
 
     // Calculate final percentage
-    let final_percentage = (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
+    let final_percentage = if total_sequence_length == 0 {
+        0.0
+    } else {
+        (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0
+    };
     // Create formatted percentage string with conditional scientific notation
     let final_percentage_str = if final_percentage < 0.0001 {
         format!("{final_percentage:.4e}%")
@@ -862,92 +851,59 @@ fn select_and_window_sequences(
                 _ => 1, // Default to sample if unrecognized
             };
 
-            // Group only sequences that still have missing regions.
-            let prefix_to_seqs: FxHashMap<String, Vec<u32>> = missing_regions
-                .keys()
-                .par_bridge()
-                .fold(
-                    || FxHashMap::with_capacity_and_hasher(0, Default::default()),
-                    |mut map: FxHashMap<String, Vec<u32>>, seq_id: &u32| {
-                        let seq_id = *seq_id; // Dereference to get u32
-                        if let Some(name) = impg.seq_index().get_name(seq_id) {
-                            let mut split = name.split(separator);
-                            let prefix = match field_count {
-                                1 => split.next().unwrap_or(name).to_string(),
-                                2 => {
-                                    let p1 = split.next().unwrap_or(name);
-                                    let p2 = split.next().unwrap_or("");
-                                    format!("{p1}{separator}{p2}")
-                                }
-                                _ => name.to_string(),
-                            };
-                            map.entry(prefix).or_default().push(seq_id);
-                        }
-                        map
-                    },
-                )
-                .reduce(
-                    || FxHashMap::with_capacity_and_hasher(0, Default::default()),
-                    |mut map1, map2| {
-                        for (key, vec2) in map2 {
-                            map1.entry(key).or_default().extend(vec2);
-                        }
-                        map1
-                    },
-                );
+            // Group only sequences that still have missing regions and track missing bases per prefix directly.
+            let mut prefix_to_seqs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+            let mut prefix_missing: FxHashMap<String, i64> = FxHashMap::default();
+            for (&seq_id, ranges) in missing_regions {
+                let Some(name) = impg.seq_index().get_name(seq_id) else {
+                    continue;
+                };
+                let mut split = name.split(separator);
+                let prefix = match field_count {
+                    1 => split.next().unwrap_or(name).to_string(),
+                    2 => {
+                        let p1 = split.next().unwrap_or(name);
+                        let p2 = split.next().unwrap_or("");
+                        format!("{p1}{separator}{p2}")
+                    }
+                    _ => name.to_string(),
+                };
+                let missing: i64 = ranges.iter().map(|&(s, e)| (e - s) as i64).sum();
+                prefix_to_seqs.entry(prefix.clone()).or_default().push(seq_id);
+                *prefix_missing.entry(prefix).or_insert(0) += missing;
+            }
 
             // Find the prefix with the most missing bases in total.
-            if !prefix_to_seqs.is_empty() {
-                let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs
-                    .par_iter()
-                    .map(|(prefix, ids)| {
-                        let missing: i64 = ids
-                            .par_iter()
-                            .filter_map(|id| missing_regions.get(id))
-                            .map(|ranges| ranges.iter().map(|&(s, e)| (e - s) as i64).sum::<i64>())
-                            .sum();
-                        (prefix.clone(), missing)
-                    })
-                    .collect();
+            if let Some((best_prefix, best_missing)) = prefix_missing
+                .iter()
+                .max_by(|(prefix1, missing1), (prefix2, missing2)| {
+                    missing1.cmp(missing2).then_with(|| prefix1.cmp(prefix2))
+                })
+                .map(|(p, &m)| (p.clone(), m))
+            {
+                if let Some(best_seqs) = prefix_to_seqs.get(&best_prefix) {
+                    if !best_seqs.is_empty() {
+                        debug!(
+                            "Selected {} sequences from group {} ({} bp missing)",
+                            best_seqs.len(),
+                            best_prefix,
+                            best_missing
+                        );
 
-                // Find the prefix with maximum missing (sequential)
-                if let Some((best_prefix, best_missing)) = prefix_with_missing
-                    .par_iter()
-                    .max_by(|&(prefix1, missing1), &(prefix2, missing2)| {
-                        // First compare by missing amount
-                        missing1
-                            .cmp(missing2)
-                            // If missing amounts are equal, compare by prefix name for deterministic results
-                            .then_with(|| prefix1.cmp(prefix2))
-                    })
-                    .map(|(p, m)| (p.clone(), *m))
-                {
-                    if let Some(best_seqs) = prefix_to_seqs.get(&best_prefix) {
-                        if !best_seqs.is_empty() {
-                            debug!(
-                                "Selected {} sequences from group {} ({} bp missing)",
-                                best_seqs.len(),
-                                best_prefix,
-                                best_missing
-                            );
+                        let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
+                            .iter()
+                            .filter_map(|&id| impg.seq_index().get_len_from_id(id).map(|l| (id, l)))
+                            .collect();
 
-                            // Parallelize fetching lengths
-                            let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
-                                .par_iter()
-                                .filter_map(|&id| {
-                                    impg.seq_index().get_len_from_id(id).map(|l| (id, l))
-                                })
-                                .collect();
+                        seqs_with_len.sort_unstable_by(|a, b| {
+                            b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+                        });
 
-                            // Sort by length descending (this remains sequential)
-                            seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-
-                            ranges_to_window.extend(
-                                seqs_with_len
-                                    .into_iter()
-                                    .map(|(id, len)| (id, 0, len as i32)),
-                            );
-                        }
+                        ranges_to_window.extend(
+                            seqs_with_len
+                                .into_iter()
+                                .map(|(id, len)| (id, 0, len as i32)),
+                        );
                     }
                 }
             }
@@ -969,22 +925,9 @@ fn select_and_window_sequences(
     // Create windows from ranges
     let new_windows: Vec<(u32, i32, i32)> = ranges_to_window
         .par_iter()
-        .flat_map(|(seq_id, start, end)| {
+        .flat_map(|&(seq_id, start, end)| {
             let mut range_windows: Vec<(u32, i32, i32)> = Vec::new();
-            let mut pos = *start;
-            while pos < *end {
-                let window_end = std::cmp::min(pos.saturating_add(window_size as i32), *end);
-
-                // If this tail-window is too small, merge it into the last one
-                if window_end - pos < window_size as i32 && !range_windows.is_empty() {
-                    let last = range_windows.last_mut().unwrap();
-                    last.2 = *end;
-                } else {
-                    range_windows.push((*seq_id, pos, window_end));
-                }
-
-                pos = window_end;
-            }
+            append_windows_for_range(&mut range_windows, seq_id, start, end, window_size);
             range_windows
         })
         .collect();
@@ -992,6 +935,27 @@ fn select_and_window_sequences(
     windows.extend(new_windows);
 
     Ok(())
+}
+
+fn append_windows_for_range(
+    windows: &mut Vec<(u32, i32, i32)>,
+    seq_id: u32,
+    start: i32,
+    end: i32,
+    window_size: usize,
+) {
+    let win = window_size as i32;
+    let mut pos = start;
+    while pos < end {
+        let window_end = std::cmp::min(pos.saturating_add(win), end);
+        // If this tail-window is too small, merge it into the last one
+        if window_end - pos < win && windows.last().is_some_and(|w| w.0 == seq_id) {
+            windows.last_mut().unwrap().2 = end;
+            break;
+        }
+        windows.push((seq_id, pos, window_end));
+        pos = window_end;
+    }
 }
 
 /// The selected source occurrence is known even if discovery returns no
@@ -1038,7 +1002,7 @@ fn merge_overlaps(
             let next_max = std::cmp::max(next_interval.first, next_interval.last);
 
             if curr_interval.metadata != next_interval.metadata
-                || next_min > curr_max + merge_distance
+                || next_min > curr_max.saturating_add(merge_distance)
             {
                 write_idx += 1;
                 if write_idx != read_idx {
@@ -1051,6 +1015,51 @@ fn merge_overlaps(
         }
         overlaps.truncate(write_idx + 1);
     }
+}
+
+fn first_overlapping_range_idx(ranges: &[(i32, i32)], start: i32) -> usize {
+    ranges.partition_point(|&(_, range_end)| range_end <= start)
+}
+
+fn push_unmasked_segment(
+    result: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
+    query_interval: &Interval<u32>,
+    target_interval: &Interval<u32>,
+    start: i32,
+    end: i32,
+    seg_start: i32,
+    seg_end: i32,
+) {
+    if seg_start >= seg_end || start >= end {
+        return;
+    }
+    let total_span = (end - start) as f64;
+    let target_span = (target_interval.last - target_interval.first) as f64;
+    let segment_ratio = (seg_end - seg_start) as f64 / total_span;
+    let segment_offset = (seg_start - start) as f64 / total_span * target_span;
+    let segment_target_span = target_span * segment_ratio;
+
+    let new_target = Interval {
+        first: target_interval.first + segment_offset as i32,
+        last: target_interval.first + (segment_offset + segment_target_span) as i32,
+        metadata: target_interval.metadata,
+    };
+
+    let new_query = if query_interval.first <= query_interval.last {
+        Interval {
+            first: seg_start,
+            last: seg_end,
+            metadata: query_interval.metadata,
+        }
+    } else {
+        Interval {
+            first: seg_end,
+            last: seg_start,
+            metadata: query_interval.metadata,
+        }
+    };
+
+    result.push((new_query, Vec::new(), new_target));
 }
 
 fn mask_and_update_regions(
@@ -1085,25 +1094,7 @@ fn mask_and_update_regions(
                 };
 
                 // Use binary search to find relevant missing regions
-                let pos = match missing
-                    .ranges
-                    .binary_search_by_key(&mask_start, |&(s, _)| s)
-                {
-                    Ok(pos) => pos,
-                    Err(pos) => {
-                        if pos > 0 {
-                            // Check if previous range might overlap
-                            let (_prev_start, prev_end) = missing.ranges[pos - 1];
-                            if prev_end > mask_start {
-                                pos - 1
-                            } else {
-                                pos
-                            }
-                        } else {
-                            pos
-                        }
-                    }
-                };
+                let pos = first_overlapping_range_idx(&missing.ranges, mask_start);
 
                 // Check only relevant missing regions
                 for i in pos..missing.ranges.len() {
@@ -1208,7 +1199,11 @@ fn mask_and_update_regions(
                 adjusted_query.first - adjusted_query.last
             } as f64;
 
-            let scale = new_span / original_span;
+            let scale = if original_span == 0.0 {
+                1.0
+            } else {
+                new_span / original_span
+            };
             let target_span = (target_interval.last - target_interval.first) as f64;
 
             let adjusted_target = Interval {
@@ -1222,28 +1217,13 @@ fn mask_and_update_regions(
                 let mut curr_pos = start;
 
                 // Binary search for starting position in masks
-                let mut idx = match masks.ranges.binary_search_by_key(&curr_pos, |&(s, _)| s) {
-                    Ok(pos) => pos,
-                    Err(pos) => {
-                        if pos > 0 {
-                            // Check if previous range might overlap
-                            let (_, prev_end) = masks.ranges[pos - 1];
-                            if prev_end > curr_pos {
-                                pos - 1
-                            } else {
-                                pos
-                            }
-                        } else {
-                            pos
-                        }
-                    }
-                };
+                let mut idx = first_overlapping_range_idx(&masks.ranges, curr_pos);
 
                 // Process only relevant masks
                 while idx < masks.ranges.len() {
                     let (mask_start, mask_end) = masks.ranges[idx];
 
-                    if mask_start > end {
+                    if mask_start >= end {
                         break;
                     } // No more relevant masks
                     if mask_end <= curr_pos {
@@ -1252,34 +1232,15 @@ fn mask_and_update_regions(
                     }
 
                     if curr_pos < mask_start {
-                        // Push segment before the next mask
-                        let segment_ratio = (mask_start - curr_pos) as f64 / (end - start) as f64;
-                        let segment_offset =
-                            (curr_pos - start) as f64 / (end - start) as f64 * target_span;
-                        let segment_target_span = target_span * segment_ratio;
-
-                        let new_target = Interval {
-                            first: target_interval.first + segment_offset as i32,
-                            last: target_interval.first
-                                + (segment_offset + segment_target_span) as i32,
-                            metadata: target_interval.metadata,
-                        };
-
-                        let new_query = if query_interval.first <= query_interval.last {
-                            Interval {
-                                first: curr_pos,
-                                last: mask_start,
-                                metadata: query_interval.metadata,
-                            }
-                        } else {
-                            Interval {
-                                first: mask_start,
-                                last: curr_pos,
-                                metadata: query_interval.metadata,
-                            }
-                        };
-
-                        result.push((new_query, Vec::new(), new_target));
+                        push_unmasked_segment(
+                            result,
+                            &query_interval,
+                            &target_interval,
+                            start,
+                            end,
+                            curr_pos,
+                            mask_start,
+                        );
                     }
 
                     curr_pos = curr_pos.max(mask_end);
@@ -1292,32 +1253,15 @@ fn mask_and_update_regions(
 
                 // Check for final unmasked segment
                 if curr_pos < end {
-                    let segment_ratio = (end - curr_pos) as f64 / (end - start) as f64;
-                    let segment_offset =
-                        (curr_pos - start) as f64 / (end - start) as f64 * target_span;
-                    let segment_target_span = target_span * segment_ratio;
-
-                    let new_target = Interval {
-                        first: target_interval.first + segment_offset as i32,
-                        last: target_interval.first + (segment_offset + segment_target_span) as i32,
-                        metadata: target_interval.metadata,
-                    };
-
-                    let new_query = if query_interval.first <= query_interval.last {
-                        Interval {
-                            first: curr_pos,
-                            last: end,
-                            metadata: query_interval.metadata,
-                        }
-                    } else {
-                        Interval {
-                            first: end,
-                            last: curr_pos,
-                            metadata: query_interval.metadata,
-                        }
-                    };
-
-                    result.push((new_query, Vec::new(), new_target));
+                    push_unmasked_segment(
+                        result,
+                        &query_interval,
+                        &target_interval,
+                        start,
+                        end,
+                        curr_pos,
+                        end,
+                    );
                 }
             } else {
                 // No existing masks - keep the entire interval
@@ -1344,22 +1288,7 @@ fn mask_and_update_regions(
                     let mut current = miss_start;
 
                     // Find masks that could affect this missing range with binary search
-                    let mut idx = match masked.ranges.binary_search_by_key(&miss_start, |&(s, _)| s)
-                    {
-                        Ok(pos) => pos,
-                        Err(pos) => {
-                            if pos > 0 {
-                                let (_, prev_end) = masked.ranges[pos - 1];
-                                if prev_end > miss_start {
-                                    pos - 1
-                                } else {
-                                    pos
-                                }
-                            } else {
-                                pos
-                            }
-                        }
-                    };
+                    let mut idx = first_overlapping_range_idx(&masked.ranges, miss_start);
 
                     // Process all relevant masks
                     while idx < masked.ranges.len() && current < miss_end {
@@ -1910,6 +1839,44 @@ mod tests {
                 mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0).is_empty()
             );
         }
+    }
+
+    #[test]
+    fn merge_overlaps_handles_large_merge_distance_without_overflow() {
+        let a = Interval {
+            first: 10,
+            last: 20,
+            metadata: 1,
+        };
+        let b = Interval {
+            first: 100,
+            last: 120,
+            metadata: 1,
+        };
+        let mut overlaps = vec![(a, Vec::new(), a), (b, Vec::new(), b)];
+        merge_overlaps(&mut overlaps, i32::MAX);
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!((overlaps[0].0.first, overlaps[0].0.last), (10, 120));
+    }
+
+    #[test]
+    fn mask_and_update_regions_handles_zero_span_without_nan() {
+        let zero_span = Interval {
+            first: 50,
+            last: 50,
+            metadata: 0,
+        };
+        let target = Interval {
+            first: 10,
+            last: 10,
+            metadata: 0,
+        };
+        let mut overlaps = vec![(zero_span, Vec::new(), target)];
+        let mut masked = FxHashMap::default();
+        let mut missing = FxHashMap::default();
+        let out = mask_and_update_regions(&mut overlaps, &mut masked, &mut missing, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].2.first, out[0].2.last), (10, 10));
     }
 }
 

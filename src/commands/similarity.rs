@@ -36,8 +36,8 @@ pub enum SimilarityEngine {
 
 /// Per-group signatures produced by the chosen engine. Exactly one variant is used per region.
 enum GroupSignatures {
-    /// Aligned rows (one per input sequence). Indexed by `GroupInfo::sequence_indices`.
-    Msa { chars: Vec<Vec<char>> },
+    /// Aligned ASCII rows (one per input sequence). Indexed by `GroupInfo::sequence_indices`.
+    Msa { bytes: Vec<Vec<u8>> },
     /// One deduplicated, sorted minimizer set per group. Indexed by `GroupInfo::sketch_index`.
     Sketches {
         /// Sorted, deduplicated minimizers per group.
@@ -337,6 +337,40 @@ pub fn compute_and_output_similarities(
     Ok(())
 }
 
+fn engine_identity_k(engine: SimilarityEngine) -> Option<usize> {
+    match engine {
+        SimilarityEngine::Poa { .. } => None,
+        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
+    }
+}
+
+fn visit_upper_triangle_pairs(
+    groups: &[GroupInfo],
+    signatures: &GroupSignatures,
+    identity_k: Option<usize>,
+    emit_all_pairs: bool,
+    is_individual: bool,
+    mut on_pair: impl FnMut(usize, usize, AlignmentCounts, SimilarityMetrics),
+) {
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            let group_a = &groups[i];
+            let group_b = &groups[j];
+            let counts = calculate_intersection(signatures, group_a, group_b, is_individual);
+            if counts.matches == 0 && !emit_all_pairs {
+                continue;
+            }
+            let metrics = SimilarityMetrics::new(
+                counts,
+                group_a.total_length,
+                group_b.total_length,
+                identity_k,
+            );
+            on_pair(i, j, counts, metrics);
+        }
+    }
+}
+
 // Helper function for computing similarities for a single region
 fn compute_similarities_for_region(
     impg: &impl ImpgIndex,
@@ -360,40 +394,27 @@ fn compute_similarities_for_region(
         delim_pos,
     )?;
 
-    // Identity correction: POA mode uses the k=1 special case, Mash mode uses the k-th root.
-    let identity_k: Option<usize> = match engine {
-        SimilarityEngine::Poa { .. } => None,
-        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
-    };
+    let identity_k = engine_identity_k(engine);
 
     // Parse region once
     let (chrom, start, end) = parse_region_string(region);
 
     let mut output = String::new();
+    let mut fmt_buf = String::with_capacity(32);
 
     // Compute only upper triangle (including diagonal) and output both (i,j) and (j,i)
-    for i in 0..groups.len() {
-        for j in i..groups.len() {
+    visit_upper_triangle_pairs(
+        &groups,
+        &signatures,
+        identity_k,
+        emit_all_pairs,
+        delim.is_none(),
+        |i, j, counts, metrics| {
             let group_a = &groups[i];
             let group_b = &groups[j];
-
-            let counts =
-                calculate_intersection(&signatures, group_a, group_b, delim.is_none());
-
-            if counts.matches == 0 && !emit_all_pairs {
-                continue;
-            }
-
-            let metrics = SimilarityMetrics::new(
-                counts,
-                group_a.total_length,
-                group_b.total_length,
-                identity_k,
-            );
-
-            // Output (i,j)
             format_similarity_line(
                 &mut output,
+                &mut fmt_buf,
                 &chrom,
                 &start,
                 &end,
@@ -405,11 +426,10 @@ fn compute_similarities_for_region(
                 &metrics,
                 emit_distances,
             );
-
-            // Output (j,i) if different
             if i != j {
                 format_similarity_line(
                     &mut output,
+                    &mut fmt_buf,
                     &chrom,
                     &start,
                     &end,
@@ -422,8 +442,8 @@ fn compute_similarities_for_region(
                     emit_distances,
                 );
             }
-        }
-    }
+        },
+    );
 
     Ok(output)
 }
@@ -451,38 +471,26 @@ fn compute_pca_for_region(
         delim_pos,
     )?;
 
-    let identity_k: Option<usize> = match engine {
-        SimilarityEngine::Poa { .. } => None,
-        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
-    };
+    let identity_k = engine_identity_k(engine);
 
     // Collect all similarities for PCA
     let mut similarities = Vec::new();
-
-    for i in 0..groups.len() {
-        for j in i..groups.len() {
+    visit_upper_triangle_pairs(
+        &groups,
+        &signatures,
+        identity_k,
+        emit_all_pairs,
+        delim.is_none(),
+        |i, j, _counts, metrics| {
             let group_a = &groups[i];
             let group_b = &groups[j];
-
-            let counts =
-                calculate_intersection(&signatures, group_a, group_b, delim.is_none());
-
-            if counts.matches > 0 || emit_all_pairs {
-                let metrics = SimilarityMetrics::new(
-                    counts,
-                    group_a.total_length,
-                    group_b.total_length,
-                    identity_k,
-                );
-                let similarity = metrics.get_by_name(pca_similarity);
-
-                similarities.push((group_a.name.clone(), group_b.name.clone(), similarity));
-                if i != j {
-                    similarities.push((group_b.name.clone(), group_a.name.clone(), similarity));
-                }
+            let similarity = metrics.get_by_name(pca_similarity);
+            similarities.push((group_a.name.clone(), group_b.name.clone(), similarity));
+            if i != j {
+                similarities.push((group_b.name.clone(), group_a.name.clone(), similarity));
             }
-        }
-    }
+        },
+    );
 
     // Build distance matrix and perform MDS
     let (distance_matrix, labels) = build_distance_matrix(&similarities, pca_similarity)?;
@@ -521,11 +529,14 @@ fn prepare_groups_and_signatures(
             let (graph, sequence_metadata) =
                 prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring)?;
 
-            let msa = graph.generate_msa();
-            let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+            let msa_bytes: Vec<Vec<u8>> = graph
+                .generate_msa()
+                .into_iter()
+                .map(String::into_bytes)
+                .collect();
             let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
 
-            Ok((groups, GroupSignatures::Msa { chars: msa_chars }))
+            Ok((groups, GroupSignatures::Msa { bytes: msa_bytes }))
         }
         SimilarityEngine::Mash {
             kmer_k,
@@ -533,8 +544,7 @@ fn prepare_groups_and_signatures(
         } => {
             // 1. Fetch strand-normalized sequences + metadata via the shared helper.
             let pairs = prepare_sequences(impg, results, sequence_index)?;
-            let sequences: Vec<String> = pairs.iter().map(|(s, _)| s.clone()).collect();
-            let sequence_metadata: Vec<_> = pairs.into_iter().map(|(_, m)| m).collect();
+            let (sequences, sequence_metadata): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
 
             // 2. Build groups over sequence metadata (same logic as POA path).
             let mut groups = create_groups(&sequence_metadata, delim, delim_pos)?;
@@ -547,6 +557,7 @@ fn prepare_groups_and_signatures(
             //    does the cap kick in. Sampling too aggressively on small regions was hiding
             //    real pair-to-pair variation under Jaccard estimator noise — observed on chr6
             //    1-5 kb runs where POA disagreed with a highly-quantized sketch identity.
+            let k_minus_1 = kmer_k.saturating_sub(1);
             let mut group_num_kmers: Vec<usize> = groups
                 .iter()
                 .map(|g| {
@@ -556,7 +567,7 @@ fn prepare_groups_and_signatures(
                     // separator blocks any cross-boundary k-mers).
                     g.sequence_indices
                         .iter()
-                        .map(|&idx| sequences[idx].len().saturating_sub(kmer_k - 1))
+                        .map(|&idx| sequences[idx].len().saturating_sub(k_minus_1))
                         .sum()
                 })
                 .collect();
@@ -593,11 +604,17 @@ fn prepare_groups_and_signatures(
             // 5. Sketch each group in parallel: concat sequences with an N*k separator so no
             //    k-mer can span a boundary, then build a bottom-k MinHash.
             //    Store sketches deduplicated and sorted for O(n+m) merge-intersection.
+            let sep = vec![b'N'; kmer_k];
             let sketches: Vec<Vec<u64>> = groups
                 .par_iter()
                 .map(|g| {
-                    let mut concat: Vec<u8> = Vec::new();
-                    let sep = vec![b'N'; kmer_k];
+                    let concat_len: usize = g
+                        .sequence_indices
+                        .iter()
+                        .map(|&idx| sequences[idx].len())
+                        .sum::<usize>()
+                        + g.sequence_indices.len().saturating_sub(1) * sep.len();
+                    let mut concat: Vec<u8> = Vec::with_capacity(concat_len);
                     for (i, &seq_idx) in g.sequence_indices.iter().enumerate() {
                         if i > 0 {
                             concat.extend_from_slice(&sep);
@@ -633,18 +650,18 @@ fn calculate_intersection(
     is_individual: bool,
 ) -> AlignmentCounts {
     match signatures {
-        GroupSignatures::Msa { chars } => {
+        GroupSignatures::Msa { bytes } => {
             if is_individual
                 && group_a.sequence_indices.len() == 1
                 && group_b.sequence_indices.len() == 1
             {
                 calculate_pairwise_intersection(
-                    &chars[group_a.sequence_indices[0]],
-                    &chars[group_b.sequence_indices[0]],
+                    &bytes[group_a.sequence_indices[0]],
+                    &bytes[group_b.sequence_indices[0]],
                 )
             } else {
                 calculate_group_intersection(
-                    chars,
+                    bytes,
                     &group_a.sequence_indices,
                     &group_b.sequence_indices,
                 )
@@ -689,6 +706,7 @@ fn count_shared_sorted(a: &[u64], b: &[u64]) -> usize {
 // Unified function for formatting similarity output
 fn format_similarity_line(
     output: &mut String,
+    fmt_buf: &mut String,
     chrom: &str,
     start: &str,
     end: &str,
@@ -700,37 +718,39 @@ fn format_similarity_line(
     metrics: &SimilarityMetrics,
     emit_distances: bool,
 ) {
-    output.push_str(&format!(
+    use std::fmt::Write as _;
+    let _ = write!(
+        output,
         "{chrom}\t{start}\t{end}\t{name_a}\t{name_b}\t{len_a}\t{len_b}\t{intersection}\t"
-    ));
+    );
 
     if emit_distances {
-        output.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            format_value(1.0 - metrics.jaccard),
-            format_value(1.0 - metrics.cosine),
-            format_value(1.0 - metrics.dice),
-            format_value(1.0 - metrics.estimated_identity)
-        ));
+        push_trimmed_f32(output, fmt_buf, 1.0 - metrics.jaccard);
+        output.push('\t');
+        push_trimmed_f32(output, fmt_buf, 1.0 - metrics.cosine);
+        output.push('\t');
+        push_trimmed_f32(output, fmt_buf, 1.0 - metrics.dice);
+        output.push('\t');
+        push_trimmed_f32(output, fmt_buf, 1.0 - metrics.estimated_identity);
+        output.push('\n');
     } else {
-        output.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            format_value(metrics.jaccard),
-            format_value(metrics.cosine),
-            format_value(metrics.dice),
-            format_value(metrics.estimated_identity)
-        ));
+        push_trimmed_f32(output, fmt_buf, metrics.jaccard);
+        output.push('\t');
+        push_trimmed_f32(output, fmt_buf, metrics.cosine);
+        output.push('\t');
+        push_trimmed_f32(output, fmt_buf, metrics.dice);
+        output.push('\t');
+        push_trimmed_f32(output, fmt_buf, metrics.estimated_identity);
+        output.push('\n');
     }
 }
 
-fn format_value(value: f32) -> String {
-    let formatted = format!("{value:.7}");
-    let trimmed = formatted.trim_end_matches('0');
-    if trimmed.ends_with('.') {
-        trimmed.trim_end_matches('.').to_string()
-    } else {
-        trimmed.to_string()
-    }
+fn push_trimmed_f32(out: &mut String, buf: &mut String, value: f32) {
+    use std::fmt::Write as _;
+    buf.clear();
+    let _ = write!(buf, "{value:.7}");
+    let trimmed = buf.trim_end_matches('0').trim_end_matches('.');
+    out.push_str(trimmed);
 }
 
 fn create_groups(
@@ -785,19 +805,9 @@ fn create_groups(
 }
 
 fn extract_group_name(path_name: &str, delim: char, delim_pos: u16) -> io::Result<String> {
-    let mut delimiter_positions = Vec::new();
-    let mut start = 0;
-
-    // Find all delimiter positions
-    while let Some(pos) = path_name[start..].find(delim) {
-        delimiter_positions.push(start + pos);
-        start += pos + 1;
-    }
-
     let target_index = (delim_pos as usize).saturating_sub(1);
-
-    if target_index < delimiter_positions.len() {
-        Ok(path_name[..delimiter_positions[target_index]].to_string())
+    if let Some((byte_idx, _)) = path_name.match_indices(delim).nth(target_index) {
+        Ok(path_name[..byte_idx].to_string())
     } else {
         // Not enough delimiters, use the whole name
         Ok(path_name.to_string())
@@ -811,7 +821,7 @@ fn extract_group_name(path_name: &str, delim: char, delim_pos: u16) -> io::Resul
 //   * exactly one is a gap      → part of an indel run; one maximal run = one gap_event
 //   * both gapped               → ignored (gap-vs-gap MSA columns carry no pair signal)
 // Gap-compressed identity: indel *events* are penalized, not indel *bases*.
-fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentCounts {
+fn calculate_pairwise_intersection(seq_a: &[u8], seq_b: &[u8]) -> AlignmentCounts {
     #[derive(PartialEq, Eq, Clone, Copy)]
     enum ColState {
         Aligned,
@@ -827,9 +837,9 @@ fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentC
 
     for (&char_a, &char_b) in seq_a.iter().zip(seq_b.iter()) {
         let state = match (char_a, char_b) {
-            ('-', '-') => ColState::BothGap,
-            ('-', _) => ColState::GapInA,
-            (_, '-') => ColState::GapInB,
+            (b'-', b'-') => ColState::BothGap,
+            (b'-', _) => ColState::GapInA,
+            (_, b'-') => ColState::GapInB,
             (a, b) => {
                 if a == b {
                     matches += 1;
@@ -867,7 +877,7 @@ fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentC
 // Gap events are counted at transitions *into* a group-level indel state.
 #[allow(clippy::needless_range_loop)]
 fn calculate_group_intersection(
-    msa_chars: &[Vec<char>],
+    msa_bytes: &[Vec<u8>],
     group_a_indices: &[usize],
     group_b_indices: &[usize],
 ) -> AlignmentCounts {
@@ -879,38 +889,114 @@ fn calculate_group_intersection(
         BothGap,
     }
 
-    let msa_len = msa_chars[0].len();
+    if msa_bytes.is_empty() || group_a_indices.is_empty() || group_b_indices.is_empty() {
+        return AlignmentCounts::default();
+    }
+
+    let msa_len = msa_bytes[0].len();
     let mut total_matches = 0usize;
     let mut total_mismatches = 0usize;
     let mut gap_events = 0usize;
     let mut prev_state: Option<ColState> = None;
 
     for pos in 0..msa_len {
-        let mut position_matches = 0usize;
+        let mut a_counts = [0usize; 5]; // A, C, G, T, N
+        let mut b_counts = [0usize; 5];
         let mut group_a_count = 0usize;
         let mut group_b_count = 0usize;
+        let mut non_acgtn = false;
 
         for &idx_a in group_a_indices {
-            let char_a = msa_chars[idx_a][pos];
-            if char_a == '-' {
-                continue;
+            match msa_bytes[idx_a][pos] {
+                b'-' => {}
+                b'A' => {
+                    a_counts[0] += 1;
+                    group_a_count += 1;
+                }
+                b'C' => {
+                    a_counts[1] += 1;
+                    group_a_count += 1;
+                }
+                b'G' => {
+                    a_counts[2] += 1;
+                    group_a_count += 1;
+                }
+                b'T' => {
+                    a_counts[3] += 1;
+                    group_a_count += 1;
+                }
+                b'N' => {
+                    a_counts[4] += 1;
+                    group_a_count += 1;
+                }
+                _ => {
+                    non_acgtn = true;
+                    break;
+                }
             }
-            group_a_count += 1;
+        }
+        if !non_acgtn {
             for &idx_b in group_b_indices {
-                let char_b = msa_chars[idx_b][pos];
-                if char_b == '-' {
+                match msa_bytes[idx_b][pos] {
+                    b'-' => {}
+                    b'A' => {
+                        b_counts[0] += 1;
+                        group_b_count += 1;
+                    }
+                    b'C' => {
+                        b_counts[1] += 1;
+                        group_b_count += 1;
+                    }
+                    b'G' => {
+                        b_counts[2] += 1;
+                        group_b_count += 1;
+                    }
+                    b'T' => {
+                        b_counts[3] += 1;
+                        group_b_count += 1;
+                    }
+                    b'N' => {
+                        b_counts[4] += 1;
+                        group_b_count += 1;
+                    }
+                    _ => {
+                        non_acgtn = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let position_matches = if !non_acgtn {
+            a_counts[0] * b_counts[0]
+                + a_counts[1] * b_counts[1]
+                + a_counts[2] * b_counts[2]
+                + a_counts[3] * b_counts[3]
+                + a_counts[4] * b_counts[4]
+        } else {
+            let mut matches = 0usize;
+            group_a_count = 0;
+            group_b_count = 0;
+            for &idx_a in group_a_indices {
+                let byte_a = msa_bytes[idx_a][pos];
+                if byte_a == b'-' {
                     continue;
                 }
-                if char_a == char_b {
-                    position_matches += 1;
+                group_a_count += 1;
+                for &idx_b in group_b_indices {
+                    let byte_b = msa_bytes[idx_b][pos];
+                    if byte_b != b'-' && byte_a == byte_b {
+                        matches += 1;
+                    }
                 }
             }
-        }
-        for &idx_b in group_b_indices {
-            if msa_chars[idx_b][pos] != '-' {
-                group_b_count += 1;
+            for &idx_b in group_b_indices {
+                if msa_bytes[idx_b][pos] != b'-' {
+                    group_b_count += 1;
+                }
             }
-        }
+            matches
+        };
 
         let state = match (group_a_count, group_b_count) {
             (0, 0) => ColState::BothGap,
@@ -1007,17 +1093,25 @@ fn polarize_pca_result(
             .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
             .collect();
 
+        if pc_values.is_empty() {
+            continue;
+        }
+
         // Find current polarizer
         let (current_polarizer_idx, _) = pc_values
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-            .unwrap();
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .expect("pc_values checked non-empty");
 
         debug!(
             "Current polarizer: [{}] {} (value: {:.3})",
             current_polarizer_idx,
-            pca_result.sample_labels.get(current_polarizer_idx).unwrap(),
+            pca_result
+                .sample_labels
+                .get(current_polarizer_idx)
+                .map(String::as_str)
+                .unwrap_or(""),
             pc_values[current_polarizer_idx]
         );
 
@@ -1131,7 +1225,7 @@ fn polarize_pca_result_with_guides(
     }
 
     // Process each PC component
-    let n_components = pca_results.first().map(|r| r.n_components).unwrap();
+    let n_components = pca_results.iter().map(|r| r.n_components).max().unwrap_or(0);
 
     for pc_idx in 0..n_components {
         // For each guide sample, track flip decisions
@@ -1394,5 +1488,51 @@ fn parse_region_string(region_str: &str) -> (String, String, String) {
         }
     } else {
         (region_str.to_string(), "0".to_string(), "0".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_intersection_handles_empty_and_matches_pairwise_histogram() {
+        let msa = vec![b"AC-T".to_vec(), b"AC-G".to_vec(), b"AGNT".to_vec()];
+        assert_eq!(calculate_group_intersection(&[], &[0], &[1]).matches, 0);
+        assert_eq!(calculate_group_intersection(&msa, &[], &[1]).matches, 0);
+
+        let group_res = calculate_group_intersection(&msa, &[0, 1], &[2]);
+        assert_eq!(group_res.matches, 2); // col 0 ('A') and col 3 ('T')
+        assert_eq!(group_res.mismatches, 1); // col 1 ('C' vs 'G')
+        assert_eq!(group_res.gap_events, 1); // col 2 ('-' vs 'N')
+    }
+
+    #[test]
+    fn extract_group_name_handles_utf8_delimiter() {
+        assert_eq!(extract_group_name("a•b•c", '•', 2).unwrap(), "a•b");
+        assert_eq!(extract_group_name("a#b", '#', 5).unwrap(), "a#b");
+    }
+
+    #[test]
+    fn polarize_pca_guards_empty_and_nan() {
+        let mut empty = PcaResult {
+            coordinates: Vec::new(),
+            eigenvalues: Vec::new(),
+            explained_variance_ratio: Vec::new(),
+            sample_labels: Vec::new(),
+            n_components: 1,
+        };
+        let _ = polarize_pca_result(&mut empty, &[]);
+        polarize_pca_result_with_guides(&mut [], &[]).unwrap();
+
+        let mut with_nan = PcaResult {
+            coordinates: vec![vec![f32::NAN], vec![1.5]],
+            eigenvalues: vec![1.0],
+            explained_variance_ratio: vec![1.0],
+            sample_labels: vec!["s0".into(), "s1".into()],
+            n_components: 1,
+        };
+        let p = polarize_pca_result(&mut with_nan, &[]);
+        assert_eq!(p.polarizer_indices, vec![0]); // total_cmp orders NaN at top deterministically
     }
 }
