@@ -52,6 +52,7 @@ impl PanelIdentity {
     /// sidecars. Same parameters alone cannot make two panels compatible.
     pub fn read(prefix: &str) -> io::Result<Self> {
         let mut sidecars = Vec::new();
+        let mut buffer = [0u8; 65536];
         for suffix in ["1gbwt", "1khash", "names", "meta", "spos", "pstep"] {
             let primary = if suffix.starts_with('1') || prefix.ends_with(".syng") {
                 format!("{prefix}.{suffix}")
@@ -67,7 +68,6 @@ impl PanelIdentity {
             let mut file = File::open(&path)?;
             let mut hash = 0xcbf29ce484222325;
             let mut size = 0;
-            let mut buffer = vec![0; 1024 * 1024];
             loop {
                 let n = file.read(&mut buffer)?;
                 if n == 0 {
@@ -79,17 +79,7 @@ impl PanelIdentity {
             sidecars.push((suffix.to_string(), size, format!("{hash:016x}")));
         }
         // Legacy ambiguity-derived dictionaries are not acceptable for new samples.
-        let primary_meta = crate::syng::syng_meta_path(prefix);
-        let meta_path = if Path::new(&primary_meta).exists() {
-            primary_meta
-        } else {
-            format!("{prefix}.syng.meta")
-        };
-        let meta_text = fs::read_to_string(&meta_path)?;
-        let metadata_version: u32 = meta_text
-            .lines()
-            .find_map(|l| l.strip_prefix("version\t").and_then(|v| v.parse().ok()))
-            .unwrap_or(0);
+        let (meta_path, metadata_version) = resolve_meta_path_and_version(prefix)?;
         if metadata_version != 2 {
             // THE LEGACY-PANEL OPT-IN (the global-panel call mode's
             // committed-evidence continuity, fail-closed by default):
@@ -130,21 +120,31 @@ impl PanelIdentity {
     }
 }
 
-/// The panel's own metadata version statement (the syng `.meta`
-/// `version` line; 0 when the meta carries none) — a provenance
-/// receipt helper, NOT a gate (the gate lives in
-/// `PanelIdentity::read`, fail-closed by default).
-pub fn panel_metadata_version(prefix: &str) -> io::Result<u32> {
+fn parse_meta_version(meta_text: &str) -> u32 {
+    meta_text
+        .lines()
+        .find_map(|l| l.strip_prefix("version\t").and_then(|v| v.parse().ok()))
+        .unwrap_or(0)
+}
+
+fn resolve_meta_path_and_version(prefix: &str) -> io::Result<(String, u32)> {
     let primary_meta = crate::syng::syng_meta_path(prefix);
     let meta_path = if Path::new(&primary_meta).exists() {
         primary_meta
     } else {
         format!("{prefix}.syng.meta")
     };
-    Ok(fs::read_to_string(meta_path)?
-        .lines()
-        .find_map(|l| l.strip_prefix("version\t").and_then(|v| v.parse().ok()))
-        .unwrap_or(0))
+    let meta_text = fs::read_to_string(&meta_path)?;
+    let version = parse_meta_version(&meta_text);
+    Ok((meta_path, version))
+}
+
+/// The panel's own metadata version statement (the syng `.meta`
+/// `version` line; 0 when the meta carries none) — a provenance
+/// receipt helper, NOT a gate (the gate lives in
+/// `PanelIdentity::read`, fail-closed by default).
+pub fn panel_metadata_version(prefix: &str) -> io::Result<u32> {
+    resolve_meta_path_and_version(prefix).map(|(_, version)| version)
 }
 
 pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
@@ -252,5 +252,124 @@ pub fn with_output_model(
             );
             Err(error)
         }
+    }
+}
+
+const IUPAC_BASE_TABLE: [bool; 256] = {
+    let mut table = [false; 256];
+    let bases = b"ACGTRYSWKMBDHVNacgtryswkmbdhvn";
+    let mut i = 0;
+    while i < bases.len() {
+        table[bases[i] as usize] = true;
+        i += 1;
+    }
+    table
+};
+
+/// Return true if `b` is an ASCII IUPAC nucleotide base (upper or lower case).
+#[inline]
+pub(crate) fn is_valid_iupac_base(b: u8) -> bool {
+    IUPAC_BASE_TABLE[b as usize]
+}
+
+/// Resident-set memory budget monitor reading `/proc/self/status`.
+pub(crate) struct RssGuard {
+    tag: &'static str,
+    budget_bytes: Option<u64>,
+}
+
+impl RssGuard {
+    pub(crate) fn new(tag: &'static str, budget_gib: f64) -> Self {
+        Self {
+            tag,
+            budget_bytes: (budget_gib > 0.0)
+                .then(|| (budget_gib * (1u64 << 30) as f64) as u64),
+        }
+    }
+
+    pub(crate) fn probe(&self, stage: &str) -> io::Result<u64> {
+        let text = fs::read_to_string("/proc/self/status")?;
+        let rss_kb = text
+            .lines()
+            .find(|l| l.starts_with("VmRSS:"))
+            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
+            .unwrap_or(0);
+        if let Some(budget) = self.budget_bytes {
+            if rss_kb.saturating_mul(1024) > budget {
+                return Err(invalid(format!(
+                    "RSS guard exceeded at {stage}: {rss_kb} kB"
+                )));
+            }
+        }
+        eprintln!("[{}] rss {stage}: {rss_kb} kB", self.tag);
+        Ok(rss_kb)
+    }
+}
+
+#[derive(Deserialize)]
+struct MapAxisMemberRow {
+    path_name: String,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Deserialize)]
+struct MapAxisPartition {
+    partition: u32,
+    members: Vec<MapAxisMemberRow>,
+}
+
+/// Load `(partition, start, end)` axis windows for `component` from `*.gfa.map.json`
+/// files in `partition_graphs`, sorted by `(start, end, partition)`.
+pub(crate) fn load_component_axis_rows(
+    partition_graphs: &Path,
+    component: &str,
+) -> io::Result<Vec<(u32, u64, u64)>> {
+    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
+    for entry in fs::read_dir(partition_graphs)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.ends_with(".gfa.map.json") {
+            continue;
+        }
+        let map: MapAxisPartition = read_json(&path)?;
+        for member in map.members.iter().filter(|m| m.path_name == component) {
+            axis_rows.push((map.partition, member.start, member.end));
+        }
+    }
+    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    Ok(axis_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iupac_table_matches_canonical_set() {
+        let valid = b"ACGTRYSWKMBDHVNacgtryswkmbdhvn";
+        for b in 0u8..=255 {
+            assert_eq!(is_valid_iupac_base(b), valid.contains(&b));
+        }
+    }
+
+    #[test]
+    fn meta_version_parsing_and_axis_loader_sort_order() {
+        assert_eq!(parse_meta_version("k\t63\nversion\t2\n"), 2);
+        assert_eq!(parse_meta_version("k\t63\n"), 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("window1.gfa.map.json"),
+            r#"{"partition":7,"members":[{"path_name":"A#0#chr","start":200,"end":300}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("window0.gfa.map.json"),
+            r#"{"partition":3,"members":[{"path_name":"A#0#chr","start":0,"end":100},{"path_name":"B#0#chr","start":0,"end":50}]}"#,
+        )
+        .unwrap();
+        let rows = load_component_axis_rows(dir.path(), "A#0#chr").unwrap();
+        assert_eq!(rows, vec![(3, 0, 100), (7, 200, 300)]);
     }
 }

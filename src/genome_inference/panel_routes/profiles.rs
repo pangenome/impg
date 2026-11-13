@@ -19,13 +19,17 @@ pub struct NativeIndex {
     pub index: Seal,
     pub totals: Seal,
 }
+pub(super) fn start_count(length: u64, source_length: u64) -> u64 {
+    if length <= source_length {
+        source_length - length + 1
+    } else {
+        0
+    }
+}
+
 impl NativeIndex {
     pub fn validate(&self, length: u64, source_length: u64) -> io::Result<()> {
-        let starts = if length <= source_length {
-            source_length - length + 1
-        } else {
-            0
-        };
+        let starts = start_count(length, source_length);
         require(
             self.length == length
                 && self.starts == starts
@@ -87,11 +91,7 @@ pub fn events(
     mut fetch: impl FnMut(u64, u64) -> io::Result<Vec<u8>>,
     mut emit: impl FnMut(Event) -> io::Result<()>,
 ) -> io::Result<()> {
-    let starts = if length <= molecule {
-        molecule - length + 1
-    } else {
-        0
-    };
+    let starts = start_count(length, molecule);
     require(
         length > 0 && core > 0 && lo <= hi && hi <= starts,
         "invalid admitted event domain",
@@ -182,7 +182,7 @@ pub fn compile(
         add(&mut offset, bytes.len() as u64 + 1)?;
         add(&mut runs, 1)
     };
-    let starts = if length <= n { n - length + 1 } else { 0 };
+    let starts = start_count(length, n);
     let mut previous: Option<Event> = None;
     events(
         panel,

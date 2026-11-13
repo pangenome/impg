@@ -117,8 +117,21 @@ pub struct Evaluator<'a> {
 /// Canonical source-forward span capacity, shared by both orientations and all
 /// storage/ownership descriptions. Disjoint uses are admitted even across slots.
 pub fn resources_feasible(segments: impl IntoIterator<Item = Segment>) -> bool {
-    let mut spans: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
+    resources_feasible_iter(segments)
+}
+
+pub(super) fn resources_feasible_refs<'a>(
+    segments: impl IntoIterator<Item = &'a Segment>,
+) -> bool {
+    resources_feasible_iter(segments)
+}
+
+fn resources_feasible_iter<S: std::borrow::Borrow<Segment>>(
+    segments: impl IntoIterator<Item = S>,
+) -> bool {
+    let mut spans: rustc_hash::FxHashMap<usize, Vec<(u64, u64)>> = Default::default();
     for p in segments {
+        let p = p.borrow();
         spans.entry(p.source).or_default().push((p.start, p.end));
     }
     spans.values_mut().all(|s| {

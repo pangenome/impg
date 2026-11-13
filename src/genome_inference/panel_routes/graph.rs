@@ -377,9 +377,7 @@ impl Sources {
         )?;
         require(
             dna.len() as u64 == end - start
-                && dna
-                    .iter()
-                    .all(|b| b"ACGTRYSWKMBDHVNacgtryswkmbdhvn".contains(b)),
+                && dna.iter().all(|&b| super::super::is_valid_iupac_base(b)),
             "invalid source DNA",
         )?;
         dna.make_ascii_uppercase();

@@ -245,9 +245,7 @@ impl Sources {
                 )?;
                 require(
                     part.len() as u64 == b - a
-                        && part
-                            .iter()
-                            .all(|b| b"ACGTRYSWKMBDHVNacgtryswkmbdhvn".contains(b)),
+                        && part.iter().all(|&b| super::super::is_valid_iupac_base(b)),
                     "invalid source DNA/crop",
                 )?;
                 if p.strand == "-" {
