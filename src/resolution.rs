@@ -1498,9 +1498,8 @@ fn resolve_graph_bubbles(
                     &global_path_names,
                     config,
                 )
-                .unwrap_or_default()
             })
-            .collect();
+            .collect::<io::Result<_>>()?;
         let local_povu_elapsed = local_povu_start.elapsed();
 
         // Wire children into the tree (parent → child edges) and record the
@@ -5255,15 +5254,10 @@ fn collect_unique_anchor_ranges(
     let mut ranges = Vec::new();
     for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
         if let Some((begin_step, end_step)) = unique_anchor_range(path_index, entry, exit) {
-            let Some(positions) = path_positions_by_path.get(path_idx) else {
-                continue;
-            };
-            let Some(&source_begin_bp) = positions.get(begin_step) else {
-                continue;
-            };
-            let Some(&source_end_bp) = positions.get(end_step) else {
-                continue;
-            };
+            let what = "collect_unique_anchor_ranges: path positions";
+            let positions = must_index(path_positions_by_path, path_idx, what);
+            let source_begin_bp = *must_index(positions, begin_step, what);
+            let source_end_bp = *must_index(positions, end_step, what);
             let path_name = graph.paths.get(path_idx).map(|path| path.name.clone());
             ranges.push(PathRange {
                 path_idx,
@@ -5290,22 +5284,29 @@ fn build_bubble_candidate(
     path_positions_by_path: &[Vec<usize>],
     min_max_traversal_len: Option<usize>,
 ) -> Option<BubbleCandidate> {
-    if ranges.len() < 2 || root_start_step > root_end_step {
+    if ranges.len() < 2 {
         return None;
     }
-    let root_positions = path_positions_by_path.get(root_path_idx)?;
-    let root_end_bp = root_end_step
-        .checked_add(1)
-        .and_then(|idx| root_positions.get(idx).copied())?;
-    let root_start_bp = root_positions.get(root_start_step).copied()?;
-    let root_span = root_end_bp.checked_sub(root_start_bp)?;
+    let what = "build_bubble_candidate: root path positions";
+    let root_positions = must_index(path_positions_by_path, root_path_idx, what);
+    let root_end_bp = *must_index(root_positions, root_end_step + 1, what);
+    let root_start_bp = *must_index(root_positions, root_start_step, what);
+    let root_span = root_end_bp.checked_sub(root_start_bp).unwrap_or_else(|| {
+        panic!("build_bubble_candidate: inverted root steps {root_start_step}..={root_end_step} on path {root_path_idx}")
+    });
 
+    let what = "build_bubble_candidate: range path positions";
     let mut lengths = Vec::with_capacity(ranges.len());
     for range in &ranges {
-        let positions = path_positions_by_path.get(range.path_idx)?;
-        let end_bp = positions.get(range.end_step).copied()?;
-        let begin_bp = positions.get(range.begin_step).copied()?;
-        lengths.push(end_bp.checked_sub(begin_bp)?);
+        let positions = must_index(path_positions_by_path, range.path_idx, what);
+        let end_bp = *must_index(positions, range.end_step, what);
+        let begin_bp = *must_index(positions, range.begin_step, what);
+        lengths.push(end_bp.checked_sub(begin_bp).unwrap_or_else(|| {
+            panic!(
+                "build_bubble_candidate: inverted range steps {}..{} on path {}",
+                range.begin_step, range.end_step, range.path_idx
+            )
+        }));
     }
     let traversal_stats = traversal_stats_from_lengths(lengths);
     if let Some(min_len) = min_max_traversal_len {
@@ -5320,8 +5321,19 @@ fn build_bubble_candidate(
         .sum::<usize>();
     let mut unique_steps = FxHashSet::default();
     for range in &ranges {
-        let path = graph.paths.get(range.path_idx)?;
-        let steps = path.steps.get(range.begin_step..range.end_step)?;
+        let path = must_index(&graph.paths, range.path_idx, "build_bubble_candidate: graph paths");
+        let steps = path
+            .steps
+            .get(range.begin_step..range.end_step)
+            .unwrap_or_else(|| {
+                panic!(
+                    "build_bubble_candidate: steps {}..{} out of range on path {} (len {})",
+                    range.begin_step,
+                    range.end_step,
+                    range.path_idx,
+                    path.steps.len()
+                )
+            });
         unique_steps.extend(steps.iter().copied());
     }
     let signature = candidate_signature(
@@ -5355,9 +5367,6 @@ fn candidate_from_root_interval(
     path_positions_by_path: &[Vec<usize>],
     path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
 ) -> Option<BubbleCandidate> {
-    if root_start_step > root_end_step {
-        return None;
-    }
     let root_path_idx = 0usize;
     let root_path = graph.paths.get(root_path_idx)?;
     let entry = *root_path.steps.get(root_start_step)?;
@@ -6874,19 +6883,6 @@ fn graph_quality(graph: &Graph) -> GraphQuality {
     }
 }
 
-#[allow(dead_code)]
-fn trivial_stringy_bubble_count(graph: &Graph) -> usize {
-    let mut visits = vec![0usize; graph.segments.len()];
-    for path in &graph.paths {
-        for step in &path.steps {
-            if step.node < visits.len() {
-                visits[step.node] += 1;
-            }
-        }
-    }
-    trivial_stringy_bubble_count_with_visits(graph, &visits)
-}
-
 fn trivial_stringy_bubble_count_with_visits(graph: &Graph, visits: &[usize]) -> usize {
     let n_paths = graph.paths.len();
     if n_paths < 2 {
@@ -6993,6 +6989,21 @@ fn quantile_usize(values: &[usize], numerator: usize, denominator: usize) -> usi
         return 0;
     }
     values[percentile_index(values.len(), numerator, denominator)]
+}
+
+// Bounds-checked index, error names the site.
+fn checked_index<'a, T>(items: &'a [T], idx: usize, what: &str) -> io::Result<&'a T> {
+    items.get(idx).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{what}: index {idx} out of range (len {})", items.len()),
+        )
+    })
+}
+
+// Bounds-checked index, panics naming the site.
+fn must_index<'a, T>(items: &'a [T], idx: usize, what: &str) -> &'a T {
+    checked_index(items, idx, what).unwrap_or_else(|err| panic!("{err}"))
 }
 
 fn path_positions(graph: &Graph, path_idx: usize) -> Vec<usize> {
@@ -7115,9 +7126,14 @@ fn discover_all_candidates_with_context(
         .filter_map(|site| {
             let begin = site.reference_start_step;
             let exit_step = site.reference_end_step;
-            if begin > exit_step || exit_step + 1 >= root_positions.len() {
+            if exit_step + 1 >= root_positions.len() {
                 return None;
             }
+            assert!(
+                begin <= exit_step + 1,
+                "discover_all_candidates: POVU site {} has inverted reference steps {begin}..={exit_step}",
+                site.id
+            );
             let entry = step_from_povu(&id_to_idx, &site.start)?;
             let exit = step_from_povu(&id_to_idx, &site.end)?;
             let ranges = collect_unique_anchor_ranges(
@@ -7282,29 +7298,6 @@ fn reference_path_walk_candidates(mut candidates: Vec<BubbleCandidate>) -> Vec<B
     walked
 }
 
-#[allow(dead_code)]
-fn greedy_path_walk_chain_candidates(
-    graph: &Graph,
-    config: &ResolutionConfig,
-    walk_candidates: Vec<BubbleCandidate>,
-) -> io::Result<Vec<ChainCandidate>> {
-    if walk_candidates.is_empty() || graph.paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let path_positions_by_path: Vec<Vec<usize>> = (0..graph.paths.len())
-        .map(|idx| path_positions(graph, idx))
-        .collect();
-    let path_step_indexes: Vec<FxHashMap<Step, Vec<usize>>> =
-        graph.paths.iter().map(path_step_index).collect();
-    greedy_path_walk_chain_candidates_with_indexes(
-        graph,
-        config,
-        walk_candidates,
-        &path_positions_by_path,
-        &path_step_indexes,
-    )
-}
-
 fn greedy_path_walk_chain_candidates_with_indexes(
     graph: &Graph,
     config: &ResolutionConfig,
@@ -7369,9 +7362,6 @@ fn chain_candidate_from_group(
     let root_path = graph.paths.get(root_path_idx)?;
     let root_start_step = first.root_start_step;
     let root_end_step = last.root_end_step;
-    if root_start_step > root_end_step {
-        return None;
-    }
     let entry = *root_path.steps.get(root_start_step)?;
     let exit = *root_path.steps.get(root_end_step)?;
 
@@ -7724,6 +7714,12 @@ fn build_initial_bubble_tree(
     config: &ResolutionConfig,
     emit_logs: bool,
 ) -> io::Result<(Vec<BubbleNode>, Vec<usize>, GraphDiscovery)> {
+    if graph.paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "build_initial_bubble_tree: graph has no paths",
+        ));
+    }
     let discovery = discover_all_candidates_with_context(graph, config, emit_logs)?;
     let discovered = &discovery.candidates;
     if emit_logs {
@@ -7744,16 +7740,9 @@ fn build_initial_bubble_tree(
     let mut nodes: Vec<BubbleNode> = Vec::with_capacity(discovered.len());
     let mut id_to_node_idx: FxHashMap<String, usize> = FxHashMap::default();
     for d in discovered {
-        let ref_bp_begin = root_positions
-            .get(d.candidate.root_start_step)
-            .copied()
-            .unwrap_or(0);
-        let ref_bp_end = d
-            .candidate
-            .root_end_step
-            .checked_add(1)
-            .and_then(|idx| root_positions.get(idx).copied())
-            .unwrap_or(ref_bp_begin);
+        let what = "build_initial_bubble_tree: root path positions";
+        let ref_bp_begin = *checked_index(root_positions, d.candidate.root_start_step, what)?;
+        let ref_bp_end = *checked_index(root_positions, d.candidate.root_end_step + 1, what)?;
         let node_idx = nodes.len();
         id_to_node_idx.insert(d.povu_site_id.clone(), node_idx);
         nodes.push(BubbleNode {
@@ -7838,14 +7827,10 @@ fn discover_local_subbubble_keys(
     let local_ref_path_name = replacement.paths[local_ref_idx].name.clone();
 
     let rendered = render_graph(replacement);
-    let native = match povu::NativeGfa::parse(&rendered) {
-        Ok(g) => g,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let decomposition = match native.decompose_flubbles(&[local_ref_path_name]) {
-        Ok(d) => d,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let native = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
+    let decomposition = native
+        .decompose_flubbles(&[local_ref_path_name])
+        .map_err(povu_to_io_error)?;
     if decomposition.sites.is_empty() {
         return Ok(Vec::new());
     }
@@ -7896,34 +7881,29 @@ fn discover_local_subbubble_keys(
             None => continue,
         };
         // For each LOCAL path the sub-site traverses, compute global bp range
-        let Some(local_ref_positions) = local_path_positions.get(local_ref_idx) else {
-            continue;
-        };
+        let what = "discover_local_subbubble_keys: local reference positions";
+        let local_ref_positions = checked_index(&local_path_positions, local_ref_idx, what)?;
         if site.reference_start_step > site.reference_end_step {
+            log::warn!(
+                "discover_local_subbubble_keys: skipping local POVU site {} with inverted reference steps {}..={}",
+                site.id,
+                site.reference_start_step,
+                site.reference_end_step
+            );
             continue;
         }
-        let Some(&local_ref_bp_begin) = local_ref_positions.get(site.reference_start_step) else {
-            continue;
-        };
-        let Some(&local_ref_bp_end) = site
-            .reference_end_step
-            .checked_add(1)
-            .and_then(|idx| local_ref_positions.get(idx))
-        else {
-            continue;
-        };
-        let Some(parent_ref_range) = parent.ranges.get(local_ref_idx) else {
-            continue;
-        };
-        let Some(parent_ref_path_pos) = parent_pre_apply_path_positions.get(parent_ref_range.path_idx) else {
-            continue;
-        };
-        let Some(&parent_ref_bp_begin) = parent_ref_path_pos.get(parent_ref_range.begin_step) else {
-            continue;
-        };
-        let Some(global_ref_name) = global_path_names.get(global_ref_path_idx) else {
-            continue;
-        };
+        let local_ref_bp_begin = *checked_index(local_ref_positions, site.reference_start_step, what)?;
+        let local_ref_bp_end = *checked_index(local_ref_positions, site.reference_end_step + 1, what)?;
+        let parent_ref_range = &parent.ranges[local_ref_idx];
+        let what = "discover_local_subbubble_keys: parent pre-apply reference positions";
+        let parent_ref_path_pos =
+            checked_index(parent_pre_apply_path_positions, parent_ref_range.path_idx, what)?;
+        let parent_ref_bp_begin = *checked_index(parent_ref_path_pos, parent_ref_range.begin_step, what)?;
+        let global_ref_name = checked_index(
+            global_path_names,
+            global_ref_path_idx,
+            "discover_local_subbubble_keys: global path names",
+        )?;
 
         let mut per_path_coords: Vec<String> = Vec::new();
         for (local_path_idx, path_idx) in local_path_step_indexes.iter().enumerate() {
@@ -7931,27 +7911,24 @@ fn discover_local_subbubble_keys(
                 Some(r) => r,
                 None => continue,
             };
-            let Some(local_positions) = local_path_positions.get(local_path_idx) else {
-                continue;
-            };
-            let (Some(&local_bp_begin), Some(&local_bp_end)) =
-                (local_positions.get(lp_begin), local_positions.get(lp_end))
-            else {
-                continue;
-            };
-            let Some(parent_range) = parent.ranges.get(local_path_idx) else {
-                continue;
-            };
+            let what = "discover_local_subbubble_keys: local path positions";
+            let local_positions = checked_index(&local_path_positions, local_path_idx, what)?;
+            let local_bp_begin = *checked_index(local_positions, lp_begin, what)?;
+            let local_bp_end = *checked_index(local_positions, lp_end, what)?;
+            let parent_range = checked_index(
+                &parent.ranges,
+                local_path_idx,
+                "discover_local_subbubble_keys: parent ranges",
+            )?;
             let global_path_idx = parent_range.path_idx;
-            let Some(parent_path_pos) = parent_pre_apply_path_positions.get(global_path_idx) else {
-                continue;
-            };
-            let Some(&parent_path_bp_begin) = parent_path_pos.get(parent_range.begin_step) else {
-                continue;
-            };
-            let Some(global_name) = global_path_names.get(global_path_idx) else {
-                continue;
-            };
+            let what = "discover_local_subbubble_keys: parent pre-apply path positions";
+            let parent_path_pos = checked_index(parent_pre_apply_path_positions, global_path_idx, what)?;
+            let parent_path_bp_begin = *checked_index(parent_path_pos, parent_range.begin_step, what)?;
+            let global_name = checked_index(
+                global_path_names,
+                global_path_idx,
+                "discover_local_subbubble_keys: global path names",
+            )?;
             let global_bp_begin = parent_path_bp_begin + local_bp_begin;
             let global_bp_end = parent_path_bp_begin + local_bp_end;
             per_path_coords.push(format!("{global_name}:{global_bp_begin}-{global_bp_end}"));
@@ -8175,7 +8152,12 @@ fn collect_flank_left(
     };
     let mut pieces: Vec<(usize, usize)> = Vec::new();
     let mut actual = 0usize;
-    let mut step_idx = begin_step.min(path.steps.len());
+    assert!(
+        begin_step <= path.steps.len(),
+        "collect_flank_left: begin_step {begin_step} out of range on path {path_idx} (len {})",
+        path.steps.len()
+    );
+    let mut step_idx = begin_step;
     while step_idx > 0 && actual < flank_bp {
         step_idx -= 1;
         let step = path.steps[step_idx];
@@ -8202,7 +8184,7 @@ fn collect_flank_left(
         context.truncation = FlankTruncationReason::RequestedLength;
     }
     if actual > 0 {
-        let path_bp_end = path.steps[..begin_step.min(path.steps.len())]
+        let path_bp_end = path.steps[..begin_step]
             .iter()
             .map(|step| graph.segments[step.node].seq.len())
             .sum::<usize>();
@@ -8261,7 +8243,7 @@ fn collect_flank_right(
     }
     let actual = collected.len();
     if actual > 0 {
-        let path_bp_begin = path.steps[..end_step.min(path.steps.len())]
+        let path_bp_begin = path.steps[..end_step]
             .iter()
             .map(|step| graph.segments[step.node].seq.len())
             .sum::<usize>();
@@ -17147,7 +17129,7 @@ P\talt\t1+,4+,3+,5+,6+,7+\t*
         let path_step_indexes: Vec<FxHashMap<Step, Vec<usize>>> =
             graph.paths.iter().map(path_step_index).collect();
 
-        // Inverted step interval must return None rather than panicking on subtraction overflow.
+        // Inverted anchors form no range: None.
         assert!(candidate_from_root_interval(
             &graph,
             2,
@@ -17158,7 +17140,7 @@ P\talt\t1+,4+,3+,5+,6+,7+\t*
         )
         .is_none());
 
-        // Out-of-bounds end step must return None cleanly.
+        // Root step lookup misses: None.
         assert!(candidate_from_root_interval(
             &graph,
             0,
@@ -17169,7 +17151,7 @@ P\talt\t1+,4+,3+,5+,6+,7+\t*
         )
         .is_none());
 
-        // Chaining candidates where first.root_start_step > last.root_end_step must return None.
+        // Inverted chain anchors form no range: None.
         let c1 = homologous_candidate_for_paths(&graph, &[0, 1], "c1");
         let mut c2 = c1.clone();
         c2.root_end_step = 0;
@@ -17180,6 +17162,85 @@ P\talt\t1+,4+,3+,5+,6+,7+\t*
             &path_step_indexes,
         )
         .is_none());
+    }
+
+    fn fixture_positions_and_indexes(
+        graph: &Graph,
+    ) -> (Vec<Vec<usize>>, Vec<FxHashMap<Step, Vec<usize>>>) {
+        (
+            (0..graph.paths.len())
+                .map(|idx| path_positions(graph, idx))
+                .collect(),
+            graph.paths.iter().map(path_step_index).collect(),
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "collect_unique_anchor_ranges: path positions: index 4 out of range (len 1)")]
+    fn candidate_from_root_interval_panics_on_short_positions() {
+        let graph = incomplete_homologous_fixture_graph();
+        let (_, path_step_indexes) = fixture_positions_and_indexes(&graph);
+        let truncated_positions = vec![vec![0]; graph.paths.len()];
+        candidate_from_root_interval(&graph, 0, 3, 0, &truncated_positions, &path_step_indexes);
+    }
+
+    #[test]
+    #[should_panic(expected = "build_bubble_candidate: root path positions: index 4 out of range (len 1)")]
+    fn build_bubble_candidate_panics_on_short_root_positions() {
+        let graph = incomplete_homologous_fixture_graph();
+        let ranges = homologous_candidate_for_paths(&graph, &[0, 1], "c").ranges;
+        let truncated_positions = vec![vec![0]; graph.paths.len()];
+        build_bubble_candidate(&graph, ranges, 0, 0, 3, 0, &truncated_positions, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "build_bubble_candidate: inverted root steps 3..=1 on path 0")]
+    fn build_bubble_candidate_panics_on_inverted_root_steps() {
+        let graph = incomplete_homologous_fixture_graph();
+        let (path_positions_by_path, _) = fixture_positions_and_indexes(&graph);
+        let ranges = homologous_candidate_for_paths(&graph, &[0, 1], "c").ranges;
+        build_bubble_candidate(&graph, ranges, 0, 3, 1, 0, &path_positions_by_path, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "build_bubble_candidate: inverted range steps 3..1 on path 1")]
+    fn build_bubble_candidate_panics_on_inverted_range_steps() {
+        let graph = incomplete_homologous_fixture_graph();
+        let (path_positions_by_path, _) = fixture_positions_and_indexes(&graph);
+        let mut ranges = homologous_candidate_for_paths(&graph, &[0, 1], "c").ranges;
+        ranges[1].begin_step = 3;
+        ranges[1].end_step = 1;
+        build_bubble_candidate(&graph, ranges, 0, 1, 2, 0, &path_positions_by_path, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "build_bubble_candidate: graph paths: index 9 out of range (len 4)")]
+    fn build_bubble_candidate_panics_on_unknown_range_path() {
+        let graph = incomplete_homologous_fixture_graph();
+        let (mut path_positions_by_path, _) = fixture_positions_and_indexes(&graph);
+        path_positions_by_path.resize(10, vec![0, 1, 2, 3, 4]);
+        let mut ranges = homologous_candidate_for_paths(&graph, &[0, 1], "c").ranges;
+        ranges[1].path_idx = 9;
+        build_bubble_candidate(&graph, ranges, 0, 1, 2, 0, &path_positions_by_path, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "collect_flank_left: begin_step 6 out of range on path 0 (len 4)")]
+    fn collect_flank_left_panics_on_oob_begin_step() {
+        collect_flank_left(&incomplete_homologous_fixture_graph(), 0, 6, 3);
+    }
+
+    #[test]
+    fn build_initial_bubble_tree_errors_on_graph_without_paths() {
+        let graph = Graph {
+            segments: Vec::new(),
+            paths: Vec::new(),
+        };
+        let err = build_initial_bubble_tree(&graph, &ResolutionConfig::default(), false)
+            .err()
+            .expect("a graph without paths must be an error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "build_initial_bubble_tree: graph has no paths");
     }
 
     #[test]
@@ -17328,20 +17389,52 @@ P\talt\t1+,4+,3+,5+,6+,7+\t*
     }
 
     #[test]
-    fn discover_local_subbubble_keys_handles_short_parent_positions_without_panic() {
+    fn discover_local_subbubble_keys_errors_on_short_parent_positions() {
         let graph = incomplete_homologous_fixture_graph();
         let parent = homologous_candidate_for_paths(&graph, &[0, 1], "p");
-        let replacement = two_node_homologous_replacement(2);
-        let truncated_positions = vec![vec![0]; graph.paths.len()];
+        // Replacement holds one bubble: r1 (r2|r3) r4.
+        let step = |node| Step { node, rev: false };
+        let replacement = Graph {
+            segments: [("r1", "A"), ("r2", "C"), ("r3", "G"), ("r4", "T")]
+                .iter()
+                .map(|(id, seq)| Segment {
+                    id: id.to_string(),
+                    seq: seq.as_bytes().to_vec(),
+                })
+                .collect(),
+            paths: vec![
+                Path {
+                    name: "replacement_path_0".to_string(),
+                    steps: vec![step(0), step(1), step(3)],
+                },
+                Path {
+                    name: "replacement_path_1".to_string(),
+                    steps: vec![step(0), step(2), step(3)],
+                },
+            ],
+        };
+        let (full_positions, _) = fixture_positions_and_indexes(&graph);
         let global_names = graph.paths.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
-        let keys = discover_local_subbubble_keys(
+        let config = ResolutionConfig::default();
+        // Full positions: the site yields a key.
+        let keys =
+            discover_local_subbubble_keys(&parent, &replacement, &full_positions, &global_names, &config)
+                .unwrap();
+        assert_eq!(keys.len(), 1, "fixture must reach the position lookups: {keys:?}");
+
+        let truncated_positions = vec![vec![0]; graph.paths.len()];
+        let err = discover_local_subbubble_keys(
             &parent,
             &replacement,
             &truncated_positions,
             &global_names,
-            &ResolutionConfig::default(),
+            &config,
         )
-        .unwrap();
-        assert!(keys.is_empty());
+        .expect_err("short parent positions must be an error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.to_string(),
+            "discover_local_subbubble_keys: parent pre-apply reference positions: index 1 out of range (len 1)"
+        );
     }
 }
