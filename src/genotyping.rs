@@ -130,10 +130,7 @@ fn cosine_for_features_with<T: Copy>(
     sample: &FxHashMap<u32, T>,
     sample_norm_sq: f64,
     to_f64: impl Fn(T) -> f64,
-) -> f64 {
-    if sample_norm_sq <= 0.0 || !sample_norm_sq.is_finite() {
-        return 0.0;
-    }
+) -> io::Result<f64> {
     let mut dot = 0.0;
     let mut genotype_norm_sq = 0.0;
     for &(feature_id, val) in candidate_features {
@@ -143,15 +140,42 @@ fn cosine_for_features_with<T: Copy>(
             dot += g * to_f64(s);
         }
     }
-    if genotype_norm_sq <= 0.0 || !genotype_norm_sq.is_finite() || !dot.is_finite() {
-        return 0.0;
+    let sample_norm = sample_norm_sq.sqrt();
+    Ok(checked_cosine(format_args!("the candidate"), dot, sample_norm, genotype_norm_sq)?.0)
+}
+
+/// Returns (similarity, genotype norm); zero norm gives 0.0.
+fn checked_cosine(
+    what: std::fmt::Arguments,
+    dot: f64,
+    sample_norm: f64,
+    genotype_norm_sq: f64,
+) -> io::Result<(f64, f64)> {
+    let invalid = |quantity: &str, value: f64| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("cosine {quantity} is not finite ({value}) for {what}"),
+        )
+    };
+    let genotype_norm = genotype_norm_sq.sqrt();
+    for (quantity, value) in [
+        ("dot product", dot),
+        ("sample norm", sample_norm),
+        ("genotype norm", genotype_norm),
+    ] {
+        if !value.is_finite() {
+            return Err(invalid(quantity, value));
+        }
     }
-    let sim = dot / (sample_norm_sq.sqrt() * genotype_norm_sq.sqrt());
-    if sim.is_finite() {
-        sim
-    } else {
-        0.0
+    // Empty sample or genotype scores zero
+    if sample_norm == 0.0 || genotype_norm == 0.0 {
+        return Ok((0.0, genotype_norm));
     }
+    let similarity = dot / (sample_norm * genotype_norm);
+    if !similarity.is_finite() {
+        return Err(invalid("similarity", similarity));
+    }
+    Ok((similarity, genotype_norm))
 }
 
 fn finalize_combination_score(
@@ -159,26 +183,13 @@ fn finalize_combination_score(
     dot: f64,
     sample_norm: f64,
     genotype_norm_sq: f64,
-) -> CombinationScore {
-    let genotype_norm = if genotype_norm_sq > 0.0 && genotype_norm_sq.is_finite() {
-        genotype_norm_sq.sqrt()
-    } else {
-        0.0
-    };
-    let similarity = if sample_norm <= 0.0
-        || !sample_norm.is_finite()
-        || genotype_norm <= 0.0
-        || !dot.is_finite()
-    {
-        0.0
-    } else {
-        let sim = dot / (sample_norm * genotype_norm);
-        if sim.is_finite() {
-            sim
-        } else {
-            0.0
-        }
-    };
+) -> io::Result<CombinationScore> {
+    let (similarity, genotype_norm) = checked_cosine(
+        format_args!("combination {combination:?}"),
+        dot,
+        sample_norm,
+        genotype_norm_sq,
+    )?;
     let qv = if similarity >= 1.0 {
         999.0
     } else if similarity <= 0.0 {
@@ -187,14 +198,14 @@ fn finalize_combination_score(
         -10.0 * (1.0 - similarity).log10()
     };
 
-    CombinationScore {
+    Ok(CombinationScore {
         combination: combination.to_vec(),
         similarity,
         qv,
         dot,
         sample_norm,
         genotype_norm,
-    }
+    })
 }
 
 pub fn feature_universe<'a, I>(candidate_features: I) -> Vec<u32>
@@ -212,7 +223,7 @@ pub fn cosine_for_feature_counts(
     candidate_features: &[(u32, u64)],
     sample_counts: &FxHashMap<u32, u64>,
     sample_norm_sq: f64,
-) -> f64 {
+) -> io::Result<f64> {
     cosine_for_features_with(candidate_features, sample_counts, sample_norm_sq, |v| {
         v as f64
     })
@@ -236,19 +247,19 @@ pub fn cosine_for_feature_weights(
     candidate_features: &[(u32, f64)],
     sample_weights: &FxHashMap<u32, f64>,
     sample_norm_sq: f64,
-) -> f64 {
+) -> io::Result<f64> {
     cosine_for_features_with(candidate_features, sample_weights, sample_norm_sq, |v| v)
 }
 
 trait FeatureWeight: Copy + Default {
-    fn add_saturating(self, rhs: Self) -> Self;
+    fn add_checked(self, rhs: Self) -> Option<Self>;
     fn into_f64(self) -> f64;
 }
 
 impl FeatureWeight for u64 {
     #[inline]
-    fn add_saturating(self, rhs: Self) -> Self {
-        self.saturating_add(rhs)
+    fn add_checked(self, rhs: Self) -> Option<Self> {
+        self.checked_add(rhs)
     }
 
     #[inline]
@@ -259,8 +270,8 @@ impl FeatureWeight for u64 {
 
 impl FeatureWeight for f64 {
     #[inline]
-    fn add_saturating(self, rhs: Self) -> Self {
-        self + rhs
+    fn add_checked(self, rhs: Self) -> Option<Self> {
+        Some(self + rhs)
     }
 
     #[inline]
@@ -269,17 +280,26 @@ impl FeatureWeight for f64 {
     }
 }
 
+fn feature_sum_overflow(feature_id: u32, combination: &[usize]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("count sum overflows u64 for feature {feature_id} in combination {combination:?}"),
+    )
+}
+
 fn score_combination_with<W: FeatureWeight>(
     combination: &[usize],
     candidate_features: &[&[(u32, W)]],
     sample: &FxHashMap<u32, W>,
     sample_norm_sq: f64,
-) -> CombinationScore {
+) -> io::Result<CombinationScore> {
     let mut genotype: FxHashMap<u32, W> = FxHashMap::default();
     for &idx in combination {
         for &(feature_id, value) in candidate_features[idx] {
             let entry = genotype.entry(feature_id).or_default();
-            *entry = entry.add_saturating(value);
+            *entry = entry
+                .add_checked(value)
+                .ok_or_else(|| feature_sum_overflow(feature_id, combination))?;
         }
     }
 
@@ -293,12 +313,7 @@ fn score_combination_with<W: FeatureWeight>(
         }
     }
 
-    let sample_norm = if sample_norm_sq > 0.0 && sample_norm_sq.is_finite() {
-        sample_norm_sq.sqrt()
-    } else {
-        0.0
-    };
-    finalize_combination_score(combination, dot, sample_norm, genotype_norm_sq)
+    finalize_combination_score(combination, dot, sample_norm_sq.sqrt(), genotype_norm_sq)
 }
 
 pub fn score_cosine_combination(
@@ -306,7 +321,7 @@ pub fn score_cosine_combination(
     candidate_features: &[&[(u32, u64)]],
     sample_counts: &FxHashMap<u32, u64>,
     sample_norm_sq: f64,
-) -> CombinationScore {
+) -> io::Result<CombinationScore> {
     score_combination_with(combination, candidate_features, sample_counts, sample_norm_sq)
 }
 
@@ -315,7 +330,7 @@ pub fn score_cosine_combination_f64(
     candidate_features: &[&[(u32, f64)]],
     sample_weights: &FxHashMap<u32, f64>,
     sample_norm_sq: f64,
-) -> CombinationScore {
+) -> io::Result<CombinationScore> {
     score_combination_with(combination, candidate_features, sample_weights, sample_norm_sq)
 }
 
@@ -340,21 +355,20 @@ fn run_dense_cosine_search<W: FeatureWeight>(
     }
 
     let mut dense_sample = vec![0.0f64; feature_to_dense.len()];
+    let mut dense_to_feature = vec![0u32; feature_to_dense.len()];
     for (&feature_id, &dense_idx) in &feature_to_dense {
+        dense_to_feature[dense_idx] = feature_id;
         if let Some(&val) = sample.get(&feature_id) {
             dense_sample[dense_idx] = val.into_f64();
         }
     }
 
-    let sample_norm = if sample_norm_sq > 0.0 && sample_norm_sq.is_finite() {
-        sample_norm_sq.sqrt()
-    } else {
-        0.0
-    };
+    let sample_norm = sample_norm_sq.sqrt();
 
     struct Search<'a, W: FeatureWeight> {
         dense_candidates: &'a [Vec<(usize, W)>],
         dense_sample: &'a [f64],
+        dense_to_feature: &'a [u32],
         sample_norm: f64,
         ploidy: usize,
         max_combinations: u64,
@@ -392,7 +406,13 @@ fn run_dense_cosine_search<W: FeatureWeight>(
                             self.acc[feature_idx] = value;
                             self.touched.push(feature_idx);
                         } else {
-                            self.acc[feature_idx] = self.acc[feature_idx].add_saturating(value);
+                            self.acc[feature_idx] =
+                                self.acc[feature_idx].add_checked(value).ok_or_else(|| {
+                                    feature_sum_overflow(
+                                        self.dense_to_feature[feature_idx],
+                                        current,
+                                    )
+                                })?;
                         }
                     }
                 }
@@ -408,7 +428,7 @@ fn run_dense_cosine_search<W: FeatureWeight>(
                     dot,
                     self.sample_norm,
                     genotype_norm_sq,
-                ));
+                )?);
                 return Ok(());
             }
 
@@ -425,6 +445,7 @@ fn run_dense_cosine_search<W: FeatureWeight>(
     let mut search = Search {
         dense_candidates: &dense_candidates,
         dense_sample: &dense_sample,
+        dense_to_feature: &dense_to_feature,
         sample_norm,
         ploidy,
         max_combinations,
@@ -555,18 +576,49 @@ mod tests {
         let candidates = vec![candidate_a.as_slice(), candidate_b.as_slice()];
         let mut nan_sample = FxHashMap::default();
         nan_sample.insert(1, f64::NAN);
+        let err = cosine_for_feature_weights(&candidate_a, &nan_sample, 1.0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("dot product"), "{err}");
+        let mut ok_sample = FxHashMap::default();
+        ok_sample.insert(1, 1.0);
+        for bad_norm_sq in [f64::NAN, f64::INFINITY, -1.0] {
+            let err = score_cosine_combination_f64(&[0], &candidates, &ok_sample, bad_norm_sq)
+                .unwrap_err();
+            assert!(err.to_string().contains("sample norm"), "{err}");
+            assert!(err.to_string().contains("combination [0]"), "{err}");
+            assert!(
+                run_cosine_combination_search_f64(&candidates, &ok_sample, bad_norm_sq, 2, 10)
+                    .is_err()
+            );
+        }
+        assert!(run_cosine_combination_search_f64(&candidates, &nan_sample, 1.0, 1, 10).is_err());
+        let inf_candidate = vec![(1, f64::INFINITY)];
+        let err = score_cosine_combination_f64(&[0], &[inf_candidate.as_slice()], &ok_sample, 1.0)
+            .unwrap_err();
+        assert!(err.to_string().contains("not finite"), "{err}");
+
+        // Zero norm is legitimate: similarity 0.0
+        let empty_sample = FxHashMap::default();
         assert_eq!(
-            cosine_for_feature_weights(&candidate_a, &nan_sample, 1.0),
+            cosine_for_feature_weights(&candidate_a, &empty_sample, 0.0).unwrap(),
             0.0
         );
-        let zero_score = score_cosine_combination_f64(&[0], &candidates, &nan_sample, f64::NAN);
-        assert_eq!(zero_score.similarity, 0.0);
-        assert_eq!(zero_score.qv, 0.0);
-
-        let empty_sample = FxHashMap::default();
+        assert_eq!(
+            cosine_for_feature_weights(&candidate_b, &ok_sample, 1.0).unwrap(),
+            0.0
+        );
         let results =
             run_cosine_combination_search_f64(&candidates, &empty_sample, 0.0, 2, 10).unwrap();
         assert_eq!(results.len(), 3);
         assert!(results.iter().all(|r| r.similarity == 0.0 && r.qv == 0.0));
+
+        let big = vec![(7u32, u64::MAX)];
+        let big_candidates = vec![big.as_slice()];
+        let mut count_sample = FxHashMap::default();
+        count_sample.insert(7u32, 1u64);
+        let err =
+            run_cosine_combination_search(&big_candidates, &count_sample, 1.0, 2, 10).unwrap_err();
+        assert!(err.to_string().contains("feature 7"), "{err}");
+        assert!(score_cosine_combination(&[0, 0], &big_candidates, &count_sample, 1.0).is_err());
     }
 }

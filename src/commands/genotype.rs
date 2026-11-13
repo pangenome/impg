@@ -553,13 +553,17 @@ fn rank_candidates_with<C: CosigtCandidate>(
     empty_error: &str,
     feature_universe_fn: impl Fn(&[C]) -> Vec<u32>,
     sample_norm_sq_fn: impl Fn(&[u32]) -> f64,
-    single_cosine_fn: impl Fn(&[(u32, C::Weight)], f64) -> f64,
+    single_cosine_fn: impl Fn(&[(u32, C::Weight)], f64) -> io::Result<f64>,
     combo_search_fn: impl Fn(&[&[(u32, C::Weight)]], f64) -> io::Result<Vec<CosigtResult>>,
 ) -> io::Result<(Vec<CosigtResult>, Vec<u32>)> {
     let all_locus_features = feature_universe_fn(candidates);
     let all_sample_norm_sq = sample_norm_sq_fn(&all_locus_features);
     for candidate in candidates.iter_mut() {
-        let sim = single_cosine_fn(candidate.scoring_features(), all_sample_norm_sq);
+        let sim = single_cosine_fn(candidate.scoring_features(), all_sample_norm_sq)
+            .map_err(|e| {
+                let name = candidate.path_name();
+                io::Error::new(e.kind(), format!("candidate {name}: {e}"))
+            })?;
         candidate.set_single_similarity(sim);
     }
     candidates.sort_by(|a, b| {
