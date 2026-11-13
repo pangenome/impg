@@ -1631,8 +1631,12 @@ fn read_derive_cache(
 // ---------------------------------------------------------------------------
 
 fn window_slice_at<'a>(seq: &'a [u8], seq_lo: u64, bp: u64, k: u64) -> Option<&'a [u8]> {
-    let rel = usize::try_from(bp.checked_sub(seq_lo)?).ok()?;
-    let end = rel.checked_add(usize::try_from(k).ok()?)?;
+    let rel = bp
+        .checked_sub(seq_lo)
+        .expect("step position before the fetched sequence start") as usize;
+    let end = rel
+        .checked_add(k as usize)
+        .expect("step window end overflows usize");
     seq.get(rel..end)
 }
 
@@ -1667,6 +1671,18 @@ fn canonical_scheme_steps(
     steps
 }
 
+fn rc_step_bp(seq_lo: u64, seq_len: u64, k: u64, q: u64) -> io::Result<u64> {
+    seq_len
+        .checked_sub(k)
+        .and_then(|max_q| max_q.checked_sub(q))
+        .and_then(|rel| seq_lo.checked_add(rel))
+        .ok_or_else(|| {
+            invalid(&format!(
+                "reverse syncmer at {q} leaves the {seq_len} bp sequence at {seq_lo} (k {k})"
+            ))
+        })
+}
+
 fn reverse_matched_steps(
     panel: &SyngIndex,
     seq: &[u8],
@@ -1674,19 +1690,11 @@ fn reverse_matched_steps(
     k: u64,
 ) -> io::Result<Vec<(u64, i32)>> {
     let seq_len = seq.len() as u64;
-    let Some(max_q) = seq_len.checked_sub(k) else {
-        return Ok(Vec::new());
-    };
     let rc_seq = revcomp(seq);
-    Ok(
-        crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
-            .into_iter()
-            .filter_map(|(signed, q)| {
-                let bp = seq_lo.checked_add(max_q.checked_sub(q)?)?;
-                Some((bp, -signed))
-            })
-            .collect(),
-    )
+    crate::genome_inference::mem_records::raw_matched_syncmers(panel, &rc_seq)?
+        .into_iter()
+        .map(|(signed, q)| Ok((rc_step_bp(seq_lo, seq_len, k, q)?, -signed)))
+        .collect()
 }
 
 /// The canonical-scheme steps overlapping one row range [start, end)
@@ -4794,11 +4802,6 @@ pub fn path_matches_glob(path_name: &str, pattern: &str) -> bool {
     inner(path_name.as_bytes(), pattern.as_bytes())
 }
 
-/// The component's axis rows (start, end), in axis order, from the
-/// locality maps (windowN.gfa.map.json) - the same rows the scoring
-/// path derives from --partition-graphs (the axis intervals of the
-/// component lane, sorted by start). One spelling of the axis for
-/// every region-resolution site.
 fn load_partition_maps_and_axis(
     partition_graphs: &std::path::Path,
     component: &str,
@@ -4830,6 +4833,11 @@ fn load_partition_maps_and_axis(
     Ok((maps, axis_rows))
 }
 
+/// The component's axis rows (start, end), in axis order, from the
+/// locality maps (windowN.gfa.map.json) - the same rows the scoring
+/// path derives from --partition-graphs (the axis intervals of the
+/// component lane, sorted by start). One spelling of the axis for
+/// every region-resolution site.
 pub fn component_axis_rows(
     partition_graphs: &std::path::Path,
     component: &str,
@@ -5053,7 +5061,10 @@ impl Fold {
         let (nodes, edges) = fold_multisets(&relative);
         Self {
             seq,
-            len: row.end.saturating_sub(row.start) as u64,
+            len: row
+                .end
+                .checked_sub(row.start)
+                .expect("Fold::from_row: row end before row start"),
             walk: relative,
             node_positions,
             members: Vec::new(),
@@ -5114,16 +5125,6 @@ fn serving_anchor(pinned: &[Option<i64>], own_hull: &[u64], d: i64) -> Option<(u
     best
 }
 
-/// The FACTORIZED per-placement score for one read variant: the
-/// backbone (merged pinned-window bp, matches by node identity and
-/// sign — asserted per base by the direct check) plus the skipped-base
-/// votes against the fold's spelled sequence. Returns None when the
-/// placement is invalid for this variant (a voted base projects
-/// outside the comparison domain — the fold's extent, or under the
-/// normalized convention the fold's TERRITORY IMAGE [img_lo, img_hi),
-/// the uniform placement prior's support requires the read fully
-/// inside it).
-#[allow(clippy::too_many_arguments)]
 #[inline]
 fn projected_coord(origin: i64, d: i64, own_pos: i64, span: u64, forward: bool) -> i64 {
     if forward {
@@ -5142,6 +5143,16 @@ fn oriented_base(base: u8, forward: bool) -> u8 {
     }
 }
 
+/// The FACTORIZED per-placement score for one read variant: the
+/// backbone (merged pinned-window bp, matches by node identity and
+/// sign — asserted per base by the direct check) plus the skipped-base
+/// votes against the fold's spelled sequence. Returns None when the
+/// placement is invalid for this variant (a voted base projects
+/// outside the comparison domain — the fold's extent, or under the
+/// normalized convention the fold's TERRITORY IMAGE [img_lo, img_hi),
+/// the uniform placement prior's support requires the read fully
+/// inside it).
+#[allow(clippy::too_many_arguments)]
 fn placement_score(
     unit: &Unit,
     canonical: &[(i32, u64)],
@@ -16826,13 +16837,13 @@ mod tests {
     }
 
     #[test]
-    fn canonical_scheme_steps_guards_bp_before_seq_lo() {
+    #[should_panic(expected = "before the fetched sequence start")]
+    fn canonical_scheme_steps_panics_on_bp_before_seq_lo() {
         let mut forward = BTreeMap::new();
         forward.insert(3, 11);
         let reverse = BTreeMap::new();
         let seq = b"ACGTACGTACGTACGTACGT";
-        let steps = canonical_scheme_steps(&forward, &reverse, seq, 10, 5);
-        assert!(steps.is_empty());
+        canonical_scheme_steps(&forward, &reverse, seq, 10, 5);
     }
 
     #[test]
@@ -16874,21 +16885,25 @@ mod tests {
             mk_fold(vec![], vec![]),
             mk_fold(vec![(3, 1)], vec![]),
         ];
-        // Pair (0,1) and pair (2,3) have identical merged nodes [(1,1),(2,1)]!
-        // Pair (2,4) has distinct merged nodes [(1,1),(2,1),(3,1)].
+        // Winner (2,4); tied (0,1) and (2,3) share one shape.
+        // Tied (0,4) has its own shape.
         let spectrum = vec![
-            (0.0, 0.0, 0.0, 0, 1, 0),
-            (0.0, 0.0, 0.0, 2, 3, 1),
-            (0.0, 0.0, 0.0, 2, 4, 2),
+            (0.0, 0.0, 0.0, 2, 4, 0),
+            (0.0, 0.0, 0.0, 0, 1, 1),
+            (0.0, 0.0, 0.0, 2, 3, 2),
+            (0.0, 0.0, 0.0, 0, 4, 3),
         ];
-        let called = vec![(0, 1), (2, 3), (2, 4)];
+        let called = vec![(2, 4), (0, 1), (2, 3), (0, 4)];
         let obs = |k: u64| k as f64;
         let lists = tied_class_cut_lists(&folds, &called, &spectrum, &obs, &obs, 2.0);
-        assert_eq!(lists.len(), 2);
+        assert_eq!(lists.len(), 3);
         assert_eq!(lists[0].0, 1);
-        assert_eq!(lists[0].1, CutSet::from_ascending([0, 1]));
         assert_eq!(lists[1].0, 2);
-        assert_eq!(lists[1].1, CutSet::from_ascending([2]));
+        assert_eq!(lists[2].0, 3);
+        assert_eq!(lists[0].1, CutSet::from_ascending([1, 2]));
+        assert_eq!(lists[1].1, lists[0].1);
+        assert_eq!(lists[2].1, CutSet::from_ascending([0, 3]));
+        assert_ne!(lists[2].1, lists[0].1);
     }
 
     #[test]
@@ -16944,8 +16959,21 @@ mod tests {
     }
 
     #[test]
-    fn reverse_matched_steps_handles_short_sequence_without_underflow() {
-        assert!(window_slice_at(b"ACGT", 10, 5, 2).is_none());
+    fn rc_step_bp_errors_outside_the_sequence() {
+        assert!(rc_step_bp(100, 10, 63, 0).unwrap_err().to_string().contains("leaves"));
+        assert!(rc_step_bp(100, 70, 63, 20).is_err());
+        assert!(rc_step_bp(u64::MAX, 70, 63, 2).is_err());
+        assert_eq!(rc_step_bp(100, 70, 63, 2).unwrap(), 105);
+    }
+
+    #[test]
+    #[should_panic(expected = "before the fetched sequence start")]
+    fn window_slice_at_panics_before_sequence_start() {
+        window_slice_at(b"ACGT", 10, 5, 2);
+    }
+
+    #[test]
+    fn window_slice_at_returns_none_past_sequence_end() {
         assert!(window_slice_at(b"ACGT", 10, 12, 5).is_none());
         assert!(window_slice_at(b"ACGT", 10, u64::MAX, 4).is_none());
         assert_eq!(window_slice_at(b"ACGT", 10, 11, 2), Some(&b"CG"[..]));

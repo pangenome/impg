@@ -54,6 +54,7 @@ use crate::sample_mem_bwt::{canonical, encode_walk};
 use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1055,9 +1056,17 @@ fn rc_frame_step(
     range_lo: u64,
     range_len: u64,
     k: u64,
-) -> Option<(u64, i32)> {
-    let bp = range_lo.checked_add(range_len.checked_sub(k)?.checked_sub(q)?)?;
-    Some((bp, -signed_hash))
+) -> io::Result<(u64, i32)> {
+    let bp = range_len
+        .checked_sub(k)
+        .and_then(|max_q| max_q.checked_sub(q))
+        .and_then(|rel| range_lo.checked_add(rel))
+        .ok_or_else(|| {
+            invalid(format!(
+                "reverse syncmer at {q} leaves the {range_len} bp sequence at {range_lo} (k {k})"
+            ))
+        })?;
+    Ok((bp, -signed_hash))
 }
 
 fn reverse_complement_walk(anchors: &[(i32, u64)], _k: u64) -> Vec<(i32, u64)> {
@@ -1066,7 +1075,10 @@ fn reverse_complement_walk(anchors: &[(i32, u64)], _k: u64) -> Vec<(i32, u64)> {
     };
     let mut out = Vec::with_capacity(anchors.len());
     for &(node, pos) in anchors.iter().rev() {
-        out.push((-node, last_pos.saturating_sub(pos)));
+        let rel = last_pos
+            .checked_sub(pos)
+            .expect("reverse_complement_walk: anchor positions not ascending");
+        out.push((-node, rel));
     }
     out
 }
@@ -1105,9 +1117,7 @@ fn occurrences_from_anchor(
     index: &TerritoryIndex,
     seen: &mut HashSet<(usize, u64)>,
 ) {
-    let Some(&(anchor_node, base)) = walk.get(anchor) else {
-        return;
-    };
+    let (anchor_node, base) = walk[anchor];
     let (start, end) = index.node_range(anchor_node);
     for entry in &index.entries[start..end] {
         let territory_index = entry.1 as usize;
@@ -1136,9 +1146,7 @@ fn route_record(
     Vec<(usize, u64)>,
     Vec<(usize, u64)>,
 ) {
-    if anchors.is_empty() {
-        return (BTreeMap::new(), 0, Vec::new(), Vec::new());
-    }
+    assert!(!anchors.is_empty(), "route_record: empty anchor walk");
     let mut occurrences: BTreeMap<u32, u64> = BTreeMap::new();
     let mut total_occurrences = 0u64;
     let mut forward_positions: Vec<(usize, u64)> = Vec::new();
@@ -1147,9 +1155,6 @@ fn route_record(
         .into_iter()
         .enumerate()
     {
-        if orientation.is_empty() {
-            continue;
-        }
         let mut seen = HashSet::new();
         let mut best = 0usize;
         let mut best_entries = usize::MAX;
@@ -1173,9 +1178,9 @@ fn route_record(
         for (path_idx, occurrence_start) in seen {
             let mut touched = BTreeSet::new();
             for &(_node, rel) in orientation {
-                let Some(bp) = occurrence_start.checked_add(rel) else {
-                    continue;
-                };
+                let bp = occurrence_start
+                    .checked_add(rel)
+                    .expect("route_record: verified occurrence position overflows");
                 for partition in index.partitions_at(path_idx, bp, k) {
                     touched.insert(partition);
                 }
@@ -1328,17 +1333,13 @@ fn build_territory_index(
             let seq_lo = lo.saturating_sub(syncmer_len);
             let seq_hi = hi + syncmer_len;
             let seq: Vec<u8> = fetch_lane(&row.path_name, seq_lo, seq_hi)?;
-            let reverse_steps: Vec<(u64, i32)> = if (seq.len() as u64) >= syncmer_len {
-                let rc_seq = crate::graph::reverse_complement(&seq);
-                mem_records::raw_matched_syncmers(panel, &rc_seq)?
-                    .into_iter()
-                    .filter_map(|(signed_node, q)| {
-                        rc_frame_step(signed_node, q, seq_lo, seq.len() as u64, syncmer_len)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let rc_seq = crate::graph::reverse_complement(&seq);
+            let reverse_steps: Vec<(u64, i32)> = mem_records::raw_matched_syncmers(panel, &rc_seq)?
+                .into_iter()
+                .map(|(signed_node, q)| {
+                    rc_frame_step(signed_node, q, seq_lo, seq.len() as u64, syncmer_len)
+                })
+                .collect::<io::Result<_>>()?;
             let forward_map: BTreeMap<u64, i32> = forward_steps.into_iter().collect();
             let reverse_map: BTreeMap<u64, i32> = reverse_steps.into_iter().collect();
             let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
@@ -1525,7 +1526,7 @@ impl FileCut {
 
     fn push_read_records(
         &mut self,
-        seq: Vec<u8>,
+        seq: Cow<[u8]>,
         records: Vec<Option<(Vec<u64>, OwnWalk, bool)>>,
         count_mappable: bool,
         record_unmappable: bool,
@@ -1561,7 +1562,7 @@ impl FileCut {
             for &(key, _) in &kept {
                 self.key_reads[key as usize].push(read_index);
             }
-            self.reads.push(seq);
+            self.reads.push(seq.into_owned());
             self.read_records.push(kept);
         }
     }
@@ -1937,7 +1938,7 @@ fn scan_packets(
             } else {
                 cut.records_scanned += records.len() as u64;
             }
-            cut.push_read_records(read.seq, records, mode != RemapMode::LocalDerive, true);
+            cut.push_read_records(read.seq.into(), records, mode != RemapMode::LocalDerive, true);
         }
     }
     Ok(cut)
@@ -2093,20 +2094,12 @@ fn pair_binds(tokens: &[u64], own: &OwnWalk, e_own: &[u64]) -> io::Result<bool> 
         let j = if mirrored { m - 1 - t } else { t };
         let expect_node = if mirrored { -canonical[j].0 } else { canonical[j].0 };
         let expect_pos = if mirrored {
-            let delta = match last.checked_sub(canonical[j].1) {
-                Some(d) => d,
-                None => return Ok(false),
-            };
-            match w_lo.checked_add(delta) {
-                Some(p) => p,
-                None => return Ok(false),
-            }
+            last.checked_sub(canonical[j].1)
+                .and_then(|delta| w_lo.checked_add(delta))
         } else {
-            match w_lo.checked_add(canonical[j].1) {
-                Some(p) => p,
-                None => return Ok(false),
-            }
-        };
+            w_lo.checked_add(canonical[j].1)
+        }
+        .ok_or_else(|| invalid("pair_binds: expected own position leaves u64"))?;
         if own_node != expect_node || own_pos as u64 != expect_pos {
             return Ok(false);
         }
@@ -2775,7 +2768,9 @@ fn map_locus_sources(
             let lo = (s as i64 + candidate).max(0) as usize;
             let hi = lo + record.len();
             let (Ok(lo_i32), Ok(hi_i32)) = (i32::try_from(lo), i32::try_from(hi)) else {
-                continue;
+                return Err(invalid(format!(
+                    "locus record {header}: AGC interval {lo}-{hi} exceeds i32 range"
+                )));
             };
             if let Ok(fetched) = agc.fetch_sequence(&global_name, lo_i32, hi_i32) {
                 if fetched == *record {
@@ -2824,7 +2819,10 @@ fn map_locus_sources(
                 }
             }
         }
-        global_only_anchor_total += global_walk.len().saturating_sub(local_walk.len());
+        global_only_anchor_total += global_walk
+            .len()
+            .checked_sub(local_walk.len())
+            .ok_or_else(|| invalid("locality walk longer than the global walk"))?;
     }
     Ok((
         node_map,
@@ -3478,7 +3476,7 @@ fn run_cut_batch(
                         let cut = per.entry(ti).or_insert_with(FileCut::empty);
                         cut.reads_routed += 1;
                         cut.records_mappable += records.len() as u64;
-                        cut.push_read_records(seq.clone(), records, false, false);
+                        cut.push_read_records(seq.as_slice().into(), records, false, false);
                     }
                 }
             }
@@ -3942,7 +3940,7 @@ fn cut_batch_global_with(
                     for (ti, records) in per_terr {
                         let cut = per.entry(ti).or_insert_with(FileCut::empty);
                         *routed_records.entry(ti).or_insert(0) += records.len() as u64;
-                        cut.push_read_records(seq.clone(), records, true, true);
+                        cut.push_read_records(seq.as_slice().into(), records, true, true);
                     }
                 }
             }
@@ -6105,7 +6103,7 @@ mod census_profile_tests {
     fn file_cut_push_read_records_updates_counts_and_consumes_walks() {
         let mut cut = FileCut::empty();
         cut.push_read_records(
-            b"ACGTACGT".to_vec(),
+            b"ACGTACGT".to_vec().into(),
             vec![
                 None,
                 Some((vec![11, 22], vec![(1, 0), (2, 5)], true)),
@@ -6132,10 +6130,12 @@ mod census_profile_tests {
     }
 
     #[test]
-    fn rc_frame_step_rejects_underflow_and_short_sequence() {
-        assert_eq!(rc_frame_step(5, 0, 100, 10, 63), None);
-        assert_eq!(rc_frame_step(5, 20, 100, 70, 63), None);
-        assert_eq!(rc_frame_step(5, 2, 100, 70, 63), Some((105, -5)));
+    fn rc_frame_step_errors_on_underflow_and_short_sequence() {
+        let err = rc_frame_step(5, 0, 100, 10, 63).unwrap_err();
+        assert!(err.to_string().contains("leaves the 10 bp sequence"));
+        assert!(rc_frame_step(5, 20, 100, 70, 63).is_err());
+        assert!(rc_frame_step(5, 2, u64::MAX, 70, 63).is_err());
+        assert_eq!(rc_frame_step(5, 2, 100, 70, 63).unwrap(), (105, -5));
     }
 
     #[test]
@@ -6152,7 +6152,7 @@ mod census_profile_tests {
             path_intervals: vec![vec![(0, 100, 0)]],
         };
         let mut seen = HashSet::new();
-        // base = 5 > entry.2 = 2: checked_sub rejects instead of saturating to 0.
+        // base 5 > entry.2 2: no occurrence.
         occurrences_from_anchor(&[(10, 5)], 0, &index, &mut seen);
         assert!(seen.is_empty());
         // Valid matching offset resolves cleanly.
@@ -6161,17 +6161,24 @@ mod census_profile_tests {
     }
 
     #[test]
-    fn route_record_handles_empty_anchors_safely() {
+    #[should_panic(expected = "route_record: empty anchor walk")]
+    fn route_record_panics_on_empty_anchors() {
         let index = TerritoryIndex {
             entries: Vec::new(),
             territories: Vec::new(),
             path_intervals: Vec::new(),
         };
-        let (occ, total, fwd, rev) = route_record(&[], &index, 63);
-        assert!(occ.is_empty());
-        assert_eq!(total, 0);
-        assert!(fwd.is_empty());
-        assert!(rev.is_empty());
+        route_record(&[], &index, 63);
+    }
+
+    #[test]
+    #[should_panic(expected = "anchor positions not ascending")]
+    fn reverse_complement_walk_panics_on_unsorted_walk() {
+        reverse_complement_walk(&[(1, 9), (2, 3)], 63);
+    }
+
+    #[test]
+    fn reverse_complement_walk_handles_empty_and_extreme_walks() {
         assert!(reverse_complement_walk(&[], 63).is_empty());
         assert_eq!(
             reverse_complement_walk(&[(1, u64::MAX - 1)], 63),
