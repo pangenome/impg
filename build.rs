@@ -90,6 +90,18 @@ fn copy_dep_binary(
         set_executable(&dest);
     }
 
+    // cargo sets OUT_DIR when it runs tests, and fastga-rs looks there. Test
+    // executables are not siblings of the copy above, so they need this one.
+    let out_dest = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set")).join(binary_name);
+    if let Err(e) = fs::copy(&src, &out_dest) {
+        println!(
+            "cargo:warning=Failed to copy {binary_name} to {}: {e}",
+            out_dest.display()
+        );
+    } else {
+        set_executable(&out_dest);
+    }
+
     // Copy to CARGO_HOME/bin/ if it exists (for `cargo install`)
     if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
         let cargo_bin = PathBuf::from(cargo_home).join("bin");
