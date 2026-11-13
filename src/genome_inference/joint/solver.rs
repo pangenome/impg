@@ -217,8 +217,9 @@ impl<'a> Problem<'a> {
             }
             alt_resources.push(slot_alts);
         }
-        for scope in &resource_slots {
-            connect(&scope.iter().copied().collect::<Vec<_>>());
+        // Resource-name order fixes component order.
+        for &id in resource_ids.values() {
+            connect(&resource_slots[id].iter().copied().collect::<Vec<_>>());
         }
         let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (s, label) in labels.into_iter().enumerate() {
@@ -242,7 +243,8 @@ impl<'a> Problem<'a> {
                 mus[f] += self.depth * e;
             }
         }
-        let mut objective = 0.0f64;
+        // Empty f64 sum is -0.0.
+        let mut objective = -0.0f64;
         for (f, &mu) in self.factors.iter().zip(mus.iter()) {
             require(mu.is_finite(), "nonfinite joint objective")?;
             objective += mu - f.observed as f64 * mu.ln();

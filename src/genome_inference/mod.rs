@@ -40,6 +40,22 @@ fn hash_update(hash: &mut u64, bytes: &[u8]) {
         *hash = (*hash ^ *b as u64).wrapping_mul(0x100000001b3);
     }
 }
+/// Streamed FNV-1a of a file: (bytes, hash).
+pub(crate) fn hash_file(path: &Path) -> io::Result<(u64, u64)> {
+    let mut file = File::open(path)?;
+    let mut hash = 0xcbf29ce484222325;
+    let mut size = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        size += n as u64;
+        hash_update(&mut hash, &buffer[..n]);
+    }
+    Ok((size, hash))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -52,7 +68,6 @@ impl PanelIdentity {
     /// sidecars. Same parameters alone cannot make two panels compatible.
     pub fn read(prefix: &str) -> io::Result<Self> {
         let mut sidecars = Vec::new();
-        let mut buffer = [0u8; 65536];
         for suffix in ["1gbwt", "1khash", "names", "meta", "spos", "pstep"] {
             let primary = if suffix.starts_with('1') || prefix.ends_with(".syng") {
                 format!("{prefix}.{suffix}")
@@ -65,17 +80,7 @@ impl PanelIdentity {
             } else {
                 format!("{prefix}.syng.{suffix}")
             };
-            let mut file = File::open(&path)?;
-            let mut hash = 0xcbf29ce484222325;
-            let mut size = 0;
-            loop {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                size += n as u64;
-                hash_update(&mut hash, &buffer[..n]);
-            }
+            let (size, hash) = hash_file(Path::new(&path))?;
             sidecars.push((suffix.to_string(), size, format!("{hash:016x}")));
         }
         // Legacy ambiguity-derived dictionaries are not acceptable for new samples.

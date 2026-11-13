@@ -626,16 +626,22 @@ pub fn run(options: Options) -> io::Result<()> {
             if nodes_buf.is_empty() {
                 continue;
             }
+            let overflow = || {
+                invalid(&format!(
+                    "census occurrence start {} overflows u64",
+                    occurrence.start
+                ))
+            };
             let walk = panel.walk_path_range(
                 occurrence.path,
                 occurrence.start,
-                occurrence.start.saturating_add(READ_LENGTH),
+                occurrence.start.checked_add(READ_LENGTH).ok_or_else(overflow)?,
             )?;
             let spans = windows_buf.entry(occurrence.path).or_default();
             let was_empty = spans.is_empty();
             for (node, bp) in walk {
                 if nodes_buf.contains(&node.unsigned_abs()) {
-                    spans.push((bp, bp + k));
+                    spans.push((bp, bp.checked_add(k).ok_or_else(overflow)?));
                 }
             }
             if was_empty && !spans.is_empty() {
@@ -1396,14 +1402,5 @@ mod tests {
         let mut empty = Vec::new();
         merge_intervals(&mut empty);
         assert!(empty.is_empty());
-    }
-
-    #[test]
-    fn partition_point_finds_the_sorted_range() {
-        let sorted = vec![0u64, 10, 20, 30];
-        assert_eq!(sorted.partition_point(|_| false), 0);
-        assert_eq!(sorted.partition_point(|&s| s < 10), 1);
-        assert_eq!(sorted.partition_point(|&s| s < 25), 3);
-        assert_eq!(sorted.partition_point(|&s| s < 100), 4);
     }
 }

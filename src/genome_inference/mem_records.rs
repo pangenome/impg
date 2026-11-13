@@ -107,10 +107,12 @@ pub fn canonical_anchor_walk(panel: &SyngIndex, sequence: &[u8]) -> io::Result<V
     let mut out = Vec::with_capacity(forward.len().max(reverse.len()));
     let mut fi = 0usize;
     let mut ri = reverse.len();
+    if let Some(&(_, q)) = reverse.iter().find(|&&(_, q)| q > max_q) {
+        return Err(io::Error::other(format!(
+            "reverse syncmer position {q} exceeds {max_q}"
+        )));
+    }
     while fi < forward.len() || ri > 0 {
-        while ri > 0 && reverse[ri - 1].1 > max_q {
-            ri -= 1;
-        }
         let f_pos = forward.get(fi).map(|&(_, p)| p);
         let r_pos = if ri > 0 {
             Some(max_q - reverse[ri - 1].1)
@@ -129,7 +131,7 @@ pub fn canonical_anchor_walk(panel: &SyngIndex, sequence: &[u8]) -> io::Result<V
             fi += 1;
         }
         let mut r_node = None;
-        while ri > 0 && reverse[ri - 1].1 <= max_q && max_q - reverse[ri - 1].1 == position {
+        while ri > 0 && max_q - reverse[ri - 1].1 == position {
             // Keep the last occurrence in `reverse` forward order, matching `BTreeMap`.
             if r_node.is_none() {
                 r_node = Some(-reverse[ri - 1].0);
@@ -340,6 +342,7 @@ mod tests {
         assert!(canonical_anchor_walk(&panel, &seq[..k - 1]).unwrap().is_empty());
 
         let fwd = canonical_anchor_walk(&panel, &seq).unwrap();
+        assert!(!fwd.is_empty());
         let rc = crate::graph::reverse_complement(&seq);
         let rev = canonical_anchor_walk(&panel, &rc).unwrap();
         let expected_rev: Vec<(i32, u64)> = fwd

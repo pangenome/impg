@@ -616,13 +616,19 @@ pub fn run(options: Options) -> io::Result<()> {
                     nodes_buf.clear();
                     nodes_buf.extend(occurrence.intervals.iter().flatten().copied());
                     if !nodes_buf.is_empty() {
+                        let overflow = || {
+                            invalid(&format!(
+                                "census occurrence start {} overflows u64",
+                                occurrence.start
+                            ))
+                        };
                         for (signed_node, bp) in panel.walk_path_range(
                             occurrence.path,
                             occurrence.start,
-                            occurrence.start.saturating_add(READ_LENGTH),
+                            occurrence.start.checked_add(READ_LENGTH).ok_or_else(overflow)?,
                         )? {
                             if nodes_buf.contains(&signed_node.unsigned_abs()) {
-                                material_buf.push((bp, bp + k));
+                                material_buf.push((bp, bp.checked_add(k).ok_or_else(overflow)?));
                             }
                         }
                         material_buf.sort_unstable();
@@ -1053,14 +1059,10 @@ mod tests {
 
     #[test]
     fn rows_touch_material_overlaps_any_window() {
-        let rows_touch_material = |rows: &[(u64, u64)], windows: &[(u64, u64)]| {
-            rows.iter()
-                .any(|&(start, end)| span_touches_windows(start, end, windows))
-        };
-        let rows = [(100u64, 200u64)];
-        assert!(rows_touch_material(&rows, &[(150, 213)]));
-        assert!(!rows_touch_material(&rows, &[(200, 260)]));
-        assert!(rows_touch_material(&rows, &[(199, 262)]));
+        let rows = [(0usize, 100u64, 200u64)];
+        assert!(fold_rows_touch_material(&rows, 0, &[(150, 213)]));
+        assert!(!fold_rows_touch_material(&rows, 0, &[(200, 260)]));
+        assert!(fold_rows_touch_material(&rows, 0, &[(199, 262)]));
 
         let tagged = vec![(0usize, 100, 200), (1usize, 300, 400)];
         assert!(fold_rows_touch_material(&tagged, 0, &[(150, 213)]));

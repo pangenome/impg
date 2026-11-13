@@ -7,8 +7,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -16,18 +15,7 @@ pub const MODEL: &str = "source-supported-block-reconstruction-v1";
 
 /// Streaming content fingerprint; FNV is provenance/corruption detection, not authentication.
 pub fn fingerprint(path: &Path) -> io::Result<Value> {
-    let mut file = File::open(path)?;
-    let mut hash = 0xcbf29ce484222325;
-    let mut size = 0u64;
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        super::hash_update(&mut hash, &buffer[..n]);
-        size += n as u64;
-    }
+    let (size, hash) = super::hash_file(path)?;
     Ok(json!({"path":path,"bytes":size,"fnv1a64":format!("{hash:016x}")}))
 }
 fn same_interval(a: &Interval, b: &Interval) -> bool {
