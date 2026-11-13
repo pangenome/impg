@@ -398,9 +398,20 @@ mod tests {
     #[test]
     fn shared_checksum_and_rss_guard_helpers_match_contracts() {
         assert_eq!(realign_score::fnv1a64(b""), FNV1A64_OFFSET_BASIS);
-        assert_eq!(realign_score::fnv1a64(b"ACGT"), checksum(b"ACGT"));
-        let (rss_kb, hwm_kb) = read_proc_status_kb().unwrap();
-        assert!(rss_kb > 0 && hwm_kb >= rss_kb);
-        assert!(RssGuard::with_peak("test", 0.0).probe("zero").is_ok());
+        // Published FNV-1a64 vectors
+        assert_eq!(checksum(b"a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(realign_score::fnv1a64(b"foobar"), 0x85944171f73967e8);
+        match read_proc_status_kb() {
+            Ok((rss_kb, hwm_kb)) => {
+                assert!(rss_kb > 0 && hwm_kb >= rss_kb);
+                assert!(RssGuard::with_peak("test", 0.0).probe("zero").is_ok());
+                assert!(RssGuard::new("test", 1e-9).probe("tiny").is_err());
+            }
+            // No procfs outside Linux
+            Err(e) => {
+                assert!(!cfg!(target_os = "linux"), "{e}");
+                assert!(RssGuard::new("test", 0.0).probe("zero").is_err());
+            }
+        }
     }
 }
