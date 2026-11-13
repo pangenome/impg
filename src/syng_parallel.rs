@@ -234,7 +234,7 @@ mod tests {
             "forward and reverse-complement syncmers should share packed canonical form"
         );
         // Multi-word (>32 bp) canonical packing invariant across word boundary.
-        let long_seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+        let long_seq = b"ACGGTTCAGATTACAGGCATCGATCGGATTACCATGACCAGTA";
         let mut long_rc = Vec::with_capacity(long_seq.len());
         for &b in long_seq.iter().rev() {
             long_rc.push(match b {
@@ -245,10 +245,24 @@ mod tests {
                 other => other,
             });
         }
+        assert_ne!(long_seq.as_slice(), long_rc.as_slice());
         assert_eq!(
             pack_canonical_syncmer(long_seq),
             pack_canonical_syncmer(&long_rc),
         );
+        // Forward is canonical: A < T.
+        let mut expected = vec![0u64; 2];
+        for (i, &b) in long_seq.iter().enumerate() {
+            let code = match b {
+                b'A' => 0u64,
+                b'C' => 1,
+                b'G' => 2,
+                _ => 3,
+            };
+            expected[i / 32] |= code << (2 * (i % 32));
+        }
+        assert_ne!(expected[1], 0);
+        assert_eq!(pack_canonical_syncmer(long_seq), expected);
     }
 
     #[test]

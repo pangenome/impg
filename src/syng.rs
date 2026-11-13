@@ -2643,7 +2643,7 @@ impl SyngIndex {
     /// sequences before GBWT construction.
     pub fn add_sequence(&mut self, name: String, seq: Vec<u8>) -> SyngAddSequenceStats {
         self.add_sequence_internal(name, seq, SyncmerLookupMode::AddMissing)
-            .expect("adding new syncmers to KmerHash should not fail")
+            .unwrap_or_else(|e| panic!("add_sequence failed: {e}"))
     }
 
     /// Add one sequence using a preloaded dictionary.
@@ -9848,6 +9848,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_at_or_before_matches_decode_path_and_padding_saturates() {
+        let _guard = lock_syng();
         let mut builder = SampledPositionBuilder::new_path_steps_only(2, 0, 0).unwrap();
         let syncmers: Vec<PathStepRecord> = [(1, 0), (2, 10), (3, 25), (4, 40), (5, 60)]
             .into_iter()
