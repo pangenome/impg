@@ -43,7 +43,10 @@
 
 use clap::Parser;
 use crate::agc_index::AgcIndex;
-use crate::genome_inference::{mem_records, realign_score, territory_frame};
+use crate::genome_inference::realign_score::{
+    self, decode_record_tokens as decode_tokens, fnv1a64, merge_windows, read_proc_status_kb,
+};
+use crate::genome_inference::{mem_records, territory_frame};
 use crate::sample_mem_bwt::{canonical, encode_walk};
 use crate::syng::{SyncmerParams, SyngIndex};
 use rayon::prelude::*;
@@ -65,29 +68,8 @@ fn ensure(condition: bool, message: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 fn rss_now_kb() -> u64 {
-    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                return rest
-                    .trim()
-                    .trim_end_matches("kB")
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-            }
-        }
-    }
-    0
+    read_proc_status_kb().map(|(rss, _)| rss).unwrap_or(0)
 }
 
 /// A Send-safe stdin reader (`StdinLock` is not `Send`).
@@ -956,13 +938,14 @@ fn run_dedup(out_dir: &Path, occurrences: &Path, partitions: usize) -> io::Resul
         let file = std::fs::File::open(path)?;
         let mut reader = io::BufReader::with_capacity(1 << 20, file);
         while let Some((tokens, mult)) = read_occ_entry(&mut reader)? {
-            let bin = (fnv1a64(
-                &tokens
-                    .iter()
-                    .flat_map(|t| t.to_le_bytes())
-                    .collect::<Vec<_>>(),
-            ) as usize)
-                % partitions;
+            let mut hash = 0xcbf29ce484222325u64;
+            for t in &tokens {
+                for b in t.to_le_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+            }
+            let bin = (hash as usize) % partitions;
             write_occ_entry(&mut bins[bin], &tokens, mult)?;
             entries += 1;
         }
@@ -1066,38 +1049,24 @@ impl TerritoryIndex {
     }
 }
 
-fn rc_frame_step(signed_hash: i32, q: u64, range_lo: u64, range_len: u64, k: u64) -> (u64, i32) {
-    (range_lo + range_len - k - q, -signed_hash)
+fn rc_frame_step(
+    signed_hash: i32,
+    q: u64,
+    range_lo: u64,
+    range_len: u64,
+    k: u64,
+) -> Option<(u64, i32)> {
+    let bp = range_lo.checked_add(range_len.checked_sub(k)?.checked_sub(q)?)?;
+    Some((bp, -signed_hash))
 }
 
-fn decode_tokens(tokens: &[u64]) -> io::Result<Vec<(i32, u64)>> {
-    ensure(!tokens.is_empty() && tokens.len() % 2 == 1, "invalid record tokens")?;
-    let mut anchors = Vec::with_capacity(tokens.len() / 2 + 1);
-    let mut position = 0u64;
-    for (i, &token) in tokens.iter().enumerate() {
-        if i % 2 == 0 {
-            let zigzag = token
-                .checked_sub(2)
-                .ok_or_else(|| invalid("record node token"))?
-                / 2;
-            let node = ((zigzag >> 1) as i64 ^ -(zigzag as i64 & 1)) as i32;
-            anchors.push((node, position));
-        } else {
-            let gap = token
-                .checked_sub(1)
-                .ok_or_else(|| invalid("record gap token"))?
-                / 2;
-            position += gap;
-        }
-    }
-    Ok(anchors)
-}
-
-fn reverse_complement_walk(anchors: &[(i32, u64)], k: u64) -> Vec<(i32, u64)> {
-    let span = anchors.last().map(|&(_, p)| p + k).unwrap_or(k);
+fn reverse_complement_walk(anchors: &[(i32, u64)], _k: u64) -> Vec<(i32, u64)> {
+    let Some(&(_, last_pos)) = anchors.last() else {
+        return Vec::new();
+    };
     let mut out = Vec::with_capacity(anchors.len());
     for &(node, pos) in anchors.iter().rev() {
-        out.push((-node, span - k - pos));
+        out.push((-node, last_pos.saturating_sub(pos)));
     }
     out
 }
@@ -1136,11 +1105,15 @@ fn occurrences_from_anchor(
     index: &TerritoryIndex,
     seen: &mut HashSet<(usize, u64)>,
 ) {
-    let (start, end) = index.node_range(walk[anchor].0);
-    let base = walk[anchor].1;
+    let Some(&(anchor_node, base)) = walk.get(anchor) else {
+        return;
+    };
+    let (start, end) = index.node_range(anchor_node);
     for entry in &index.entries[start..end] {
         let territory_index = entry.1 as usize;
-        let occurrence_start = entry.2.saturating_sub(base);
+        let Some(occurrence_start) = entry.2.checked_sub(base) else {
+            continue;
+        };
         let territory = &index.territories[territory_index];
         let key = (territory.path_idx, occurrence_start);
         if seen.contains(&key) {
@@ -1163,6 +1136,9 @@ fn route_record(
     Vec<(usize, u64)>,
     Vec<(usize, u64)>,
 ) {
+    if anchors.is_empty() {
+        return (BTreeMap::new(), 0, Vec::new(), Vec::new());
+    }
     let mut occurrences: BTreeMap<u32, u64> = BTreeMap::new();
     let mut total_occurrences = 0u64;
     let mut forward_positions: Vec<(usize, u64)> = Vec::new();
@@ -1171,6 +1147,9 @@ fn route_record(
         .into_iter()
         .enumerate()
     {
+        if orientation.is_empty() {
+            continue;
+        }
         let mut seen = HashSet::new();
         let mut best = 0usize;
         let mut best_entries = usize::MAX;
@@ -1194,7 +1173,9 @@ fn route_record(
         for (path_idx, occurrence_start) in seen {
             let mut touched = BTreeSet::new();
             for &(_node, rel) in orientation {
-                let bp = occurrence_start + rel;
+                let Some(bp) = occurrence_start.checked_add(rel) else {
+                    continue;
+                };
                 for partition in index.partitions_at(path_idx, bp, k) {
                     touched.insert(partition);
                 }
@@ -1347,22 +1328,31 @@ fn build_territory_index(
             let seq_lo = lo.saturating_sub(syncmer_len);
             let seq_hi = hi + syncmer_len;
             let seq: Vec<u8> = fetch_lane(&row.path_name, seq_lo, seq_hi)?;
-            let rc_seq = crate::graph::reverse_complement(&seq);
-            let reverse_steps: Vec<(u64, i32)> = mem_records::raw_matched_syncmers(panel, &rc_seq)?
-                .into_iter()
-                .map(|(signed_node, q)| {
-                    rc_frame_step(signed_node, q, seq_lo, seq.len() as u64, syncmer_len)
-                })
-                .collect();
+            let reverse_steps: Vec<(u64, i32)> = if (seq.len() as u64) >= syncmer_len {
+                let rc_seq = crate::graph::reverse_complement(&seq);
+                mem_records::raw_matched_syncmers(panel, &rc_seq)?
+                    .into_iter()
+                    .filter_map(|(signed_node, q)| {
+                        rc_frame_step(signed_node, q, seq_lo, seq.len() as u64, syncmer_len)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let forward_map: BTreeMap<u64, i32> = forward_steps.into_iter().collect();
             let reverse_map: BTreeMap<u64, i32> = reverse_steps.into_iter().collect();
             let mut positions: BTreeSet<u64> = forward_map.keys().copied().collect();
             positions.extend(reverse_map.keys().copied());
             let mut steps = Vec::with_capacity(positions.len());
             for bp in positions {
-                let start = (bp.saturating_sub(seq_lo)) as usize;
-                let canonical_forward = seq
-                    .get(start..start + syncmer_len as usize)
+                let canonical_forward = bp
+                    .checked_sub(seq_lo)
+                    .and_then(|start| {
+                        let start = start as usize;
+                        start
+                            .checked_add(syncmer_len as usize)
+                            .and_then(|end| seq.get(start..end))
+                    })
                     .map(mem_records::window_is_canonical_forward)
                     .unwrap_or(false);
                 let chosen = if canonical_forward {
@@ -1532,6 +1522,130 @@ impl FileCut {
         self.key_index.insert(tokens.to_vec(), index);
         index
     }
+
+    fn push_read_records(
+        &mut self,
+        seq: Vec<u8>,
+        records: Vec<Option<(Vec<u64>, OwnWalk, bool)>>,
+        count_mappable: bool,
+        record_unmappable: bool,
+    ) {
+        let mut kept: Vec<(u32, OwnWalk)> = Vec::with_capacity(records.len());
+        let mut any_touch = false;
+        for record in records {
+            match record {
+                None => {
+                    if record_unmappable {
+                        self.records_unmappable += 1;
+                    }
+                }
+                Some((tokens, walk, touch)) => {
+                    if count_mappable {
+                        self.records_mappable += 1;
+                    }
+                    let key = self.intern_key(&tokens);
+                    if touch {
+                        any_touch = true;
+                        if let Some(count) = self.pattern_mult.get_mut(&tokens) {
+                            *count += 1;
+                        } else {
+                            self.pattern_mult.insert(tokens, 1);
+                        }
+                    }
+                    kept.push((key, walk));
+                }
+            }
+        }
+        if any_touch {
+            let read_index = self.reads.len();
+            for &(key, _) in &kept {
+                self.key_reads[key as usize].push(read_index);
+            }
+            self.reads.push(seq);
+            self.read_records.push(kept);
+        }
+    }
+}
+
+fn collect_shard_paths(shards_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut shard_paths: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(shards_dir)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
+            shard_paths.push(path);
+        }
+    }
+    shard_paths.sort();
+    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    Ok(shard_paths)
+}
+
+fn build_global_identity_node_map(
+    global: &SyngIndex,
+    agc: &AgcIndex,
+    universe: &[UniverseRow],
+    record_origin: u64,
+) -> io::Result<(HashMap<i32, i32>, usize, usize)> {
+    let mut node_map: HashMap<i32, i32> = HashMap::new();
+    let mut expressibility_pairs = 0usize;
+    let mut record_names: BTreeSet<&str> = BTreeSet::new();
+    for row in universe {
+        record_names.insert(row.path_name.as_str());
+    }
+    for header in &record_names {
+        let (global_name, start, end) = parse_locus_header(header)?;
+        let length = (end - start) as usize;
+        let content_start = start
+            .checked_add(record_origin)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "record {header}: the content origin start+{record_origin} overflows"
+                ))
+            })?;
+        let content_end = content_start
+            .checked_add(length as u64)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "record {header}: the content end start+{record_origin}+{length} overflows"
+                ))
+            })?;
+        let content_start_i32 = i32::try_from(content_start).map_err(|_| {
+            invalid(format!(
+                "record {header}: content start {content_start} exceeds i32 range"
+            ))
+        })?;
+        let content_end_i32 = i32::try_from(content_end).map_err(|_| {
+            invalid(format!(
+                "record {header}: content end {content_end} exceeds i32 range"
+            ))
+        })?;
+        let content = agc
+            .fetch_sequence(&global_name, content_start_i32, content_end_i32)
+            .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
+        ensure(
+            content.len() == length,
+            &format!(
+                "record {header}: the content fetch at origin +{record_origin} \
+                 returned {} bytes, not the record's {length} (the content origin \
+                 leaves the path; state the substrate's own convention)",
+                content.len()
+            ),
+        )?;
+        let walk = mem_records::canonical_anchor_walk(global, &content)?;
+        for &(node, _position) in &walk {
+            match node_map.entry(node) {
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    ensure(*o.get() == node, "conflicting identity entry")?;
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(node);
+                    expressibility_pairs += 1;
+                }
+            }
+        }
+    }
+    Ok((node_map, expressibility_pairs, record_names.len()))
 }
 
 /// The cut's attribution mode, all env-gated (default Strict = the
@@ -1742,21 +1856,7 @@ fn scan_packets(
     .map(|path| readset_hashes(Path::new(&path), "[cut] read-set shadow instrument"))
     .transpose()?;
     let readset_ref = readset.as_ref();
-    let mut cut = FileCut {
-        reads_scanned: 0,
-        records_scanned: 0,
-        records_mappable: 0,
-        records_unmappable: 0,
-        reads_with_unmappable: 0,
-        reads_routed: 0,
-        reads_unrouted: 0,
-        reads: Vec::new(),
-        pattern_mult: BTreeMap::new(),
-        key_tokens: Vec::new(),
-        key_index: HashMap::new(),
-        key_reads: Vec::new(),
-        read_records: Vec::new(),
-    };
+    let mut cut = FileCut::empty();
     for batch in batches {
         let packets = batch?;
         cut.reads_scanned += packets.len() as u64;
@@ -1837,34 +1937,7 @@ fn scan_packets(
             } else {
                 cut.records_scanned += records.len() as u64;
             }
-            let mut kept: Vec<(u32, OwnWalk)> = Vec::new();
-            let mut any_touch = false;
-            for record in &records {
-                match record {
-                    None => {
-                        cut.records_unmappable += 1;
-                    }
-                    Some((tokens, walk, touch)) => {
-                        if mode != RemapMode::LocalDerive {
-                            cut.records_mappable += 1;
-                        }
-                        if *touch {
-                            any_touch = true;
-                            *cut.pattern_mult.entry(tokens.clone()).or_insert(0) += 1;
-                        }
-                        let key = cut.intern_key(tokens);
-                        kept.push((key, walk.clone()));
-                    }
-                }
-            }
-            if any_touch {
-                let read_index = cut.reads.len();
-                for (key, _walk) in &kept {
-                    cut.key_reads[*key as usize].push(read_index);
-                }
-                cut.reads.push(read.seq);
-                cut.read_records.push(std::mem::take(&mut kept));
-            }
+            cut.push_read_records(read.seq, records, mode != RemapMode::LocalDerive, true);
         }
     }
     Ok(cut)
@@ -2020,9 +2093,19 @@ fn pair_binds(tokens: &[u64], own: &OwnWalk, e_own: &[u64]) -> io::Result<bool> 
         let j = if mirrored { m - 1 - t } else { t };
         let expect_node = if mirrored { -canonical[j].0 } else { canonical[j].0 };
         let expect_pos = if mirrored {
-            w_lo + (last - canonical[j].1)
+            let delta = match last.checked_sub(canonical[j].1) {
+                Some(d) => d,
+                None => return Ok(false),
+            };
+            match w_lo.checked_add(delta) {
+                Some(p) => p,
+                None => return Ok(false),
+            }
         } else {
-            w_lo + canonical[j].1
+            match w_lo.checked_add(canonical[j].1) {
+                Some(p) => p,
+                None => return Ok(false),
+            }
         };
         if own_node != expect_node || own_pos as u64 != expect_pos {
             return Ok(false);
@@ -2047,6 +2130,10 @@ fn parse_locus_header(header: &str) -> io::Result<(String, u64, u64)> {
     let end: u64 = end
         .parse()
         .map_err(|_| invalid(&format!("locus header {header} end")))?;
+    ensure(
+        start <= end,
+        &format!("locus header {header} inverted interval {start}-{end}"),
+    )?;
     Ok((name.to_string(), start, end))
 }
 
@@ -2132,9 +2219,8 @@ fn run_cut(
     // universe rows by their own record headers and fetches the
     // per-row slices from the AGC by coordinate — no locus.fa, no
     // locality syng, no node map (conversion-not-materialization).
-    let mut node_map: HashMap<i32, i32> = HashMap::new();
-    let mut node_map_pairs = 0usize;
-    let mut global_only_anchor_total = 0usize;
+    let node_map: HashMap<i32, i32>;
+    let node_map_pairs: usize;
     let mut offset_variants: BTreeMap<String, u64> = BTreeMap::new();
     let territory;
     let territory_nodes_abs: HashSet<u32>;
@@ -2142,42 +2228,10 @@ fn run_cut(
     match frame {
         CutFrame::Local => {
             // The locus sources (the committed substrate's sequences).
-            let mut sources: HashMap<String, Vec<u8>> = HashMap::new();
-            {
-                let text = std::fs::read_to_string(
-                    sources_path.ok_or_else(|| invalid("the local frame requires --sources"))?,
-                )?;
-                let mut name: Option<String> = None;
-                let mut seq: Vec<u8> = Vec::new();
-                for line in text.lines() {
-                    if let Some(header) = line.strip_prefix('>') {
-                        if let Some(prev) = name.take() {
-                            sources.insert(prev, std::mem::take(&mut seq));
-                        }
-                        name = Some(header.split_whitespace().next().unwrap_or("").to_string());
-                    } else if name.is_some() {
-                        seq.extend_from_slice(line.trim().as_bytes());
-                    }
-                }
-                if let Some(prev) = name {
-                    sources.insert(prev, seq);
-                }
-            }
-            ensure(!sources.is_empty(), "no locus.fa records")?;
-
-            let sources_ref = &sources;
-            let fetch_lane =
-                move |name: &str, lo: u64, hi: u64| -> io::Result<Vec<u8>> {
-                    let lane = sources_ref
-                        .get(name)
-                        .ok_or_else(|| invalid(&format!("source {name} absent")))?;
-                    let hi_clip = hi.min(lane.len() as u64);
-                    if lo >= hi_clip {
-                        Ok(Vec::new())
-                    } else {
-                        Ok(lane[lo as usize..hi_clip as usize].to_vec())
-                    }
-                };
+            let sources = batch_load_sources(
+                sources_path.ok_or_else(|| invalid("the local frame requires --sources"))?,
+            )?;
+            let fetch_lane = lane_fetch_over(&sources);
             territory = build_territory_index(panel, &universe, &fetch_lane, k)?;
             eprintln!(
                 "[cut] territory: {} rows, {} entries",
@@ -2191,88 +2245,11 @@ fn run_cut(
                 .collect();
             component_contig_source = component.to_string();
 
-            // The per-path node correspondence: the complete canonical
-            // walk of the SAME AGC-verified sequence through both syngs,
-            // paired by position. Each locus.fa header states its own
-            // provenance — the global panel path and interval
-            // "path:start-end" (the refined-bed rows and the axis-window
-            // records alike) — so the correspondence is derived from the
-            // substrate's own statement, with the offset convention
-            // (exact or one-base-earlier) verified by sequence identity
-            // against the AGC.
-            for (header, record) in &sources {
-                let (global_name, s, e) = parse_locus_header(header)?;
-                ensure(
-                    (e - s) as usize == record.len(),
-                    &format!("locus record {header} length differs from its header interval"),
-                )?;
-                // The offset candidates cover both committed extraction
-                // conventions (the generic exact-bed intervals and the
-                // pilot's one-base-earlier records) under the AGC range
-                // fetch's own 1-based-inclusive coordinate system;
-                // sequence identity decides.
-                let mut delta: Option<i64> = None;
-                for candidate in [0i64, -1, 1] {
-                    let lo = (s as i64 + candidate).max(0) as usize;
-                    let hi = lo + record.len();
-                    if let Ok(fetched) =
-                        agc.fetch_sequence(&global_name, lo as i32, hi as i32)
-                    {
-                        if fetched == *record {
-                            delta = Some(candidate);
-                            break;
-                        }
-                    }
-                }
-                let delta = delta.ok_or_else(|| {
-                    invalid(format!(
-                        "locus record {header} is not identical to the AGC interval \
-                         under either offset convention"
-                    ))
-                })?;
-                *offset_variants
-                    .entry(format!("delta={delta}"))
-                    .or_insert(0) += 1;
-                let lo = (s as i64 + delta).max(0) as i32;
-                let global_seq = agc
-                    .fetch_sequence(&global_name, lo, lo + record.len() as i32)
-                    .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
-                ensure(global_seq == *record, "AGC refetch mismatch")?;
-                let local_walk = mem_records::canonical_anchor_walk(panel, record)?;
-                let global_walk = mem_records::canonical_anchor_walk(&global, &global_seq)?;
-                // The locality dictionary is a subset of the global one, so
-                // every locality anchor position must appear in the global
-                // walk; the global walk may carry EXTRA anchors (the
-                // superset class). Pair on the locality positions (the true
-                // correspondence); the global-only positions have no
-                // locality node and stay unmapped.
-                let global_by_pos: HashMap<u64, i32> = global_walk
-                    .iter()
-                    .map(|&(node, pos)| (pos, node))
-                    .collect();
-                for &(lnode, lpos) in &local_walk {
-                    let gnode = *global_by_pos.get(&lpos).ok_or_else(|| {
-                        invalid("locality anchor position absent from the global walk")
-                    })?;
-                    match node_map.entry(gnode) {
-                        std::collections::hash_map::Entry::Occupied(o) => {
-                            ensure(
-                                *o.get() == lnode,
-                                "conflicting node correspondence",
-                            )?;
-                        }
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(lnode);
-                            node_map_pairs += 1;
-                        }
-                    }
-                }
-                global_only_anchor_total += global_walk.len() - local_walk.len();
-            }
-            eprintln!(
-                "[cut] node map: {node_map_pairs} pairs, {global_only_anchor_total} global-only anchors ({:?})",
-                offset_variants
-            );
+            let (built_map, built_pairs, _global_only_anchors, built_variants) =
+                batch_build_node_map(&global, panel, &agc, &sources)?;
+            node_map = built_map;
+            node_map_pairs = built_pairs;
+            offset_variants = built_variants;
         }
         CutFrame::Global => {
             // THE GLOBAL FRAME (lever 1): the universe rows translate to
@@ -2361,71 +2338,21 @@ fn run_cut(
             // The projection's records then ride the committed remap
             // flow unchanged: the expressible ones verbatim, the rest
             // dropped exactly as the strict local cut drops them.
-            let mut expressibility_pairs = 0usize;
-            let mut record_names: BTreeSet<&str> = BTreeSet::new();
-            for row in &universe {
-                record_names.insert(row.path_name.as_str());
-            }
-            for header in &record_names {
-                let (global_name, start, end) = parse_locus_header(header)?;
-                let length = (end - start) as usize;
-                let content_start = start
-                    .checked_add(record_origin)
-                    .ok_or_else(|| invalid(format!(
-                        "record {header}: the content origin start+{record_origin} overflows"
-                    )))?;
-                let content = agc
-                    .fetch_sequence(
-                        &global_name,
-                        content_start as i32,
-                        (content_start + length as u64) as i32,
-                    )
-                    .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
-                ensure(
-                    content.len() == length,
-                    &format!(
-                        "record {header}: the content fetch at origin +{record_origin} \
-                         returned {} bytes, not the record's {length} (the content origin \
-                         leaves the path; state the substrate's own convention)",
-                        content.len()
-                    ),
-                )?;
-                let walk = mem_records::canonical_anchor_walk(&global, &content)?;
-                for &(node, _position) in &walk {
-                    match node_map.entry(node) {
-                        std::collections::hash_map::Entry::Occupied(o) => {
-                            ensure(*o.get() == node, "conflicting identity entry")?;
-                        }
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(node);
-                            expressibility_pairs += 1;
-                        }
-                    }
-                }
-            }
+            let (built_map, expressibility_pairs, record_count) =
+                build_global_identity_node_map(&global, &agc, &universe, record_origin)?;
+            node_map = built_map;
             node_map_pairs = expressibility_pairs;
             eprintln!(
                 "[cut] global frame: the identity expressibility map over \
-                 {} records: {} canonical anchors; component contig {}",
-                record_names.len(),
-                expressibility_pairs,
-                component_contig_source
+                 {record_count} records: {expressibility_pairs} canonical anchors; component contig \
+                 {component_contig_source}",
             );
         }
     }
     let load_seconds = load_started.elapsed().as_secs_f64();
 
     // The shard scan (parallel over files; deterministic merge order).
-    let mut shard_paths: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(shards_dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
-            shard_paths.push(path);
-        }
-    }
-    shard_paths.sort();
-    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    let shard_paths = collect_shard_paths(shards_dir)?;
     let node_map_ref = &node_map;
     let territory_nodes_ref = &territory_nodes_abs;
     // The env-gated attribution modes (default OFF = the committed
@@ -2517,74 +2444,10 @@ fn run_cut(
             .collect(),
     };
 
-    // Merge in file order (deterministic).
-    struct Merged {
-        reads: Vec<Vec<u8>>,
-        pattern_mult: BTreeMap<Vec<u64>, u64>,
-        key_tokens: Vec<Vec<u64>>,
-        key_index: HashMap<Vec<u64>, u32>,
-        key_reads: Vec<Vec<usize>>,
-        read_records: Vec<Vec<(u32, OwnWalk)>>,
-        reads_scanned: u64,
-        records_scanned: u64,
-        records_mappable: u64,
-        records_unmappable: u64,
-        reads_with_unmappable: u64,
-        reads_routed: u64,
-        reads_unrouted: u64,
-    }
-    let mut merged = Merged {
-        reads: Vec::new(),
-        pattern_mult: BTreeMap::new(),
-        key_tokens: Vec::new(),
-        key_index: HashMap::new(),
-        key_reads: Vec::new(),
-        read_records: Vec::new(),
-        reads_scanned: 0,
-        records_scanned: 0,
-        records_mappable: 0,
-        records_unmappable: 0,
-        reads_with_unmappable: 0,
-        reads_routed: 0,
-        reads_unrouted: 0,
-    };
-    fn intern_merged(merged: &mut Merged, tokens: &[u64]) -> u32 {
-        if let Some(&index) = merged.key_index.get(tokens) {
-            return index;
-        }
-        let index = merged.key_tokens.len() as u32;
-        merged.key_tokens.push(tokens.to_vec());
-        merged.key_reads.push(Vec::new());
-        merged.key_index.insert(tokens.to_vec(), index);
-        index
-    }
-    for result in per_file {
-        let cut = result?;
-        merged.reads_scanned += cut.reads_scanned;
-        merged.records_scanned += cut.records_scanned;
-        merged.records_mappable += cut.records_mappable;
-        merged.records_unmappable += cut.records_unmappable;
-        merged.reads_with_unmappable += cut.reads_with_unmappable;
-        merged.reads_routed += cut.reads_routed;
-        merged.reads_unrouted += cut.reads_unrouted;
-        let base = merged.reads.len();
-        for (index, seq) in cut.reads.into_iter().enumerate() {
-            merged.reads.push(seq);
-            let read_index = base + index;
-            let records = cut.read_records[index].clone();
-            let mut rebased: Vec<(u32, OwnWalk)> = Vec::with_capacity(records.len());
-            for (local_key, walk) in records {
-                let tokens = cut.key_tokens[local_key as usize].clone();
-                let new_key = intern_merged(&mut merged, &tokens);
-                merged.key_reads[new_key as usize].push(read_index);
-                rebased.push((new_key, walk));
-            }
-            merged.read_records.push(rebased);
-        }
-        for (tokens, mult) in cut.pattern_mult {
-            *merged.pattern_mult.entry(tokens).or_insert(0) += mult;
-        }
-    }
+    let merged = batch_merge_file(
+        MergedBatch::new(),
+        per_file.into_iter().collect::<io::Result<Vec<_>>>()?,
+    );
     eprintln!(
         "[cut] scan done: {} reads scanned, {} kept, {} touching patterns",
         merged.reads_scanned,
@@ -2592,286 +2455,37 @@ fn run_cut(
         merged.pattern_mult.len()
     );
     let scan_seconds = started.elapsed().as_secs_f64() - load_seconds;
-
-    // The derive cache (the committed format): multiplicity by identical
-    // sequence, first representative carries the count.
-    let reads = merged.reads;
-    let mut read_counts: HashMap<u64, u32> = HashMap::new();
-    for seq in &reads {
-        *read_counts.entry(fnv1a64(seq)).or_insert(0) += 1;
-    }
-    let mut read_multiplicity: Vec<u32> = Vec::with_capacity(reads.len());
-    {
-        let mut first_seen: HashMap<u64, usize> = HashMap::new();
-        for seq in &reads {
-            let hash = fnv1a64(seq);
-            match first_seen.get(&hash) {
-                Some(_) => read_multiplicity.push(0),
-                None => {
-                    first_seen.insert(hash, 0);
-                    read_multiplicity.push(*read_counts.get(&hash).unwrap_or(&1));
-                }
-            }
-        }
-    }
-    write_derive_cache(
-        &out_dir.join("cut-cache.bin"),
-        &merged.key_tokens,
-        &merged.key_reads,
-        &reads,
-        &read_multiplicity,
-        &merged.read_records,
-    )?;
-    {
-        let mut out =
-            io::BufWriter::new(std::fs::File::create(out_dir.join("cut-reads.fasta"))?);
-        for (index, seq) in reads.iter().enumerate() {
-            writeln!(out, ">cutread:{index}")?;
-            out.write_all(seq)?;
-            out.write_all(b"\n")?;
-        }
-        out.flush()?;
-    }
-
-    // The cut census: route every touching pattern through the committed
-    // placement machinery; emit the committed JSONL schema.
-    let census_started = Instant::now();
-    let mut out = io::BufWriter::new(std::fs::File::create(out_dir.join("cut-census.jsonl"))?);
-    // (THE GLOBAL FRAME's pair-bins convention: the contig comparison
-    // runs in the panel's own frame — the translated component's
-    // contig suffix; the committed local frame keeps its own.)
-    let component_contig = component_contig_source
-        .rsplit('#')
-        .next()
-        .unwrap_or(&component_contig_source)
-        .to_string();
-    let mut routed_patterns = 0u64;
-    let mut census_mult_total = 0u64;
-    let mut dropped_no_occurrence = 0u64;
-    // The committed census record order: the pattern multiset's BTreeMap
-    // order (sorted by tokens), dense record ids over the routed set.
-    // The routing and per-occurrence covered-node construction are pure
-    // per-pattern functions over shared immutable state, so they run in
-    // parallel and the lines are written in the sorted order.
-    let sorted: Vec<(Vec<u64>, u64)> = merged
-        .pattern_mult
-        .clone()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect();
-    let routed: Vec<io::Result<Option<(serde_json::Value, u64)>>> = sorted
-        .par_iter()
-        .map(|(tokens, multiplicity)| {
-            let anchors = decode_tokens(tokens)?;
-            let (occurrence_map, total_occurrences, forward_positions, reverse_positions) =
-                route_record(&anchors, &territory, k);
-            if occurrence_map.is_empty() {
-                return Ok(None);
-            }
-            let anchor_count = anchors.len();
-            struct CensusOcc {
-                path: usize,
-                start: u64,
-                orientation: u8,
-                intervals: Vec<(u64, u64)>,
-                partitions: Vec<u32>,
-            }
-            let mut occurrences: Vec<CensusOcc> = Vec::new();
-            let rc_anchors = reverse_complement_walk(&anchors, k);
-            let orientations: [(&[(i32, u64)], &[(usize, u64)], u8); 2] = [
-                (&anchors, &forward_positions, 0),
-                (&rc_anchors, &reverse_positions, 1),
-            ];
-            for (walk, positions, orientation) in orientations {
-                for &(path, start) in positions.iter() {
-                    let mut windows: Vec<(u64, u64)> = walk
-                        .iter()
-                        .map(|&(_, rel)| {
-                            (
-                                start.saturating_add(rel),
-                                start.saturating_add(rel).saturating_add(k),
-                            )
-                        })
-                        .collect();
-                    windows.sort_unstable();
-                    let mut intervals: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
-                    for (lo, hi) in windows {
-                        match intervals.last_mut() {
-                            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
-                            _ => intervals.push((lo, hi)),
-                        }
-                    }
-                    let mut partitions: Vec<u32> = Vec::new();
-                    for &(_, rel) in walk {
-                        for partition in territory.partitions_at(path, start + rel, k) {
-                            if !partitions.contains(&partition) {
-                                partitions.push(partition);
-                            }
-                        }
-                    }
-                    partitions.sort_unstable();
-                    occurrences.push(CensusOcc {
-                        path,
-                        start,
-                        orientation,
-                        intervals,
-                        partitions,
-                    });
-                }
-            }
-            let mut occurrence_nodes: Vec<Vec<Vec<u32>>> =
-                vec![Vec::with_capacity(1); occurrences.len()];
-            let mut by_path: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-            for (position, occ) in occurrences.iter().enumerate() {
-                by_path.entry(occ.path).or_default().push(position);
-            }
-            for (path, members) in &by_path {
-                let lo_min = members
-                    .iter()
-                    .flat_map(|&position| occurrences[position].intervals.iter().map(|&(lo, _)| lo))
-                    .min()
-                    .unwrap_or(0);
-                let hi_max = members
-                    .iter()
-                    .flat_map(|&position| {
-                        occurrences[position].intervals.iter().map(|&(_, hi)| hi)
-                    })
-                    .max()
-                    .unwrap_or(0);
-                if hi_max <= lo_min {
-                    continue;
-                }
-                let mut steps: Vec<(u64, i32)> = panel
-                    .walk_path_range(*path, lo_min, hi_max)?
-                    .into_iter()
-                    .map(|(node, bp)| (bp, node))
-                    .collect();
-                steps.sort_unstable_by_key(|&(bp, _)| bp);
-                for &position in members {
-                    for &(lo, hi) in &occurrences[position].intervals {
-                        let start = steps.partition_point(|&(bp, _)| bp < lo);
-                        let end = steps.partition_point(|&(bp, _)| bp.saturating_add(k) <= hi);
-                        let contained = &steps[start..end.max(start)];
-                        occurrence_nodes[position]
-                            .push(contained.iter().map(|&(_, node)| node.unsigned_abs()).collect());
-                    }
-                }
-            }
-            let mut pair_bins = [0u64; MULTI_CENSUS_PAIR_BINS.len()];
-            let contigs: Vec<bool> = occurrences
-                .iter()
-                .map(|occ| {
-                    panel.name_map.path_to_name[occ.path]
-                        .rsplit('#')
-                        .next()
-                        .map(|contig| contig == component_contig)
-                        .unwrap_or(false)
-                })
-                .collect();
-            let occurrence_node_sets: Vec<BTreeSet<u32>> = occurrence_nodes
-                .iter()
-                .map(|intervals| intervals.iter().flatten().copied().collect())
-                .collect();
-            for left in 0..occurrences.len() {
-                for right in left + 1..occurrences.len() {
-                    let bin = multi_census_pair_bin(
-                        &occurrence_node_sets[left].iter().copied().collect::<Vec<_>>(),
-                        &occurrence_node_sets[right].iter().copied().collect::<Vec<_>>(),
-                        &occurrences[left].partitions,
-                        &occurrences[right].partitions,
-                        contigs[left] && contigs[right],
-                    );
-                    pair_bins[bin] += 1;
-                }
-            }
-            let occurrences_json: Vec<serde_json::Value> = occurrences
-                .iter()
-                .enumerate()
-                .map(|(position, occ)| {
-                    serde_json::json!({
-                        "path": occ.path,
-                        "start": occ.start,
-                        "orientation": occ.orientation,
-                        "partitions": occ.partitions,
-                        "intervals": occurrence_nodes[position]
-                            .iter()
-                            .map(|nodes| serde_json::json!(nodes))
-                            .collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            let pair_bins_json: serde_json::Value = MULTI_CENSUS_PAIR_BINS
-                .iter()
-                .enumerate()
-                .map(|(bin, name)| (name.to_string(), serde_json::json!(pair_bins[bin])))
-                .collect::<serde_json::Map<String, serde_json::Value>>()
-                .into();
-            let line = serde_json::json!({
-                "multiplicity": multiplicity,
-                "t_r": occurrence_map.len(),
-                "share": *multiplicity as f64 / occurrence_map.len() as f64,
-                "total_occurrences": total_occurrences,
-                "anchors": anchor_count,
-                "occurrences": occurrences_json,
-                "pair_bins": pair_bins_json,
-            });
-            Ok(Some((line, *multiplicity)))
-        })
-        .collect();
-    for result in routed {
-        if let Some((mut line, multiplicity)) = result? {
-            line["record"] = serde_json::json!(routed_patterns);
-            writeln!(out, "{line}")?;
-            routed_patterns += 1;
-            census_mult_total += multiplicity;
-        } else {
-            dropped_no_occurrence += 1;
-        }
-    }
-    out.flush()?;
-    let census_seconds = census_started.elapsed().as_secs_f64();
-    let wall_seconds = started.elapsed().as_secs_f64();
-    let stats = CutStatsJson {
-        frame: match frame {
-            CutFrame::Local => "local".into(),
-            CutFrame::Global => "global".into(),
-        },
-        census_profile: match frame {
-            CutFrame::Local => None,
-            CutFrame::Global => Some(census_profile.label().into()),
-        },
+    let frame_str = match frame {
+        CutFrame::Local => "local",
+        CutFrame::Global => "global",
+    };
+    let profile_label = match frame {
+        CutFrame::Local => None,
+        CutFrame::Global => Some(census_profile.label().into()),
+    };
+    let (stats, dropped_no_occurrence) = emit_territory_outputs(
+        out_dir,
+        panel,
+        k,
+        &territory,
+        merged,
+        &component_contig_source,
+        frame_str,
+        profile_label,
         record_origin,
-        reads_scanned: merged.reads_scanned,
-        reads_kept: reads.len() as u64,
-        records_scanned: merged.records_scanned,
-        records_mappable: merged.records_mappable,
-        records_unmappable_global_only: merged.records_unmappable,
-        reads_with_unmappable_records: merged.reads_with_unmappable,
-        touching_patterns: merged.pattern_mult.len() as u64,
-        routed_patterns,
-        census_mult: census_mult_total,
-        territory_rows: territory.territories.len(),
-        territory_entries: territory.entries.len(),
         node_map_pairs,
         offset_variants,
-        partial_remap: mode == RemapMode::PartialSubwalk,
-        local_derive: mode == RemapMode::LocalDerive,
-        global_frame: mode == RemapMode::GlobalFrame,
-        reads_routed: merged.reads_routed,
-        reads_unrouted: merged.reads_unrouted,
+        mode,
         load_seconds,
         scan_seconds,
-        census_seconds,
-        wall_seconds,
-        peak_rss_kb: rss_now_kb(),
-    };
-    let text = serde_json::to_string_pretty(&stats)?;
-    std::fs::write(out_dir.join("cut-stats.json"), text + "\n")?;
+        &started,
+    )?;
     eprintln!(
-        "[cut] DONE: {routed_patterns} routed patterns ({} dropped, no occurrence), \
-         mult {census_mult_total} [{wall_seconds:.1}s]",
-        dropped_no_occurrence
+        "[cut] DONE: {} routed patterns ({dropped_no_occurrence} dropped, no occurrence), \
+         mult {} [{:.1}s]",
+        stats.routed_patterns,
+        stats.census_mult,
+        stats.wall_seconds,
     );
     Ok(())
 }
@@ -3075,15 +2689,13 @@ fn batch_merge_file(mut merged: MergedBatch, files: Vec<FileCut>) -> MergedBatch
         merged.reads_with_unmappable += cut.reads_with_unmappable;
         merged.reads_routed += cut.reads_routed;
         merged.reads_unrouted += cut.reads_unrouted;
-        let base = merged.reads.len();
-        for (index, seq) in cut.reads.into_iter().enumerate() {
+        for (seq, records) in cut.reads.into_iter().zip(cut.read_records) {
+            let read_index = merged.reads.len();
             merged.reads.push(seq);
-            let read_index = base + index;
-            let records = cut.read_records[index].clone();
             let mut rebased: Vec<(u32, OwnWalk)> = Vec::with_capacity(records.len());
             for (local_key, walk) in records {
-                let tokens = cut.key_tokens[local_key as usize].clone();
-                let new_key = batch_intern_merged(&mut merged, &tokens);
+                let tokens = &cut.key_tokens[local_key as usize];
+                let new_key = batch_intern_merged(&mut merged, tokens);
                 merged.key_reads[new_key as usize].push(read_index);
                 rebased.push((new_key, walk));
             }
@@ -3124,12 +2736,12 @@ fn batch_load_sources(sources_path: &Path) -> io::Result<HashMap<String, Vec<u8>
 
 /// The per-path global<->locality node correspondence (the single
 /// cut's construction, verbatim).
-#[allow(clippy::type_complexity)]
-fn batch_build_node_map(
+fn map_locus_sources(
     global: &SyngIndex,
     panel: &SyngIndex,
     agc: &AgcIndex,
     sources: &HashMap<String, Vec<u8>>,
+    mut slice_global_nodes: Option<&mut HashSet<i32>>,
 ) -> io::Result<(
     HashMap<i32, i32>,
     usize,
@@ -3158,18 +2770,21 @@ fn batch_build_node_map(
         // conventions (the generic exact-bed intervals and the pilot's
         // one-base-earlier records) under the AGC range fetch's own
         // 1-based-inclusive coordinate system; sequence identity decides.
-        let mut delta: Option<i64> = None;
+        let mut matched: Option<(i64, Vec<u8>)> = None;
         for candidate in [0i64, -1, 1] {
             let lo = (s as i64 + candidate).max(0) as usize;
             let hi = lo + record.len();
-            if let Ok(fetched) = agc.fetch_sequence(&global_name, lo as i32, hi as i32) {
+            let (Ok(lo_i32), Ok(hi_i32)) = (i32::try_from(lo), i32::try_from(hi)) else {
+                continue;
+            };
+            if let Ok(fetched) = agc.fetch_sequence(&global_name, lo_i32, hi_i32) {
                 if fetched == *record {
-                    delta = Some(candidate);
+                    matched = Some((candidate, fetched));
                     break;
                 }
             }
         }
-        let delta = delta.ok_or_else(|| {
+        let (delta, global_seq) = matched.ok_or_else(|| {
             invalid(format!(
                 "locus record {header} is not identical to the AGC interval \
                  under either offset convention"
@@ -3178,13 +2793,13 @@ fn batch_build_node_map(
         *offset_variants
             .entry(format!("delta={delta}"))
             .or_insert(0) += 1;
-        let lo = (s as i64 + delta).max(0) as i32;
-        let global_seq = agc
-            .fetch_sequence(&global_name, lo, lo + record.len() as i32)
-            .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
-        ensure(global_seq == *record, "AGC refetch mismatch")?;
-        let local_walk = mem_records::canonical_anchor_walk(&panel, record)?;
-        let global_walk = mem_records::canonical_anchor_walk(&global, &global_seq)?;
+        let local_walk = mem_records::canonical_anchor_walk(panel, record)?;
+        let global_walk = mem_records::canonical_anchor_walk(global, &global_seq)?;
+        if let Some(nodes) = slice_global_nodes.as_deref_mut() {
+            for &(gnode, _pos) in &global_walk {
+                nodes.insert(gnode);
+            }
+        }
         // The locality dictionary is a subset of the global one, so every
         // locality anchor position must appear in the global walk; the
         // global walk may carry EXTRA anchors (the superset class). Pair
@@ -3209,8 +2824,30 @@ fn batch_build_node_map(
                 }
             }
         }
-        global_only_anchor_total += global_walk.len() - local_walk.len();
+        global_only_anchor_total += global_walk.len().saturating_sub(local_walk.len());
     }
+    Ok((
+        node_map,
+        node_map_pairs,
+        global_only_anchor_total,
+        offset_variants,
+    ))
+}
+
+#[allow(clippy::type_complexity)]
+fn batch_build_node_map(
+    global: &SyngIndex,
+    panel: &SyngIndex,
+    agc: &AgcIndex,
+    sources: &HashMap<String, Vec<u8>>,
+) -> io::Result<(
+    HashMap<i32, i32>,
+    usize,
+    usize,
+    BTreeMap<String, u64>,
+)> {
+    let (node_map, node_map_pairs, global_only_anchor_total, offset_variants) =
+        map_locus_sources(global, panel, agc, sources, None)?;
     eprintln!(
         "[cut] node map: {node_map_pairs} pairs, {global_only_anchor_total} global-only anchors ({:?})",
         offset_variants
@@ -3226,47 +2863,32 @@ fn batch_build_node_map(
 /// One territory's emission tail (the single cut's, verbatim): the
 /// derive cache, the cut reads FASTA, the cut census, the stats.
 #[allow(clippy::too_many_arguments)]
-fn batch_emit_territory(
-    t: BatchTerritory,
-    files: Vec<FileCut>,
+fn emit_territory_outputs(
+    out_dir: &Path,
+    panel: &SyngIndex,
+    k: u64,
+    territory: &TerritoryIndex,
+    merged: MergedBatch,
+    component_contig_source: &str,
+    frame: &str,
+    census_profile: Option<String>,
+    record_origin: u64,
+    node_map_pairs: usize,
+    offset_variants: BTreeMap<String, u64>,
+    mode: RemapMode,
     load_seconds: f64,
     scan_seconds: f64,
     started: &Instant,
-) -> io::Result<serde_json::Value> {
-    let BatchTerritory {
-        spec,
-        panel,
-        k,
-        territory,
-        territory_nodes_abs: _,
-        node_map: _,
-        node_map_pairs,
-        offset_variants,
-    } = t;
-    let out_dir = spec.out_dir.as_path();
-    let component = spec.component.as_str();
-    let mode = RemapMode::LocalDerive;
-    let merged = batch_merge_file(MergedBatch::new(), files);
-    // The derive cache (the committed format): multiplicity by identical
-    // sequence, first representative carries the count.
+) -> io::Result<(CutStatsJson, u64)> {
     let reads = merged.reads;
-    let mut read_counts: HashMap<u64, u32> = HashMap::new();
-    for seq in &reads {
-        *read_counts.entry(fnv1a64(seq)).or_insert(0) += 1;
+    let read_hashes: Vec<u64> = reads.iter().map(|seq| fnv1a64(seq)).collect();
+    let mut read_counts: HashMap<u64, u32> = HashMap::with_capacity(read_hashes.len());
+    for &hash in &read_hashes {
+        *read_counts.entry(hash).or_insert(0) += 1;
     }
     let mut read_multiplicity: Vec<u32> = Vec::with_capacity(reads.len());
-    {
-        let mut first_seen: HashMap<u64, usize> = HashMap::new();
-        for seq in &reads {
-            let hash = fnv1a64(seq);
-            match first_seen.get(&hash) {
-                Some(_) => read_multiplicity.push(0),
-                None => {
-                    first_seen.insert(hash, 0);
-                    read_multiplicity.push(*read_counts.get(&hash).unwrap_or(&1));
-                }
-            }
-        }
+    for &hash in &read_hashes {
+        read_multiplicity.push(read_counts.remove(&hash).unwrap_or(0));
     }
     write_derive_cache(
         &out_dir.join("cut-cache.bin"),
@@ -3287,32 +2909,24 @@ fn batch_emit_territory(
         out.flush()?;
     }
 
-    // The cut census: route every touching pattern through the committed
-    // placement machinery; emit the committed JSONL schema.
     let census_started = Instant::now();
     let mut out = io::BufWriter::new(std::fs::File::create(out_dir.join("cut-census.jsonl"))?);
-    let component_contig = component.rsplit('#').next().unwrap_or(component).to_string();
+    let component_contig = component_contig_source
+        .rsplit('#')
+        .next()
+        .unwrap_or(component_contig_source)
+        .to_string();
     let mut routed_patterns = 0u64;
     let mut census_mult_total = 0u64;
     let mut dropped_no_occurrence = 0u64;
-    // The committed census record order: the pattern multiset's BTreeMap
-    // order (sorted by tokens), dense record ids over the routed set.
-    // The routing and per-occurrence covered-node construction are pure
-    // per-pattern functions over shared immutable state, so they run in
-    // parallel and the lines are written in the sorted order.
-    let sorted: Vec<(Vec<u64>, u64)> = merged
-        .pattern_mult
-        .clone()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect();
+    let touching_patterns = merged.pattern_mult.len() as u64;
+    let sorted: Vec<(Vec<u64>, u64)> = merged.pattern_mult.into_iter().collect();
     let routed: Vec<io::Result<Option<(serde_json::Value, u64)>>> = sorted
         .par_iter()
         .map(|(tokens, multiplicity)| {
             let anchors = decode_tokens(tokens)?;
             let (occurrence_map, total_occurrences, forward_positions, reverse_positions) =
-                route_record(&anchors, &territory, k);
+                route_record(&anchors, territory, k);
             if occurrence_map.is_empty() {
                 return Ok(None);
             }
@@ -3332,7 +2946,7 @@ fn batch_emit_territory(
             ];
             for (walk, positions, orientation) in orientations {
                 for &(path, start) in positions.iter() {
-                    let mut windows: Vec<(u64, u64)> = walk
+                    let windows: Vec<(u64, u64)> = walk
                         .iter()
                         .map(|&(_, rel)| {
                             (
@@ -3341,14 +2955,7 @@ fn batch_emit_territory(
                             )
                         })
                         .collect();
-                    windows.sort_unstable();
-                    let mut intervals: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
-                    for (lo, hi) in windows {
-                        match intervals.last_mut() {
-                            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
-                            _ => intervals.push((lo, hi)),
-                        }
-                    }
+                    let intervals = merge_windows(windows);
                     let mut partitions: Vec<u32> = Vec::new();
                     for &(_, rel) in walk {
                         for partition in territory.partitions_at(path, start + rel, k) {
@@ -3416,15 +3023,20 @@ fn batch_emit_territory(
                         .unwrap_or(false)
                 })
                 .collect();
-            let occurrence_node_sets: Vec<BTreeSet<u32>> = occurrence_nodes
+            let occurrence_node_sets: Vec<Vec<u32>> = occurrence_nodes
                 .iter()
-                .map(|intervals| intervals.iter().flatten().copied().collect())
+                .map(|intervals| {
+                    let mut nodes: Vec<u32> = intervals.iter().flatten().copied().collect();
+                    nodes.sort_unstable();
+                    nodes.dedup();
+                    nodes
+                })
                 .collect();
             for left in 0..occurrences.len() {
                 for right in left + 1..occurrences.len() {
                     let bin = multi_census_pair_bin(
-                        &occurrence_node_sets[left].iter().copied().collect::<Vec<_>>(),
-                        &occurrence_node_sets[right].iter().copied().collect::<Vec<_>>(),
+                        &occurrence_node_sets[left],
+                        &occurrence_node_sets[right],
                         &occurrences[left].partitions,
                         &occurrences[right].partitions,
                         contigs[left] && contigs[right],
@@ -3480,16 +3092,16 @@ fn batch_emit_territory(
     let census_seconds = census_started.elapsed().as_secs_f64();
     let wall_seconds = started.elapsed().as_secs_f64();
     let stats = CutStatsJson {
-        frame: "local-batch".into(),
-        census_profile: None,
-        record_origin: 0,
+        frame: frame.into(),
+        census_profile,
+        record_origin,
         reads_scanned: merged.reads_scanned,
         reads_kept: reads.len() as u64,
         records_scanned: merged.records_scanned,
         records_mappable: merged.records_mappable,
         records_unmappable_global_only: merged.records_unmappable,
         reads_with_unmappable_records: merged.reads_with_unmappable,
-        touching_patterns: merged.pattern_mult.len() as u64,
+        touching_patterns,
         routed_patterns,
         census_mult: census_mult_total,
         territory_rows: territory.territories.len(),
@@ -3509,10 +3121,53 @@ fn batch_emit_territory(
     };
     let text = serde_json::to_string_pretty(&stats)?;
     std::fs::write(out_dir.join("cut-stats.json"), text + "\n")?;
+    Ok((stats, dropped_no_occurrence))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn batch_emit_territory(
+    t: BatchTerritory,
+    files: Vec<FileCut>,
+    load_seconds: f64,
+    scan_seconds: f64,
+    started: &Instant,
+) -> io::Result<serde_json::Value> {
+    let BatchTerritory {
+        spec,
+        panel,
+        k,
+        territory,
+        territory_nodes_abs: _,
+        node_map: _,
+        node_map_pairs,
+        offset_variants,
+    } = t;
+    let out_dir = spec.out_dir.as_path();
+    let component = spec.component.as_str();
+    let merged = batch_merge_file(MergedBatch::new(), files);
+    let (stats, dropped_no_occurrence) = emit_territory_outputs(
+        out_dir,
+        &panel,
+        k,
+        &territory,
+        merged,
+        component,
+        "local-batch",
+        None,
+        0,
+        node_map_pairs,
+        offset_variants,
+        RemapMode::LocalDerive,
+        load_seconds,
+        scan_seconds,
+        started,
+    )?;
     eprintln!(
-        "[cut] DONE: {routed_patterns} routed patterns ({} dropped, no occurrence), \
-         mult {census_mult_total} [{wall_seconds:.1}s]",
-        dropped_no_occurrence
+        "[cut] DONE: {} routed patterns ({dropped_no_occurrence} dropped, no occurrence), \
+         mult {} [{:.1}s]",
+        stats.routed_patterns,
+        stats.census_mult,
+        stats.wall_seconds,
     );
     Ok(serde_json::json!({
         "name": spec.name,
@@ -3746,16 +3401,7 @@ fn run_cut_batch(
     // territory's local derivation in parallel over reads; the
     // per-(file, territory) states accumulate in read order exactly as
     // the single cut's per-file state does).
-    let mut shard_paths: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(shards_dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
-            shard_paths.push(path);
-        }
-    }
-    shard_paths.sort();
-    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    let shard_paths = collect_shard_paths(shards_dir)?;
     let routing_ref = &routing;
     let territories_ref = &territories;
     let scan_started = Instant::now();
@@ -3832,26 +3478,7 @@ fn run_cut_batch(
                         let cut = per.entry(ti).or_insert_with(FileCut::empty);
                         cut.reads_routed += 1;
                         cut.records_mappable += records.len() as u64;
-                        let mut kept: Vec<(u32, OwnWalk)> = Vec::new();
-                        let mut any_touch = false;
-                        for record in &records {
-                            if let Some((tokens, walk, touch)) = record {
-                                if *touch {
-                                    any_touch = true;
-                                    *cut.pattern_mult.entry(tokens.clone()).or_insert(0) += 1;
-                                }
-                                let key = cut.intern_key(tokens);
-                                kept.push((key, walk.clone()));
-                            }
-                        }
-                        if any_touch {
-                            let read_index = cut.reads.len();
-                            for (key, _walk) in &kept {
-                                cut.key_reads[*key as usize].push(read_index);
-                            }
-                            cut.reads.push(seq.clone());
-                            cut.read_records.push(std::mem::take(&mut kept));
-                        }
+                        cut.push_read_records(seq.clone(), records, false, false);
                     }
                 }
             }
@@ -4110,55 +3737,12 @@ fn cut_batch_global_with(
             // every record's content — fetched from the AGC at the
             // record's CONTENT origin start + d — every node remapped
             // to itself.
-            let mut node_map: HashMap<i32, i32> = HashMap::new();
-            let mut expressibility_pairs = 0usize;
-            let mut record_names: BTreeSet<&str> = BTreeSet::new();
-            for row in &universe {
-                record_names.insert(row.path_name.as_str());
-            }
-            for header in &record_names {
-                let (global_name, start, end) = parse_locus_header(header)?;
-                let length = (end - start) as usize;
-                let content_start = start
-                    .checked_add(record_origin)
-                    .ok_or_else(|| invalid(format!(
-                        "record {header}: the content origin start+{record_origin} overflows"
-                    )))?;
-                let content = agc_ref
-                    .fetch_sequence(
-                        &global_name,
-                        content_start as i32,
-                        (content_start + length as u64) as i32,
-                    )
-                    .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
-                ensure(
-                    content.len() == length,
-                    &format!(
-                        "record {header}: the content fetch at origin +{record_origin} \
-                         returned {} bytes, not the record's {length} (the content origin \
-                         leaves the path; state the substrate's own convention)",
-                        content.len()
-                    ),
-                )?;
-                let walk = mem_records::canonical_anchor_walk(global_ref, &content)?;
-                for &(node, _position) in &walk {
-                    match node_map.entry(node) {
-                        std::collections::hash_map::Entry::Occupied(o) => {
-                            ensure(*o.get() == node, "conflicting identity entry")?;
-                        }
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(node);
-                            expressibility_pairs += 1;
-                        }
-                    }
-                }
-            }
+            let (node_map, expressibility_pairs, record_count) =
+                build_global_identity_node_map(global_ref, agc_ref, &universe, record_origin)?;
             eprintln!(
-                "[cut-batch-global] {} identity expressibility map over {} records: \
-                 {} canonical anchors",
+                "[cut-batch-global] {} identity expressibility map over {record_count} records: \
+                 {expressibility_pairs} canonical anchors",
                 spec.name,
-                record_names.len(),
-                expressibility_pairs
             );
             Ok(GlobalBatchTerritory {
                 spec,
@@ -4253,16 +3837,7 @@ fn cut_batch_global_with(
     // territory's committed identity remap; the per-(file, territory)
     // states accumulate in read order exactly as the single cut's
     // per-file state does).
-    let mut shard_paths: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(shards_dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
-            shard_paths.push(path);
-        }
-    }
-    shard_paths.sort();
-    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    let shard_paths = collect_shard_paths(shards_dir)?;
     let routing_ref = &routing;
     let territories_ref = &territories;
     let scan_started = Instant::now();
@@ -4328,10 +3903,10 @@ fn cut_batch_global_with(
                         // read is in ITS basis; a native territory
                         // counts every routed read (the committed
                         // batch form, byte-identical).
-                        let in_basis: Vec<u16> = restricted_ref
+                        let in_basis: &[u16] = restricted_ref
                             .get(&seq_hash)
-                            .cloned()
-                            .unwrap_or_default();
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
                         let mut out = Vec::with_capacity(routed.len());
                         for &ti in &routed {
                             let t = &territories_ref[ti as usize];
@@ -4349,7 +3924,7 @@ fn cut_batch_global_with(
                             )?;
                             out.push((ti, records));
                         }
-                        Ok(Some((read.seq, n_records, in_basis, out)))
+                        Ok(Some((read.seq, n_records, in_basis.to_vec(), out)))
                     })
                     .collect();
                 // Fold in read order (the single cut's per-read
@@ -4367,29 +3942,7 @@ fn cut_batch_global_with(
                     for (ti, records) in per_terr {
                         let cut = per.entry(ti).or_insert_with(FileCut::empty);
                         *routed_records.entry(ti).or_insert(0) += records.len() as u64;
-                        let mut kept: Vec<(u32, OwnWalk)> = Vec::new();
-                        let mut any_touch = false;
-                        for record in &records {
-                            if let Some((tokens, walk, touch)) = record {
-                                cut.records_mappable += 1;
-                                if *touch {
-                                    any_touch = true;
-                                    *cut.pattern_mult.entry(tokens.clone()).or_insert(0) += 1;
-                                }
-                                let key = cut.intern_key(tokens);
-                                kept.push((key, walk.clone()));
-                            } else {
-                                cut.records_unmappable += 1;
-                            }
-                        }
-                        if any_touch {
-                            let read_index = cut.reads.len();
-                            for (key, _walk) in &kept {
-                                cut.key_reads[*key as usize].push(read_index);
-                            }
-                            cut.reads.push(seq.clone());
-                            cut.read_records.push(std::mem::take(&mut kept));
-                        }
+                        cut.push_read_records(seq.clone(), records, true, true);
                     }
                 }
             }
@@ -5315,280 +4868,31 @@ fn batch_global_emit_territory(
     let out_dir = spec.out_dir.as_path();
     let record_origin = spec.record_origin;
     let merged = batch_merge_file(MergedBatch::new(), files);
-    // The derive cache (the committed format): multiplicity by
-    // identical sequence, first representative carries the count.
-    let reads = merged.reads;
-    let mut read_counts: HashMap<u64, u32> = HashMap::new();
-    for seq in &reads {
-        *read_counts.entry(fnv1a64(seq)).or_insert(0) += 1;
-    }
-    let mut read_multiplicity: Vec<u32> = Vec::with_capacity(reads.len());
-    {
-        let mut first_seen: HashMap<u64, usize> = HashMap::new();
-        for seq in &reads {
-            let hash = fnv1a64(seq);
-            match first_seen.get(&hash) {
-                Some(_) => read_multiplicity.push(0),
-                None => {
-                    first_seen.insert(hash, 0);
-                    read_multiplicity.push(*read_counts.get(&hash).unwrap_or(&1));
-                }
-            }
-        }
-    }
-    write_derive_cache(
-        &out_dir.join("cut-cache.bin"),
-        &merged.key_tokens,
-        &merged.key_reads,
-        &reads,
-        &read_multiplicity,
-        &merged.read_records,
-    )?;
-    {
-        let mut out =
-            io::BufWriter::new(std::fs::File::create(out_dir.join("cut-reads.fasta"))?);
-        for (index, seq) in reads.iter().enumerate() {
-            writeln!(out, ">cutread:{index}")?;
-            out.write_all(seq)?;
-            out.write_all(b"\n")?;
-        }
-        out.flush()?;
-    }
-
-    // The cut census: route every touching pattern through the
-    // committed placement machinery; emit the committed JSONL schema
-    // (the single global cut's emission, verbatim — the component
-    // contig comparison in the panel's own frame).
-    let census_started = Instant::now();
     let k = panel.syncmer_length_bp() as u64;
-    let mut out = io::BufWriter::new(std::fs::File::create(out_dir.join("cut-census.jsonl"))?);
-    let component_contig = component_contig_source
-        .rsplit('#')
-        .next()
-        .unwrap_or(&component_contig_source)
-        .to_string();
-    let mut routed_patterns = 0u64;
-    let mut census_mult_total = 0u64;
-    let mut dropped_no_occurrence = 0u64;
-    let sorted: Vec<(Vec<u64>, u64)> = merged
-        .pattern_mult
-        .clone()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect();
-    let routed: Vec<io::Result<Option<(serde_json::Value, u64)>>> = sorted
-        .par_iter()
-        .map(|(tokens, multiplicity)| {
-            let anchors = decode_tokens(tokens)?;
-            let (occurrence_map, total_occurrences, forward_positions, reverse_positions) =
-                route_record(&anchors, &territory, k);
-            if occurrence_map.is_empty() {
-                return Ok(None);
-            }
-            let anchor_count = anchors.len();
-            struct CensusOcc {
-                path: usize,
-                start: u64,
-                orientation: u8,
-                intervals: Vec<(u64, u64)>,
-                partitions: Vec<u32>,
-            }
-            let mut occurrences: Vec<CensusOcc> = Vec::new();
-            let rc_anchors = reverse_complement_walk(&anchors, k);
-            let orientations: [(&[(i32, u64)], &[(usize, u64)], u8); 2] = [
-                (&anchors, &forward_positions, 0),
-                (&rc_anchors, &reverse_positions, 1),
-            ];
-            for (walk, positions, orientation) in orientations {
-                for &(path, start) in positions.iter() {
-                    let mut windows: Vec<(u64, u64)> = walk
-                        .iter()
-                        .map(|&(_, rel)| {
-                            (
-                                start.saturating_add(rel),
-                                start.saturating_add(rel).saturating_add(k),
-                            )
-                        })
-                        .collect();
-                    windows.sort_unstable();
-                    let mut intervals: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
-                    for (lo, hi) in windows {
-                        match intervals.last_mut() {
-                            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
-                            _ => intervals.push((lo, hi)),
-                        }
-                    }
-                    let mut partitions: Vec<u32> = Vec::new();
-                    for &(_, rel) in walk {
-                        for partition in territory.partitions_at(path, start + rel, k) {
-                            if !partitions.contains(&partition) {
-                                partitions.push(partition);
-                            }
-                        }
-                    }
-                    partitions.sort_unstable();
-                    occurrences.push(CensusOcc {
-                        path,
-                        start,
-                        orientation,
-                        intervals,
-                        partitions,
-                    });
-                }
-            }
-            let mut occurrence_nodes: Vec<Vec<Vec<u32>>> =
-                vec![Vec::with_capacity(1); occurrences.len()];
-            let mut by_path: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-            for (position, occ) in occurrences.iter().enumerate() {
-                by_path.entry(occ.path).or_default().push(position);
-            }
-            for (path, members) in &by_path {
-                let lo_min = members
-                    .iter()
-                    .flat_map(|&position| occurrences[position].intervals.iter().map(|&(lo, _)| lo))
-                    .min()
-                    .unwrap_or(0);
-                let hi_max = members
-                    .iter()
-                    .flat_map(|&position| {
-                        occurrences[position].intervals.iter().map(|&(_, hi)| hi)
-                    })
-                    .max()
-                    .unwrap_or(0);
-                if hi_max <= lo_min {
-                    continue;
-                }
-                let mut steps: Vec<(u64, i32)> = panel
-                    .walk_path_range(*path, lo_min, hi_max)?
-                    .into_iter()
-                    .map(|(node, bp)| (bp, node))
-                    .collect();
-                steps.sort_unstable_by_key(|&(bp, _)| bp);
-                for &position in members {
-                    for &(lo, hi) in &occurrences[position].intervals {
-                        let start = steps.partition_point(|&(bp, _)| bp < lo);
-                        let end = steps.partition_point(|&(bp, _)| bp.saturating_add(k) <= hi);
-                        let contained = &steps[start..end.max(start)];
-                        occurrence_nodes[position]
-                            .push(contained.iter().map(|&(_, node)| node.unsigned_abs()).collect());
-                    }
-                }
-            }
-            let mut pair_bins = [0u64; MULTI_CENSUS_PAIR_BINS.len()];
-            let contigs: Vec<bool> = occurrences
-                .iter()
-                .map(|occ| {
-                    panel.name_map.path_to_name[occ.path]
-                        .rsplit('#')
-                        .next()
-                        .map(|contig| contig == component_contig)
-                        .unwrap_or(false)
-                })
-                .collect();
-            let occurrence_node_sets: Vec<BTreeSet<u32>> = occurrence_nodes
-                .iter()
-                .map(|intervals| intervals.iter().flatten().copied().collect())
-                .collect();
-            for left in 0..occurrences.len() {
-                for right in left + 1..occurrences.len() {
-                    let bin = multi_census_pair_bin(
-                        &occurrence_node_sets[left].iter().copied().collect::<Vec<_>>(),
-                        &occurrence_node_sets[right].iter().copied().collect::<Vec<_>>(),
-                        &occurrences[left].partitions,
-                        &occurrences[right].partitions,
-                        contigs[left] && contigs[right],
-                    );
-                    pair_bins[bin] += 1;
-                }
-            }
-            let occurrences_json: Vec<serde_json::Value> = occurrences
-                .iter()
-                .enumerate()
-                .map(|(position, occ)| {
-                    serde_json::json!({
-                        "path": occ.path,
-                        "start": occ.start,
-                        "orientation": occ.orientation,
-                        "partitions": occ.partitions,
-                        "intervals": occurrence_nodes[position]
-                            .iter()
-                            .map(|nodes| serde_json::json!(nodes))
-                            .collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            let pair_bins_json: serde_json::Value = MULTI_CENSUS_PAIR_BINS
-                .iter()
-                .enumerate()
-                .map(|(bin, name)| (name.to_string(), serde_json::json!(pair_bins[bin])))
-                .collect::<serde_json::Map<String, serde_json::Value>>()
-                .into();
-            let line = serde_json::json!({
-                "multiplicity": multiplicity,
-                "t_r": occurrence_map.len(),
-                "share": *multiplicity as f64 / occurrence_map.len() as f64,
-                "total_occurrences": total_occurrences,
-                "anchors": anchor_count,
-                "occurrences": occurrences_json,
-                "pair_bins": pair_bins_json,
-            });
-            Ok(Some((line, *multiplicity)))
-        })
-        .collect();
-    for result in routed {
-        if let Some((mut line, multiplicity)) = result? {
-            line["record"] = serde_json::json!(routed_patterns);
-            writeln!(out, "{line}")?;
-            routed_patterns += 1;
-            census_mult_total += multiplicity;
-        } else {
-            dropped_no_occurrence += 1;
-        }
-    }
-    out.flush()?;
-    let census_seconds = census_started.elapsed().as_secs_f64();
-    let wall_seconds = started.elapsed().as_secs_f64();
-    let stats = CutStatsJson {
-        frame: "global".into(),
-        // THE CENSUS PROFILE (the §10.6.17 product default, carried
-        // into the batch forms — the named follow-up executed): the
-        // row's own stated basis decides — "restricted" (the basis
-        // read set, the single restricted cut's own rule) or
-        // "global-native" (the full routed mass, the committed batch
-        // receipts' form, byte-identical).
-        census_profile: Some(census_profile.into()),
+    let (stats, dropped_no_occurrence) = emit_territory_outputs(
+        out_dir,
+        panel,
+        k,
+        &territory,
+        merged,
+        &component_contig_source,
+        "global",
+        Some(census_profile.into()),
         record_origin,
-        reads_scanned: merged.reads_scanned,
-        reads_kept: reads.len() as u64,
-        records_scanned: merged.records_scanned,
-        records_mappable: merged.records_mappable,
-        records_unmappable_global_only: merged.records_unmappable,
-        reads_with_unmappable_records: merged.reads_with_unmappable,
-        touching_patterns: merged.pattern_mult.len() as u64,
-        routed_patterns,
-        census_mult: census_mult_total,
-        territory_rows: territory.territories.len(),
-        territory_entries: territory.entries.len(),
         node_map_pairs,
-        offset_variants: BTreeMap::new(),
-        partial_remap: false,
-        local_derive: false,
-        global_frame: true,
-        reads_routed: merged.reads_routed,
-        reads_unrouted: merged.reads_unrouted,
+        BTreeMap::new(),
+        RemapMode::GlobalFrame,
         load_seconds,
         scan_seconds,
-        census_seconds,
-        wall_seconds,
-        peak_rss_kb: rss_now_kb(),
-    };
-    let text = serde_json::to_string_pretty(&stats)?;
-    std::fs::write(out_dir.join("cut-stats.json"), text + "\n")?;
+        started,
+    )?;
     eprintln!(
-        "[cut-batch] {} DONE: {routed_patterns} routed patterns ({dropped_no_occurrence} dropped, \
-         no occurrence), mult {census_mult_total} [{wall_seconds:.1}s]",
-        spec.name
+        "[cut-batch] {} DONE: {} routed patterns ({dropped_no_occurrence} dropped, \
+         no occurrence), mult {} [{:.1}s]",
+        spec.name,
+        stats.routed_patterns,
+        stats.census_mult,
+        stats.wall_seconds,
     );
     Ok(serde_json::json!({
         "name": spec.name,
@@ -5942,25 +5246,7 @@ fn trace_load_locality(
     let axis: AxisFile = serde_json::from_str(&std::fs::read_to_string(&spec.axis)?)
         .map_err(|e| invalid(format!("axis parse: {e}")))?;
     let universe = load_universe_component(&axis, &spec.bed_directory, &spec.component)?;
-    let mut sources: HashMap<String, Vec<u8>> = HashMap::new();
-    {
-        let text = std::fs::read_to_string(&spec.sources)?;
-        let mut name: Option<String> = None;
-        let mut seq: Vec<u8> = Vec::new();
-        for line in text.lines() {
-            if let Some(header) = line.strip_prefix('>') {
-                if let Some(prev) = name.take() {
-                    sources.insert(prev, std::mem::take(&mut seq));
-                }
-                name = Some(header.split_whitespace().next().unwrap_or("").to_string());
-            } else if name.is_some() {
-                seq.extend_from_slice(line.trim().as_bytes());
-            }
-        }
-        if let Some(prev) = name {
-            sources.insert(prev, seq);
-        }
-    }
+    let sources = batch_load_sources(&spec.sources)?;
     ensure(!sources.is_empty(), "no locus.fa records")?;
     let fetch_lane = lane_fetch_over(&sources);
     let territory = build_territory_index(&panel, &universe, &fetch_lane, k)?;
@@ -5969,57 +5255,9 @@ fn trace_load_locality(
         .iter()
         .map(|&(node, _, _)| node.unsigned_abs())
         .collect();
-    let mut node_map: HashMap<i32, i32> = HashMap::new();
     let mut slice_global_nodes: HashSet<i32> = HashSet::new();
-    for (header, record) in &sources {
-        let (global_name, s, e) = parse_locus_header(header)?;
-        ensure(
-            (e - s) as usize == record.len(),
-            &format!("locus record {header} length differs from its header interval"),
-        )?;
-        let mut delta: Option<i64> = None;
-        for candidate in [0i64, -1, 1] {
-            let lo = (s as i64 + candidate).max(0) as usize;
-            let hi = lo + record.len();
-            if let Ok(fetched) = agc.fetch_sequence(&global_name, lo as i32, hi as i32) {
-                if fetched == *record {
-                    delta = Some(candidate);
-                    break;
-                }
-            }
-        }
-        let delta = delta.ok_or_else(|| {
-            invalid(format!(
-                "locus record {header} is not identical to the AGC interval \
-                 under either offset convention"
-            ))
-        })?;
-        let lo = (s as i64 + delta).max(0) as i32;
-        let global_seq = agc
-            .fetch_sequence(&global_name, lo, lo + record.len() as i32)
-            .map_err(|e| invalid(format!("AGC fetch {global_name}: {e}")))?;
-        ensure(global_seq == *record, "AGC refetch mismatch")?;
-        let local_walk = mem_records::canonical_anchor_walk(&panel, record)?;
-        let global_walk = mem_records::canonical_anchor_walk(global, &global_seq)?;
-        let global_by_pos: HashMap<u64, i32> =
-            global_walk.iter().map(|&(node, pos)| (pos, node)).collect();
-        for &(gnode, _pos) in &global_walk {
-            slice_global_nodes.insert(gnode);
-        }
-        for &(lnode, lpos) in &local_walk {
-            let gnode = *global_by_pos
-                .get(&lpos)
-                .ok_or_else(|| invalid("locality anchor position absent from the global walk"))?;
-            match node_map.entry(gnode) {
-                std::collections::hash_map::Entry::Occupied(o) => {
-                    ensure(*o.get() == lnode, "conflicting node correspondence")?;
-                }
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(lnode);
-                }
-            }
-        }
-    }
+    let (node_map, _, _, _) =
+        map_locus_sources(global, &panel, agc, &sources, Some(&mut slice_global_nodes))?;
     eprintln!(
         "[trace] locality {}: {} node-map pairs, {} slice global nodes, {} territory rows",
         spec.name,
@@ -6111,16 +5349,7 @@ fn run_trace(
     }
     let load_seconds = started.elapsed().as_secs_f64();
 
-    let mut shard_paths: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(shards_dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("shard.") && name.ends_with(".bin.gz") {
-            shard_paths.push(path);
-        }
-    }
-    shard_paths.sort();
-    ensure(!shard_paths.is_empty(), "no shard files found")?;
+    let shard_paths = collect_shard_paths(shards_dir)?;
     let per_file: Vec<io::Result<FileTrace>> = shard_paths
         .par_iter()
         .map(|path| scan_trace_file(path, &localities, &memberships, &query_set))
@@ -6857,5 +6086,96 @@ mod census_profile_tests {
         .unwrap();
         assert_eq!(effective, CensusProfile::Restricted);
         assert!(over);
+    }
+
+    #[test]
+    fn parse_locus_header_rejects_inverted_interval() {
+        let err = parse_locus_header("chrI:200-100").unwrap_err();
+        assert!(err.to_string().contains("inverted interval"));
+    }
+
+    #[test]
+    fn pair_binds_handles_extreme_positions_without_overflow() {
+        let tokens = crate::sample_mem_bwt::encode_walk(&[(1, 0), (2, 10)]).unwrap();
+        assert!(!pair_binds(&tokens, &vec![(1, u32::MAX), (2, 0)], &tokens).unwrap());
+        assert!(!pair_binds(&tokens, &vec![(-2, u32::MAX), (-1, 0)], &[]).unwrap());
+    }
+
+    #[test]
+    fn file_cut_push_read_records_updates_counts_and_consumes_walks() {
+        let mut cut = FileCut::empty();
+        cut.push_read_records(
+            b"ACGTACGT".to_vec(),
+            vec![
+                None,
+                Some((vec![11, 22], vec![(1, 0), (2, 5)], true)),
+                Some((vec![33], vec![(3, 1)], false)),
+            ],
+            true,
+            true,
+        );
+        assert_eq!(cut.records_unmappable, 1);
+        assert_eq!(cut.records_mappable, 2);
+        assert_eq!(cut.reads.len(), 1);
+        assert_eq!(cut.pattern_mult.get(&vec![11, 22]), Some(&1));
+        assert_eq!(cut.pattern_mult.get(&vec![33]), None);
+        assert_eq!(cut.read_records[0].len(), 2);
+        assert_eq!(cut.key_reads, vec![vec![0], vec![0]]);
+    }
+
+    #[test]
+    fn decode_tokens_rejects_position_overflow() {
+        let huge_gap = u64::MAX; // gap = 2^63 - 1
+        let tokens = [2, huge_gap, 2, huge_gap, 2, huge_gap, 4];
+        let err = decode_tokens(&tokens).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn rc_frame_step_rejects_underflow_and_short_sequence() {
+        assert_eq!(rc_frame_step(5, 0, 100, 10, 63), None);
+        assert_eq!(rc_frame_step(5, 20, 100, 70, 63), None);
+        assert_eq!(rc_frame_step(5, 2, 100, 70, 63), Some((105, -5)));
+    }
+
+    #[test]
+    fn occurrences_from_anchor_ignores_entry_before_anchor_offset() {
+        let index = TerritoryIndex {
+            entries: vec![(10, 0, 2)],
+            territories: vec![Territory {
+                partition: 0,
+                path_idx: 0,
+                start: 0,
+                end: 100,
+                steps: vec![(2, 10), (5, 20)],
+            }],
+            path_intervals: vec![vec![(0, 100, 0)]],
+        };
+        let mut seen = HashSet::new();
+        // base = 5 > entry.2 = 2: checked_sub rejects instead of saturating to 0.
+        occurrences_from_anchor(&[(10, 5)], 0, &index, &mut seen);
+        assert!(seen.is_empty());
+        // Valid matching offset resolves cleanly.
+        occurrences_from_anchor(&[(10, 2)], 0, &index, &mut seen);
+        assert!(seen.contains(&(0, 0)));
+    }
+
+    #[test]
+    fn route_record_handles_empty_anchors_safely() {
+        let index = TerritoryIndex {
+            entries: Vec::new(),
+            territories: Vec::new(),
+            path_intervals: Vec::new(),
+        };
+        let (occ, total, fwd, rev) = route_record(&[], &index, 63);
+        assert!(occ.is_empty());
+        assert_eq!(total, 0);
+        assert!(fwd.is_empty());
+        assert!(rev.is_empty());
+        assert!(reverse_complement_walk(&[], 63).is_empty());
+        assert_eq!(
+            reverse_complement_walk(&[(1, u64::MAX - 1)], 63),
+            vec![(-1, 0)]
+        );
     }
 }
