@@ -5,7 +5,8 @@
 //! graph via lacing.
 
 use crate::graph::{
-    build_spoa_engine, feed_sequences_to_graph, reverse_complement, sort_gfa, unchop_gfa,
+    build_spoa_engine, complement_base, feed_sequences_to_graph, reverse_complement, sort_gfa,
+    unchop_gfa,
 };
 use bitvec::{bitvec, prelude::BitVec};
 use log::info;
@@ -1033,22 +1034,59 @@ struct NeighborSiteGroup {
     reference_span_bp: usize,
 }
 
-fn flubble_guided_blocks(
+struct PreparedPovuSite {
+    id: String,
+    level: usize,
+    reference_start_step: usize,
+    reference_end_step: usize,
+    is_leaf: bool,
+    entry: (usize, bool),
+    exit: (usize, bool),
+    reference_span_bp: Option<usize>,
+    path_ranges: Vec<PathRange>,
+}
+
+struct PreparedPovuSites {
+    total_sites: usize,
+    level_ge_1_sites: usize,
+    reference_path_index: usize,
+    path_step_indexes: Vec<FxHashMap<(usize, bool), Vec<usize>>>,
+    sites: Vec<PreparedPovuSite>,
+}
+
+fn collect_site_path_ranges(
+    path_step_indexes: &[FxHashMap<(usize, bool), Vec<usize>>],
+    path_positions: &[Vec<usize>],
+    entry: (usize, bool),
+    exit: (usize, bool),
+) -> Option<Vec<PathRange>> {
+    let mut path_ranges = Vec::new();
+    for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
+        if let Some((begin_step, end_step)) = unique_smooth_anchor_range(path_index, entry, exit) {
+            let length = path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
+            if length > 0 {
+                path_ranges.push(PathRange {
+                    path_idx,
+                    begin_step,
+                    end_step,
+                    length,
+                });
+            }
+        }
+    }
+    if path_ranges.len() < 2 {
+        return None;
+    }
+    path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
+    Some(path_ranges)
+}
+
+fn prepare_povu_flubble_sites(
     graph: &SmoothGraph,
     path_positions: &[Vec<usize>],
     config: &SmoothConfig,
-) -> io::Result<FlubbleGuidedBlockPlan> {
-    if graph.paths.is_empty() {
-        return Ok(FlubbleGuidedBlockPlan {
-            blocks: Vec::new(),
-            povu_sites: 0,
-            level_ge_1_sites: 0,
-            selected_flubble_blocks: 0,
-            overlap_skipped_sites: 0,
-            gap_blocks: 0,
-        });
-    }
-
+    min_level: usize,
+) -> io::Result<PreparedPovuSites> {
     let rendered = render_smooth_graph_gfa(graph)?;
     let native = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
     let reference_names = if config.flubble_reference_names.is_empty() {
@@ -1084,56 +1122,88 @@ fn flubble_guided_blocks(
         .map(smooth_path_step_index)
         .collect::<Vec<_>>();
 
-    let mut candidates = Vec::new();
+    let total_sites = decomposition.sites.len();
     let mut level_ge_1_sites = 0usize;
+    let mut sites = Vec::new();
     for site in &decomposition.sites {
-        if site.level < 1 {
+        if site.level >= 1 {
+            level_ge_1_sites += 1;
+        }
+        if site.level < min_level {
             continue;
         }
-        level_ge_1_sites += 1;
         let Some(entry) = smooth_step_from_povu(&id_to_idx, &site.start) else {
             continue;
         };
         let Some(exit) = smooth_step_from_povu(&id_to_idx, &site.end) else {
             continue;
         };
-        let mut path_ranges = Vec::new();
-        for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
-            if let Some((begin_step, end_step)) =
-                unique_smooth_anchor_range(path_index, entry, exit)
-            {
-                let length =
-                    path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
-                if length > 0 {
-                    path_ranges.push(PathRange {
-                        path_idx,
-                        begin_step,
-                        end_step,
-                        length,
-                    });
-                }
-            }
-        }
-        if path_ranges.len() < 2 {
-            continue;
-        }
-        path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
-        let reference_span_bp = if site.reference_end_step + 1 < root_positions.len()
+        let reference_end_idx = site.reference_end_step.saturating_add(1);
+        let reference_span_bp = if reference_end_idx < root_positions.len()
             && site.reference_start_step < root_positions.len()
         {
-            root_positions[site.reference_end_step + 1] - root_positions[site.reference_start_step]
+            Some(root_positions[reference_end_idx] - root_positions[site.reference_start_step])
         } else {
-            0
+            None
         };
+        let Some(path_ranges) =
+            collect_site_path_ranges(&path_step_indexes, path_positions, entry, exit)
+        else {
+            continue;
+        };
+        sites.push(PreparedPovuSite {
+            id: site.id.clone(),
+            level: site.level,
+            reference_start_step: site.reference_start_step,
+            reference_end_step: site.reference_end_step,
+            is_leaf: site.is_leaf,
+            entry,
+            exit,
+            reference_span_bp,
+            path_ranges,
+        });
+    }
+
+    Ok(PreparedPovuSites {
+        total_sites,
+        level_ge_1_sites,
+        reference_path_index: decomposition.reference_path_index,
+        path_step_indexes,
+        sites,
+    })
+}
+
+fn flubble_guided_blocks(
+    graph: &SmoothGraph,
+    path_positions: &[Vec<usize>],
+    config: &SmoothConfig,
+) -> io::Result<FlubbleGuidedBlockPlan> {
+    if graph.paths.is_empty() {
+        return Ok(FlubbleGuidedBlockPlan {
+            blocks: Vec::new(),
+            povu_sites: 0,
+            level_ge_1_sites: 0,
+            selected_flubble_blocks: 0,
+            overlap_skipped_sites: 0,
+            gap_blocks: 0,
+        });
+    }
+
+    let prepared = prepare_povu_flubble_sites(graph, path_positions, config, 1)?;
+    let level_ge_1_sites = prepared.level_ge_1_sites;
+    let povu_sites = prepared.total_sites;
+    let mut candidates = Vec::new();
+    for site in prepared.sites {
+        let reference_span_bp = site.reference_span_bp.unwrap_or(0);
         candidates.push(FlubbleBlockCandidate {
             source: BlockSource::Flubble {
-                site_id: site.id.clone(),
+                site_id: site.id,
                 level: site.level,
                 reference_start_step: site.reference_start_step,
                 reference_end_step: site.reference_end_step,
                 is_leaf: site.is_leaf,
             },
-            path_ranges,
+            path_ranges: site.path_ranges,
             level: site.level,
             reference_start_step: site.reference_start_step,
             reference_end_step: site.reference_end_step,
@@ -1181,7 +1251,7 @@ fn flubble_guided_blocks(
 
     Ok(FlubbleGuidedBlockPlan {
         blocks,
-        povu_sites: decomposition.sites.len(),
+        povu_sites,
         level_ge_1_sites,
         selected_flubble_blocks,
         overlap_skipped_sites,
@@ -1211,82 +1281,18 @@ fn neighbor_merge_blocks(
         });
     }
 
-    let rendered = render_smooth_graph_gfa(graph)?;
-    let native = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
-    let reference_names = if config.flubble_reference_names.is_empty() {
-        vec![graph.paths[0].name.clone()]
-    } else {
-        config.flubble_reference_names.clone()
-    };
-    let decomposition = match native.decompose_flubbles(&reference_names) {
-        Ok(decomposition) => decomposition,
-        Err(err) if !config.flubble_reference_names.is_empty() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "POVU flubble reference hint(s) {:?} did not match graph paths: {}",
-                    config.flubble_reference_names, err
-                ),
-            ));
-        }
-        Err(err) => return Err(povu_to_io_error(err)),
-    };
-    let root_positions = path_positions
-        .get(decomposition.reference_path_index)
-        .ok_or_else(|| {
-            io::Error::other("POVU reference path index is outside smooth graph paths")
-        })?;
-
-    let id_to_idx = (0..graph.nodes.len())
-        .map(|idx| ((idx + 1).to_string(), idx))
-        .collect::<FxHashMap<_, _>>();
-    let path_step_indexes = graph
-        .paths
-        .iter()
-        .map(smooth_path_step_index)
-        .collect::<Vec<_>>();
-
+    let prepared = prepare_povu_flubble_sites(graph, path_positions, config, 0)?;
+    let povu_sites = prepared.total_sites;
+    let root_positions = &path_positions[prepared.reference_path_index];
+    let path_step_indexes = prepared.path_step_indexes;
     let mut candidates = Vec::new();
-    for site in &decomposition.sites {
-        let Some(entry) = smooth_step_from_povu(&id_to_idx, &site.start) else {
+    for site in prepared.sites {
+        let Some(reference_span_bp) = site.reference_span_bp else {
             continue;
         };
-        let Some(exit) = smooth_step_from_povu(&id_to_idx, &site.end) else {
-            continue;
-        };
-        let reference_end_idx = site.reference_end_step.saturating_add(1);
-        let reference_span_bp = if reference_end_idx < root_positions.len()
-            && site.reference_start_step < root_positions.len()
-        {
-            root_positions[reference_end_idx] - root_positions[site.reference_start_step]
-        } else {
-            continue;
-        };
-
-        let mut path_ranges = Vec::new();
-        for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
-            if let Some((begin_step, end_step)) =
-                unique_smooth_anchor_range(path_index, entry, exit)
-            {
-                let length =
-                    path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
-                if length > 0 {
-                    path_ranges.push(PathRange {
-                        path_idx,
-                        begin_step,
-                        end_step,
-                        length,
-                    });
-                }
-            }
-        }
-        if path_ranges.len() < 2 {
-            continue;
-        }
-        path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
         candidates.push(NeighborSiteCandidate {
-            entry,
-            exit,
+            entry: site.entry,
+            exit: site.exit,
             level: site.level,
             reference_start_step: site.reference_start_step,
             reference_end_step: site.reference_end_step,
@@ -1367,28 +1373,13 @@ fn neighbor_merge_blocks(
         let Some(last) = group.sites.last() else {
             continue;
         };
-        let mut path_ranges = Vec::new();
-        for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
-            if let Some((begin_step, end_step)) =
-                unique_smooth_anchor_range(path_index, first.entry, last.exit)
-            {
-                let length =
-                    path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
-                if length > 0 {
-                    path_ranges.push(PathRange {
-                        path_idx,
-                        begin_step,
-                        end_step,
-                        length,
-                    });
-                }
-            }
-        }
-        if path_ranges.len() < 2 || ranges_overlap_claimed(&path_ranges, &claimed_steps) {
+        let Some(path_ranges) =
+            collect_site_path_ranges(&path_step_indexes, path_positions, first.entry, last.exit)
+                .filter(|ranges| !ranges_overlap_claimed(ranges, &claimed_steps))
+        else {
             final_overlap_skipped_sites += group.sites.len();
             continue;
-        }
-        path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
+        };
         mark_claimed_ranges(&path_ranges, &mut claimed_steps);
         let source = BlockSource::NeighborMerge {
             site_count: group.sites.len(),
@@ -1408,7 +1399,7 @@ fn neighbor_merge_blocks(
 
     Ok(NeighborMergeBlockPlan {
         blocks,
-        povu_sites: decomposition.sites.len(),
+        povu_sites,
         candidate_sites,
         selected_sites,
         selected_groups,
@@ -1741,6 +1732,71 @@ fn extract_path_range_sequence(graph: &SmoothGraph, range: &PathRange) -> Vec<u8
         }
     }
     seq
+}
+
+/// Extract up to `poa_padding` bases immediately preceding `begin_step` in path orientation.
+fn extract_left_pad_sequence(
+    graph: &SmoothGraph,
+    steps: &[(usize, bool)],
+    begin_step: usize,
+    poa_padding: usize,
+) -> Vec<u8> {
+    let mut left_pad_seq = Vec::new();
+    if poa_padding == 0 {
+        return left_pad_seq;
+    }
+    let mut remaining = poa_padding;
+    let mut si = begin_step;
+    while si > 0 && remaining > 0 {
+        si -= 1;
+        let (node_idx, is_reverse) = steps[si];
+        let node_seq = &graph.nodes[node_idx];
+        let take = node_seq.len().min(remaining);
+        // Append each step's suffix in reverse so the final `.reverse()` restores
+        // both chunk order and forward base order inside each step.
+        if is_reverse {
+            // Reversed suffix of rc(node_seq) equals complement of node_seq prefix.
+            left_pad_seq.extend(node_seq[..take].iter().map(|&b| complement_base(b)));
+        } else {
+            left_pad_seq.extend(node_seq[node_seq.len() - take..].iter().rev().copied());
+        }
+        remaining -= take;
+    }
+    left_pad_seq.reverse();
+    left_pad_seq
+}
+
+/// Extract up to `poa_padding` bases immediately following `end_step` in path orientation.
+fn extract_right_pad_sequence(
+    graph: &SmoothGraph,
+    steps: &[(usize, bool)],
+    end_step: usize,
+    poa_padding: usize,
+) -> Vec<u8> {
+    let mut right_pad_seq = Vec::new();
+    if poa_padding == 0 {
+        return right_pad_seq;
+    }
+    let mut remaining = poa_padding;
+    let mut si = end_step;
+    while si < steps.len() && remaining > 0 {
+        let (node_idx, is_reverse) = steps[si];
+        let node_seq = &graph.nodes[node_idx];
+        let take = node_seq.len().min(remaining);
+        if is_reverse {
+            right_pad_seq.extend(
+                node_seq[node_seq.len() - take..]
+                    .iter()
+                    .rev()
+                    .map(|&b| complement_base(b)),
+            );
+        } else {
+            right_pad_seq.extend_from_slice(&node_seq[..take]);
+        }
+        remaining -= take;
+        si += 1;
+    }
+    right_pad_seq
 }
 
 // ---------------------------------------------------------------------------
@@ -2126,59 +2182,11 @@ fn smooth_block(
         let path = &graph.paths[range.path_idx];
         let (path_key, path_start) = parse_path_coords(&path.name);
 
-        // Extract core sequence
-        let mut core_seq: Vec<u8> = Vec::with_capacity(range.length);
-        for step_idx in range.begin_step..range.end_step {
-            let (node_idx, is_reverse) = path.steps[step_idx];
-            let node_seq = &graph.nodes[node_idx];
-            if is_reverse {
-                core_seq.extend(reverse_complement(node_seq));
-            } else {
-                core_seq.extend_from_slice(node_seq);
-            }
-        }
-
-        // Extract left padding (walk backwards from begin_step)
-        let mut left_pad_seq = Vec::new();
-        if poa_padding > 0 {
-            let mut remaining = poa_padding;
-            let mut si = range.begin_step;
-            while si > 0 && remaining > 0 {
-                si -= 1;
-                let (node_idx, is_reverse) = path.steps[si];
-                let node_seq = &graph.nodes[node_idx];
-                let take = node_seq.len().min(remaining);
-                if is_reverse {
-                    let rc = reverse_complement(node_seq);
-                    // Take the LAST `take` bases (we're walking backwards)
-                    left_pad_seq.extend_from_slice(&rc[rc.len() - take..]);
-                } else {
-                    left_pad_seq.extend_from_slice(&node_seq[node_seq.len() - take..]);
-                }
-                remaining -= take;
-            }
-            left_pad_seq.reverse();
-        }
-
-        // Extract right padding (walk forwards from end_step)
-        let mut right_pad_seq = Vec::new();
-        if poa_padding > 0 {
-            let mut remaining = poa_padding;
-            let mut si = range.end_step;
-            while si < path.steps.len() && remaining > 0 {
-                let (node_idx, is_reverse) = path.steps[si];
-                let node_seq = &graph.nodes[node_idx];
-                let take = node_seq.len().min(remaining);
-                if is_reverse {
-                    let rc = reverse_complement(node_seq);
-                    right_pad_seq.extend_from_slice(&rc[..take]);
-                } else {
-                    right_pad_seq.extend_from_slice(&node_seq[..take]);
-                }
-                remaining -= take;
-                si += 1;
-            }
-        }
+        let core_seq = extract_path_range_sequence(graph, range);
+        let left_pad_seq =
+            extract_left_pad_sequence(graph, &path.steps, range.begin_step, poa_padding);
+        let right_pad_seq =
+            extract_right_pad_sequence(graph, &path.steps, range.end_step, poa_padding);
 
         let actual_left_pad = left_pad_seq.len();
         let actual_right_pad = right_pad_seq.len();
@@ -2822,6 +2830,60 @@ P\tp2:0-4\t3+\t*
             ..SmoothConfig::new(5)
         };
 
+        let smoothed = smooth_gfa(gfa, &config).unwrap();
+        let after = keyed_path_sequences(&smoothed);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_extract_left_and_right_pad_sequence_preserves_base_order() {
+        let graph = SmoothGraph {
+            nodes: vec![
+                b"ACGTA".to_vec(), // 0: + is ACGTA
+                b"TTTCC".to_vec(), // 1: - is GGAAA
+                b"GAGTC".to_vec(), // 2: + is GAGTC (core)
+                b"CAATT".to_vec(), // 3: + is CAATT
+                b"GGTAC".to_vec(), // 4: - is GTACC
+            ],
+            edges: FxHashSet::default(),
+            paths: vec![],
+        };
+        let steps = vec![(0, false), (1, true), (2, false), (3, false), (4, true)];
+        // Full path sequence: ACGTA + GGAAA + GAGTC + CAATT + GTACC
+        assert_eq!(extract_left_pad_sequence(&graph, &steps, 2, 0), b"");
+        assert_eq!(extract_left_pad_sequence(&graph, &steps, 2, 3), b"AAA");
+        assert_eq!(extract_left_pad_sequence(&graph, &steps, 2, 5), b"GGAAA");
+        assert_eq!(extract_left_pad_sequence(&graph, &steps, 2, 7), b"TAGGAAA");
+        assert_eq!(
+            extract_left_pad_sequence(&graph, &steps, 2, 20),
+            b"ACGTAGGAAA"
+        );
+        assert_eq!(extract_right_pad_sequence(&graph, &steps, 3, 7), b"CAATTGT");
+    }
+
+    #[test]
+    fn test_smooth_gfa_left_padding_preserves_reverse_and_forward_paths() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tATGCA
+S\t2\tTTTCCGG
+S\t3\tGTCAGTCAGTCA
+S\t4\tTTAACCTTGG
+L\t1\t+\t2\t-\t0M
+L\t2\t-\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tp1:0-34\t1+,2-,3+,4+\t*
+P\tp2:0-34\t1+,2-,3+,4+\t*
+";
+        let before = keyed_path_sequences(gfa);
+        let config = SmoothConfig {
+            target_poa_lengths: vec![15],
+            max_node_length: 10,
+            poa_padding_fraction: 0.5,
+            pre_sorted: true,
+            num_threads: 1,
+            ..SmoothConfig::new(2)
+        };
         let smoothed = smooth_gfa(gfa, &config).unwrap();
         let after = keyed_path_sequences(&smoothed);
         assert_eq!(before, after);
