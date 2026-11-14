@@ -76,7 +76,7 @@ pub fn read_fasta(path: &Path) -> io::Result<Fasta> {
         } else {
             for b in line.bytes() {
                 let b = b.to_ascii_uppercase();
-                if !b"ACGTRYSWKMBDHVN".contains(&b) {
+                if !super::is_valid_iupac_base(b) {
                     return Err(invalid("invalid FASTA DNA"));
                 }
                 sequence.push(b);

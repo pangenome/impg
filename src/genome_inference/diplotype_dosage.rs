@@ -99,10 +99,11 @@
 //!    independence and compares). The default output carries ZERO
 //!    truth keys.
 
-use crate::genome_inference::{PanelIdentity};
+use crate::genome_inference::{load_component_axis_rows, PanelIdentity, RssGuard};
 use crate::syng::{SyncmerParams, SyngIndex};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -149,34 +150,6 @@ fn ensure(ok: bool, s: &str) -> io::Result<()> {
         Ok(())
     } else {
         Err(invalid(s))
-    }
-}
-
-struct RssGuard {
-    budget_bytes: Option<u64>,
-}
-
-impl RssGuard {
-    fn new(budget_gib: f64) -> Self {
-        RssGuard {
-            budget_bytes: (budget_gib > 0.0).then(|| (budget_gib * (1u64 << 30) as f64) as u64),
-        }
-    }
-    fn probe(&self, stage: &str) -> io::Result<u64> {
-        let text = std::fs::read_to_string("/proc/self/status")?;
-        let rss_kb = text
-            .lines()
-            .find(|l| l.starts_with("VmRSS:"))
-            .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
-            .unwrap_or(0);
-        if let Some(budget) = self.budget_bytes {
-            ensure(
-                rss_kb * 1024 <= budget,
-                &format!("RSS guard exceeded at {stage}: {rss_kb} kB"),
-            )?;
-        }
-        eprintln!("[dosage] rss {stage}: {rss_kb} kB");
-        Ok(rss_kb)
     }
 }
 
@@ -336,33 +309,23 @@ fn expected_mass(mu: f64, dosage: u64, length: u64) -> f64 {
     mu * (dosage * length) as f64
 }
 
-/// The number of entries before the first for which `predicate` is
-/// false (the standard partition_point over a sorted vec).
-fn partition_point<T>(sorted: &[T], predicate: impl Fn(&T) -> bool) -> usize {
-    let mut lo = 0usize;
-    let mut hi = sorted.len();
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if predicate(&sorted[mid]) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
 /// Merge the overlapping/touching intervals of a sorted list in
 /// place (the union of a record's material windows).
 fn merge_intervals(spans: &mut Vec<(u64, u64)>) {
-    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(spans.len());
-    for &(lo, hi) in spans.iter() {
-        match merged.last_mut() {
-            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
-            _ => merged.push((lo, hi)),
+    if spans.is_empty() {
+        return;
+    }
+    let mut write = 0usize;
+    for read in 1..spans.len() {
+        let (lo, hi) = spans[read];
+        if lo <= spans[write].1 {
+            spans[write].1 = spans[write].1.max(hi);
+        } else {
+            write += 1;
+            spans[write] = (lo, hi);
         }
     }
-    *spans = merged;
+    spans.truncate(write + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +370,7 @@ struct ReceiptLocus {
 
 pub fn run(options: Options) -> io::Result<()> {
     let started = Instant::now();
-    let rss = RssGuard::new(options.rss_budget_gib);
+    let rss = RssGuard::new("dosage", options.rss_budget_gib);
     ensure(options.molecules.is_file(), "the molecules file is absent")?;
     let text = std::fs::read_to_string(&options.molecules)?;
     let record: MoleculesRecord = serde_json::from_str(&text)?;
@@ -456,26 +419,7 @@ pub fn run(options: Options) -> io::Result<()> {
     // The window axis extents (the chain's own derivation: the
     // component's member rows ranked by start map to the window ids
     // in order — one window per axis row).
-    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
-    for entry in std::fs::read_dir(&options.partition_graphs)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".gfa.map.json") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)?;
-        #[derive(Deserialize)]
-        struct PartitionMap {
-            #[allow(dead_code)]
-            partition: u32,
-            members: Vec<MemberRow>,
-        }
-        let map: PartitionMap = serde_json::from_str(&text)?;
-        for axis in map.members.iter().filter(|m| m.path_name == component) {
-            axis_rows.push((map.partition, axis.start, axis.end));
-        }
-    }
-    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
+    let axis_rows = load_component_axis_rows(&options.partition_graphs, &component)?;
     let window_axis: Vec<(u64, u64)> =
         axis_rows.iter().map(|&(_, start, end)| (start, end)).collect();
     ensure(
@@ -586,8 +530,8 @@ pub fn run(options: Options) -> io::Result<()> {
                 for &(row_start, row_end) in rows {
                     // The segments a row contains are a contiguous
                     // sorted index range within the path.
-                    let lo = partition_point(starts, |&s| s < row_start);
-                    let hi = partition_point(starts, |&s| s < row_end);
+                    let lo = starts.partition_point(|&s| s < row_start);
+                    let hi = starts.partition_point(|&s| s < row_end);
                     for position in lo..hi {
                         if ends[position] <= row_end {
                             visits[base + position].push(Visit {
@@ -652,44 +596,69 @@ pub fn run(options: Options) -> io::Result<()> {
     let mut census_mass = 0u64;
     let mut material_mass = 0u64;
     let mut attributed_mass = 0u64;
-    for line in BufReader::new(reader).lines() {
-        let record: CensusLine = serde_json::from_str(&line?)?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    let mut nodes_buf: FxHashSet<u32> = FxHashSet::default();
+    let mut windows_buf: FxHashMap<usize, Vec<(u64, u64)>> = FxHashMap::default();
+    let mut touched_paths: Vec<usize> = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let record: CensusLine = serde_json::from_str(&line)?;
         census_records += 1;
         census_mass += record.multiplicity;
         // The union of the record's material windows, per path,
         // merged across occurrences (record-once).
-        let mut windows: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
-        for occurrence in &record.occurrences {
-            let nodes: HashSet<u32> = occurrence.intervals.iter().flatten().copied().collect();
-            if nodes.is_empty() {
-                continue;
+        for &path in &touched_paths {
+            if let Some(spans) = windows_buf.get_mut(&path) {
+                spans.clear();
             }
-            let mut spans: Vec<(u64, u64)> = panel
-                .walk_path_range(
-                    occurrence.path,
-                    occurrence.start,
-                    occurrence.start + READ_LENGTH,
-                )?
-                .into_iter()
-                .filter(|&(node, _)| nodes.contains(&node.unsigned_abs()))
-                .map(|(_, bp)| (bp, bp + k))
-                .collect();
-            if spans.is_empty() {
-                continue;
-            }
-            spans.sort_unstable();
-            windows.entry(occurrence.path).or_default().extend(spans);
         }
-        for spans in windows.values_mut() {
+        touched_paths.clear();
+        for occurrence in &record.occurrences {
+            if occurrence.intervals.is_empty() {
+                continue;
+            }
+            nodes_buf.clear();
+            nodes_buf.extend(occurrence.intervals.iter().flatten().copied());
+            if nodes_buf.is_empty() {
+                continue;
+            }
+            let overflow = || {
+                invalid(&format!(
+                    "census occurrence start {} overflows u64",
+                    occurrence.start
+                ))
+            };
+            let walk = panel.walk_path_range(
+                occurrence.path,
+                occurrence.start,
+                occurrence.start.checked_add(READ_LENGTH).ok_or_else(overflow)?,
+            )?;
+            let spans = windows_buf.entry(occurrence.path).or_default();
+            let was_empty = spans.is_empty();
+            for (node, bp) in walk {
+                if nodes_buf.contains(&node.unsigned_abs()) {
+                    spans.push((bp, bp.checked_add(k).ok_or_else(overflow)?));
+                }
+            }
+            if was_empty && !spans.is_empty() {
+                touched_paths.push(occurrence.path);
+            }
+        }
+        for &path in &touched_paths {
+            let Some(spans) = windows_buf.get_mut(&path) else {
+                continue;
+            };
             spans.sort_unstable();
             spans.dedup();
             merge_intervals(spans);
-        }
-        for (path, spans) in &windows {
             let Some(name) = panel
                 .name_map
                 .path_to_name
-                .get(*path)
+                .get(path)
                 .map(|n| n.as_str())
             else {
                 continue;
@@ -698,12 +667,11 @@ pub fn run(options: Options) -> io::Result<()> {
                 continue;
             };
             let segments = &mut per_path[slot].1;
-            for &(lo, hi) in spans {
+            for &(lo, hi) in spans.iter() {
                 material_mass += record.multiplicity * (hi - lo);
                 // The segments overlapping [lo, hi): a contiguous
                 // sorted index range from the first candidate.
-                let mut index =
-                    partition_point(&segments.starts, |&s| s < lo).saturating_sub(1);
+                let mut index = segments.starts.partition_point(|&s| s < lo).saturating_sub(1);
                 while index < segments.starts.len() && segments.starts[index] < hi {
                     let overlap_lo = segments.starts[index].max(lo);
                     let overlap_hi = segments.ends[index].min(hi);
@@ -748,29 +716,45 @@ pub fn run(options: Options) -> io::Result<()> {
         .map(|(index, (path, start, end))| {
             let observed = per_path[segment_slot[index]].1.mass[segment_pos[index]];
             let expected = expected_mass(mu, dosage[index], end - start);
+            let seg_visits = &visits[index];
+            let mut visits_molecule1 = 0usize;
+            let mut visits_molecule2 = 0usize;
+            let mut axis_min = u64::MAX;
+            let mut axis_max = 0u64;
+            let visits_json: Vec<serde_json::Value> = seg_visits
+                .iter()
+                .map(|v| {
+                    if v.molecule == 1 {
+                        visits_molecule1 += 1;
+                    } else if v.molecule == 2 {
+                        visits_molecule2 += 1;
+                    }
+                    axis_min = axis_min.min(v.axis_window.0);
+                    axis_max = axis_max.max(v.axis_window.1);
+                    serde_json::json!({
+                        "molecule": v.molecule,
+                        "locus": v.locus,
+                        "partition": v.partition,
+                        "fold_index": v.fold_index,
+                        "axis_window": [v.axis_window.0, v.axis_window.1],
+                    })
+                })
+                .collect();
+            let (axis_lo, axis_hi) = if seg_visits.is_empty() {
+                (*start, *end)
+            } else {
+                (axis_min, axis_max)
+            };
             serde_json::json!({
                 "path_name": path,
                 "start": start,
                 "end": end,
                 "length": end - start,
                 "dosage": dosage[index],
-                "visits_molecule1":
-                    visits[index].iter().filter(|v| v.molecule == 1).count(),
-                "visits_molecule2":
-                    visits[index].iter().filter(|v| v.molecule == 2).count(),
-                "visits": visits[index].iter().map(|v| serde_json::json!({
-                    "molecule": v.molecule,
-                    "locus": v.locus,
-                    "partition": v.partition,
-                    "fold_index": v.fold_index,
-                    "axis_window": [v.axis_window.0, v.axis_window.1],
-                })).collect::<Vec<_>>(),
-                "axis_extent": [
-                    visits[index].iter().map(|v| v.axis_window.0).min()
-                        .unwrap_or(*start),
-                    visits[index].iter().map(|v| v.axis_window.1).max()
-                        .unwrap_or(*end),
-                ],
+                "visits_molecule1": visits_molecule1,
+                "visits_molecule2": visits_molecule2,
+                "visits": visits_json,
+                "axis_extent": [axis_lo, axis_hi],
                 "observed_mass": observed,
                 "expected_mass": expected,
                 "mass_ratio": if expected > 0.0 {
@@ -781,21 +765,21 @@ pub fn run(options: Options) -> io::Result<()> {
             })
         })
         .collect();
+    let mut path_copy_bp = vec![0u64; per_path.len()];
+    for (index, (_, start, end)) in universe.iter().enumerate() {
+        path_copy_bp[segment_slot[index]] += dosage[index] * (end - start);
+    }
     let paths_json: Vec<serde_json::Value> = per_path
         .iter()
-        .map(|(path, segments)| {
+        .enumerate()
+        .map(|(slot, (path, segments))| {
             let covered_bp: u64 = segments
                 .starts
                 .iter()
                 .zip(&segments.ends)
                 .map(|(&s, &e)| e - s)
                 .sum();
-            let copy_bp: u64 = universe
-                .iter()
-                .zip(&dosage)
-                .filter(|((p, _, _), _)| p == path)
-                .map(|((_, s, e), &c)| c * (e - s))
-                .sum();
+            let copy_bp = path_copy_bp[slot];
             let path_length = path_of_name
                 .get(path)
                 .map(|&idx| panel.name_map.path_to_length[idx])
@@ -960,8 +944,8 @@ pub fn run(options: Options) -> io::Result<()> {
                 return Vec::new();
             };
             let (starts, ends) = (&union_bounds[slot].0, &union_bounds[slot].1);
-            let lo = partition_point(starts, |&s| s < row_start);
-            let hi = partition_point(starts, |&s| s < row_end);
+            let lo = starts.partition_point(|&s| s < row_start);
+            let hi = starts.partition_point(|&s| s < row_end);
             (lo..hi)
                 .filter(|&pos| ends[pos] <= row_end)
                 .map(|pos| union_slot_base[slot] + pos)
@@ -1415,14 +1399,8 @@ mod tests {
         let mut spans = vec![(0, 5), (5, 10), (20, 25), (22, 30)];
         merge_intervals(&mut spans);
         assert_eq!(spans, vec![(0, 10), (20, 30)]);
-    }
-
-    #[test]
-    fn partition_point_finds_the_sorted_range() {
-        let sorted = vec![0u64, 10, 20, 30];
-        assert_eq!(partition_point(&sorted, |_| false), 0);
-        assert_eq!(partition_point(&sorted, |&s| s < 10), 1);
-        assert_eq!(partition_point(&sorted, |&s| s < 25), 3);
-        assert_eq!(partition_point(&sorted, |&s| s < 100), 4);
+        let mut empty = Vec::new();
+        merge_intervals(&mut empty);
+        assert!(empty.is_empty());
     }
 }
