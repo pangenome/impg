@@ -161,12 +161,39 @@ pub fn normalize_repeat_self_loops(
     gfa_text: &str,
     config: &NormalizeSelfLoopsConfig,
 ) -> io::Result<NormalizeSelfLoopsResult> {
-    let before_paths = path_sequence_map(gfa_text)?;
     let parsed = parse_gfa(gfa_text)?;
     let before_report = diagnose_parsed_gfa(&parsed, 10);
 
     let eligible_nodes = eligible_self_loop_nodes(&parsed, config.max_unit_len);
     let targeted_nodes = targeted_run_nodes(&parsed, &eligible_nodes);
+    let path_steps_before = parsed
+        .paths
+        .iter()
+        .map(|path| path.steps().len())
+        .sum::<usize>();
+
+    if targeted_nodes.is_empty() {
+        let stats = NormalizeSelfLoopsStats {
+            input_direct_self_loop_edges: before_report.direct_self_loop_edges,
+            output_direct_self_loop_edges: before_report.direct_self_loop_edges,
+            input_adjacent_same_node_path_steps: before_report.adjacent_same_node_path_steps,
+            output_adjacent_same_node_path_steps: before_report.adjacent_same_node_path_steps,
+            input_adjacent_same_step_path_steps: before_report.adjacent_same_step_path_steps,
+            output_adjacent_same_step_path_steps: before_report.adjacent_same_step_path_steps,
+            normalized_nodes: 0,
+            collapsed_runs: 0,
+            created_segments: 0,
+            added_links: 0,
+            removed_self_loop_links: 0,
+            paths_changed: 0,
+            path_steps_before,
+            path_steps_after: path_steps_before,
+        };
+        return Ok(NormalizeSelfLoopsResult {
+            gfa: gfa_text.to_string(),
+            stats,
+        });
+    }
 
     let mut existing_segment_ids = parsed
         .segments
@@ -179,11 +206,6 @@ pub fn normalize_repeat_self_loops(
     let mut transformed_paths = Vec::<PathRecord>::with_capacity(parsed.paths.len());
     let mut collapsed_runs = 0usize;
     let mut paths_changed = 0usize;
-    let path_steps_before = parsed
-        .paths
-        .iter()
-        .map(|path| path.steps().len())
-        .sum::<usize>();
 
     for path in &parsed.paths {
         let (new_steps, path_collapsed_runs) = transform_path_steps(
@@ -196,17 +218,43 @@ pub fn normalize_repeat_self_loops(
             &mut new_segments,
         )?;
         collapsed_runs = collapsed_runs.saturating_add(path_collapsed_runs);
-        if new_steps != path.steps() {
+        if path_collapsed_runs > 0 {
             paths_changed += 1;
         }
         transformed_paths.push(path.with_steps(new_steps));
+    }
+
+    let new_segment_sequences = new_segments
+        .iter()
+        .filter_map(|seg| {
+            seg.raw
+                .split('\t')
+                .nth(2)
+                .map(|seq| (seg.id.clone(), seq.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    for (before_path, after_path) in parsed.paths.iter().zip(&transformed_paths) {
+        let before_seq = spell_path_steps(before_path.steps(), &parsed.segment_sequences, None)?;
+        let after_seq = spell_path_steps(
+            after_path.steps(),
+            &parsed.segment_sequences,
+            Some(&new_segment_sequences),
+        )?;
+        if before_seq != after_seq {
+            return Err(io::Error::other(
+                "self-loop normalization changed one or more GFA path spellings",
+            ));
+        }
     }
 
     let mut retained_links = Vec::new();
     let mut retained_link_keys = HashSet::<LinkKey>::new();
     let mut removed_self_loop_links = 0usize;
     for link in &parsed.links {
-        if link.key.from == link.key.to && targeted_nodes.contains(&link.key.from) {
+        if link.key.from == link.key.to
+            && link.key.from_orientation == link.key.to_orientation
+            && targeted_nodes.contains(&link.key.from)
+        {
             removed_self_loop_links += 1;
             continue;
         }
@@ -236,25 +284,28 @@ pub fn normalize_repeat_self_loops(
         &added_links,
         &transformed_paths,
     );
-    let after_paths = path_sequence_map(&normalized)?;
-    if before_paths != after_paths {
-        return Err(io::Error::other(
-            "self-loop normalization changed one or more GFA path spellings",
-        ));
-    }
 
-    let after_report = diagnose_gfa(&normalized)?;
+    let output_direct_self_loop_edges = retained_links
+        .iter()
+        .filter(|link| link.key.from == link.key.to)
+        .count()
+        + added_links
+            .iter()
+            .filter(|key| key.from == key.to)
+            .count();
+    let (output_adjacent_same_node_path_steps, output_adjacent_same_step_path_steps) =
+        count_adjacent_same_steps(&transformed_paths);
     let path_steps_after = transformed_paths
         .iter()
         .map(|path| path.steps().len())
         .sum::<usize>();
     let stats = NormalizeSelfLoopsStats {
         input_direct_self_loop_edges: before_report.direct_self_loop_edges,
-        output_direct_self_loop_edges: after_report.direct_self_loop_edges,
+        output_direct_self_loop_edges,
         input_adjacent_same_node_path_steps: before_report.adjacent_same_node_path_steps,
-        output_adjacent_same_node_path_steps: after_report.adjacent_same_node_path_steps,
+        output_adjacent_same_node_path_steps,
         input_adjacent_same_step_path_steps: before_report.adjacent_same_step_path_steps,
-        output_adjacent_same_step_path_steps: after_report.adjacent_same_step_path_steps,
+        output_adjacent_same_step_path_steps,
         normalized_nodes: targeted_nodes.len(),
         collapsed_runs,
         created_segments: new_segments.len(),
@@ -271,9 +322,51 @@ pub fn normalize_repeat_self_loops(
     })
 }
 
-fn path_sequence_map(gfa_text: &str) -> io::Result<BTreeMap<String, String>> {
-    crate::resolution::path_sequences(gfa_text)
-        .map(|paths| paths.into_iter().collect::<BTreeMap<_, _>>())
+fn spell_path_steps(
+    steps: &[Step],
+    base_segments: &HashMap<String, String>,
+    extra_segments: Option<&HashMap<String, String>>,
+) -> io::Result<Vec<u8>> {
+    let mut seq = Vec::new();
+    for step in steps {
+        let seg_seq = base_segments
+            .get(&step.node)
+            .or_else(|| extra_segments.and_then(|extra| extra.get(&step.node)))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("path references unknown segment '{}'", step.node),
+                )
+            })?;
+        if seg_seq == "*" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("segment '{}' is missing an explicit sequence", step.node),
+            ));
+        }
+        if step.orientation == '-' {
+            seq.extend(crate::graph::reverse_complement(seg_seq.as_bytes()));
+        } else {
+            seq.extend_from_slice(seg_seq.as_bytes());
+        }
+    }
+    Ok(seq)
+}
+
+fn count_adjacent_same_steps(paths: &[PathRecord]) -> (usize, usize) {
+    let mut same_node = 0usize;
+    let mut same_step = 0usize;
+    for path in paths {
+        for pair in path.steps().windows(2) {
+            if pair[0].node == pair[1].node {
+                same_node += 1;
+                if pair[0].orientation == pair[1].orientation {
+                    same_step += 1;
+                }
+            }
+        }
+    }
+    (same_node, same_step)
 }
 
 fn parse_gfa(gfa_text: &str) -> io::Result<ParsedGfa> {
@@ -1128,5 +1221,26 @@ P\tGRCh38#0#chr6:31846088-32072428(+)\t7067+,7068+,7069+\t*
             path_map(gfa) == path_map(&result.gfa),
             "compare_gfa_paths-style path spelling check must pass"
         );
+    }
+
+    #[test]
+    fn preserves_untraversed_hairpin_self_loop_when_normalizing_same_orient_runs() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\ts\tGG
+S\tu\tA
+S\te\tTT
+L\ts\t+\tu\t+\t0M
+L\tu\t+\tu\t+\t0M
+L\tu\t+\tu\t-\t0M
+L\tu\t+\te\t+\t0M
+P\tp\ts+,u+,u+,e+\t*
+";
+        let result =
+            normalize_repeat_self_loops(gfa, &NormalizeSelfLoopsConfig::default()).unwrap();
+        assert_eq!(path_map(gfa), path_map(&result.gfa));
+        assert!(!result.gfa.contains("\nL\tu\t+\tu\t+\t0M\n"));
+        assert!(result.gfa.contains("\nL\tu\t+\tu\t-\t0M\n"));
+        assert_eq!(result.stats.output_direct_self_loop_edges, 1);
     }
 }
