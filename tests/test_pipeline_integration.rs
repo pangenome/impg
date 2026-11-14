@@ -1,6 +1,6 @@
 //! Integration test for the full impg pipeline: index -> partition -> graph -> lace
 //! Uses yeast chrV test data (7 strains)
-//! Requires wfmash and samtools to be installed
+//! Uses the wfmash that the impg build puts beside the impg binary
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -9,41 +9,49 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn get_impg_binary() -> PathBuf {
-    // CARGO_BIN_EXE_impg is set by cargo test for the binary crate
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
-        return PathBuf::from(path);
-    }
-
-    // Get manifest dir and look for binary relative to it
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-    let candidates = [
-        manifest_dir.join("target/release/impg"),
-        manifest_dir.join("target/debug/impg"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return path.clone();
-        }
-    }
-
-    // Fall back to PATH
-    PathBuf::from("impg")
+    // The binary cargo built for this test run
+    PathBuf::from(env!("CARGO_BIN_EXE_impg"))
 }
 
 fn decompress_gz(gz_path: &PathBuf, out_path: &PathBuf) -> std::io::Result<()> {
-    // Use zcat which handles both standard gzip and BGZIP
-    let output = Command::new("zcat").arg(gz_path).output()?;
+    // gzip -dc reads standard gzip and BGZIP
+    let output = Command::new("gzip").arg("-dc").arg(gz_path).output()?;
     if !output.status.success() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            "zcat failed",
+            "gzip -dc failed",
         ));
     }
     let mut out_file = File::create(out_path)?;
     out_file.write_all(&output.stdout)?;
     Ok(())
+}
+
+/// Write the first `bases` of the first `records` FASTA records.
+fn write_subset(
+    full: &PathBuf,
+    subset: &PathBuf,
+    records: usize,
+    bases: usize,
+) -> std::io::Result<Vec<(String, String)>> {
+    let text = fs::read_to_string(full)?;
+    let mut kept: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        if let Some(name) = line.strip_prefix('>') {
+            if kept.len() == records {
+                break;
+            }
+            kept.push((name.to_string(), String::new()));
+        } else if let Some((_, seq)) = kept.last_mut() {
+            let room = bases - seq.len();
+            seq.push_str(&line[..line.len().min(room)].to_ascii_uppercase());
+        }
+    }
+    let mut out = File::create(subset)?;
+    for (name, seq) in &kept {
+        writeln!(out, ">{name}\n{seq}")?;
+    }
+    Ok(kept)
 }
 
 fn run_impg(work_dir: &PathBuf, args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -55,7 +63,6 @@ fn run_impg(work_dir: &PathBuf, args: &[&str]) -> std::io::Result<std::process::
 }
 
 #[test]
-#[ignore] // Requires wfmash and samtools - run with: cargo test -- --ignored
 fn test_full_pipeline() -> std::io::Result<()> {
     // Create temp directory
     let temp_dir = TempDir::new()?;
@@ -71,22 +78,18 @@ fn test_full_pipeline() -> std::io::Result<()> {
     // Check test data exists
     assert!(fasta_gz.exists(), "Test FASTA not found: {:?}", fasta_gz);
 
-    // Decompress FASTA
+    // Decompress FASTA, keep 4 strains x 60 kb
+    let full_path = work_dir.join("full.fa");
+    decompress_gz(&fasta_gz, &full_path)?;
     let fasta_path = work_dir.join("seqs.fa");
-    decompress_gz(&fasta_gz, &fasta_path)?;
-
-    // Create FASTA index using samtools
-    let samtools_result = Command::new("samtools")
-        .args(["faidx", fasta_path.to_str().unwrap()])
-        .output();
-
-    if samtools_result.is_err() || !samtools_result.as_ref().unwrap().status.success() {
-        eprintln!("Warning: samtools faidx failed, test may fail");
-    }
+    let inputs = write_subset(&full_path, &fasta_path, 4, 60_000)?;
+    assert_eq!(inputs.len(), 4, "subset records: {}", inputs.len());
 
     // Generate PAF alignments using wfmash
     let paf_path = work_dir.join("alignments.paf");
-    let wfmash_output = Command::new("wfmash")
+    let wfmash = get_impg_binary().with_file_name("wfmash");
+    assert!(wfmash.exists(), "bundled wfmash not found: {:?}", wfmash);
+    let wfmash_output = Command::new(&wfmash)
         .args([
             fasta_path.to_str().unwrap(),
             "-p",
@@ -101,9 +104,7 @@ fn test_full_pipeline() -> std::io::Result<()> {
         .output()?;
 
     if !wfmash_output.status.success() {
-        panic!(
-            "wfmash failed - is it installed? This test requires wfmash to generate alignments."
-        );
+        panic!("bundled wfmash failed with {}", wfmash_output.status);
     }
 
     // Write PAF output
@@ -133,13 +134,13 @@ fn test_full_pipeline() -> std::io::Result<()> {
         &[
             "partition",
             "-d",
-            "100000",
+            "10000",
             "-a",
             "alignments.paf",
             "-i",
             "test.impg",
             "-w",
-            "200000",
+            "20000",
             "--sequence-files",
             "seqs.fa",
             "-o",
@@ -257,7 +258,41 @@ fn test_full_pipeline() -> std::io::Result<()> {
     let path_count = gfa_content.lines().filter(|l| l.starts_with("P\t")).count();
 
     assert!(node_count >= 10, "Too few nodes: {}", node_count);
-    assert_eq!(path_count, 7, "Expected 7 paths, got {}", path_count);
+    assert_eq!(path_count, 4, "Expected 4 paths, got {}", path_count);
+
+    // Every laced path spells its input sequence
+    let segments: std::collections::HashMap<&str, &str> = gfa_content
+        .lines()
+        .filter(|l| l.starts_with("S\t"))
+        .map(|l| {
+            let mut f = l.split('\t');
+            (f.nth(1).unwrap(), f.next().unwrap())
+        })
+        .collect();
+    let complement = |b: u8| match b {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        other => other,
+    };
+    for (name, expected) in &inputs {
+        let line = gfa_content
+            .lines()
+            .find(|l| l.starts_with("P\t") && l.split('\t').nth(1) == Some(name.as_str()))
+            .unwrap_or_else(|| panic!("no path named {name}"));
+        let mut spelled = String::with_capacity(expected.len());
+        for step in line.split('\t').nth(2).unwrap().split(',') {
+            let (id, orient) = step.split_at(step.len() - 1);
+            let seq = segments[id].to_ascii_uppercase();
+            if orient == "+" {
+                spelled.push_str(&seq);
+            } else {
+                spelled.extend(seq.bytes().rev().map(|b| complement(b) as char));
+            }
+        }
+        assert!(spelled == *expected, "path {name} does not spell its input");
+    }
 
     eprintln!(
         "Pipeline test passed: {} nodes, {} paths, {} bytes",

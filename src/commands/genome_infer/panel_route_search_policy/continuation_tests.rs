@@ -447,13 +447,3 @@ fn long_dead_chain_and_exhaustion_have_no_history_or_depth_cap() {
     assert!(s.tasks.is_empty() && s.fifo.is_empty() && s.shallow.is_empty());
     assert_eq!(s.task_bytes, 0);
 }
-#[test]
-#[ignore = "intentional RED proof: current newest-ready cannot complete the frozen causal harness"]
-fn newest_ready_intentional_red() {
-    assert!(causal(0).iter().all(|&n| n > 0));
-}
-#[test]
-#[ignore = "intentional RED proof: naive greatest-creation-ID cannot complete the frozen causal harness"]
-fn greatest_creation_intentional_red() {
-    assert!(causal(1).iter().all(|&n| n > 0));
-}

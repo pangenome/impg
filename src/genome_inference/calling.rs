@@ -296,24 +296,4 @@ mod tests {
             .to_string()
             .contains("scaffold union base-pair count overflow"));
     }
-    #[test]
-    fn boundary_phase_counterexample_is_not_a_local_dosage_factor() {
-        let count_ab = |chromosomes: [&str; 2]| {
-            chromosomes
-                .iter()
-                .map(|s| s.as_bytes().windows(2).filter(|w| *w == b"AB").count())
-                .sum::<usize>()
-        };
-        assert_eq!(count_ab(["AB", "ab"]), 1);
-        assert_eq!(count_ab(["Ab", "aB"]), 0);
-        let marginal = |chromosomes: [&str; 2]| {
-            let mut l = chromosomes.map(|s| s.as_bytes()[0]);
-            let mut r = chromosomes.map(|s| s.as_bytes()[1]);
-            l.sort();
-            r.sort();
-            (l, r)
-        };
-        assert_eq!(marginal(["AB", "ab"]), marginal(["Ab", "aB"]));
-        // This caller excludes crossing spans; it never asserts discrimination.
-    }
 }

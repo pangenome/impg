@@ -1129,7 +1129,7 @@ P\tp\ta+,a+,b+\t*\tTP:Z:kept
         let gfa = "\
 H\tVN:Z:1.0
 S\tleft\tG
-S\tunit\tAT
+S\tunit\tAC
 S\tright\tC
 L\tleft\t+\tunit\t+\t0M
 L\tunit\t+\tunit\t+\t0M
@@ -1143,9 +1143,9 @@ W\tt\t0\tchr2\t0\t5\t>left<unit<unit>right
             normalize_repeat_self_loops(gfa, &NormalizeSelfLoopsConfig::default()).unwrap();
         let after = path_map(&result.gfa);
         assert_eq!(before, after);
-        assert_eq!(after["chr1"], "GATATC");
-        assert_eq!(after["chr2"], "GATATC");
-        assert!(result.gfa.contains("\nS\tunit_selfloop_run2\tATAT\n"));
+        assert_eq!(after["chr1"], "GACACC");
+        assert_eq!(after["chr2"], "GGTGTC");
+        assert!(result.gfa.contains("\nS\tunit_selfloop_run2\tACAC\n"));
         assert_eq!(result.stats.output_adjacent_same_step_path_steps, 0);
         assert_eq!(result.stats.created_segments, 1);
         assert_eq!(result.stats.collapsed_runs, 2);

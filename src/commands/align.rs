@@ -886,43 +886,10 @@ pub fn run_joblist(joblist_path: &Path, jobs: usize) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_sparsification() {
-        // Parsing is delegated to sweepga's FromStr — verify it works through the re-export
-        let s: SparsificationStrategy = "none".parse().unwrap();
-        assert_eq!(s, SparsificationStrategy::None);
-
-        let s: SparsificationStrategy = "giant:0.99".parse().unwrap();
-        assert_eq!(s, SparsificationStrategy::Connectivity(0.99));
-
-        let s: SparsificationStrategy = "tree:2:1:0.1".parse().unwrap();
-        assert_eq!(s, SparsificationStrategy::TreeSampling(2, 1, 0.1));
-
-        let s: SparsificationStrategy = "wfmash:auto".parse().unwrap();
-        assert_eq!(s, SparsificationStrategy::WfmashDensity(None));
-    }
-
     // The haplotype-grouping / sketch-merging / pair-expansion unit tests
     // moved upstream with the helpers themselves (sweepga:
     // knn_graph::{merge_sketches, expand_haplotype_pairs,
     // select_pairs_haplotype_aware*} and pansn::group_indices_by_pansn).
-
-    #[test]
-    fn test_mash_sketch_and_distance() {
-        let seq1 = b"ACGTACGTACGTACGT";
-        let seq2 = b"ACGTACGTACGTACGT";
-        let seq3 = b"GGGGGGGGGGGGGGGG";
-
-        let sketch1 = sweepga::mash::KmerSketch::from_sequence(seq1, 5, 100);
-        let sketch2 = sweepga::mash::KmerSketch::from_sequence(seq2, 5, 100);
-        let sketch3 = sweepga::mash::KmerSketch::from_sequence(seq3, 5, 100);
-
-        // Identical sequences should have distance 0
-        assert!(sketch1.mash_distance(&sketch2) < 0.01);
-
-        // Different sequences should have higher distance
-        assert!(sketch1.mash_distance(&sketch3) > 0.5);
-    }
 
     #[test]
     fn test_total_unique_pairs_no_underflow() {

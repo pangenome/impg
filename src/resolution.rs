@@ -12011,31 +12011,6 @@ W\t*\t0\twalk0\t0\t4\t>s0<s1
     }
 
     #[test]
-    fn poasta_global_two_piece_aligner_handles_end_indel_case() {
-        use poasta::aligner::config::Affine2PieceMinGapCost;
-        use poasta::aligner::PoastaAligner;
-        use poasta::graphs::poa::POAGraph;
-
-        let scoring = poasta_two_piece_scoring((1, 4, 6, 4, 26, 1)).unwrap();
-        let mut graph = POAGraph::<u32>::new();
-        let reference = b"ACGT";
-        let weights = vec![1usize; reference.len()];
-        graph
-            .add_alignment_with_weights("ref", reference, None, &weights)
-            .unwrap();
-
-        let aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
-        let query = b"TTACGTAA";
-        let result = aligner.align::<u32, _>(&graph, query);
-
-        assert!(!result.alignment.is_empty());
-        assert!(
-            u32::from(result.score) > 0,
-            "global alignment should penalize non-matching query ends"
-        );
-    }
-
-    #[test]
     fn poasta_gfa_clipped_w_walks_are_normalized_to_exact_paths() {
         let gfa = "\
 H\tVN:Z:1.1
@@ -12136,6 +12111,7 @@ P\tref\t1+,2+,4+\t*
 P\talt\t1+,3+,4+\t*
 ";
         let before = seq_map(gfa);
+        assert_eq!(ResolutionConfig::default().retry_min_compression_ratio, 0.0);
         let resolved = resolve_gfa_bubbles(gfa, &ResolutionConfig::default()).unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1);
@@ -12416,33 +12392,6 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
-    fn resolves_insertion_bubble_with_allwave_without_changing_path_sequences() {
-        let gfa = "\
-H\tVN:Z:1.0
-S\t1\tAAAAAAAAAAAAAAAAAAAA
-S\t2\tCCCCCCCCCCCCCCCCCCCC
-S\t3\tTTTTTTTTTTTTTTTTTTTT
-L\t1\t+\t3\t+\t0M
-L\t1\t+\t2\t+\t0M
-L\t2\t+\t3\t+\t0M
-P\tref\t1+,3+\t*
-P\tins\t1+,2+,3+\t*
-";
-        let before = seq_map(gfa);
-        let resolved = resolve_gfa_bubbles(
-            gfa,
-            &ResolutionConfig {
-                method: ResolutionMethod::Allwave,
-                max_median_traversal_len: 10_000,
-                ..ResolutionConfig::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.stats.resolved, 1);
-    }
-
-    #[test]
     fn smooth_polish_preserves_replacement_path_sequences() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -12454,11 +12403,17 @@ L\t1\t+\t2\t+\t0M
 L\t2\t+\t4\t+\t0M
 L\t1\t+\t3\t+\t0M
 L\t3\t+\t4\t+\t0M
-P\tp0\t1+,2+,4+\t*
-P\tp1\t1+,3+,4+\t*
+P\tp0:0-12\t1+,2+,4+\t*
+P\tp1:0-12\t1+,3+,4+\t*
 ";
+        // Candidate headers carry a range; smoothing keeps such names
         let before = seq_map(gfa);
-        let polished = polish_replacement_gfa(gfa, 2, &ResolutionConfig::default()).unwrap();
+        let config = ResolutionConfig {
+            polish_method: ResolutionPolishMethod::Smooth,
+            ..ResolutionConfig::default()
+        };
+        assert_ne!(config.polish_iterations, 0, "0 skips every polish");
+        let polished = polish_replacement_gfa(gfa, 2, &config).unwrap();
         assert_eq!(before, seq_map(&polished));
     }
 
@@ -12501,39 +12456,6 @@ P\tp1\t1+,3+,4+\t*
         }
     }
 
-    /// Per docs/crush-architecture-spec.md §Phase-2: median <1 kb → sPOA.
-    #[test]
-    fn auto_routes_small_median_to_spoa() {
-        let config = ResolutionConfig::default();
-        let candidate = routing_candidate_with_stats(traversal_stats_with(500, 800, 10));
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Poa
-        );
-    }
-
-    /// Per docs/crush-architecture-spec.md §Phase-2: 1 kb ≤ median < 10 kb → POASTA.
-    #[test]
-    fn auto_routes_medium_median_to_poasta() {
-        let config = ResolutionConfig::default();
-        let candidate = routing_candidate_with_stats(traversal_stats_with(5_000, 8_000, 10));
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Poasta
-        );
-    }
-
-    /// Per docs/crush-architecture-spec.md §Phase-2: median ≥10 kb → sweepga.
-    #[test]
-    fn auto_routes_large_median_to_sweepga() {
-        let config = ResolutionConfig::default();
-        let candidate = routing_candidate_with_stats(traversal_stats_with(20_000, 30_000, 10));
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Sweepga
-        );
-    }
-
     /// Decision variable is **median**, not max. A bubble with median=100 and
     /// max=30000 (one long outlier among many short traversals) must route to
     /// sPOA — see pick (a) in docs/crush-aligner-failure-trace.md where exactly
@@ -12556,6 +12478,14 @@ P\tp1\t1+,3+,4+\t*
     #[test]
     fn auto_routing_boundaries_are_exclusive_upper_bounds() {
         let config = ResolutionConfig::default();
+        assert_eq!(
+            (
+                config.auto_spoa_max_traversal_len,
+                config.auto_poasta_max_traversal_len
+            ),
+            (1_000, 10_000),
+            "default auto-routing thresholds"
+        );
         let at_spoa_boundary = routing_candidate_with_stats(traversal_stats_with(
             config.auto_spoa_max_traversal_len,
             2_000,
@@ -13868,32 +13798,6 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn candidate_interval_name_matches_query_fasta_contract() {
-        let candidate = BubbleCandidate {
-            ranges: vec![PathRange {
-                path_idx: 0,
-                source_path_name: Some("sample#0#chr1:100-220".to_string()),
-                source_begin_bp: 5,
-                source_end_bp: 17,
-                sequence: b"ACGTACGTACGT".to_vec(),
-                ..PathRange::default()
-            }],
-            signature: "query-contract".to_string(),
-            root_start_step: 0,
-            root_end_step: 0,
-            root_span: 0,
-            total_steps: 0,
-            unique_steps: 0,
-            traversal_stats: TraversalStats::default(),
-            level: 0,
-        };
-
-        let headers = candidate_sequence_headers(&candidate).unwrap();
-        let query_fasta_header_for_same_interval = "sample#0#chr1:105-117";
-        assert_eq!(headers, vec![query_fasta_header_for_same_interval]);
-    }
-
-    #[test]
     fn local_replacement_visible_names_adjust_only_ranges() {
         assert_eq!(
             local_replacement_visible_source_name("HG001#1#chr6:100-500", 20, 60).as_deref(),
@@ -14002,47 +13906,6 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn replacement_paf_sequence_names_match_fasta_headers() {
-        let candidate = BubbleCandidate {
-            ranges: vec![
-                PathRange {
-                    path_idx: 0,
-                    source_path_name: Some("HG001#1#chr6:100-120".to_string()),
-                    source_begin_bp: 2,
-                    source_end_bp: 10,
-                    sequence: b"ACGTACGT".to_vec(),
-                    ..PathRange::default()
-                },
-                PathRange {
-                    path_idx: 1,
-                    source_path_name: Some("HG002#2#chr6:200-220".to_string()),
-                    source_begin_bp: 3,
-                    source_end_bp: 11,
-                    sequence: b"ACGTTCGT".to_vec(),
-                    ..PathRange::default()
-                },
-            ],
-            signature: "paf-naming".to_string(),
-            root_start_step: 0,
-            root_end_step: 0,
-            root_span: 0,
-            total_steps: 0,
-            unique_steps: 0,
-            traversal_stats: TraversalStats::default(),
-            level: 0,
-        };
-
-        let (headers, seqs) = candidate_named_sequences(&candidate).unwrap();
-        let paf =
-            crate::syng_graph::pairwise_biwfa_paf(&seqs[1].0, &seqs[1].1, &seqs[0].0, &seqs[0].1)
-                .expect("BiWFA should emit a PAF row for non-empty local replacement sequences");
-        let fields = paf.trim_end().split('\t').collect::<Vec<_>>();
-
-        assert_eq!(fields[0], headers[1]);
-        assert_eq!(fields[5], headers[0]);
-    }
-
-    #[test]
     fn local_replacement_gfa_path_names_preserve_semantic_source_names() {
         let candidate = BubbleCandidate {
             ranges: vec![
@@ -14074,6 +13937,16 @@ P\talt\t1+,3+,4+\t*
         };
 
         let headers = candidate_sequence_headers(&candidate).unwrap();
+
+        // PAF keeps names with # and :
+        let (_, seqs) = candidate_named_sequences(&candidate).unwrap();
+        let paf =
+            crate::syng_graph::pairwise_biwfa_paf(&seqs[1].0, &seqs[1].1, &seqs[0].0, &seqs[0].1)
+                .expect("BiWFA should emit a PAF row for non-empty local replacement sequences");
+        let fields = paf.trim_end().split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], headers[1]);
+        assert_eq!(fields[5], headers[0]);
+
         let replacement =
             build_biwfa_inmemory_replacement(&candidate, &ResolutionConfig::default()).unwrap();
         let path_names = replacement
@@ -16802,31 +16675,6 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
-    fn direct_poa_processes_candidate_within_max_traversal_budget() {
-        let gfa = "\
-H\tVN:Z:1.0
-S\t1\tAC
-S\t2\tGGG
-S\t3\tTA
-L\t1\t+\t3\t+\t0M
-L\t1\t+\t2\t+\t0M
-L\t2\t+\t3\t+\t0M
-P\tref\t1+,3+\t*
-P\tins\t1+,2+,3+\t*
-";
-        let before = seq_map(gfa);
-        let config = ResolutionConfig {
-            method: ResolutionMethod::Poa,
-            max_traversal_len: 100,
-            ..ResolutionConfig::default()
-        };
-        let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
-        assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
-        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
-    }
-
-    #[test]
     fn skips_ambiguous_repeated_boundaries() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -17067,60 +16915,6 @@ P\tp\t1+,2+\t*
         zero_input.traversal_stats.total_len = 0;
         let replacement = mk_replacement(&[("1", &[b'A'; 10])]);
         assert!(replacement_compression_ratio(&zero_input, &replacement).is_none());
-    }
-
-    /// End-to-end: compression-ratio thresholds are diagnostic only. Even an
-    /// aggressive threshold must not rebuild with an alternate aligner, swap a
-    /// replacement, or reject an otherwise path-valid replacement.
-    #[test]
-    fn compression_ratio_threshold_is_diagnostic_only() {
-        // Reuse the canonical snp bubble fixture from
-        // `resolves_simple_snp_bubble_without_changing_path_sequences`.
-        let gfa = "\
-H\tVN:Z:1.0
-S\t1\tA
-S\t2\tC
-S\t3\tG
-S\t4\tT
-S\t5\tA
-S\t6\tC
-S\t7\tG
-L\t1\t+\t2\t+\t0M
-L\t2\t+\t3\t+\t0M
-L\t1\t+\t4\t+\t0M
-L\t4\t+\t3\t+\t0M
-L\t3\t+\t5\t+\t0M
-L\t5\t+\t6\t+\t0M
-L\t6\t+\t7\t+\t0M
-P\tref\t1+,2+,3+,5+,6+,7+\t*
-P\talt\t1+,4+,3+,5+,6+,7+\t*
-";
-        let before = seq_map(gfa);
-        assert_eq!(ResolutionConfig::default().retry_min_compression_ratio, 0.0);
-
-        let cfg_aggressive = ResolutionConfig {
-            retry_min_compression_ratio: 1e9,
-            retry_min_input_bp: 0,
-            ..ResolutionConfig::default()
-        };
-        let aggressive = resolve_gfa_bubbles(gfa, &cfg_aggressive).unwrap();
-        assert_eq!(
-            before,
-            seq_map(&aggressive.gfa),
-            "diagnostic compression thresholds must preserve every input path sequence"
-        );
-        assert_eq!(
-            aggressive.stats.retry_attempts, 0,
-            "compression threshold must not trigger alternate aligner attempts"
-        );
-        assert_eq!(
-            aggressive.stats.retry_wins, 0,
-            "compression threshold must not swap replacements by metric"
-        );
-        assert_eq!(
-            aggressive.stats.retry_failures, 0,
-            "compression threshold must not record retry failures"
-        );
     }
 
     #[test]

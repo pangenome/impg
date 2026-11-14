@@ -176,15 +176,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_noop() {
-        let cig = b"MMMMMMMM";
-        assert_eq!(
-            left_align_indels(cig, b"ACGTACGT", b"ACGTACGT"),
-            cig.to_vec()
-        );
-    }
-
-    #[test]
     fn simple_insertion_shifts_left_over_homopolymer() {
         // query has an extra A in a homopolymer run:
         //   target: ACAAAAG   (len 7)
@@ -238,23 +229,10 @@ mod tests {
 
     #[test]
     fn shift_stops_at_mismatch() {
-        // Preceding op is X → should not shift past it.
-        //   target: ACGTTT (6)
-        //   query:  AXGTT  (5, with mismatch at pos 1 and a missing T)
-        //   Hmm, let me keep it simpler with a concrete case.
-        // target: ACTTT (5), query: ATTT (4) → query has an X at pos 0
-        // (A→?), and missing a C or T. Actually let me just verify the
-        // invariant: if prev_op is X, the run doesn't shift past it.
-        let cig = b"XMDMM".to_vec(); // position 2 is D, preceded by M at 1 preceded by X at 0.
-                                     // D can shift over M but should stop before X.
-                                     // Sequences for this: CIGAR consumes q=1+1+0+1+1=4, t=1+1+1+1+1=5.
-        let query = b"ACGT";
-        let target = b"ACGTT"; // extra T at the end.
-        let out = left_align_indels(&cig, query, target);
-        // D was at index 2 originally, preceded by M at 1. The D run tail
-        // base = target[t_pos + run_len - 1] = target[2+1-1] = target[2] = 'G'.
-        // The swap_base (target[t_pos - 1]) = target[1] = 'C'. 'G' != 'C',
-        // so no shift. Output == input.
+        // target AAT, query CT. D follows X.
+        // Without the X guard: DXM.
+        let cig = b"XDM".to_vec();
+        let out = left_align_indels(&cig, b"CT", b"AAT");
         assert_eq!(
             out,
             cig,

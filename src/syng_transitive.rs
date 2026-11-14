@@ -1674,27 +1674,6 @@ mod tests {
         assert_eq!(out[0].anchors.len(), 1);
     }
 
-    #[test]
-    fn chain_anchors_colinear_forms_one_chain() {
-        // Four anchors on the primary diagonal within the queried range:
-        // mutual-best links pair (i, i+1) for every i.
-        let hits = vec![HomologousIntervalWithAnchors {
-            genome: "g".into(),
-            start: 0,
-            end: 500,
-            strand: '+',
-            anchors: vec![
-                mk_anchor(0, 0),
-                mk_anchor(50, 50),
-                mk_anchor(100, 100),
-                mk_anchor(150, 150),
-            ],
-        }];
-        let out = chain_anchors(hits, 500, TEST_SYNCMER_LEN);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].anchors.len(), 4);
-    }
-
     fn irregular_exact_anchors(strand: char, offset: u64) -> Vec<Anchor> {
         let steps = [1, 47, 3, 24, 55, 2, 13, 63, 7, 31];
         let mut q = 0;

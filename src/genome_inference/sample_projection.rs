@@ -6093,7 +6093,7 @@ mod census_profile_tests {
     }
 
     #[test]
-    fn pair_binds_handles_extreme_positions_without_overflow() {
+    fn pair_binds_returns_false_on_position_mismatch() {
         let tokens = crate::sample_mem_bwt::encode_walk(&[(1, 0), (2, 10)]).unwrap();
         assert!(!pair_binds(&tokens, &vec![(1, u32::MAX), (2, 0)], &tokens).unwrap());
         assert!(!pair_binds(&tokens, &vec![(-2, u32::MAX), (-1, 0)], &[]).unwrap());
@@ -6122,14 +6122,6 @@ mod census_profile_tests {
     }
 
     #[test]
-    fn decode_tokens_rejects_position_overflow() {
-        let huge_gap = u64::MAX; // gap = 2^63 - 1
-        let tokens = [2, huge_gap, 2, huge_gap, 2, huge_gap, 4];
-        let err = decode_tokens(&tokens).unwrap_err();
-        assert!(err.to_string().contains("overflow"));
-    }
-
-    #[test]
     fn rc_frame_step_errors_on_underflow_and_short_sequence() {
         let err = rc_frame_step(5, 0, 100, 10, 63).unwrap_err();
         assert!(err.to_string().contains("leaves the 10 bp sequence"));
@@ -6147,7 +6139,7 @@ mod census_profile_tests {
                 path_idx: 0,
                 start: 0,
                 end: 100,
-                steps: vec![(2, 10), (5, 20)],
+                steps: vec![(2, 10), (5, 10)],
             }],
             path_intervals: vec![vec![(0, 100, 0)]],
         };

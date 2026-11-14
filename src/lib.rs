@@ -1676,6 +1676,19 @@ mod tests {
             )
             .unwrap();
 
+        // The loop below needs paired results
+        assert!(
+            !results_no_pad.is_empty() && !results_with_pad.is_empty(),
+            "both queries must return intervals: {} unpadded, {} padded",
+            results_no_pad.len(),
+            results_with_pad.len()
+        );
+        assert_eq!(
+            results_no_pad.len(),
+            results_with_pad.len(),
+            "padding must not change the number of intervals"
+        );
+
         // With padding, intervals should be at least as wide
         for (no_p, with_p) in results_no_pad.iter().zip(results_with_pad.iter()) {
             if no_p.0.metadata == with_p.0.metadata {

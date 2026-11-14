@@ -1,21 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn impg_binary() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
-        return Some(PathBuf::from(path));
-    }
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        manifest_dir.join("target/debug/impg"),
-        manifest_dir.join("target/release/impg"),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    // The binary cargo built for this test run
+    Some(PathBuf::from(env!("CARGO_BIN_EXE_impg")))
 }
 
 fn report_section_lines<'a>(report: &'a str, section: &str) -> Vec<&'a str> {

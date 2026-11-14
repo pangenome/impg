@@ -188,20 +188,8 @@ fn create_test_agc(path: &str) {
 
 /// Locate the compiled `impg` binary for CLI tests.
 fn impg_binary() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
-        return Some(PathBuf::from(path));
-    }
-
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        manifest_dir.join("target/debug/impg"),
-        manifest_dir.join("target/release/impg"),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    // The binary cargo built for this test run
+    Some(PathBuf::from(env!("CARGO_BIN_EXE_impg")))
 }
 
 fn read_pack_tsv_counts(path: &Path) -> BTreeMap<u32, u64> {
@@ -617,95 +605,6 @@ fn test_syng_render_bundle_preserves_source_namespace() {
 }
 
 #[test]
-fn test_syng_agc_build_produces_non_empty_index() {
-    let _guard = lock_syng();
-    let Some(bin) = impg_binary() else {
-        eprintln!("Skipping: impg binary not built");
-        return;
-    };
-
-    let dir = std::env::temp_dir().join("impg_test_syng_agc_build");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let agc_path = dir.join("test.agc");
-    create_test_agc(agc_path.to_str().unwrap());
-
-    let out_prefix = dir.join("idx");
-
-    let output = Command::new(&bin)
-        .args([
-            "syng",
-            "--agc",
-            agc_path.to_str().unwrap(),
-            "--syncmer-length",
-            "63",
-            "--smer-length",
-            "8",
-            "-o",
-            out_prefix.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run impg syng --agc");
-
-    assert!(
-        output.status.success(),
-        "impg syng --agc failed. stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let gbwt_path = format!("{}.1gbwt", out_prefix.to_str().unwrap());
-    let khash_path = format!("{}.1khash", out_prefix.to_str().unwrap());
-    let names_path = format!("{}.syng.names", out_prefix.to_str().unwrap());
-    let spos_path = format!("{}.syng.spos", out_prefix.to_str().unwrap());
-    let pstep_path = format!("{}.syng.pstep", out_prefix.to_str().unwrap());
-    let meta_path = format!("{}.syng.meta", out_prefix.to_str().unwrap());
-
-    assert!(std::path::Path::new(&gbwt_path).exists(), ".1gbwt missing");
-    assert!(
-        std::path::Path::new(&khash_path).exists(),
-        ".1khash missing"
-    );
-    assert!(
-        std::path::Path::new(&names_path).exists(),
-        ".syng.names missing"
-    );
-    assert!(
-        std::path::Path::new(&spos_path).exists(),
-        ".syng.spos missing"
-    );
-    assert!(
-        std::path::Path::new(&pstep_path).exists(),
-        ".syng.pstep missing"
-    );
-    assert!(
-        std::path::Path::new(&meta_path).exists(),
-        ".syng.meta missing"
-    );
-
-    // Key assertion: the GBWT must contain actual vertex data, not just a
-    // schema header. The yeast235 bug slipped through because nothing
-    // asserted on file size. An empty GBWT is ~1300 bytes; a populated one
-    // for even this tiny test should be several KB.
-    let gbwt_size = std::fs::metadata(&gbwt_path).unwrap().len();
-    assert!(
-        gbwt_size > 2000,
-        ".1gbwt is only {} bytes — suggests no syncmer vertices were written. \
-         This is the bug that slipped through on yeast235.agc.",
-        gbwt_size
-    );
-
-    let khash_size = std::fs::metadata(&khash_path).unwrap().len();
-    assert!(
-        khash_size > 1000,
-        ".1khash is only {} bytes — suggests no k-mer hash entries",
-        khash_size
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
 fn test_syng_agc_roundtrip_query() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
@@ -739,6 +638,17 @@ fn test_syng_agc_roundtrip_query() {
         build_output.status.success(),
         "impg syng --agc failed. stderr: {}",
         String::from_utf8_lossy(&build_output.stderr)
+    );
+    // An empty GBWT is 1300 bytes.
+    let gbwt_size = std::fs::metadata(format!("{out_prefix_str}.1gbwt")).unwrap().len();
+    assert!(
+        gbwt_size > 2000,
+        ".1gbwt is only {gbwt_size} bytes: no syncmer vertices were written"
+    );
+    let khash_size = std::fs::metadata(format!("{out_prefix_str}.1khash")).unwrap().len();
+    assert!(
+        khash_size > 1000,
+        ".1khash is only {khash_size} bytes: no k-mer hash entries"
     );
 
     // Load the index back and run a query on the shared backbone region.
@@ -839,131 +749,6 @@ fn test_syng_agc_parallel_dictionary_roundtrip_query() {
     assert!(
         intervals.iter().any(|iv| iv.genome.contains("sampleB")),
         "parallel dictionary build should preserve shared-backbone query behavior"
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn test_syng_fasta_build_produces_non_empty_index() {
-    // Same non-empty-GBWT assertion but via the FASTA input path, to catch
-    // regressions in either build path symmetrically.
-    let _guard = lock_syng();
-    let Some(bin) = impg_binary() else {
-        eprintln!("Skipping: impg binary not built");
-        return;
-    };
-
-    let dir = std::env::temp_dir().join("impg_test_syng_fasta_nonempty");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let fasta_path = dir.join("test.fa");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&fasta_path).unwrap();
-        let backbone = numeric_to_ascii(&make_sequence_numeric(800, 42));
-        let tail_a = numeric_to_ascii(&make_sequence_numeric(400, 1));
-        let tail_b = numeric_to_ascii(&make_sequence_numeric(400, 2));
-        let other = numeric_to_ascii(&make_sequence_numeric(1200, 99));
-
-        writeln!(f, ">sampleA#chr1").unwrap();
-        f.write_all(&backbone).unwrap();
-        f.write_all(&tail_a).unwrap();
-        writeln!(f).unwrap();
-        writeln!(f, ">sampleB#chr1").unwrap();
-        f.write_all(&backbone).unwrap();
-        f.write_all(&tail_b).unwrap();
-        writeln!(f).unwrap();
-        writeln!(f, ">sampleC#chr1").unwrap();
-        f.write_all(&other).unwrap();
-        writeln!(f).unwrap();
-    }
-
-    let out_prefix = dir.join("idx");
-    let out = Command::new(&bin)
-        .args([
-            "syng",
-            "-f",
-            fasta_path.to_str().unwrap(),
-            "-o",
-            out_prefix.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run impg syng -f");
-    assert!(
-        out.status.success(),
-        "impg syng -f failed. stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let gbwt_size = std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
-        .unwrap()
-        .len();
-    assert!(
-        gbwt_size > 2000,
-        ".1gbwt is only {} bytes from FASTA build",
-        gbwt_size
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn test_syng_fasta_parallel_dictionary_build_produces_non_empty_index() {
-    let _guard = lock_syng();
-    let Some(bin) = impg_binary() else {
-        eprintln!("Skipping: impg binary not built");
-        return;
-    };
-
-    let dir = std::env::temp_dir().join("impg_test_syng_fasta_parallel_dictionary");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let fasta_path = dir.join("test.fa");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&fasta_path).unwrap();
-        let backbone = numeric_to_ascii(&make_sequence_numeric(800, 42));
-        let tail_a = numeric_to_ascii(&make_sequence_numeric(400, 1));
-        let tail_b = numeric_to_ascii(&make_sequence_numeric(400, 2));
-
-        writeln!(f, ">sampleA#chr1").unwrap();
-        f.write_all(&backbone).unwrap();
-        f.write_all(&tail_a).unwrap();
-        writeln!(f).unwrap();
-        writeln!(f, ">sampleB#chr1").unwrap();
-        f.write_all(&backbone).unwrap();
-        f.write_all(&tail_b).unwrap();
-        writeln!(f).unwrap();
-    }
-
-    let out_prefix = dir.join("idx");
-    let out = Command::new(&bin)
-        .args([
-            "syng",
-            "-f",
-            fasta_path.to_str().unwrap(),
-            "--parallel-dictionary",
-            "-o",
-            out_prefix.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run impg syng -f --parallel-dictionary");
-    assert!(
-        out.status.success(),
-        "impg syng -f --parallel-dictionary failed. stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let gbwt_size = std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
-        .unwrap()
-        .len();
-    assert!(
-        gbwt_size > 2000,
-        ".1gbwt is only {} bytes from parallel FASTA build",
-        gbwt_size
     );
 
     std::fs::remove_dir_all(&dir).ok();

@@ -16,20 +16,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn get_impg_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
-        return PathBuf::from(path);
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("target/release/impg"),
-        manifest_dir.join("target/debug/impg"),
-    ];
-    for path in &candidates {
-        if path.exists() {
-            return path.clone();
-        }
-    }
-    PathBuf::from("impg")
+    // The binary cargo built for this test run
+    PathBuf::from(env!("CARGO_BIN_EXE_impg"))
 }
 
 fn run_impg(work_dir: &PathBuf, args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -187,6 +175,17 @@ fn test_transitive_coordinate_accuracy() {
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
+
+    let seq_names: HashSet<_> = results
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
+    for expected in ["A", "B", "C"] {
+        assert!(
+            seq_names.contains(expected),
+            "Should contain {expected}, got {seq_names:?}"
+        );
+    }
 
     // Check coordinate accuracy
     for (name, start, end, _) in &results {

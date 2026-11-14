@@ -30,8 +30,8 @@ fn align_fastga_accepts_bare_relative_fasta_name() {
         "impg align failed with a bare relative FASTA name\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        dir.path().join("out/alignments.paf").exists(),
-        "impg align wrote no PAF"
-    );
+    let paf = std::fs::read_to_string(dir.path().join("out/alignments.paf"))
+        .expect("impg align wrote no PAF");
+    // -f2 dropped every shared seed.
+    assert!(paf.lines().count() > 0, "expected at least one alignment");
 }

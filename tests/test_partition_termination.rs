@@ -15,20 +15,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn get_impg_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
-        return PathBuf::from(path);
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("target/release/impg"),
-        manifest_dir.join("target/debug/impg"),
-    ];
-    for path in &candidates {
-        if path.exists() {
-            return path.clone();
-        }
-    }
-    PathBuf::from("impg")
+    // The binary cargo built for this test run
+    PathBuf::from(env!("CARGO_BIN_EXE_impg"))
 }
 
 /// Run impg with a hard wall clock. A pre-fix infinite loop shows up as a

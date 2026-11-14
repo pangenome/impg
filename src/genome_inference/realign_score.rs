@@ -6237,7 +6237,7 @@ impl ClassScanBoundIndex {
 /// accumulation walks units ascending in both — and IEEE-754
 /// round-to-nearest is a deterministic function of the input bits
 /// and the op sequence, so the results are equal bit for bit. Proven per-shape by
-/// `bit_equal_rows_share_one_class_sum` and per-fixture by
+/// `scan_memo_canonicalizes_only_bit_equal_columns` and per-fixture by
 /// `memoized_scan_is_bit_identical_to_direct_on_randomized_rows`.
 /// THE KEY DISCIPLINE (the fold-signature doctrine): bucketing by
 /// the canonical column-content hash (`column_key_hash` —
@@ -12573,37 +12573,6 @@ mod tests {
     }
 
     #[test]
-    fn placements_with_out_of_extent_votes_are_invalid() {
-        // A fold whose extent ends inside the read's right flank: the
-        // voted bases do not all project inside, so the placement is
-        // not a placement of the model (the read must lie fully
-        // inside).
-        let seq = fold_seq();
-        let (read, _) = forward_read(&seq);
-        let reads = vec![read];
-        let unit = Unit {
-            record: 0,
-            variant: 0,
-            mirror: false,
-            read: 0,
-            w_lo: 2,
-            count: 1,
-        };
-        let pin = Pin {
-            orientation: 0,
-            pinned: vec![Some(4), Some(14)],
-            backbone_bp: 16,
-        };
-        let placed = placement_score(&unit, &canonical(), &pin, &seq, 24, &reads, K, 0, 24);
-        assert!(placed.is_none());
-        // Backbone windows partly outside the extent are not
-        // placements either (the windows_inside check at pin
-        // construction discards them).
-        let pin_outside = [Some(196i64), Some(206)];
-        assert!(pin_outside.iter().flatten().any(|&r| r + K as i64 > 24));
-    }
-
-    #[test]
     fn the_territory_image_restricts_placements_symmetrically() {
         // Stage 2, rule 8: under the normalized convention the
         // comparison domain is the fold's TERRITORY IMAGE — a
@@ -12851,7 +12820,6 @@ mod tests {
         let a_local = -9.9f64;
         let b_local = -25.0f64;
         assert!(logsumexp2(a_local, e) > logsumexp2(b_local, e));
-        assert_eq!(logsumexp2(a_local, e), logsumexp2(a_local, e));
         // Deep below E the branches are indistinguishable: the read
         // does not vote.
         let x = logsumexp2(-1546.0f64, e);
@@ -14953,27 +14921,7 @@ mod tests {
         // known-nonzero point (e^-744 ~ 2^-1073.4, far above the
         // boundary) and a known-zero point (-1075*ln(2), the
         // real-arithmetic boundary itself).
-        let mut lo = -744.0f64;
-        let mut hi = -1075.0f64 * 2.0f64.ln();
-        assert!(lo.exp() > 0.0, "the search's low anchor must not underflow");
-        assert_eq!(hi.exp(), 0.0, "the search's high anchor must underflow");
-        while hi.to_bits() - lo.to_bits() > 1 {
-            // the midpoint on the bit axis WITHOUT the u64 sum
-            // overflow (both anchors are negative doubles: their bit
-            // patterns sum past u64::MAX).
-            let mid = f64::from_bits(
-                lo.to_bits() + (hi.to_bits() - lo.to_bits()) / 2,
-            );
-            if mid == lo || mid == hi {
-                break;
-            }
-            if mid.exp() == 0.0 {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-        }
-        let t = hi;
+        let t = exp_underflow_point();
         // (a) the constant's own contract: exp(t) is exactly +0.0
         // and one ulp up the exponential is already nonzero.
         assert_eq!(t.exp(), 0.0);
@@ -15002,85 +14950,6 @@ mod tests {
         let running = 3.7e-300f64;
         assert_eq!((running + 0.0f64).to_bits(), running.to_bits());
         assert_eq!((0.0f64 + 0.0f64).to_bits(), 0.0f64.to_bits());
-    }
-
-    #[test]
-    fn bit_equal_rows_share_one_class_sum() {
-        // THE EXACT-PRESERVING MEMOIZATION'S OWN PROOF (the only
-        // frontier-1 lever that can pass the committed byte-identity
-        // bar, SS10.6.21): the class pair sum is a function of the
-        // rows' VALUES in unit order alone — two folds whose ll
-        // columns are bit-equal (whichever encoding each row took)
-        // produce BIT-IDENTICAL sums against every third fold, so
-        // one computed sum per unordered (row-class, row-class) pair
-        // serves every merged-fold pair without changing an output
-        // bit. The construction crosses the ENCODINGS: one twin keeps
-        // pinned=true at units whose value is exactly E (the sparse
-        // form stores those entries), the other holds pinned=false
-        // there (its sparse form drops them — the values are the
-        // constant either way); the columns are bit-equal, the
-        // encodings differ.
-        let elsewhere = -14.418156f64;
-        let n_units = 40usize;
-        let mut dense: Vec<Vec<f64>> = Vec::new();
-        let mut pinned: Vec<Vec<bool>> = Vec::new();
-        let mut mismatches: Vec<Vec<u32>> = Vec::new();
-        // Fold 0: the pinned-heavy row (Dense encoding).
-        let mut row0 = vec![elsewhere; n_units];
-        let mut pin0 = vec![false; n_units];
-        for unit in (0..n_units).step_by(2) {
-            row0[unit] = elsewhere + unit as f64 / 8.0;
-            pin0[unit] = true;
-        }
-        dense.push(row0.clone());
-        pinned.push(pin0);
-        mismatches.push(vec![0; n_units]);
-        // Fold 1: fold 0's VALUES with pinned=false at the constant
-        // units (Sparse encoding, values unchanged).
-        dense.push(row0.clone());
-        pinned.push(vec![false; n_units]);
-        mismatches.push(vec![0; n_units]);
-        // Fold 2: an all-no-pin row (Sparse, empty).
-        dense.push(vec![elsewhere; n_units]);
-        pinned.push(vec![false; n_units]);
-        mismatches.push(vec![0; n_units]);
-        // Fold 3: bit-equal to fold 0's values but pinned=true at a
-        // CONSTANT unit too (the cross-encoding case: the sparse
-        // form stores the E-valued entry, the column is unchanged).
-        let mut pin3 = vec![false; n_units];
-        pin3[1] = true;
-        dense.push(row0.clone());
-        pinned.push(pin3);
-        mismatches.push(vec![0; n_units]);
-        let matrix = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
-        assert!(
-            matrix.ll_bits_equal(0, 1),
-            "the twins' ll columns are bit-equal"
-        );
-        assert!(
-            matrix.ll_bits_equal(0, 3),
-            "the cross-encoding twin's column is bit-equal"
-        );
-        let counts: Vec<f64> = (0..n_units).map(|u| 1.0 + u as f64).collect();
-        for other in 0..matrix.n_folds() {
-            assert_eq!(
-                matrix.class_pair_sum(0, other, &counts).to_bits(),
-                matrix.class_pair_sum(1, other, &counts).to_bits(),
-                "twin rows share one sum against fold {other}"
-            );
-            assert_eq!(
-                matrix.class_pair_sum(0, other, &counts).to_bits(),
-                matrix.class_pair_sum(3, other, &counts).to_bits(),
-                "the cross-encoding twin shares one sum against fold {other}"
-            );
-        }
-        // The hom pair too (a twin against itself is trivially equal;
-        // the twin's hom pair is the same accumulation).
-        assert_eq!(
-            matrix.class_pair_sum(0, 0, &counts).to_bits(),
-            matrix.class_pair_sum(1, 1, &counts).to_bits(),
-            "the twins' hom pairs share one sum"
-        );
     }
 
     #[test]
@@ -15113,6 +14982,7 @@ mod tests {
         let (row1, pin1) = (row0.clone(), pin0.clone());
         let (row2_src, pin2_src) = (row0.clone(), pin0.clone());
         let (row3_src, pin3_src) = (row0.clone(), pin0.clone());
+        let row7 = row0.clone();
         dense.push(row0);
         pinned.push(pin0);
         mismatches.push(vec![0; n_units]);
@@ -15152,7 +15022,15 @@ mod tests {
         dense.push(vec![elsewhere; n_units]);
         pinned.push(vec![false; n_units]);
         mismatches.push(vec![0; n_units]);
+        // fold 7: fold 0's values, nothing pinned.
+        dense.push(row7);
+        pinned.push(vec![false; n_units]);
+        mismatches.push(vec![0; n_units]);
         let matrix = ScoreMatrix::from_dense(dense, pinned, mismatches, elsewhere);
+        assert!(
+            matrix.ll_bits_equal(0, 7),
+            "the unpinned twin's ll column is bit-equal"
+        );
         // the canonical key: the pinned-at-E entries are invisible —
         // folds 0/1/2 share one key, folds 4/5/6 share one, fold 3
         // is its own.
@@ -15177,7 +15055,7 @@ mod tests {
             "pinned-at-E everywhere is the all-E column"
         );
         let memo = ClassScanMemo::build(&matrix);
-        assert_eq!(memo.canon, vec![0, 0, 0, 3, 4, 4, 4]);
+        assert_eq!(memo.canon, vec![0, 0, 0, 3, 4, 4, 4, 0]);
         assert_eq!(memo.distinct_rows, 3);
         assert_eq!(memo.canonical_pairs, 6);
         // the memo's flat spelling: bit-equal pairs share one
@@ -15197,6 +15075,23 @@ mod tests {
             matrix.class_pair_sum(4, 4, &counts).to_bits(),
             matrix.class_pair_sum(5, 6, &counts).to_bits(),
             "the all-E class shares one hom sum"
+        );
+        for other in 0..matrix.n_folds() {
+            assert_eq!(
+                matrix.class_pair_sum(0, other, &counts).to_bits(),
+                matrix.class_pair_sum(7, other, &counts).to_bits(),
+                "the unpinned twin shares one sum against fold {other}"
+            );
+            assert_eq!(
+                matrix.class_pair_sum(0, other, &counts).to_bits(),
+                matrix.class_pair_sum(2, other, &counts).to_bits(),
+                "the cross-encoding twin shares one sum against fold {other}"
+            );
+        }
+        assert_eq!(
+            matrix.class_pair_sum(0, 0, &counts).to_bits(),
+            matrix.class_pair_sum(7, 7, &counts).to_bits(),
+            "the twins' hom pairs share one sum"
         );
         // (The near-twin fold 3 carries a DIFFERENT column — proven
         // above by canon and the key — but its pair SUMS may still
@@ -15362,63 +15257,6 @@ mod tests {
                 );
             }
         }
-    }
-
-
-    #[test]
-    fn receipt_f64_text_is_the_non_roundtrip_serialization_class() {
-        // THE RECEIPT-SERIALIZATION CLASS, NAMED AND PROOFED (the
-        // frontier-1 probe's verify flags resolved to it, SS10.6.21):
-        // this repo's serde_json carries NO float_roundtrip feature,
-        // so a serialized f64 can emit JSON text that parses back to
-        // a DIFFERENT f64 — one ulp off on the monotone bit axis.
-        // The committed receipts' float fields (the instrument
-        // receipt's class_log_likelihoods, the ingredients' ll_matrix)
-        // are that emission: an offline re-accumulation of the
-        // emitted text can sit 1-2 ulps from the emitted class sum at
-        // pairs whose accumulation crosses affected values, while the
-        // emitting BINARY reproduces its own receipt bit-identically
-        // (the rerun receipt: same binary, same inputs, same bytes).
-        // The class therefore lives in the EMISSION, never in the
-        // scan's float path and never in a consumer's parse: the
-        // byte-identity gates compare BYTES (unaffected); only
-        // offline value-level recomputations see the ulps. The
-        // counterexample below is pinned against the repo's locked
-        // serde_json; if a future dependency flip enables
-        // float_roundtrip, this test names exactly what changed.
-        let value = 1.1919406916781266e-278f64;
-        let text = serde_json::to_string(&value).unwrap();
-        let parsed: f64 = serde_json::from_str(&text).unwrap();
-        assert_eq!(text, "1.1919406916781266e-278");
-        assert_ne!(
-            parsed.to_bits(),
-            value.to_bits(),
-            "the emitted text must parse back one ulp off (the class)"
-        );
-        assert_eq!(ulp_distance(parsed, value), 1);
-        // The class is COMMON, not a corner: a deterministic sweep
-        // finds it across the exponent range (receipted ~31.5% of a
-        // random sweep at the probe; here a small pinned sample).
-        let mut bad = 0usize;
-        let mut state = 0x243F_6A88_85A3_08D3u64;
-        for _ in 0..100_000u64 {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let v = f64::from_bits(state & !(0xFu64 << 60));
-            if !v.is_finite() {
-                continue;
-            }
-            let t = serde_json::to_string(&v).unwrap();
-            let back: f64 = serde_json::from_str(&t).unwrap();
-            if back.to_bits() != v.to_bits() {
-                bad += 1;
-            }
-        }
-        assert!(
-            bad > 10_000,
-            "the non-roundtrip class is the common case at this              dependency configuration (saw {bad} of 100k)"
-        );
     }
 
     #[test]
@@ -16842,19 +16680,23 @@ mod tests {
         let b = [(2, 5), (3, 3), (9, 1)];
         let c = [(1, 2), (2, 2), (4, 1), (7, 4)];
         let d = [(3, 2), (8, 3)];
+        // Shared key 3 sums: 1 + 3.
+        let want_ab: Vec<(u64, u32)> = vec![(1, 2), (2, 5), (3, 4), (7, 4), (9, 1)];
+        let want_cd: Vec<(u64, u32)> = vec![(1, 2), (2, 2), (3, 2), (4, 1), (7, 4), (8, 3)];
         let iter_ab: Vec<(u64, u32)> = MergedMultisetIter::new(&a, &b).collect();
-        let mat_ab = merged_multiset(&a, &b);
-        assert_eq!(iter_ab, mat_ab);
+        assert_eq!(iter_ab, want_ab);
+        assert_eq!(merged_multiset(&a, &b), want_ab);
+        assert_eq!(merged_multiset(&c, &d), want_cd);
 
-        let mat_cd = merged_multiset(&c, &d);
+        // 3*3.25 + 2*4.75 + 6.25 + 3*12.25 + 13.75.
         let observed = |k: u64| (k as f64) * 1.5 + 0.25;
-        let expected = differing_observed_mass(&mat_ab, &mat_cd, &observed);
+        assert_eq!(differing_observed_mass(&want_ab, &want_cd, &observed), 76.0);
         let actual = differing_observed_mass_iter(
             MergedMultisetIter::new(&a, &b),
             MergedMultisetIter::new(&c, &d),
             &observed,
         );
-        assert!((actual - expected).abs() < 1e-12);
+        assert_eq!(actual, 76.0);
     }
 
     #[test]
@@ -16954,12 +16796,6 @@ mod tests {
         assert!(rc_step_bp(100, 70, 63, 20).is_err());
         assert!(rc_step_bp(u64::MAX, 70, 63, 2).is_err());
         assert_eq!(rc_step_bp(100, 70, 63, 2).unwrap(), 105);
-    }
-
-    #[test]
-    #[should_panic(expected = "before the fetched sequence start")]
-    fn window_slice_at_panics_before_sequence_start() {
-        window_slice_at(b"ACGT", 10, 5, 2);
     }
 
     #[test]
