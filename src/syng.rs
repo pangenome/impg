@@ -3845,8 +3845,20 @@ impl SyngIndex {
 
         let query_nodes =
             self.walk_path_range_from_sampled_steps(query_path_num as usize, start, end)?;
+        let query_walk: Vec<QueryWalkStep> = query_nodes
+            .iter()
+            .map(|&(signed_node, pos)| QueryWalkStep {
+                signed_node,
+                bp_pos: pos,
+                query_pos: pos,
+            })
+            .collect();
+        let reverse_walk = self.reverse_strand_walk(&query_walk)?;
         let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
-        for (signed_node, pos) in query_nodes {
+        for (signed_node, pos) in query_nodes
+            .into_iter()
+            .chain(reverse_walk.iter().map(|s| (s.signed_node, s.query_pos)))
+        {
             let abs = signed_node.unsigned_abs();
             let q_orient: u8 = if signed_node >= 0 { 0 } else { 1 };
             query_node_positions
@@ -5016,17 +5028,42 @@ impl SyngIndex {
             }
         }
 
+        let reverse_walk = self.reverse_strand_walk(&query_walk)?;
         if seed_filter.enabled() {
-            return self.query_region_from_ordered_walk_seed_filtered(
+            let mut visited_nodes = visited_nodes;
+            // Filter the virtual walk before the real walk marks its nodes:
+            // a shared node dropped later would cut the virtual seeds.
+            let reverse_walk: Vec<QueryWalkStep> = match visited_nodes.as_deref() {
+                Some(visited) => reverse_walk
+                    .into_iter()
+                    .filter(|step| !visited.contains(&step.signed_node.unsigned_abs()))
+                    .collect(),
+                None => reverse_walk,
+            };
+            let reverse_nodes: Vec<u32> = reverse_walk
+                .iter()
+                .map(|step| step.signed_node.unsigned_abs())
+                .collect();
+            let mut hits = self.query_region_from_ordered_walk_seed_filtered(
                 query_walk,
                 padding,
-                visited_nodes,
+                visited_nodes.as_deref_mut(),
                 seed_filter,
-            );
+            )?;
+            hits.extend(self.query_region_from_ordered_walk_seed_filtered(
+                reverse_walk,
+                padding,
+                None,
+                seed_filter,
+            )?);
+            if let Some(visited) = visited_nodes {
+                visited.extend(reverse_nodes);
+            }
+            return Ok(Self::merge_hits_per_strand(hits));
         }
 
         let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
-        for step in query_walk {
+        for step in query_walk.into_iter().chain(reverse_walk) {
             let abs = step.signed_node.unsigned_abs();
             let q_orient: u8 = if step.signed_node >= 0 { 0 } else { 1 };
             query_node_positions
@@ -5339,6 +5376,67 @@ impl SyngIndex {
                 steps: run[seed_start..seed_end].to_vec(),
             });
         }
+    }
+
+    /// The syncmers a reverse-complemented copy of the query range carries
+    /// on its own forward path. syng selects syncmers on each strand, so they
+    /// mostly differ from the query's own (34 of 715 shared on 20 kb): the
+    /// query sequence is rebuilt from its syncmers, reverse-complemented and
+    /// traced in the dictionary. Steps are in the query's frame (ascending
+    /// position, node sign flipped), like a forward walk.
+    fn reverse_strand_walk(&self, walk: &[QueryWalkStep]) -> io::Result<Vec<QueryWalkStep>> {
+        let syncmer_len = self.syncmer_length_bp();
+        let (Some(first), Some(last)) = (
+            walk.iter().map(|s| s.query_pos).min(),
+            walk.iter().map(|s| s.query_pos).max(),
+        ) else {
+            return Ok(Vec::new());
+        };
+        let span = (last - first) as usize + syncmer_len;
+        let mut seq = vec![b'N'; span];
+        for step in walk {
+            let off = (step.query_pos - first) as usize;
+            let syncmer = self.syncmer_seq(step.signed_node);
+            for (dst, src) in seq[off..off + syncmer_len].iter_mut().zip(syncmer) {
+                *dst = src.to_ascii_uppercase();
+            }
+        }
+        let rc = crate::graph::reverse_complement(&seq);
+        let mut out: Vec<QueryWalkStep> = self
+            .raw_syncmers_in_sequence(&rc)?
+            .into_iter()
+            .map(|(signed_node, rc_pos)| {
+                let pos = first + (span - syncmer_len) as u64 - rc_pos;
+                QueryWalkStep {
+                    signed_node: -signed_node,
+                    bp_pos: pos,
+                    query_pos: pos,
+                }
+            })
+            .collect();
+        out.sort_by_key(|step| step.query_pos);
+        Ok(out)
+    }
+
+    /// Merge hits of separate walks per genome and strand.
+    fn merge_hits_per_strand(
+        hits: Vec<HomologousIntervalWithAnchors>,
+    ) -> Vec<HomologousIntervalWithAnchors> {
+        type Groups =
+            std::collections::BTreeMap<(String, char), Vec<HomologousIntervalWithAnchors>>;
+        let mut per_path = Groups::new();
+        for hit in hits {
+            per_path
+                .entry((hit.genome.clone(), hit.strand))
+                .or_default()
+                .push(hit);
+        }
+        let mut merged = Vec::new();
+        for (_, mut group) in per_path {
+            Self::merge_intervals_with_anchors(&mut group);
+            merged.extend(group);
+        }
+        merged
     }
 
     fn reverse_query_run(&self, run: &[QueryWalkStep]) -> Vec<QueryWalkStep> {
@@ -6328,6 +6426,81 @@ mod tests {
     }
 
     // ── 5. SyngIndex::build ─────────────────────────────────────────
+
+    #[test]
+    fn query_finds_reverse_complement_homolog() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let a = make_test_sequence(20_000, 42);
+        let d = crate::graph::reverse_complement(&a);
+        let index = SyngIndex::build(
+            params,
+            vec![("A".to_string(), a), ("D".to_string(), d)].into_iter(),
+        );
+        let reverse_hit = |hits: Vec<(String, u64, u64, char)>| {
+            hits.into_iter()
+                .find(|h| h.0 == "D" && h.3 == '-')
+                .map(|h| h.2 - h.1)
+                .unwrap_or(0)
+        };
+        let anchored: Vec<_> = index
+            .query_region_with_anchors("A", 1_000, 19_000, 0)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        assert!(reverse_hit(anchored) > 17_000);
+        let filtered: Vec<_> = index
+            .query_region_ext_with_seed_filter("A", 1_000, 19_000, 0, 0, SyngSeedFilter::default())
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        assert!(reverse_hit(filtered) > 17_000);
+        let intervals: Vec<_> = index
+            .query_region_intervals("A", 1_000, 19_000, 0)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        assert!(reverse_hit(intervals) > 17_000);
+        // The CLI default walks 5-anchor seeds: the branch with the second walk
+        let walked: Vec<_> = index
+            .query_region_ext_with_seed_filter(
+                "A",
+                1_000,
+                19_000,
+                0,
+                0,
+                SyngSeedFilter { walk_anchors: 5, ..SyngSeedFilter::default() },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        assert!(reverse_hit(walked) > 17_000);
+        // The transitive path passes a visited set. The real walk marks the
+        // nodes both walks share, and the virtual seeds must stay whole.
+        let mut visited = FxHashSet::default();
+        let transitive: Vec<_> = index
+            .query_region_with_anchors_ext_visited_seed_filtered(
+                "A",
+                1_000,
+                19_000,
+                0,
+                0,
+                Some(&mut visited),
+                SyngSeedFilter { walk_anchors: 5, ..SyngSeedFilter::default() },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        let fragments = transitive.iter().filter(|h| h.0 == "D" && h.3 == '-').count();
+        assert_eq!(fragments, 1, "{transitive:?}");
+        assert!(reverse_hit(transitive) > 17_000);
+        assert!(!visited.is_empty());
+    }
 
     /// Generate a random-ish DNA sequence of the given length.
     fn make_test_sequence(len: usize, seed: u8) -> Vec<u8> {
