@@ -4731,7 +4731,7 @@ fn logsumexp2(a: f64, b: f64) -> f64 {
 ///
 ///   E(read) = len(read) * A - ln(2 * (G_diploid - len(read) + 1))
 ///
-/// With uniform L150 reads and uniform quality bytes this is ONE
+/// With reads of one length and uniform quality bytes this is ONE
 /// derived constant per run. THE FLOOR for a read a candidate cannot
 /// place is E — not the all-mismatch 150*B (which survives only as
 /// the per-placement lower bound inside the local branch, a bit-exact
@@ -6981,11 +6981,11 @@ pub fn run(options: Options) -> io::Result<()> {
 pub fn run_injected(options: Options, injected_panel: Option<&SyngIndex>) -> io::Result<()> {
     // (THE PER-CALL READ LENGTH — the concurrent-calls audit's
     // finding, the one mutable process-global the call path held:
-    // every committed receipt's E is computed at the FRESH-PROCESS
-    // value 150 BEFORE the derive cache stores the cache's own
-    // declared length, and every later read (the skipped-positions
-    // sites, the unit likelihood, the scoring receipt) reads the
-    // DECLARED value. The value is therefore PER-CALL state — a
+    // E, the skipped-positions sites, the unit likelihood and the
+    // scoring receipt all read the cache's own DECLARED length, set
+    // at the derive-cache load. (Receipts committed before 2026-11-11
+    // computed E at a fixed 150 before that load.) The value is
+    // therefore PER-CALL state — a
     // plain local, initialized fresh, stored once at the derive-cache
     // load — so the combined process's CONCURRENT calls cannot read
     // each other's length (the serial form's first-gate divergence,
