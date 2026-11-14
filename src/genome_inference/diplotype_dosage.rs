@@ -590,13 +590,11 @@ pub fn run(options: Options) -> io::Result<()> {
         #[serde(default)]
         occurrences: Vec<Occurrence>,
     }
-    let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
-        .map_err(io::Error::other)?;
+    let mut reader = crate::fasta::open_reader(&options.census)?;
     let mut census_records = 0u64;
     let mut census_mass = 0u64;
     let mut material_mass = 0u64;
     let mut attributed_mass = 0u64;
-    let mut reader = BufReader::new(reader);
     let mut line = String::new();
     let mut nodes_buf: FxHashSet<u32> = FxHashSet::default();
     let mut windows_buf: FxHashMap<usize, Vec<(u64, u64)>> = FxHashMap::default();

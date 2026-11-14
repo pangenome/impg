@@ -518,11 +518,7 @@ pub fn align(
         let path = out.join(name);
         let mut bytes = Vec::new();
         for (n, s) in records {
-            bytes.extend(format!(">{n}\n").bytes());
-            for line in s.chunks(80) {
-                bytes.extend(line);
-                bytes.push(b'\n');
-            }
+            crate::fasta::write_wrapped_fasta(&mut bytes, n, s)?;
         }
         atomic_write(&path, &bytes)?;
         fs::canonicalize(path)
