@@ -120,4 +120,10 @@ jobs:
           fi
           export TMPDIR="${{ runner.temp }}"
           # Overflow checks, impg crate only
-          cargo test --release --config 'profile.release.package.impg.overflow-checks=true' -- --test-threads=1
+          CFG=(--config 'profile.release.package.impg.overflow-checks=true')
+          # Examples have no tests to run
+          cargo test --release "${CFG[@]}" --lib --bins --tests -- --test-threads=1
+          cargo test --release "${CFG[@]}" --doc
+
+      - name: Check examples compile
+        run: cargo check --release --examples
