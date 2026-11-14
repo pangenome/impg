@@ -11,7 +11,7 @@ use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the tr
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
-use coitrees::{BasicCOITree, Interval, IntervalTree};
+use coitrees::{BasicCOITree, GenericInterval, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
 use onecode::OneFile;
@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracepoints::{tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar_with_aligner};
 
@@ -48,7 +49,32 @@ thread_local! {
     static PAF_HANDLE: RefCell<Option<(String, std::fs::File)>> = const { RefCell::new(None) };
     static PAF_CIGAR_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static TPA_HANDLE: RefCell<Option<(String, tpa::TpaReader)>> = const { RefCell::new(None) };
-    static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
+    /// Last target sequence fetched on this thread.
+    ///
+    /// The key must include the sequence name, not only its numeric id:
+    /// `MultiImpg` sub-indices use dense per-file ids, so `(id, start, end,
+    /// reverse)` alone collides across genomes and would serve another
+    /// sample's DNA to CIGAR reconstruction.
+    static TARGET_SEQ_CACHE: RefCell<Option<TargetSeqCacheEntry>> = const { RefCell::new(None) };
+}
+
+struct TargetSeqCacheEntry {
+    name: String,
+    target_id: u32,
+    start: i32,
+    end: i32,
+    is_reverse: bool,
+    seq: Vec<u8>,
+}
+
+impl TargetSeqCacheEntry {
+    fn matches(&self, name: &str, target_id: u32, start: i32, end: i32, is_reverse: bool) -> bool {
+        self.target_id == target_id
+            && self.start == start
+            && self.end == end
+            && self.is_reverse == is_reverse
+            && self.name == name
+    }
 }
 
 /// Execute a closure with a thread-local aligner matched to the given distance metric
@@ -202,6 +228,15 @@ impl QueryMetadata {
         self.strand_and_data_offset & !(Self::STRAND_BIT | Self::REVERSED_BIT)
     }
 
+    /// Key for `cigar_cache`: preserves `REVERSED_BIT` alongside `(alignment_file_index, data_offset)`
+    /// because cached CIGARs are stored in the perspective (forward vs reversed) of the entry.
+    fn cigar_cache_key(&self) -> (u32, u64) {
+        (
+            self.alignment_file_index,
+            self.strand_and_data_offset & !Self::STRAND_BIT,
+        )
+    }
+
     fn is_reversed(&self) -> bool {
         (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
     }
@@ -223,7 +258,222 @@ impl QueryMetadata {
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
+
+/// Reject inputs that would only fail later, deep inside a query or a worker.
+///
+/// Coordinates are stored as `i32`, so a sequence or a coordinate above
+/// `i32::MAX` would wrap to a negative value without any message. A PAF record
+/// without a `cg:Z` tag cannot be projected at all: the projection reads the
+/// CIGAR to place the query interval inside each segment, and the old code
+/// panicked inside a rayon worker when it reached such a record.
+fn validate_index_inputs(
+    records_by_file: &[(Vec<AlignmentRecord>, String)],
+    seq_index: &SequenceIndex,
+) -> io::Result<()> {
+    for id in 0..seq_index.len() as u32 {
+        if let Some(len) = seq_index.get_len_from_id(id) {
+            if len > i32::MAX as usize {
+                let name = seq_index.get_name(id).unwrap_or("<unknown>");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "sequence '{name}' is {len} bp, above the maximum supported length of {} bp",
+                        i32::MAX
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (records, path) in records_by_file {
+        for record in records {
+            let max_coord = record
+                .query_start
+                .max(record.query_end)
+                .max(record.target_start)
+                .max(record.target_end);
+            if max_coord > i32::MAX as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "an alignment record in '{path}' has the coordinate {max_coord}, above the maximum supported value {} bp",
+                        i32::MAX
+                    ),
+                ));
+            }
+        }
+
+        if !matches!(QueryMetadata::get_file_type(path), FileType::Paf) {
+            continue;
+        }
+        let missing = records.iter().filter(|r| r.data_bytes == 0).count();
+        if missing > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the alignment file '{path}' has {missing} PAF record(s) out of {} without a CIGAR ('cg:Z' tag). impg projects intervals through the CIGAR, so these records cannot be indexed. Re-run the alignment step so that it writes CIGAR strings.",
+                    records.len()
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
+
+struct CachedTree {
+    tree: Arc<BasicCOITree<QueryMetadata, u32>>,
+    bytes: usize,
+    /// Logical timestamp of the last access, for LRU eviction. Atomic so a lookup
+    /// only needs a read lock.
+    last_used: AtomicU64,
+}
+
+/// Per-target interval trees held in memory, with optional LRU eviction.
+///
+/// A query only needs the trees of the targets it touches, but a multi-target run
+/// used to keep every tree it ever loaded. Trees read from an index file can be
+/// dropped and reloaded on demand, so the cache is bounded. Indexes built in memory
+/// have no file to reload from (their forest-map offsets are placeholders), so they
+/// are never evicted.
+pub struct TreeCache {
+    /// Key: cache namespace (one per sub-index) in the high 32 bits, target id below
+    map: FxHashMap<u64, CachedTree>,
+    capacity_bytes: Option<usize>,
+    bytes: usize,
+    clock: AtomicU64,
+}
+
+impl TreeCache {
+    /// Cache for an in-memory index: holds everything, never evicts.
+    fn unbounded(trees: TreeMap) -> Self {
+        let mut cache = Self {
+            map: FxHashMap::default(),
+            capacity_bytes: None,
+            bytes: 0,
+            clock: AtomicU64::new(0),
+        };
+        for (target_id, tree) in trees {
+            cache.insert(target_id as u64, tree);
+        }
+        cache
+    }
+
+    /// Cache for a file-backed index: evicts least-recently-used trees past `capacity_bytes`.
+    pub(crate) fn bounded(capacity_bytes: usize) -> Self {
+        Self {
+            map: FxHashMap::default(),
+            capacity_bytes: Some(capacity_bytes),
+            bytes: 0,
+            clock: AtomicU64::new(0),
+        }
+    }
+
+    /// Approximate resident cost of a tree. A coitrees node holds the metadata plus
+    /// subtree_last, first, last and two child indices, so about 24 bytes of overhead
+    /// per record. This tracks the steady-state size of cached trees; the transient
+    /// peak while a tree is being decoded and built is several times larger.
+    fn estimate_bytes(tree: &BasicCOITree<QueryMetadata, u32>) -> usize {
+        tree.len() * (std::mem::size_of::<QueryMetadata>() + 24)
+    }
+
+    fn get(&self, key: u64) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+        self.map.get(&key).map(|entry| {
+            entry
+                .last_used
+                .store(self.clock.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+            Arc::clone(&entry.tree)
+        })
+    }
+
+    fn insert(&mut self, key: u64, tree: Arc<BasicCOITree<QueryMetadata, u32>>) {
+        let bytes = Self::estimate_bytes(&tree);
+        let stamp = self.clock.fetch_add(1, Ordering::Relaxed);
+        if let Some(previous) = self.map.insert(
+            key,
+            CachedTree {
+                tree,
+                bytes,
+                last_used: AtomicU64::new(stamp),
+            },
+        ) {
+            self.bytes -= previous.bytes;
+        }
+        self.bytes += bytes;
+        self.evict_to_capacity(key);
+    }
+
+    /// Drop least-recently-used entries until the cache fits. Never evicts
+    /// `keep`, the entry just inserted, so a single oversized tree still works.
+    fn evict_to_capacity(&mut self, keep: u64) {
+        let Some(capacity) = self.capacity_bytes else {
+            return;
+        };
+        if self.bytes <= capacity {
+            return;
+        }
+        // One scan and one sort per overflow, not one scan per victim
+        let mut by_age: Vec<(u64, u64)> = self
+            .map
+            .iter()
+            .filter(|(&key, _)| key != keep)
+            .map(|(&key, entry)| (entry.last_used.load(Ordering::Relaxed), key))
+            .collect();
+        by_age.sort_unstable();
+        for (_, key) in by_age {
+            if self.bytes <= capacity {
+                break;
+            }
+            if let Some(entry) = self.map.remove(&key) {
+                self.bytes -= entry.bytes;
+                debug!("tree cache: evicted {key:#x} ({} B), {} B cached", entry.bytes, self.bytes);
+            }
+        }
+    }
+
+    fn remove(&mut self, key: u64) {
+        if let Some(entry) = self.map.remove(&key) {
+            self.bytes -= entry.bytes;
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&u64, &Arc<BasicCOITree<QueryMetadata, u32>>)> {
+        self.map.iter().map(|(id, entry)| (id, &entry.tree))
+    }
+}
+
+/// Capacity for the file-backed tree cache: `IMPG_TREE_CACHE_MB` if set, else a
+/// quarter of the memory this process can use (physical RAM, or the cgroup limit
+/// when it is lower), with a 512 MB floor. Computed once per process. In per-file
+/// mode all sub-indices share one cache with this budget (`MultiImpg`).
+pub(crate) fn default_tree_cache_bytes() -> usize {
+    static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        const FLOOR: usize = 512 * 1024 * 1024;
+        if let Ok(value) = std::env::var("IMPG_TREE_CACHE_MB") {
+            match value.trim().parse::<usize>() {
+                Ok(mb) => return mb.saturating_mul(1024 * 1024),
+                Err(e) => warn!("IMPG_TREE_CACHE_MB={value:?} is not a whole number of MB ({e}); using the default"),
+            }
+        }
+        // SAFETY: sysconf only reads system configuration
+        let (pages, page_size) =
+            unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+        let physical = if pages > 0 && page_size > 0 { pages as usize * page_size as usize } else { 0 };
+        // cgroup v2, then v1; "max" or a huge v1 value means no limit
+        let cgroup = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok()?.trim().parse::<usize>().ok());
+        let usable = match cgroup {
+            Some(limit) if physical == 0 || limit < physical => limit,
+            _ => physical,
+        };
+        let bytes = (usable / 4).max(FLOOR);
+        debug!("tree cache budget {} MB (usable memory {} MB)", bytes >> 20, usable >> 20);
+        bytes
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FileType {
@@ -237,6 +487,20 @@ struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
+}
+
+/// Lets a decoded interval be fed straight to `BasicCOITree::new`, without first
+/// rebuilding the whole slice as `Vec<Interval<QueryMetadata>>`.
+impl GenericInterval<QueryMetadata> for SerializableInterval {
+    fn first(&self) -> i32 {
+        self.first
+    }
+    fn last(&self) -> i32 {
+        self.last
+    }
+    fn metadata(&self) -> &QueryMetadata {
+        &self.metadata
+    }
 }
 
 #[derive(Default, Clone)]
@@ -279,47 +543,63 @@ impl SortedRanges {
         self.insert_inner(new_range, min_distance)
     }
 
-    fn insert_inner(&mut self, new_range: (i32, i32), min_distance: i32) -> Vec<(i32, i32)> {
+    fn insert_with_bounds(
+        &mut self,
+        new_range: (i32, i32),
+        min_distance: i32,
+        clamp_seq_ends: bool,
+    ) -> Vec<(i32, i32)> {
         let (mut start, mut end) = if new_range.0 <= new_range.1 {
             (new_range.0, new_range.1)
         } else {
             (new_range.1, new_range.0)
         };
 
-        // Find nearby ranges to potentially merge with
         let i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
 
-        // Check previous range
-        if i > 0 && (start - self.ranges[i - 1].1).abs() < min_distance {
-            start = self.ranges[i - 1].1;
+        // Snap `start` back onto the previous range's end when the gap is small.
+        // Only ever extend: never pull `start` forward over novel territory.
+        if i > 0 {
+            let prev_end = self.ranges[i - 1].1;
+            if start > prev_end && start - prev_end < min_distance {
+                start = prev_end;
+            }
+        } else if clamp_seq_ends && self.sequence_length > 0 && start < min_distance {
+            start = 0;
         }
 
-        // Check next range
-        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < min_distance {
-            end = self.ranges[i].0;
+        // Snap `end` forward onto the next range's start when the gap is small.
+        // The successor must be searched from `end`: `ranges[i]` can start inside
+        // the range being inserted, and `end` may only ever grow. Using
+        // `(ranges[i].0 - end).abs()` truncated `end` and silently dropped the
+        // novel tail of the inserted range.
+        if let Some(&(next_start, _)) = self.ranges[i..].iter().find(|(s, _)| *s >= end) {
+            if next_start > end && next_start - end < min_distance {
+                end = next_start;
+            }
+        } else if clamp_seq_ends
+            && self.sequence_length > 0
+            && end > (self.sequence_length - min_distance)
+        {
+            end = self.sequence_length;
         }
 
-        // Return regions that don't overlap with existing ranges
+        // Collect regions that don't overlap with existing ranges
         let mut non_overlapping = Vec::new();
         let mut current = start;
-
-        // Find the first range that could overlap
-        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+        let mut idx = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
-
-        // Check previous range for overlap
-        if i > 0 && self.ranges[i - 1].1 > start {
-            i -= 1;
+        if idx > 0 && self.ranges[idx - 1].1 > start {
+            idx -= 1;
         }
 
-        // Process all potentially overlapping ranges
-        while i < self.ranges.len() && current < end {
-            let (range_start, range_end) = self.ranges[i];
+        while idx < self.ranges.len() && current < end {
+            let (range_start, range_end) = self.ranges[idx];
             if range_start > end {
                 break;
             }
@@ -327,16 +607,14 @@ impl SortedRanges {
                 non_overlapping.push((current, range_start));
             }
             current = max(current, range_end);
-            i += 1;
+            idx += 1;
         }
-
         if current < end {
             non_overlapping.push((current, end));
         }
 
         match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) | Err(pos) => {
-                // Check if we can merge with the previous range
                 if pos > 0 && self.ranges[pos - 1].1 >= start {
                     self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
                     self.merge_forward_from(pos - 1);
@@ -350,13 +628,11 @@ impl SortedRanges {
             }
         }
 
-        // let adjusted_new_range = if new_range.0 <= new_range.1 {
-        //     (start, end)
-        // } else {
-        //     (end, start)
-        // };
-
         non_overlapping
+    }
+
+    fn insert_inner(&mut self, new_range: (i32, i32), min_distance: i32) -> Vec<(i32, i32)> {
+        self.insert_with_bounds(new_range, min_distance, false)
     }
 
     pub fn len(&self) -> usize {
@@ -372,88 +648,7 @@ impl SortedRanges {
     }
 
     pub fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
-        let (mut start, mut end) = if new_range.0 <= new_range.1 {
-            (new_range.0, new_range.1)
-        } else {
-            (new_range.1, new_range.0)
-        };
-
-        // Find nearby ranges to potentially merge with
-        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
-
-        // Check previous range
-        if i > 0 && (start - self.ranges[i - 1].1).abs() < self.min_distance {
-            start = self.ranges[i - 1].1;
-            i -= 1;
-        } else if self.sequence_length > 0 && start < self.min_distance {
-            start = 0;
-        }
-
-        // Check next range
-        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < self.min_distance {
-            end = self.ranges[i].0;
-        } else if self.sequence_length > 0 && end > (self.sequence_length - self.min_distance) {
-            end = self.sequence_length;
-        }
-
-        // Return regions that don't overlap with existing ranges
-        let mut non_overlapping = Vec::new();
-        let mut current = start;
-
-        // Find the first range that could overlap
-        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
-
-        // Check previous range for overlap
-        if i > 0 && self.ranges[i - 1].1 > start {
-            i -= 1;
-        }
-
-        // Process all potentially overlapping ranges
-        while i < self.ranges.len() && current < end {
-            let (range_start, range_end) = self.ranges[i];
-            if range_start > end {
-                break;
-            }
-            if current < range_start {
-                non_overlapping.push((current, range_start));
-            }
-            current = max(current, range_end);
-            i += 1;
-        }
-
-        if current < end {
-            non_overlapping.push((current, end));
-        }
-
-        match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
-            Ok(pos) | Err(pos) => {
-                // Check if we can merge with the previous range
-                if pos > 0 && self.ranges[pos - 1].1 >= start {
-                    self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
-                    self.merge_forward_from(pos - 1);
-                } else if pos < self.ranges.len() && end >= self.ranges[pos].0 {
-                    self.ranges[pos].0 = min(start, self.ranges[pos].0);
-                    self.ranges[pos].1 = max(end, self.ranges[pos].1);
-                    self.merge_forward_from(pos);
-                } else {
-                    self.ranges.insert(pos, (start, end));
-                }
-            }
-        }
-
-        // let adjusted_new_range = if new_range.0 <= new_range.1 {
-        //     (start, end)
-        // } else {
-        //     (end, start)
-        // };
-
-        non_overlapping
+        self.insert_with_bounds(new_range, self.min_distance, true)
     }
 
     pub fn merge_forward_from(&mut self, start_idx: usize) {
@@ -493,12 +688,395 @@ struct SubsettingResult {
     first_segment_info: (i32, i32, i32, i32, i32, i32),
     /// Info about last overlapping segment: (query_pos, query_delta, seg_start, seg_end, abs_target_delta, trace_diffs)
     last_segment_info: (i32, i32, i32, i32, i32, i32),
+    /// Scan direction along metadata target axis (`+1` or `-1`)
+    scan_dir: i32,
+    /// Project direction along metadata query axis (`+1` or `-1`)
+    project_dir: i32,
+}
+
+impl SubsettingResult {
+    /// Compute normalized `(scan_start, scan_end, proj_lo, proj_hi)` bounds for the subset.
+    /// When the subset reaches the last tracepoint (`tracepoints_len - 1`), clamp the trailing
+    /// endpoint along `scan_dir` / `project_dir` to the exact metadata boundary.
+    fn bounds(&self, tracepoints_len: usize, metadata: &QueryMetadata) -> (i32, i32, i32, i32) {
+        let (_, _, first_seg_start, first_seg_end, _, _) = self.first_segment_info;
+        let (_, _, last_seg_start, last_seg_end, _, _) = self.last_segment_info;
+        let mut scan_start = first_seg_start
+            .min(first_seg_end)
+            .min(last_seg_start.min(last_seg_end));
+        let mut scan_end = first_seg_start
+            .max(first_seg_end)
+            .max(last_seg_start.max(last_seg_end));
+
+        let mut proj_end = self.last_query_pos;
+        if self.last_idx == tracepoints_len - 1 {
+            if self.scan_dir == 1 {
+                scan_end = metadata.target_end;
+            } else {
+                scan_start = metadata.target_start;
+            }
+            proj_end = if self.project_dir == 1 {
+                metadata.query_end
+            } else {
+                metadata.query_start
+            };
+        }
+
+        let proj_lo = self.first_query_pos.min(proj_end);
+        let proj_hi = self.first_query_pos.max(proj_end);
+        (scan_start, scan_end, proj_lo, proj_hi)
+    }
+}
+
+/// One alignment file as recorded in the index header.
+///
+/// The index stores a file index and a byte offset for every CIGAR, so the
+/// order of the file list is part of the index. Without this record, passing
+/// the same files in a different order reads CIGARs from the wrong file
+/// without any error. `size` is `None` when the size cannot be read, for
+/// example for a process-substitution path; such an entry cannot be compared.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AlignmentFileEntry {
+    pub path: String,
+    pub size: Option<u64>,
+}
+
+impl AlignmentFileEntry {
+    fn from_path(path: &str) -> Self {
+        let size = std::fs::metadata(path).ok().map(|m| m.len());
+        // Canonical, so the same file compares equal however it is spelled
+        let path = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string());
+        AlignmentFileEntry { path, size }
+    }
+}
+
+/// Header block written by the current index format.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexHeaderInfo {
+    /// Alignment files in the order the index was built from.
+    pub alignment_files: Vec<AlignmentFileEntry>,
+    /// True when the index holds both directions of every record.
+    pub bidirectional: bool,
+}
+
+/// Describe a whole recorded list for an error message.
+fn describe_files_from(files: &[AlignmentFileEntry]) -> String {
+    files
+        .iter()
+        .map(|f| match f.size {
+            Some(size) => format!("{} ({} bytes)", f.path, size),
+            None => f.path.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Refuse an index built from a different alignment file list.
+///
+/// A reordered list is the dangerous case: every file index still resolves, so
+/// the query reads CIGARs from the wrong file and returns wrong intervals with
+/// no message.
+pub(crate) fn validate_alignment_file_list(
+    recorded: &[AlignmentFileEntry],
+    given: &[String],
+    index_file_path: &str,
+) -> io::Result<()> {
+    if recorded.len() != given.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "The index '{index_file_path}' was built from {} alignment file(s) but {} were given. \
+                 The index stores CIGAR offsets into those files, so the list and its order must match. \
+                 Rebuild the index with `impg index` on this list, or pass the original one.",
+                recorded.len(),
+                given.len()
+            ),
+        ));
+    }
+
+    let mismatch = recorded
+        .iter()
+        .zip(given.iter())
+        .enumerate()
+        .find(|(_, (recorded_entry, path))| {
+            let given_entry = AlignmentFileEntry::from_path(path);
+            // Both paths are canonical, so `data/x.paf`, `./x.paf` from inside
+            // `data/`, an absolute path and a symlink compare equal. When the
+            // recorded path is gone (the files were moved), fall back to the
+            // file name.
+            let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_owned());
+            let same_path = recorded_entry.path == given_entry.path
+                || (!std::path::Path::new(&recorded_entry.path).exists()
+                    && name(&recorded_entry.path) == name(&given_entry.path));
+            match (recorded_entry.size, given_entry.size) {
+                (Some(a), Some(b)) => a != b || !same_path,
+                // A size that could not be read (a pipe, for example) cannot be compared
+                _ => false,
+            }
+        });
+
+    if let Some((position, (recorded_entry, path))) = mismatch {
+        let given_entry = AlignmentFileEntry::from_path(path);
+        let given_entries: Vec<AlignmentFileEntry> = given
+            .iter()
+            .map(|p| AlignmentFileEntry::from_path(p))
+            .collect();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "The index '{index_file_path}' was built from a different alignment file list. \
+                 Entry {position} is '{}' in the index but '{}' was given. \
+                 The index stores CIGAR offsets into those files, so a different list or a different \
+                 order reads the wrong CIGAR. \
+                 Recorded: [{}]. Given now: [{}]. \
+                 Rebuild the index with `impg index` on this list, or pass the original one.",
+                describe_files_from(std::slice::from_ref(recorded_entry)),
+                describe_files_from(std::slice::from_ref(&given_entry)),
+                describe_files_from(recorded),
+                describe_files_from(&given_entries)
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Identify one edge of the alignment graph, for deduplication.
+///
+/// Two entries with the same key project to the same interval pair.
+fn edge_key(interval: &Interval<QueryMetadata>) -> (u32, i32, i32, i32, i32, bool) {
+    let metadata = &interval.metadata;
+    (
+        metadata.query_id(),
+        metadata.target_start,
+        metadata.target_end,
+        metadata.query_start,
+        metadata.query_end,
+        metadata.strand() == Strand::Reverse,
+    )
+}
+
+fn with_cached_handle<H: 'static, OpenFn, UseFn, R>(
+    cell: &'static std::thread::LocalKey<RefCell<Option<(String, H)>>>,
+    file_path: &str,
+    open_fn: OpenFn,
+    use_fn: UseFn,
+) -> Result<R, String>
+where
+    OpenFn: FnOnce(&str) -> Result<H, String>,
+    UseFn: FnOnce(&mut H) -> Result<R, String>,
+{
+    cell.with(|handle_cell| {
+        let mut slot = handle_cell.borrow_mut();
+        let needs_open = match slot.as_ref() {
+            Some((cached_path, _)) => cached_path != file_path,
+            None => true,
+        };
+
+        if needs_open {
+            *slot = None;
+            let handle = open_fn(file_path)?;
+            *slot = Some((file_path.to_string(), handle));
+        }
+
+        let (_, handle) = slot
+            .as_mut()
+            .expect("cached handle slot must contain a handle after opening");
+        use_fn(handle)
+    })
+}
+
+pub(crate) fn make_self_interval(
+    target_id: u32,
+    range_start: i32,
+    range_end: i32,
+    store_cigar: bool,
+) -> AdjustedInterval {
+    (
+        Interval {
+            first: range_start,
+            last: range_end,
+            metadata: target_id,
+        },
+        if store_cigar {
+            vec![CigarOp::new(range_end - range_start, '=')]
+        } else {
+            Vec::new()
+        },
+        Interval {
+            first: range_start,
+            last: range_end,
+            metadata: target_id,
+        },
+    )
+}
+
+pub(crate) trait QueueRangeItem {
+    fn key_start(&self) -> (u32, i32);
+    fn range_end(&self) -> i32;
+    fn extend_end(&mut self, new_end: i32);
+}
+
+impl QueueRangeItem for (u32, i32, i32) {
+    fn key_start(&self) -> (u32, i32) {
+        (self.0, self.1)
+    }
+    fn range_end(&self) -> i32 {
+        self.2
+    }
+    fn extend_end(&mut self, new_end: i32) {
+        self.2 = new_end;
+    }
+}
+
+impl QueueRangeItem for (u32, i32, i32, u16) {
+    fn key_start(&self) -> (u32, i32) {
+        (self.0, self.1)
+    }
+    fn range_end(&self) -> i32 {
+        self.2
+    }
+    fn extend_end(&mut self, new_end: i32) {
+        self.2 = new_end;
+    }
+}
+
+/// Merge contiguous or overlapping ranges in a slice already sorted by `(id, start)`.
+/// Returns the compacted prefix length to pass to `truncate`.
+pub(crate) fn compact_sorted_ranges<T: QueueRangeItem>(items: &mut [T]) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    let mut write = 0;
+    for read in 1..items.len() {
+        if items[write].key_start().0 == items[read].key_start().0
+            && items[write].range_end() >= items[read].key_start().1
+        {
+            let merged_end = items[write].range_end().max(items[read].range_end());
+            items[write].extend_end(merged_end);
+        } else {
+            write += 1;
+            items.swap(write, read);
+        }
+    }
+    write + 1
+}
+
+pub(crate) struct LoadedIndexHeader {
+    pub(crate) seq_index: SequenceIndex,
+    pub(crate) forest_map: ForestMap,
+    pub(crate) built_bidirectional: bool,
+}
+
+/// Read magic bytes, optional V4 header (validating the alignment file list),
+/// sequence index, and forest map from an `.impg` index stream.
+pub(crate) fn read_index_header<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    alignment_files: &[String],
+    index_file_path: &str,
+    warn_on_legacy: bool,
+) -> std::io::Result<LoadedIndexHeader> {
+    const MAGIC_V1: &[u8] = b"IMPGIDX1";
+    const MAGIC_V2: &[u8] = b"IMPGIDX2";
+    const MAGIC_V4: &[u8] = b"IMPGIDX4";
+
+    let mut magic_buf = [0u8; 8];
+    reader.read_exact(&mut magic_buf)?;
+    if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Invalid magic bytes - not a valid IMPG index file '{}' (got {:?})",
+                index_file_path,
+                String::from_utf8_lossy(&magic_buf)
+            ),
+        ));
+    }
+
+    if warn_on_legacy && magic_buf == MAGIC_V1 {
+        warn!("Loading IMPGIDX1 format (unidirectional). Rebuild without --unidirectional for better transitive query reach (bidirectional mode is default).");
+    }
+
+    let mut offset_buf = [0u8; 8];
+    reader.read_exact(&mut offset_buf)?;
+    let forest_map_offset = u64::from_le_bytes(offset_buf);
+
+    let header_info: Option<IndexHeaderInfo> = if magic_buf == MAGIC_V4 {
+        Some(
+            bincode::serde::decode_from_std_read(&mut *reader, bincode::config::standard())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to load index header from '{index_file_path}': {e}"),
+                    )
+                })?,
+        )
+    } else {
+        if warn_on_legacy {
+            warn!(
+                "The index '{}' does not record its alignment file list, so impg cannot check that the files given now are the ones it was built from. Rebuild the index to enable the check.",
+                index_file_path
+            );
+        }
+        None
+    };
+
+    if let Some(header) = &header_info {
+        validate_alignment_file_list(&header.alignment_files, alignment_files, index_file_path)?;
+        if warn_on_legacy {
+            debug!(
+                "Index '{}' was built {} from {} alignment file(s)",
+                index_file_path,
+                if header.bidirectional {
+                    "bidirectionally"
+                } else {
+                    "unidirectionally"
+                },
+                header.alignment_files.len()
+            );
+        }
+    }
+
+    let seq_index: SequenceIndex =
+        bincode::serde::decode_from_std_read(&mut *reader, bincode::config::standard()).map_err(
+            |e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to load sequence index: {e}"),
+                )
+            },
+        )?;
+
+    reader.seek(SeekFrom::Start(forest_map_offset))?;
+    let forest_map: ForestMap =
+        bincode::serde::decode_from_std_read(&mut *reader, bincode::config::standard()).map_err(
+            |e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to load forest map: {e}"),
+                )
+            },
+        )?;
+
+    Ok(LoadedIndexHeader {
+        seq_index,
+        forest_map,
+        built_bidirectional: header_info
+            .map(|h| h.bidirectional)
+            .unwrap_or(magic_buf != MAGIC_V1),
+    })
 }
 
 pub struct Impg {
-    pub trees: RwLock<TreeMap>,
+    pub trees: Arc<RwLock<TreeCache>>,
+    /// Namespace of this index inside `trees`; 0 unless the cache is shared
+    cache_ns: u32,
     pub seq_index: SequenceIndex,
     alignment_files: Vec<String>,
+    /// True when this index holds both directions of every record.
+    built_bidirectional: bool,
     pub forest_map: ForestMap,
     index_file_path: String,
     pub sequence_files: Vec<String>,
@@ -542,25 +1120,15 @@ impl Impg {
         F: FnOnce(&mut OneFile) -> Result<R, OneAlnParseErr>,
     {
         let file_path = &self.alignment_files[file_index];
-        ONEALN_HANDLE.with(|handle_cell| {
-            let mut slot = handle_cell.borrow_mut();
-            let needs_open = match slot.as_ref() {
-                Some((cached_path, _)) => cached_path != file_path,
-                None => true,
-            };
-
-            if needs_open {
-                *slot = None;
-                let file = OneFile::open_read(file_path, None, None, 1)
-                    .map_err(|e| format!("Failed to open 1aln file '{}': {}", file_path, e))?;
-                *slot = Some((file_path.clone(), file));
-            }
-
-            let (_, handle) = slot
-                .as_mut()
-                .expect("ONEALN_HANDLE must contain a handle after opening");
-            f(handle).map_err(|e| e.to_string())
-        })
+        with_cached_handle(
+            &ONEALN_HANDLE,
+            file_path,
+            |path| {
+                OneFile::open_read(path, None, None, 1)
+                    .map_err(|e| format!("Failed to open 1aln file '{}': {}", path, e))
+            },
+            |handle| f(handle).map_err(|e| e.to_string()),
+        )
     }
 
     fn get_target_sequence_cached(
@@ -572,12 +1140,11 @@ impl Impg {
         end: i32,
         is_reverse: bool,
     ) -> Vec<u8> {
-        let key = (target_id, start, end, is_reverse);
         TARGET_SEQ_CACHE.with(|cache_cell| {
             let mut slot = cache_cell.borrow_mut();
-            if let Some((cached_key, cached_seq)) = slot.as_mut() {
-                if *cached_key == key {
-                    return cached_seq.clone();
+            if let Some(entry) = slot.as_ref() {
+                if entry.matches(target_name, target_id, start, end, is_reverse) {
+                    return entry.seq.clone();
                 }
             }
 
@@ -590,7 +1157,14 @@ impl Impg {
                 seq
             };
 
-            *slot = Some((key, seq.clone()));
+            *slot = Some(TargetSeqCacheEntry {
+                name: target_name.to_string(),
+                target_id,
+                start,
+                end,
+                is_reverse,
+                seq: seq.clone(),
+            });
             seq
         })
     }
@@ -686,28 +1260,19 @@ impl Impg {
         F: FnOnce(&mut tpa::TpaReader) -> Result<R, TpaParseErr>,
     {
         let file_path = &self.alignment_files[file_index];
-        TPA_HANDLE.with(|handle_cell| {
-            let mut slot = handle_cell.borrow_mut();
-            let needs_open = match slot.as_ref() {
-                Some((cached_path, _)) => cached_path != file_path,
-                None => true,
-            };
-
-            if needs_open {
-                *slot = None;
-                let mut reader = tpa::TpaReader::new(file_path)
-                    .map_err(|e| format!("Failed to open TPA file '{}': {}", file_path, e))?;
-                reader.load_string_table().map_err(|e| {
-                    format!("Failed to load TPA string table '{}': {}", file_path, e)
-                })?;
-                *slot = Some((file_path.clone(), reader));
-            }
-
-            let (_, handle) = slot
-                .as_mut()
-                .expect("TPA_HANDLE must contain a handle after opening");
-            f(handle).map_err(|e| e.to_string())
-        })
+        with_cached_handle(
+            &TPA_HANDLE,
+            file_path,
+            |path| {
+                let mut reader = tpa::TpaReader::new(path)
+                    .map_err(|e| format!("Failed to open TPA file '{}': {}", path, e))?;
+                reader
+                    .load_string_table()
+                    .map_err(|e| format!("Failed to load TPA string table '{}': {}", path, e))?;
+                Ok(reader)
+            },
+            |handle| f(handle).map_err(|e| e.to_string()),
+        )
     }
 
     fn get_tpa_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
@@ -741,6 +1306,27 @@ impl Impg {
         }
     }
 
+    /// Compute `(scan_dir, project_dir)` along metadata's `(target, query)` axes
+    /// as tracepoint segments are traversed from index `0` to `len - 1`.
+    ///
+    /// On forward strand (`+`), both formats traverse original `(query, target)`
+    /// ascending (`+1, +1`). On reverse strand (`-`), FastGA traverses original
+    /// query ascending (`+1`) vs original target descending (`-1`), whereas
+    /// Standard/Variable/Mixed TPA stores PAF CIGAR order: original query
+    /// descending (`-1`) vs original target ascending (`+1`). Reversed entries
+    /// swap which axis is scanned vs projected.
+    fn tracepoint_directions(alignment: &OneAlnAlignment, metadata: &QueryMetadata) -> (i32, i32) {
+        let is_reverse = metadata.strand() == Strand::Reverse;
+        let is_standard = matches!(alignment.mode_data, TracepointModeData::Standard { .. });
+        let orig_q_dir = if is_reverse && is_standard { -1 } else { 1 };
+        let orig_t_dir = if is_reverse && !is_standard { -1 } else { 1 };
+        if metadata.is_reversed() {
+            (orig_q_dir, orig_t_dir)
+        } else {
+            (orig_t_dir, orig_q_dir)
+        }
+    }
+
     /// Scan tracepoints to find segments overlapping the requested target range.
     ///
     /// For forward entries: scans along the target axis, projects onto the query axis.
@@ -755,50 +1341,18 @@ impl Impg {
         range_end: i32,
         is_reversed_entry: bool,
     ) -> Option<SubsettingResult> {
-        let is_reverse = metadata.strand() == Strand::Reverse;
+        let (scan_dir, project_dir) = Self::tracepoint_directions(alignment, metadata);
 
-        // Scan axis = metadata target axis (where range_start/range_end live)
-        // Project axis = metadata query axis (output axis)
-        //
-        // Forward entry: scan along original target, project along original query
-        //   scan_dir: +1 (+strand) or -1 (-strand); project_dir: always +1
-        // Reversed entry: scan along original query (=metadata target), project along original target (=metadata query)
-        //   scan_dir: always +1; project_dir: +1 (+strand) or -1 (-strand)
-        let scan_dir: i32 = if is_reversed_entry {
-            1
-        } else if is_reverse {
-            -1
-        } else {
-            1
-        };
-        let project_dir: i32 = if is_reversed_entry {
-            if is_reverse {
-                -1
-            } else {
-                1
-            }
-        } else {
-            1
-        };
-
-        // Initialize scan position (along range axis)
-        let mut scan_pos = if is_reversed_entry {
-            metadata.target_start // = orig query_start, always scan forward
-        } else if is_reverse {
-            metadata.target_end
-        } else {
+        // Initialize scan position (along range axis) and project position (along output axis)
+        let mut scan_pos = if scan_dir == 1 {
             metadata.target_start
-        };
-
-        // Initialize project position (along output axis)
-        let mut project_pos = if is_reversed_entry {
-            if is_reverse {
-                metadata.query_end
-            } else {
-                metadata.query_start
-            }
         } else {
-            metadata.query_start // Always start from query_start for forward
+            metadata.target_end
+        };
+        let mut project_pos = if project_dir == 1 {
+            metadata.query_start
+        } else {
+            metadata.query_end
         };
 
         // Track overlapping segments
@@ -814,7 +1368,7 @@ impl Impg {
         let mut total_matches = 0.0;
         let mut total_mismatches = 0.0;
 
-        // Pre-compute FASTGA-specific values if needed
+        // Pre-compute FASTGA-specific values and remaining original query span for clamping
         let (trace_spacing, first_boundary) = match &alignment.mode_data {
             TracepointModeData::Fastga { trace_spacing, .. } => {
                 let ts = *trace_spacing as i32;
@@ -824,29 +1378,36 @@ impl Impg {
             }
             TracepointModeData::Standard { .. } => (0, 0), // not used
         };
+        let orig_q_total = if is_reversed_entry {
+            metadata.target_end - metadata.target_start
+        } else {
+            metadata.query_end - metadata.query_start
+        };
+        let mut consumed_orig_q = 0;
 
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
-            // Query delta (always positive, along original query axis)
+            // Query delta (unsigned magnitude along original query axis)
             let query_delta = match &alignment.mode_data {
                 TracepointModeData::Standard { query_deltas, .. } => query_deltas[idx] as i32,
                 TracepointModeData::Fastga { .. } => {
-                    if idx == 0 {
+                    let raw = if idx == 0 {
                         first_boundary
                     } else {
                         trace_spacing
-                    }
+                    };
+                    let clamped = raw.min(orig_q_total - consumed_orig_q);
+                    consumed_orig_q += clamped;
+                    clamped
                 }
             };
             let abs_tracepoint = tracepoint.abs() as i32;
 
-            // Compute scan and project deltas based on entry type
+            // Compute signed scan and project deltas based on entry type and directions
             let (scan_delta, project_delta, abs_scan_delta) = if is_reversed_entry {
-                // Reversed: scan with query_delta (always positive), project with tracepoint
-                (query_delta, abs_tracepoint * project_dir, query_delta)
+                (query_delta * scan_dir, abs_tracepoint * project_dir, query_delta)
             } else {
-                // Forward: scan with tracepoint * scan_dir, project with query_delta
-                ((tracepoint as i32) * scan_dir, query_delta, abs_tracepoint)
+                (abs_tracepoint * scan_dir, query_delta * project_dir, abs_tracepoint)
             };
 
             // Segment boundaries (forward coordinate space along scan axis)
@@ -923,43 +1484,76 @@ impl Impg {
             total_mismatches,
             first_segment_info: first_segment_info.unwrap(),
             last_segment_info: last_segment_info.unwrap(),
+            scan_dir,
+            project_dir,
         })
     }
 
-    fn process_tracepoints_data(
+    /// Fetch `(a_seq, b_seq)` in the orientation expected by tracepoint WFA reconstruction.
+    ///
+    /// Always fetches original query (`a_seq`) and original target (`b_seq`) even when
+    /// `metadata.is_reversed()` has swapped `query_id`/`target_id` in metadata.
+    /// On reverse strand, FastGA expects `(fwd(orig_q), RC(orig_t))`, while Standard/
+    /// Variable/Mixed TPA expects `(RC(orig_q), fwd(orig_t))` (PAF CIGAR order).
+    #[allow(clippy::too_many_arguments)]
+    fn fetch_tracepoint_sequences(
         &self,
         alignment: &OneAlnAlignment,
         metadata: &QueryMetadata,
         target_id: u32,
+        orig_q_lo: i32,
+        orig_q_hi: i32,
+        orig_t_lo: i32,
+        orig_t_hi: i32,
         sequence_index: &UnifiedSequenceIndex,
-    ) -> Vec<CigarOp> {
-        let (query_start, query_end) = (metadata.query_start, metadata.query_end);
-        let (target_start, target_end) = (metadata.target_start, metadata.target_end);
-
-        // if there are no differences, we can shortcut to a perfect match CIGAR
-        if alignment.differences == 0 {
-            let match_len = query_end - query_start;
-            return vec![CigarOp::new(match_len, '=')];
-        }
-
-        // Fetch query sequence (not cached)
-        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq = sequence_index
-            .fetch_sequence(query_name, query_start, query_end)
-            .unwrap_or_else(|e| panic!("Failed to fetch query sequence: {e}"));
-
-        let target_name = self.seq_index.get_name(target_id).unwrap();
-
+    ) -> (Vec<u8>, Vec<u8>) {
         let is_reverse = metadata.strand() == Strand::Reverse;
-        let target_seq = self.get_target_sequence_cached(
+        let is_standard = matches!(alignment.mode_data, TracepointModeData::Standard { .. });
+        let rc_orig_q = is_reverse && is_standard;
+        let rc_orig_t = is_reverse && !is_standard;
+
+        let (orig_q_id, orig_t_id) = if metadata.is_reversed() {
+            (target_id, metadata.query_id)
+        } else {
+            (metadata.query_id, target_id)
+        };
+
+        let a_name = self.seq_index.get_name(orig_q_id).unwrap();
+        let a_seq_raw = sequence_index
+            .fetch_sequence(a_name, orig_q_lo, orig_q_hi)
+            .unwrap_or_else(|e| panic!("Failed to fetch query sequence: {e}"));
+        let a_seq = if rc_orig_q {
+            reverse_complement(&a_seq_raw)
+        } else {
+            a_seq_raw
+        };
+
+        let b_name = self.seq_index.get_name(orig_t_id).unwrap();
+        let b_seq = self.get_target_sequence_cached(
             sequence_index,
-            target_name,
-            target_id,
-            target_start,
-            target_end,
-            is_reverse,
+            b_name,
+            orig_t_id,
+            orig_t_lo,
+            orig_t_hi,
+            rc_orig_t,
         );
 
+        (a_seq, b_seq)
+    }
+
+    /// Reconstruct a CIGAR vector in the original alignment perspective from a
+    /// contiguous tracepoint slice `[start_idx..end_idx]` and aligned sequence slices.
+    #[allow(clippy::too_many_arguments)]
+    fn reconstruct_cigar_from_tracepoints(
+        alignment: &OneAlnAlignment,
+        start_idx: usize,
+        end_idx: usize,
+        a_seq: &[u8],
+        b_seq: &[u8],
+        a_contig_offset: usize,
+        b_contig_offset: usize,
+        is_reverse: bool,
+    ) -> Vec<CigarOp> {
         let cigar_str = match &alignment.mode_data {
             TracepointModeData::Standard {
                 query_deltas,
@@ -967,9 +1561,9 @@ impl Impg {
                 max_complexity,
                 distance,
             } => {
-                let tracepoints: Vec<(usize, usize)> = query_deltas
+                let tracepoints: Vec<(usize, usize)> = query_deltas[start_idx..end_idx]
                     .iter()
-                    .zip(alignment.tracepoints.iter())
+                    .zip(alignment.tracepoints[start_idx..end_idx].iter())
                     .map(|(&qd, &td)| (qd as usize, td as usize))
                     .collect();
                 let metric = *complexity_metric;
@@ -977,8 +1571,8 @@ impl Impg {
                 with_aligner(distance, |aligner| {
                     tracepoints_to_cigar_with_aligner(
                         &tracepoints,
-                        &query_seq,
-                        &target_seq,
+                        a_seq,
+                        b_seq,
                         0,
                         0,
                         metric,
@@ -991,9 +1585,9 @@ impl Impg {
                 diffs,
                 trace_spacing,
             } => {
-                let tracepoints: Vec<(usize, usize)> = diffs
+                let tracepoints: Vec<(usize, usize)> = diffs[start_idx..end_idx]
                     .iter()
-                    .zip(alignment.tracepoints.iter())
+                    .zip(alignment.tracepoints[start_idx..end_idx].iter())
                     .map(|(&diff, &tp)| (diff as usize, tp as usize))
                     .collect();
                 let ts = *trace_spacing as usize;
@@ -1001,11 +1595,11 @@ impl Impg {
                     tracepoints_to_cigar_fastga_with_aligner(
                         &tracepoints,
                         ts.try_into().unwrap(),
-                        &query_seq,
-                        &target_seq,
-                        alignment.query_contig_start.try_into().unwrap(),
-                        alignment.target_contig_start.try_into().unwrap(),
-                        metadata.strand() == Strand::Reverse,
+                        a_seq,
+                        b_seq,
+                        a_contig_offset,
+                        b_contig_offset,
+                        is_reverse,
                         aligner,
                         true,
                     )
@@ -1013,21 +1607,65 @@ impl Impg {
             }
         };
 
-        match parse_cigar_to_delta(&cigar_str) {
-            Ok(ops) => ops,
-            Err(e) => panic!(
-                "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
-                e
-            ),
+        parse_cigar_to_delta(&cigar_str).unwrap_or_else(|e| {
+            panic!("Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {e:?}")
+        })
+    }
+
+    fn process_tracepoints_data(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        sequence_index: &UnifiedSequenceIndex,
+    ) -> Vec<CigarOp> {
+        let (orig_q_lo, orig_q_hi, orig_t_lo, orig_t_hi) = if metadata.is_reversed() {
+            (
+                metadata.target_start,
+                metadata.target_end,
+                metadata.query_start,
+                metadata.query_end,
+            )
+        } else {
+            (
+                metadata.query_start,
+                metadata.query_end,
+                metadata.target_start,
+                metadata.target_end,
+            )
+        };
+
+        let (a_seq, b_seq) = self.fetch_tracepoint_sequences(
+            alignment,
+            metadata,
+            target_id,
+            orig_q_lo,
+            orig_q_hi,
+            orig_t_lo,
+            orig_t_hi,
+            sequence_index,
+        );
+
+        // Shortcut to a pure-match CIGAR only when both diff metadata and the
+        // fetched sequences confirm an exact match of equal length (guards against
+        // stale TPA metadata or boundary normalization offsets).
+        if alignment.differences == 0 && a_seq.len() == b_seq.len() && a_seq.eq_ignore_ascii_case(&b_seq) {
+            return vec![CigarOp::new(a_seq.len() as i32, '=')];
         }
+
+        Self::reconstruct_cigar_from_tracepoints(
+            alignment,
+            0,
+            alignment.tracepoints.len(),
+            &a_seq,
+            &b_seq,
+            alignment.query_contig_start.try_into().unwrap(),
+            alignment.target_contig_start.try_into().unwrap(),
+            metadata.strand() == Strand::Reverse,
+        )
     }
 
     /// Reconstruct CIGAR only for the subset of tracepoints that overlap the requested range.
-    ///
-    /// For reversed entries, the metadata names/coordinates are swapped but tracepoint
-    /// reconstruction needs the original sequences: a_seq = original query (from target_id
-    /// at scan-axis coords), b_seq = original target (from metadata.query_id at project-axis
-    /// coords, RC if - strand).
     fn process_subset_tracepoints(
         &self,
         alignment: &OneAlnAlignment,
@@ -1037,170 +1675,54 @@ impl Impg {
         sequence_index: &UnifiedSequenceIndex,
     ) -> Vec<CigarOp> {
         let is_reverse = metadata.strand() == Strand::Reverse;
-        let is_reversed_entry = metadata.is_reversed();
+        let (subset_scan_start, subset_scan_end, subset_proj_lo, subset_proj_hi) =
+            subset.bounds(alignment.tracepoints.len(), metadata);
 
-        // Extract subset tracepoints [first_idx..=last_idx]
-        let subset_tracepoints: Vec<(usize, usize)> = match &alignment.mode_data {
-            TracepointModeData::Standard { query_deltas, .. } => {
-                // Standard mode: (query_delta, target_delta)
-                query_deltas[subset.first_idx..=subset.last_idx]
-                    .iter()
-                    .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
-                    .map(|(&qd, &tp)| (qd as usize, tp as usize))
-                    .collect()
-            }
-            TracepointModeData::Fastga { diffs, .. } => {
-                // Fastga mode: (diffs, target_delta)
-                diffs[subset.first_idx..=subset.last_idx]
-                    .iter()
-                    .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
-                    .map(|(&diff, &tp)| (diff as usize, tp as usize))
-                    .collect()
-            }
-        };
-
-        // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
-        // first_query_pos/last_query_pos are project-axis positions from scan_overlapping_tracepoints
-        let subset_query_start = subset.first_query_pos;
-
-        // If last_idx is the actual last tracepoint of the alignment, the last
-        // segment may be shorter than trace_spacing. Use metadata boundary.
-        let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-            // For reversed - strand: project went from query_end toward query_start,
-            // so the last segment ends at query_start, not query_end
-            if is_reversed_entry && is_reverse {
-                metadata.query_start
+        let (orig_q_lo, orig_q_hi, orig_t_lo, orig_t_hi, orig_q_start, orig_t_start) =
+            if metadata.is_reversed() {
+                (
+                    subset_scan_start,
+                    subset_scan_end,
+                    subset_proj_lo,
+                    subset_proj_hi,
+                    metadata.target_start,
+                    metadata.query_start,
+                )
             } else {
-                metadata.query_end
-            }
-        } else {
-            subset.last_query_pos // Middle segment - use calculated position
-        };
-
-        // For target (scan axis): extract from first/last segment info (seg_start, seg_end already in forward space)
-        let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
-        let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
-        let subset_target_start = first_seg_start
-            .min(first_seg_end)
-            .min(last_seg_start.min(last_seg_end));
-
-        // If last_idx is the actual last tracepoint, use metadata target boundary
-        let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-            metadata.target_end // Last segment of alignment - use exact boundary
-        } else {
-            first_seg_start
-                .max(first_seg_end)
-                .max(last_seg_start.max(last_seg_end)) // Middle segment - use calculated
-        };
-
-        // Fetch sequences and compute contig offsets
-        let (query_seq, target_seq, adjusted_query_offset, adjusted_target_offset) =
-            if is_reversed_entry {
-                // For reversed entries, tracepoint reconstruction needs ORIGINAL sequences:
-                // a_seq = original query (from target_id at scan-axis coords, no RC)
-                // b_seq = original target (from metadata.query_id at project-axis coords, RC if - strand)
-                let a_name = self.seq_index.get_name(target_id).unwrap();
-                let a_seq = sequence_index
-                    .fetch_sequence(a_name, subset_target_start, subset_target_end)
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to fetch subset query sequence (reversed): {e}")
-                    });
-
-                // Handle reversed - strand range ordering: project-axis start > end
-                let proj_lo = subset_query_start.min(subset_query_end);
-                let proj_hi = subset_query_start.max(subset_query_end);
-                let b_name = self.seq_index.get_name(metadata.query_id).unwrap();
-                let b_seq = self.get_target_sequence_cached(
-                    sequence_index,
-                    b_name,
-                    metadata.query_id,
-                    proj_lo,
-                    proj_hi,
-                    is_reverse,
-                );
-
-                // Contig offsets for original alignment perspective:
-                // query offset = position in original query contig (scan axis)
-                let qoff = alignment.query_contig_start as usize
-                    + (subset_target_start - metadata.target_start) as usize;
-                // target offset = position in original target contig (project axis)
-                let toff = alignment.target_contig_start as usize
-                    + (proj_lo - metadata.query_start) as usize;
-
-                (a_seq, b_seq, qoff, toff)
-            } else {
-                // Forward entries: standard sequence fetching
-                let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-                let query_seq = sequence_index
-                    .fetch_sequence(query_name, subset_query_start, subset_query_end)
-                    .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
-
-                let target_name = self.seq_index.get_name(target_id).unwrap();
-                let target_seq = self.get_target_sequence_cached(
-                    sequence_index,
-                    target_name,
-                    target_id,
-                    subset_target_start,
-                    subset_target_end,
-                    is_reverse,
-                );
-
-                let qoff = alignment.query_contig_start as usize
-                    + (subset_query_start - metadata.query_start) as usize;
-                let toff = alignment.target_contig_start as usize
-                    + (subset_target_start - metadata.target_start) as usize;
-
-                (query_seq, target_seq, qoff, toff)
+                (
+                    subset_proj_lo,
+                    subset_proj_hi,
+                    subset_scan_start,
+                    subset_scan_end,
+                    metadata.query_start,
+                    metadata.target_start,
+                )
             };
 
-        // Reconstruct CIGAR for subset only
-        let cigar_str = match &alignment.mode_data {
-            TracepointModeData::Standard {
-                complexity_metric,
-                max_complexity,
-                distance,
-                ..
-            } => {
-                let metric = *complexity_metric;
-                let max_val = Some(*max_complexity as u32);
-                with_aligner(distance, |aligner| {
-                    tracepoints_to_cigar_with_aligner(
-                        &subset_tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        metric,
-                        aligner,
-                        max_val,
-                    )
-                })
-            }
-            TracepointModeData::Fastga { trace_spacing, .. } => {
-                let ts = *trace_spacing as usize;
-                with_aligner(&Distance::Edit, |aligner| {
-                    tracepoints_to_cigar_fastga_with_aligner(
-                        &subset_tracepoints,
-                        ts.try_into().unwrap(),
-                        &query_seq,
-                        &target_seq,
-                        adjusted_query_offset,
-                        adjusted_target_offset,
-                        is_reverse,
-                        aligner,
-                        true,
-                    )
-                })
-            }
-        };
+        let (a_seq, b_seq) = self.fetch_tracepoint_sequences(
+            alignment,
+            metadata,
+            target_id,
+            orig_q_lo,
+            orig_q_hi,
+            orig_t_lo,
+            orig_t_hi,
+            sequence_index,
+        );
 
-        match parse_cigar_to_delta(&cigar_str) {
-            Ok(ops) => ops,
-            Err(e) => panic!(
-                "Failed to parse CIGAR string '{cigar_str}' during subset tracepoint processing: {:?}",
-                e
-            ),
-        }
+        let qoff = alignment.query_contig_start as usize + (orig_q_lo - orig_q_start) as usize;
+        let toff = alignment.target_contig_start as usize + (orig_t_lo - orig_t_start) as usize;
+
+        Self::reconstruct_cigar_from_tracepoints(
+            alignment,
+            subset.first_idx,
+            subset.last_idx + 1,
+            &a_seq,
+            &b_seq,
+            qoff,
+            toff,
+            is_reverse,
+        )
     }
 
     fn project_overlapping_interval(
@@ -1215,8 +1737,10 @@ impl Impg {
         // Check if this is a tracepoint file that supports subsetting
         let file_index = metadata.alignment_file_index as usize;
         let alignment_file = &self.alignment_files[file_index];
-        let is_tracepoint_file =
-            alignment_file.ends_with(".1aln") || alignment_file.ends_with(".tpa");
+        let is_tracepoint_file = matches!(
+            QueryMetadata::get_file_type(alignment_file),
+            FileType::OneAln | FileType::Tpa
+        );
 
         // Try subsetting approach for tracepoint files
         if let (true, Some(sequence_index)) = (is_tracepoint_file, sequence_index) {
@@ -1281,40 +1805,12 @@ impl Impg {
                 }
             }
 
-            let is_reverse = metadata.strand() == Strand::Reverse;
-
-            // Project the CIGAR through the alignment to get exact coordinates
-            // Use same boundary logic as in process_subset_tracepoints
-            let subset_query_start = subset.first_query_pos;
-            let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-                // For reversed - strand: project went from query_end toward query_start
-                if metadata.is_reversed() && is_reverse {
-                    metadata.query_start
-                } else {
-                    metadata.query_end
-                }
-            } else {
-                subset.last_query_pos
-            };
-
-            let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
-            let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
-            let subset_target_start = first_seg_start
-                .min(first_seg_end)
-                .min(last_seg_start.min(last_seg_end));
-            let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-                metadata.target_end
-            } else {
-                first_seg_start
-                    .max(first_seg_end)
-                    .max(last_seg_start.max(last_seg_end))
-            };
-
-            // Normalize query bounds for projection (start < end required)
-            let alignment_target_start = subset_target_start;
-            let alignment_target_end = subset_target_end;
-            let alignment_query_start = subset_query_start.min(subset_query_end);
-            let alignment_query_end = subset_query_start.max(subset_query_end);
+            let (
+                alignment_target_start,
+                alignment_target_end,
+                alignment_query_start,
+                alignment_query_end,
+            ) = subset.bounds(alignment.tracepoints.len(), metadata);
 
             // Project the requested range through the CIGAR
             let projection = match project_target_range_through_alignment(
@@ -1468,10 +1964,13 @@ impl Impg {
         let pre_refinement_query = (subset.first_query_pos, subset.last_query_pos);
         let pre_refinement_target = (range_start, range_end);
 
-        // Refine query coordinates using indel-aware heuristic
+        // Refine query coordinates using indel-aware heuristic.
+        // When scanning in -1 direction, query_pos corresponds to segment_target_end
+        // (and first_segment hits range_end while last_segment hits range_start).
         let refine_boundary = |query_pos: i32,
                                query_delta: i32,
                                segment_target_start: i32,
+                               segment_target_end: i32,
                                overlap_pos: i32,
                                abs_target_delta: i32,
                                trace_diffs: i32,
@@ -1486,9 +1985,6 @@ impl Impg {
 
             if abs_target_delta == 0 {
                 // Pure insertion in query: zero target bases consumed.
-                // The entire insertion maps to a single target point strictly within the range.
-                // First boundary: start of insertion (query_pos)
-                // Last boundary: end of insertion (query_pos + query_delta)
                 let refined_pos = if boundary_name == "First" {
                     query_pos
                 } else {
@@ -1503,8 +1999,12 @@ impl Impg {
                 return refined_pos.max(lo).min(hi);
             }
 
-            let target_fraction =
-                (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
+            let target_offset = if subset.scan_dir == 1 {
+                overlap_pos - segment_target_start
+            } else {
+                segment_target_end - overlap_pos
+            };
+            let target_fraction = target_offset as f64 / abs_target_delta as f64;
             let indel_ratio = query_delta as f64 / abs_target_delta as f64;
             let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
             let refined_pos = query_pos + query_advance.round() as i32;
@@ -1520,14 +2020,25 @@ impl Impg {
         };
 
         // Refine first and last query positions
-        let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) =
-            subset.first_segment_info;
-        let overlap_start = segment_target_start.max(range_start);
+        let (
+            query_pos,
+            query_delta,
+            segment_target_start,
+            segment_target_end,
+            abs_target_delta,
+            trace_diffs,
+        ) = subset.first_segment_info;
+        let first_overlap = if subset.scan_dir == 1 {
+            segment_target_start.max(range_start)
+        } else {
+            segment_target_end.min(range_end)
+        };
         let refined_first = refine_boundary(
             query_pos,
             query_delta,
             segment_target_start,
-            overlap_start,
+            segment_target_end,
+            first_overlap,
             abs_target_delta,
             trace_diffs,
             "First",
@@ -1541,12 +2052,17 @@ impl Impg {
             abs_target_delta,
             trace_diffs,
         ) = subset.last_segment_info;
-        let overlap_end = segment_target_end.min(range_end);
+        let last_overlap = if subset.scan_dir == 1 {
+            segment_target_end.min(range_end)
+        } else {
+            segment_target_start.max(range_start)
+        };
         let refined_last = refine_boundary(
             query_pos,
             query_delta,
             segment_target_start,
-            overlap_end,
+            segment_target_end,
+            last_overlap,
             abs_target_delta,
             trace_diffs,
             "Last",
@@ -1601,17 +2117,22 @@ impl Impg {
         let working_query_start = refined_first;
         let working_query_end = refined_last;
 
-        // For forward reverse-strand alignments: swap projected query coordinates.
-        // For reversed entries, the project direction already handles the ordering.
-        let (query_start, query_end) = if is_reverse && !metadata.is_reversed() {
-            (working_query_end, working_query_start) // Swap: first=end, last=start
+        // Ensure reverse-strand query intervals are returned as (high, low).
+        // When project_dir == 1, refined_first < refined_last so swap them;
+        // when project_dir == -1, refined_first is already the higher coordinate.
+        let (query_start, query_end) = if is_reverse && subset.project_dir == 1 {
+            (working_query_end, working_query_start)
         } else {
             (working_query_start, working_query_end)
         };
 
-        // Target coordinates: use exact requested range
-        let target_start = range_start;
-        let target_end = range_end;
+        // The target interval is the part of the requested range that this
+        // alignment actually covers. Copying the requested range here claimed
+        // homology outside the alignment: with a reverse record over target
+        // 100-900, querying 0-1000 returned target 0-1000 while the CIGAR path
+        // returned 100-900.
+        let target_start = range_start.max(metadata.target_start);
+        let target_end = range_end.min(metadata.target_end);
 
         // Validate coordinates are non-negative
         if working_query_start < 0 || working_query_end < 0 {
@@ -1642,6 +2163,8 @@ impl Impg {
         sequence_files: Option<&[String]>,
         bidirectional: bool,
     ) -> io::Result<Self> {
+        validate_index_inputs(records_by_file, &seq_index)?;
+
         // Extract just the alignment file paths
         let alignment_files: Vec<String> = records_by_file
             .par_iter()
@@ -1654,15 +2177,24 @@ impl Impg {
             debug!("Creating unidirectional alignment entries");
         }
 
-        let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
-            .par_iter()
-            .enumerate() // Add enumeration to get the position as index
+        const RECORD_CHUNK_SIZE: usize = 4096;
+        let record_chunks: Vec<(u32, &[AlignmentRecord])> = records_by_file
+            .iter()
+            .enumerate()
             .flat_map(|(file_index, (records, _))| {
+                let file_idx = file_index as u32;
                 records
-                    .par_iter()
-                    .flat_map(|record| {
-                        let mut entries = Vec::with_capacity(if bidirectional { 2 } else { 1 });
+                    .chunks(RECORD_CHUNK_SIZE)
+                    .map(move |chunk| (file_idx, chunk))
+            })
+            .collect();
 
+        let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = record_chunks
+            .into_par_iter()
+            .fold(
+                FxHashMap::default,
+                |mut acc: FxHashMap<u32, Vec<Interval<QueryMetadata>>>, (file_index, chunk)| {
+                    for record in chunk {
                         // ENTRY 1: Original direction (query → target)
                         let forward_metadata = QueryMetadata {
                             query_id: record.query_id,
@@ -1670,18 +2202,15 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            alignment_file_index: file_index as u32,
+                            alignment_file_index: file_index,
                             strand_and_data_offset: record.strand_and_data_offset,
                             data_bytes: record.data_bytes,
                         };
-                        entries.push((
-                            record.target_id,
-                            Interval {
-                                first: record.target_start as i32,
-                                last: record.target_end as i32,
-                                metadata: forward_metadata,
-                            },
-                        ));
+                        acc.entry(record.target_id).or_default().push(Interval {
+                            first: record.target_start as i32,
+                            last: record.target_end as i32,
+                            metadata: forward_metadata,
+                        });
 
                         // ENTRY 2: Reversed direction (target → query)
                         // Skip self-alignments to avoid duplicates
@@ -1692,43 +2221,45 @@ impl Impg {
                                 target_end: record.query_end as i32,     // SWAPPED
                                 query_start: record.target_start as i32, // SWAPPED
                                 query_end: record.target_end as i32,     // SWAPPED
-                                alignment_file_index: file_index as u32,
+                                alignment_file_index: file_index,
                                 strand_and_data_offset: record.strand_and_data_offset,
                                 data_bytes: record.data_bytes,
                             };
                             reversed_metadata.set_reversed(); // Mark with REVERSED_BIT
 
-                            entries.push((
-                                record.query_id, // NOW indexed by original query_id
-                                Interval {
-                                    first: record.query_start as i32,
-                                    last: record.query_end as i32,
-                                    metadata: reversed_metadata,
-                                },
-                            ));
+                            acc.entry(record.query_id).or_default().push(Interval {
+                                first: record.query_start as i32,
+                                last: record.query_end as i32,
+                                metadata: reversed_metadata,
+                            });
                         }
-
-                        entries
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .fold(
-                FxHashMap::default,
-                |mut acc: FxHashMap<u32, Vec<Interval<QueryMetadata>>>, (target_id, interval)| {
-                    acc.entry(target_id).or_default().push(interval);
+                    }
                     acc
                 },
             )
             .reduce(FxHashMap::default, |mut acc, part| {
-                for (key, value) in part {
-                    acc.entry(key).or_default().extend(value);
+                for (key, mut value) in part {
+                    acc.entry(key)
+                        .and_modify(|existing| existing.extend(value.drain(..)))
+                        .or_insert(value);
                 }
                 acc
             });
 
+        // A reciprocal pair (`A -> B` and `B -> A` for the same alignment)
+        // reaches the same edge twice: once as the reversed entry of the first
+        // record and once as the forward entry of the second. Both describe the
+        // same projection, and both reached the output, so bedpe and paf
+        // printed the row twice. The released set has 1,483 such pairs.
+        //
+        // The key ignores the file index, the byte offset and the reversed
+        // flag: those say which record a projection reads its CIGAR from, not
+        // which edge this is.
         let trees: TreeMap = intervals
             .into_par_iter()
-            .map(|(target_id, interval_nodes)| {
+            .map(|(target_id, mut interval_nodes)| {
+                interval_nodes.sort_unstable_by_key(edge_key);
+                interval_nodes.dedup_by(|a, b| edge_key(a) == edge_key(b));
                 (
                     target_id,
                     Arc::new(BasicCOITree::new(interval_nodes.as_slice())),
@@ -1745,9 +2276,11 @@ impl Impg {
 
         let num_files = alignment_files.len();
         Ok(Self {
-            trees: RwLock::new(trees),
+            trees: Arc::new(RwLock::new(TreeCache::unbounded(trees))),
+            cache_ns: 0,
             seq_index,
             alignment_files,
+            built_bidirectional: bidirectional,
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
@@ -1760,7 +2293,7 @@ impl Impg {
         &self,
         mut writer: W,
     ) -> std::io::Result<()> {
-        const MAGIC: &[u8] = b"IMPGIDX2";
+        const MAGIC: &[u8] = b"IMPGIDX4";
         let mut forest_map = ForestMap::new();
 
         // Write magic bytes
@@ -1769,7 +2302,24 @@ impl Impg {
         // Write placeholder for forest map offset (will be updated later)
         writer.write_all(&[0u8; 8])?;
 
-        let mut current_offset = 16u64; // Header size
+        let mut current_offset = 16u64; // Magic plus forest map offset
+
+        // Record which alignment files this index was built from, in order: the
+        // byte offsets in the trees are only valid for that list.
+        let header_info = IndexHeaderInfo {
+            alignment_files: self
+                .alignment_files
+                .iter()
+                .map(|path| AlignmentFileEntry::from_path(path))
+                .collect(),
+            bidirectional: self.built_bidirectional,
+        };
+        let header_data =
+            bincode::serde::encode_to_vec(&header_info, bincode::config::standard()).map_err(
+                |e| std::io::Error::other(format!("Failed to encode index header: {e}")),
+            )?;
+        writer.write_all(&header_data)?;
+        current_offset += header_data.len() as u64;
 
         // Serialize sequence index
         let seq_index_data =
@@ -1782,7 +2332,11 @@ impl Impg {
 
         // Serialize each tree and track its offset
         let trees = self.trees.read().unwrap();
-        for (&target_id, tree) in trees.iter() {
+        for (&key, tree) in trees.iter() {
+            if (key >> 32) as u32 != self.cache_ns {
+                continue;
+            }
+            let target_id = key as u32;
             // Record the offset before serializing this tree
             forest_map.add_entry(target_id, current_offset);
 
@@ -1826,6 +2380,12 @@ impl Impg {
 
     /// Load a specific tree from disk using the forest map
     fn load_tree_from_disk(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+        // An in-memory index has no file to reload from. Callers can evict a
+        // tree and ask for it again (`impg stats` does), so return nothing
+        // instead of opening an empty path.
+        if self.index_file_path.is_empty() {
+            return None;
+        }
         if let Some(tree_offset) = self.forest_map.get_tree_offset(target_id) {
             let mut file = File::open(&self.index_file_path).expect("Failed to open index file");
             file.seek(std::io::SeekFrom::Start(tree_offset))
@@ -1843,18 +2403,8 @@ impl Impg {
                 panic!("Tree mismatch: expected {target_id}, got {loaded_target_id}");
             }
 
-            // Reconstruct the tree
-            let tree = BasicCOITree::new(
-                intervals
-                    .into_iter()
-                    .map(|interval| Interval {
-                        first: interval.first,
-                        last: interval.last,
-                        metadata: interval.metadata, // Move instead of clone
-                    })
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            );
+            // Reconstruct the tree directly from the decoded records
+            let tree = BasicCOITree::new(&intervals);
 
             let arc_tree = Arc::new(tree);
 
@@ -1862,7 +2412,7 @@ impl Impg {
             self.trees
                 .write()
                 .unwrap()
-                .insert(target_id, Arc::clone(&arc_tree));
+                .insert(self.cache_key(target_id), Arc::clone(&arc_tree));
 
             Some(arc_tree)
         } else {
@@ -1871,16 +2421,28 @@ impl Impg {
     }
 
     /// Get a tree from memory or load it from disk if necessary
+    fn cache_key(&self, target_id: u32) -> u64 {
+        ((self.cache_ns as u64) << 32) | target_id as u64
+    }
+
+    /// Use `cache` instead of this index's own tree cache, under namespace `ns`.
+    /// `MultiImpg` gives every sub-index the same cache, so one budget bounds
+    /// them all and the least recently used tree of any sub-index goes first.
+    pub(crate) fn share_tree_cache(&mut self, cache: Arc<RwLock<TreeCache>>, ns: u32) {
+        self.trees = cache;
+        self.cache_ns = ns;
+    }
+
     pub fn get_or_load_tree(
         &self,
         target_id: u32,
     ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
-        // First check if the tree is already in memory
-        if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
-            // Get a clone of the Arc<tree> (incrementing the reference count, a cheap operation)
-            // We clone to avoid holding the RwLock for the duration of the operation using the tree
-
-            return Some(Arc::clone(tree));
+        // First check if the tree is already in memory.
+        // The cache hands back a clone of the Arc (cheap refcount bump) so the RwLock
+        // is not held while the tree is used, and so eviction can never invalidate a
+        // tree a caller is still holding.
+        if let Some(tree) = self.trees.read().unwrap().get(self.cache_key(target_id)) {
+            return Some(tree);
         }
 
         // Not in memory - try to load from disk
@@ -1894,59 +2456,15 @@ impl Impg {
         index_file_path: String,
         sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
-        const MAGIC_V1: &[u8] = b"IMPGIDX1";
-        const MAGIC_V2: &[u8] = b"IMPGIDX2";
-
-        // Read and verify magic bytes
-        let mut magic_buf = [0u8; 8];
-        reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid magic bytes - not a valid IMPG index file (got {:?})",
-                    String::from_utf8_lossy(&magic_buf)
-                ),
-            ));
-        }
-
-        // Warn if loading old format
-        if magic_buf == MAGIC_V1 {
-            warn!("Loading IMPGIDX1 format (unidirectional). Rebuild without --unidirectional for better transitive query reach (bidirectional mode is default).");
-        }
-
-        // Read forest map offset
-        let mut offset_buf = [0u8; 8];
-        reader.read_exact(&mut offset_buf)?;
-        let forest_map_offset = u64::from_le_bytes(offset_buf);
-
-        // Read sequence index
-        let seq_index: SequenceIndex =
-            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to load sequence index: {e}"),
-                    )
-                })?;
-
-        // Seek to forest map and read it
-        reader.seek(SeekFrom::Start(forest_map_offset))?;
-        let forest_map: ForestMap =
-            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to load forest map: {e}"),
-                    )
-                })?;
-
+        let header = read_index_header(&mut reader, alignment_files, &index_file_path, true)?;
         let num_files = alignment_files.len();
         Ok(Self {
-            trees: RwLock::new(FxHashMap::default()),
-            seq_index,
+            trees: Arc::new(RwLock::new(TreeCache::bounded(default_tree_cache_bytes()))),
+            cache_ns: 0,
+            seq_index: header.seq_index,
             alignment_files: alignment_files.to_vec(),
-            forest_map,
+            built_bidirectional: header.built_bidirectional,
+            forest_map: header.forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             trace_spacing_cache: RwLock::new(vec![None; num_files]),
@@ -1963,25 +2481,12 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
-        let mut results = Vec::new();
-        // Add the input range to the results
-        results.push((
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            if store_cigar {
-                vec![CigarOp::new(range_end - range_start, '=')]
-            } else {
-                Vec::new()
-            },
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-        ));
+        let mut results = vec![make_self_interval(
+            target_id,
+            range_start,
+            range_end,
+            store_cigar,
+        )];
 
         debug!(
             "Querying region{}: {}:{}-{}, len: {}",
@@ -2043,7 +2548,7 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let cache_key = (metadata.alignment_file_index, metadata.data_offset());
+                let cache_key = metadata.cigar_cache_key();
                 cache
                     .entry(cache_key)
                     .or_insert_with(|| self.get_cigar_ops(metadata, target_id, sequence_index));
@@ -2051,6 +2556,13 @@ impl Impg {
         }
     }
 
+    /// Query a range, reusing CIGARs from `cigar_cache` instead of reading them
+    /// again.
+    ///
+    /// With `approximate_mode`, the projection interpolates the query interval
+    /// from the segment boundaries and never reads a CIGAR or a sequence, so
+    /// `cigar_cache` and `sequence_index` are not used.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_with_cache(
         &self,
         target_id: u32,
@@ -2060,30 +2572,37 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
-        let mut results = Vec::new();
-        results.push((
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            if store_cigar {
-                vec![CigarOp::new(range_end - range_start, '=')]
-            } else {
-                Vec::new()
-            },
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-        ));
+        let mut results = vec![make_self_interval(
+            target_id,
+            range_start,
+            range_end,
+            store_cigar,
+        )];
 
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let cache_key = (metadata.alignment_file_index, metadata.data_offset());
+
+                if approximate_mode {
+                    // Fast path: no CIGAR and no sequence I/O.
+                    if let Some((query_interval, cigar_ops, target_interval)) = self
+                        .project_overlapping_interval_fast(
+                            metadata,
+                            target_id,
+                            range_start,
+                            range_end,
+                            min_gap_compressed_identity,
+                        )
+                    {
+                        let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                        results.push((query_interval, cigar_vec, target_interval));
+                    }
+                    return;
+                }
+
+                let cache_key = metadata.cigar_cache_key();
                 let cigar_ops = cigar_cache
                     .get(&cache_key)
                     .cloned()
@@ -2194,22 +2713,11 @@ impl Impg {
 
         for (filtered_start, filtered_end) in filtered_input_range {
             // Add the filtered input range(s) to the results
-            results.push((
-                Interval {
-                    first: filtered_start,
-                    last: filtered_end,
-                    metadata: target_id,
-                },
-                if store_cigar {
-                    vec![CigarOp::new(filtered_end - filtered_start, '=')]
-                } else {
-                    Vec::new()
-                },
-                Interval {
-                    first: filtered_start,
-                    last: filtered_end,
-                    metadata: target_id,
-                },
+            results.push(make_self_interval(
+                target_id,
+                filtered_start,
+                filtered_end,
+                store_cigar,
             ));
 
             // Add the filtered input range(s) to the stack
@@ -2353,24 +2861,9 @@ impl Impg {
             //debug!("Collected {} results", results.len() - prec_num_results);
 
             // Merge contiguous/overlapping ranges with same sequence_id
-            //let stack_size = stack.len();
-            stack.par_sort_by_key(|(id, start, _, _)| (*id, *start));
-
-            let mut write = 0;
-            for read in 1..stack.len() {
-                if stack[write].0 == stack[read].0 &&   // Same sequence_id 
-                    stack[write].2 >= stack[read].1
-                // Overlapping or contiguous
-                {
-                    // Merge by extending end
-                    stack[write].2 = stack[write].2.max(stack[read].2);
-                } else {
-                    write += 1;
-                    stack.swap(write, read);
-                }
-            }
-            stack.truncate(write + 1);
-            //debug!("Merged stack size from {} to {}", stack_size, stack.len());
+            stack.par_sort_by_key(QueueRangeItem::key_start);
+            let new_len = compact_sorted_ranges(&mut stack);
+            stack.truncate(new_len);
         }
 
         results
@@ -2410,23 +2903,12 @@ impl Impg {
         let mut results = Vec::new();
 
         // Add the filtered input range(s) to the results
-        for (filtered_start, filtered_end) in &filtered_input_range {
-            results.push((
-                Interval {
-                    first: *filtered_start,
-                    last: *filtered_end,
-                    metadata: target_id,
-                },
-                if store_cigar {
-                    vec![CigarOp::new(filtered_end - filtered_start, '=')]
-                } else {
-                    Vec::new()
-                },
-                Interval {
-                    first: *filtered_start,
-                    last: *filtered_end,
-                    metadata: target_id,
-                },
+        for &(filtered_start, filtered_end) in &filtered_input_range {
+            results.push(make_self_interval(
+                target_id,
+                filtered_start,
+                filtered_end,
+                store_cigar,
             ));
         }
 
@@ -2596,28 +3078,9 @@ impl Impg {
             // Prepare ranges for next depth
             if !next_depth_ranges.is_empty() {
                 // Sort and merge contiguous/overlapping ranges
-                next_depth_ranges.par_sort_by_key(|(id, start, _)| (*id, *start));
-
-                let mut write = 0;
-                for read in 1..next_depth_ranges.len() {
-                    if next_depth_ranges[write].0 == next_depth_ranges[read].0 &&  // Same sequence_id 
-                       next_depth_ranges[write].2 >= next_depth_ranges[read].1
-                    // Overlapping or contiguous
-                    {
-                        // Merge by extending end
-                        next_depth_ranges[write].2 =
-                            next_depth_ranges[write].2.max(next_depth_ranges[read].2);
-                    } else {
-                        write += 1;
-                        next_depth_ranges.swap(write, read);
-                    }
-                }
-                next_depth_ranges.truncate(write + 1);
-
-                // debug!(
-                //     "Next depth will process {} ranges after merging",
-                //     next_depth_ranges.len()
-                // );
+                next_depth_ranges.par_sort_by_key(QueueRangeItem::key_start);
+                let new_len = compact_sorted_ranges(&mut next_depth_ranges);
+                next_depth_ranges.truncate(new_len);
             }
 
             // Set up for next iteration
@@ -2666,6 +3129,7 @@ impl ImpgIndex for Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         Ok(Impg::query_with_cache(
             self,
@@ -2676,6 +3140,7 @@ impl ImpgIndex for Impg {
             min_gap_compressed_identity,
             sequence_index,
             cigar_cache,
+            approximate_mode,
         ))
     }
 
@@ -2776,7 +3241,7 @@ impl ImpgIndex for Impg {
     }
 
     fn remove_cached_tree(&self, target_id: u32) {
-        self.trees.write().unwrap().remove(&target_id);
+        self.trees.write().unwrap().remove(self.cache_key(target_id));
     }
 
     fn num_targets(&self) -> usize {
@@ -2785,6 +3250,16 @@ impl ImpgIndex for Impg {
 
     fn sequence_files(&self) -> &[String] {
         &self.sequence_files
+    }
+
+    fn can_reload_tree(&self, target_id: u32) -> bool {
+        // Offset 0 marks a tree that only exists in memory (see
+        // `from_multi_alignment_records`), so there is nothing to read back.
+        !self.index_file_path.is_empty()
+            && self
+                .forest_map
+                .get_tree_offset(target_id)
+                .is_some_and(|offset| offset > 0)
     }
 }
 
@@ -2938,43 +3413,81 @@ fn read_paf_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
     }
 
     use std::os::unix::fs::FileExt;
-    PAF_HANDLE.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let needs_open = match slot.as_ref() {
-            Some((cached_path, _)) => cached_path != alignment_file,
-            None => true,
-        };
-        if needs_open {
-            *slot = None;
-            let file = std::fs::File::open(alignment_file)
-                .map_err(|e| format!("Failed to open file '{}': {}", alignment_file, e))?;
-            *slot = Some((alignment_file.to_string(), file));
-        }
-        let (_, file) = slot.as_ref().expect("PAF_HANDLE must contain a handle");
-        file.read_exact_at(buffer, offset).map_err(|e| {
-            format!(
-                "Failed to read {} CIGAR bytes at offset {} in '{}': {}",
-                buffer.len(),
-                offset,
-                alignment_file,
-                e
-            )
-        })
-    })
+    with_cached_handle(
+        &PAF_HANDLE,
+        alignment_file,
+        |path| {
+            std::fs::File::open(path)
+                .map_err(|e| format!("Failed to open file '{}': {}", path, e))
+        },
+        |file| {
+            file.read_exact_at(buffer, offset).map_err(|e| {
+                format!(
+                    "Failed to read {} CIGAR bytes at offset {} in '{}': {}",
+                    buffer.len(),
+                    offset,
+                    alignment_file,
+                    e
+                )
+            })
+        },
+    )
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     // CIGAR is pure ASCII; iterate bytes to skip UTF-8 decoding of every char.
+    const MAX_CIGAR_OP_LEN: i32 = (1 << 29) - 1;
     let mut ops = Vec::new();
     let mut len: i32 = 0;
+    let mut has_len = false;
 
     for &c in cigar.as_bytes() {
         if c.is_ascii_digit() {
-            len = len * 10 + (c - b'0') as i32;
+            has_len = true;
+            let next_len = len
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((c - b'0') as i32))
+                .ok_or_else(|| {
+                    OneAlnParseErr::InvalidFormat(format!(
+                        "CIGAR operation length overflows i32 in '{}'",
+                        cigar
+                    ))
+                })?;
+            if next_len > MAX_CIGAR_OP_LEN {
+                return Err(OneAlnParseErr::InvalidFormat(format!(
+                    "CIGAR operation length {} exceeds maximum {} in '{}'",
+                    next_len, MAX_CIGAR_OP_LEN, cigar
+                )));
+            }
+            len = next_len;
         } else {
-            ops.push(CigarOp::new(len, c as char));
+            let op = c as char;
+            if !matches!(op, '=' | 'X' | 'I' | 'D' | 'M') {
+                return Err(OneAlnParseErr::InvalidFormat(format!(
+                    "Invalid CIGAR operation '{}' in '{}'",
+                    op, cigar
+                )));
+            }
+            if !has_len {
+                return Err(OneAlnParseErr::InvalidFormat(format!(
+                    "Missing CIGAR operation length before '{}' in '{}'",
+                    op, cigar
+                )));
+            }
+            // Zero-length operation: no-op
+            if len != 0 {
+                ops.push(CigarOp::new(len, op));
+            }
             len = 0;
+            has_len = false;
         }
+    }
+
+    if has_len {
+        return Err(OneAlnParseErr::InvalidFormat(format!(
+            "Trailing CIGAR digits without operation in '{}'",
+            cigar
+        )));
     }
 
     Ok(ops)
@@ -2984,8 +3497,8 @@ fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
     let (matches, mismatches, insertions, deletions) =
         cigar_ops
             .iter()
-            .fold((0i32, 0i32, 0i32, 0i32), |(m, mm, i, d), op| {
-                let len = op.len();
+            .fold((0i64, 0i64, 0i64, 0i64), |(m, mm, i, d), op| {
+                let len = op.len() as i64;
                 match op.op() {
                     'M' | '=' => (m + len, mm, i, d), // Assume 'M' represents matches
                     'X' => (m, mm + len, i, d),
@@ -3000,6 +3513,122 @@ fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
         0.0
     } else {
         (matches as f64) / (total as f64)
+    }
+}
+
+#[cfg(test)]
+mod tree_cache_tests {
+    use super::*;
+
+    /// Build a tree with `n` one-base intervals, so its accounted size is
+    /// predictable: n * (size_of::<QueryMetadata>() + 24).
+    fn tree_of(n: usize) -> Arc<BasicCOITree<QueryMetadata, u32>> {
+        let intervals: Vec<Interval<QueryMetadata>> = (0..n)
+            .map(|i| Interval {
+                first: i as i32,
+                last: i as i32,
+                metadata: QueryMetadata {
+                    query_id: i as u32,
+                    target_start: 0,
+                    target_end: 1,
+                    query_start: 0,
+                    query_end: 1,
+                    alignment_file_index: 0,
+                    strand_and_data_offset: 0,
+                    data_bytes: 0,
+                },
+            })
+            .collect();
+        Arc::new(BasicCOITree::new(intervals.as_slice()))
+    }
+
+    fn bytes_for(n: usize) -> usize {
+        n * (std::mem::size_of::<QueryMetadata>() + 24)
+    }
+
+    #[test]
+    fn unbounded_cache_never_evicts() {
+        let mut trees = TreeMap::default();
+        for id in 0..10u32 {
+            trees.insert(id, tree_of(50));
+        }
+        let cache = TreeCache::unbounded(trees);
+        for id in 0..10u32 {
+            assert!(cache.get(id as u64).is_some(), "target {id} was evicted");
+        }
+    }
+
+    #[test]
+    fn bounded_cache_evicts_least_recently_used() {
+        // Room for two trees of 100 intervals, not three.
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        // Touch 1 so that 2 becomes the least recently used.
+        assert!(cache.get(1).is_some());
+        cache.insert(3, tree_of(100));
+
+        assert!(cache.get(1).is_some(), "recently used tree was evicted");
+        assert!(cache.get(3).is_some(), "just-inserted tree was evicted");
+        assert!(cache.get(2).is_none(), "LRU tree should have been evicted");
+    }
+
+    #[test]
+    fn oversized_tree_is_still_served() {
+        // A single tree larger than the whole capacity must not evict itself,
+        // otherwise a big chromosome could never be loaded.
+        let mut cache = TreeCache::bounded(bytes_for(10));
+        cache.insert(7, tree_of(1000));
+        assert!(cache.get(7).is_some());
+    }
+
+    #[test]
+    fn reinserting_same_target_does_not_double_count() {
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        // Only two trees' worth of bytes are live, so nothing should be evicted.
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_some());
+    }
+
+    #[test]
+    fn remove_frees_capacity() {
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(1, tree_of(100));
+        cache.insert(2, tree_of(100));
+        cache.remove(1);
+        cache.insert(3, tree_of(100));
+        // Removing 1 made room, so 2 must survive.
+        assert!(cache.get(2).is_some(), "eviction happened despite free room");
+        assert!(cache.get(3).is_some());
+        assert!(cache.get(1).is_none());
+    }
+
+    #[test]
+    fn shared_cache_evicts_across_namespaces() {
+        // Two sub-indices share one budget: the LRU tree goes first, whoever owns it
+        let key = |ns: u64, target: u64| (ns << 32) | target;
+        let mut cache = TreeCache::bounded(bytes_for(250));
+        cache.insert(key(0, 1), tree_of(100));
+        cache.insert(key(1, 1), tree_of(100));
+        cache.insert(key(2, 1), tree_of(100));
+        assert!(cache.get(key(0, 1)).is_none(), "the oldest tree, of another sub-index, must go");
+        assert!(cache.get(key(1, 1)).is_some());
+        assert!(cache.get(key(2, 1)).is_some());
+        assert!(cache.bytes <= bytes_for(250));
+    }
+
+    #[test]
+    fn iter_yields_every_cached_tree() {
+        let mut cache = TreeCache::bounded(bytes_for(10_000));
+        for id in 0..5u64 {
+            cache.insert(id, tree_of(10));
+        }
+        let mut ids: Vec<u64> = cache.iter().map(|(&id, _)| id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
     }
 }
 
@@ -3198,11 +3827,41 @@ mod tests {
         assert_eq!(ops, cigar_ops);
     }
 
-    // #[test]
-    // fn test_parse_cigar_to_delta_invalid() {
-    //     let cigar = "10=5Q"; // Q is not a valid CIGAR operation
-    //     assert!(parse_cigar_to_delta(cigar).is_err());
-    // }
+    #[test]
+    fn test_zero_length_cigar_op_is_ignored() {
+        let ops = parse_cigar_to_delta("10=0I5=").unwrap();
+        // No merge: adjacent runs stay separate
+        assert_eq!(ops, vec![CigarOp::new(10, '='), CigarOp::new(5, '=')]);
+        assert_eq!(ops, parse_cigar_to_delta("10=5=").unwrap());
+        assert_eq!(parse_cigar_to_delta("0D10=0X5=0I").unwrap(), ops);
+        assert!(parse_cigar_to_delta("0=0I").unwrap().is_empty());
+        assert!(parse_cigar_to_delta("10=0").is_err()); // trailing digits
+        assert!(parse_cigar_to_delta("10=0Q").is_err()); // invalid op
+
+        let plain = parse_cigar_to_delta("10=5=").unwrap();
+        assert_eq!(
+            calculate_gap_compressed_identity(&ops),
+            calculate_gap_compressed_identity(&plain)
+        );
+        assert_eq!(calculate_gap_compressed_identity(&ops), 1.0);
+        let record = (0, 15, 0, 15, Strand::Forward);
+        for range in [(0, 15), (3, 12), (9, 11)] {
+            assert_eq!(
+                project_target_range_through_alignment(range, record, &ops),
+                project_target_range_through_alignment(range, record, &plain),
+                "{range:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_cigar_to_delta_invalid() {
+        assert!(parse_cigar_to_delta("10=5Q").is_err()); // Q is not a valid CIGAR operation
+        assert!(parse_cigar_to_delta("=5M").is_err()); // missing length
+        assert!(parse_cigar_to_delta("10=5").is_err()); // trailing digits
+        assert!(parse_cigar_to_delta("600000000=").is_err()); // > 29-bit max length
+        assert!(parse_cigar_to_delta("9999999999=").is_err()); // i32 overflow
+    }
 
     #[test]
     fn test_parse_paf_valid() {
@@ -3292,5 +3951,669 @@ mod tests {
         // Reverse: just reversed order
         assert_eq!(inverted_reverse[0].op(), 'X');
         assert_eq!(inverted_reverse[1].op(), '=');
+    }
+
+    #[test]
+    fn test_index_rejects_paf_record_without_cigar() {
+        // A PAF record without cg:Z cannot be projected. The index must say so
+        // instead of panicking inside a worker at query time.
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data_bytes, 0, "fixture must have no CIGAR");
+
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        let err = match Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true) {
+            Ok(_) => panic!("a PAF record without cg:Z must be rejected at index time"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("without a CIGAR"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("test.paf"), "error must name the file: {msg}");
+    }
+
+    #[test]
+    fn test_index_accepts_paf_record_with_cigar() {
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true)
+            .expect("a PAF record with a CIGAR must index");
+    }
+
+    #[test]
+    fn test_index_rejects_sequence_longer_than_i32() {
+        // Coordinates are i32, so a longer sequence would wrap silently.
+        let mut seq_index = SequenceIndex::new();
+        let long = i32::MAX as usize + 1;
+        seq_index.get_or_insert_id("chrBig", Some(long));
+        seq_index.get_or_insert_id("chrSmall", Some(1000));
+
+        let err = match Impg::from_multi_alignment_records(&[], seq_index, None, true) {
+            Ok(_) => panic!("a sequence above i32::MAX bp must be rejected"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("chrBig"), "error must name the sequence: {msg}");
+        assert!(
+            msg.contains(&long.to_string()),
+            "error must give the length: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_index_rejects_coordinate_above_i32() {
+        let mut seq_index = SequenceIndex::new();
+        seq_index.get_or_insert_id("q", Some(1000));
+        seq_index.get_or_insert_id("t", Some(1000));
+
+        let record = AlignmentRecord {
+            query_id: 0,
+            query_start: 0,
+            query_end: i32::MAX as usize + 10,
+            target_id: 1,
+            target_start: 0,
+            target_end: 100,
+            strand_and_data_offset: 0,
+            data_bytes: 10,
+        };
+        let records_by_file = vec![(vec![record], "test.paf".to_string())];
+        let err = match Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true) {
+            Ok(_) => panic!("a coordinate above i32::MAX must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("above the maximum supported value"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_in_memory_index_does_not_reload_trees_from_disk() {
+        // `impg stats` walks every tree twice and evicts as it goes. An
+        // in-memory index has no file to load a tree back from, so the second
+        // walk must not try to open an empty path.
+        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        let impg =
+            Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true).unwrap();
+
+        let target_id = *impg.target_ids().first().expect("one target sequence");
+        assert!(
+            !impg.can_reload_tree(target_id),
+            "an in-memory index must report that its trees cannot be reloaded"
+        );
+        assert!(impg.get_or_load_tree(target_id).is_some());
+        impg.remove_cached_tree(target_id);
+        assert!(
+            impg.get_or_load_tree(target_id).is_none(),
+            "a tree evicted from an in-memory index must come back as None, not as a panic"
+        );
+    }
+
+    #[test]
+    fn in_memory_index_serves_two_walks_when_trees_are_not_evicted() {
+        // The behaviour `impg stats` needs: when the index cannot reload a
+        // tree, both walks must still see every interval.
+        let paf = "q\t1000\t0\t500\t+\tt\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
+                   t\t1000\t100\t600\t+\tr\t1000\t100\t600\t500\t500\t60\tcg:Z:500=\n"
+            .to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let records_by_file = vec![(records, "test.paf".to_string())];
+        let impg =
+            Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true).unwrap();
+
+        let mut first_walk = 0usize;
+        let mut second_walk = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                first_walk += tree.len();
+                if impg.can_reload_tree(id) {
+                    impg.remove_cached_tree(id);
+                }
+            }
+        }
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                second_walk += tree.iter().count();
+                if impg.can_reload_tree(id) {
+                    impg.remove_cached_tree(id);
+                }
+            }
+        }
+
+        assert_eq!(first_walk, 4, "two PAF records indexed bidirectionally");
+        assert_eq!(
+            second_walk, first_walk,
+            "the second walk must see the same intervals as the first"
+        );
+    }
+
+    #[test]
+    fn index_header_records_the_alignment_file_list() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let a = temp.path().join("a.paf");
+        let b = temp.path().join("b.paf");
+        std::fs::write(&a, "x".repeat(100)).unwrap();
+        std::fs::write(&b, "y".repeat(200)).unwrap();
+        let names = vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()];
+
+        let header = IndexHeaderInfo {
+            alignment_files: names
+                .iter()
+                .map(|p| AlignmentFileEntry::from_path(p))
+                .collect(),
+            bidirectional: true,
+        };
+        assert_eq!(header.alignment_files[0].size, Some(100));
+        assert_eq!(header.alignment_files[1].size, Some(200));
+
+        // The same list in the same order is accepted, even when a path is
+        // spelled differently.
+        validate_alignment_file_list(&header.alignment_files, &names, "idx").unwrap();
+        let respelled = vec![
+            format!("{}/./a.paf", temp.path().display()),
+            temp.path().join("..").join(temp.path().file_name().unwrap()).join("b.paf").to_string_lossy().into_owned(),
+        ];
+        validate_alignment_file_list(&header.alignment_files, &respelled, "idx")
+            .expect("a different spelling of the same files must be accepted");
+
+        // A reordered list must be refused: every file index still resolves, so
+        // the query would read a CIGAR offset from the wrong file.
+        let mut reordered = names.clone();
+        reordered.reverse();
+        let err = validate_alignment_file_list(&header.alignment_files, &reordered, "idx")
+            .expect_err("a reordered file list must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("different alignment file list"), "{msg}");
+        assert!(msg.contains("Entry 0"), "{msg}");
+
+        // A different list length must be refused too.
+        let err = validate_alignment_file_list(&header.alignment_files, &names[..1], "idx")
+            .expect_err("a shorter file list must be refused");
+        assert!(err.to_string().contains("was built from 2"), "{err}");
+
+        // A file of a different size in the same position must be refused.
+        std::fs::write(&a, "z".repeat(101)).unwrap();
+        assert!(
+            validate_alignment_file_list(&header.alignment_files, &names, "idx").is_err(),
+            "a file that changed size must be refused"
+        );
+    }
+
+    #[test]
+    fn serialized_index_carries_the_file_list_and_refuses_a_mismatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paf = temp.path().join("a.paf");
+        std::fs::write(
+            &paf,
+            "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n",
+        )
+        .unwrap();
+        let files = vec![paf.to_string_lossy().into_owned()];
+
+        let mut seq_index = SequenceIndex::new();
+        let content = std::fs::read_to_string(&paf).unwrap();
+        let records = parse_paf(BufReader::new(content.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, files[0].clone())], seq_index, None, true)
+                .unwrap();
+
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        impg.serialize_with_forest_map(&mut buffer).unwrap();
+        let bytes = buffer.into_inner();
+
+        // The same list loads.
+        let loaded = Impg::load_from_file(
+            std::io::Cursor::new(bytes.clone()),
+            &files,
+            "idx".to_string(),
+            None,
+        )
+        .expect("the same file list must load");
+        assert!(loaded.built_bidirectional);
+
+        // A different file list is refused rather than reading wrong offsets.
+        let mut other = files.clone();
+        other.push(temp.path().join("b.paf").to_string_lossy().into_owned());
+        std::fs::write(&other[1], "q\n").unwrap();
+        let err = match Impg::load_from_file(
+            std::io::Cursor::new(bytes),
+            &other,
+            "idx".to_string(),
+            None,
+        ) {
+            Ok(_) => panic!("a different file list must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("different alignment file list")
+                || err.to_string().contains("was built from 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reciprocal_records_collapse_to_one_edge() {
+        // The same alignment written in both directions describes one edge. It
+        // used to be indexed twice, so every projection appeared twice.
+        let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
+                   B\t1000\t0\t500\t+\tA\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n"
+            .to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
+                .unwrap();
+
+        let mut total = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                total += tree.len();
+            }
+        }
+        assert_eq!(
+            total, 2,
+            "one edge between A and B must be indexed once per direction, not twice"
+        );
+
+        // A single record still indexes both directions.
+        let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n".to_string();
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
+                .unwrap();
+        let mut total = 0usize;
+        for id in impg.target_ids() {
+            if let Some(tree) = impg.get_or_load_tree(id) {
+                total += tree.len();
+            }
+        }
+        assert_eq!(total, 2, "one record must keep both directions");
+    }
+    #[test]
+    fn sorted_ranges_snap_keeps_novel_tail_past_an_inner_range() {
+        // Regression: snapping `end` onto `ranges[i].0` truncated the inserted
+        // range and silently dropped `110..140`.
+        let mut ranges = SortedRanges::with_distance(1000, 50);
+        ranges.insert((105, 110));
+
+        let novel = ranges.insert_with_boundary_snap((10, 140), 50);
+
+        assert_eq!(
+            novel,
+            vec![(10, 105), (110, 140)],
+            "the tail of the inserted range must survive"
+        );
+        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(10, 140)]);
+    }
+
+    #[test]
+    fn sorted_ranges_snap_never_shrinks_the_inserted_range() {
+        let mut ranges = SortedRanges::with_distance(1000, 10);
+        ranges.insert((105, 110));
+
+        let novel = ranges.insert_with_boundary_snap((50, 200), 10);
+
+        assert_eq!(novel, vec![(50, 105), (110, 200)]);
+        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(50, 200)]);
+    }
+
+    #[test]
+    fn sorted_ranges_snap_still_closes_small_gaps() {
+        let mut ranges = SortedRanges::with_distance(1000, 20);
+        ranges.insert((100, 200));
+
+        // 5 bp gap on the left: `start` snaps onto the previous end, so the
+        // jitter is absorbed but the novel tail stays novel.
+        let novel = ranges.insert_with_boundary_snap((205, 300), 20);
+
+        assert_eq!(novel, vec![(200, 300)]);
+        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(100, 300)]);
+    }
+
+    #[test]
+    fn sorted_ranges_plain_insert_ignores_snapping() {
+        // `insert` is used for user-requested ranges: `SortedRanges::new()`
+        // carries `min_distance == 0`, so nothing is ever absorbed.
+        let mut ranges = SortedRanges::new();
+        ranges.insert((0, 5));
+
+        let novel = ranges.insert((10, 40));
+
+        assert_eq!(novel, vec![(10, 40)]);
+    }
+
+    fn test_dna_seq(len: usize, seed: u64) -> Vec<u8> {
+        let bases = [b'A', b'C', b'G', b'T'];
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                bases[((state >> 33) % 4) as usize]
+            })
+            .collect()
+    }
+
+    fn test_revcomp_seq(seq: &[u8]) -> Vec<u8> {
+        seq.iter()
+            .rev()
+            .map(|b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                other => *other,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_calculate_gap_compressed_identity_large_cigar_no_overflow() {
+        // Total bases > i32::MAX (2.5e9) must not overflow with overflow-checks=true.
+        let ops = vec![
+            CigarOp::new(500_000_000, '='),
+            CigarOp::new(500_000_000, '='),
+            CigarOp::new(500_000_000, '='),
+            CigarOp::new(500_000_000, '='),
+            CigarOp::new(500_000_000, 'X'),
+        ];
+        let id = calculate_gap_compressed_identity(&ops);
+        assert!((id - 0.8).abs() < 1e-12, "unexpected identity: {id}");
+    }
+
+    #[test]
+    fn test_populate_cigar_cache_distinguishes_forward_and_reversed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paf_path = temp.path().join("asym.paf");
+        // Asymmetric deletion (20=5D20=): indexed bidirectionally, seqB's tree holds
+        // the forward entry (REVERSED_BIT=0 -> 20=5D20=) and seqA's tree holds the
+        // reversed entry (REVERSED_BIT=1 -> 20=5I20=) at the exact same file index
+        // and CIGAR byte offset.
+        std::fs::write(
+            &paf_path,
+            "seqA\t200\t0\t40\t+\tseqB\t200\t100\t145\t40\t45\t60\tcg:Z:20=5D20=\n",
+        )
+        .unwrap();
+
+        let paf_str = paf_path.to_string_lossy().into_owned();
+        let mut seq_index = SequenceIndex::new();
+        let file = std::fs::File::open(&paf_path).unwrap();
+        let records = parse_paf(BufReader::new(file), &mut seq_index).unwrap();
+        let impg =
+            Impg::from_multi_alignment_records(&[(records, paf_str)], seq_index, None, true)
+                .unwrap();
+
+        let seq_a_id = impg.seq_index.get_id("seqA").unwrap();
+        let seq_b_id = impg.seq_index.get_id("seqB").unwrap();
+        let mut cache = FxHashMap::default();
+        impg.populate_cigar_cache(seq_b_id, 100, 145, None, None, &mut cache);
+        impg.populate_cigar_cache(seq_a_id, 0, 40, None, None, &mut cache);
+        assert_eq!(
+            cache.len(),
+            2,
+            "forward and reversed entries sharing an alignment offset must have distinct cache keys"
+        );
+
+        let to_comparable = |res: Vec<AdjustedInterval>| {
+            res.into_iter()
+                .map(|(q, ops, t)| (q.metadata, q.first, q.last, ops, t.metadata, t.first, t.last))
+                .collect::<Vec<_>>()
+        };
+
+        for (tid, start, end) in [(seq_b_id, 105, 140), (seq_a_id, 5, 35)] {
+            let uncached =
+                to_comparable(impg.query(tid, start, end, true, None, None, false));
+            let cached = to_comparable(impg.query_with_cache(
+                tid, start, end, true, None, None, &cache, false,
+            ));
+            assert_eq!(cached.len(), 2);
+            assert_eq!(cached, uncached, "cached projection diverged for ({tid}, {start}..{end})");
+        }
+    }
+
+    #[test]
+    fn test_tpa_process_tracepoints_stale_differences_and_reversed_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fa_path = temp.path().join("seqs.fa");
+        // Two sequences of equal length with 1 mismatch in the middle
+        let seq_q = test_dna_seq(120, 7);
+        let mut seq_t = seq_q.clone();
+        seq_t[60] = if seq_t[60] == b'A' { b'C' } else { b'A' };
+        std::fs::write(
+            &fa_path,
+            format!(
+                ">q\n{}\n>t\n{}\n",
+                String::from_utf8_lossy(&seq_q),
+                String::from_utf8_lossy(&seq_t)
+            ),
+        )
+        .unwrap();
+
+        let fa_str = fa_path.to_string_lossy().into_owned();
+        let seq_index_uni = UnifiedSequenceIndex::from_files(&[fa_str.clone()]).unwrap();
+
+        let mut seq_index = SequenceIndex::new();
+        let q_id = seq_index.get_or_insert_id("q", Some(120));
+        let t_id = seq_index.get_or_insert_id("t", Some(120));
+        let rec = AlignmentRecord {
+            query_id: q_id,
+            query_start: 0,
+            query_end: 120,
+            target_id: t_id,
+            target_start: 0,
+            target_end: 120,
+            strand_and_data_offset: 0,
+            data_bytes: 0,
+        };
+        let impg = Impg::from_multi_alignment_records(
+            &[(vec![rec], "dummy.1aln".to_string())],
+            seq_index,
+            Some(&[fa_str]),
+            true,
+        )
+        .unwrap();
+
+        // Simulate stale metadata claiming differences == 0 even though base 60 differs.
+        let aln = crate::onealn::OneAlnAlignment {
+            query_name: "q".to_string(),
+            query_length: 120,
+            query_contig_start: 0,
+            query_contig_end: 120,
+            query_contig_offset: 0,
+            target_name: "t".to_string(),
+            target_length: 120,
+            target_contig_start: 0,
+            target_contig_end: 120,
+            target_contig_offset: 0,
+            target_contig_len: 120,
+            strand: '+',
+            differences: 0,
+            tracepoints: vec![60, 60],
+            mode_data: crate::onealn::TracepointModeData::Fastga {
+                diffs: vec![0, 0],
+                trace_spacing: 60,
+            },
+        };
+
+        // Reversed tree entry (`t` was indexed under `q`'s tree with REVERSED_BIT).
+        let rev_meta = QueryMetadata {
+            query_id: t_id,
+            target_start: 0,
+            target_end: 120,
+            query_start: 0,
+            query_end: 120,
+            alignment_file_index: 0,
+            strand_and_data_offset: QueryMetadata::REVERSED_BIT,
+            data_bytes: 0,
+        };
+
+        let ops = impg.process_tracepoints_data(&aln, &rev_meta, q_id, &seq_index_uni);
+        assert!(
+            ops.iter().any(|op| op.op() == 'X'),
+            "stale differences == 0 must not blindly emit matches when bases differ: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn test_tpa_reverse_strand_asymmetric_indels_matches_paf_all_modes_and_approx() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+
+        // Build `t` (len 1200) and `q_rev` aligning on '-' strand to t[50..1130]
+        // with asymmetric deletion (30D), mismatch (1X), and insertion (20I):
+        //   PAF CIGAR (fwd(t[50..1130]) vs revcomp(q_rev)):
+        //   200=30D170=1X179=20I500=
+        let t = test_dna_seq(1200, 99);
+        let ins = test_dna_seq(20, 123);
+        let mut aligned_q_fwd = Vec::with_capacity(1070);
+        aligned_q_fwd.extend_from_slice(&t[50..250]); // 200=
+        // 30D skips t[250..280]
+        aligned_q_fwd.extend_from_slice(&t[280..450]); // 170=
+        aligned_q_fwd.push(if t[450] == b'A' { b'C' } else { b'A' }); // 1X at t[450]
+        aligned_q_fwd.extend_from_slice(&t[451..630]); // 179=
+        aligned_q_fwd.extend_from_slice(&ins); // 20I
+        aligned_q_fwd.extend_from_slice(&t[630..1130]); // 500=
+        assert_eq!(aligned_q_fwd.len(), 1070);
+
+        let q_rev = test_revcomp_seq(&aligned_q_fwd);
+
+        let fa_path = dir.join("seqs.fa");
+        std::fs::write(
+            &fa_path,
+            format!(
+                ">q_rev\n{}\n>t\n{}\n",
+                String::from_utf8_lossy(&q_rev),
+                String::from_utf8_lossy(&t),
+            ),
+        )
+        .unwrap();
+        let fa_str = fa_path.to_string_lossy().into_owned();
+        let seq_index_uni = UnifiedSequenceIndex::from_files(&[fa_str.clone()]).unwrap();
+
+        let paf_path = dir.join("aln.paf");
+        std::fs::write(
+            &paf_path,
+            "q_rev\t1070\t0\t1070\t-\tt\t1200\t50\t1130\t1049\t1100\t60\tcg:Z:200=30D170=1X179=20I500=\n",
+        )
+        .unwrap();
+        let paf_str = paf_path.to_string_lossy().into_owned();
+
+        let mut paf_seq_idx = SequenceIndex::new();
+        let paf_records =
+            parse_paf(BufReader::new(std::fs::File::open(&paf_path).unwrap()), &mut paf_seq_idx)
+                .unwrap();
+        let paf_impg =
+            Impg::from_multi_alignment_records(&[(paf_records, paf_str)], paf_seq_idx, None, true)
+                .unwrap();
+
+        let normalize_results =
+            |impg: &Impg, res: Vec<AdjustedInterval>| -> Vec<(String, i32, i32, i32, i32)> {
+                let mut rows: Vec<_> = res
+                    .into_iter()
+                    .map(|(q_iv, _, t_iv)| {
+                        (
+                            impg.seq_index.get_name(q_iv.metadata).unwrap().to_string(),
+                            q_iv.first,
+                            q_iv.last,
+                            t_iv.first,
+                            t_iv.last,
+                        )
+                    })
+                    .collect();
+                rows.sort();
+                rows
+            };
+
+        use tpa::TracepointType as T;
+        for tp_type in [T::Standard, T::Variable, T::Mixed, T::Fastga, T::FastgaNoDiff] {
+            let tpa_path = dir.join(format!("{tp_type:?}.tpa"));
+            let tpa_str = tpa_path.to_string_lossy().into_owned();
+            tpa::paf_to_tpa(
+                paf_path.to_str().unwrap(),
+                tpa_path.to_str().unwrap(),
+                tpa::CompressionConfig {
+                    tp_type,
+                    max_complexity: 50,
+                    ..tpa::CompressionConfig::default()
+                },
+            )
+            .unwrap();
+
+            let parser = crate::tpa_parser::TpaParser::new(tpa_str.clone()).unwrap();
+            let mut tpa_seq_idx = SequenceIndex::new();
+            let tpa_records = parser.parse_alignments(&mut tpa_seq_idx, 1).unwrap();
+            let tpa_impg = Impg::from_multi_alignment_records(
+                &[(tpa_records, tpa_str)],
+                tpa_seq_idx,
+                Some(std::slice::from_ref(&fa_str)),
+                true,
+            )
+            .unwrap();
+
+            // Exact sub-range queries spanning start, middle, and trailing segments
+            // on both t (forward entry) and q_rev (REVERSED_BIT entry).
+            for (seq_name, start, end) in [
+                ("t", 50, 1130),
+                ("t", 100, 220),
+                ("t", 320, 600),
+                ("t", 700, 1100),
+                ("t", 1000, 1130),
+                ("q_rev", 0, 1070),
+                ("q_rev", 50, 450),
+                ("q_rev", 620, 820),
+                ("q_rev", 950, 1070),
+            ] {
+                let paf_tid = paf_impg.seq_index.get_id(seq_name).unwrap();
+                let tpa_tid = tpa_impg.seq_index.get_id(seq_name).unwrap();
+
+                let expected = normalize_results(
+                    &paf_impg,
+                    paf_impg.query(paf_tid, start, end, false, None, None, false),
+                );
+                let actual = normalize_results(
+                    &tpa_impg,
+                    tpa_impg.query(tpa_tid, start, end, false, None, Some(&seq_index_uni), false),
+                );
+                assert_eq!(
+                    actual, expected,
+                    "{tp_type:?} projection diverged for {seq_name}:{start}-{end}"
+                );
+
+                // Approximate mode must preserve self-interval forward orientation
+                // (`qs < qe`), reverse-strand projected orientation (`qs > qe`), and
+                // exact full-span endpoint bounds.
+                let approx = normalize_results(
+                    &tpa_impg,
+                    tpa_impg.query(tpa_tid, start, end, false, None, None, true),
+                );
+                assert_eq!(approx.len(), 2, "{tp_type:?} approx count for {seq_name}:{start}-{end}");
+                for (q_name, qs, qe, ts, te) in &approx {
+                    if q_name == seq_name {
+                        assert!(qs < qe, "{tp_type:?} approx self query inverted: {qs}..{qe}");
+                    } else {
+                        assert!(
+                            qs > qe,
+                            "{tp_type:?} approx reverse projection expected qs > qe, got {qs}..{qe}"
+                        );
+                    }
+                    assert!(ts < te, "{tp_type:?} approx target inverted: {ts}..{te}");
+                }
+                if (start, end) == (50, 1130) || (start, end) == (0, 1070) {
+                    assert_eq!(approx, expected, "{tp_type:?} approx full-span endpoints mismatch");
+                }
+            }
+        }
     }
 }

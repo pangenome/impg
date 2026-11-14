@@ -76,7 +76,7 @@ pub fn read_fasta(path: &Path) -> io::Result<Fasta> {
         } else {
             for b in line.bytes() {
                 let b = b.to_ascii_uppercase();
-                if !b"ACGTRYSWKMBDHVN".contains(&b) {
+                if !super::is_valid_iupac_base(b) {
                     return Err(invalid("invalid FASTA DNA"));
                 }
                 sequence.push(b);
@@ -133,12 +133,15 @@ fn cigar(s: &str) -> io::Result<Vec<(u64, u8)>> {
     for (i, b) in s.bytes().enumerate() {
         if !b.is_ascii_digit() {
             let n = number(&s[start..i])?;
-            if n == 0 || !b"M=XIDSH".contains(&b) {
+            if !b"M=XIDSH".contains(&b) {
                 return Err(invalid(
-                    "unsupported/zero-length CIGAR operation (only M=XID and terminal SH)",
+                    "unsupported CIGAR operation (only M=XID and terminal SH)",
                 ));
             }
-            result.push((n, b));
+            // Zero-length operation: no-op
+            if n != 0 {
+                result.push((n, b));
+            }
             start = i + 1;
         }
     }
@@ -515,11 +518,7 @@ pub fn align(
         let path = out.join(name);
         let mut bytes = Vec::new();
         for (n, s) in records {
-            bytes.extend(format!(">{n}\n").bytes());
-            for line in s.chunks(80) {
-                bytes.extend(line);
-                bytes.push(b'\n');
-            }
+            crate::fasta::write_wrapped_fasta(&mut bytes, n, s)?;
         }
         atomic_write(&path, &bytes)?;
         fs::canonicalize(path)

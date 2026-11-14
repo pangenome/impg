@@ -130,13 +130,17 @@ pub fn lookup(
     // lookup the call performs through the lane inventory).
     let mut census_records = 0u64;
     let mut census_occurrences = 0u64;
-    let mut census_partitions: BTreeSet<u32> = BTreeSet::new();
-    let mut census_paths: BTreeSet<usize> = BTreeSet::new();
+    let mut census_partitions: rustc_hash::FxHashSet<u32> = Default::default();
+    let mut census_paths: rustc_hash::FxHashSet<usize> = Default::default();
     {
-        let (reader, _) =
-            niffler::get_reader(Box::new(File::open(census)?)).map_err(io::Error::other)?;
-        for line in BufReader::new(reader).lines() {
-            let record: CensusRecordLine = serde_json::from_str(&line?)?;
+        let mut reader = crate::fasta::open_reader(census)?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let record: CensusRecordLine = serde_json::from_str(&line)?;
             census_records += 1;
             for occurrence in &record.occurrences {
                 require(
@@ -194,11 +198,7 @@ pub fn lookup(
                 }
                 profiles.push(profiles::NativeIndex {
                     length: read_length,
-                    starts: if read_length <= length {
-                        length - read_length + 1
-                    } else {
-                        0
-                    },
+                    starts: profiles::start_count(read_length, length),
                     runs: 0,
                     events: Seal::create(out, &format!("{stem}.events.jsonl"))?,
                     index: Seal::create(out, &format!("{stem}.index"))?,

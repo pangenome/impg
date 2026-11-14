@@ -12,6 +12,7 @@ use log::{debug, error, info, warn};
 use niffler::compression::Format;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -77,10 +78,13 @@ impl CompactEdge {
     }
 }
 
-// Sequence storage with memory mapping
-pub(crate) struct SequenceStore {
-    sequences_file: File,
-    offsets: Vec<(u64, u32)>, // (offset, length) for each node
+// Sequence storage (disk-backed for streaming large GFAs, or in-memory for sub-GFA lacing)
+pub(crate) enum SequenceStore {
+    Disk {
+        sequences_file: File,
+        offsets: Vec<(u64, u32)>, // (offset, length) for each node
+    },
+    Memory(Vec<Vec<u8>>),
 }
 
 impl SequenceStore {
@@ -93,49 +97,99 @@ impl SequenceStore {
 
         let sequences_file = temp_file.into_file();
 
-        Ok(SequenceStore {
+        Ok(SequenceStore::Disk {
             sequences_file,
             offsets: Vec::new(),
         })
     }
 
-    pub(crate) fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
-        let offset = self.sequences_file.seek(SeekFrom::End(0))?;
-        self.sequences_file.write_all(seq)?;
+    pub(crate) fn new_in_memory() -> Self {
+        SequenceStore::Memory(Vec::new())
+    }
 
-        let idx = self.offsets.len();
-        self.offsets.push((offset, seq.len() as u32));
-        Ok(idx)
+    pub(crate) fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
+        match self {
+            SequenceStore::Disk {
+                sequences_file,
+                offsets,
+            } => {
+                let offset = sequences_file.seek(SeekFrom::End(0))?;
+                sequences_file.write_all(seq)?;
+
+                let idx = offsets.len();
+                offsets.push((offset, seq.len() as u32));
+                Ok(idx)
+            }
+            SequenceStore::Memory(seqs) => {
+                let idx = seqs.len();
+                seqs.push(seq.to_vec());
+                Ok(idx)
+            }
+        }
     }
 
     pub(crate) fn get_sequence(&self, idx: usize) -> io::Result<Vec<u8>> {
-        if idx >= self.offsets.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid sequence index",
-            ));
+        match self {
+            SequenceStore::Disk {
+                sequences_file,
+                offsets,
+            } => {
+                if idx >= offsets.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid sequence index",
+                    ));
+                }
+
+                let (offset, length) = offsets[idx];
+                let mut buffer = vec![0u8; length as usize];
+
+                // Use pread for thread-safe reading without modifying file cursor
+                use std::os::unix::fs::FileExt;
+                sequences_file.read_exact_at(&mut buffer, offset)?;
+
+                Ok(buffer)
+            }
+            SequenceStore::Memory(seqs) => seqs.get(idx).cloned().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Invalid sequence index")
+            }),
         }
-
-        let (offset, length) = self.offsets[idx];
-        let mut buffer = vec![0u8; length as usize];
-
-        // Use pread for thread-safe reading without modifying file cursor
-        use std::os::unix::fs::FileExt;
-        self.sequences_file.read_exact_at(&mut buffer, offset)?;
-
-        Ok(buffer)
     }
 
     // Get sequence length without reading the actual sequence data
     pub(crate) fn get_sequence_length(&self, idx: usize) -> io::Result<usize> {
-        if idx < self.offsets.len() {
-            let (_, length) = self.offsets[idx];
-            Ok(length as usize)
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Sequence index {idx} out of bounds"),
-            ))
+        match self {
+            SequenceStore::Disk { offsets, .. } => {
+                if idx < offsets.len() {
+                    let (_, length) = offsets[idx];
+                    Ok(length as usize)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Sequence index {idx} out of bounds"),
+                    ))
+                }
+            }
+            SequenceStore::Memory(seqs) => seqs.get(idx).map(Vec::len).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Sequence index {idx} out of bounds"),
+                )
+            }),
+        }
+    }
+
+    pub(crate) fn with_sequence<R>(
+        &self,
+        idx: usize,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> io::Result<R> {
+        match self {
+            SequenceStore::Memory(seqs) => seqs
+                .get(idx)
+                .map(|seq| f(seq))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid sequence index")),
+            SequenceStore::Disk { .. } => self.get_sequence(idx).map(|seq| f(&seq)),
         }
     }
 }
@@ -156,6 +210,14 @@ impl CompactGraph {
         })
     }
 
+    pub(crate) fn new_in_memory() -> Self {
+        CompactGraph {
+            node_count: 0,
+            edges: FxHashSet::default(),
+            sequence_store: SequenceStore::new_in_memory(),
+        }
+    }
+
     pub(crate) fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
         self.sequence_store.add_sequence(seq)?;
         self.node_count += 1;
@@ -172,6 +234,11 @@ impl CompactGraph {
         let edge1 = CompactEdge::new(from_id, from_rev, to_id, to_rev);
         let edge2 = CompactEdge::new(to_id, !to_rev, from_id, !from_rev);
         self.edges.contains(&edge1) || self.edges.contains(&edge2)
+    }
+
+    pub(crate) fn get_sequence_length(&self, handle: Handle) -> io::Result<usize> {
+        self.sequence_store
+            .get_sequence_length((u64::from(handle.id()) - 1) as usize)
     }
 
     pub(crate) fn get_sequence(&self, handle: Handle) -> io::Result<Vec<u8>> {
@@ -594,74 +661,39 @@ pub(crate) fn split_path_name(path_name: &str) -> Option<(String, usize, usize)>
 }
 
 pub(crate) fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
-    // Sort ranges by start position
-    ranges.sort_by_key(|r| (r.start, r.end));
+    // Sort by start, then longest first, so a containing range always precedes
+    // the ranges nested inside it.
+    ranges.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
 
     debug!("  Removing redundant ranges");
 
-    // Remove ranges that are contained within other ranges
+    // Drop exact duplicates and ranges fully contained in the range already
+    // kept. Also drop a range that its two neighbours together cover, but only
+    // when they really cover it: the previous heuristic compared overlap lengths
+    // and dropped the middle range even when the neighbours left a hole, losing
+    // the tail. `[(0,100), (50,200), (60,70)]` lost `100..200` that way.
     let mut write_idx = 0;
     for read_idx in 1..ranges.len() {
         let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
         let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
 
-        if curr_start == prev_start && curr_end == prev_end {
-            // Skip duplicate range
-            // Current range is a duplicate of the previous range, skip it
-            // debug!(
-            //     "    Duplicate range detected: Range [start={curr_start}, end={curr_end}] is identical to previous range and will be removed."
-            // );
-
+        // Duplicate or fully contained in the range already kept.
+        if curr_start >= prev_start && curr_end <= prev_end {
             continue;
-        } else if curr_start >= prev_start && curr_end <= prev_end {
-            // Skip range that is fully contained within previous range
-            // debug!(
-            //     "    Contained range detected: Range [start={curr_start}, end={curr_end}] is fully contained within previous range [start={prev_start}, end={prev_end}] and will be removed."
-            // );
+        }
 
-            continue;
-        } else if prev_start >= curr_start && prev_end <= curr_end {
-            // Previous range is fully contained within current range
-            // debug!(
-            //     "    Containing range detected: Previous range [start={prev_start}, end={prev_end}] is fully contained within current range [start={curr_start}, end={curr_end}] and will be removed."
-            // );
+        // The next range, plus everything kept so far, covers this one:
+        // no gap between them (`next_start <= prev_end`) and the next range
+        // reaches at least as far as this one (`next_end >= curr_end`).
+        if let Some(next) = ranges.get(read_idx + 1) {
+            if next.start <= prev_end && next.end >= curr_end {
+                continue;
+            }
+        }
 
+        write_idx += 1;
+        if write_idx != read_idx {
             ranges.swap(write_idx, read_idx);
-        } else if curr_start < prev_end {
-            // Handle overlapping ranges - check both previous and next ranges
-            let mut should_skip = false;
-
-            if read_idx < ranges.len() - 1 {
-                let next_start = ranges[read_idx + 1].start;
-
-                // Check if current range is significantly overlapped by both neighbors
-                if curr_start > prev_start && next_start < curr_end {
-                    let overlap_with_prev = prev_end - curr_start;
-                    let overlap_with_next = curr_end - next_start;
-                    let range_length = curr_end - curr_start;
-
-                    // Skip if the range is mostly covered by its neighbors
-                    if overlap_with_prev + overlap_with_next > range_length {
-                        should_skip = true;
-                    }
-                }
-            }
-
-            if !should_skip {
-                debug!(
-                    "    Overlapping range detected: Range [start={curr_start}, end={curr_end}] overlaps with previous range [start={prev_start}, end={prev_end}] and will be kept."
-                );
-                write_idx += 1;
-                if write_idx != read_idx {
-                    ranges.swap(write_idx, read_idx);
-                }
-            }
-        } else {
-            // No overlap - keep both ranges
-            write_idx += 1;
-            if write_idx != read_idx {
-                ranges.swap(write_idx, read_idx);
-            }
         }
     }
     ranges.truncate(write_idx + 1);
@@ -706,8 +738,7 @@ pub(crate) fn trim_range_overlaps(
                 let graph = graph_mutex.lock().unwrap();
                 for (idx, &step_handle) in r2.steps.iter().enumerate() {
                     let step_start = cumulative_pos;
-                    let node_seq = graph.get_sequence(step_handle).unwrap();
-                    let node_length = node_seq.len();
+                    let node_length = graph.get_sequence_length(step_handle).unwrap();
                     cumulative_pos += node_length;
                     let step_end = cumulative_pos;
 
@@ -739,26 +770,27 @@ pub(crate) fn trim_range_overlaps(
             for (idx, &step_handle) in r2.steps.iter().enumerate() {
                 let step_start = cumulative_pos;
 
-                // Get node sequence with lock
-                let node_seq = {
-                    let graph = graph_mutex.lock().unwrap();
-                    graph.get_sequence(step_handle).unwrap()
-                }; // Lock released here
-
-                let node_length = node_seq.len();
-                cumulative_pos += node_length;
-                let step_end = cumulative_pos;
-
                 if steps_to_remove.contains(&idx) {
-                    // Skip steps to remove
+                    let node_length = {
+                        let graph = graph_mutex.lock().unwrap();
+                        graph.get_sequence_length(step_handle).unwrap()
+                    };
+                    cumulative_pos += node_length;
                     continue;
                 } else if step_to_split == Some(idx) {
+                    let node_seq = {
+                        let graph = graph_mutex.lock().unwrap();
+                        graph.get_sequence(step_handle).unwrap()
+                    };
+                    let node_len = node_seq.len();
+                    cumulative_pos += node_len;
+                    let step_end = cumulative_pos;
+
                     // Split node for the single partially overlapping step
                     let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
                     let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
 
                     // Calculate offsets relative to the node sequence
-                    let node_len = node_seq.len();
                     let overlap_start_offset =
                         (overlap_within_step_start - step_start).min(node_len);
                     let overlap_end_offset = (overlap_within_step_end - step_start).min(node_len);
@@ -788,6 +820,7 @@ pub(crate) fn trim_range_overlaps(
                             range_new_start = Some(step_start);
                             current_pos = Some(step_start);
                         }
+                        current_pos = Some(current_pos.unwrap() + new_seq.len());
                     } else if step_end > overlap_end {
                         // debug!(
                         //     "      Adding right part of step [start={overlap_within_step_end}, end={step_end}]"
@@ -813,6 +846,11 @@ pub(crate) fn trim_range_overlaps(
                         current_pos = Some(current_pos.unwrap() + new_seq.len());
                     }
                 } else {
+                    let node_length = {
+                        let graph = graph_mutex.lock().unwrap();
+                        graph.get_sequence_length(step_handle).unwrap()
+                    };
+                    cumulative_pos += node_length;
                     // Keep steps that are not to be removed or split
                     new_steps.push(step_handle);
                     if range_new_start.is_none() {
@@ -1061,20 +1099,32 @@ fn write_gfa_content<W: Write>(
     }
 
     info!("Writing edges connecting used nodes");
-    for edge in &combined_graph.edges {
-        let from_id = edge.source_id() as usize;
-        let to_id = edge.target_id() as usize;
-
-        if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
-            let from_mapped = id_mapping[from_id];
-            let to_mapped = id_mapping[to_id];
-            let from_orient = if edge.source_rev() { "-" } else { "+" };
-            let to_orient = if edge.target_rev() { "-" } else { "+" };
-            writeln!(
-                file,
-                "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M"
-            )?;
-        }
+    let mut kept_edges: Vec<(usize, bool, usize, bool)> = combined_graph
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            let from_id = edge.source_id() as usize;
+            let to_id = edge.target_id() as usize;
+            if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
+                Some((
+                    id_mapping[from_id],
+                    edge.source_rev(),
+                    id_mapping[to_id],
+                    edge.target_rev(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    kept_edges.sort_unstable();
+    for (from_mapped, from_rev, to_mapped, to_rev) in kept_edges {
+        let from_orient = if from_rev { "-" } else { "+" };
+        let to_orient = if to_rev { "-" } else { "+" };
+        writeln!(
+            file,
+            "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M"
+        )?;
     }
 
     // Write paths by processing ranges directly
@@ -1601,13 +1651,7 @@ fn process_vcf_file(
 
 /// Get VCF reader that handles compression transparently
 fn get_vcf_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = File::open(path)?;
-
-    // Use niffler to automatically detect and handle compression
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{path}': {e}")))?;
-
-    Ok(Box::new(BufReader::new(reader)))
+    Ok(Box::new(crate::fasta::open_reader(Path::new(path))?))
 }
 
 /// Write merged VCF file
@@ -1896,7 +1940,7 @@ fn merge_vcf_file_records<W: Write>(
 /// 4. Link contiguous ranges.
 /// 5. Remove unused nodes and compact IDs.
 /// 6. Emit the final GFA as a string.
-pub fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result<String> {
+pub fn lace_subgraphs(sub_gfas: &[String], _temp_dir: Option<&str>) -> io::Result<String> {
     if sub_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
@@ -1906,7 +1950,7 @@ pub fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result
     }
 
     // 1. Build CompactGraph + path_key_ranges from in-memory GFA strings
-    let mut graph = CompactGraph::new(temp_dir)?;
+    let mut graph = CompactGraph::new_in_memory();
     let mut path_key_ranges: IndexMap<String, Vec<RangeInfo>> = IndexMap::default();
 
     for gfa_str in sub_gfas {
@@ -1918,57 +1962,67 @@ pub fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result
                 continue;
             }
 
-            let fields: Vec<&str> = line.split('\t').collect();
-            match fields[0] {
-                "S" => {
-                    if fields.len() < 3 {
+            let mut fields = line.split('\t');
+            match fields.next() {
+                Some("S") => {
+                    let (Some(id_str), Some(seq_str)) = (fields.next(), fields.next()) else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Invalid S line in sub-GFA: {line}"),
                         ));
-                    }
-                    let node_id: u64 = fields[1].parse().map_err(|_| {
+                    };
+                    let node_id: u64 = id_str.parse().map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Invalid node ID '{}' in S line", fields[1]),
+                            format!("Invalid node ID '{id_str}' in S line"),
                         )
                     })?;
-                    let sequence = fields[2].as_bytes();
-                    let new_node_id = graph.add_node(sequence)?;
+                    let new_node_id = graph.add_node(seq_str.as_bytes())?;
                     id_translation.insert(NodeId::from(node_id), NodeId::from(new_node_id));
                 }
-                "L" => {
-                    if fields.len() < 6 {
+                Some("L") => {
+                    let (
+                        Some(from_str),
+                        Some(from_orient),
+                        Some(to_str),
+                        Some(to_orient),
+                        Some(_overlap),
+                    ) = (
+                        fields.next(),
+                        fields.next(),
+                        fields.next(),
+                        fields.next(),
+                        fields.next(),
+                    )
+                    else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Invalid L line in sub-GFA: {line}"),
                         ));
-                    }
-                    let from_id: u64 = fields[1].parse().map_err(|_| {
+                    };
+                    let from_id: u64 = from_str.parse().map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Invalid from node ID '{}' in L line", fields[1]),
+                            format!("Invalid from node ID '{from_str}' in L line"),
                         )
                     })?;
-                    let from_rev = fields[2] == "-";
-                    let to_id: u64 = fields[3].parse().map_err(|_| {
+                    let from_rev = from_orient == "-";
+                    let to_id: u64 = to_str.parse().map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Invalid to node ID '{}' in L line", fields[3]),
+                            format!("Invalid to node ID '{to_str}' in L line"),
                         )
                     })?;
-                    let to_rev = fields[4] == "-";
+                    let to_rev = to_orient == "-";
                     temp_edges.push((from_id, from_rev, to_id, to_rev));
                 }
-                "P" => {
-                    if fields.len() < 3 {
+                Some("P") => {
+                    let (Some(path_name), Some(nodes_str)) = (fields.next(), fields.next()) else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Invalid P line in sub-GFA: {line}"),
                         ));
-                    }
-                    let path_name = fields[1];
-                    let nodes_str = fields[2];
+                    };
 
                     if let Some((path_key, start, end)) = split_path_name(path_name) {
                         let mut translated_steps = Vec::new();
@@ -2076,89 +2130,80 @@ pub fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result
     for node_id in 1..=graph.node_count {
         if !nodes_to_remove[node_id as usize] {
             id_mapping[node_id as usize] = new_id;
-            let sequence = graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
-            let sequence_str =
-                String::from_utf8(sequence).expect("Node sequence contains invalid UTF-8");
-            output.push_str(&format!("S\t{new_id}\t{sequence_str}\n"));
+            graph
+                .sequence_store
+                .with_sequence((node_id - 1) as usize, |sequence| {
+                    let sequence_str = std::str::from_utf8(sequence)
+                        .expect("Node sequence contains invalid UTF-8");
+                    let _ = writeln!(output, "S\t{new_id}\t{sequence_str}");
+                })?;
             new_id += 1;
         }
     }
 
-    // Write L lines with mapped IDs (skip edges to removed nodes)
-    for edge in &graph.edges {
-        let from_id = edge.source_id() as usize;
-        let to_id = edge.target_id() as usize;
-
-        if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
-            let from_mapped = id_mapping[from_id];
-            let to_mapped = id_mapping[to_id];
-            let from_orient = if edge.source_rev() { "-" } else { "+" };
-            let to_orient = if edge.target_rev() { "-" } else { "+" };
-            output.push_str(&format!(
-                "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M\n"
-            ));
-        }
+    // Write L lines with mapped IDs in deterministic sorted order (skip edges to removed nodes)
+    let mut kept_edges: Vec<(u64, bool, u64, bool)> = graph
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            let from_id = edge.source_id() as usize;
+            let to_id = edge.target_id() as usize;
+            if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
+                Some((
+                    id_mapping[from_id],
+                    edge.source_rev(),
+                    id_mapping[to_id],
+                    edge.target_rev(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    kept_edges.sort_unstable();
+    for (from_mapped, from_rev, to_mapped, to_rev) in kept_edges {
+        let from_orient = if from_rev { "-" } else { "+" };
+        let to_orient = if to_rev { "-" } else { "+" };
+        let _ = writeln!(
+            output,
+            "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M"
+        );
     }
 
     // Write P lines: merge contiguous ranges per path key (preserving insertion order)
-    let path_keys: Vec<&String> = path_key_ranges.keys().collect();
-
-    for path_key in path_keys {
-        let ranges = &path_key_ranges[path_key];
+    for (path_key, ranges) in &path_key_ranges {
         if ranges.is_empty() {
             continue;
         }
 
-        let mut path_elements: Vec<String> = Vec::new();
-        let mut path_start = ranges[0].start;
-        let mut path_end = ranges[0].start;
-
         let mut i = 0;
         while i < ranges.len() {
-            // Add steps from this range
-            for handle in &ranges[i].steps {
-                let node_id = id_mapping[u64::from(handle.id()) as usize];
-                let orient = if handle.is_reverse() { "-" } else { "+" };
-                path_elements.push(format!("{node_id}{orient}"));
-            }
+            let path_start = ranges[i].start;
+            let block_start = i;
             let mut last_range_end = ranges[i].end;
             i += 1;
 
-            // Merge contiguous ranges
             while i < ranges.len() && ranges[i - 1].is_contiguous_with(&ranges[i]) {
-                for handle in &ranges[i].steps {
-                    let node_id = id_mapping[u64::from(handle.id()) as usize];
-                    let orient = if handle.is_reverse() { "-" } else { "+" };
-                    path_elements.push(format!("{node_id}{orient}"));
-                }
                 last_range_end = ranges[i].end;
                 i += 1;
             }
-            path_end = last_range_end;
-
-            // If there's a gap before the next block, emit current path and start new one
-            if i < ranges.len() {
-                if !path_elements.is_empty() {
-                    let path_name = format!("{path_key}:{path_start}-{path_end}");
-                    output.push_str(&format!(
-                        "P\t{}\t{}\t*\n",
-                        path_name,
-                        path_elements.join(",")
-                    ));
-                    path_elements.clear();
+            let block = &ranges[block_start..i];
+            if block.iter().any(|r| !r.steps.is_empty()) {
+                let _ = write!(output, "P\t{path_key}:{path_start}-{last_range_end}\t");
+                let mut first = true;
+                for range in block {
+                    for handle in &range.steps {
+                        if !first {
+                            output.push(',');
+                        }
+                        first = false;
+                        let node_id = id_mapping[u64::from(handle.id()) as usize];
+                        let orient = if handle.is_reverse() { '-' } else { '+' };
+                        let _ = write!(output, "{node_id}{orient}");
+                    }
                 }
-                path_start = ranges[i].start;
+                output.push_str("\t*\n");
             }
-        }
-
-        // Write remaining path
-        if !path_elements.is_empty() {
-            let path_name = format!("{path_key}:{path_start}-{path_end}");
-            output.push_str(&format!(
-                "P\t{}\t{}\t*\n",
-                path_name,
-                path_elements.join(",")
-            ));
         }
     }
 
@@ -2245,6 +2290,31 @@ mod tests {
                 vec![(8000, 11000), (10908, 13908)],
                 "Overlapping ranges",
             ),
+            // Regression: the middle range is NOT covered by its neighbours
+            // (the next one ends inside it), so its tail must survive.
+            (
+                vec![(0, 100), (50, 200), (60, 70)],
+                vec![(0, 100), (50, 200)],
+                "Middle range tail must not be dropped",
+            ),
+            (
+                vec![(0, 50), (10, 200), (20, 30)],
+                vec![(0, 50), (10, 200)],
+                "Overlap kept when the next range ends inside it",
+            ),
+            // The neighbours touch (100 == 100): lacing links them, so the
+            // middle range is redundant. The old rule kept it.
+            (
+                vec![(0, 100), (50, 200), (100, 300)],
+                vec![(0, 100), (100, 300)],
+                "Middle range dropped when its neighbours touch and cover it",
+            ),
+            // A chain where each next range covers the current tail
+            (
+                vec![(0, 100), (50, 150), (90, 250), (140, 400)],
+                vec![(0, 100), (90, 250), (140, 400)],
+                "Covered middle ranges dropped along a chain",
+            ),
         ];
 
         // Run each test case
@@ -2259,58 +2329,7 @@ mod tests {
                 .map(|(start, end)| create_range_info(*start, *end))
                 .collect();
 
-            // Sort ranges by start position
-            ranges.sort_by_key(|r| (r.start, r.end));
-
-            let mut write_idx = 0;
-            for read_idx in 1..ranges.len() {
-                let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
-                let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
-
-                if curr_start == prev_start && curr_end == prev_end {
-                    // Skip duplicate range
-                    continue;
-                } else if curr_start >= prev_start && curr_end <= prev_end {
-                    // Skip range that is fully contained within previous range
-                    continue;
-                } else if prev_start >= curr_start && prev_end <= curr_end {
-                    // Previous range is fully contained within current range
-                    ranges.swap(write_idx, read_idx);
-                } else if curr_start < prev_end {
-                    // Handle overlapping ranges - check both previous and next ranges
-                    let mut should_skip = false;
-
-                    if read_idx < ranges.len() - 1 {
-                        let next_start = ranges[read_idx + 1].start;
-
-                        // Check if current range is significantly overlapped by both neighbors
-                        if curr_start > prev_start && next_start < curr_end {
-                            let overlap_with_prev = prev_end - curr_start;
-                            let overlap_with_next = curr_end - next_start;
-                            let range_length = curr_end - curr_start;
-
-                            // Skip if the range is mostly covered by its neighbors
-                            if overlap_with_prev + overlap_with_next > range_length {
-                                should_skip = true;
-                            }
-                        }
-                    }
-
-                    if !should_skip {
-                        write_idx += 1;
-                        if write_idx != read_idx {
-                            ranges.swap(write_idx, read_idx);
-                        }
-                    }
-                } else {
-                    // No overlap - keep both ranges
-                    write_idx += 1;
-                    if write_idx != read_idx {
-                        ranges.swap(write_idx, read_idx);
-                    }
-                }
-            }
-            ranges.truncate(write_idx + 1);
+            sort_and_filter_ranges(&mut ranges);
 
             // Create expected ranges
             let expected: Vec<RangeInfo> = expected_ranges
@@ -2627,5 +2646,33 @@ mod tests {
             result.contains("P\ts:0-16\t1+,2+,3+,4-\t*"),
             "expected merged path, got:\n{result}"
         );
+    }
+
+    #[test]
+    fn test_trim_range_overlaps_updates_end_on_left_split() {
+        let mut graph = CompactGraph::new_in_memory();
+        let n1 = graph.add_node(b"ACGT").unwrap();
+        let n2 = graph.add_node(b"TTTTA").unwrap();
+        let graph_mutex = Arc::new(Mutex::new(graph));
+
+        let mut ranges = vec![
+            RangeInfo {
+                start: 6,
+                end: 10,
+                steps: vec![Handle::pack(NodeId::from(n1), false)],
+            },
+            RangeInfo {
+                start: 4,
+                end: 9,
+                steps: vec![Handle::pack(NodeId::from(n2), false)],
+            },
+        ];
+
+        trim_range_overlaps(&mut ranges, &graph_mutex);
+        assert_eq!(ranges[1].start, 4);
+        assert_eq!(ranges[1].end, 6);
+        assert_eq!(ranges[1].steps.len(), 1);
+        let g = graph_mutex.lock().unwrap();
+        assert_eq!(g.get_sequence(ranges[1].steps[0]).unwrap(), b"TT");
     }
 }

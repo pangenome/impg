@@ -4,7 +4,10 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{genotype, graph, infer, lace, partition, refine, render, similarity};
+use impg::commands::{
+    ensure_parent_dir, genotype, graph, infer, lace, partition, read_text_from_path_or_stdin,
+    refine, render, similarity, write_text_to_path_or_stdout,
+};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -20,7 +23,7 @@ use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
@@ -52,6 +55,38 @@ fn parse_merge_distance(s: &str) -> Result<i32, String> {
             i32::MAX
         )
     })
+}
+
+/// Parse a partition window size: at least 1 bp and at most `i32::MAX` bp,
+/// because window boundaries are stored as `i32` and a 0 bp window never advances.
+fn parse_window_size(s: &str) -> Result<usize, String> {
+    let value = parse_usize_size(s)?;
+    // parse_metric_number truncates fractions; refuse them
+    let t = s.trim();
+    let (num, mult) = match t.chars().last() {
+        Some('k' | 'K') => (&t[..t.len() - 1], 1e3),
+        Some('m' | 'M') => (&t[..t.len() - 1], 1e6),
+        Some('g' | 'G') => (&t[..t.len() - 1], 1e9),
+        _ => (t, 1.0),
+    };
+    let exact = num.parse::<f64>().map_err(|e| format!("invalid window size '{s}': {e}"))? * mult;
+    if (exact - exact.round()).abs() > 1e-6 {
+        return Err(format!(
+            "window size '{s}' is {exact} bp: it must be a whole number of bp"
+        ));
+    }
+    if value == 0 {
+        return Err(
+            "window size must be at least 1 bp: a window of 0 bp never advances".to_string(),
+        );
+    }
+    if value > i32::MAX as usize {
+        return Err(format!(
+            "window size {value} exceeds the maximum supported value {}",
+            i32::MAX
+        ));
+    }
+    Ok(value)
 }
 
 fn parse_usize_size(s: &str) -> Result<usize, String> {
@@ -374,10 +409,7 @@ fn is_blank_line_bytes(line: &[u8]) -> bool {
 }
 
 fn read_query_sequences(path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
-    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+    let mut reader = impg::fasta::open_reader_with_capacity(Path::new(path), 8 * 1024 * 1024)?;
 
     let mut first_line = String::new();
     loop {
@@ -923,10 +955,7 @@ fn stream_query_chunks_with<F>(path: &str, mut on_chunk: F) -> io::Result<()>
 where
     F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
-    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+    let mut reader = impg::fasta::open_reader_with_capacity(Path::new(path), 8 * 1024 * 1024)?;
 
     let mut first_line = Vec::new();
     loop {
@@ -2484,143 +2513,82 @@ fn set_terminal_n_clip(
     Ok(())
 }
 
-fn parse_syng_mask_stage(
+fn apply_common_syng_mask_param(
     raw: &str,
-    stage: &GraphPipelineStage,
-    mut mask: SyngGfaFrequencyMask,
-) -> io::Result<SyngGfaFrequencyMask> {
-    if stage.params.is_empty()
-        && matches!(
-            stage.name.as_str(),
-            "nomask" | "no-mask" | "unmask" | "nofilter" | "no-filter" | "unfilter"
-        )
-    {
-        return Ok(SyngGfaFrequencyMask::disabled());
-    }
-    if matches!(
-        stage.name.as_str(),
-        "mask" | "frequency-mask" | "freq-mask" | "filter" | "frequency-filter" | "freq-filter"
-    ) && !mask.enabled()
-    {
-        mask = SyngGfaFrequencyMask::local_default();
-    }
-    if stage.params.is_empty() {
-        return Ok(mask);
-    }
-    for param in &stage.params {
-        match param.key.as_str() {
-            "top" | "drop-top" | "drop-top-fraction" | "top-fraction" | "fraction" => {
-                mask.drop_top_fraction = parse_f64_engine_param(raw, &param.key, &param.value)?;
-            }
-            "max-occurrences" | "max-occurrence" | "max-occ" => {
-                let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
-                mask.max_occurrences = (value > 0).then_some(value);
-            }
-            "freq-run"
-            | "frequency-run"
-            | "freq-min-run"
-            | "high-freq-run"
-            | "high-frequency-run"
-            | "high-freq-min-run"
-            | "high-frequency-min-run" => {
-                mask.high_freq_min_run =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "freq-span"
-            | "frequency-span"
-            | "freq-sequence-span"
-            | "freq-seq-span"
-            | "freq-seq-k"
-            | "high-freq-span"
-            | "high-frequency-span"
-            | "high-freq-sequence-span"
-            | "high-frequency-sequence-span"
-            | "high-freq-seq-k" => {
-                mask.high_freq_min_sequence_span_bp =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "freq-run-aware"
-            | "frequency-run-aware"
-            | "high-freq-run-aware"
-            | "high-frequency-run-aware"
-            | "run-aware-freq"
-            | "run-aware-frequency"
-            | "freq-occurrence"
-            | "frequency-occurrence"
-            | "high-freq-occurrence"
-            | "high-frequency-occurrence" => {
-                mask.run_aware_frequency_mask =
-                    parse_bool_engine_param(raw, &param.key, &param.value)?;
-            }
-            "legacy-freq-mask"
-            | "legacy-frequency-mask"
-            | "node-freq-mask"
-            | "node-frequency-mask" => {
-                mask.run_aware_frequency_mask =
-                    !parse_bool_engine_param(raw, &param.key, &param.value)?;
-            }
-            "min-shared-run"
-            | "min-run"
-            | "run"
-            | "shared-run"
-            | "mask-min-shared-run"
-            | "mask-min-run" => {
-                mask.min_shared_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "sequence-k"
-            | "seq-k"
-            | "sequence-span"
-            | "sequence-context"
-            | "min-sequence-span"
-            | "min-sequence-context"
-            | "min-sequence-bp"
-            | "mask-sequence-k"
-            | "mask-seq-k" => {
-                mask.min_sequence_span_bp =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "repeat-minor"
-            | "repeat-max-minor"
-            | "local-repeat-minor"
-            | "local-repeat-max-minor"
-            | "context-minor"
-            | "context-max-minor" => {
-                mask.local_repeat_max_minor =
-                    parse_u32_engine_param(raw, &param.key, &param.value)?;
-            }
-            "repeat-dominance"
-            | "local-repeat-dominance"
-            | "context-dominance"
-            | "min-dominance" => {
-                mask.local_repeat_min_dominant_fraction =
-                    parse_f64_engine_param(raw, &param.key, &param.value)?;
-            }
-            "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps" => {
-                mask.cut_n_gaps = parse_bool_engine_param(raw, &param.key, &param.value)?;
-            }
-            "cut-n-min-run" | "cut-n-min-len" | "n-cut-min-run" | "n-cut-min-len" => {
-                mask.cut_n_min_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "enabled" | "enable" => {
-                if parse_bool_engine_param(raw, &param.key, &param.value)? {
-                    if !mask.enabled() {
-                        mask = SyngGfaFrequencyMask::local_default();
-                    }
-                } else {
-                    mask = SyngGfaFrequencyMask::disabled();
-                }
-            }
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Invalid --gfa-engine '{}': unknown syng mask parameter '{}'",
-                        raw, other
-                    ),
-                ));
-            }
+    key: &str,
+    value: &str,
+    mask: &mut SyngGfaFrequencyMask,
+) -> io::Result<bool> {
+    match key {
+        "freq-run"
+        | "frequency-run"
+        | "freq-min-run"
+        | "high-freq-run"
+        | "high-frequency-run"
+        | "high-freq-min-run"
+        | "high-frequency-min-run" => {
+            mask.high_freq_min_run = parse_usize_size_engine_param(raw, key, value)?;
         }
+        "freq-span"
+        | "frequency-span"
+        | "freq-sequence-span"
+        | "freq-seq-span"
+        | "freq-seq-k"
+        | "high-freq-span"
+        | "high-frequency-span"
+        | "high-freq-sequence-span"
+        | "high-frequency-sequence-span"
+        | "high-freq-seq-k" => {
+            mask.high_freq_min_sequence_span_bp = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        "freq-run-aware"
+        | "frequency-run-aware"
+        | "high-freq-run-aware"
+        | "high-frequency-run-aware"
+        | "run-aware-freq"
+        | "run-aware-frequency"
+        | "freq-occurrence"
+        | "frequency-occurrence"
+        | "high-freq-occurrence"
+        | "high-frequency-occurrence" => {
+            mask.run_aware_frequency_mask = parse_bool_engine_param(raw, key, value)?;
+        }
+        "legacy-freq-mask"
+        | "legacy-frequency-mask"
+        | "node-freq-mask"
+        | "node-frequency-mask" => {
+            mask.run_aware_frequency_mask = !parse_bool_engine_param(raw, key, value)?;
+        }
+        "min-shared-run"
+        | "min-run"
+        | "shared-run"
+        | "mask-min-shared-run"
+        | "mask-min-run" => {
+            mask.min_shared_run = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        "sequence-k"
+        | "seq-k"
+        | "sequence-span"
+        | "sequence-context"
+        | "min-sequence-span"
+        | "min-sequence-context"
+        | "min-sequence-bp"
+        | "mask-sequence-k"
+        | "mask-seq-k" => {
+            mask.min_sequence_span_bp = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps" => {
+            mask.cut_n_gaps = parse_bool_engine_param(raw, key, value)?;
+        }
+        "cut-n-min-run" | "cut-n-min-len" | "n-cut-min-run" | "n-cut-min-len" => {
+            mask.cut_n_min_run = parse_usize_size_engine_param(raw, key, value)?;
+        }
+        _ => return Ok(false),
     }
+    Ok(true)
+}
+
+fn validate_syng_mask(raw: &str, mask: &SyngGfaFrequencyMask) -> io::Result<()> {
     if !mask.drop_top_fraction.is_finite() || !(0.0..1.0).contains(&mask.drop_top_fraction) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -2659,6 +2627,84 @@ fn parse_syng_mask_stage(
             ),
         ));
     }
+    Ok(())
+}
+
+fn parse_syng_mask_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+    mut mask: SyngGfaFrequencyMask,
+) -> io::Result<SyngGfaFrequencyMask> {
+    if stage.params.is_empty()
+        && matches!(
+            stage.name.as_str(),
+            "nomask" | "no-mask" | "unmask" | "nofilter" | "no-filter" | "unfilter"
+        )
+    {
+        return Ok(SyngGfaFrequencyMask::disabled());
+    }
+    if matches!(
+        stage.name.as_str(),
+        "mask" | "frequency-mask" | "freq-mask" | "filter" | "frequency-filter" | "freq-filter"
+    ) && !mask.enabled()
+    {
+        mask = SyngGfaFrequencyMask::local_default();
+    }
+    if stage.params.is_empty() {
+        return Ok(mask);
+    }
+    for param in &stage.params {
+        if apply_common_syng_mask_param(raw, &param.key, &param.value, &mut mask)? {
+            continue;
+        }
+        match param.key.as_str() {
+            "top" | "drop-top" | "drop-top-fraction" | "top-fraction" | "fraction" => {
+                mask.drop_top_fraction = parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-occurrences" | "max-occurrence" | "max-occ" => {
+                let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
+                mask.max_occurrences = (value > 0).then_some(value);
+            }
+            "run" => {
+                mask.min_shared_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "repeat-minor"
+            | "repeat-max-minor"
+            | "local-repeat-minor"
+            | "local-repeat-max-minor"
+            | "context-minor"
+            | "context-max-minor" => {
+                mask.local_repeat_max_minor =
+                    parse_u32_engine_param(raw, &param.key, &param.value)?;
+            }
+            "repeat-dominance"
+            | "local-repeat-dominance"
+            | "context-dominance"
+            | "min-dominance" => {
+                mask.local_repeat_min_dominant_fraction =
+                    parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "enabled" | "enable" => {
+                if parse_bool_engine_param(raw, &param.key, &param.value)? {
+                    if !mask.enabled() {
+                        mask = SyngGfaFrequencyMask::local_default();
+                    }
+                } else {
+                    mask = SyngGfaFrequencyMask::disabled();
+                }
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown syng mask parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+    validate_syng_mask(raw, &mask)?;
     Ok(mask)
 }
 
@@ -3466,6 +3512,10 @@ where
             params: Vec::new(),
         };
         for param in &stage.params {
+            if apply_common_syng_mask_param(raw, &param.key, &param.value, syng_gfa_frequency_mask)?
+            {
+                continue;
+            }
             match param.key.as_str() {
                 "mode" => {
                     set_syng_gfa_mode(raw, syng_gfa_mode, SyngGfaMode::parse(&param.value)?)?;
@@ -3487,14 +3537,7 @@ where
                 | "mask-high-freq-run"
                 | "mask-high-frequency-run"
                 | "mask-high-freq-min-run"
-                | "mask-high-frequency-min-run"
-                | "freq-run"
-                | "frequency-run"
-                | "freq-min-run"
-                | "high-freq-run"
-                | "high-frequency-run"
-                | "high-freq-min-run"
-                | "high-frequency-min-run" => {
+                | "mask-high-frequency-min-run" => {
                     syng_gfa_frequency_mask.high_freq_min_run =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
@@ -3507,17 +3550,7 @@ where
                 | "mask-high-frequency-span"
                 | "mask-high-freq-sequence-span"
                 | "mask-high-frequency-sequence-span"
-                | "mask-high-freq-seq-k"
-                | "freq-span"
-                | "frequency-span"
-                | "freq-sequence-span"
-                | "freq-seq-span"
-                | "freq-seq-k"
-                | "high-freq-span"
-                | "high-frequency-span"
-                | "high-freq-sequence-span"
-                | "high-frequency-sequence-span"
-                | "high-freq-seq-k" => {
+                | "mask-high-freq-seq-k" => {
                     syng_gfa_frequency_mask.high_freq_min_sequence_span_bp =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
@@ -3530,50 +3563,16 @@ where
                 | "mask-freq-occurrence"
                 | "mask-frequency-occurrence"
                 | "mask-high-freq-occurrence"
-                | "mask-high-frequency-occurrence"
-                | "freq-run-aware"
-                | "frequency-run-aware"
-                | "high-freq-run-aware"
-                | "high-frequency-run-aware"
-                | "run-aware-freq"
-                | "run-aware-frequency"
-                | "freq-occurrence"
-                | "frequency-occurrence"
-                | "high-freq-occurrence"
-                | "high-frequency-occurrence" => {
+                | "mask-high-frequency-occurrence" => {
                     syng_gfa_frequency_mask.run_aware_frequency_mask =
                         parse_bool_engine_param(raw, &param.key, &param.value)?;
                 }
                 "mask-legacy-freq-mask"
                 | "mask-legacy-frequency-mask"
                 | "mask-node-freq-mask"
-                | "mask-node-frequency-mask"
-                | "legacy-freq-mask"
-                | "legacy-frequency-mask"
-                | "node-freq-mask"
-                | "node-frequency-mask" => {
+                | "mask-node-frequency-mask" => {
                     syng_gfa_frequency_mask.run_aware_frequency_mask =
                         !parse_bool_engine_param(raw, &param.key, &param.value)?;
-                }
-                "mask-min-shared-run"
-                | "mask-min-run"
-                | "min-shared-run"
-                | "min-run"
-                | "shared-run" => {
-                    syng_gfa_frequency_mask.min_shared_run =
-                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-                }
-                "sequence-k"
-                | "seq-k"
-                | "sequence-span"
-                | "sequence-context"
-                | "min-sequence-span"
-                | "min-sequence-context"
-                | "min-sequence-bp"
-                | "mask-sequence-k"
-                | "mask-seq-k" => {
-                    syng_gfa_frequency_mask.min_sequence_span_bp =
-                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
                 "mask-repeat-minor"
                 | "mask-repeat-max-minor"
@@ -3591,17 +3590,11 @@ where
                     syng_gfa_frequency_mask.local_repeat_min_dominant_fraction =
                         parse_f64_engine_param(raw, &param.key, &param.value)?;
                 }
-                "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps"
-                | "mask-cut-ns" | "mask-cut-n" | "filter-cut-ns" => {
+                "mask-cut-ns" | "mask-cut-n" | "filter-cut-ns" => {
                     syng_gfa_frequency_mask.cut_n_gaps =
                         parse_bool_engine_param(raw, &param.key, &param.value)?;
                 }
-                "cut-n-min-run"
-                | "cut-n-min-len"
-                | "n-cut-min-run"
-                | "n-cut-min-len"
-                | "mask-cut-n-min-run"
-                | "filter-cut-n-min-run" => {
+                "mask-cut-n-min-run" | "filter-cut-n-min-run" => {
                     syng_gfa_frequency_mask.cut_n_min_run =
                         parse_usize_size_engine_param(raw, &param.key, &param.value)?;
                 }
@@ -3640,48 +3633,7 @@ where
             syncmer_seed,
             saw_syng_param,
         )?;
-        if !syng_gfa_frequency_mask.drop_top_fraction.is_finite()
-            || !(0.0..1.0).contains(&syng_gfa_frequency_mask.drop_top_fraction)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng mask top fraction must be finite and in [0, 1)",
-                    raw
-                ),
-            ));
-        }
-        if !syng_gfa_frequency_mask
-            .local_repeat_min_dominant_fraction
-            .is_finite()
-            || !(0.0..=1.0).contains(&syng_gfa_frequency_mask.local_repeat_min_dominant_fraction)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng local repeat dominance must be finite and in [0, 1]",
-                    raw
-                ),
-            ));
-        }
-        if syng_gfa_frequency_mask.min_shared_run == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng mask min-shared-run must be > 0",
-                    raw
-                ),
-            ));
-        }
-        if syng_gfa_frequency_mask.cut_n_min_run == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid --gfa-engine '{}': syng N-cut minimum run length must be > 0",
-                    raw
-                ),
-            ));
-        }
+        validate_syng_mask(raw, syng_gfa_frequency_mask)?;
         Ok(())
     } else {
         for param in &stage.params {
@@ -4339,7 +4291,11 @@ struct QueryOpts {
     #[clap(long, action)]
     original_sequence_coordinates: bool,
 
-    /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
+    /// Use approximate mode for faster queries with tracepoint files (.1aln or .tpa).
+    /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
+    /// --sequence-files is not needed. In `query` it works with bed and bedpe output; `refine`
+    /// accepts it too. Intervals are close to the CIGAR path, not identical,
+    /// and the reported identity is a lower bound from the trace spacing.
     #[arg(help_heading = "Performance")]
     #[clap(long, action)]
     approximate: bool,
@@ -4445,7 +4401,7 @@ impl RefineOpts {
         if self.query.approximate {
             validate_approximate_mode_min_length(
                 self.query.transitive_opts.min_transitive_len,
-                self.query.transitive,
+                self.query.transitive || self.query.transitive_opts.transitive_dfs,
             )?;
         }
 
@@ -4768,9 +4724,9 @@ enum Args {
         no_rehome_singletons: bool,
 
         // --- Partition-specific ---
-        /// Window size for partitioning
+        /// Window size for partitioning (at least 1 bp)
         #[arg(help_heading = "Partition options")]
-        #[clap(short = 'w', long, value_parser)]
+        #[clap(short = 'w', long, value_parser = parse_window_size)]
         window_size: usize,
 
         /// Path to the file with sequence names to start with (one per line)
@@ -4832,7 +4788,9 @@ enum Args {
         transitive_opts: TransitiveOpts,
 
         // --- Performance ---
-        /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
+        /// Use approximate mode with tracepoint files (.1aln or .tpa), bed output only.
+        /// The projection interpolates from tracepoint boundaries instead of reading CIGARs, so
+        /// --sequence-files is not needed. Intervals are close to the CIGAR path, not identical.
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
@@ -5077,7 +5035,7 @@ GFA engine shorthand:
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Compute pairwise similarity between sequences in a region
+    /// (experimental) Compute pairwise similarity between sequences in a region
     Similarity {
         // --- Input ---
         #[clap(flatten)]
@@ -5171,14 +5129,14 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Genotype a locus from graph-derived sample evidence
+    /// (experimental) Genotype a locus from graph-derived sample evidence
     #[command(alias = "gt")]
     Genotype {
         #[command(subcommand)]
         command: GenotypeCommand,
     },
 
-    /// Project graph alignments into typed GFA genotype evidence
+    /// (experimental) Project graph alignments into typed GFA genotype evidence
     #[command(alias = "projection")]
     Project {
         /// GFA graph whose S-line segment names appear in the GAF path walks
@@ -5214,15 +5172,16 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Genotype from a syncmer panel: the three-step surface (partition -> map -> call),
-    /// the product call, the panel-side precomputes and the diplotype emission path.
+    /// (experimental) Genotype from a syncmer panel in three steps: partition the panel, map each
+    /// sample onto it, then call a diplotype per locus. The subcommand descriptions are internal
+    /// working notes. Needs a syng panel and is not ready for third-party use.
     #[command(name = "infer", alias = "genome-infer")]
     GenomeInfer {
         #[command(subcommand)]
         command: impg::commands::genome_infer::Command,
     },
 
-    /// Infer allele calls across ranges or partitions from graph-derived evidence
+    /// (experimental) Infer allele calls across ranges or partitions from graph-derived evidence
     /// (the graph-evidence path; the syncmer-panel pipeline is `impg infer`)
     #[command(name = "genotype-infer")]
     Infer {
@@ -5473,7 +5432,7 @@ GFA engine shorthand:
         report: Option<String>,
     },
 
-    /// Resolve bounded bubbles in an existing blunt GFA
+    /// (experimental) Resolve bounded bubbles in an existing blunt GFA
     Crush {
         /// Input blunt GFA path, or '-' for stdin
         #[clap(short = 'g', long, value_parser)]
@@ -5870,7 +5829,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Render a syng-backed source-coordinate region into a GBZ-style bundle
+    /// (experimental) Render a syng-backed source-coordinate region into a GBZ-style bundle
     Render {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
@@ -5948,7 +5907,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Map sequences to a syng index using exact shared syncmers
+    /// (experimental) Map sequences to a syng index using exact shared syncmers
     Map {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
@@ -5991,7 +5950,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Build a compact read-to-syncmer inverted index
+    /// (experimental) Build a compact read-to-syncmer inverted index
     ReadIndex {
         /// Syng index prefix or .1khash/.meta path
         #[clap(short = 'a', long, value_parser)]
@@ -6075,7 +6034,7 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
-    /// Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
+    /// (experimental) Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
     ///
     /// Loads `<prefix>.1khash`, `<prefix>.1gbwt`, `<prefix>.syng.names`,
     /// `<prefix>.syng.meta` (and `.syng.spos`) and writes a GFA with one
@@ -7675,11 +7634,13 @@ fn run() -> io::Result<()> {
                                     common.threads.get(),
                                 )?;
                             } else {
-                                output_results_gfa(
+                                output_results_graph(
                                     &impg,
                                     &mut results,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
+                                    "gfa",
+                                    &[],
                                     &name,
                                     query.effective_merge_distance(),
                                     query.merge_strands_for_output("gfa"),
@@ -7716,11 +7677,12 @@ fn run() -> io::Result<()> {
                                     common.threads.get(),
                                 )?;
                             } else {
-                                output_results_vcf(
+                                output_results_graph(
                                     &impg,
                                     &mut results,
                                     &target_output_prefix,
                                     sequence_index.as_ref().unwrap(),
+                                    "vcf",
                                     &reference_names,
                                     &name,
                                     query.effective_merge_distance(),
@@ -7869,13 +7831,33 @@ fn run() -> io::Result<()> {
             let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = refine.sequence.resolve_sequence_files()?;
 
-            // Check if we have .1aln files and validate sequence files are provided
-            let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
-            if has_onealn_files && sequence_files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Sequence files (FASTA or AGC) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list".to_string(),
-                ));
+            if refine.query.approximate {
+                // Approximate mode interpolates from the tracepoint boundaries
+                // and never reads a CIGAR, so it needs tracepoint input and no
+                // sequence files.
+                let non_tracepoint_files: Vec<&String> = alignment_files
+                    .iter()
+                    .filter(|f| !f.ends_with(".1aln") && !f.ends_with(".tpa"))
+                    .collect();
+                if !non_tracepoint_files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode only works with tracepoint alignment files (.1aln or .tpa), found {} incompatible files in refine.",
+                            non_tracepoint_files.len()
+                        ),
+                    ));
+                }
+            } else {
+                // Check if we have .1aln files and validate sequence files are provided
+                let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
+                if has_onealn_files && sequence_files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Sequence files (FASTA or AGC) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list"
+                            .to_string(),
+                    ));
+                }
             }
 
             let impg = initialize_index(
@@ -8980,11 +8962,7 @@ fn run() -> io::Result<()> {
                     }
                 };
                 let gfa = impg::apply_graph_transforms(gfa, &engine_opts)?;
-                if output == "-" {
-                    io::stdout().lock().write_all(gfa.as_bytes())?;
-                } else {
-                    std::fs::write(&output, gfa)?;
-                }
+                write_text_to_path_or_stdout(&output, &gfa, false)?;
             }
         }
         Args::NormalizeSelfLoops {
@@ -8993,12 +8971,7 @@ fn run() -> io::Result<()> {
             max_unit_len,
             report,
         } => {
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
             let result = impg::gfa_self_loops::normalize_repeat_self_loops(
                 &gfa_text,
                 &impg::gfa_self_loops::NormalizeSelfLoopsConfig { max_unit_len },
@@ -9023,16 +8996,7 @@ fn run() -> io::Result<()> {
                 out.flush()?;
             }
 
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(result.gfa.as_bytes())?;
-                out.flush()?;
-            } else {
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                out.write_all(result.gfa.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &result.gfa, false)?;
         }
         Args::Crush {
             gfa,
@@ -9230,12 +9194,7 @@ fn run() -> io::Result<()> {
                         "--replacement-scaffold-filter must be like 1:1, 1:many, 1-many, 1-to-many, or many:many",
                     )
                 })?;
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
 
             let config = impg::resolution::ResolutionConfig {
                 max_iterations,
@@ -9316,16 +9275,7 @@ fn run() -> io::Result<()> {
                 )?;
             }
 
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(gfa.as_bytes())?;
-                out.flush()?;
-            } else {
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                out.write_all(gfa.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &gfa, false)?;
         }
         Args::Gfa2vcf {
             gfa,
@@ -9334,26 +9284,10 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
 
             let vcf = impg::gfa_to_vcf_string(&gfa_text, &reference_names)?;
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(vcf.as_bytes())?;
-                out.flush()?;
-            } else {
-                let output_path = Path::new(&output);
-                ensure_parent_dir(output_path)?;
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
-                out.write_all(vcf.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &vcf, true)?;
         }
         Args::GraphReport {
             gfa,
@@ -9367,12 +9301,7 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            let mut gfa_text = String::new();
-            if gfa == "-" {
-                io::stdin().read_to_string(&mut gfa_text)?;
-            } else {
-                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
-            }
+            let gfa_text = read_text_from_path_or_stdin(&gfa)?;
             let options = impg::graph_report::GraphReportOptions {
                 top_n: top.max(1),
                 include_povu: povu,
@@ -9381,18 +9310,7 @@ fn run() -> io::Result<()> {
             };
             let report = impg::graph_report::describe_gfa(&gfa, &gfa_text, &options)?;
             let text = impg::graph_report::format_report(&report, &format)?;
-            if output == "-" {
-                let stdout = io::stdout();
-                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                out.write_all(text.as_bytes())?;
-                out.flush()?;
-            } else {
-                let output_path = Path::new(&output);
-                ensure_parent_dir(output_path)?;
-                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
-                out.write_all(text.as_bytes())?;
-                out.flush()?;
-            }
+            write_text_to_path_or_stdout(&output, &text, true)?;
             if let Some(flubble_path_gfa) = flubble_path_gfa {
                 let (annotated_gfa, stats) = impg::graph_report::gfa_with_flubble_paths(
                     &gfa_text,
@@ -10177,14 +10095,7 @@ fn run() -> io::Result<()> {
                         format_duration(total_start.elapsed())
                     );
 
-                    let file = File::open(&fasta_path)?;
-                    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-                        io::Error::other(format!(
-                            "Failed to open reader for '{}': {}",
-                            fasta_path, e
-                        ))
-                    })?;
-                    let reader = BufReader::new(reader);
+                    let reader = impg::fasta::open_reader(Path::new(&fasta_path))?;
 
                     let mut index = impg::syng::SyngIndex::new(params);
                     configure_position_sampling(&mut index)?;
@@ -10856,10 +10767,7 @@ fn determine_file_format(
 
 // Helper function for auto-detection with compression support
 fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = std::fs::File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader: {e}")))?;
-    Ok(Box::new(BufReader::new(reader)))
+    Ok(Box::new(impg::fasta::open_reader(Path::new(path))?))
 }
 
 fn output_path_for_basename(basename: &Option<String>, extension: &str) -> Option<PathBuf> {
@@ -10876,15 +10784,6 @@ fn output_path_for_basename(basename: &Option<String>, extension: &str) -> Optio
             PathBuf::from(format!("{}.{}", name, wanted))
         }
     })
-}
-
-fn ensure_parent_dir(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    Ok(())
 }
 
 /// Helper function to return a Write implementer that is either standard output or a file with the
@@ -11729,8 +11628,11 @@ fn build_single_index(
 
     // Create a deterministic global SequenceIndex
     let mut seq_index = SequenceIndex::new();
-    for (name, id) in &tmp_union_index.name_to_id {
-        let length = tmp_union_index.get_len_from_id(*id).unwrap_or(0);
+    for name in &sequence_names {
+        let length = tmp_union_index
+            .get_id(name)
+            .and_then(|id| tmp_union_index.get_len_from_id(id))
+            .unwrap_or(0);
         seq_index.get_or_insert_id(name, Some(length));
     }
 
@@ -12308,12 +12210,14 @@ fn output_results_paf(
     Ok(())
 }
 
-fn output_results_gfa(
+fn output_results_graph(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
-    name: &str,
+    output_format: &str,
+    reference_names: &[String],
+    range_name: &str,
     merge_distance: i32,
     merge_strands: bool,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
@@ -12341,53 +12245,9 @@ fn output_results_gfa(
     )?;
     write_graph_output_and_render(
         &gfa_output,
-        "gfa",
+        output_format,
         target_output_prefix,
-        "gfa",
-        &[],
-        graph_render,
-        graph_report,
-        bed_graph_dir,
-        name,
-        threads,
-    )
-}
-
-fn output_results_vcf(
-    impg: &impl ImpgIndex,
-    results: &mut Vec<AdjustedInterval>,
-    target_output_prefix: &Option<String>,
-    sequence_index: &UnifiedSequenceIndex,
-    reference_names: &[String],
-    range_name: &str,
-    merge_distance: i32,
-    merge_strands: bool,
-    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-    engine_opts: &EngineOpts,
-    graph_render: &GraphRenderOpts,
-    graph_report: &GraphReportCliOpts,
-    bed_graph_dir: Option<&Path>,
-    threads: usize,
-) -> io::Result<()> {
-    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
-
-    let query_intervals: Vec<Interval<u32>> = results
-        .drain(..)
-        .map(|(query_interval, _, _)| query_interval)
-        .collect();
-
-    let gfa_output = impg::dispatch_gfa_engine(
-        impg,
-        &query_intervals,
-        sequence_index,
-        scoring_params,
-        engine_opts,
-    )?;
-    write_graph_output_and_render(
-        &gfa_output,
-        "vcf",
-        target_output_prefix,
-        "vcf",
+        output_format,
         reference_names,
         graph_render,
         graph_report,
@@ -13293,13 +13153,18 @@ fn print_stats(impg: &impl ImpgIndex) {
     let target_ids: Vec<u32> = impg.target_ids();
 
     // Process trees in parallel, computing stats without keeping them in memory
+    // when the index can load them back. A tree is evicted only when the index
+    // can reload it: `stats` walks every tree twice, and an in-memory tree that
+    // is evicted is gone.
     let results: Vec<(u32, usize)> = target_ids
         .par_iter()
         .map(|&target_id| {
             // Get tree and count, removing it from memory for efficiency
             let count = if let Some(tree) = impg.get_or_load_tree(target_id) {
                 let len = tree.len();
-                impg.remove_cached_tree(target_id);
+                if impg.can_reload_tree(target_id) {
+                    impg.remove_cached_tree(target_id);
+                }
                 len
             } else {
                 0
@@ -13371,7 +13236,9 @@ fn print_stats(impg: &impl ImpgIndex) {
                     .iter()
                     .map(|interval| interval.metadata.query_id())
                     .collect();
-                impg.remove_cached_tree(target_id);
+                if impg.can_reload_tree(target_id) {
+                    impg.remove_cached_tree(target_id);
+                }
                 ids
             } else {
                 Vec::new()
@@ -15700,6 +15567,85 @@ mod tests {
                 assert_eq!(merge_distance, Some(50_000));
             }
             _ => panic!("expected partition command"),
+        }
+    }
+
+    #[test]
+    fn test_partition_cli_rejects_zero_window_size() {
+        // A 0 bp window never advances the window loop, so it must be rejected
+        // at parse time instead of hanging the run.
+        let err = Args::try_parse_from(["impg", "partition", "-w", "0", "-d", "0"])
+            .expect_err("partition -w 0 must be rejected");
+        assert!(
+            err.to_string().contains("at least 1 bp"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_partition_cli_window_size_fractions() {
+        // A fraction of a bp used to be truncated without a message
+        for bad in ["2000.7", "0.5", "1.0001k"] {
+            let err = Args::try_parse_from(["impg", "partition", "-w", bad, "-d", "0"])
+                .expect_err("a fractional window size must be rejected");
+            assert!(err.to_string().contains("whole number"), "{bad}: {err}");
+        }
+        for (ok, bp) in [("1.5k", 1500usize), ("1.1k", 1100), ("2000", 2000), ("2000.0", 2000)] {
+            assert_eq!(parse_window_size(ok), Ok(bp), "{ok}");
+        }
+    }
+
+    #[test]
+    fn test_partition_cli_rejects_window_size_above_i32() {
+        let too_big = (i32::MAX as u64 + 1).to_string();
+        let err = Args::try_parse_from(["impg", "partition", "-w", &too_big, "-d", "0"])
+            .expect_err("partition -w above i32::MAX must be rejected");
+        assert!(
+            err.to_string().contains("exceeds the maximum supported value"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_refine_cli_accepts_approximate_without_transitive() {
+        // The non-transitive path projects tracepoints itself, so
+        // --approximate works without --transitive.
+        let args = Args::try_parse_from([
+            "impg", "refine", "-a", "idx.impg", "-r", "A:1-1000", "-d", "0", "--approximate",
+        ])
+        .unwrap();
+        match args {
+            Args::Refine { refine, .. } => refine
+                .validate()
+                .expect("--approximate without --transitive must be accepted"),
+            _ => panic!("expected refine command"),
+        }
+    }
+
+    #[test]
+    fn test_refine_cli_accepts_approximate_with_transitive() {
+        for transitive_flag in ["--transitive", "--transitive-dfs"] {
+            let args = Args::try_parse_from([
+                "impg",
+                "refine",
+                "-a",
+                "idx.impg",
+                "-r",
+                "A:1-1000",
+                "-d",
+                "0",
+                "--approximate",
+                transitive_flag,
+            ])
+            .unwrap();
+            match args {
+                Args::Refine { refine, .. } => {
+                    refine.validate().unwrap_or_else(|e| {
+                        panic!("--approximate with {transitive_flag} must be accepted: {e}")
+                    });
+                }
+                _ => panic!("expected refine command"),
+            }
         }
     }
 

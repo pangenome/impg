@@ -17,7 +17,6 @@ pub enum ParseErr {
     IoError(IoError),
     InvalidField(ParseIntError),
     InvalidStrand,
-    InvalidCigarFormat,
     UnsupportedCigarOperation,
     InvalidFormat(String),
 }
@@ -29,7 +28,6 @@ impl std::fmt::Display for ParseErr {
             ParseErr::IoError(e) => write!(f, "IO error: {}", e),
             ParseErr::InvalidField(e) => write!(f, "Invalid field: {}", e),
             ParseErr::InvalidStrand => write!(f, "Invalid strand"),
-            ParseErr::InvalidCigarFormat => write!(f, "Invalid CIGAR format"),
             ParseErr::UnsupportedCigarOperation => write!(f, "Unsupported CIGAR operation"),
             ParseErr::InvalidFormat(msg) => write!(f, "{}", msg),
         }
@@ -113,6 +111,67 @@ pub fn read_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
     }
 }
 
+/// Validate the payload of a `cg:Z` tag and return its byte length.
+///
+/// impg re-reads the CIGAR out of the file on every query. Without this check a
+/// malformed CIGAR was only discovered inside a rayon worker, where
+/// `CigarOp::new` panics on an unknown operation and the run dies without
+/// naming the offending file or record.
+fn validate_cigar_tag(cigar: &str) -> Result<usize, String> {
+    let b = cigar.as_bytes();
+    let digit = |c: u8| c.wrapping_sub(b'0') < 10;
+    let op = |c: u8| matches!(c, b'=' | b'X' | b'I' | b'D' | b'M');
+    // Independent per-byte checks, no early exit, so they vectorize
+    let bad = b.iter().fold(false, |acc, &c| acc | !(digit(c) | op(c)));
+    let op_after_op = b.windows(2).fold(false, |acc, w| acc | (!digit(w[0]) & !digit(w[1])));
+    // 9+ digits may not fit the 29 packed bits: check exactly below
+    let long = b
+        .windows(9)
+        .fold(false, |acc, w| acc | w.iter().fold(true, |all, &c| all & digit(c)));
+    let ends_ok = b.first().is_some_and(|&c| digit(c)) && b.last().is_some_and(|&c| op(c));
+    if bad | op_after_op | long | !ends_ok {
+        let reason = describe_cigar_error(b);
+        if !reason.is_empty() {
+            return Err(reason);
+        }
+    }
+    Ok(cigar.len())
+}
+
+/// Reason a CIGAR fails, or an empty string when it is valid.
+fn describe_cigar_error(bytes: &[u8]) -> String {
+    // `CigarOp` packs the length into 29 bits
+    const MAX_OP_LEN: u64 = 1 << 29;
+    if bytes.is_empty() {
+        return "it is empty".to_string();
+    }
+    let mut run_start = 0;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_digit() {
+            continue;
+        }
+        let digits = &bytes[run_start..i];
+        if digits.is_empty() {
+            return format!("operation '{}' has no length", byte as char);
+        }
+        if !matches!(byte, b'=' | b'X' | b'I' | b'D' | b'M') {
+            return format!(
+                "operation '{}' is not one of =XIDM (S/H clips, N and P are unsupported)",
+                byte as char
+            );
+        }
+        let len = digits.iter().fold(0u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d - b'0')));
+        if len >= MAX_OP_LEN {
+            return format!("an operation length reaches {MAX_OP_LEN}, the packed maximum");
+        }
+        run_start = i + 1;
+    }
+    if run_start < bytes.len() {
+        return "it ends with a length and no operation".to_string();
+    }
+    String::new()
+}
+
 /// Parse a single PAF line into an AlignmentRecord
 /// This is PAF-format specific parsing logic
 fn parse_paf_line(
@@ -120,20 +179,27 @@ fn parse_paf_line(
     file_pos: u64,
     seq_index: &mut SequenceIndex,
 ) -> Result<AlignmentRecord, ParseErr> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    if fields.len() < 12 {
-        return Err(ParseErr::NotEnoughFields);
-    }
+    let mut fields = line.split('\t');
+    let query_name = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let query_len_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let query_start_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let query_end_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let strand_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_name = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_len_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_start_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_end_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let f9 = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let f10 = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let f11 = fields.next().ok_or(ParseErr::NotEnoughFields)?;
 
-    let query_name = fields[0].to_string();
-    let query_length = fields[1].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let query_start = fields[2].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let query_end = fields[3].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let target_name = fields[5].to_string();
-    let target_length = fields[6].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let target_start = fields[7].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let target_end = fields[8].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let strand_char = fields[4]
+    let query_length = query_len_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let query_start = query_start_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let query_end = query_end_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let target_length = target_len_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let target_start = target_start_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let target_end = target_end_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let strand_char = strand_str
         .chars()
         .next()
         .ok_or_else(|| ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string()))?;
@@ -144,16 +210,39 @@ fn parse_paf_line(
     };
 
     // Convert names to IDs using the SequenceIndex
-    let query_id = seq_index.get_or_insert_id(&query_name, Some(query_length));
-    let target_id = seq_index.get_or_insert_id(&target_name, Some(target_length));
+    let query_id = seq_index.get_or_insert_id(query_name, Some(query_length));
+    let target_id = seq_index.get_or_insert_id(target_name, Some(target_length));
 
-    let mut cigar_offset: u64 = file_pos;
+    // Byte offset up to the start of optional tags (column 12)
+    let prefix_len: u64 = [
+        query_name,
+        query_len_str,
+        query_start_str,
+        query_end_str,
+        strand_str,
+        target_name,
+        target_len_str,
+        target_start_str,
+        target_end_str,
+        f9,
+        f10,
+        f11,
+    ]
+    .iter()
+    .map(|s| (s.len() + 1) as u64)
+    .sum();
+    let mut cigar_offset: u64 = file_pos + prefix_len;
     let mut cigar_bytes: usize = 0;
 
-    for tag_str in fields.iter() {
-        if tag_str.starts_with("cg:Z:") {
+    for tag_str in fields {
+        if let Some(cigar) = tag_str.strip_prefix("cg:Z:") {
             cigar_offset += 5;
-            cigar_bytes = tag_str.len() - 5;
+            cigar_bytes = validate_cigar_tag(cigar).map_err(|reason| {
+                ParseErr::InvalidFormat(format!(
+                    "invalid cg:Z CIGAR in record {query_name}:{query_start}-{query_end} -> \
+                     {target_name}:{target_start}-{target_end}: {reason}"
+                ))
+            })?;
             break;
         } else {
             cigar_offset += (tag_str.len() + 1) as u64;
@@ -177,18 +266,27 @@ fn parse_paf_line(
 }
 
 pub fn parse_paf<R: BufRead>(
-    reader: R,
+    mut reader: R,
     seq_index: &mut SequenceIndex,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
     let mut bytes_read: u64 = 0;
     let mut records = Vec::new();
-    for line_result in reader.lines() {
-        let line = line_result.map_err(ParseErr::IoError)?;
-        let record = parse_paf_line(&line, bytes_read, seq_index)?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let line_bytes = reader.read_line(&mut line).map_err(ParseErr::IoError)?;
+        if line_bytes == 0 {
+            break; // EOF
+        }
+
+        // `read_line` keeps the terminator. Strip it before parsing, but advance
+        // `bytes_read` by the raw byte count: the stored CIGAR offsets are
+        // absolute file positions, so a CRLF file must not lose one byte per line.
+        let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
+        let record = parse_paf_line(trimmed, bytes_read, seq_index)?;
         records.push(record);
 
-        // Size of line plus newline
-        bytes_read += (line.len() + 1) as u64;
+        bytes_read += line_bytes as u64;
     }
     Ok(records)
 }
@@ -217,11 +315,16 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
             break; // EOF
         }
 
-        // Convert to string for parsing (excluding newline)
+        // Convert to string for parsing (excluding the terminator)
         let line_len = if line_bytes.ends_with(b"\n") {
             line_bytes.len() - 1
         } else {
             line_bytes.len()
+        };
+        let line_len = if line_bytes[..line_len].ends_with(b"\r") {
+            line_len - 1
+        } else {
+            line_len
         };
         let line = std::str::from_utf8(&line_bytes[..line_len])
             .map_err(|_| ParseErr::InvalidFormat("Invalid UTF-8".to_string()))?;
@@ -408,9 +511,99 @@ mod tests {
 
     #[test]
     fn test_parse_paf_cigar_invalid() {
-        // it's got Q in the CIGAR string
-        let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
+        // it's got Q in the CIGAR string (all other fields are valid)
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10Q";
+        let mut seq_index = SequenceIndex::new();
+        let err = parse_paf_line(line, 0, &mut seq_index).unwrap_err().to_string();
+        assert!(err.contains("'Q'") && err.contains("seq1:0-100 -> seq2:0-100"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_paf_bgzf_crlf() {
+        // The BGZF reader kept the `\r`, so the CIGAR ended in `\r` and was rejected
+        let paf = "seq1\t100\t0\t50\t+\tseq2\t100\t0\t50\t50\t50\t60\tcg:Z:50=\r\n";
+        let mut buf = Vec::new();
+        {
+            let mut writer = noodles::bgzf::io::Writer::new(&mut buf);
+            std::io::Write::write_all(&mut writer, paf.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        let mut seq_index = SequenceIndex::new();
+        let reader = noodles::bgzf::io::Reader::new(std::io::Cursor::new(buf));
+        let records = parse_paf_bgzf(reader, &mut seq_index).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data_bytes, 3, "the CIGAR is `50=` without the `\\r`");
+    }
+
+    #[test]
+    fn test_parse_paf_cigar_with_clip_is_rejected() {
+        // impg cannot project soft/hard clips (`CigarOp::new` panics); reject
+        // them at index time instead of inside a query worker.
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10S90=";
+        let mut seq_index = SequenceIndex::new();
+        let err = parse_paf_line(line, 0, &mut seq_index).unwrap_err().to_string();
+        assert!(err.contains("'S'") && err.contains("clips"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_cigar_tag_edges() {
+        for ok in ["10=20X3I4D5M", "536870911=", "0000000001=", "1="] {
+            assert_eq!(validate_cigar_tag(ok), Ok(ok.len()), "{ok}");
+        }
+        for bad in ["", "=", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
+            assert!(validate_cigar_tag(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn test_validate_cigar_tag_fast_path_agrees_with_the_exact_check() {
+        // The fast path only decides when to run `describe_cigar_error`; a
+        // CIGAR it lets through unchecked must be valid. 200,000 random
+        // strings over digits and ops, lengths 0-14, many near the 29-bit limit
+        let alphabet = b"0123456789=XIDMSN";
+        let mut x: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut rejected = 0;
+        for _ in 0..200_000 {
+            let len = (next() % 15) as usize;
+            let s: String = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize] as char)
+                .collect();
+            let exact_ok = describe_cigar_error(s.as_bytes()).is_empty();
+            assert_eq!(validate_cigar_tag(&s).is_ok(), exact_ok, "{s:?}");
+            rejected += usize::from(!exact_ok);
+        }
+        assert!(rejected > 0 && rejected < 200_000, "{rejected} rejected");
+    }
+
+    #[test]
+    fn test_parse_paf_cigar_without_op_is_rejected() {
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:100";
         let mut seq_index = SequenceIndex::new();
         assert!(parse_paf_line(line, 0, &mut seq_index).is_err());
+    }
+
+    #[test]
+    fn test_parse_paf_crlf_offsets_stay_absolute() {
+        // Regression: `BufRead::lines()` strips `\r\n`, so advancing by
+        // `len + 1` drifted every following CIGAR offset by one byte per line
+        // and read the wrong bytes back out of the file.
+        let paf = "seq1\t100\t0\t50\t+\tseq2\t100\t0\t50\t50\t50\t60\tcg:Z:50=\r\n\
+seq1\t100\t50\t100\t+\tseq2\t100\t50\t100\t50\t50\t60\tcg:Z:50=\r\n";
+        let mut seq_index = SequenceIndex::new();
+        let records = parse_paf(std::io::BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
+        assert_eq!(records.len(), 2);
+
+        let second_offset = records[1].data_offset();
+        let expected = paf.match_indices("cg:Z:").nth(1).unwrap().0 + 5;
+        assert_eq!(
+            second_offset, expected as u64,
+            "second CIGAR offset must point at its own `cg:Z:` field"
+        );
     }
 }

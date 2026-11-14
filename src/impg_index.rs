@@ -35,6 +35,10 @@ pub trait ImpgIndex: Send + Sync {
     ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Query with pre-populated CIGAR cache for efficiency.
+    /// Query a range, reusing cached CIGARs. With `approximate_mode` the
+    /// projection interpolates from the segment boundaries instead, and no
+    /// CIGAR or sequence is read.
+    #[allow(clippy::too_many_arguments)]
     fn query_with_cache(
         &self,
         target_id: u32,
@@ -44,6 +48,7 @@ pub trait ImpgIndex: Send + Sync {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Populate CIGAR cache for a region.
@@ -101,6 +106,17 @@ pub trait ImpgIndex: Send + Sync {
 
     /// Remove a cached tree from memory (for memory management).
     fn remove_cached_tree(&self, target_id: u32);
+
+    /// Whether `remove_cached_tree(target_id)` can be undone by loading the
+    /// tree again.
+    ///
+    /// A caller that walks every tree twice (`impg stats` does) may only evict
+    /// a tree it can get back. An index held in memory cannot: it has no file
+    /// to read the tree from.
+    fn can_reload_tree(&self, target_id: u32) -> bool {
+        let _ = target_id;
+        true
+    }
 
     /// Get number of targets with trees.
     fn num_targets(&self) -> usize {
@@ -200,6 +216,7 @@ impl ImpgIndex for ImpgWrapper {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+        approximate_mode: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
             ImpgWrapper::Single(impg) => Ok(impg.query_with_cache(
@@ -210,6 +227,7 @@ impl ImpgIndex for ImpgWrapper {
                 min_gap_compressed_identity,
                 sequence_index,
                 cigar_cache,
+                approximate_mode,
             )),
             ImpgWrapper::Multi(multi) => ImpgIndex::query_with_cache(
                 multi,
@@ -220,6 +238,7 @@ impl ImpgIndex for ImpgWrapper {
                 min_gap_compressed_identity,
                 sequence_index,
                 cigar_cache,
+                approximate_mode,
             ),
         }
     }
@@ -373,6 +392,15 @@ impl ImpgIndex for ImpgWrapper {
         match self {
             ImpgWrapper::Single(impg) => impg.remove_cached_tree(target_id),
             ImpgWrapper::Multi(multi) => multi.remove_cached_tree(target_id),
+        }
+    }
+
+    fn can_reload_tree(&self, target_id: u32) -> bool {
+        // This wrapper must forward every trait method it can answer more
+        // precisely than the default, or the default silently wins here.
+        match self {
+            ImpgWrapper::Single(impg) => ImpgIndex::can_reload_tree(impg, target_id),
+            ImpgWrapper::Multi(multi) => ImpgIndex::can_reload_tree(multi, target_id),
         }
     }
 

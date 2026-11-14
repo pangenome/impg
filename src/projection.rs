@@ -27,13 +27,63 @@ pub struct ProjectionPaths {
     pub gaf_path: Option<PathBuf>,
 }
 
-fn resolve_relative(root: &Path, path: &str) -> PathBuf {
+pub(crate) fn resolve_relative(root: &Path, path: &str) -> PathBuf {
     let p = Path::new(path);
     if p.is_absolute() {
         p.to_path_buf()
     } else {
         root.join(p)
     }
+}
+
+pub(crate) fn read_manifest_json<T: serde::de::DeserializeOwned>(
+    root: &Path,
+    kind_label: &str,
+    header_fields: impl FnOnce(&T) -> (&str, u32),
+) -> io::Result<(T, PathBuf)> {
+    let manifest_path = root.join("manifest.json");
+    let file = fs::File::open(&manifest_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "failed to open projection manifest '{}': {}",
+                manifest_path.display(),
+                e
+            ),
+        )
+    })?;
+    let manifest: T = serde_json::from_reader(file).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to parse {}: '{}': {}",
+                kind_label,
+                manifest_path.display(),
+                e
+            ),
+        )
+    })?;
+    let (format, version) = header_fields(&manifest);
+    if format != PROJECTION_FORMAT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "projection manifest has format '{}', expected '{}'",
+                format, PROJECTION_FORMAT
+            ),
+        ));
+    }
+    if version != PROJECTION_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported projection version {}; expected {}",
+                version, PROJECTION_VERSION
+            ),
+        ));
+    }
+    let parent = manifest_path.parent().unwrap_or(root).to_path_buf();
+    Ok((manifest, parent))
 }
 
 pub fn write_manifest(
@@ -60,51 +110,16 @@ pub fn write_manifest(
 
 pub fn load(path: impl AsRef<Path>) -> io::Result<ProjectionPaths> {
     let root = path.as_ref();
-    let manifest_path = root.join("manifest.json");
-    let file = fs::File::open(&manifest_path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "failed to open projection manifest '{}': {}",
-                manifest_path.display(),
-                e
-            ),
-        )
-    })?;
-    let manifest: ProjectionManifest = serde_json::from_reader(file).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to parse projection manifest '{}': {}",
-                manifest_path.display(),
-                e
-            ),
-        )
-    })?;
-    if manifest.format != PROJECTION_FORMAT {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "projection manifest has format '{}', expected '{}'",
-                manifest.format, PROJECTION_FORMAT
-            ),
-        ));
-    }
-    if manifest.version != PROJECTION_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unsupported projection version {}; expected {}",
-                manifest.version, PROJECTION_VERSION
-            ),
-        ));
-    }
-    let parent = manifest_path.parent().unwrap_or(root);
-    let pack_path = resolve_relative(parent, &manifest.pack);
+    let (manifest, parent) = read_manifest_json::<ProjectionManifest>(
+        root,
+        "projection manifest",
+        |m| (m.format.as_str(), m.version),
+    )?;
+    let pack_path = resolve_relative(&parent, &manifest.pack);
     let gaf_path = manifest
         .gaf
         .as_deref()
-        .map(|gaf| resolve_relative(parent, gaf));
+        .map(|gaf| resolve_relative(&parent, gaf));
     Ok(ProjectionPaths {
         root: root.to_path_buf(),
         syng_prefix: manifest.syng_prefix,

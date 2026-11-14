@@ -141,15 +141,6 @@ fn create_parent_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn resolve_relative(root: &Path, path: &str) -> PathBuf {
-    let p = Path::new(path);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        root.join(p)
-    }
-}
-
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
@@ -164,29 +155,20 @@ fn parse_u64_field(value: &str, field_name: &str, line_no: usize) -> io::Result<
 }
 
 fn parse_p_token(token: &str, line_no: usize) -> io::Result<GafWalkStep> {
-    if let Some(name) = token.strip_suffix('+') {
-        if !name.is_empty() {
-            return Ok(GafWalkStep {
-                segment_name: name.to_string(),
-                orientation: '+',
-            });
-        }
-    }
-    if let Some(name) = token.strip_suffix('-') {
-        if !name.is_empty() {
-            return Ok(GafWalkStep {
-                segment_name: name.to_string(),
-                orientation: '-',
-            });
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "GAF line {} has invalid comma-walk token '{}'",
-            line_no, token
-        ),
-    ))
+    let (segment_name, orientation) =
+        crate::commands::genotype::parse_p_step_token(token, line_no).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "GAF line {} has invalid comma-walk token '{}'",
+                    line_no, token
+                ),
+            )
+        })?;
+    Ok(GafWalkStep {
+        segment_name,
+        orientation,
+    })
 }
 
 fn parse_gaf_walk(path_field: &str, line_no: usize) -> io::Result<Vec<GafWalkStep>> {
@@ -198,53 +180,16 @@ fn parse_gaf_walk(path_field: &str, line_no: usize) -> io::Result<Vec<GafWalkSte
     }
 
     if path_field.starts_with('>') || path_field.starts_with('<') {
-        let mut steps = Vec::new();
-        let mut orientation: Option<char> = None;
-        let mut name = String::new();
-        for ch in path_field.chars() {
-            if ch == '>' || ch == '<' {
-                if let Some(prev) = orientation {
-                    if name.is_empty() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("GAF line {} has an empty graph-walk step", line_no),
-                        ));
-                    }
-                    steps.push(GafWalkStep {
-                        segment_name: std::mem::take(&mut name),
-                        orientation: prev,
-                    });
-                }
-                orientation = Some(if ch == '>' { '+' } else { '-' });
-            } else {
-                if orientation.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("GAF line {} graph walk must start with '>' or '<'", line_no),
-                    ));
-                }
-                name.push(ch);
-            }
-        }
-        if let Some(prev) = orientation {
-            if name.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("GAF line {} has an empty trailing graph-walk step", line_no),
-                ));
-            }
-            steps.push(GafWalkStep {
-                segment_name: name,
-                orientation: prev,
-            });
-        }
-        if steps.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("GAF line {} has an empty graph walk", line_no),
-            ));
-        }
-        return Ok(steps);
+        let parsed = crate::commands::genotype::parse_w_walk(path_field, line_no).map_err(|e| {
+            io::Error::new(e.kind(), format!("GAF line {} invalid walk: {}", line_no, e))
+        })?;
+        return Ok(parsed
+            .into_iter()
+            .map(|(segment_name, orientation)| GafWalkStep {
+                segment_name,
+                orientation,
+            })
+            .collect());
     }
 
     if path_field.contains(',') {
@@ -276,33 +221,58 @@ fn project_gaf_records(
             format!("failed to open GAF '{}': {}", gaf_path.display(), e),
         )
     })?;
+    let mut reader = BufReader::new(file);
+    let mut raw_line = String::new();
+    let mut line_no = 0usize;
     let mut projection = ProjectionCounts::default();
+    let mut field_bounds: Vec<(usize, usize)> = Vec::with_capacity(16);
+    let mut segment_visits: FxHashMap<u32, u64> = FxHashMap::default();
 
-    for (line_idx, line) in BufReader::new(file).lines().enumerate() {
-        let line_no = line_idx + 1;
-        let line = line?;
-        let line = line.trim();
+    loop {
+        raw_line.clear();
+        if reader.read_line(&mut raw_line)? == 0 {
+            break;
+        }
+        line_no += 1;
+        let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 12 {
+        field_bounds.clear();
+        let bytes = line.as_bytes();
+        let mut start = 0usize;
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b == b'\t' {
+                field_bounds.push((start, idx));
+                start = idx + 1;
+            }
+        }
+        field_bounds.push((start, bytes.len()));
+        if field_bounds.len() < 12 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "GAF line {} has {} field(s); expected at least 12",
                     line_no,
-                    fields.len()
+                    field_bounds.len()
                 ),
             ));
         }
 
         projection.total_records += 1;
         let read_ordinal = projection.total_records;
-        let read_name = fields[0];
-        let path_field = fields[5];
-        let path_start = parse_u64_field(fields[7], "path_start", line_no)?;
-        let path_end = parse_u64_field(fields[8], "path_end", line_no)?;
+        let read_name = &line[field_bounds[0].0..field_bounds[0].1];
+        let path_field = &line[field_bounds[5].0..field_bounds[5].1];
+        let path_start = parse_u64_field(
+            &line[field_bounds[7].0..field_bounds[7].1],
+            "path_start",
+            line_no,
+        )?;
+        let path_end = parse_u64_field(
+            &line[field_bounds[8].0..field_bounds[8].1],
+            "path_end",
+            line_no,
+        )?;
         if path_end <= path_start {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -316,7 +286,7 @@ fn project_gaf_records(
         let walk = parse_gaf_walk(path_field, line_no)?;
         let mut cursor = 0u64;
         let mut retained = false;
-        let mut segment_visits: FxHashMap<String, u64> = FxHashMap::default();
+        segment_visits.clear();
         for (step_offset, step) in walk.iter().enumerate() {
             let segment = segment_by_name.get(&step.segment_name).ok_or_else(|| {
                 io::Error::new(
@@ -344,7 +314,7 @@ fn project_gaf_records(
             retained = true;
             projection.contributed_steps += 1;
             *projection.counts.entry(segment.feature_id).or_insert(0) += 1;
-            let visit = segment_visits.entry(step.segment_name.clone()).or_insert(0);
+            let visit = segment_visits.entry(segment.feature_id).or_insert(0);
             *visit += 1;
             let explanation = if *visit == 1 {
                 "first visit to segment in read; counted".to_string()
@@ -451,45 +421,11 @@ fn write_manifest(path: &Path, manifest: &GfaProjectionManifest) -> io::Result<(
 
 pub fn load_gfa_projection_bundle(path: impl AsRef<Path>) -> io::Result<GfaProjectionPaths> {
     let root = path.as_ref();
-    let manifest_path = root.join("manifest.json");
-    let file = File::open(&manifest_path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "failed to open projection manifest '{}': {}",
-                manifest_path.display(),
-                e
-            ),
-        )
-    })?;
-    let manifest: GfaProjectionManifest = serde_json::from_reader(file).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to parse GFA projection manifest '{}': {}",
-                manifest_path.display(),
-                e
-            ),
-        )
-    })?;
-    if manifest.format != PROJECTION_FORMAT {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "projection manifest has format '{}', expected '{}'",
-                manifest.format, PROJECTION_FORMAT
-            ),
-        ));
-    }
-    if manifest.version != PROJECTION_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unsupported projection version {}; expected {}",
-                manifest.version, PROJECTION_VERSION
-            ),
-        ));
-    }
+    let (manifest, parent) = super::read_manifest_json::<GfaProjectionManifest>(
+        root,
+        "GFA projection manifest",
+        |m| (m.format.as_str(), m.version),
+    )?;
     if manifest.projection_method != GFA_PROJECTION_METHOD {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -512,16 +448,15 @@ pub fn load_gfa_projection_bundle(path: impl AsRef<Path>) -> io::Result<GfaProje
         ));
     }
 
-    let parent = manifest_path.parent().unwrap_or(root);
     Ok(GfaProjectionPaths {
         root: root.to_path_buf(),
-        graph_path: resolve_relative(parent, &manifest.graph),
-        gaf_path: resolve_relative(parent, &manifest.gaf),
-        pack_path: resolve_relative(parent, &manifest.pack),
+        graph_path: super::resolve_relative(&parent, &manifest.graph),
+        gaf_path: super::resolve_relative(&parent, &manifest.gaf),
+        pack_path: super::resolve_relative(&parent, &manifest.pack),
         read_contributions_path: manifest
             .read_contributions
             .as_deref()
-            .map(|p| resolve_relative(parent, p)),
+            .map(|p| super::resolve_relative(&parent, p)),
         feature_space: manifest.feature_space,
         graph_id: manifest.graph_id,
         feature_id_mode: manifest.feature_id_mode,

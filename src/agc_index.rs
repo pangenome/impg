@@ -381,6 +381,7 @@ impl AgcIndex {
     }
 
     pub fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
+        let requested = checked_range_len(seq_name, start, end)?;
         let (sample, contig, agc_idx) = self.parse_query(seq_name);
 
         let agc_idx = agc_idx.ok_or_else(|| {
@@ -403,6 +404,8 @@ impl AgcIndex {
                 "Failed to fetch sequence '{contig}@{sample}:{start}-{end}': {e}"
             ))
         })?;
+
+        check_fetched_length(seq_name, requested, sequence.len(), start, end)?;
 
         Ok(numeric_to_ascii(&sequence))
     }
@@ -429,6 +432,35 @@ impl AgcIndex {
     }
 }
 
+/// Validate an AGC range and return the number of bases it asks for.
+fn checked_range_len(seq_name: &str, start: i32, end: i32) -> io::Result<usize> {
+    crate::sequence_index::checked_range_len(seq_name, start, end, "the AGC archive")
+}
+
+/// AGC returns a short sequence when the requested range runs past the end of
+/// the contig, and an archive appended with agc older than 3.2.2 returns wrong
+/// ranges for the appended samples. Either way a short fetch shifts every
+/// downstream coordinate, so it is an error, not a shorter answer.
+fn check_fetched_length(
+    seq_name: &str,
+    requested: usize,
+    fetched: usize,
+    start: i32,
+    end: i32,
+) -> io::Result<()> {
+    if fetched == requested {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "AGC returned {fetched} bases for '{seq_name}:{start}-{end}', but {requested} were requested. \
+             The range goes past the end of the contig, or the archive was appended with agc older than 3.2.2, \
+             which returns wrong ranges for appended samples. Rebuild the archive with agc >= 3.2.2."
+        ),
+    ))
+}
+
 /// AGC numeric bases (0-3) to ASCII ACGT; any other code becomes N.
 pub fn numeric_to_ascii(seq: &[u8]) -> Vec<u8> {
     seq.iter()
@@ -445,6 +477,39 @@ pub fn numeric_to_ascii(seq: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetched_range_must_have_the_requested_length() {
+        // An exact fetch is fine.
+        assert!(check_fetched_length("chr1@ref", 100, 100, 0, 100).is_ok());
+
+        // A short fetch shifts every downstream coordinate, so it is an error
+        // that names the sequence, the range and both lengths.
+        let err = check_fetched_length("chr1@ref", 100, 40, 0, 100).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("chr1@ref:0-100"), "{msg}");
+        assert!(msg.contains("40 bases"), "{msg}");
+        assert!(msg.contains("100 were requested"), "{msg}");
+        assert!(msg.contains("3.2.2"), "{msg}");
+
+        // A long fetch is equally wrong.
+        assert!(check_fetched_length("chr1@ref", 100, 101, 0, 100).is_err());
+    }
+
+    #[test]
+    fn agc_range_length_rejects_reversed_and_negative_ranges() {
+        assert_eq!(checked_range_len("chr1@ref", 10, 20).unwrap(), 10);
+        assert_eq!(checked_range_len("chr1@ref", 7, 7).unwrap(), 0);
+
+        for (start, end) in [(-1, 10), (20, 10), (0, -5)] {
+            let err = checked_range_len("chr1@ref", start, end)
+                .expect_err("invalid range must be rejected");
+            assert!(
+                err.to_string().contains("invalid range"),
+                "unexpected error: {err}"
+            );
+        }
+    }
 
     /// THE MEMORY BOUND IS THE POOL SIZE (the 711 GB regression's own
     /// guard): the ambient thread count may never inflate the pool, an

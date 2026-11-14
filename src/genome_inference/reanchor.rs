@@ -216,37 +216,13 @@ fn load_territory(
 ) -> io::Result<Territory> {
     // The component's axis rows (its own member rows) ranked by
     // (start, end, partition) are the window ids in order.
-    let mut axis_rows: Vec<(u32, u64, u64)> = Vec::new();
-    for entry in fs::read_dir(partition_graphs)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".gfa.map.json") {
-            continue;
-        }
-        #[derive(Deserialize)]
-        struct MemberRow {
-            path_name: String,
-            start: u64,
-            end: u64,
-        }
-        #[derive(Deserialize)]
-        struct PartitionMap {
-            partition: u32,
-            members: Vec<MemberRow>,
-        }
-        let text = fs::read_to_string(&path)?;
-        let map: PartitionMap = serde_json::from_str(&text).map_err(io::Error::other)?;
-        for member in map.members.iter().filter(|m| m.path_name == component) {
-            axis_rows.push((map.partition, member.start, member.end));
-        }
-    }
+    let axis_rows = super::load_component_axis_rows(partition_graphs, component)?;
     if axis_rows.is_empty() {
         return Err(invalid(format!(
             "component {component:?} has no axis rows in {}",
             partition_graphs.display()
         )));
     }
-    axis_rows.sort_by_key(|&(partition, start, end)| (start, end, partition));
     let window_partition: Vec<u32> = axis_rows.iter().map(|&(partition, _, _)| partition).collect();
     let n_windows = window_partition.len();
 
@@ -635,8 +611,7 @@ pub fn run(options: &Options) -> io::Result<()> {
     // per-record transform rides rayon in bounded batches, emitted in
     // input order; the counters merge per batch.
     let t = Instant::now();
-    let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
-        .map_err(io::Error::other)?;
+    let mut reader = crate::fasta::open_reader_with_capacity(&options.census, 4 << 20)?;
     let out_name = options.out.display().to_string();
     let out_file = File::create(&options.out)?;
     let out_buf = BufWriter::with_capacity(4 << 20, out_file);
@@ -651,7 +626,6 @@ pub fn run(options: &Options) -> io::Result<()> {
         Box::new(out_buf)
     };
     let mut counters = Counters::default();
-    let mut reader = BufReader::with_capacity(4 << 20, reader);
     let mut process_seconds = 0f64;
     let mut emit_seconds = 0f64;
     const BATCH: usize = 256;

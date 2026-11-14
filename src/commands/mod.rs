@@ -10,8 +10,53 @@ pub mod render;
 pub mod similarity;
 pub mod syng2gfa;
 
-use std::io::{self, BufRead};
+use std::fs::File;
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::path::Path;
+
+/// Create missing parent directories for `path` if non-empty.
+pub fn ensure_parent_dir(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read all UTF-8 text from `input`, or stdin when `input == "-"`.
+pub fn read_text_from_path_or_stdin(input: &str) -> io::Result<String> {
+    let mut text = String::new();
+    if input == "-" {
+        io::stdin().read_to_string(&mut text)?;
+    } else {
+        File::open(input)?.read_to_string(&mut text)?;
+    }
+    Ok(text)
+}
+
+/// Write UTF-8 `text` to `output`, or stdout when `output == "-"`.
+pub fn write_text_to_path_or_stdout(
+    output: &str,
+    text: &str,
+    create_parent: bool,
+) -> io::Result<()> {
+    if output == "-" {
+        let stdout = io::stdout();
+        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+        out.write_all(text.as_bytes())?;
+        out.flush()?;
+    } else {
+        let output_path = Path::new(output);
+        if create_parent {
+            ensure_parent_dir(output_path)?;
+        }
+        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
+        out.write_all(text.as_bytes())?;
+        out.flush()?;
+    }
+    Ok(())
+}
 
 /// Floor for the haplotype-derived FastGA seed frequency, as the sweepga
 /// help states. FastGA drops seeds with frequency >= -f, so -f equal to

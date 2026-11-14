@@ -589,9 +589,43 @@ fn test_multiple_alignments_stay_separate() {
     );
 }
 
-/// Test 8: Verify partition doesn't merge distant windows
+/// Read `partitions.bed` from the work directory as (name, start, end, partition).
+fn read_partitions_bed(work_dir: &PathBuf) -> Vec<(String, i32, i32, String)> {
+    let bed_path = work_dir.join("partitions.bed");
+    let content = std::fs::read_to_string(&bed_path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {}: {e}. Files in work dir: {:?}",
+            bed_path.display(),
+            std::fs::read_dir(work_dir)
+                .map(|d| d
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        )
+    });
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            assert_eq!(f.len(), 4, "partitions.bed row is not name/start/end/partition: {l}");
+            (
+                f[0].to_string(),
+                f[1].parse().unwrap(),
+                f[2].parse().unwrap(),
+                f[3].to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Test 8: Verify partition splits a long sequence into separate windows
 ///
-/// Create alignments that could potentially cause window merging, verify they stay separate
+/// Sequence A (10,000 bp) has two aligned regions: 0-1,000 against B and
+/// 5,000-6,000 against C. With `-w 2000` and no merging (`-d 0`), the windows
+/// of A must not collapse into a single partition, and every base of A must be
+/// assigned to exactly one partition.
 #[test]
 fn test_partition_window_separation() {
     let temp_dir = TempDir::new().unwrap();
@@ -603,43 +637,103 @@ fn test_partition_window_separation() {
         "A\t10000\t5000\t6000\t+\tC\t5000\t0\t1000\t1000\t1000\t60\tcg:Z:1000=",
     ];
     create_paf_file(&work_dir, "test.paf", &alignments);
+    std::fs::write(work_dir.join("start.txt"), "A\n").unwrap();
 
     let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    // Run partition with a window that should create separate partitions
+    // Window of 2,000 bp over a 10,000 bp sequence, no merging of gathered ranges
     let output = run_impg(
         &work_dir,
         &[
             "partition",
-            "-d",
-            "100000",
             "-a",
             "test.paf",
             "-i",
             "test.impg",
             "-w",
-            "2000", // Window size
+            "2000",
+            "-d",
+            "0",
+            "--starting-sequences-file",
+            "start.txt",
             "-o",
             "bed",
-            "--reference-fai",
-            "A\t10000",
         ],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "partition failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    // Note: This test may need adjustment based on partition output format
-    // The key assertion is that windows don't get incorrectly merged
-    if let Ok(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Count distinct windows - should have multiple, not one giant merged window
-            let lines: Vec<_> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    let rows = read_partitions_bed(&work_dir);
+    assert!(!rows.is_empty(), "partitions.bed is empty");
+
+    let a_rows: Vec<_> = rows.iter().filter(|r| r.0 == "A").collect();
+    assert!(!a_rows.is_empty(), "sequence A is not assigned to any partition");
+
+    // A must not be one single partition: the windows stay separate
+    let distinct: HashSet<&String> = a_rows.iter().map(|r| &r.3).collect();
+    assert!(
+        distinct.len() >= 2,
+        "sequence A of 10,000 bp with -w 2000 should span multiple partitions, got {} ({:?})",
+        distinct.len(),
+        a_rows.iter().map(|r| (r.1, r.2, &r.3)).collect::<Vec<_>>()
+    );
+
+    // Every base of A is owned exactly once
+    let mut covered = vec![0u32; 10_000];
+    for (_, start, end, _) in &a_rows {
+        for pos in *start..*end {
             assert!(
-                lines.len() >= 2,
-                "Partition should create multiple windows, not merge everything"
+                (0..10_000).contains(&pos),
+                "partition row for A is outside the sequence: {start}-{end}"
             );
+            covered[pos as usize] += 1;
         }
     }
+    let uncovered = covered.iter().filter(|c| **c == 0).count();
+    let double = covered.iter().filter(|c| **c > 1).count();
+    assert_eq!(uncovered, 0, "{uncovered} bases of A are in no partition");
+    assert_eq!(double, 0, "{double} bases of A are in more than one partition");
+}
+
+/// Window ends near i32::MAX must not wrap
+///
+/// A is 2,000,000,000 bp and -w is 1,500,000,000: `pos + window` reaches
+/// 3,000,000,000 on the second window. It used to wrap and cut A into windows
+/// of 205,032,704 bp. The tail is shorter than -w, so it joins the first window.
+#[test]
+fn test_partition_window_end_does_not_wrap() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path().to_path_buf();
+    create_paf_file(
+        &work_dir,
+        "big.paf",
+        &["A\t2000000000\t0\t1000\t+\tB\t5000\t0\t1000\t1000\t1000\t60\tcg:Z:1000="],
+    );
+    let output = run_impg(&work_dir, &["index", "-a", "big.paf", "-i", "big.impg"]).unwrap();
+    assert!(output.status.success(), "index failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let output = run_impg(
+        &work_dir,
+        &["partition", "-a", "big.paf", "-i", "big.impg", "-w", "1500000000", "-d", "0", "-o", "bed"],
+    )
+    .unwrap();
+    assert!(output.status.success(), "partition failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let a_rows: Vec<(i32, i32)> = read_partitions_bed(&work_dir)
+        .into_iter()
+        .filter(|r| r.0 == "A")
+        .map(|r| (r.1, r.2))
+        .collect();
+    assert_eq!(a_rows, vec![(0, 2_000_000_000)], "windows of A wrapped");
 }
 
 /// Test 9: Empty/no-result queries handled correctly

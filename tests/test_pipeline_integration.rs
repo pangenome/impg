@@ -179,7 +179,7 @@ fn test_full_pipeline() -> std::io::Result<()> {
                 &work_dir,
                 &[
                     "graph",
-                    "--fasta-files",
+                    "--sequence-files",
                     &format!("partitions/{}.fasta", stem),
                     "-g",
                     &format!("gfas/{}", gfa_name),

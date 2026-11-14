@@ -140,7 +140,7 @@ impl OneAlnParser {
                     alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
                 }
                 'X' => trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default(),
-                'A' | 'a' | 'g' | '^' | '\0' => break,
+                'A' | 'a' | 'g' | 'S' | '^' | '\0' => break,
                 _ => {}
             }
         }
@@ -652,11 +652,14 @@ impl OneAlnParser {
 
         if strand == Strand::Reverse {
             // Reverse complement: flip coordinates within contig
-            let contig_len = target_contig_len as usize;
-            let orig_start = target_contig_start;
-            let orig_end = target_contig_end;
-            target_contig_start = contig_len - orig_end;
-            target_contig_end = contig_len - orig_start;
+            let (flipped_start, flipped_end) = flip_reverse_target_coords(
+                target_contig_len,
+                target_contig_start,
+                target_contig_end,
+                target_contig_id,
+            )?;
+            target_contig_start = flipped_start;
+            target_contig_end = flipped_end;
         }
 
         let query_scaffold_start = usize::try_from(query_contig_offset + query_contig_start as i64)
@@ -890,5 +893,45 @@ impl OneAlnAlignment {
             ParseErr::InvalidFormat(format!("Target scaffold end outside i32 range: {}", end))
         })?;
         Ok((start_i32, end_i32))
+    }
+}
+
+fn flip_reverse_target_coords(
+    target_contig_len: i64,
+    orig_start: usize,
+    orig_end: usize,
+    target_contig_id: i64,
+) -> Result<(usize, usize), ParseErr> {
+    let contig_len = usize::try_from(target_contig_len).map_err(|_| {
+        ParseErr::InvalidFormat(format!(
+            "Negative target contig length {} for contig {}",
+            target_contig_len, target_contig_id
+        ))
+    })?;
+    let flipped_start = contig_len.checked_sub(orig_end).ok_or_else(|| {
+        ParseErr::InvalidFormat(format!(
+            "Reverse-strand target end {} exceeds contig {} length {}",
+            orig_end, target_contig_id, contig_len
+        ))
+    })?;
+    let flipped_end = contig_len.checked_sub(orig_start).ok_or_else(|| {
+        ParseErr::InvalidFormat(format!(
+            "Reverse-strand target start {} exceeds contig {} length {}",
+            orig_start, target_contig_id, contig_len
+        ))
+    })?;
+    Ok((flipped_start, flipped_end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_flip_reverse_target_coords_bounds() {
+        assert_eq!(flip_reverse_target_coords(100, 10, 40, 1).unwrap(), (60, 90));
+        assert!(flip_reverse_target_coords(-1, 10, 40, 1).is_err());
+        assert!(flip_reverse_target_coords(30, 10, 40, 1).is_err());
+        assert!(flip_reverse_target_coords(30, 35, 30, 1).is_err());
     }
 }

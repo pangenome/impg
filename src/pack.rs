@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 
 pub const BINARY_MAGIC: &[u8; 8] = b"IMPGPKB1";
 pub const BINARY_VERSION: u32 = 1;
@@ -62,7 +62,7 @@ fn read_u64_le<R: Read>(input: &mut R) -> io::Result<u64> {
 
 pub fn write_tsv<W: Write>(out: &mut W, counts: FxHashMap<u32, u64>) -> io::Result<usize> {
     writeln!(out, "#node_id\tcount")?;
-    let mut rows: Vec<(u32, u64)> = counts.into_iter().collect();
+    let mut rows: Vec<(u32, u64)> = counts.into_iter().filter(|&(_, c)| c > 0).collect();
     rows.sort_unstable_by_key(|&(node_id, _)| node_id);
     for (node_id, count) in &rows {
         writeln!(out, "{node_id}\t{count}")?;
@@ -105,6 +105,7 @@ pub fn write_binary<W: Write>(
 
     let mut dense = vec![0u8; universe_nodes];
     let mut overflow = Vec::new();
+    let mut nonzero_nodes = 0u64;
     for (&node_id, &count) in counts {
         if node_id == 0 || node_id as usize > universe_nodes {
             return Err(io::Error::new(
@@ -112,6 +113,10 @@ pub fn write_binary<W: Write>(
                 format!("pack count node {node_id} is outside 1..={universe_nodes}"),
             ));
         }
+        if count == 0 {
+            continue;
+        }
+        nonzero_nodes += 1;
         dense[(node_id - 1) as usize] = count.min(255) as u8;
         if count > 255 {
             overflow.push((node_id, count));
@@ -152,7 +157,7 @@ pub fn write_binary<W: Write>(
     write_u32_le(out, BINARY_VERSION)?;
     write_u32_le(out, BINARY_HEADER_LEN)?;
     write_u64_le(out, universe_nodes as u64)?;
-    write_u64_le(out, counts.len() as u64)?;
+    write_u64_le(out, nonzero_nodes)?;
     write_u64_le(out, stats.retained_records)?;
     write_u64_le(out, stats.syncmer_anchors)?;
     write_u32_le(out, block_size as u32)?;
@@ -174,7 +179,7 @@ pub fn write_binary<W: Write>(
         out.write_all(&block)?;
     }
 
-    Ok(counts.len())
+    Ok(nonzero_nodes as usize)
 }
 
 pub fn read(path: &str) -> io::Result<Coverage> {
@@ -260,13 +265,20 @@ fn read_binary(mut file: File) -> io::Result<Coverage> {
         ));
     }
     let universe_nodes = read_u64_le(&mut file)?;
+    if universe_nodes > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "packbin universe_nodes exceeds u32::MAX",
+        ));
+    }
+    let universe_usize = universe_nodes as usize;
     let nonzero_nodes = read_u64_le(&mut file)?;
     let retained_records = read_u64_le(&mut file)?;
     let syncmer_anchors = read_u64_le(&mut file)?;
     let block_size = read_u32_le(&mut file)? as usize;
     let _zstd_level = read_i32_le(&mut file)?;
-    let block_count = read_u64_le(&mut file)? as usize;
-    let overflow_count = read_u64_le(&mut file)? as usize;
+    let block_count_u64 = read_u64_le(&mut file)?;
+    let overflow_count_u64 = read_u64_le(&mut file)?;
     let block_index_offset = read_u64_le(&mut file)?;
     let overflow_offset = read_u64_le(&mut file)?;
     let data_offset = read_u64_le(&mut file)?;
@@ -277,6 +289,49 @@ fn read_binary(mut file: File) -> io::Result<Coverage> {
             "packbin block size is zero",
         ));
     }
+    let expected_blocks = if universe_usize == 0 {
+        0
+    } else {
+        universe_usize.div_ceil(block_size)
+    };
+    let block_count = usize::try_from(block_count_u64)
+        .ok()
+        .filter(|&c| c == expected_blocks)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "packbin block count {} does not match expected {}",
+                    block_count_u64, expected_blocks
+                ),
+            )
+        })?;
+    let overflow_count = usize::try_from(overflow_count_u64)
+        .ok()
+        .filter(|&c| (c as u64) <= universe_nodes)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packbin overflow count exceeds universe_nodes",
+            )
+        })?;
+
+    let block_index_end = (block_count as u64)
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(8))
+        .and_then(|bytes| block_index_offset.checked_add(bytes))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin index overflow"))?;
+    let overflow_end = (overflow_count as u64)
+        .checked_mul(12)
+        .and_then(|bytes| overflow_offset.checked_add(bytes))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin overflow table overflow"))?;
+    let file_len = file.metadata()?.len();
+    if block_index_end > file_len || overflow_end > file_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "packbin table extends past end of file",
+        ));
+    }
 
     file.seek(SeekFrom::Start(block_index_offset))?;
     let mut block_offsets = Vec::with_capacity(block_count + 1);
@@ -285,14 +340,28 @@ fn read_binary(mut file: File) -> io::Result<Coverage> {
     }
 
     file.seek(SeekFrom::Start(overflow_offset))?;
-    let mut overflow = FxHashMap::default();
+    let mut overflow = Vec::with_capacity(overflow_count);
     for _ in 0..overflow_count {
         let node_id = read_u32_le(&mut file)?;
         let count = read_u64_le(&mut file)?;
-        overflow.insert(node_id, count);
+        if node_id == 0 || u64::from(node_id) > universe_nodes || count <= 255 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid packbin overflow entry (node_id={node_id}, count={count}, universe={universe_nodes})"
+                ),
+            ));
+        }
+        overflow.push((node_id, count));
     }
 
-    let mut counts = FxHashMap::default();
+    let initial_cap = usize::try_from(nonzero_nodes)
+        .unwrap_or(usize::MAX)
+        .min(universe_usize)
+        .min(1 << 20);
+    let mut counts = FxHashMap::with_capacity_and_hasher(initial_cap, Default::default());
+    let mut compressed_buf = Vec::new();
+    let mut decompressed_buf = Vec::new();
     for block_idx in 0..block_count {
         let start = block_offsets[block_idx];
         let end = block_offsets[block_idx + 1];
@@ -302,29 +371,54 @@ fn read_binary(mut file: File) -> io::Result<Coverage> {
                 "packbin block offsets are not monotonic",
             ));
         }
-        let compressed_len = (end - start) as usize;
-        file.seek(SeekFrom::Start(data_offset + start))?;
-        let mut compressed = vec![0u8; compressed_len];
-        file.read_exact(&mut compressed)?;
-        let remaining = (universe_nodes as usize).saturating_sub(block_idx * block_size);
+        let compressed_len = usize::try_from(end - start)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "packbin block too large"))?;
+        let seek_pos = data_offset
+            .checked_add(start)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin offset overflow"))?;
+        if seek_pos
+            .checked_add(compressed_len as u64)
+            .is_none_or(|block_end| block_end > file_len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packbin block extends past end of file",
+            ));
+        }
+        file.seek(SeekFrom::Start(seek_pos))?;
+        compressed_buf.resize(compressed_len, 0);
+        file.read_exact(&mut compressed_buf)?;
+        let base_idx = block_idx
+            .checked_mul(block_size)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin block overflow"))?;
+        let remaining = universe_usize.saturating_sub(base_idx);
         let expected_len = remaining.min(block_size);
-        let block = zstd::bulk::decompress(&compressed, expected_len)?;
-        if block.len() != expected_len {
+        decompressed_buf.resize(expected_len, 0);
+        let decompressed_len =
+            zstd::bulk::decompress_to_buffer(&compressed_buf, &mut decompressed_buf)?;
+        if decompressed_len != expected_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "packbin block decompressed to unexpected length",
             ));
         }
-        for (offset, &count) in block.iter().enumerate() {
+        for (offset, &count) in decompressed_buf[..expected_len].iter().enumerate() {
             if count == 0 {
                 continue;
             }
-            let node_id = (block_idx * block_size + offset + 1) as u32;
+            let node_id = (base_idx + offset + 1) as u32;
             counts.insert(node_id, u64::from(count));
         }
     }
     for (node_id, count) in overflow {
-        counts.insert(node_id, count);
+        if counts.insert(node_id, count) != Some(255) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "packbin overflow node {node_id} is duplicate or lacks saturated count 255"
+                ),
+            ));
+        }
     }
 
     Ok(Coverage {
@@ -337,8 +431,102 @@ fn read_binary(mut file: File) -> io::Result<Coverage> {
 }
 
 fn auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
-    Ok(Box::new(BufReader::new(reader)))
+    Ok(Box::new(crate::fasta::open_reader(std::path::Path::new(
+        path,
+    ))?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_pack_round_trip_handles_overflow_boundary_and_zero_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.pack");
+        let mut counts = FxHashMap::default();
+        counts.insert(1, 0);
+        counts.insert(2, 255);
+        counts.insert(3, 256);
+        counts.insert(7, u64::MAX);
+
+        let written = {
+            let mut f = File::create(&path).unwrap();
+            write_binary(
+                &mut f,
+                &counts,
+                WriteStats {
+                    retained_records: 12,
+                    syncmer_anchors: 34,
+                },
+                8,
+                3,
+                3,
+            )
+            .unwrap()
+        };
+        assert_eq!(written, 3);
+
+        let loaded = read(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.nonzero_nodes, 3);
+        assert_eq!(loaded.universe_nodes, Some(8));
+        assert_eq!(loaded.retained_records, Some(12));
+        assert_eq!(loaded.syncmer_anchors, Some(34));
+        assert_eq!(loaded.counts.len(), 3);
+        assert_eq!(loaded.counts.get(&1), None);
+        assert_eq!(loaded.counts.get(&2), Some(&255));
+        assert_eq!(loaded.counts.get(&3), Some(&256));
+        assert_eq!(loaded.counts.get(&7), Some(&u64::MAX));
+    }
+
+    #[test]
+    fn binary_pack_rejects_corrupt_overflow_and_block_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.pack");
+        let mut counts = FxHashMap::default();
+        counts.insert(1, 300);
+        {
+            let mut f = File::create(&path).unwrap();
+            write_binary(
+                &mut f,
+                &counts,
+                WriteStats {
+                    retained_records: 1,
+                    syncmer_anchors: 1,
+                },
+                4,
+                3,
+                4,
+            )
+            .unwrap();
+        }
+        // 1. Corrupt overflow entry's count (offset 116) to 100 (<= 255).
+        let orig = std::fs::read(&path).unwrap();
+        let mut bytes = orig.clone();
+        bytes[116..124].copy_from_slice(&100u64.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read(path.to_str().unwrap()).is_err());
+
+        // 2. Corrupt overflow entry's node_id (offset 112) to 2 (dense count 0 != 255).
+        let mut bytes = orig.clone();
+        bytes[112..116].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read(path.to_str().unwrap()).is_err());
+
+        // 3. Corrupt overflow_count (offset 64) to 99 (> universe_nodes).
+        let mut bytes = orig.clone();
+        bytes[64..72].copy_from_slice(&99u64.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read(path.to_str().unwrap()).is_err());
+
+        // 4. Corrupt block_count (offset 56) to 99 (!= expected_blocks).
+        let mut bytes = orig.clone();
+        bytes[56..64].copy_from_slice(&99u64.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read(path.to_str().unwrap()).is_err());
+
+        // 5. Truncate before end of overflow table to verify file-bounds guard.
+        std::fs::write(&path, &orig[..118]).unwrap();
+        assert!(read(path.to_str().unwrap()).is_err());
+    }
 }

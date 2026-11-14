@@ -173,25 +173,96 @@ fn syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     }
 }
 
-fn syng_sidecar_candidates(prefix: &str, suffix: &str) -> Vec<String> {
+pub(crate) fn existing_syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     let primary = syng_sidecar_path(prefix, suffix);
-    let legacy = format!("{prefix}.syng.{suffix}");
-    if legacy == primary {
-        vec![primary]
-    } else {
-        vec![primary, legacy]
+    if Path::new(&primary).exists() {
+        return primary;
+    }
+    if prefix.ends_with(".syng") {
+        let legacy = format!("{prefix}.syng.{suffix}");
+        if Path::new(&legacy).exists() {
+            return legacy;
+        }
+    }
+    primary
+}
+
+struct OneFileSession {
+    schema: *mut std::os::raw::c_void,
+    of: *mut std::os::raw::c_void,
+}
+
+impl OneFileSession {
+    fn open(path: &str, file_type: &str, write: bool) -> io::Result<Self> {
+        let schema_text = syng_ffi::syng_schema_text();
+        let cpath = CString::new(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let ctype =
+            CString::new(file_type).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        unsafe {
+            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
+            if schema.is_null() {
+                return Err(io::Error::other(format!(
+                    "Failed to create ONEcode schema for {}",
+                    file_type
+                )));
+            }
+            let of = if write {
+                syng_ffi::oneFileOpenWriteNew(cpath.as_ptr(), schema, ctype.as_ptr(), true, 1)
+            } else {
+                syng_ffi::oneFileOpenRead(cpath.as_ptr(), schema, ctype.as_ptr(), 1)
+            };
+            if of.is_null() {
+                syng_ffi::oneSchemaDestroy(schema);
+                let action = if write { "writing" } else { "reading" };
+                return Err(io::Error::other(format!(
+                    "Failed to open {} for {}",
+                    path, action
+                )));
+            }
+            Ok(Self { schema, of })
+        }
+    }
+
+    fn open_read(path: &str, file_type: &str) -> io::Result<Self> {
+        Self::open(path, file_type, false)
+    }
+
+    fn open_write(path: &str, file_type: &str) -> io::Result<Self> {
+        Self::open(path, file_type, true)
     }
 }
 
-fn existing_syng_sidecar_path(prefix: &str, suffix: &str) -> String {
-    syng_sidecar_candidates(prefix, suffix)
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-        .unwrap_or_else(|| syng_sidecar_path(prefix, suffix))
+impl Drop for OneFileSession {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.of.is_null() {
+                syng_ffi::oneFileClose(self.of);
+            }
+            if !self.schema.is_null() {
+                syng_ffi::oneSchemaDestroy(self.schema);
+            }
+        }
+    }
+}
+
+/// RAII guard for C-allocated `SyngBWTpath` traversal cursors.
+struct SyngBwtPathGuard(*mut syng_ffi::SyngBWTpath);
+
+impl SyngBwtPathGuard {
+    fn as_mut_ptr(&mut self) -> *mut syng_ffi::SyngBWTpath {
+        self.0
+    }
+}
+
+impl Drop for SyngBwtPathGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { syng_ffi::syngBWTpathDestroy(self.0) };
+        }
+    }
 }
 
 fn read_kmer_hash_from_prefix(prefix: &str) -> io::Result<*mut syng_ffi::KmerHash> {
-    let schema_text = syng_ffi::syng_schema_text();
     let khash_path = format!("{}.1khash", prefix);
     if !Path::new(&khash_path).exists() {
         return Err(io::Error::new(
@@ -199,32 +270,12 @@ fn read_kmer_hash_from_prefix(prefix: &str) -> io::Result<*mut syng_ffi::KmerHas
             format!("KmerHash file not found: {}", khash_path),
         ));
     }
-    let khash_cpath = CString::new(khash_path.as_str())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let khash_type = CString::new("khash").unwrap();
-    unsafe {
-        let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
-        if schema.is_null() {
-            return Err(io::Error::other(
-                "Failed to create ONEcode schema for khash read",
-            ));
-        }
-        let of = syng_ffi::oneFileOpenRead(khash_cpath.as_ptr(), schema, khash_type.as_ptr(), 1);
-        if of.is_null() {
-            syng_ffi::oneSchemaDestroy(schema);
-            return Err(io::Error::other(format!(
-                "Failed to open {} for reading",
-                khash_path
-            )));
-        }
-        let kh = syng_ffi::kmerHashReadOneFile(of);
-        syng_ffi::oneFileClose(of);
-        syng_ffi::oneSchemaDestroy(schema);
-        if kh.is_null() {
-            return Err(io::Error::other("kmerHashReadOneFile returned null"));
-        }
-        Ok(kh)
+    let session = OneFileSession::open_read(&khash_path, "khash")?;
+    let kh = unsafe { syng_ffi::kmerHashReadOneFile(session.of) };
+    if kh.is_null() {
+        return Err(io::Error::other("kmerHashReadOneFile returned null"));
     }
+    Ok(kh)
 }
 
 pub(crate) fn encode_query_base(base: u8) -> (u8, bool) {
@@ -741,7 +792,10 @@ impl SampledPathSteps {
         self.path_byte_offsets.len().saturating_sub(1)
     }
 
-    pub fn decode_path(&self, path_idx: usize) -> io::Result<Vec<SampledPathStepHit>> {
+    fn decode_path_until<F>(&self, path_idx: usize, mut on_hit: F) -> io::Result<()>
+    where
+        F: FnMut(SampledPathStepHit) -> bool,
+    {
         let start =
             *self.path_byte_offsets.get(path_idx).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "path index out of range")
@@ -760,7 +814,6 @@ impl SampledPathSteps {
             ));
         }
 
-        let mut hits = Vec::new();
         let mut pos = start;
         let mut bp_pos = 0u64;
         let mut step_idx = 0u32;
@@ -789,7 +842,7 @@ impl SampledPathSteps {
                     "path-step traversal fields exceed u32",
                 ));
             }
-            hits.push(SampledPathStepHit {
+            if !on_hit(SampledPathStepHit {
                 path_idx,
                 step_idx,
                 bp_pos,
@@ -797,8 +850,19 @@ impl SampledPathSteps {
                 prev_node,
                 prev_offset: prev_offset as u32,
                 traversal_rank: traversal_rank as u32,
-            });
+            }) {
+                break;
+            }
         }
+        Ok(())
+    }
+
+    pub fn decode_path(&self, path_idx: usize) -> io::Result<Vec<SampledPathStepHit>> {
+        let mut hits = Vec::new();
+        self.decode_path_until(path_idx, |hit| {
+            hits.push(hit);
+            true
+        })?;
         Ok(hits)
     }
 
@@ -807,9 +871,16 @@ impl SampledPathSteps {
         path_idx: usize,
         bp_pos: u64,
     ) -> io::Result<Option<SampledPathStepHit>> {
-        let hits = self.decode_path(path_idx)?;
-        let upper = hits.partition_point(|hit| hit.bp_pos <= bp_pos);
-        Ok(upper.checked_sub(1).map(|idx| hits[idx]))
+        let mut best = None;
+        self.decode_path_until(path_idx, |hit| {
+            if hit.bp_pos <= bp_pos {
+                best = Some(hit);
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(best)
     }
 
     fn save(&self, path: &str) -> io::Result<()> {
@@ -2032,7 +2103,6 @@ fn matched_syncmers_in_sequence_impl(
     query_seq: &[u8],
     kmer_buf: &mut [u64],
     seq_buf: &mut Vec<u8>,
-    valid_prefix: &mut Vec<usize>,
     out: &mut Vec<SyngQuerySyncmer>,
 ) {
     out.clear();
@@ -2042,24 +2112,25 @@ fn matched_syncmers_in_sequence_impl(
     }
 
     seq_buf.clear();
-    valid_prefix.clear();
     seq_buf.reserve(query_seq.len() + 1);
-    valid_prefix.reserve(query_seq.len() + 1);
-    valid_prefix.push(0);
     for &base in query_seq {
-        let (encoded, valid) = encode_query_base(base);
-        seq_buf.push(encoded);
-        let prev = *valid_prefix.last().unwrap();
-        valid_prefix.push(prev + usize::from(valid));
+        seq_buf.push(encode_query_base(base).0);
     }
     seq_buf.push(0);
 
+    assert!(
+        query_seq.len() <= std::os::raw::c_int::MAX as usize,
+        "query sequence length {} exceeds C int maximum",
+        query_seq.len()
+    );
+    let mut validity = SyncmerWindowValidity::new(query_seq);
     unsafe {
         let sit = syng_ffi::syncmerIterator(
             seqhash,
             seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            query_seq.len() as i32,
+            query_seq.len() as std::os::raw::c_int,
         );
+        assert!(!sit.is_null(), "syncmerIterator returned null");
         let mut pos: i32 = 0;
         while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
             if pos < 0 {
@@ -2069,7 +2140,7 @@ fn matched_syncmers_in_sequence_impl(
             let Some(end) = start.checked_add(syncmer_len) else {
                 continue;
             };
-            if end > query_seq.len() || valid_prefix[end] - valid_prefix[start] != syncmer_len {
+            if end > query_seq.len() || !validity.is_valid(start, syncmer_len) {
                 continue;
             }
 
@@ -2127,7 +2198,6 @@ fn matched_syncmers_best_query_orientation_impl(
     query_seq: &[u8],
     kmer_buf: &mut [u64],
     seq_buf: &mut Vec<u8>,
-    valid_prefix: &mut Vec<usize>,
     rc_seq: &mut Vec<u8>,
     rc_syncmers: &mut Vec<SyngQuerySyncmer>,
     out: &mut Vec<SyngQuerySyncmer>,
@@ -2142,7 +2212,6 @@ fn matched_syncmers_best_query_orientation_impl(
         query_seq,
         kmer_buf,
         seq_buf,
-        valid_prefix,
         out,
     );
 
@@ -2154,7 +2223,6 @@ fn matched_syncmers_best_query_orientation_impl(
         rc_seq,
         kmer_buf,
         seq_buf,
-        valid_prefix,
         rc_syncmers,
     );
 
@@ -2162,6 +2230,31 @@ fn matched_syncmers_best_query_orientation_impl(
         orient_reverse_query_syncmers(rc_syncmers, query_seq.len(), (params.w + params.k) as usize);
         std::mem::swap(out, rc_syncmers);
     }
+}
+
+fn matched_syncmers_best_query_orientation(
+    seqhash: *mut syng_ffi::Seqhash,
+    kmer_hash: *mut syng_ffi::KmerHash,
+    params: SyncmerParams,
+    query_seq: &[u8],
+) -> Vec<SyngQuerySyncmer> {
+    let mut kmer_buf = vec![0u64; unsafe { (*kmer_hash).plen as usize }];
+    let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
+    let mut rc_seq = Vec::with_capacity(query_seq.len());
+    let mut rc_syncmers = Vec::new();
+    let mut out = Vec::new();
+    matched_syncmers_best_query_orientation_impl(
+        seqhash,
+        kmer_hash,
+        params,
+        query_seq,
+        &mut kmer_buf,
+        &mut seq_buf,
+        &mut rc_seq,
+        &mut rc_syncmers,
+        &mut out,
+    );
+    out
 }
 
 /// Lightweight syng syncmer dictionary handle for read-to-node matching.
@@ -2180,7 +2273,6 @@ pub struct SyngMatcherWorker<'a> {
     seqhash: *mut syng_ffi::Seqhash,
     kmer_buf: Vec<u64>,
     seq_buf: Vec<u8>,
-    valid_prefix: Vec<usize>,
     rc_seq: Vec<u8>,
     rc_syncmers: Vec<SyngQuerySyncmer>,
     params: SyncmerParams,
@@ -2216,25 +2308,7 @@ impl SyngMatcher {
 
     /// Return query syncmers that are present in this syng dictionary.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
-        let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
-        let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
-        let mut valid_prefix = Vec::with_capacity(query_seq.len() + 1);
-        let mut rc_seq = Vec::with_capacity(query_seq.len());
-        let mut rc_syncmers = Vec::new();
-        let mut out = Vec::new();
-        matched_syncmers_best_query_orientation_impl(
-            self.seqhash,
-            self.kmer_hash,
-            self.params,
-            query_seq,
-            &mut kmer_buf,
-            &mut seq_buf,
-            &mut valid_prefix,
-            &mut rc_seq,
-            &mut rc_syncmers,
-            &mut out,
-        );
-        out
+        matched_syncmers_best_query_orientation(self.seqhash, self.kmer_hash, self.params, query_seq)
     }
 
     /// Number of syncmer nodes stored in the KmerHash (valid IDs are `1..=N`).
@@ -2258,7 +2332,6 @@ impl SyngMatcher {
             seqhash,
             kmer_buf: vec![0u64; unsafe { (*self.kmer_hash).plen as usize }],
             seq_buf: Vec::new(),
-            valid_prefix: Vec::new(),
             rc_seq: Vec::new(),
             rc_syncmers: Vec::new(),
             params: self.params,
@@ -2287,7 +2360,6 @@ impl SyngMatcherWorker<'_> {
             query_seq,
             &mut self.kmer_buf,
             &mut self.seq_buf,
-            &mut self.valid_prefix,
             &mut self.rc_seq,
             &mut self.rc_syncmers,
             out,
@@ -2358,10 +2430,22 @@ impl SyngIndex {
         Self::initialize_native_diagnostics();
         let syncmer_len = (params.w + params.k) as i32;
         let gbwt = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
+        assert!(!gbwt.is_null(), "syngBWTcreate returned null");
         let kmer_hash = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
+        if kmer_hash.is_null() {
+            unsafe { syng_ffi::syngBWTdestroy(gbwt) };
+            panic!("kmerHashCreate returned null");
+        }
         let seqhash = unsafe {
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
+        if seqhash.is_null() {
+            unsafe {
+                syng_ffi::kmerHashDestroy(kmer_hash);
+                syng_ffi::syngBWTdestroy(gbwt);
+            }
+            panic!("impg_seqhashCreateSafe returned null");
+        }
         Self {
             gbwt,
             kmer_hash,
@@ -2559,7 +2643,7 @@ impl SyngIndex {
     /// sequences before GBWT construction.
     pub fn add_sequence(&mut self, name: String, seq: Vec<u8>) -> SyngAddSequenceStats {
         self.add_sequence_internal(name, seq, SyncmerLookupMode::AddMissing)
-            .expect("adding new syncmers to KmerHash should not fail")
+            .unwrap_or_else(|e| panic!("add_sequence failed: {e}"))
     }
 
     /// Add one sequence using a preloaded dictionary.
@@ -2587,6 +2671,17 @@ impl SyngIndex {
 
         let syncmer_len = (self.params.w + self.params.k) as usize;
         let seq_len = seq.len();
+        if seq_len > std::os::raw::c_int::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "sequence '{}' length {} exceeds C int maximum ({})",
+                    name,
+                    seq_len,
+                    std::os::raw::c_int::MAX
+                ),
+            ));
+        }
         if seq_len < syncmer_len {
             // Sequence too short for syncmer extraction — record in name map but skip
             let path_num = self.name_map.add(name, seq_len as u64);
@@ -2624,11 +2719,24 @@ impl SyngIndex {
             let sit = syng_ffi::syncmerIterator(
                 self.seqhash,
                 seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
-                seq_len as i32,
+                seq_len as std::os::raw::c_int,
             );
+            if sit.is_null() {
+                return Err(io::Error::other("syncmerIterator returned null"));
+            }
 
             let mut pos: i32 = 0;
             while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
+                if pos < 0 || (pos as usize) + syncmer_len > seq_len {
+                    syng_ffi::impg_seqhashIteratorDestroy(sit);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "syncmer iterator returned out-of-range position {} for sequence length {}",
+                            pos, seq_len
+                        ),
+                    ));
+                }
                 if !validity.is_valid(pos as usize, syncmer_len) {
                     continue;
                 }
@@ -2779,66 +2887,19 @@ impl SyngIndex {
             ));
         }
         let _ = self.finalize_online_sampled_positions()?;
-        let schema_text = syng_ffi::syng_schema_text();
 
         // Write .1gbwt
-        let gbwt_path = format!("{}.1gbwt", prefix);
-        let gbwt_cpath = CString::new(gbwt_path.as_str())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let gbwt_type = CString::new("gbwt").unwrap();
-        unsafe {
-            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
-            if schema.is_null() {
-                return Err(io::Error::other("Failed to create ONEcode schema for gbwt"));
-            }
-            let of = syng_ffi::oneFileOpenWriteNew(
-                gbwt_cpath.as_ptr(),
-                schema,
-                gbwt_type.as_ptr(),
-                true,
-                1,
-            );
-            if of.is_null() {
-                syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::other(format!(
-                    "Failed to open {} for writing",
-                    gbwt_path
-                )));
-            }
-            syng_ffi::syngBWTwrite(of, self.gbwt);
-            syng_ffi::oneFileClose(of);
-            syng_ffi::oneSchemaDestroy(schema);
+        {
+            let gbwt_path = format!("{}.1gbwt", prefix);
+            let session = OneFileSession::open_write(&gbwt_path, "gbwt")?;
+            unsafe { syng_ffi::syngBWTwrite(session.of, self.gbwt) };
         }
 
         // Write .1khash
-        let khash_path = format!("{}.1khash", prefix);
-        let khash_cpath = CString::new(khash_path.as_str())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let khash_type = CString::new("khash").unwrap();
-        unsafe {
-            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
-            if schema.is_null() {
-                return Err(io::Error::other(
-                    "Failed to create ONEcode schema for khash",
-                ));
-            }
-            let of = syng_ffi::oneFileOpenWriteNew(
-                khash_cpath.as_ptr(),
-                schema,
-                khash_type.as_ptr(),
-                true,
-                1,
-            );
-            if of.is_null() {
-                syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::other(format!(
-                    "Failed to open {} for writing",
-                    khash_path
-                )));
-            }
-            let ok = syng_ffi::kmerHashWriteOneFile(self.kmer_hash, of);
-            syng_ffi::oneFileClose(of);
-            syng_ffi::oneSchemaDestroy(schema);
+        {
+            let khash_path = format!("{}.1khash", prefix);
+            let session = OneFileSession::open_write(&khash_path, "khash")?;
+            let ok = unsafe { syng_ffi::kmerHashWriteOneFile(self.kmer_hash, session.of) };
             if !ok {
                 return Err(io::Error::other("kmerHashWriteOneFile failed"));
             }
@@ -2875,14 +2936,7 @@ impl SyngIndex {
 
     /// Save only the inverted path-step sidecar for an existing syng index prefix.
     pub fn save_path_step_sidecar(&self, prefix: &str) -> io::Result<()> {
-        let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "cannot save syng index without sampled path-step checkpoints",
-            )
-        })?;
-        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))?;
-        self.save_checkpoint_sidecar(prefix)
+        self.save_position_sidecars(prefix)
     }
 
     /// Save only the occurrence-major syncmer-position sidecar for an existing syng index prefix.
@@ -2974,7 +3028,6 @@ impl SyngIndex {
         let metadata_path = existing_syng_sidecar_path(prefix, "meta");
         let metadata = SyngMetadata::load(&metadata_path)?;
         let params = metadata.params;
-        let schema_text = syng_ffi::syng_schema_text();
 
         // Read .1gbwt
         let gbwt_path = format!("{}.1gbwt", prefix);
@@ -2984,27 +3037,9 @@ impl SyngIndex {
                 format!("GBWT file not found: {}", gbwt_path),
             ));
         }
-        let gbwt_cpath = CString::new(gbwt_path.as_str())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let gbwt_type = CString::new("gbwt").unwrap();
-        let gbwt = unsafe {
-            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
-            if schema.is_null() {
-                return Err(io::Error::other(
-                    "Failed to create ONEcode schema for gbwt read",
-                ));
-            }
-            let of = syng_ffi::oneFileOpenRead(gbwt_cpath.as_ptr(), schema, gbwt_type.as_ptr(), 1);
-            if of.is_null() {
-                syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::other(format!(
-                    "Failed to open {} for reading",
-                    gbwt_path
-                )));
-            }
-            let gbwt = syng_ffi::syngBWTread(of);
-            syng_ffi::oneFileClose(of);
-            syng_ffi::oneSchemaDestroy(schema);
+        let gbwt = {
+            let session = OneFileSession::open_read(&gbwt_path, "gbwt")?;
+            let gbwt = unsafe { syng_ffi::syngBWTread(session.of) };
             if gbwt.is_null() {
                 return Err(io::Error::other("syngBWTread returned null"));
             }
@@ -3055,6 +3090,13 @@ impl SyngIndex {
         let seqhash = unsafe {
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
+        if seqhash.is_null() {
+            unsafe {
+                syng_ffi::syngBWTdestroy(gbwt);
+                syng_ffi::kmerHashDestroy(kmer_hash);
+            }
+            return Err(io::Error::other("impg_seqhashCreateSafe returned null"));
+        }
 
         // Read sampled path-step sidecar.
         let sampled_path_steps_path = existing_syng_sidecar_path(prefix, "pstep");
@@ -3863,9 +3905,9 @@ impl SyngIndex {
                         continue;
                     }
                     let genome_len = self.name_map.path_to_length[hit.path_idx];
-                    let hit_end = hit.target_pos + syncmer_len;
+                    let hit_end = hit.target_pos.saturating_add(syncmer_len);
                     let padded_start = hit.target_pos.saturating_sub(padding);
-                    let padded_end = (hit_end + padding).min(genome_len);
+                    let padded_end = hit_end.saturating_add(padding).min(genome_len);
                     if padded_start >= padded_end {
                         continue;
                     }
@@ -4179,11 +4221,12 @@ impl SyngIndex {
 
     fn signed_node_occurrence_count(&self, signed_node: i32) -> io::Result<u32> {
         let mut high = 0u32;
-        let sbp = unsafe { syng_ffi::syngBWTmatchStart(self.gbwt, signed_node, &mut high) };
-        if sbp.is_null() {
+        let guard = SyngBwtPathGuard(unsafe {
+            syng_ffi::syngBWTmatchStart(self.gbwt, signed_node, &mut high)
+        });
+        if guard.0.is_null() {
             return Err(io::Error::other("syngBWTmatchStart returned null"));
         }
-        unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
         Ok(high)
     }
 
@@ -4217,23 +4260,21 @@ impl SyngIndex {
             .and_then(|offset| u32::try_from(offset).ok())
     }
 
-    fn start_gbwt_match(
-        &self,
-        signed_node: i32,
-    ) -> io::Result<Option<(*mut syng_ffi::SyngBWTpath, u32, u32)>> {
+    fn start_gbwt_match(&self, signed_node: i32) -> io::Result<Option<(SyngBwtPathGuard, u32, u32)>> {
         if !self.valid_walk_node(signed_node) {
             return Ok(None);
         }
         let mut high = 0u32;
-        let sbp = unsafe { syng_ffi::syngBWTmatchStart(self.gbwt, signed_node, &mut high) };
-        if sbp.is_null() {
+        let guard = SyngBwtPathGuard(unsafe {
+            syng_ffi::syngBWTmatchStart(self.gbwt, signed_node, &mut high)
+        });
+        if guard.0.is_null() {
             return Err(io::Error::other("syngBWTmatchStart returned null"));
         }
         if high == 0 {
-            unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
             return Ok(None);
         }
-        Ok(Some((sbp, 0, high)))
+        Ok(Some((guard, 0, high)))
     }
 
     fn advance_gbwt_match(
@@ -4289,36 +4330,28 @@ impl SyngIndex {
         });
     }
 
-    fn prune_contained_gbwt_mems(candidates: Vec<SyngGbwtMem>) -> Vec<SyngGbwtMem> {
-        let mut candidates = candidates;
+    fn prune_contained_gbwt_mems(mut candidates: Vec<SyngGbwtMem>) -> Vec<SyngGbwtMem> {
         candidates.sort_by(|a, b| {
             a.step_start
                 .cmp(&b.step_start)
                 .then(b.step_end.cmp(&a.step_end))
+                .then(b.anchors.cmp(&a.anchors))
                 .then(a.occurrences.cmp(&b.occurrences))
         });
-        let mut mems: Vec<SyngGbwtMem> = Vec::new();
-        'candidate: for candidate in candidates {
-            for kept in &mems {
-                if kept.step_start <= candidate.step_start
-                    && kept.step_end >= candidate.step_end
-                    && kept.anchors >= candidate.anchors
-                {
-                    continue 'candidate;
-                }
+        // In (step_start ASC, step_end DESC) order, the most recently kept
+        // MEM has the largest `step_end` of all kept MEMs and starts at or
+        // before every subsequent candidate.
+        let mut mems: Vec<SyngGbwtMem> = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            debug_assert_eq!(candidate.anchors, candidate.step_end - candidate.step_start);
+            if mems
+                .last()
+                .is_some_and(|kept| kept.step_end >= candidate.step_end && kept.anchors >= candidate.anchors)
+            {
+                continue;
             }
-            mems.retain(|kept| {
-                !(candidate.step_start <= kept.step_start
-                    && candidate.step_end >= kept.step_end
-                    && candidate.anchors >= kept.anchors)
-            });
             mems.push(candidate);
         }
-        mems.sort_by(|a, b| {
-            a.step_start
-                .cmp(&b.step_start)
-                .then(a.step_end.cmp(&b.step_end))
-        });
         mems
     }
 
@@ -4327,8 +4360,8 @@ impl SyngIndex {
         walk: &[SyngWalkStep],
         run_start: usize,
         current: usize,
-    ) -> io::Result<Option<(*mut syng_ffi::SyngBWTpath, usize, u32, u32)>> {
-        let Some((reverse_sbp, mut reverse_low, mut reverse_high)) =
+    ) -> io::Result<Option<(SyngBwtPathGuard, usize, u32, u32)>> {
+        let Some((mut reverse_sbp, mut reverse_low, mut reverse_high)) =
             self.start_gbwt_match(-walk[current].signed_node)?
         else {
             return Ok(None);
@@ -4341,7 +4374,7 @@ impl SyngIndex {
                 break;
             };
             if !self.advance_gbwt_match(
-                reverse_sbp,
+                reverse_sbp.as_mut_ptr(),
                 &mut reverse_low,
                 &mut reverse_high,
                 -walk[prev].signed_node,
@@ -4351,20 +4384,24 @@ impl SyngIndex {
             }
             suffix_start = prev;
         }
-        unsafe { syng_ffi::syngBWTpathDestroy(reverse_sbp) };
+        drop(reverse_sbp);
 
-        let Some((sbp, mut low, mut high)) =
+        let Some((mut sbp, mut low, mut high)) =
             self.start_gbwt_match(walk[suffix_start].signed_node)?
         else {
             return Ok(None);
         };
         for next in suffix_start + 1..=current {
             let Some(offset) = Self::walk_step_offset(walk[next - 1], walk[next]) else {
-                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
                 return Ok(None);
             };
-            if !self.advance_gbwt_match(sbp, &mut low, &mut high, walk[next].signed_node, offset) {
-                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+            if !self.advance_gbwt_match(
+                sbp.as_mut_ptr(),
+                &mut low,
+                &mut high,
+                walk[next].signed_node,
+                offset,
+            ) {
                 return Ok(None);
             }
         }
@@ -4383,7 +4420,7 @@ impl SyngIndex {
         }
 
         let mut candidates = Vec::new();
-        let mut sbp: *mut syng_ffi::SyngBWTpath = std::ptr::null_mut();
+        let mut sbp: Option<SyngBwtPathGuard> = None;
         let mut active_start = 0usize;
         let mut run_start = 0usize;
         let mut low = 0u32;
@@ -4391,23 +4428,21 @@ impl SyngIndex {
 
         for idx in 0..walk.len() {
             if !self.valid_walk_node(walk[idx].signed_node) {
-                if !sbp.is_null() {
+                if sbp.take().is_some() {
                     self.push_gbwt_mem(walk, active_start, idx, low, high, &mut candidates);
-                    unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
-                    sbp = std::ptr::null_mut();
                 }
                 run_start = idx + 1;
                 continue;
             }
 
-            if sbp.is_null() {
+            if sbp.is_none() {
                 let Some((started_sbp, started_low, started_high)) =
                     self.start_gbwt_match(walk[idx].signed_node)?
                 else {
                     run_start = idx + 1;
                     continue;
                 };
-                sbp = started_sbp;
+                sbp = Some(started_sbp);
                 active_start = idx;
                 run_start = idx;
                 low = started_low;
@@ -4416,16 +4451,15 @@ impl SyngIndex {
             }
 
             let Some(offset) = Self::walk_step_offset(walk[idx - 1], walk[idx]) else {
+                sbp = None;
                 self.push_gbwt_mem(walk, active_start, idx, low, high, &mut candidates);
-                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
-                sbp = std::ptr::null_mut();
                 let Some((started_sbp, started_low, started_high)) =
                     self.start_gbwt_match(walk[idx].signed_node)?
                 else {
                     run_start = idx + 1;
                     continue;
                 };
-                sbp = started_sbp;
+                sbp = Some(started_sbp);
                 active_start = idx;
                 run_start = idx;
                 low = started_low;
@@ -4433,29 +4467,33 @@ impl SyngIndex {
                 continue;
             };
 
-            if self.advance_gbwt_match(sbp, &mut low, &mut high, walk[idx].signed_node, offset) {
+            if self.advance_gbwt_match(
+                sbp.as_mut().unwrap().as_mut_ptr(),
+                &mut low,
+                &mut high,
+                walk[idx].signed_node,
+                offset,
+            ) {
                 continue;
             }
 
+            sbp = None;
             self.push_gbwt_mem(walk, active_start, idx, low, high, &mut candidates);
-            unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
             match self.restart_gbwt_match_at_suffix(walk, run_start, idx)? {
                 Some((restarted_sbp, restarted_start, restarted_low, restarted_high)) => {
-                    sbp = restarted_sbp;
+                    sbp = Some(restarted_sbp);
                     active_start = restarted_start;
                     low = restarted_low;
                     high = restarted_high;
                 }
                 None => {
-                    sbp = std::ptr::null_mut();
                     run_start = idx + 1;
                 }
             }
         }
 
-        if !sbp.is_null() {
+        if sbp.take().is_some() {
             self.push_gbwt_mem(walk, active_start, walk.len(), low, high, &mut candidates);
-            unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
         }
 
         Ok(Self::prune_contained_gbwt_mems(candidates))
@@ -4590,7 +4628,7 @@ impl SyngIndex {
         Ok(hits)
     }
 
-    fn top_frequency_seed_nodes(
+    pub(crate) fn top_frequency_seed_nodes(
         occurrence_counts: &[(u32, u32)],
         drop_top_fraction: f64,
     ) -> FxHashSet<u32> {
@@ -4601,13 +4639,16 @@ impl SyngIndex {
         if drop_count == 0 {
             return FxHashSet::default();
         }
+        let drop_count = drop_count.min(occurrence_counts.len());
         let mut ranked = occurrence_counts.to_vec();
-        ranked.sort_by(|(node_a, count_a), (node_b, count_b)| {
-            count_b.cmp(count_a).then(node_a.cmp(node_b))
-        });
+        if drop_count < ranked.len() {
+            ranked.select_nth_unstable_by(drop_count - 1, |(node_a, count_a), (node_b, count_b)| {
+                count_b.cmp(count_a).then(node_a.cmp(node_b))
+            });
+        }
         ranked
             .into_iter()
-            .take(drop_count.min(occurrence_counts.len()))
+            .take(drop_count)
             .map(|(node, _)| node)
             .collect()
     }
@@ -4741,7 +4782,6 @@ impl SyngIndex {
             sequence,
             &mut packed,
             &mut Vec::new(),
-            &mut Vec::new(),
             &mut out,
         );
         out.sort_unstable_by_key(|m| m.query_pos);
@@ -4753,25 +4793,7 @@ impl SyngIndex {
     /// The query sequence does not need to be one of the indexed paths. This
     /// is the primitive used by `impg map -o gaf`.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
-        let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
-        let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
-        let mut valid_prefix = Vec::with_capacity(query_seq.len() + 1);
-        let mut rc_seq = Vec::with_capacity(query_seq.len());
-        let mut rc_syncmers = Vec::new();
-        let mut out = Vec::new();
-        matched_syncmers_best_query_orientation_impl(
-            self.seqhash,
-            self.kmer_hash,
-            self.params,
-            query_seq,
-            &mut kmer_buf,
-            &mut seq_buf,
-            &mut valid_prefix,
-            &mut rc_seq,
-            &mut rc_syncmers,
-            &mut out,
-        );
-        out
+        matched_syncmers_best_query_orientation(self.seqhash, self.kmer_hash, self.params, query_seq)
     }
 
     /// Project query syncmer matches to indexed genome coordinates.
@@ -5424,20 +5446,23 @@ impl SyngIndex {
         let Some(first) = walk.first().copied() else {
             return Ok(None);
         };
-        let Some((sbp, mut low, mut high)) = self.start_gbwt_match(first.signed_node)? else {
+        let Some((mut sbp, mut low, mut high)) = self.start_gbwt_match(first.signed_node)? else {
             return Ok(None);
         };
         for idx in 1..walk.len() {
             let Some(offset) = Self::walk_step_offset(walk[idx - 1], walk[idx]) else {
-                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
                 return Ok(None);
             };
-            if !self.advance_gbwt_match(sbp, &mut low, &mut high, walk[idx].signed_node, offset) {
-                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+            if !self.advance_gbwt_match(
+                sbp.as_mut_ptr(),
+                &mut low,
+                &mut high,
+                walk[idx].signed_node,
+                offset,
+            ) {
                 return Ok(None);
             }
         }
-        unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
         Ok(Some((walk.last().unwrap().signed_node, low, high)))
     }
 
@@ -5609,9 +5634,9 @@ impl SyngIndex {
                         continue;
                     }
                     let genome_len = self.name_map.path_to_length[hit.path_idx];
-                    let hit_end = hit.target_pos + syncmer_len;
+                    let hit_end = hit.target_pos.saturating_add(syncmer_len);
                     let padded_start = hit.target_pos.saturating_sub(padding);
-                    let padded_end = (hit_end + padding).min(genome_len);
+                    let padded_end = hit_end.saturating_add(padding).min(genome_len);
                     let mut by_strand: [FxHashMap<i64, Anchor>; 2] = Default::default();
                     for &(qp, q_orient) in &query_positions {
                         let forward = q_orient == hit.target_orient;
@@ -9954,6 +9979,67 @@ mod tests {
         assert!(
             tiny.is_empty(),
             "tiny top-fraction filters should not affect small queries"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_at_or_before_matches_decode_path_and_padding_saturates() {
+        let _guard = lock_syng();
+        let mut builder = SampledPositionBuilder::new_path_steps_only(2, 0, 0).unwrap();
+        let syncmers: Vec<PathStepRecord> = [(1, 0), (2, 10), (3, 25), (4, 40), (5, 60)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (node, bp_pos))| PathStepRecord {
+                step_idx: i as u32,
+                bp_pos,
+                signed_node: node,
+                prev_node: if i == 0 { 0 } else { node - 1 },
+                prev_offset: if i == 0 { 0 } else { 10 },
+                traversal_rank: 0,
+            })
+            .collect();
+        builder.record_path(0, 100, &syncmers);
+        builder.record_path(1, 5, &[]);
+        let (_, pstep, _) = builder.finish(&[100, 5]).unwrap();
+
+        let decoded = pstep.decode_path(0).unwrap();
+        assert!(!decoded.is_empty());
+        assert_eq!(
+            pstep.checkpoint_at_or_before(0, 0).unwrap(),
+            Some(decoded[0])
+        );
+        assert_eq!(
+            pstep.checkpoint_at_or_before(0, 24).unwrap(),
+            decoded.iter().copied().filter(|h| h.bp_pos <= 24).last()
+        );
+        assert_eq!(
+            pstep.checkpoint_at_or_before(0, 25).unwrap(),
+            decoded.iter().copied().filter(|h| h.bp_pos <= 25).last()
+        );
+        assert_eq!(
+            pstep.checkpoint_at_or_before(0, u64::MAX).unwrap(),
+            decoded.last().copied()
+        );
+        assert_eq!(pstep.checkpoint_at_or_before(1, 10).unwrap(), None);
+
+        // Large padding must saturate cleanly under overflow-checks=true.
+        let params = SyncmerParams {
+            k: 5,
+            w: 10,
+            seed: 7,
+        };
+        let mut idx = SyngIndex::new(params);
+        let seq = make_test_sequence(120, 99);
+        idx.add_sequence("seq_a".to_string(), seq.clone());
+        idx.add_sequence("seq_b".to_string(), seq);
+        idx.finalize_online_sampled_positions().unwrap();
+        let hits = idx
+            .query_region("seq_a", 10, 90, u64::MAX - 10)
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.genome == "seq_b" && h.start == 0 && h.end == 120),
+            "expected saturated hit across seq_b, got {:?}",
+            hits
         );
     }
 

@@ -999,249 +999,119 @@ fn collect_range_work(
         });
     }
 
-    if !reverse {
-        if let Some(&(first, first_pos)) = oriented_nodes.first() {
-            let prefix_gap_idx = if first_pos > range.start {
-                let gap_seq =
-                    fetch_oriented_gap_dna(gap_fill, source_name, range.start, first_pos, false)?;
-                Some(push_gap(
-                    GapContext::Prefix { right: first },
-                    gap_seq,
-                    &mut steps,
-                ))
-            } else {
-                None
-            };
+    if let Some(&(first, first_pos)) = oriented_nodes.first() {
+        let prefix_gap_idx = if reverse {
+            let lo = first_pos.saturating_add(syncmer_len_u64);
+            (range.end > lo).then_some((lo, range.end))
+        } else {
+            (first_pos > range.start).then_some((range.start, first_pos))
+        };
+        let prefix_gap = if let Some((lo, hi)) = prefix_gap_idx {
+            let gap_seq = fetch_oriented_gap_dna(gap_fill, source_name, lo, hi, reverse)?;
+            Some(push_gap(
+                GapContext::Prefix { right: first },
+                gap_seq,
+                &mut steps,
+            ))
+        } else {
+            None
+        };
+        let (left_clip, right_clip) =
+            oriented_syncmer_clips(first_pos, range.start, range.end, syncmer_len_u64, reverse);
+        let first_occ = push_syncmer_step(
+            &mut steps,
+            &mut next_syncmer_occ,
+            first,
+            first_pos,
+            left_clip,
+            right_clip,
+        );
+        if let Some(gap) = prefix_gap {
+            if !gap.ends_with_cut {
+                if let Some(endpoint) = gap.last_endpoint() {
+                    edges.push((endpoint, raw_syncmer_endpoint(first_occ), 0));
+                }
+            }
+        }
+        last_syncmer_occ = Some(first_occ);
+    }
+
+    for w in oriented_nodes.windows(2) {
+        let (a, pos_a) = w[0];
+        let (b, pos_b) = w[1];
+        let a_occ = last_syncmer_occ.expect("range window without a previous syncmer occurrence");
+        let off_u64 = if reverse {
+            pos_a.saturating_sub(pos_b)
+        } else {
+            pos_b.saturating_sub(pos_a)
+        };
+        if off_u64 <= syncmer_len_u64 {
             let (left_clip, right_clip) =
-                oriented_syncmer_clips(first_pos, range.start, range.end, syncmer_len_u64, false);
-            let first_occ = push_syncmer_step(
+                oriented_syncmer_clips(pos_b, range.start, range.end, syncmer_len_u64, reverse);
+            let b_occ = push_syncmer_step(
                 &mut steps,
                 &mut next_syncmer_occ,
-                first,
-                first_pos,
+                b,
+                pos_b,
                 left_clip,
                 right_clip,
             );
-            if let Some(gap) = prefix_gap_idx {
-                if !gap.ends_with_cut {
-                    if let Some(endpoint) = gap.last_endpoint() {
-                        edges.push((endpoint, raw_syncmer_endpoint(first_occ), 0));
-                    }
-                }
-            }
-            last_syncmer_occ = Some(first_occ);
-        }
-
-        for w in oriented_nodes.windows(2) {
-            let (a, pos_a) = w[0];
-            let (b, pos_b) = w[1];
-            let a_occ =
-                last_syncmer_occ.expect("range window without a previous syncmer occurrence");
-            let off_u64 = pos_b.saturating_sub(pos_a);
-            if off_u64 <= syncmer_len_u64 {
-                let (left_clip, right_clip) =
-                    oriented_syncmer_clips(pos_b, range.start, range.end, syncmer_len_u64, false);
-                let b_occ = push_syncmer_step(
-                    &mut steps,
-                    &mut next_syncmer_occ,
-                    b,
-                    pos_b,
-                    left_clip,
-                    right_clip,
-                );
-                edges.push((
-                    raw_syncmer_endpoint(a_occ),
-                    raw_syncmer_endpoint(b_occ),
-                    (syncmer_len_u64 - off_u64) as u32,
-                ));
-                last_syncmer_occ = Some(b_occ);
+            edges.push((
+                raw_syncmer_endpoint(a_occ),
+                raw_syncmer_endpoint(b_occ),
+                (syncmer_len_u64 - off_u64) as u32,
+            ));
+            last_syncmer_occ = Some(b_occ);
+        } else {
+            let (gap_lo, gap_hi) = if reverse {
+                (pos_b + syncmer_len_u64, pos_a)
             } else {
-                let gap_seq = fetch_oriented_gap_dna(
-                    gap_fill,
-                    source_name,
-                    pos_a + syncmer_len_u64,
-                    pos_b,
-                    false,
-                )?;
-                let gap = push_gap(
-                    GapContext::Between { left: a, right: b },
-                    gap_seq,
-                    &mut steps,
-                );
-                let (left_clip, right_clip) =
-                    oriented_syncmer_clips(pos_b, range.start, range.end, syncmer_len_u64, false);
-                let b_occ = push_syncmer_step(
-                    &mut steps,
-                    &mut next_syncmer_occ,
-                    b,
-                    pos_b,
-                    left_clip,
-                    right_clip,
-                );
-                if !gap.starts_with_cut {
-                    if let Some(endpoint) = gap.first_endpoint() {
-                        edges.push((raw_syncmer_endpoint(a_occ), endpoint, 0));
-                    }
-                }
-                if !gap.ends_with_cut {
-                    if let Some(endpoint) = gap.last_endpoint() {
-                        edges.push((endpoint, raw_syncmer_endpoint(b_occ), 0));
-                    }
-                }
-                last_syncmer_occ = Some(b_occ);
-            }
-        }
-
-        if let Some(&(last, last_pos)) = oriented_nodes.last() {
-            let suffix_start = last_pos.saturating_add(syncmer_len_u64);
-            if range.end > suffix_start {
-                let gap_seq =
-                    fetch_oriented_gap_dna(gap_fill, source_name, suffix_start, range.end, false)?;
-                let gap = push_gap(GapContext::Suffix { left: last }, gap_seq, &mut steps);
-                if let Some(last_occ) = last_syncmer_occ {
-                    if !gap.starts_with_cut {
-                        if let Some(endpoint) = gap.first_endpoint() {
-                            edges.push((raw_syncmer_endpoint(last_occ), endpoint, 0));
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        if let Some(&(first_oriented, last_fwd_pos)) = oriented_nodes.first() {
-            let prefix_fwd_start = last_fwd_pos.saturating_add(syncmer_len_u64);
-            let prefix_gap_idx = if range.end > prefix_fwd_start {
-                let gap_seq = fetch_oriented_gap_dna(
-                    gap_fill,
-                    source_name,
-                    prefix_fwd_start,
-                    range.end,
-                    true,
-                )?;
-                Some(push_gap(
-                    GapContext::Prefix {
-                        right: first_oriented,
-                    },
-                    gap_seq,
-                    &mut steps,
-                ))
-            } else {
-                None
+                (pos_a + syncmer_len_u64, pos_b)
             };
+            let gap_seq = fetch_oriented_gap_dna(gap_fill, source_name, gap_lo, gap_hi, reverse)?;
+            let gap = push_gap(
+                GapContext::Between { left: a, right: b },
+                gap_seq,
+                &mut steps,
+            );
             let (left_clip, right_clip) =
-                oriented_syncmer_clips(last_fwd_pos, range.start, range.end, syncmer_len_u64, true);
-            let first_occ = push_syncmer_step(
+                oriented_syncmer_clips(pos_b, range.start, range.end, syncmer_len_u64, reverse);
+            let b_occ = push_syncmer_step(
                 &mut steps,
                 &mut next_syncmer_occ,
-                first_oriented,
-                last_fwd_pos,
+                b,
+                pos_b,
                 left_clip,
                 right_clip,
             );
-            if let Some(gap) = prefix_gap_idx {
-                if !gap.ends_with_cut {
-                    if let Some(endpoint) = gap.last_endpoint() {
-                        edges.push((endpoint, raw_syncmer_endpoint(first_occ), 0));
-                    }
+            if !gap.starts_with_cut {
+                if let Some(endpoint) = gap.first_endpoint() {
+                    edges.push((raw_syncmer_endpoint(a_occ), endpoint, 0));
                 }
             }
-            last_syncmer_occ = Some(first_occ);
+            if !gap.ends_with_cut {
+                if let Some(endpoint) = gap.last_endpoint() {
+                    edges.push((endpoint, raw_syncmer_endpoint(b_occ), 0));
+                }
+            }
+            last_syncmer_occ = Some(b_occ);
         }
+    }
 
-        for w in oriented_nodes.windows(2) {
-            let (a_oriented, a_fwd_pos) = w[0];
-            let (b_oriented, b_fwd_pos) = w[1];
-            let a_occ =
-                last_syncmer_occ.expect("range window without a previous syncmer occurrence");
-            let off_u64 = a_fwd_pos.saturating_sub(b_fwd_pos);
-            if off_u64 <= syncmer_len_u64 {
-                let (left_clip, right_clip) = oriented_syncmer_clips(
-                    b_fwd_pos,
-                    range.start,
-                    range.end,
-                    syncmer_len_u64,
-                    true,
-                );
-                let b_occ = push_syncmer_step(
-                    &mut steps,
-                    &mut next_syncmer_occ,
-                    b_oriented,
-                    b_fwd_pos,
-                    left_clip,
-                    right_clip,
-                );
-                edges.push((
-                    raw_syncmer_endpoint(a_occ),
-                    raw_syncmer_endpoint(b_occ),
-                    (syncmer_len_u64 - off_u64) as u32,
-                ));
-                last_syncmer_occ = Some(b_occ);
-            } else {
-                let gap_seq = fetch_oriented_gap_dna(
-                    gap_fill,
-                    source_name,
-                    b_fwd_pos + syncmer_len_u64,
-                    a_fwd_pos,
-                    true,
-                )?;
-                let gap = push_gap(
-                    GapContext::Between {
-                        left: a_oriented,
-                        right: b_oriented,
-                    },
-                    gap_seq,
-                    &mut steps,
-                );
-                let (left_clip, right_clip) = oriented_syncmer_clips(
-                    b_fwd_pos,
-                    range.start,
-                    range.end,
-                    syncmer_len_u64,
-                    true,
-                );
-                let b_occ = push_syncmer_step(
-                    &mut steps,
-                    &mut next_syncmer_occ,
-                    b_oriented,
-                    b_fwd_pos,
-                    left_clip,
-                    right_clip,
-                );
+    if let Some(&(last, last_pos)) = oriented_nodes.last() {
+        let suffix_gap_bounds = if reverse {
+            (last_pos > range.start).then_some((range.start, last_pos))
+        } else {
+            let lo = last_pos.saturating_add(syncmer_len_u64);
+            (range.end > lo).then_some((lo, range.end))
+        };
+        if let Some((lo, hi)) = suffix_gap_bounds {
+            let gap_seq = fetch_oriented_gap_dna(gap_fill, source_name, lo, hi, reverse)?;
+            let gap = push_gap(GapContext::Suffix { left: last }, gap_seq, &mut steps);
+            if let Some(last_occ) = last_syncmer_occ {
                 if !gap.starts_with_cut {
                     if let Some(endpoint) = gap.first_endpoint() {
-                        edges.push((raw_syncmer_endpoint(a_occ), endpoint, 0));
-                    }
-                }
-                if !gap.ends_with_cut {
-                    if let Some(endpoint) = gap.last_endpoint() {
-                        edges.push((endpoint, raw_syncmer_endpoint(b_occ), 0));
-                    }
-                }
-                last_syncmer_occ = Some(b_occ);
-            }
-        }
-
-        if let Some(&(last_oriented, first_fwd_pos)) = oriented_nodes.last() {
-            if first_fwd_pos > range.start {
-                let gap_seq = fetch_oriented_gap_dna(
-                    gap_fill,
-                    source_name,
-                    range.start,
-                    first_fwd_pos,
-                    true,
-                )?;
-                let gap = push_gap(
-                    GapContext::Suffix {
-                        left: last_oriented,
-                    },
-                    gap_seq,
-                    &mut steps,
-                );
-                if let Some(last_occ) = last_syncmer_occ {
-                    if !gap.starts_with_cut {
-                        if let Some(endpoint) = gap.first_endpoint() {
-                            edges.push((raw_syncmer_endpoint(last_occ), endpoint, 0));
-                        }
+                        edges.push((raw_syncmer_endpoint(last_occ), endpoint, 0));
                     }
                 }
             }
@@ -2433,32 +2303,14 @@ fn split_shared_context_clone_occurrences(
     if split_occurrences.is_empty() {
         return FxHashSet::default();
     }
-    raw_work_syncmer_context_occurrences(work)
-        .into_iter()
-        .filter_map(|occ| {
-            split_occurrences
-                .contains(&occ.syncmer.occ)
-                .then_some(occ.syncmer.occ)
+    work.steps
+        .iter()
+        .filter_map(|step| match step {
+            RawPathStep::Syncmer(syncmer) if split_occurrences.contains(&syncmer.occ) => {
+                Some(syncmer.occ)
+            }
+            _ => None,
         })
-        .collect()
-}
-
-fn top_frequency_nodes(occurrence_counts: &[(u32, u32)], drop_top_fraction: f64) -> FxHashSet<u32> {
-    if drop_top_fraction <= 0.0 || occurrence_counts.is_empty() {
-        return FxHashSet::default();
-    }
-    let drop_count = ((occurrence_counts.len() as f64) * drop_top_fraction).floor() as usize;
-    if drop_count == 0 {
-        return FxHashSet::default();
-    }
-    let mut ranked = occurrence_counts.to_vec();
-    ranked.sort_by(|(node_a, count_a), (node_b, count_b)| {
-        count_b.cmp(count_a).then(node_a.cmp(node_b))
-    });
-    ranked
-        .into_iter()
-        .take(drop_count.min(occurrence_counts.len()))
-        .map(|(node, _)| node)
         .collect()
 }
 
@@ -2482,7 +2334,8 @@ fn frequency_masked_syncmers(
         occurrence_counts.push((node, count));
     }
 
-    let mut masked = top_frequency_nodes(&occurrence_counts, mask.drop_top_fraction);
+    let mut masked =
+        SyngIndex::top_frequency_seed_nodes(&occurrence_counts, mask.drop_top_fraction);
     if let Some(max_allowed) = mask.max_occurrences {
         for (node, count) in &occurrence_counts {
             if *count > max_allowed {
