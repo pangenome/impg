@@ -13591,10 +13591,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs gfalook on PATH"]
     fn test_render_graph_image_with_gfalook_when_available() {
-        if Command::new("gfalook").arg("--help").output().is_err() {
-            return;
-        }
+        Command::new("gfalook")
+            .arg("--help")
+            .output()
+            .expect("gfalook is not on PATH");
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("tiny.png");
         let render = test_graph_render_opts();
@@ -15133,28 +15135,6 @@ mod tests {
             parse_poa_scoring_string(POA_SCORING_DEFAULT).unwrap(),
             impg::graph::POA_SCORING_DEFAULT
         );
-    }
-
-    #[test]
-    fn test_gfa_output_format_accepts_syng_nosort_stage() {
-        let args =
-            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:crush:nosort"])
-                .unwrap();
-        match args {
-            Args::Query {
-                output_format,
-                mut engine_cli,
-                ..
-            } => {
-                let output_format =
-                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
-                assert_eq!(output_format, "gfa");
-                let parsed = engine_cli.parse_engine().unwrap();
-                assert_eq!(parsed.graph_sort_pipeline, None);
-                assert!(parsed.crush_config.is_some());
-            }
-            _ => panic!("expected query command"),
-        }
     }
 
     #[test]

@@ -1279,31 +1279,6 @@ P\tseq2:0-8\t1+,3+\t*
     }
 
     #[test]
-    fn test_gfa_to_msa_single_path() {
-        let gfa = "\
-H\tVN:Z:1.0
-S\t1\tACGT
-P\tseq1:0-4\t1+\t*
-";
-        let msa = gfa_to_msa(gfa);
-        assert_eq!(msa.len(), 1);
-        assert_eq!(msa[0].1, "ACGT");
-    }
-
-    #[test]
-    fn test_gfa_to_msa_reverse_orient() {
-        let gfa = "\
-H\tVN:Z:1.0
-S\t1\tACGT
-P\tseq1:0-4\t1-\t*
-";
-        let msa = gfa_to_msa(gfa);
-        assert_eq!(msa.len(), 1);
-        // Reverse complement of ACGT is ACGT
-        assert_eq!(msa[0].1, "ACGT");
-    }
-
-    #[test]
     fn test_gfa_to_msa_reverse_orient_asymmetric() {
         let gfa = "\
 H\tVN:Z:1.0

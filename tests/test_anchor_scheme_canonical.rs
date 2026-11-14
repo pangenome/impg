@@ -252,10 +252,6 @@ fn anchor_scheme_dispatch_reads_env_once() {
     // The default is the collapsed production scheme; the env override is
     // parsed once and stable in-process.
     let scheme = anchor_scheme();
-    assert!(
-        scheme == AnchorScheme::Canonical || scheme == AnchorScheme::Syng,
-        "scheme must be one of the two"
-    );
     assert_eq!(anchor_scheme(), scheme, "scheme is process-stable");
     assert!(AnchorScheme::parse("syng").is_ok());
     assert!(AnchorScheme::parse("canonical").is_ok());

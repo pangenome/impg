@@ -2495,11 +2495,22 @@ P\tseq:0-10\t1+,2+,3+\t*
     }
 
     #[test]
-    fn test_detect_repeat_no_repeat() {
-        // Random sequence — should not detect repeats
-        let seq = b"ACGTACGATCGATCGTAGCTAGCTGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG";
-        // Too short for min_copy_length=1000
-        assert!(detect_repeat(seq, 1000, 20000, 5.0, 50).is_none());
+    fn test_detect_repeat_tandem_and_random() {
+        // xorshift64 bases, fixed seed
+        let mut x: u64 = 0x2545F4914F6CDD1D;
+        let mut base = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            b"ACGT"[(x % 4) as usize]
+        };
+        // 10 exact copies of 1,013 bp
+        let unit: Vec<u8> = (0..1013).map(|_| base()).collect();
+        let tandem: Vec<u8> = unit.iter().copied().cycle().take(10 * unit.len()).collect();
+        let random: Vec<u8> = (0..tandem.len()).map(|_| base()).collect();
+        // First lag run above min_z
+        assert_eq!(detect_repeat(&tandem, 1000, 20000, 5.0, 50), Some(1013));
+        assert_eq!(detect_repeat(&random, 1000, 20000, 5.0, 50), None);
     }
 
     #[test]

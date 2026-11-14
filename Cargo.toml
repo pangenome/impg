@@ -80,7 +80,6 @@ allwave = { git = "https://github.com/pangenome/allwave", rev = "a145a311f2d341b
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "4a8ff0028594e87607cb267f80f9ba6d31eb45be" }
-bluntg = { git = "https://github.com/pangenome/bluntg" }
 povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "0c9f21a40e7755293f5b21f33a7e2c894dc6cb15", default-features = false }
 
 [build-dependencies]
