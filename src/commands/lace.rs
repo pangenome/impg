@@ -1651,13 +1651,7 @@ fn process_vcf_file(
 
 /// Get VCF reader that handles compression transparently
 fn get_vcf_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = File::open(path)?;
-
-    // Use niffler to automatically detect and handle compression
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{path}': {e}")))?;
-
-    Ok(Box::new(BufReader::new(reader)))
+    Ok(Box::new(crate::fasta::open_reader(Path::new(path))?))
 }
 
 /// Write merged VCF file

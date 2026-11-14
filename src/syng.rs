@@ -173,7 +173,7 @@ fn syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     }
 }
 
-fn existing_syng_sidecar_path(prefix: &str, suffix: &str) -> String {
+pub(crate) fn existing_syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     let primary = syng_sidecar_path(prefix, suffix);
     if Path::new(&primary).exists() {
         return primary;

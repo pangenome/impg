@@ -4,7 +4,10 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{genotype, graph, infer, lace, partition, refine, render, similarity};
+use impg::commands::{
+    ensure_parent_dir, genotype, graph, infer, lace, partition, read_text_from_path_or_stdin,
+    refine, render, similarity, write_text_to_path_or_stdout,
+};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -20,7 +23,7 @@ use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
@@ -406,10 +409,7 @@ fn is_blank_line_bytes(line: &[u8]) -> bool {
 }
 
 fn read_query_sequences(path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
-    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+    let mut reader = impg::fasta::open_reader_with_capacity(Path::new(path), 8 * 1024 * 1024)?;
 
     let mut first_line = String::new();
     loop {
@@ -955,10 +955,7 @@ fn stream_query_chunks_with<F>(path: &str, mut on_chunk: F) -> io::Result<()>
 where
     F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
-    let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
-    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+    let mut reader = impg::fasta::open_reader_with_capacity(Path::new(path), 8 * 1024 * 1024)?;
 
     let mut first_line = Vec::new();
     loop {
@@ -8965,11 +8962,7 @@ fn run() -> io::Result<()> {
                     }
                 };
                 let gfa = impg::apply_graph_transforms(gfa, &engine_opts)?;
-                if output == "-" {
-                    io::stdout().lock().write_all(gfa.as_bytes())?;
-                } else {
-                    std::fs::write(&output, gfa)?;
-                }
+                write_text_to_path_or_stdout(&output, &gfa, false)?;
             }
         }
         Args::NormalizeSelfLoops {
@@ -10102,14 +10095,7 @@ fn run() -> io::Result<()> {
                         format_duration(total_start.elapsed())
                     );
 
-                    let file = File::open(&fasta_path)?;
-                    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-                        io::Error::other(format!(
-                            "Failed to open reader for '{}': {}",
-                            fasta_path, e
-                        ))
-                    })?;
-                    let reader = BufReader::new(reader);
+                    let reader = impg::fasta::open_reader(Path::new(&fasta_path))?;
 
                     let mut index = impg::syng::SyngIndex::new(params);
                     configure_position_sampling(&mut index)?;
@@ -10781,10 +10767,7 @@ fn determine_file_format(
 
 // Helper function for auto-detection with compression support
 fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = std::fs::File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader: {e}")))?;
-    Ok(Box::new(BufReader::new(reader)))
+    Ok(Box::new(impg::fasta::open_reader(Path::new(path))?))
 }
 
 fn output_path_for_basename(basename: &Option<String>, extension: &str) -> Option<PathBuf> {
@@ -10801,15 +10784,6 @@ fn output_path_for_basename(basename: &Option<String>, extension: &str) -> Optio
             PathBuf::from(format!("{}.{}", name, wanted))
         }
     })
-}
-
-fn ensure_parent_dir(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    Ok(())
 }
 
 /// Helper function to return a Write implementer that is either standard output or a file with the
@@ -12233,34 +12207,6 @@ fn output_results_paf(
         )?;
     }
 
-    Ok(())
-}
-
-fn read_text_from_path_or_stdin(input: &str) -> io::Result<String> {
-    let mut text = String::new();
-    if input == "-" {
-        io::stdin().read_to_string(&mut text)?;
-    } else {
-        File::open(input)?.read_to_string(&mut text)?;
-    }
-    Ok(text)
-}
-
-fn write_text_to_path_or_stdout(output: &str, text: &str, create_parent: bool) -> io::Result<()> {
-    if output == "-" {
-        let stdout = io::stdout();
-        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        out.write_all(text.as_bytes())?;
-        out.flush()?;
-    } else {
-        let output_path = Path::new(output);
-        if create_parent {
-            ensure_parent_dir(output_path)?;
-        }
-        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
-        out.write_all(text.as_bytes())?;
-        out.flush()?;
-    }
     Ok(())
 }
 

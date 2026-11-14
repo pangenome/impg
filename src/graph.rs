@@ -853,11 +853,7 @@ pub fn write_intervals_fasta(
         })
         .collect::<io::Result<_>>()?;
     for (header, sequence) in records {
-        writeln!(out, ">{header}")?;
-        for line in sequence.chunks(80) {
-            out.write_all(line)?;
-            writeln!(out)?;
-        }
+        crate::fasta::write_wrapped_fasta(out, &header, &sequence)?;
     }
     Ok(())
 }

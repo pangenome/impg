@@ -611,8 +611,7 @@ pub fn run(options: &Options) -> io::Result<()> {
     // per-record transform rides rayon in bounded batches, emitted in
     // input order; the counters merge per batch.
     let t = Instant::now();
-    let (reader, _) = niffler::get_reader(Box::new(File::open(&options.census)?))
-        .map_err(io::Error::other)?;
+    let mut reader = crate::fasta::open_reader_with_capacity(&options.census, 4 << 20)?;
     let out_name = options.out.display().to_string();
     let out_file = File::create(&options.out)?;
     let out_buf = BufWriter::with_capacity(4 << 20, out_file);
@@ -627,7 +626,6 @@ pub fn run(options: &Options) -> io::Result<()> {
         Box::new(out_buf)
     };
     let mut counters = Counters::default();
-    let mut reader = BufReader::with_capacity(4 << 20, reader);
     let mut process_seconds = 0f64;
     let mut emit_seconds = 0f64;
     const BATCH: usize = 256;
