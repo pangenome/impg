@@ -293,13 +293,20 @@ fn score_combination_with<W: FeatureWeight>(
     sample: &FxHashMap<u32, W>,
     sample_norm_sq: f64,
 ) -> io::Result<CombinationScore> {
-    let mut genotype: FxHashMap<u32, W> = FxHashMap::default();
+    // First-touch order, as the dense search
+    let mut slot: FxHashMap<u32, usize> = FxHashMap::default();
+    let mut genotype: Vec<(u32, W)> = Vec::new();
     for &idx in combination {
         for &(feature_id, value) in candidate_features[idx] {
-            let entry = genotype.entry(feature_id).or_default();
-            *entry = entry
-                .add_checked(value)
-                .ok_or_else(|| feature_sum_overflow(feature_id, combination))?;
+            let at = *slot.entry(feature_id).or_insert(genotype.len());
+            if at == genotype.len() {
+                genotype.push((feature_id, value));
+            } else {
+                genotype[at].1 = genotype[at]
+                    .1
+                    .add_checked(value)
+                    .ok_or_else(|| feature_sum_overflow(feature_id, combination))?;
+            }
         }
     }
 
@@ -567,6 +574,27 @@ mod tests {
 
         assert_eq!(results[0].combination, vec![0]);
         assert!(results[0].similarity > results[1].similarity);
+    }
+
+    #[test]
+    fn single_scorer_matches_dense_search_bits() {
+        // Sums whose value depends on order
+        let a: Vec<(u32, f64)> = (0..200u32).map(|i| (i * 7 % 211, 0.1 + i as f64 * 1e-3)).collect();
+        let b: Vec<(u32, f64)> = (0..200u32).map(|i| (i * 13 % 211, 0.3 + i as f64 * 7e-4)).collect();
+        let c: Vec<(u32, f64)> = (0..150u32).map(|i| (i * 3 % 211, 1e-7 + i as f64 * 0.37)).collect();
+        let candidates = [a.as_slice(), b.as_slice(), c.as_slice()];
+        let sample: FxHashMap<u32, f64> = (0..211u32).step_by(2).map(|i| (i, 0.7 + i as f64 * 1e-2)).collect();
+        let features = feature_universe_f64(candidates.iter().copied());
+        let sample_norm_sq = sample_norm_sq_for_weight_features(&sample, &features);
+        let results =
+            run_cosine_combination_search_f64(&candidates, &sample, sample_norm_sq, 2, 100).unwrap();
+        assert_eq!(results.len(), 6);
+        for r in &results {
+            let single =
+                score_cosine_combination_f64(&r.combination, &candidates, &sample, sample_norm_sq).unwrap();
+            assert_eq!(single.similarity.to_bits(), r.similarity.to_bits(), "{:?}", r.combination);
+            assert_eq!(single.dot.to_bits(), r.dot.to_bits(), "{:?}", r.combination);
+        }
     }
 
     #[test]
