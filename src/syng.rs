@@ -5031,6 +5031,19 @@ impl SyngIndex {
         let reverse_walk = self.reverse_strand_walk(&query_walk)?;
         if seed_filter.enabled() {
             let mut visited_nodes = visited_nodes;
+            // Filter the virtual walk before the real walk marks its nodes:
+            // a shared node dropped later would cut the virtual seeds.
+            let reverse_walk: Vec<QueryWalkStep> = match visited_nodes.as_deref() {
+                Some(visited) => reverse_walk
+                    .into_iter()
+                    .filter(|step| !visited.contains(&step.signed_node.unsigned_abs()))
+                    .collect(),
+                None => reverse_walk,
+            };
+            let reverse_nodes: Vec<u32> = reverse_walk
+                .iter()
+                .map(|step| step.signed_node.unsigned_abs())
+                .collect();
             let mut hits = self.query_region_from_ordered_walk_seed_filtered(
                 query_walk,
                 padding,
@@ -5040,9 +5053,12 @@ impl SyngIndex {
             hits.extend(self.query_region_from_ordered_walk_seed_filtered(
                 reverse_walk,
                 padding,
-                visited_nodes,
+                None,
                 seed_filter,
             )?);
+            if let Some(visited) = visited_nodes {
+                visited.extend(reverse_nodes);
+            }
             return Ok(Self::merge_hits_per_strand(hits));
         }
 
@@ -6463,6 +6479,27 @@ mod tests {
             .map(|h| (h.genome, h.start, h.end, h.strand))
             .collect();
         assert!(reverse_hit(walked) > 17_000);
+        // The transitive path passes a visited set. The real walk marks the
+        // nodes both walks share, and the virtual seeds must stay whole.
+        let mut visited = FxHashSet::default();
+        let transitive: Vec<_> = index
+            .query_region_with_anchors_ext_visited_seed_filtered(
+                "A",
+                1_000,
+                19_000,
+                0,
+                0,
+                Some(&mut visited),
+                SyngSeedFilter { walk_anchors: 5, ..SyngSeedFilter::default() },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.genome, h.start, h.end, h.strand))
+            .collect();
+        let fragments = transitive.iter().filter(|h| h.0 == "D" && h.3 == '-').count();
+        assert_eq!(fragments, 1, "{transitive:?}");
+        assert!(reverse_hit(transitive) > 17_000);
+        assert!(!visited.is_empty());
     }
 
     /// Generate a random-ish DNA sequence of the given length.
