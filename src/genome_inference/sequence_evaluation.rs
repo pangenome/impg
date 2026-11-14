@@ -133,12 +133,15 @@ fn cigar(s: &str) -> io::Result<Vec<(u64, u8)>> {
     for (i, b) in s.bytes().enumerate() {
         if !b.is_ascii_digit() {
             let n = number(&s[start..i])?;
-            if n == 0 || !b"M=XIDSH".contains(&b) {
+            if !b"M=XIDSH".contains(&b) {
                 return Err(invalid(
-                    "unsupported/zero-length CIGAR operation (only M=XID and terminal SH)",
+                    "unsupported CIGAR operation (only M=XID and terminal SH)",
                 ));
             }
-            result.push((n, b));
+            // Zero-length operation: no-op
+            if n != 0 {
+                result.push((n, b));
+            }
             start = i + 1;
         }
     }

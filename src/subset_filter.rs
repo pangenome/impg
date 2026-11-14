@@ -1,16 +1,16 @@
 use crate::impg::AdjustedInterval;
 use crate::impg_index::ImpgIndex;
 use log::{debug, warn};
-use std::collections::HashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::io;
 
 /// Filter for matching sequence names against a subset list
 #[derive(Default)]
 pub struct SubsetFilter {
-    exact: HashSet<String>,
-    normalized: HashSet<String>,
-    sample_ids: HashSet<String>,
-    sample_haps: HashSet<(String, String)>,
+    exact: FxHashSet<String>,
+    normalized: FxHashSet<String>,
+    sample_ids: FxHashSet<String>,
+    sample_haps: FxHashMap<String, FxHashSet<String>>,
 }
 
 impl SubsetFilter {
@@ -44,12 +44,16 @@ impl SubsetFilter {
     fn matches_sample_keys(&self, seq_name: &str) -> bool {
         if let Some((sample, hap)) = extract_sample_and_hap(seq_name) {
             if let Some(hap) = hap {
-                if self.sample_haps.contains(&(sample.clone(), hap.clone())) {
+                if self
+                    .sample_haps
+                    .get(sample)
+                    .is_some_and(|haps| haps.contains(hap))
+                {
                     return true;
                 }
             }
 
-            if self.sample_ids.contains(&sample) {
+            if self.sample_ids.contains(sample) {
                 return true;
             }
         }
@@ -130,9 +134,9 @@ fn parse_subset_filter(contents: &str) -> SubsetFilter {
 
         if let Some((sample, hap)) = extract_sample_and_hap(no_coords) {
             if let Some(hap) = hap {
-                filter.sample_haps.insert((sample, hap));
+                self_insert_sample_hap(&mut filter.sample_haps, sample, hap);
             } else {
-                filter.sample_ids.insert(sample);
+                filter.sample_ids.insert(sample.to_string());
             }
         }
     }
@@ -140,37 +144,44 @@ fn parse_subset_filter(contents: &str) -> SubsetFilter {
     filter
 }
 
-fn extract_sample_and_hap(name: &str) -> Option<(String, Option<String>)> {
+fn self_insert_sample_hap(
+    sample_haps: &mut FxHashMap<String, FxHashSet<String>>,
+    sample: &str,
+    hap: &str,
+) {
+    if let Some(haps) = sample_haps.get_mut(sample) {
+        haps.insert(hap.to_string());
+    } else {
+        let mut haps = FxHashSet::default();
+        haps.insert(hap.to_string());
+        sample_haps.insert(sample.to_string(), haps);
+    }
+}
+
+fn extract_leading_digits(s: &str) -> Option<&str> {
+    let digit_bytes = s
+        .as_bytes()
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    (digit_bytes > 0).then_some(&s[..digit_bytes])
+}
+
+fn extract_sample_and_hap(name: &str) -> Option<(&str, Option<&str>)> {
     if let Some(idx) = name.find("_hap") {
-        let sample = name[..idx].to_string();
-        let hap_digits: String = name[idx + 4..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let hap = if hap_digits.is_empty() {
-            None
-        } else {
-            Some(hap_digits)
-        };
+        let sample = &name[..idx];
+        let hap = extract_leading_digits(&name[idx + 4..]);
         return Some((sample, hap));
     }
 
     if let Some((sample, rest)) = name.split_once('#') {
         let hap_fragment = rest.split('#').next().unwrap_or(rest);
-        let hap_digits: String = hap_fragment
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let hap = if hap_digits.is_empty() {
-            None
-        } else {
-            Some(hap_digits)
-        };
-        return Some((sample.to_string(), hap));
+        let hap = extract_leading_digits(hap_fragment);
+        return Some((sample, hap));
     }
 
     if !name.contains(':') && !name.trim().is_empty() {
-        return Some((name.to_string(), None));
+        return Some((name, None));
     }
 
     None

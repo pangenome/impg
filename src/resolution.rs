@@ -10472,6 +10472,7 @@ fn row_from_query_root_cigar(
     let mut q = 0usize;
     let mut r = 0usize;
     let mut len = 0usize;
+    let mut has_len = false;
 
     for ch in cigar.bytes() {
         if ch.is_ascii_digit() {
@@ -10479,11 +10480,13 @@ fn row_from_query_root_cigar(
                 .checked_mul(10)
                 .and_then(|v| v.checked_add((ch - b'0') as usize))
                 .ok_or_else(|| io::Error::other("BiWFA CIGAR run length overflow"))?;
+            has_len = true;
             continue;
         }
-        if len == 0 {
-            return Err(io::Error::other("BiWFA CIGAR has zero-length operation"));
+        if !has_len {
+            return Err(io::Error::other("BiWFA CIGAR operation has no length"));
         }
+        has_len = false;
         match ch {
             b'M' | b'=' | b'X' => {
                 if q + len > query.len() || r + len > root_len {
@@ -10518,7 +10521,7 @@ fn row_from_query_root_cigar(
         len = 0;
     }
 
-    if len != 0 {
+    if has_len {
         return Err(io::Error::other("BiWFA CIGAR ended before operation"));
     }
     if q != query.len() || r != root_len {
