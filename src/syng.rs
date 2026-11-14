@@ -5755,11 +5755,14 @@ impl Drop for SyngMatcherWorker<'_> {
     }
 }
 
-/// Test-only serialization for the syng C library's non-thread-safe
-/// global state (pathCount, array tracking counters, etc.) — shared
+/// Test-only serialization for the syng C library, shared
 /// by EVERY in-process test that touches the C FFI (syng's own tests
 /// and the genome_inference precompute/serve fixtures, which build
-/// in-process panels through the same C library).
+/// in-process panels through the same C library). The process-global
+/// state the C code wrote (pathCount, the allocation counters, the ONE
+/// codec histogram) is atomic, thread-local or constant since
+/// pangenome/syng#6. The lock stays because no run has shown the tests
+/// pass without it.
 #[cfg(test)]
 pub(crate) static SYNG_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
@@ -5768,9 +5771,8 @@ pub(crate) static SYNG_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
 mod tests {
     use super::*;
 
-    // The syng C library has non-thread-safe global state (pathCount, array
-    // tracking counters, etc.), so all tests that touch the C FFI must be
-    // serialized — through the crate-shared `SYNG_TEST_LOCK` (the
+    // All tests that touch the syng C FFI are
+    // serialized through the crate-shared `SYNG_TEST_LOCK` (the
     // genome_inference serve fixtures build in-process panels through
     // the same C library and take the same lock).
     fn lock_syng() -> std::sync::MutexGuard<'static, ()> {
