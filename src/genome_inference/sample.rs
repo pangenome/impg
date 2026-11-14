@@ -85,6 +85,7 @@ pub(crate) fn collect_raw_views(
     reverse: &[(i32, u64)],
     length: u64,
 ) -> io::Result<Vec<TaggedWalk>> {
+    let k = panel.syncmer_length_bp() as u64;
     let mut records = BTreeSet::new();
     for rev in [false, true] {
         let selected = if forward.len() > reverse.len() || (forward.len() == reverse.len() && !rev)
@@ -93,22 +94,31 @@ pub(crate) fn collect_raw_views(
         } else {
             reverse
         };
-        let mut selected = selected.to_vec();
-        if rev {
-            selected = normalize_reverse(&selected, length, panel.syncmer_length_bp() as u64);
-        }
-        let walk: Vec<_> = selected
-            .iter()
-            .map(|&(signed_node, bp_pos)| SyngWalkStep {
-                signed_node,
-                bp_pos,
-            })
-            .collect();
+        let walk: Vec<_> = if rev {
+            selected
+                .iter()
+                .rev()
+                .map(|&(signed_node, bp_pos)| SyngWalkStep {
+                    signed_node: -signed_node,
+                    bp_pos: length - k - bp_pos,
+                })
+                .collect()
+        } else {
+            selected
+                .iter()
+                .map(|&(signed_node, bp_pos)| SyngWalkStep {
+                    signed_node,
+                    bp_pos,
+                })
+                .collect()
+        };
         for mem in panel.gbwt_mems_for_walk(&walk)? {
-            let mut record = selected[mem.step_start..mem.step_end].to_vec();
-            if rev {
-                record = normalize_reverse(&record, length, panel.syncmer_length_bp() as u64);
-            }
+            let record: TaggedWalk = if rev {
+                let len = selected.len();
+                selected[len - mem.step_end..len - mem.step_start].to_vec()
+            } else {
+                selected[mem.step_start..mem.step_end].to_vec()
+            };
             records.insert(record);
         }
     }
@@ -234,9 +244,7 @@ fn stream_reads(path: &Path, mut visit: impl FnMut(&[u8]) -> io::Result<()>) -> 
     let valid_seq = |seq: &[u8]| -> io::Result<()> {
         if seq.is_empty()
             || seq.len() > i32::MAX as usize
-            || seq
-                .iter()
-                .any(|c| !b"ACGTRYSWKMBDHVNacgtryswkmbdhvn".contains(c))
+            || seq.iter().any(|&c| !super::is_valid_iupac_base(c))
         {
             return Err(invalid("empty, oversized or invalid DNA read"));
         }

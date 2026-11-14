@@ -1081,13 +1081,7 @@ pub fn run(command: Command) -> io::Result<()> {
             let out_dir = out_dir
                 .unwrap_or_else(|| partition_graphs.join("panel-precompute-loci"));
             if out_dir.join("manifest.json").is_file() {
-                let manifest_format = std::fs::read_to_string(out_dir.join("manifest.json"))
-                    .ok()
-                    .and_then(|text| {
-                        serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
-                            .ok()
-                    })
-                    .map(|manifest| manifest.format_text());
+                let manifest_format = panel_precompute_format(&out_dir);
                 if manifest_format.as_deref() == Some("impg-panel-precompute-loci/2") {
                     println!(
                         "=== panel-precompute: the per-locus precompute asset {} exists — REUSED \
@@ -2157,13 +2151,7 @@ pub fn run(command: Command) -> io::Result<()> {
             // bind-scaffolding section); the call falls back to the
             // live path loudly on any content-key mismatch.
             let precompute_dir = partition_graphs.join("panel-precompute-loci");
-            let precompute_format = std::fs::read_to_string(precompute_dir.join("manifest.json"))
-                .ok()
-                .and_then(|text| {
-                    serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text)
-                        .ok()
-                })
-                .map(|manifest| manifest.format_text());
+            let precompute_format = panel_precompute_format(&precompute_dir);
             if precompute_format.as_deref() == Some("impg-panel-precompute-loci/2") {
                 println!(
                     "=== panel-prep: the per-locus precompute asset {} exists — REUSED \
@@ -2484,34 +2472,11 @@ pub fn run(command: Command) -> io::Result<()> {
                     )?;
                     // THE SCORED LOCI: every window, or the --region
                     // range resolved against the partition's frame.
-                    let axis_rows = realign_score::component_axis_rows(&graphs, &component)?;
-                    let loci: Vec<u32> = match region_filter_range(region.as_deref())? {
-                        Some(range) => {
-                            let resolved = realign_score::resolve_region_loci(
-                                &component,
-                                &axis_rows,
-                                range,
-                            )?;
-                            eprintln!(
-                                "[call] partition {name}: region {range:?} resolved to \
-                                 loci {resolved:?} (frame {component})"
-                            );
-                            resolved
-                        }
-                        None => (0..axis_rows.len() as u32).collect(),
-                    };
-                    if loci.is_empty() {
-                        println!(
-                            "=== call: partition {name} skipped (the region covers no \
-                             window)"
-                        );
+                    let Some(loci) =
+                        resolve_partition_loci(&graphs, &component, name, region.as_deref())?
+                    else {
                         continue;
-                    }
-                    let loci = loci
-                        .iter()
-                        .map(|l| l.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",");
+                    };
                     println!(
                         "=== call: partition {name} ({loci} windows, the FLEET form: \
                          fork-after-load, width-32 cut, T16 calls)"
@@ -2620,30 +2585,11 @@ pub fn run(command: Command) -> io::Result<()> {
                 // THE SCORED LOCI: every window of the partition, or
                 // the --region range resolved against the partition's
                 // own reference frame ("any locus, any position").
-                let axis_rows = realign_score::component_axis_rows(&graphs, &component)?;
-                let loci: Vec<u32> = match region_filter_range(region.as_deref())? {
-                    Some(range) => {
-                        let resolved =
-                            realign_score::resolve_region_loci(&component, &axis_rows, range)?;
-                        eprintln!(
-                            "[call] partition {name}: region {range:?} resolved to loci \
-                             {resolved:?} (frame {component})"
-                        );
-                        resolved
-                    }
-                    None => (0..axis_rows.len() as u32).collect(),
-                };
-                if loci.is_empty() {
-                    println!(
-                        "=== call: partition {name} skipped (the region covers no window)"
-                    );
+                let Some(loci) =
+                    resolve_partition_loci(&graphs, &component, name, region.as_deref())?
+                else {
                     continue;
-                }
-                let loci = loci
-                    .iter()
-                    .map(|l| l.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                };
                 println!(
                     "=== call: partition {name} ({loci} windows, frame {component})"
                 );
@@ -2747,6 +2693,44 @@ fn ensure(ok: bool, message: impl Into<String>) -> io::Result<()> {
     }
 }
 
+fn panel_precompute_format(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join("manifest.json"))
+        .ok()
+        .and_then(|text| {
+            serde_json::from_str::<genome::realign_score::PanelPrecomputeManifest>(&text).ok()
+        })
+        .map(|manifest| manifest.format_text())
+}
+
+fn resolve_partition_loci(
+    graphs: &Path,
+    component: &str,
+    name: &str,
+    region: Option<&str>,
+) -> io::Result<Option<String>> {
+    let axis_rows = realign_score::component_axis_rows(graphs, component)?;
+    let loci: Vec<u32> = match region_filter_range(region)? {
+        Some(range) => {
+            let resolved = realign_score::resolve_region_loci(component, &axis_rows, range)?;
+            eprintln!(
+                "[call] partition {name}: region {range:?} resolved to loci {resolved:?} (frame {component})"
+            );
+            resolved
+        }
+        None => (0..axis_rows.len() as u32).collect(),
+    };
+    if loci.is_empty() {
+        println!("=== call: partition {name} skipped (the region covers no window)");
+        return Ok(None);
+    }
+    Ok(Some(
+        loci.iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    ))
+}
+
 /// THE BED4 READER (the one partition artifact: chrom, start, end,
 /// PARTITION_NAME - each row a named reference range).
 fn read_partitions_bed(path: &Path) -> io::Result<Vec<(String, u64, u64, String)>> {
@@ -2796,11 +2780,12 @@ fn select_partition_rows(
     if let Some(range) = region_filter_range(Some(region))? {
         let (chrom, bounds) = range
             .split_once(':')
-            .ok_or_else(|| invalid("the region must be chr:start-end: {region:?}"))?;
+            .ok_or_else(|| invalid(format!("the region must be chr:start-end: {region:?}")))?;
         let (lo, hi) = bounds
             .split_once('-')
             .and_then(|(s, e)| Some((s.parse::<u64>().ok()?, e.parse::<u64>().ok()?)))
-            .ok_or_else(|| invalid("the region must be chr:start-end: {region:?}"))?;
+            .ok_or_else(|| invalid(format!("the region must be chr:start-end: {region:?}")))?;
+        ensure(lo < hi, format!("the region is empty: {region:?}"))?;
         let selected: Vec<usize> = bed_rows
             .iter()
             .enumerate()
@@ -2816,7 +2801,7 @@ fn select_partition_rows(
     let names: Vec<&str> = region.split(',').map(|s| s.trim()).collect();
     ensure(
         names.iter().all(|name| bed_rows.iter().any(|row| row.3 == *name)),
-        "the region names {region:?} name partitions absent from the BED",
+        format!("the region names {region:?} name partitions absent from the BED"),
     )?;
     let selected: Vec<usize> = bed_rows
         .iter()
@@ -2959,5 +2944,27 @@ mod tests {
             panic!("expected call-region");
         };
         assert!(far_bin_prune, "the default is ON");
+    }
+
+    #[test]
+    fn select_partition_rows_validates_bounds_and_formats_errors() {
+        let rows = vec![
+            ("chr1".to_string(), 0, 1000, "P1".to_string()),
+            ("chr1".to_string(), 1000, 2000, "P2".to_string()),
+        ];
+        assert_eq!(select_partition_rows(&rows, Some("chr1:900-1100")).unwrap(), vec![0, 1]);
+        assert_eq!(select_partition_rows(&rows, Some("P2")).unwrap(), vec![1]);
+
+        let empty = select_partition_rows(&rows, Some("chr1:500-500")).unwrap_err();
+        assert!(empty.to_string().contains("chr1:500-500"));
+
+        let inverted = select_partition_rows(&rows, Some("chr1:600-500")).unwrap_err();
+        assert!(inverted.to_string().contains("chr1:600-500"));
+
+        let bad_bounds = select_partition_rows(&rows, Some("chr1:abc-100")).unwrap_err();
+        assert!(bad_bounds.to_string().contains("chr1:abc-100"));
+
+        let missing_name = select_partition_rows(&rows, Some("NO_SUCH")).unwrap_err();
+        assert!(missing_name.to_string().contains("NO_SUCH"));
     }
 }

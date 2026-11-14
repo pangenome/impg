@@ -37,6 +37,10 @@ pub fn left_align_indels(cigar: &[u8], query: &[u8], target: &[u8]) -> Vec<u8> {
     }
     let mut c = cigar.to_vec();
 
+    // Maintain exact (q_pos, t_pos) consumed by c[0..i] in O(L) total instead
+    // of re-scanning from 0 on every indel run.
+    let (mut q_pos, mut t_pos) = consume_to(&c, c.len());
+
     // For each index i, shift any I/D starting at i as far left as
     // possible. We walk right-to-left so earlier shifts don't affect
     // the boundary positions of later runs.
@@ -44,16 +48,36 @@ pub fn left_align_indels(cigar: &[u8], query: &[u8], target: &[u8]) -> Vec<u8> {
     while i > 0 {
         i -= 1;
         let op = c[i];
-        if op != b'I' && op != b'D' {
-            continue;
+        match op {
+            b'I' => q_pos = q_pos.saturating_sub(1),
+            b'D' => t_pos = t_pos.saturating_sub(1),
+            b'M' | b'=' | b'X' => {
+                q_pos = q_pos.saturating_sub(1);
+                t_pos = t_pos.saturating_sub(1);
+                continue;
+            }
+            _ => continue,
         }
         // Find the start of this I or D run (i is the rightmost op).
         let mut run_start = i;
         while run_start > 0 && c[run_start - 1] == op {
             run_start -= 1;
+            match op {
+                b'I' => q_pos = q_pos.saturating_sub(1),
+                b'D' => t_pos = t_pos.saturating_sub(1),
+                _ => {}
+            }
         }
-        // Shift the run left as far as possible.
-        let new_start = shift_indel_run_left(&mut c, run_start, op, query, target);
+        let mut run_len = i - run_start + 1;
+        // Include any contiguous `op` bytes immediately to the right of `i`
+        // that coalesced here when a later run shifted left.
+        while run_start + run_len < c.len() && c[run_start + run_len] == op {
+            run_len += 1;
+        }
+        // Shift the run left as far as possible; updates (q_pos, t_pos)
+        // in place so they still reflect consumption of c[0..new_start].
+        let new_start =
+            shift_indel_run_left(&mut c, run_start, run_len, op, query, target, &mut q_pos, &mut t_pos);
         // Continue scanning from one position before the (possibly new)
         // run start.
         i = new_start;
@@ -61,65 +85,59 @@ pub fn left_align_indels(cigar: &[u8], query: &[u8], target: &[u8]) -> Vec<u8> {
     c
 }
 
-/// Shift a single indel run (op-type `op`, starting at `run_start`) as
-/// far left as possible. Returns the new `run_start` index.
-///
-/// The run consists of identical `op` bytes in `cigar` starting at
-/// `run_start`. We walk the CIGAR to count how many `op`s are in the
-/// run, then repeatedly check whether the preceding op is a match
-/// (`M`/`=`/`X`) and whether swapping it with the last op of the run
-/// leaves the alignment consistent with the sequences.
+/// Shift a single indel run (op-type `op`, length `run_len`, starting at
+/// `run_start`) as far left as possible. Returns the new `run_start` index
+/// and updates `q_pos`/`t_pos` to match `consume_to(cigar, new_start)`.
 fn shift_indel_run_left(
     cigar: &mut [u8],
     mut run_start: usize,
+    run_len: usize,
     op: u8,
     query: &[u8],
     target: &[u8],
+    q_pos: &mut usize,
+    t_pos: &mut usize,
 ) -> usize {
-    // Determine the bp coordinates of the run on each sequence. To do
-    // this, walk the CIGAR from the start and count query/target
-    // consumption up to `run_start`.
-    let (mut q_pos, mut t_pos) = consume_to(cigar, run_start);
+    if run_len == 0 {
+        return run_start;
+    }
 
     loop {
         if run_start == 0 {
             return run_start;
         }
         let prev_op = cigar[run_start - 1];
-        if prev_op != b'M' && prev_op != b'=' && prev_op != b'X' {
+        // Only shift over true match ops (not X mismatches or another indel).
+        if prev_op != b'M' && prev_op != b'=' {
             return run_start;
         }
-        // Count the run length.
-        let run_len = count_run(cigar, run_start, op);
+        if *q_pos == 0 || *t_pos == 0 {
+            return run_start;
+        }
         // The base we'd be swapping: immediately before the run on the
-        // axis that the run consumes.
+        // axis that the run consumes, against the last base of the run.
         let (swap_base, run_tail_base) = match op {
-            // I consumes query. The run covers query[q_pos .. q_pos+run_len].
-            // The "previous base on query" is query[q_pos - 1]. The run
-            // tail base (last base in the inserted region) is query[q_pos + run_len - 1].
             b'I' => {
-                if q_pos == 0 {
-                    return run_start;
-                }
-                (query[q_pos - 1], query[q_pos + run_len - 1])
+                assert!(
+                    *q_pos + run_len <= query.len(),
+                    "left_align_indels: CIGAR exceeds query length {} (insertion ends at {})",
+                    query.len(),
+                    *q_pos + run_len
+                );
+                (query[*q_pos - 1], query[*q_pos + run_len - 1])
             }
-            // D consumes target. Mirror logic with target[].
             b'D' => {
-                if t_pos == 0 {
-                    return run_start;
-                }
-                (target[t_pos - 1], target[t_pos + run_len - 1])
+                assert!(
+                    *t_pos + run_len <= target.len(),
+                    "left_align_indels: CIGAR exceeds target length {} (deletion ends at {})",
+                    target.len(),
+                    *t_pos + run_len
+                );
+                (target[*t_pos - 1], target[*t_pos + run_len - 1])
             }
             _ => return run_start,
         };
         if swap_base != run_tail_base {
-            return run_start;
-        }
-        // Also require the OTHER axis's base at the boundary matches
-        // itself — i.e. the `prev_op` is a real match `=` or `M` that
-        // *stays* a match after the shift. For `X` (mismatch) we don't
-        // shift because swapping would change what the mismatch aligns.
-        if prev_op == b'X' {
             return run_start;
         }
         // Perform the rotation: swap prev_op with the last op of the run.
@@ -128,25 +146,10 @@ fn shift_indel_run_left(
         cigar[run_start - 1] = op;
         cigar[run_start + run_len - 1] = prev_op;
         run_start -= 1;
-        // Update q_pos / t_pos: the previous M consumed one of each;
-        // now it's been replaced by `op`, which consumes only one axis.
-        // So the position where the run now starts shifted back by one
-        // on both axes for the M-that-was-consumed (we were "past" it),
-        // then forward by 0 on the non-consumed axis and forward by 1
-        // on the op-consumed axis (because the M slid to the right of
-        // the run).
-        //
-        // Net: the indel's left boundary on its axis moves back by 1.
-        // The other axis's boundary is unchanged.
-        match op {
-            b'I' => {
-                q_pos -= 1;
-            }
-            b'D' => {
-                t_pos -= 1;
-            }
-            _ => unreachable!(),
-        }
+        // prev_op (M/=) consumed 1 on both axes and has moved to the right
+        // of the indel run, so c[0..run_start] now consumes 1 less on both.
+        *q_pos -= 1;
+        *t_pos -= 1;
     }
 }
 
@@ -166,15 +169,6 @@ fn consume_to(cigar: &[u8], idx: usize) -> (usize, usize) {
         }
     }
     (q, t)
-}
-
-/// Length of the run of `op` starting at `start`.
-fn count_run(cigar: &[u8], start: usize, op: u8) -> usize {
-    let mut n = 0;
-    while start + n < cigar.len() && cigar[start + n] == op {
-        n += 1;
-    }
-    n
 }
 
 #[cfg(test)]
@@ -303,5 +297,38 @@ mod tests {
             "got {}",
             std::str::from_utf8(&out).unwrap()
         );
+    }
+
+    #[test]
+    fn multiple_indels_track_coordinates() {
+        //   target: ACAAAATGGG  (len 10)
+        //   query:  ACAAAAATGGGG (len 12): extra A + extra G
+        //   raw:    MMMMMMIMMMMI (len 12: q=6+1+4+1=12, t=6+4=10)
+        let target = b"ACAAAATGGG";
+        let query = b"ACAAAAATGGGG";
+        let cig = b"MMMMMMIMMMMI";
+        let out = left_align_indels(cig, query, target);
+        assert_eq!(out, b"MMIMMMMMIMMM");
+    }
+
+    #[test]
+    #[should_panic(expected = "CIGAR exceeds query length")]
+    fn overlong_insertion_cigar_panics() {
+        left_align_indels(b"MMMI", b"AA", b"AA");
+    }
+
+    #[test]
+    #[should_panic(expected = "CIGAR exceeds target length")]
+    fn overlong_deletion_cigar_panics() {
+        left_align_indels(b"MMMD", b"AA", b"AA");
+    }
+
+    #[test]
+    fn coalescing_indel_runs_shift_left_together() {
+        // Two separated insertions that coalesce into II= and then shift across
+        // the leading match together to form II==.
+        assert_eq!(left_align_indels(b"=I=I", b"ATAA", b"AA"), b"II==");
+        assert_eq!(left_align_indels(b"=I=I=I", b"AAAAAA", b"AAA"), b"III===");
+        assert_eq!(left_align_indels(b"=D=D", b"AA", b"ATAA"), b"DD==");
     }
 }

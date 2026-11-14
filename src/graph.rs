@@ -862,19 +862,21 @@ pub fn write_intervals_fasta(
     Ok(())
 }
 
-pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    let len = seq.len();
-    let mut result = Vec::with_capacity(len);
-    for &base in seq.iter().rev() {
-        result.push(match base {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'N' | b'n' => b'N',
-            _ => base,
-        });
+#[inline]
+pub(crate) fn complement_base(base: u8) -> u8 {
+    match base {
+        b'A' | b'a' => b'T',
+        b'T' | b't' => b'A',
+        b'C' | b'c' => b'G',
+        b'G' | b'g' => b'C',
+        b'N' | b'n' => b'N',
+        _ => base,
     }
+}
+
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(seq.len());
+    result.extend(seq.iter().rev().map(|&base| complement_base(base)));
     result
 }
 
