@@ -887,14 +887,13 @@ fn should_merge(a: &SampleInterval, b: &SampleInterval, merge_distance: i32) -> 
     if merge_distance < 0 {
         return false;
     }
-    let gap = |a0: i32, a1: i32, b0: i32, b1: i32| -> u64 {
-        (i64::from(b0) - i64::from(a1))
-            .max(i64::from(a0) - i64::from(b1))
-            .max(0) as u64
+    // Endpoint adjacency; abs_diff cannot overflow
+    let distance = merge_distance as u32;
+    let adjacent = |a0: i32, a1: i32, b0: i32, b1: i32| {
+        a1.abs_diff(b0).min(a0.abs_diff(b1)) <= distance
     };
-    let distance = u64::from(merge_distance as u32);
-    gap(a.query_start, a.query_end, b.query_start, b.query_end) <= distance
-        || gap(a.target_start, a.target_end, b.target_start, b.target_end) <= distance
+    adjacent(a.query_start, a.query_end, b.query_start, b.query_end)
+        || adjacent(a.target_start, a.target_end, b.target_start, b.target_end)
 }
 
 fn build_flanks(max_extension: i32, step: i32) -> Vec<i32> {
@@ -1025,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn should_merge_merges_overlapping_intervals_and_respects_gap() {
+    fn should_merge_needs_endpoints_within_distance() {
         let interval = |s, e| SampleInterval {
             query_start: s,
             query_end: e,
@@ -1033,17 +1032,15 @@ mod tests {
             target_end: 10_000 + e,
             target_pieces: vec![(10_000 + s, 10_000 + e)],
         };
-        // Large overlapping intervals whose endpoints are > 100 bp apart still have gap == 0.
-        assert!(should_merge(
-            &interval(0, 10_000),
-            &interval(5_000, 15_000),
-            100
-        ));
-        assert!(!should_merge(
-            &interval(0, 1_000),
-            &interval(1_200, 2_000),
-            100
-        ));
+        // Adjacent endpoints merge, in both orders
+        assert!(should_merge(&interval(0, 1_000), &interval(1_100, 2_000), 100));
+        assert!(should_merge(&interval(1_100, 2_000), &interval(0, 1_000), 100));
+        assert!(!should_merge(&interval(0, 1_000), &interval(1_200, 2_000), 100));
+        // Overlap with far endpoints does not merge
+        assert!(!should_merge(&interval(0, 10_000), &interval(5_000, 15_000), 100));
+        // Extreme coordinates do not overflow
+        assert!(!should_merge(&interval(i32::MIN + 20_000, 0), &interval(i32::MAX - 20_000, i32::MAX - 10_001), 100));
+        assert!(!should_merge(&interval(0, 1_000), &interval(1_000, 2_000), -1));
     }
 
     #[test]
