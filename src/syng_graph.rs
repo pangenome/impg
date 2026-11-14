@@ -91,20 +91,23 @@ fn bases_equal_for_seqwish(query: u8, target: u8) -> bool {
     query == target && query != b'N'
 }
 
-fn paf_cigar<'a>(line_fields: &'a [&'a str]) -> Option<&'a str> {
-    line_fields
-        .iter()
-        .skip(12)
-        .find_map(|field| field.strip_prefix("cg:Z:"))
+fn parse_paf_cols<'a, const N: usize>(
+    line: &'a str,
+    cols: &mut [&'a str; N],
+) -> Option<Option<&'a str>> {
+    let mut parts = line.split('\t');
+    for slot in cols.iter_mut() {
+        *slot = parts.next()?;
+    }
+    let cigar = parts.find_map(|field| field.strip_prefix("cg:Z:"));
+    Some(cigar)
 }
 
 fn paf_line_max_exact_match_run(
-    fields: &[&str],
+    fields: &[&str; 12],
+    cigar: Option<&str>,
     seq_by_name: &std::collections::HashMap<&str, &[u8]>,
 ) -> Option<(u64, bool)> {
-    if fields.len() < 12 {
-        return None;
-    }
     let qseq = *seq_by_name.get(fields[0])?;
     let tseq = *seq_by_name.get(fields[5])?;
     let qlen = fields[1].parse::<usize>().ok()?;
@@ -123,15 +126,12 @@ fn paf_line_max_exact_match_run(
         return None;
     }
 
-    let Some(cigar) = paf_cigar(fields) else {
+    let Some(cigar) = cigar else {
         // No base-level CIGAR: use the PAF block length as a conservative
         // upper bound. seqwish itself requires a CIGAR to split exact runs, but
         // this preserves old behaviour for PAF producers that emit single-run
         // alignments without cg:Z.
-        return fields
-            .get(10)
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|len| (len, false));
+        return fields[10].parse::<u64>().ok().map(|len| (len, false));
     };
 
     let query_is_rev = fields[4] == "-";
@@ -216,19 +216,24 @@ fn filtered_paf_exact_match_run_stats(
         .map(|(name, seq)| (name.as_str(), seq.as_slice()))
         .collect();
     let file = std::fs::File::open(paf_path)?;
-    let reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(file);
     let mut stats = PafExactMatchRunStats::default();
+    let mut line = String::new();
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.trim().is_empty() {
             continue;
         }
         stats.records += 1;
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() < 12 {
+        let mut fields = [""; 12];
+        let Some(cigar) = parse_paf_cols(trimmed, &mut fields) else {
             continue;
-        }
+        };
         let names_match =
             seq_by_name.contains_key(fields[0]) && seq_by_name.contains_key(fields[5]);
         if !names_match {
@@ -249,7 +254,9 @@ fn filtered_paf_exact_match_run_stats(
             stats.length_mismatches += 1;
             continue;
         }
-        if let Some((max_run, has_cigar)) = paf_line_max_exact_match_run(&fields, &seq_by_name) {
+        if let Some((max_run, has_cigar)) =
+            paf_line_max_exact_match_run(&fields, cigar, &seq_by_name)
+        {
             stats.parsed_records += 1;
             if has_cigar {
                 stats.records_with_cigar += 1;
@@ -332,14 +339,19 @@ pub(crate) fn write_paf_stage_debug(
     let mut metrics = PafStageMetrics::default();
 
     let file = std::fs::File::open(paf_path)?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.trim().is_empty() {
             continue;
         }
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() < 11 {
+        let mut fields = [""; 11];
+        if parse_paf_cols(trimmed, &mut fields).is_none() {
             continue;
         }
         metrics.records += 1;
@@ -487,6 +499,49 @@ pub fn cigar_stats(cigar: &[u8]) -> (u32, u32, u32, u32) {
 /// line with `cg:Z:` tag. Returns `None` if either sequence is empty or
 /// the alignment does not complete.
 ///
+/// Left-align indels, validate exact query/target length consumption,
+/// compact CIGAR, and emit one PAF record line.
+fn finalize_biwfa_paf_record(
+    context: &str,
+    a_name: &str,
+    a_seq: &[u8],
+    paf_strand: char,
+    b_name: &str,
+    b_seq: &[u8],
+    raw_paf_cigar: &[u8],
+) -> Option<String> {
+    let paf_cigar_bytes = crate::syng_graph_norm::left_align_indels(raw_paf_cigar, a_seq, b_seq);
+
+    let (matches, mismatches, ins, del) = cigar_stats(&paf_cigar_bytes);
+    let block_len = matches + mismatches + ins + del;
+    if block_len == 0 {
+        return None;
+    }
+    let a_len = a_seq.len();
+    let b_len = b_seq.len();
+
+    let q_consumed = (matches + mismatches + ins) as usize;
+    let t_consumed = (matches + mismatches + del) as usize;
+    if q_consumed != a_len || t_consumed != b_len {
+        log::debug!(
+            "{}: dropping pair {}/{} — cigar consumes q={} t={} but lens are q={} t={}",
+            context,
+            a_name,
+            b_name,
+            q_consumed,
+            t_consumed,
+            a_len,
+            b_len
+        );
+        return None;
+    }
+    let cigar_str = compact_cigar(&paf_cigar_bytes);
+    Some(format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
+        a_name, a_len, 0, a_len, paf_strand, b_name, b_len, 0, b_len, matches, block_len, cigar_str,
+    ))
+}
+
 /// PAF convention: sequence `a` is the query, `b` is the target. Both
 /// are aligned forward-strand — callers must reverse-complement one
 /// side before calling if the pair is `'-'` strand (e.g., per syng
@@ -523,42 +578,8 @@ pub fn pairwise_biwfa_paf(
         })
         .collect();
 
-    // Left-align indels in the query frame. Canonicalizes microsat and
-    // homopolymer indel placements → stops seqwish from seeing the same
-    // event as two different variants. `a` is the query by our
-    // convention, so the CIGAR is already in the query frame.
-    let paf_cigar_bytes = crate::syng_graph_norm::left_align_indels(&wfa_to_paf, a_seq, b_seq);
-
-    let (matches, mismatches, ins, del) = cigar_stats(&paf_cigar_bytes);
-    let block_len = matches + mismatches + ins + del;
-    if block_len == 0 {
-        return None;
-    }
-    let a_len = a_seq.len();
-    let b_len = b_seq.len();
-
-    // Validate that the CIGAR consumes exactly a_len from query and
-    // b_len from target. If it doesn't, the PAF line would break seqwish's
-    // position math — drop it.
-    let q_consumed = (matches + mismatches + ins) as usize;
-    let t_consumed = (matches + mismatches + del) as usize;
-    if q_consumed != a_len || t_consumed != b_len {
-        log::debug!(
-            "syng_graph: dropping pair {}/{} — cigar consumes q={} t={} but lens are q={} t={}",
-            a_name,
-            b_name,
-            q_consumed,
-            t_consumed,
-            a_len,
-            b_len
-        );
-        return None;
-    }
-    let cigar_str = compact_cigar(&paf_cigar_bytes);
-    Some(format!(
-        "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
-        a_name, a_len, 0, a_len, b_name, b_len, 0, b_len, matches, block_len, cigar_str,
-    ))
+    // Left-align indels in the query frame, validate full span, and format PAF.
+    finalize_biwfa_paf_record("syng_graph", a_name, a_seq, '+', b_name, b_seq, &wfa_to_paf)
 }
 
 /// Build a PAF string from all pairs of sequences (i < j). Rayon-parallel
@@ -773,33 +794,15 @@ pub fn anchor_seeded_biwfa_paf_strand(
         }
     }
 
-    // Left-align the final CIGAR.
-    let paf_cigar = crate::syng_graph_norm::left_align_indels(&paf_cigar, a_seq, b_seq);
-    let (matches, mismatches, ins, del) = cigar_stats(&paf_cigar);
-    let block_len = matches + mismatches + ins + del;
-    if block_len == 0 {
-        return None;
-    }
-    // Final sanity check.
-    let q_consumed = (matches + mismatches + ins) as usize;
-    let t_consumed = (matches + mismatches + del) as usize;
-    if q_consumed != a_len || t_consumed != b_len {
-        log::debug!(
-            "anchor_seeded: dropping {}/{}: q={} t={} vs a_len={} b_len={}",
-            a_name,
-            b_name,
-            q_consumed,
-            t_consumed,
-            a_len,
-            b_len
-        );
-        return None;
-    }
-    let cigar_str = compact_cigar(&paf_cigar);
-    Some(format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
-        a_name, a_len, 0, a_len, paf_strand, b_name, b_len, 0, b_len, matches, block_len, cigar_str,
-    ))
+    finalize_biwfa_paf_record(
+        "anchor_seeded",
+        a_name,
+        a_seq,
+        paf_strand,
+        b_name,
+        b_seq,
+        &paf_cigar,
+    )
 }
 
 /// Build a GFA from a set of named sequences using pairwise BiWFA for
