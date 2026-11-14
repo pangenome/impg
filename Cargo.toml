@@ -67,8 +67,8 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-# sweepga pins wfmash-rs 07ed9a3 (wfmash v0.14.1 head 9b2a738).
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "4713ce0c8a53b709f47f51bb0810cd858054acef", default-features = false }
+# sweepga pins wfmash-rs 2ddd695 (wfmash v0.14.1 head 9b2a738).
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "134d9e7627f65694d8b2fad3027d380ed673b898", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "a145a311f2d341b0a7d3747c46fd197bb34177d4", default-features = false }
 
@@ -84,8 +84,8 @@ cc = "1"
 # own build-dependencies, so declare these here even though the code is unused.
 # Without them build.rs can run first and copy nothing. Revisions must match the
 # ones sweepga pins, otherwise cargo builds each crate twice.
-wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "07ed9a3f608e88ee2de0d60f5285e624073979c1" }
-fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "97a7a56299b5a565964123eb907e93c4480c9f32" }
+wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "2ddd695aa8bc60156a160d1ce1310f20c6767cf0" }
+fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "f884bbbdcc29a79eb6cc7ebf302534a0dadc3628" }
 
 [dev-dependencies]
 ahash = "0.8"
