@@ -67,13 +67,13 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "4436ce12a58c6ec6a8ad8e1c98701c3bdd4b7108", default-features = false }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "1169dbb9a12f739d19cca6d86780841b550dfe8a", default-features = false }
 # build.rs copies wfmash and the FastGA utilities next to the impg binary. Both
 # crates export their binary directory as `links` metadata, which cargo passes
 # only to direct dependents (DEP_WFMASH_BINDIR, DEP_FASTGA_BINDIR), so they are
 # listed here although the code does not use them. Revisions must match the ones
 # sweepga pins: cargo rejects two packages with the same `links` value.
-wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "9e6a259548bb235ee6893af46cd0230add16d6ea" }
+wfmash-rs = { git = "https://github.com/pangenome/wfmash-rs", rev = "ee964dfef17522b40c3de306ab9231290186297a" }
 fastga-rs = { git = "https://github.com/pangenome/fastga-rs", rev = "11bda8acd6c7409c4dfd117cf5b5df535d99e5a0" }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-3" }
 allwave = { git = "https://github.com/pangenome/allwave", rev = "a145a311f2d341b0a7d3747c46fd197bb34177d4", default-features = false }
