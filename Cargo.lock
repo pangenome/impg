@@ -1043,7 +1043,7 @@ dependencies = [
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs?rev=97a7a56299b5a565964123eb907e93c4480c9f32#97a7a56299b5a565964123eb907e93c4480c9f32"
+source = "git+https://github.com/pangenome/fastga-rs?rev=11bda8acd6c7409c4dfd117cf5b5df535d99e5a0#11bda8acd6c7409c4dfd117cf5b5df535d99e5a0"
 dependencies = [
  "anyhow",
  "cc",
@@ -3093,7 +3093,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=4713ce0c8a53b709f47f51bb0810cd858054acef#4713ce0c8a53b709f47f51bb0810cd858054acef"
+source = "git+https://github.com/pangenome/sweepga?rev=4436ce12a58c6ec6a8ad8e1c98701c3bdd4b7108#4436ce12a58c6ec6a8ad8e1c98701c3bdd4b7108"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3586,7 +3586,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs?rev=07ed9a3f608e88ee2de0d60f5285e624073979c1#07ed9a3f608e88ee2de0d60f5285e624073979c1"
+source = "git+https://github.com/pangenome/wfmash-rs?rev=9e6a259548bb235ee6893af46cd0230add16d6ea#9e6a259548bb235ee6893af46cd0230add16d6ea"
 dependencies = [
  "anyhow",
  "num_cpus",

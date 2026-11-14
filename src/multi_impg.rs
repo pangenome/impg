@@ -5,7 +5,10 @@
 //! presenting a unified view while internally managing ID translation.
 
 use crate::forest_map::ForestMap;
-use crate::impg::{AdjustedInterval, CigarOp, Impg, QueryMetadata, SortedRanges};
+use crate::impg::{
+    compact_sorted_ranges, make_self_interval, read_index_header, AdjustedInterval, CigarOp, Impg,
+    QueryMetadata, QueueRangeItem, SortedRanges,
+};
 use crate::impg_index::ImpgIndex;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
@@ -17,7 +20,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -226,14 +229,9 @@ impl MultiImpg {
     /// Auto-detects cache file as `{list_file}.multi_impg` and validates
     /// staleness before using. If cache is stale or missing, builds from
     /// scratch and saves a new cache.
-    pub fn load_with_cache(
-        index_paths: &[PathBuf],
-        alignment_files: &[String],
-        sequence_files: Option<&[String]>,
-        list_file: &Path,
-    ) -> std::io::Result<Self> {
+    fn resolve_cache_path(alignment_files: &[String], list_file: &Path) -> PathBuf {
         let list_str = list_file.to_string_lossy();
-        let cache_path = if list_str.starts_with("/proc/") || list_str.starts_with("/dev/fd/") {
+        if list_str.starts_with("/proc/") || list_str.starts_with("/dev/fd/") {
             // Process substitution: derive deterministic cache path from alignment file paths
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -242,8 +240,9 @@ impl MultiImpg {
                 f.hash(&mut hasher);
             }
             let hash = hasher.finish();
-            let dir = Path::new(&alignment_files[0])
-                .parent()
+            let dir = alignment_files
+                .first()
+                .and_then(|f| Path::new(f).parent())
                 .unwrap_or(Path::new("."));
             let cache_file = dir.join(format!("impg_cache_{:016x}.multi_impg", hash));
             debug!(
@@ -254,7 +253,16 @@ impl MultiImpg {
             cache_file
         } else {
             list_file.with_extension("multi_impg")
-        };
+        }
+    }
+
+    pub fn load_with_cache(
+        index_paths: &[PathBuf],
+        alignment_files: &[String],
+        sequence_files: Option<&[String]>,
+        list_file: &Path,
+    ) -> std::io::Result<Self> {
+        let cache_path = Self::resolve_cache_path(alignment_files, list_file);
 
         // Try to load from cache
         if cache_path.exists() {
@@ -381,70 +389,17 @@ impl MultiImpg {
 
     /// Load only the header (seq_index + forest_map) from a single index file.
     fn load_header(path: &Path, alignment_file: &str) -> std::io::Result<IndexHeader> {
-        const MAGIC_V1: &[u8] = b"IMPGIDX1";
-        const MAGIC_V2: &[u8] = b"IMPGIDX2";
-        const MAGIC_V4: &[u8] = b"IMPGIDX4";
-
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
-
-        // Read and verify magic bytes
-        let mut magic_buf = [0u8; 8];
-        reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid magic bytes in {:?}", path),
-            ));
-        }
-
-        // Read forest map offset
-        let mut offset_buf = [0u8; 8];
-        reader.read_exact(&mut offset_buf)?;
-        let forest_map_offset = u64::from_le_bytes(offset_buf);
-
-        // IMPGIDX4 records the alignment file list: check it now, not at the
-        // first lazy load in the middle of a query.
-        if magic_buf == MAGIC_V4 {
-            let info: crate::impg::IndexHeaderInfo =
-                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Failed to load index header from {path:?}: {e}"),
-                        )
-                    })?;
-            crate::impg::validate_alignment_file_list(
-                &info.alignment_files,
-                std::slice::from_ref(&alignment_file.to_string()),
-                &path.to_string_lossy(),
-            )?;
-        }
-
-        // Read sequence index
-        let seq_index: SequenceIndex =
-            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to load sequence index: {e}"),
-                    )
-                })?;
-
-        // Seek to forest map and read it
-        reader.seek(SeekFrom::Start(forest_map_offset))?;
-        let forest_map: ForestMap =
-            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to load forest map: {e}"),
-                    )
-                })?;
-
+        let header = read_index_header(
+            &mut reader,
+            std::slice::from_ref(&alignment_file.to_string()),
+            &path.to_string_lossy(),
+            false,
+        )?;
         Ok(IndexHeader {
-            seq_index,
-            forest_map,
+            seq_index: header.seq_index,
+            forest_map: header.forest_map,
         })
     }
 
@@ -643,23 +598,7 @@ impl MultiImpg {
         range_end: i32,
         store_cigar: bool,
     ) -> AdjustedInterval {
-        (
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            if store_cigar {
-                vec![CigarOp::new(range_end - range_start, '=')]
-            } else {
-                Vec::new()
-            },
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-        )
+        make_self_interval(target_id, range_start, range_end, store_cigar)
     }
 }
 
@@ -974,24 +913,9 @@ impl MultiImpg {
 
             // Merge contiguous/overlapping ranges with same sequence_id (matches original)
             let slice = stack.make_contiguous();
-            slice.sort_by_key(|(id, start, _, _)| (*id, *start));
-
-            let mut write = 0;
-            for read in 1..slice.len() {
-                if slice[write].0 == slice[read].0 &&   // Same sequence_id
-                    slice[write].2 >= slice[read].1
-                // Overlapping or contiguous
-                {
-                    // Merge by extending end
-                    slice[write].2 = slice[write].2.max(slice[read].2);
-                } else {
-                    write += 1;
-                    slice.swap(write, read);
-                }
-            }
-            if !stack.is_empty() {
-                stack.truncate(write + 1);
-            }
+            slice.sort_by_key(QueueRangeItem::key_start);
+            let new_len = compact_sorted_ranges(slice);
+            stack.truncate(new_len);
         }
 
         results
@@ -1096,5 +1020,18 @@ impl MultiImpgCache {
         }
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_cache_path_empty_alignment_files_proc_path_no_panic() {
+        let path = MultiImpg::resolve_cache_path(&[], Path::new("/proc/self/fd/99"));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("impg_cache_"));
+        assert!(name.ends_with(".multi_impg"));
     }
 }

@@ -118,13 +118,13 @@ impl Frame {
         })
     }
     fn feasible(&self, piece: &Segment) -> bool {
-        evaluate::resources_feasible(
+        evaluate::resources_feasible_refs(
             self.state
                 .completed
                 .iter()
-                .flat_map(|r| r.segments.clone())
-                .chain(self.state.segments.clone())
-                .chain(std::iter::once(piece.clone())),
+                .flat_map(|r| r.segments.iter())
+                .chain(self.state.segments.iter())
+                .chain(std::iter::once(piece)),
         )
     }
     fn traversal(&self, to: u64) -> Segment {

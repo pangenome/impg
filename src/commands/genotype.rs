@@ -32,6 +32,23 @@ pub struct HaplotypeCandidate {
     single_similarity: f64,
 }
 
+#[cfg(test)]
+impl HaplotypeCandidate {
+    pub(crate) fn new_for_test(path_name: &str, start: u64, end: u64, strand: char) -> Self {
+        Self {
+            path_name: path_name.to_string(),
+            start,
+            end,
+            strand,
+            anchors: 10,
+            query_span_fraction: 1.0,
+            features: Vec::new(),
+            oriented_walk: Vec::new(),
+            single_similarity: 1.0,
+        }
+    }
+}
+
 struct CandidateFeatures {
     unoriented: Vec<(u32, u64)>,
     oriented_walk: Vec<syng::SyngWalkStep>,
@@ -447,6 +464,134 @@ fn collect_syng_candidates(
     Ok(candidates)
 }
 
+trait CosigtCandidate {
+    type Weight: Copy;
+    fn path_name(&self) -> &str;
+    fn start(&self) -> u64;
+    fn end(&self) -> u64;
+    fn strand(&self) -> char;
+    fn anchors(&self) -> usize;
+    fn query_span_fraction(&self) -> f64;
+    fn raw_features(&self) -> &[(u32, u64)];
+    fn scoring_features(&self) -> &[(u32, Self::Weight)];
+    fn single_similarity(&self) -> f64;
+    fn set_single_similarity(&mut self, value: f64);
+}
+
+impl CosigtCandidate for HaplotypeCandidate {
+    type Weight = u64;
+    fn path_name(&self) -> &str {
+        &self.path_name
+    }
+    fn start(&self) -> u64 {
+        self.start
+    }
+    fn end(&self) -> u64 {
+        self.end
+    }
+    fn strand(&self) -> char {
+        self.strand
+    }
+    fn anchors(&self) -> usize {
+        self.anchors
+    }
+    fn query_span_fraction(&self) -> f64 {
+        self.query_span_fraction
+    }
+    fn raw_features(&self) -> &[(u32, u64)] {
+        &self.features
+    }
+    fn scoring_features(&self) -> &[(u32, u64)] {
+        &self.features
+    }
+    fn single_similarity(&self) -> f64 {
+        self.single_similarity
+    }
+    fn set_single_similarity(&mut self, value: f64) {
+        self.single_similarity = value;
+    }
+}
+
+impl CosigtCandidate for GraphHaplotypeCandidate {
+    type Weight = f64;
+    fn path_name(&self) -> &str {
+        &self.path_name
+    }
+    fn start(&self) -> u64 {
+        self.start
+    }
+    fn end(&self) -> u64 {
+        self.end
+    }
+    fn strand(&self) -> char {
+        self.strand
+    }
+    fn anchors(&self) -> usize {
+        self.anchors
+    }
+    fn query_span_fraction(&self) -> f64 {
+        self.query_span_fraction
+    }
+    fn raw_features(&self) -> &[(u32, u64)] {
+        &self.features
+    }
+    fn scoring_features(&self) -> &[(u32, f64)] {
+        &self.scoring_features
+    }
+    fn single_similarity(&self) -> f64 {
+        self.single_similarity
+    }
+    fn set_single_similarity(&mut self, value: f64) {
+        self.single_similarity = value;
+    }
+}
+
+fn rank_candidates_with<C: CosigtCandidate>(
+    candidates: &mut Vec<C>,
+    candidate_top_k: usize,
+    top_n: usize,
+    empty_error: &str,
+    feature_universe_fn: impl Fn(&[C]) -> Vec<u32>,
+    sample_norm_sq_fn: impl Fn(&[u32]) -> f64,
+    single_cosine_fn: impl Fn(&[(u32, C::Weight)], f64) -> io::Result<f64>,
+    combo_search_fn: impl Fn(&[&[(u32, C::Weight)]], f64) -> io::Result<Vec<CosigtResult>>,
+) -> io::Result<(Vec<CosigtResult>, Vec<u32>)> {
+    let all_locus_features = feature_universe_fn(candidates);
+    let all_sample_norm_sq = sample_norm_sq_fn(&all_locus_features);
+    for candidate in candidates.iter_mut() {
+        let sim = single_cosine_fn(candidate.scoring_features(), all_sample_norm_sq)
+            .map_err(|e| {
+                let name = candidate.path_name();
+                io::Error::new(e.kind(), format!("candidate {name}: {e}"))
+            })?;
+        candidate.set_single_similarity(sim);
+    }
+    candidates.sort_by(|a, b| {
+        b.single_similarity()
+            .total_cmp(&a.single_similarity())
+            .then(b.anchors().cmp(&a.anchors()))
+            .then(a.path_name().cmp(b.path_name()))
+            .then(a.start().cmp(&b.start()))
+    });
+    if candidate_top_k > 0 && candidates.len() > candidate_top_k {
+        candidates.truncate(candidate_top_k);
+    }
+
+    let selected_features = feature_universe_fn(candidates);
+    let sample_norm_sq = sample_norm_sq_fn(&selected_features);
+    if sample_norm_sq == 0.0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, empty_error));
+    }
+
+    let candidate_features: Vec<&[(u32, C::Weight)]> = candidates
+        .iter()
+        .map(CosigtCandidate::scoring_features)
+        .collect();
+    let mut results = combo_search_fn(&candidate_features, sample_norm_sq)?;
+    results.truncate(top_n);
+    Ok((results, selected_features))
+}
+
 fn rank_cosigt(
     candidates: &mut Vec<HaplotypeCandidate>,
     sample_counts: &FxHashMap<u32, u64>,
@@ -455,96 +600,155 @@ fn rank_cosigt(
     candidate_top_k: usize,
     max_combinations: u64,
 ) -> io::Result<(Vec<CosigtResult>, Vec<u32>)> {
-    let all_locus_features = genotyping::feature_universe(
-        candidates
-            .iter()
-            .map(|candidate| candidate.features.as_slice()),
-    );
-    let all_sample_norm_sq =
-        genotyping::sample_norm_sq_for_features(sample_counts, &all_locus_features);
-    for candidate in candidates.iter_mut() {
-        candidate.single_similarity = genotyping::cosine_for_feature_counts(
-            &candidate.features,
-            sample_counts,
-            all_sample_norm_sq,
-        );
-    }
-    candidates.sort_by(|a, b| {
-        b.single_similarity
-            .total_cmp(&a.single_similarity)
-            .then(b.anchors.cmp(&a.anchors))
-            .then(a.path_name.cmp(&b.path_name))
-            .then(a.start.cmp(&b.start))
-    });
-    if candidate_top_k > 0 && candidates.len() > candidate_top_k {
-        candidates.truncate(candidate_top_k);
-    }
-
-    let selected_features = genotyping::feature_universe(
-        candidates
-            .iter()
-            .map(|candidate| candidate.features.as_slice()),
-    );
-    let sample_norm_sq = genotyping::sample_norm_sq_for_features(sample_counts, &selected_features);
-    if sample_norm_sq == 0.0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sample pack has zero coverage over candidate graph features",
-        ));
-    }
-
-    let candidate_features: Vec<&[(u32, u64)]> = candidates
-        .iter()
-        .map(|candidate| candidate.features.as_slice())
-        .collect();
-    let mut results = genotyping::run_cosine_combination_search(
-        &candidate_features,
-        sample_counts,
-        sample_norm_sq,
-        ploidy,
-        max_combinations,
-    )?;
-    results.truncate(top_n);
-    Ok((results, selected_features))
-}
-
-fn format_candidate_region(candidate: &HaplotypeCandidate) -> String {
-    format!(
-        "{}:{}-{}({})",
-        candidate.path_name, candidate.start, candidate.end, candidate.strand
+    rank_candidates_with(
+        candidates,
+        candidate_top_k,
+        top_n,
+        "sample pack has zero coverage over candidate graph features",
+        |cands| genotyping::feature_universe(cands.iter().map(CosigtCandidate::scoring_features)),
+        |features| genotyping::sample_norm_sq_for_features(sample_counts, features),
+        |features, norm_sq| genotyping::cosine_for_feature_counts(features, sample_counts, norm_sq),
+        |cand_features, norm_sq| {
+            genotyping::run_cosine_combination_search(
+                cand_features,
+                sample_counts,
+                norm_sq,
+                ploidy,
+                max_combinations,
+            )
+        },
     )
 }
 
-fn candidate_count_for_feature(candidate: &HaplotypeCandidate, node_id: u32) -> u64 {
+pub(crate) fn format_candidate_region_parts(
+    path_name: &str,
+    start: u64,
+    end: u64,
+    strand: char,
+) -> String {
+    format!("{path_name}:{start}-{end}({strand})")
+}
+
+pub(crate) fn format_combination_columns(
+    candidates: &[HaplotypeCandidate],
+    combination: &[usize],
+) -> (String, String, String, String) {
+    format_combination_columns_impl(candidates, combination)
+}
+
+fn format_combination_columns_impl<C: CosigtCandidate>(
+    candidates: &[C],
+    combination: &[usize],
+) -> (String, String, String, String) {
+    let haplotypes: Vec<&str> = combination
+        .iter()
+        .map(|&idx| candidates[idx].path_name())
+        .collect();
+    let regions: Vec<String> = combination
+        .iter()
+        .map(|&idx| {
+            let c = &candidates[idx];
+            format_candidate_region_parts(c.path_name(), c.start(), c.end(), c.strand())
+        })
+        .collect();
+    let anchors: Vec<String> = combination
+        .iter()
+        .map(|&idx| candidates[idx].anchors().to_string())
+        .collect();
+    let spans: Vec<String> = combination
+        .iter()
+        .map(|&idx| format!("{:.6}", candidates[idx].query_span_fraction()))
+        .collect();
+    (
+        haplotypes.join(","),
+        regions.join(","),
+        anchors.join(","),
+        spans.join(","),
+    )
+}
+
+fn write_cosigt_result_rows<W: Write, C: CosigtCandidate>(
+    out: &mut W,
+    ploidy: usize,
+    candidates: &[C],
+    results: &[CosigtResult],
+    include_indices: bool,
+) -> io::Result<()> {
+    for (rank, genotype_result) in results.iter().enumerate() {
+        let (haplotypes, regions, anchors, spans) =
+            format_combination_columns_impl(candidates, &genotype_result.combination);
+        if include_indices {
+            let candidate_indices: Vec<String> = genotype_result
+                .combination
+                .iter()
+                .map(|idx| idx.to_string())
+                .collect();
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}",
+                rank + 1,
+                ScoringMethod::Cos.as_str(),
+                ploidy,
+                genotype_result.similarity,
+                genotype_result.qv,
+                genotype_result.dot,
+                genotype_result.sample_norm,
+                genotype_result.genotype_norm,
+                candidate_indices.join(","),
+                haplotypes,
+                regions,
+                anchors,
+                spans,
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
+                rank + 1,
+                ScoringMethod::Cos.as_str(),
+                ploidy,
+                genotype_result.similarity,
+                genotype_result.qv,
+                genotype_result.dot,
+                genotype_result.sample_norm,
+                genotype_result.genotype_norm,
+                haplotypes,
+                regions,
+                anchors,
+                spans,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn candidate_count_for_feature<C: CosigtCandidate>(candidate: &C, node_id: u32) -> u64 {
     candidate
-        .features
+        .raw_features()
         .binary_search_by_key(&node_id, |&(feature_id, _)| feature_id)
-        .map(|idx| candidate.features[idx].1)
+        .map(|idx| candidate.raw_features()[idx].1)
         .unwrap_or(0)
 }
 
-fn candidate_count_mass(candidate: &HaplotypeCandidate) -> u64 {
-    candidate.features.iter().map(|&(_, count)| count).sum()
-}
-
-fn candidate_repeated_stats(candidate: &HaplotypeCandidate) -> (usize, u64, u64) {
-    let repeated_nodes = candidate
-        .features
-        .iter()
-        .filter(|&&(_, count)| count > 1)
-        .count();
-    let repeated_extra_count = candidate
-        .features
-        .iter()
-        .map(|&(_, count)| count.saturating_sub(1))
-        .sum();
-    let max_node_count = candidate
-        .features
-        .iter()
-        .map(|&(_, count)| count)
-        .max()
-        .unwrap_or(0);
-    (repeated_nodes, repeated_extra_count, max_node_count)
+fn feature_count_stats(features: &[(u32, u64)]) -> (u64, usize, u64, u64) {
+    let mut total_mass = 0u64;
+    let mut repeated_nodes = 0usize;
+    let mut repeated_extra_count = 0u64;
+    let mut max_node_count = 0u64;
+    for &(_, count) in features {
+        total_mass += count;
+        if count > 1 {
+            repeated_nodes += 1;
+            repeated_extra_count += count - 1;
+        }
+        max_node_count = max_node_count.max(count);
+    }
+    (
+        total_mass,
+        repeated_nodes,
+        repeated_extra_count,
+        max_node_count,
+    )
 }
 
 fn candidate_sample_overlap(
@@ -709,9 +913,8 @@ pub fn write_syng_cosigt_report<W: Write>(
         "candidate_index\tpath\tinterval\tstart\tend\tstrand\tanchors\tspan_fraction\tfeature_count\ttotal_candidate_node_count_mass\tunique_nodes\trepeated_nodes\trepeated_extra_count\tmax_node_count\tsingle_haplotype_cosine\tsample_overlap_unique_nodes\tsample_overlap_sample_count_mass\tsample_overlap_dot_contribution"
     )?;
     for (idx, candidate) in result.candidates.iter().enumerate() {
-        let total_mass = candidate_count_mass(candidate);
-        let (repeated_nodes, repeated_extra_count, max_node_count) =
-            candidate_repeated_stats(candidate);
+        let (total_mass, repeated_nodes, repeated_extra_count, max_node_count) =
+            feature_count_stats(&candidate.features);
         let (overlap_unique_nodes, overlap_sample_count_mass, overlap_dot) =
             candidate_sample_overlap(candidate, &coverage.counts);
         writeln!(
@@ -762,50 +965,13 @@ pub fn write_syng_cosigt_report<W: Write>(
         out,
         "rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\tcandidate_indices\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
     )?;
-    for (rank, genotype_result) in result.results.iter().enumerate() {
-        let candidate_indices: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|idx| idx.to_string())
-            .collect();
-        let haplotypes: Vec<&str> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].path_name.as_str())
-            .collect();
-        let regions: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format_candidate_region(&result.candidates[idx]))
-            .collect();
-        let anchors: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].anchors.to_string())
-            .collect();
-        let spans: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
-            .collect();
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}",
-            rank + 1,
-            ScoringMethod::Cos.as_str(),
-            result.ploidy,
-            genotype_result.similarity,
-            genotype_result.qv,
-            genotype_result.dot,
-            genotype_result.sample_norm,
-            genotype_result.genotype_norm,
-            candidate_indices.join(","),
-            haplotypes.join(","),
-            regions.join(","),
-            anchors.join(","),
-            spans.join(","),
-        )?;
-    }
+    write_cosigt_result_rows(
+        out,
+        result.ploidy,
+        &result.candidates,
+        &result.results,
+        true,
+    )?;
 
     writeln!(out, "#section\tresult_features")?;
     writeln!(
@@ -986,44 +1152,13 @@ pub fn write_syng_cosigt_output<W: Write>(
         out,
         "#rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
     )?;
-    for (rank, genotype_result) in result.results.iter().enumerate() {
-        let haplotypes: Vec<&str> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].path_name.as_str())
-            .collect();
-        let regions: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format_candidate_region(&result.candidates[idx]))
-            .collect();
-        let anchors: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].anchors.to_string())
-            .collect();
-        let spans: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
-            .collect();
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
-            rank + 1,
-            ScoringMethod::Cos.as_str(),
-            result.ploidy,
-            genotype_result.similarity,
-            genotype_result.qv,
-            genotype_result.dot,
-            genotype_result.sample_norm,
-            genotype_result.genotype_norm,
-            haplotypes.join(","),
-            regions.join(","),
-            anchors.join(","),
-            spans.join(","),
-        )?;
-    }
+    write_cosigt_result_rows(
+        out,
+        result.ploidy,
+        &result.candidates,
+        &result.results,
+        false,
+    )?;
 
     Ok(())
 }
@@ -1125,7 +1260,7 @@ fn parse_segment_length(fields: &[&str], line_no: usize) -> io::Result<(u64, Opt
     ))
 }
 
-fn parse_p_step_token(token: &str, line_no: usize) -> io::Result<(String, char)> {
+pub(crate) fn parse_p_step_token(token: &str, line_no: usize) -> io::Result<(String, char)> {
     if let Some(name) = token.strip_suffix('+') {
         if !name.is_empty() {
             return Ok((name.to_string(), '+'));
@@ -1142,7 +1277,7 @@ fn parse_p_step_token(token: &str, line_no: usize) -> io::Result<(String, char)>
     ))
 }
 
-fn parse_w_walk(walk: &str, line_no: usize) -> io::Result<Vec<(String, char)>> {
+pub(crate) fn parse_w_walk(walk: &str, line_no: usize) -> io::Result<Vec<(String, char)>> {
     let mut parsed = Vec::new();
     let mut orientation: Option<char> = None;
     let mut name = String::new();
@@ -1295,6 +1430,20 @@ fn fnv1a_update(hash: &mut u64, bytes: &[u8]) {
     *hash = hash.wrapping_mul(FNV_PRIME);
 }
 
+fn fnv1a_update_u64(hash: &mut u64, mut value: u64) {
+    let mut buf = [0u8; 20];
+    let mut pos = buf.len();
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    fnv1a_update(hash, &buf[pos..]);
+}
+
 fn graph_id_for(graph: &NormalizedGraph) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     fnv1a_update(&mut hash, graph.feature_space.as_bytes());
@@ -1305,8 +1454,8 @@ fn graph_id_for(graph: &NormalizedGraph) -> String {
     for segment in &graph.segments {
         fnv1a_update(&mut hash, b"S");
         fnv1a_update(&mut hash, segment.name.as_bytes());
-        fnv1a_update(&mut hash, segment.feature_id.to_string().as_bytes());
-        fnv1a_update(&mut hash, segment.length.to_string().as_bytes());
+        fnv1a_update_u64(&mut hash, u64::from(segment.feature_id));
+        fnv1a_update_u64(&mut hash, segment.length);
         if let Some(sequence) = &segment.sequence {
             fnv1a_update(&mut hash, sequence.as_bytes());
         }
@@ -1337,16 +1486,15 @@ pub fn parse_normalized_gfa(
     let feature_space = feature_space.into();
     let mut segments = Vec::new();
     let mut segment_name_to_index = FxHashMap::default();
+    let mut fields = Vec::new();
 
     for (line_idx, line) in gfa_text.lines().enumerate() {
         let line_no = line_idx + 1;
-        if line.is_empty() || line.starts_with('#') {
+        if !(line == "S" || line.starts_with("S\t")) {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.first().copied() != Some("S") {
-            continue;
-        }
+        fields.clear();
+        fields.extend(line.split('\t'));
         let name = fields.get(1).copied().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1408,10 +1556,13 @@ pub fn parse_normalized_gfa(
     let mut path_name_to_index = FxHashMap::default();
     for (line_idx, line) in gfa_text.lines().enumerate() {
         let line_no = line_idx + 1;
-        if line.is_empty() || line.starts_with('#') {
+        let is_p = line == "P" || line.starts_with("P\t");
+        let is_w = !is_p && (line == "W" || line.starts_with("W\t"));
+        if !is_p && !is_w {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
+        fields.clear();
+        fields.extend(line.split('\t'));
         match fields.first().copied() {
             Some("P") => {
                 let name = fields.get(1).copied().ok_or_else(|| {
@@ -1696,58 +1847,26 @@ fn rank_graph_cosigt(
     candidate_top_k: usize,
     max_combinations: u64,
 ) -> io::Result<(Vec<CosigtResult>, Vec<u32>)> {
-    let all_locus_features = genotyping::feature_universe_f64(
-        candidates
-            .iter()
-            .map(|candidate| candidate.scoring_features.as_slice()),
-    );
-    let all_sample_norm_sq =
-        genotyping::sample_norm_sq_for_weight_features(sample_weights, &all_locus_features);
-    for candidate in candidates.iter_mut() {
-        candidate.single_similarity = genotyping::cosine_for_feature_weights(
-            &candidate.scoring_features,
-            sample_weights,
-            all_sample_norm_sq,
-        );
-    }
-    candidates.sort_by(|a, b| {
-        b.single_similarity
-            .total_cmp(&a.single_similarity)
-            .then(b.anchors.cmp(&a.anchors))
-            .then(a.path_name.cmp(&b.path_name))
-            .then(a.start.cmp(&b.start))
-    });
-    if candidate_top_k > 0 && candidates.len() > candidate_top_k {
-        candidates.truncate(candidate_top_k);
-    }
-
-    let selected_features = genotyping::feature_universe_f64(
-        candidates
-            .iter()
-            .map(|candidate| candidate.scoring_features.as_slice()),
-    );
-    let sample_norm_sq =
-        genotyping::sample_norm_sq_for_weight_features(sample_weights, &selected_features);
-    if sample_norm_sq == 0.0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sample graph pack has zero coverage over candidate graph features",
-        ));
-    }
-
-    let candidate_features: Vec<&[(u32, f64)]> = candidates
-        .iter()
-        .map(|candidate| candidate.scoring_features.as_slice())
-        .collect();
-    let mut results = genotyping::run_cosine_combination_search_f64(
-        &candidate_features,
-        sample_weights,
-        sample_norm_sq,
-        ploidy,
-        max_combinations,
-    )?;
-    results.truncate(top_n);
-    Ok((results, selected_features))
+    rank_candidates_with(
+        candidates,
+        candidate_top_k,
+        top_n,
+        "sample graph pack has zero coverage over candidate graph features",
+        |cands| genotyping::feature_universe_f64(cands.iter().map(CosigtCandidate::scoring_features)),
+        |features| genotyping::sample_norm_sq_for_weight_features(sample_weights, features),
+        |features, norm_sq| {
+            genotyping::cosine_for_feature_weights(features, sample_weights, norm_sq)
+        },
+        |cand_features, norm_sq| {
+            genotyping::run_cosine_combination_search_f64(
+                cand_features,
+                sample_weights,
+                norm_sq,
+                ploidy,
+                max_combinations,
+            )
+        },
+    )
 }
 
 fn merge_pack_metadata(target: &mut GraphPackMetadata, key: &str, value: &str, source: &str) {
@@ -2000,21 +2119,6 @@ pub fn compute_graph_cosigt(config: &GraphCosigtConfig<'_>) -> io::Result<GraphC
     })
 }
 
-fn format_graph_candidate_region(candidate: &GraphHaplotypeCandidate) -> String {
-    format!(
-        "{}:{}-{}({})",
-        candidate.path_name, candidate.start, candidate.end, candidate.strand
-    )
-}
-
-fn graph_candidate_count_for_feature(candidate: &GraphHaplotypeCandidate, node_id: u32) -> u64 {
-    candidate
-        .features
-        .binary_search_by_key(&node_id, |&(feature_id, _)| feature_id)
-        .map(|idx| candidate.features[idx].1)
-        .unwrap_or(0)
-}
-
 fn graph_candidate_weight_for_feature(candidate: &GraphHaplotypeCandidate, node_id: u32) -> f64 {
     candidate
         .scoring_features
@@ -2078,44 +2182,13 @@ pub fn write_graph_cosigt_output<W: Write>(
         out,
         "#rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
     )?;
-    for (rank, genotype_result) in result.results.iter().enumerate() {
-        let haplotypes: Vec<&str> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].path_name.as_str())
-            .collect();
-        let regions: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format_graph_candidate_region(&result.candidates[idx]))
-            .collect();
-        let anchors: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].anchors.to_string())
-            .collect();
-        let spans: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
-            .collect();
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
-            rank + 1,
-            ScoringMethod::Cos.as_str(),
-            result.ploidy,
-            genotype_result.similarity,
-            genotype_result.qv,
-            genotype_result.dot,
-            genotype_result.sample_norm,
-            genotype_result.genotype_norm,
-            haplotypes.join(","),
-            regions.join(","),
-            anchors.join(","),
-            spans.join(","),
-        )?;
-    }
+    write_cosigt_result_rows(
+        out,
+        result.ploidy,
+        &result.candidates,
+        &result.results,
+        false,
+    )?;
     Ok(())
 }
 
@@ -2310,23 +2383,8 @@ pub fn write_graph_cosigt_report<W: Write>(
         "candidate_index\tpath\tinterval\tstart\tend\tstrand\tpath_steps\tspan_fraction\tfeature_count\ttotal_candidate_node_count_mass\tunique_nodes\trepeated_nodes\trepeated_extra_count\tmax_node_count\tsingle_haplotype_cosine\tsample_overlap_unique_nodes\tsample_overlap_weight_mass\tsample_overlap_dot_contribution"
     )?;
     for (idx, candidate) in result.candidates.iter().enumerate() {
-        let total_mass: u64 = candidate.features.iter().map(|&(_, count)| count).sum();
-        let repeated_nodes = candidate
-            .features
-            .iter()
-            .filter(|&&(_, count)| count > 1)
-            .count();
-        let repeated_extra_count: u64 = candidate
-            .features
-            .iter()
-            .map(|&(_, count)| count.saturating_sub(1))
-            .sum();
-        let max_node_count = candidate
-            .features
-            .iter()
-            .map(|&(_, count)| count)
-            .max()
-            .unwrap_or(0);
+        let (total_mass, repeated_nodes, repeated_extra_count, max_node_count) =
+            feature_count_stats(&candidate.features);
         let mut overlap_unique_nodes = 0usize;
         let mut overlap_weight_mass = 0.0;
         let mut overlap_dot = 0.0;
@@ -2381,7 +2439,7 @@ pub fn write_graph_cosigt_report<W: Write>(
                 .get(&feature_id)
                 .copied()
                 .unwrap_or(0.0);
-            let candidate_count = graph_candidate_count_for_feature(candidate, feature_id);
+            let candidate_count = candidate_count_for_feature(candidate, feature_id);
             writeln!(
                 out,
                 "{}\t{}\t{}\t{}\t{}\t{:.9}\t{}\t{:.9}\t{:.9}",
@@ -2403,50 +2461,13 @@ pub fn write_graph_cosigt_report<W: Write>(
         out,
         "rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\tcandidate_indices\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
     )?;
-    for (rank, genotype_result) in result.results.iter().enumerate() {
-        let candidate_indices: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|idx| idx.to_string())
-            .collect();
-        let haplotypes: Vec<&str> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].path_name.as_str())
-            .collect();
-        let regions: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format_graph_candidate_region(&result.candidates[idx]))
-            .collect();
-        let anchors: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| result.candidates[idx].anchors.to_string())
-            .collect();
-        let spans: Vec<String> = genotype_result
-            .combination
-            .iter()
-            .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
-            .collect();
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}",
-            rank + 1,
-            ScoringMethod::Cos.as_str(),
-            result.ploidy,
-            genotype_result.similarity,
-            genotype_result.qv,
-            genotype_result.dot,
-            genotype_result.sample_norm,
-            genotype_result.genotype_norm,
-            candidate_indices.join(","),
-            haplotypes.join(","),
-            regions.join(","),
-            anchors.join(","),
-            spans.join(","),
-        )?;
-    }
+    write_cosigt_result_rows(
+        out,
+        result.ploidy,
+        &result.candidates,
+        &result.results,
+        true,
+    )?;
 
     writeln!(out, "#section\tresult_features")?;
     writeln!(

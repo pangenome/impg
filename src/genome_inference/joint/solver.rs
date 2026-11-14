@@ -34,6 +34,8 @@ pub struct Problem<'a> {
     pub depth: f64,
     pub background: f64,
     rates: Vec<Vec<Vec<(usize, f64)>>>,
+    alt_resources: Vec<Vec<Vec<usize>>>,
+    resource_count: usize,
 }
 impl<'a> Problem<'a> {
     pub fn new(
@@ -191,16 +193,33 @@ impl<'a> Problem<'a> {
         for f in &factors {
             connect(&f.scope);
         }
-        let mut resource_slots: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        let mut resource_ids: BTreeMap<String, usize> = BTreeMap::new();
+        let mut resource_slots: Vec<BTreeSet<usize>> = Vec::new();
+        let mut alt_resources: Vec<Vec<Vec<usize>>> = Vec::with_capacity(n);
         for (s, slot) in compiled.layout.slots.iter().enumerate() {
+            let mut slot_alts = Vec::with_capacity(slot.alternatives.len());
             for a in 0..slot.alternatives.len() {
-                for resource in compiled.layout.resources(s, a) {
-                    resource_slots.entry(resource).or_default().insert(s);
+                let resources = compiled.layout.resources(s, a);
+                let mut ids = Vec::with_capacity(resources.len());
+                for resource in resources {
+                    let id = if let Some(&id) = resource_ids.get(&resource) {
+                        id
+                    } else {
+                        let id = resource_slots.len();
+                        resource_ids.insert(resource, id);
+                        resource_slots.push(BTreeSet::new());
+                        id
+                    };
+                    resource_slots[id].insert(s);
+                    ids.push(id);
                 }
+                slot_alts.push(ids);
             }
+            alt_resources.push(slot_alts);
         }
-        for scope in resource_slots.values() {
-            connect(&scope.iter().copied().collect::<Vec<_>>());
+        // Resource-name order fixes component order.
+        for &id in resource_ids.values() {
+            connect(&resource_slots[id].iter().copied().collect::<Vec<_>>());
         }
         let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (s, label) in labels.into_iter().enumerate() {
@@ -213,7 +232,42 @@ impl<'a> Problem<'a> {
             depth,
             background,
             rates,
+            alt_resources,
+            resource_count: resource_slots.len(),
         })
+    }
+    fn score_objective_scratch(&self, choices: &[usize], mus: &mut [f64]) -> io::Result<f64> {
+        mus.fill(self.background);
+        for (s, &a) in choices.iter().enumerate() {
+            for &(f, e) in &self.rates[s][a] {
+                mus[f] += self.depth * e;
+            }
+        }
+        // Empty f64 sum is -0.0.
+        let mut objective = -0.0f64;
+        for (f, &mu) in self.factors.iter().zip(mus.iter()) {
+            require(mu.is_finite(), "nonfinite joint objective")?;
+            objective += mu - f.observed as f64 * mu.ln();
+        }
+        require(objective.is_finite(), "nonfinite joint objective")?;
+        Ok(objective)
+    }
+    fn is_feasible_scratch(&self, choices: &[usize], seen: &mut [u32], epoch: &mut u32) -> bool {
+        *epoch = epoch.wrapping_add(1);
+        if *epoch == 0 {
+            seen.fill(0);
+            *epoch = 1;
+        }
+        let stamp = *epoch;
+        for (s, &a) in choices.iter().enumerate() {
+            for &id in &self.alt_resources[s][a] {
+                if seen[id] == stamp {
+                    return false;
+                }
+                seen[id] = stamp;
+            }
+        }
+        true
     }
     fn score(&self, choices: &[usize]) -> io::Result<(f64, Vec<f64>, Vec<f64>)> {
         require(
@@ -321,11 +375,14 @@ pub fn solve(
     let mut incumbent: Option<OptimalAssignment> = None;
     let mut optima: Vec<OptimalAssignment> = Vec::new();
     let mut discarded = false;
+    let mut seen_epoch = vec![0u32; problem.resource_count];
+    let mut epoch = 0u32;
+    let mut mus_buf = vec![0.0f64; problem.factors.len()];
     while examined < max_assignments {
         examined += 1;
-        if problem.compiled.layout.feasible(&choices)? {
+        if problem.is_feasible_scratch(&choices, &mut seen_epoch, &mut epoch) {
             feasible += 1;
-            let (objective, _, _) = problem.score(&choices)?;
+            let objective = problem.score_objective_scratch(&choices, &mut mus_buf)?;
             if incumbent.as_ref().is_none_or(|b| objective < b.objective) {
                 incumbent = Some(OptimalAssignment {
                     choices: choices.clone(),

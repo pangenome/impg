@@ -212,6 +212,75 @@ fn physical_conflicts_connect_components_and_duplicate_descriptions_never_add_co
     assert!(l.validate().is_err());
 }
 #[test]
+fn components_follow_resource_name_order() {
+    let mut c = fixture();
+    c.layout.instances = ["a", "q", "z"]
+        .iter()
+        .map(|id| layout::Instance {
+            id: (*id).into(),
+            source: 0,
+            start: 0,
+            end: 100,
+        })
+        .collect();
+    let mut both = walk("w", "a");
+    both.pieces.push(both.pieces[0].clone());
+    both.pieces[1].instance = "z".into();
+    both.adjacencies.push(layout::Adjacency {
+        from: 0,
+        to: 1,
+        kind: "abut".into(),
+    });
+    c.layout.slots = [walk("w", "z"), walk("w", "q"), walk("w", "a"), both]
+        .into_iter()
+        .enumerate()
+        .map(|(s, w)| layout::Slot {
+            id: format!("slot{s}"),
+            alternatives: vec![w],
+        })
+        .collect();
+    let empty = |starts| Profile {
+        contributions: vec![],
+        admitted_starts: vec![starts],
+        event_runs: 1,
+        max_crop_bp: 100,
+    };
+    c.profiles = vec![
+        vec![empty(1)],
+        vec![empty(1)],
+        vec![empty(1)],
+        vec![empty(101)],
+    ];
+    let p = Problem::new(&c, &sample_fixture(), 1.0, 0.1).unwrap();
+    assert_eq!(p.components, vec![vec![0, 2, 3], vec![1]]);
+}
+#[test]
+fn zero_factor_objective_matches_score_bits() {
+    let mut c = fixture();
+    c.definitions.clear();
+    c.profiles
+        .iter_mut()
+        .flatten()
+        .for_each(|p| p.contributions.clear());
+    let mut sample = sample_fixture();
+    sample.counts = WeightedBwt::build(&BTreeMap::new()).unwrap();
+    let p = Problem::new(&c, &sample, 1.0, 0.1).unwrap();
+    assert!(p.factors.is_empty());
+    let assignment = Assignment {
+        version: VERSION,
+        model: MODEL.into(),
+        compiled_checksum: c.digest().unwrap(),
+        choices: vec![0, 0],
+    };
+    let objective = evaluate(&p, &assignment).unwrap().objective;
+    let r = solve(&p, 4, 4, 0.0).unwrap();
+    assert_eq!(
+        r.incumbent.unwrap().objective.to_bits(),
+        objective.to_bits()
+    );
+    assert_eq!(objective.to_bits(), (-0.0f64).to_bits());
+}
+#[test]
 fn corrupt_layout_artifacts_and_assignment_provenance_fail_closed() {
     let c = fixture();
     let t = tempfile::tempdir().unwrap();

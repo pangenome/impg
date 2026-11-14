@@ -433,7 +433,7 @@ fn run_alignments(
     }
 
     // Check if pairs are a proper subset (sparsified) vs all-vs-all
-    let total_possible = sequences.len() * (sequences.len() - 1) / 2;
+    let total_possible = total_unique_pairs(sequences.len());
     let is_sparsified = pairs.len() < total_possible;
 
     // Collect unique file pairs
@@ -553,15 +553,8 @@ fn run_alignments(
         }
         .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?;
 
-        // Apply filtering unless --no-filter
-        let result_paf = if config.no_filter {
-            paf_temp
-        } else {
-            apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
-        };
-
-        let paf_data = std::fs::read(result_paf.path())?;
-        combined_writer.write_all(&paf_data)?;
+        // Apply filtering unless --no-filter and stream to combined output
+        append_filtered_paf(paf_temp, config, avg_len, &mut combined_writer)?;
     } else {
         for (pair_idx, (query_path, target_path)) in file_pairs.iter().enumerate() {
             if config.show_progress {
@@ -616,16 +609,8 @@ fn run_alignments(
                             ))
                         })?;
 
-                    // Apply filtering unless --no-filter
-                    let result_paf = if config.no_filter {
-                        paf_temp
-                    } else {
-                        apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
-                    };
-
-                    // Append to combined output
-                    let paf_data = std::fs::read(result_paf.path())?;
-                    combined_writer.write_all(&paf_data)?;
+                    // Apply filtering unless --no-filter and stream to combined output
+                    append_filtered_paf(paf_temp, config, avg_len, &mut combined_writer)?;
                 }
                 AlignOutputFormat::JobList => unreachable!(),
             }
@@ -658,6 +643,27 @@ fn run_alignments(
         }
     }
 
+    Ok(())
+}
+
+#[inline]
+fn total_unique_pairs(n: usize) -> usize {
+    n.saturating_mul(n.saturating_sub(1)) / 2
+}
+
+fn append_filtered_paf(
+    paf_temp: tempfile::NamedTempFile,
+    config: &AlignConfig,
+    avg_len: Option<u64>,
+    combined_writer: &mut impl Write,
+) -> io::Result<()> {
+    let result_paf = if config.no_filter {
+        paf_temp
+    } else {
+        apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
+    };
+    let mut reader = File::open(result_paf.path())?;
+    io::copy(&mut reader, combined_writer)?;
     Ok(())
 }
 
@@ -711,7 +717,7 @@ pub fn run_align(
     let sequences = load_sequences(&fasta_files, config.show_progress, &config.mash_params)?;
 
     let n = sequences.len();
-    let total_pairs = n * (n - 1) / 2;
+    let total_pairs = total_unique_pairs(n);
 
     // Generate pairs
     if config.show_progress {
@@ -723,11 +729,16 @@ pub fn run_align(
     let pairs = generate_pairs(&sequences, &config.sparsify, &config.mash_params);
 
     if config.show_progress {
+        let pct = if total_pairs > 0 {
+            (pairs.len() as f64 / total_pairs as f64) * 100.0
+        } else {
+            0.0
+        };
         info!(
             "Selected {} pairs out of {} total ({:.1}%)",
             pairs.len(),
             total_pairs,
-            (pairs.len() as f64 / total_pairs as f64) * 100.0
+            pct
         );
     }
 
@@ -763,14 +774,14 @@ pub fn run_joblist(joblist_path: &Path, jobs: usize) -> io::Result<()> {
 
     let file = File::open(joblist_path)?;
     let reader = BufReader::new(file);
-    let commands: Vec<String> = reader
-        .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .collect();
+    let mut commands = Vec::new();
+    for line_result in reader.lines() {
+        let line = line_result?;
+        let t = line.trim();
+        if !t.is_empty() && !t.starts_with('#') {
+            commands.push(line);
+        }
+    }
 
     let total = commands.len();
     if total == 0 {
@@ -911,5 +922,24 @@ mod tests {
 
         // Different sequences should have higher distance
         assert!(sketch1.mash_distance(&sketch3) > 0.5);
+    }
+
+    #[test]
+    fn test_total_unique_pairs_no_underflow() {
+        assert_eq!(total_unique_pairs(0), 0);
+        assert_eq!(total_unique_pairs(1), 0);
+        assert_eq!(total_unique_pairs(2), 1);
+        assert_eq!(total_unique_pairs(5), 10);
+    }
+
+    #[test]
+    fn test_run_joblist_empty_and_missing_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let joblist = temp.path().join("jobs.txt");
+        std::fs::write(&joblist, "# comment only\n\n  # indented comment\n").unwrap();
+        assert!(run_joblist(&joblist, 1).is_ok());
+
+        let missing = temp.path().join("does_not_exist.txt");
+        assert!(run_joblist(&missing, 1).is_err());
     }
 }

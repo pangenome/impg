@@ -179,20 +179,27 @@ fn parse_paf_line(
     file_pos: u64,
     seq_index: &mut SequenceIndex,
 ) -> Result<AlignmentRecord, ParseErr> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    if fields.len() < 12 {
-        return Err(ParseErr::NotEnoughFields);
-    }
+    let mut fields = line.split('\t');
+    let query_name = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let query_len_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let query_start_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let query_end_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let strand_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_name = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_len_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_start_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let target_end_str = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let f9 = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let f10 = fields.next().ok_or(ParseErr::NotEnoughFields)?;
+    let f11 = fields.next().ok_or(ParseErr::NotEnoughFields)?;
 
-    let query_name = fields[0].to_string();
-    let query_length = fields[1].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let query_start = fields[2].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let query_end = fields[3].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let target_name = fields[5].to_string();
-    let target_length = fields[6].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let target_start = fields[7].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let target_end = fields[8].parse::<usize>().map_err(ParseErr::InvalidField)?;
-    let strand_char = fields[4]
+    let query_length = query_len_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let query_start = query_start_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let query_end = query_end_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let target_length = target_len_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let target_start = target_start_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let target_end = target_end_str.parse::<usize>().map_err(ParseErr::InvalidField)?;
+    let strand_char = strand_str
         .chars()
         .next()
         .ok_or_else(|| ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string()))?;
@@ -203,13 +210,31 @@ fn parse_paf_line(
     };
 
     // Convert names to IDs using the SequenceIndex
-    let query_id = seq_index.get_or_insert_id(&query_name, Some(query_length));
-    let target_id = seq_index.get_or_insert_id(&target_name, Some(target_length));
+    let query_id = seq_index.get_or_insert_id(query_name, Some(query_length));
+    let target_id = seq_index.get_or_insert_id(target_name, Some(target_length));
 
-    let mut cigar_offset: u64 = file_pos;
+    // Byte offset up to the start of optional tags (column 12)
+    let prefix_len: u64 = [
+        query_name,
+        query_len_str,
+        query_start_str,
+        query_end_str,
+        strand_str,
+        target_name,
+        target_len_str,
+        target_start_str,
+        target_end_str,
+        f9,
+        f10,
+        f11,
+    ]
+    .iter()
+    .map(|s| (s.len() + 1) as u64)
+    .sum();
+    let mut cigar_offset: u64 = file_pos + prefix_len;
     let mut cigar_bytes: usize = 0;
 
-    for tag_str in fields.iter() {
+    for tag_str in fields {
         if let Some(cigar) = tag_str.strip_prefix("cg:Z:") {
             cigar_offset += 5;
             cigar_bytes = validate_cigar_tag(cigar).map_err(|reason| {
