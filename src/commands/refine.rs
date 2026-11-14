@@ -79,12 +79,36 @@ struct CandidateResult {
     support_entities: Vec<SupportEntity>,
 }
 
+fn validate_refine_config(config: &RefineConfig<'_>) -> io::Result<()> {
+    if config.extension_step <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "extension_step must be positive, got {}",
+                config.extension_step
+            ),
+        ));
+    }
+    if !config.max_extension.is_finite() || config.max_extension < 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "max_extension must be finite and non-negative, got {}",
+                config.max_extension
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Run the refinement procedure on the provided ranges
 pub fn run_refine(
     impg: &impl ImpgIndex,
     ranges: &[(String, (i32, i32), String)],
     config: RefineConfig<'_>,
 ) -> io::Result<Vec<RefineRecord>> {
+    validate_refine_config(&config)?;
+
     info!(
         "Refining {} range(s) with support aggregated by {:?} (span_bp={}, max_extension={}, extension_step={})",
         ranges.len(),
@@ -331,6 +355,7 @@ fn refine_single_range(
             if let Some(candidate) = reduce_candidates(
                 flanks
                     .par_iter()
+                    .filter(|&&right| right != 0)
                     .filter_map(|&right| match evaluate(left_fixed, right) {
                         Ok(Some(candidate)) => Some(Ok(candidate)),
                         Ok(None) => None,
@@ -361,6 +386,7 @@ fn refine_single_range(
                 if let Some(candidate) = reduce_candidates(
                     flanks
                         .par_iter()
+                        .filter(|&&left| left != left_fixed)
                         .filter_map(|&left| match evaluate(left, right_fixed) {
                             Ok(Some(candidate)) => Some(Ok(candidate)),
                             Ok(None) => None,
@@ -525,7 +551,7 @@ fn query_overlaps(
             config.subset_filter,
         )?
     } else {
-        let mut res = impg.query_with_cache(
+        impg.query_with_cache(
             target_id,
             range.0,
             range.1,
@@ -534,14 +560,7 @@ fn query_overlaps(
             sequence_index,
             cigar_cache,
             config.approximate_mode,
-        )?;
-
-        // Apply subset filter for non-transitive queries (transitive queries filter during exploration)
-        if let Some(filter) = config.subset_filter {
-            crate::subset_filter::apply_subset_filter(impg, target_id, &mut res, Some(filter));
-        }
-
-        res
+        )?
     };
 
     buffer.append(&mut results);
@@ -681,7 +700,7 @@ fn compute_support_sets(
     let mut aggregated = FxHashSet::default();
     let mut sequence_ranges: FxHashMap<String, (i32, i32)> = FxHashMap::default();
 
-    if overlaps.len() <= 1 {
+    if overlaps.is_empty() {
         return (aggregated, Vec::new());
     }
 
@@ -786,18 +805,36 @@ fn covers_boundaries(
     region_end: i32,
     span: i32,
 ) -> bool {
-    interval.target_start <= region_start
-        && interval.target_end >= region_end
-        && covered_bases(&interval.target_pieces, region_start, region_start + span) >= span
+    if interval.target_start > region_start || interval.target_end < region_end {
+        return false;
+    }
+    if span <= 0 {
+        return true;
+    }
+    covered_bases(&interval.target_pieces, region_start, region_start + span) >= span
         && covered_bases(&interval.target_pieces, region_end - span, region_end) >= span
 }
 
 /// Bases of `[start, end)` covered by the union of `pieces`.
 fn covered_bases(pieces: &[(i32, i32)], start: i32, end: i32) -> i32 {
+    if end <= start || pieces.is_empty() {
+        return 0;
+    }
+    if pieces.len() == 1 {
+        let (s, e) = pieces[0];
+        return (e.min(end) - s.max(start)).max(0);
+    }
     let mut clipped: Vec<_> = pieces
         .iter()
-        .map(|&(s, e)| (s.max(start), e.min(end)))
+        .filter_map(|&(s, e)| {
+            let cs = s.max(start);
+            let ce = e.min(end);
+            (cs < ce).then_some((cs, ce))
+        })
         .collect();
+    if clipped.is_empty() {
+        return 0;
+    }
     clipped.sort_unstable();
     let mut covered_to = start;
     clipped
@@ -850,28 +887,25 @@ fn should_merge(a: &SampleInterval, b: &SampleInterval, merge_distance: i32) -> 
     if merge_distance < 0 {
         return false;
     }
+    // Endpoint adjacency; abs_diff cannot overflow
     let distance = merge_distance as u32;
-    let query_adjacent = a
-        .query_end
-        .abs_diff(b.query_start)
-        .min(a.query_start.abs_diff(b.query_end))
-        <= distance;
-    let target_adjacent = a
-        .target_end
-        .abs_diff(b.target_start)
-        .min(a.target_start.abs_diff(b.target_end))
-        <= distance;
-    query_adjacent || target_adjacent
+    let adjacent = |a0: i32, a1: i32, b0: i32, b1: i32| {
+        a1.abs_diff(b0).min(a0.abs_diff(b1)) <= distance
+    };
+    adjacent(a.query_start, a.query_end, b.query_start, b.query_end)
+        || adjacent(a.target_start, a.target_end, b.target_start, b.target_end)
 }
 
 fn build_flanks(max_extension: i32, step: i32) -> Vec<i32> {
+    if max_extension <= 0 {
+        return vec![0];
+    }
+    if step <= 0 {
+        return vec![0, max_extension];
+    }
+
     let mut flanks = Vec::new();
     let mut current = 0;
-
-    if max_extension == 0 {
-        flanks.push(0);
-        return flanks;
-    }
 
     while current <= max_extension {
         flanks.push(current);
@@ -986,6 +1020,57 @@ mod tests {
         assert_eq!(
             covered_bases(&[(0, 600), (500, 1_200), (1_500, 9_000)], 0, 2_000),
             1_700
+        );
+    }
+
+    #[test]
+    fn should_merge_needs_endpoints_within_distance() {
+        let interval = |s, e| SampleInterval {
+            query_start: s,
+            query_end: e,
+            target_start: 10_000 + s,
+            target_end: 10_000 + e,
+            target_pieces: vec![(10_000 + s, 10_000 + e)],
+        };
+        // Adjacent endpoints merge, in both orders
+        assert!(should_merge(&interval(0, 1_000), &interval(1_100, 2_000), 100));
+        assert!(should_merge(&interval(1_100, 2_000), &interval(0, 1_000), 100));
+        assert!(!should_merge(&interval(0, 1_000), &interval(1_200, 2_000), 100));
+        // Overlap with far endpoints does not merge
+        assert!(!should_merge(&interval(0, 10_000), &interval(5_000, 15_000), 100));
+        // Extreme coordinates do not overflow
+        assert!(!should_merge(&interval(i32::MIN + 20_000, 0), &interval(i32::MAX - 20_000, i32::MAX - 10_001), 100));
+        assert!(!should_merge(&interval(0, 1_000), &interval(1_000, 2_000), -1));
+    }
+
+    #[test]
+    fn validate_refine_config_and_build_flanks_reject_invalid_steps() {
+        assert_eq!(build_flanks(100, 0), vec![0, 100]);
+        let mut config = RefineConfig {
+            span_bp: 100,
+            max_extension: 0.5,
+            support_level: PanSnLevel::Sample,
+            extension_step: 0,
+            merge_distance: 1000,
+            min_identity: None,
+            use_transitive_bfs: false,
+            use_transitive_dfs: false,
+            max_transitive_depth: 0,
+            min_transitive_len: 0,
+            min_distance_between_ranges: 0,
+            subset_filter: None,
+            blacklist: None,
+            approximate_mode: false,
+        };
+        assert_eq!(
+            validate_refine_config(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        config.extension_step = 100;
+        config.max_extension = f64::NAN;
+        assert_eq!(
+            validate_refine_config(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
         );
     }
 }

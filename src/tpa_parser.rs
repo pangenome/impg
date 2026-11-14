@@ -160,6 +160,15 @@ impl TpaParser {
         let mut trace_diffs = Vec::new();
         let mut query_deltas = Vec::new();
 
+        // Derive the mode from the record payload, not only from the file header.
+        // The two can disagree (old writers, mixed batches); trusting the header
+        // routed `FastgaNoDiff` records into `Standard` with an empty
+        // `query_deltas` vector, which then panicked on `query_deltas[idx]`.
+        let is_fastga = matches!(
+            compact.tracepoints,
+            TracepointData::Fastga(_) | TracepointData::FastgaNoDiff(_)
+        );
+
         match compact.tracepoints {
             TracepointData::Fastga(pairs) => {
                 // Fastga: (num_diffs, target_delta)
@@ -178,23 +187,43 @@ impl TpaParser {
                 // trace_spacing = max_complexity (used as max_value for banded alignment)
             }
             TracepointData::Variable(pairs) => {
-                // Variable: (first_val, Option<second_val>)
-                for (first, second) in pairs {
-                    tracepoints.push(first as i64);
-                    if let Some(s) = second {
-                        query_deltas.push(s as i64);
-                    }
+                // Variable: `(a_len, Some(b_len))` when the two axes differ,
+                // `(len, None)` when they advance together (see the
+                // `tracepoints` crate). `a` is the query axis, so it feeds
+                // `query_deltas`; the target axis feeds `tracepoints`.
+                for (a_len, b_len) in pairs {
+                    query_deltas.push(a_len as i64);
+                    tracepoints.push(b_len.unwrap_or(a_len) as i64);
                 }
             }
             TracepointData::Mixed(items) => {
                 for item in items {
                     match item {
                         tpa::MixedRepresentation::Tracepoint(a, b) => {
-                            tracepoints.push(b as i64);
                             query_deltas.push(a as i64);
+                            tracepoints.push(b as i64);
                         }
-                        tpa::MixedRepresentation::CigarOp(_, _) => {
-                            // Skip CIGAR ops in mixed mode
+                        // A preserved CIGAR op is just a segment with a known
+                        // axis advance. Dropping it desynchronised the two
+                        // vectors and shifted every following segment.
+                        tpa::MixedRepresentation::CigarOp(len, op) => {
+                            let (query_advance, target_advance) = match op {
+                                '=' | 'X' | 'M' => (len, len),
+                                'I' => (len, 0),
+                                'D' => (0, len),
+                                other => {
+                                    return Err(ParseErr::InvalidFormat(format!(
+                                        "TPA record {}: unsupported CIGAR op '{}' in mixed tracepoints",
+                                        record_id, other
+                                    )));
+                                }
+                            };
+                            // Zero-length operation: no-op
+                            if len == 0 {
+                                continue;
+                            }
+                            query_deltas.push(query_advance as i64);
+                            tracepoints.push(target_advance as i64);
                         }
                     }
                 }
@@ -210,7 +239,17 @@ impl TpaParser {
             }
         }
 
-        let mode_data = if matches!(tp_type, tpa::TracepointType::Fastga) {
+        if !is_fastga && query_deltas.len() != tracepoints.len() {
+            return Err(ParseErr::InvalidFormat(format!(
+                "TPA record {}: {} tracepoints but {} query deltas (tracepoint type '{}')",
+                record_id,
+                tracepoints.len(),
+                query_deltas.len(),
+                tp_type.as_str()
+            )));
+        }
+
+        let mode_data = if is_fastga {
             TracepointModeData::Fastga {
                 diffs: trace_diffs,
                 trace_spacing: max_complexity as i64,
@@ -237,7 +276,15 @@ impl TpaParser {
             target_contig_offset: 0,
             target_contig_len: 0,
             strand,
-            differences: (compact.alignment_block_len - compact.residue_matches) as i64,
+            differences: compact
+                .alignment_block_len
+                .checked_sub(compact.residue_matches)
+                .ok_or_else(|| {
+                    ParseErr::InvalidFormat(format!(
+                        "TPA record {}: {} residue matches exceed alignment block length {}",
+                        record_id, compact.residue_matches, compact.alignment_block_len
+                    ))
+                })? as i64,
             tracepoints,
             mode_data,
         })

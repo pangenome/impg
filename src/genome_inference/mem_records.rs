@@ -93,30 +93,61 @@ pub fn canonical_anchor_walk(panel: &SyngIndex, sequence: &[u8]) -> io::Result<V
         return Ok(Vec::new());
     }
     let length = sequence.len() as u64;
-    let forward: std::collections::BTreeMap<u64, i32> = raw_matched_syncmers(panel, sequence)?
-        .into_iter()
-        .map(|(node, pos)| (pos, node))
-        .collect();
+    let k_u64 = k as u64;
+    let forward = raw_matched_syncmers(panel, sequence)?;
     let reverse_sequence = crate::graph::reverse_complement(sequence);
-    let reverse: std::collections::BTreeMap<u64, i32> =
-        raw_matched_syncmers(panel, &reverse_sequence)?
-            .into_iter()
-            .map(|(node, q)| (length - k as u64 - q, -node))
-            .collect();
-    let mut positions: std::collections::BTreeSet<u64> = forward.keys().copied().collect();
-    positions.extend(reverse.keys().copied());
-    let mut out = Vec::new();
-    for position in positions {
+    let reverse = raw_matched_syncmers(panel, &reverse_sequence)?;
+
+    let Some(max_q) = length.checked_sub(k_u64) else {
+        return Ok(Vec::new());
+    };
+    // `raw_matched_syncmers` emits ascending query positions. Reversing `reverse`
+    // yields ascending forward-frame positions `length - k - q`, so a single
+    // two-pointer merge selects every canonical position without BTree allocations.
+    let mut out = Vec::with_capacity(forward.len().max(reverse.len()));
+    let mut fi = 0usize;
+    let mut ri = reverse.len();
+    if let Some(&(_, q)) = reverse.iter().find(|&&(_, q)| q > max_q) {
+        return Err(io::Error::other(format!(
+            "reverse syncmer position {q} exceeds {max_q}"
+        )));
+    }
+    while fi < forward.len() || ri > 0 {
+        let f_pos = forward.get(fi).map(|&(_, p)| p);
+        let r_pos = if ri > 0 {
+            Some(max_q - reverse[ri - 1].1)
+        } else {
+            None
+        };
+        let position = match (f_pos, r_pos) {
+            (Some(fp), Some(rp)) => fp.min(rp),
+            (Some(fp), None) => fp,
+            (None, Some(rp)) => rp,
+            (None, None) => break,
+        };
+        let mut f_node = None;
+        while fi < forward.len() && forward[fi].1 == position {
+            f_node = Some(forward[fi].0);
+            fi += 1;
+        }
+        let mut r_node = None;
+        while ri > 0 && max_q - reverse[ri - 1].1 == position {
+            // Keep the last occurrence in `reverse` forward order, matching `BTreeMap`.
+            if r_node.is_none() {
+                r_node = Some(-reverse[ri - 1].0);
+            }
+            ri -= 1;
+        }
         let start = position as usize;
         let Some(window) = sequence.get(start..start + k) else {
             continue;
         };
         let chosen = if window_is_canonical_forward(window) {
-            forward.get(&position)
+            f_node
         } else {
-            reverse.get(&position)
+            r_node
         };
-        if let Some(&node) = chosen {
+        if let Some(node) = chosen {
             out.push((node, position));
         }
     }
@@ -215,9 +246,12 @@ pub fn raw_matched_syncmers(panel: &SyngIndex, sequence: &[u8]) -> io::Result<Ve
 /// Input-forward anchor positions for both raw sketch orientations. These are
 /// sufficient to derive exact enter/leave boundaries for event-compressed replay.
 pub fn raw_mem_anchor_positions(panel: &SyngIndex, sequence: &[u8]) -> io::Result<[Vec<u64>; 2]> {
-    let reverse = crate::graph::reverse_complement(sequence);
     let k = panel.syncmer_length_bp() as u64;
     let length = sequence.len() as u64;
+    if length < k {
+        return Ok([Vec::new(), Vec::new()]);
+    }
+    let reverse = crate::graph::reverse_complement(sequence);
     let forward = panel
         .raw_syncmers_in_sequence(sequence)?
         .into_iter()
@@ -280,4 +314,42 @@ pub fn own_orientation_mem_records_scheme(
                 .collect()
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syng::SyncmerParams;
+
+    #[test]
+    fn short_sequences_do_not_underflow_and_canonical_walk_mirrors() {
+        let mut seed = 42u64;
+        let seq: Vec<u8> = (0..180)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                b"ACGT"[(seed & 3) as usize]
+            })
+            .collect();
+        let panel = SyngIndex::build(SyncmerParams::default(), [("p#0#c".into(), seq.clone())].into_iter());
+        let k = panel.syncmer_length_bp() as usize;
+
+        assert_eq!(
+            raw_mem_anchor_positions(&panel, &seq[..k - 1]).unwrap(),
+            [Vec::<u64>::new(), Vec::<u64>::new()]
+        );
+        assert!(canonical_anchor_walk(&panel, &seq[..k - 1]).unwrap().is_empty());
+
+        let fwd = canonical_anchor_walk(&panel, &seq).unwrap();
+        assert!(!fwd.is_empty());
+        let rc = crate::graph::reverse_complement(&seq);
+        let rev = canonical_anchor_walk(&panel, &rc).unwrap();
+        let expected_rev: Vec<(i32, u64)> = fwd
+            .iter()
+            .rev()
+            .map(|&(node, pos)| (-node, seq.len() as u64 - k as u64 - pos))
+            .collect();
+        assert_eq!(rev, expected_rev);
+    }
 }

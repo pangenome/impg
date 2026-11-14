@@ -49,67 +49,96 @@ pub fn numeric_sequence(seq: &[u8]) -> Vec<u8> {
 
 /// Pack a full syncmer in the canonical orientation expected by KmerHash.
 pub fn pack_canonical_syncmer(syncmer: &[u8]) -> PackedSyncmer {
-    let word_len = (syncmer.len() + 31) / 32;
-    let mut bytes = vec![0u8; word_len * 8];
+    let word_len = syncmer.len().div_ceil(32);
+    let mut words = vec![0u64; word_len];
+    let len = syncmer.len();
     let use_forward = forward_is_canonical(syncmer);
 
-    for i in 0..syncmer.len() {
+    for i in 0..len {
         let code = if use_forward {
             base_code(syncmer[i])
         } else {
-            complement_code(base_code(syncmer[syncmer.len() - 1 - i]))
+            complement_code(base_code(syncmer[len - 1 - i]))
         };
-        bytes[i / 4] |= code << (2 * (i % 4));
+        words[i >> 5] |= (code as u64) << (2 * (i & 31));
     }
 
-    bytes
-        .chunks_exact(8)
-        .map(|chunk| {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(chunk);
-            u64::from_le_bytes(word)
-        })
-        .collect()
+    words
 }
 
-/// Extract packed canonical full-syncmers from a sequence.
-pub fn extract_packed_syncmers(
-    params: SyncmerParams,
+struct SeqhashGuard(*mut syng_ffi::Seqhash);
+
+impl SeqhashGuard {
+    fn new(params: SyncmerParams) -> io::Result<Self> {
+        let seqhash = unsafe {
+            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
+        };
+        if seqhash.is_null() {
+            return Err(io::Error::other("seqhashCreate returned null"));
+        }
+        Ok(Self(seqhash))
+    }
+}
+
+impl Drop for SeqhashGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                syng_ffi::impg_seqhashDestroy(self.0);
+            }
+        }
+    }
+}
+
+fn extract_packed_syncmers_with(
+    seqhash: *mut syng_ffi::Seqhash,
+    syncmer_len: usize,
     seq: &[u8],
+    seq_buf: &mut Vec<u8>,
 ) -> io::Result<Vec<PackedSyncmer>> {
-    let syncmer_len = (params.w + params.k) as usize;
     if seq.len() < syncmer_len {
         return Ok(Vec::new());
     }
+    if seq.len() > std::os::raw::c_int::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "sequence length {} exceeds C int maximum ({})",
+                seq.len(),
+                std::os::raw::c_int::MAX
+            ),
+        ));
+    }
 
-    let mut seq_buf = numeric_sequence(seq);
+    seq_buf.clear();
+    seq_buf.reserve(seq.len() + 1);
+    seq_buf.extend(seq.iter().map(|&b| base_code(b)));
     seq_buf.push(0);
 
     let mut out = Vec::new();
     let mut validity = SyncmerWindowValidity::new(seq);
     unsafe {
-        let seqhash =
-            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
-        if seqhash.is_null() {
-            return Err(io::Error::other("seqhashCreate returned null"));
-        }
-
         let sit = syng_ffi::syncmerIterator(
             seqhash,
             seq_buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            seq.len() as i32,
+            seq.len() as std::os::raw::c_int,
         );
         if sit.is_null() {
-            syng_ffi::impg_seqhashDestroy(seqhash);
             return Err(io::Error::other("syncmerIterator returned null"));
         }
 
         let mut pos: i32 = 0;
         while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
+            if pos < 0 {
+                syng_ffi::impg_seqhashIteratorDestroy(sit);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("syncmer iterator returned negative position {}", pos),
+                ));
+            }
             let start = pos as usize;
             if start + syncmer_len > seq.len() {
                 syng_ffi::impg_seqhashIteratorDestroy(sit);
-                syng_ffi::impg_seqhashDestroy(seqhash);
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -126,10 +155,23 @@ pub fn extract_packed_syncmers(
         }
 
         syng_ffi::impg_seqhashIteratorDestroy(sit);
-        syng_ffi::impg_seqhashDestroy(seqhash);
     }
 
     Ok(out)
+}
+
+/// Extract packed canonical full-syncmers from a sequence.
+pub fn extract_packed_syncmers(
+    params: SyncmerParams,
+    seq: &[u8],
+) -> io::Result<Vec<PackedSyncmer>> {
+    let syncmer_len = (params.w + params.k) as usize;
+    if seq.len() < syncmer_len {
+        return Ok(Vec::new());
+    }
+    let guard = SeqhashGuard::new(params)?;
+    let mut seq_buf = Vec::new();
+    extract_packed_syncmers_with(guard.0, syncmer_len, seq, &mut seq_buf)
 }
 
 pub fn sort_dedup_packed_syncmers(mut syncmers: Vec<PackedSyncmer>) -> Vec<PackedSyncmer> {
@@ -143,10 +185,17 @@ pub fn build_packed_syncmer_dictionary(
     params: SyncmerParams,
     sequences: &[(String, Vec<u8>)],
 ) -> io::Result<Vec<PackedSyncmer>> {
+    let syncmer_len = (params.w + params.k) as usize;
     let expected_words = packed_syncmer_word_len(params);
     let syncmers = sequences
         .par_iter()
-        .map(|(_, seq)| extract_packed_syncmers(params, seq))
+        .map_init(
+            || (SeqhashGuard::new(params), Vec::new()),
+            |(guard_res, seq_buf), (_, seq)| match guard_res {
+                Ok(guard) => extract_packed_syncmers_with(guard.0, syncmer_len, seq, seq_buf),
+                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
+            },
+        )
         .try_reduce(Vec::new, |mut acc, mut part| {
             acc.append(&mut part);
             Ok(acc)
@@ -184,5 +233,61 @@ mod tests {
             pack_canonical_syncmer(rc),
             "forward and reverse-complement syncmers should share packed canonical form"
         );
+        // Multi-word (>32 bp) canonical packing invariant across word boundary.
+        let long_seq = b"ACGGTTCAGATTACAGGCATCGATCGGATTACCATGACCAGTA";
+        let mut long_rc = Vec::with_capacity(long_seq.len());
+        for &b in long_seq.iter().rev() {
+            long_rc.push(match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                other => other,
+            });
+        }
+        assert_ne!(long_seq.as_slice(), long_rc.as_slice());
+        assert_eq!(
+            pack_canonical_syncmer(long_seq),
+            pack_canonical_syncmer(&long_rc),
+        );
+        // Forward is canonical: A < T.
+        let mut expected = vec![0u64; 2];
+        for (i, &b) in long_seq.iter().enumerate() {
+            let code = match b {
+                b'A' => 0u64,
+                b'C' => 1,
+                b'G' => 2,
+                _ => 3,
+            };
+            expected[i / 32] |= code << (2 * (i % 32));
+        }
+        assert_ne!(expected[1], 0);
+        assert_eq!(pack_canonical_syncmer(long_seq), expected);
+    }
+
+    #[test]
+    fn parallel_dictionary_matches_sequential_extraction() {
+        let params = SyncmerParams {
+            w: 11,
+            k: 5,
+            seed: 7,
+        };
+        let seqs = vec![
+            (
+                "s1".to_string(),
+                b"ACGTACGTACGTACGTTGCATGCATGCATGCA".to_vec(),
+            ),
+            (
+                "s2".to_string(),
+                b"TGCATGCATGCATGCAACGTACGTACGTACGT".to_vec(),
+            ),
+        ];
+        let parallel = build_packed_syncmer_dictionary(params, &seqs).unwrap();
+        let mut manual = Vec::new();
+        for (_, seq) in &seqs {
+            manual.extend(extract_packed_syncmers(params, seq).unwrap());
+        }
+        let manual = sort_dedup_packed_syncmers(manual);
+        assert_eq!(parallel, manual);
     }
 }

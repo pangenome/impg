@@ -245,7 +245,8 @@ fn parse_bed_like(path: &str, join_gap: Option<u64>) -> io::Result<Vec<InferTarg
         let mut blocks: Vec<InferTarget> = Vec::new();
         for row in on_chrom {
             match blocks.last_mut() {
-                Some(last) if row.start as u64 <= last.end as u64 + gap => {
+                // Saturation keeps the comparison exact
+                Some(last) if (row.start as u64) <= (last.end as u64).saturating_add(gap) => {
                     last.end = last.end.max(row.end);
                 }
                 _ => blocks.push(row),
@@ -375,13 +376,6 @@ fn discover_partitions(
 
 fn target_range_string(target: &InferTarget) -> String {
     format!("{}:{}-{}", target.chrom, target.start, target.end)
-}
-
-fn candidate_region(candidate: &genotype::HaplotypeCandidate) -> String {
-    format!(
-        "{}:{}-{}({})",
-        candidate.path_name, candidate.start, candidate.end, candidate.strand
-    )
 }
 
 fn resolve_targets(config: &InferConfig<'_>) -> io::Result<Vec<InferTarget>> {
@@ -518,26 +512,11 @@ fn write_local_infer_output<W: Write>(
         match &call_set.output {
             Some(result) => {
                 for (rank, genotype_result) in result.results.iter().enumerate() {
-                    let haplotypes: Vec<&str> = genotype_result
-                        .combination
-                        .iter()
-                        .map(|&idx| result.candidates[idx].path_name.as_str())
-                        .collect();
-                    let regions: Vec<String> = genotype_result
-                        .combination
-                        .iter()
-                        .map(|&idx| candidate_region(&result.candidates[idx]))
-                        .collect();
-                    let anchors: Vec<String> = genotype_result
-                        .combination
-                        .iter()
-                        .map(|&idx| result.candidates[idx].anchors.to_string())
-                        .collect();
-                    let spans: Vec<String> = genotype_result
-                        .combination
-                        .iter()
-                        .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
-                        .collect();
+                    let (haplotypes, regions, anchors, spans) =
+                        genotype::format_combination_columns(
+                            &result.candidates,
+                            &genotype_result.combination,
+                        );
                     writeln!(
                         out,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{:.3}\t{}\t{}\t{}\t{}\tPASS",
@@ -550,10 +529,10 @@ fn write_local_infer_output<W: Write>(
                         result.ploidy,
                         genotype_result.similarity,
                         genotype_result.qv,
-                        haplotypes.join(","),
-                        regions.join(","),
-                        anchors.join(","),
-                        spans.join(","),
+                        haplotypes,
+                        regions,
+                        anchors,
+                        spans,
                     )?;
                 }
             }
@@ -633,24 +612,28 @@ fn ordered_states(
     let Some(output) = &call_set.output else {
         return Vec::new();
     };
+    let mut emission_cache: FxHashMap<usize, CandidateEmissionScore> = FxHashMap::default();
     let mut states = Vec::new();
     for (result_idx, result) in output.results.iter().enumerate() {
         for candidates in unique_ordered_permutations(&result.combination) {
             let mut read_emissions = Vec::with_capacity(candidates.len());
             let mut read_emission_reward = 0.0;
-            let mut rewarded_candidates = Vec::new();
-            for &candidate_idx in &candidates {
-                let emission = candidate_read_emission(
-                    read_evidence,
-                    CandidateKey {
-                        call_idx,
-                        candidate_idx,
-                    },
-                    config.read_link_weight,
-                );
-                if !rewarded_candidates.contains(&candidate_idx) {
+            for (pos, &candidate_idx) in candidates.iter().enumerate() {
+                let emission = emission_cache
+                    .entry(candidate_idx)
+                    .or_insert_with(|| {
+                        candidate_read_emission(
+                            read_evidence,
+                            CandidateKey {
+                                call_idx,
+                                candidate_idx,
+                            },
+                            config.read_link_weight,
+                        )
+                    })
+                    .clone();
+                if !candidates[..pos].contains(&candidate_idx) {
                     read_emission_reward += emission.reward;
-                    rewarded_candidates.push(candidate_idx);
                 }
                 read_emissions.push(emission);
             }
@@ -715,8 +698,13 @@ fn parse_gaf_path_nodes(path: &str, nodes: &mut Vec<i32>) -> io::Result<()> {
     Ok(())
 }
 
-fn parse_gaf_query_positions(fields: &[&str], anchors: usize) -> io::Result<Option<Vec<u64>>> {
-    for field in fields.iter().skip(12) {
+fn parse_gaf_query_positions(
+    line: &str,
+    field_bounds: &[(usize, usize)],
+    anchors: usize,
+) -> io::Result<Option<Vec<u64>>> {
+    for &(start, end) in field_bounds.iter().skip(12) {
+        let field = &line[start..end];
         if let Some(values) = field.strip_prefix("qp:B:I") {
             let mut positions = Vec::with_capacity(anchors);
             let values = values.strip_prefix(',').unwrap_or(values);
@@ -783,12 +771,12 @@ fn reverse_read_walk_steps(
 }
 
 fn sorted_candidate_hits(
-    counts: FxHashMap<CandidateKey, u32>,
+    counts: &FxHashMap<CandidateKey, u32>,
     min_read_link_anchors: usize,
 ) -> Vec<(usize, Vec<(usize, u32)>)> {
     let mut by_call: BTreeMap<usize, Vec<(usize, u32)>> = BTreeMap::new();
     let min_read_link_anchors = min_read_link_anchors.max(1) as u32;
-    for (key, count) in counts {
+    for (&key, &count) in counts {
         if count >= min_read_link_anchors {
             by_call
                 .entry(key.call_idx)
@@ -881,21 +869,25 @@ fn add_whole_walk_orientation_hits(
     counts: &mut FxHashMap<CandidateKey, u32>,
     walk_index: &FxHashMap<i32, Vec<WalkOccurrence>>,
     nodes: &[i32],
+    positions_by_candidate: &mut FxHashMap<CandidateKey, Vec<u32>>,
+    vec_pool: &mut Vec<Vec<u32>>,
 ) {
-    let mut positions_by_candidate: FxHashMap<CandidateKey, Vec<u32>> = FxHashMap::default();
+    positions_by_candidate.clear();
     for &node in nodes {
         if let Some(occurrences) = walk_index.get(&node) {
             for &occurrence in occurrences {
                 positions_by_candidate
                     .entry(occurrence.key)
-                    .or_default()
+                    .or_insert_with(|| vec_pool.pop().unwrap_or_default())
                     .push(occurrence.position);
             }
         }
     }
 
-    for (key, positions) in positions_by_candidate {
+    for (key, mut positions) in positions_by_candidate.drain() {
         let matched = lis_len(&positions);
+        positions.clear();
+        vec_pool.push(positions);
         if matched == 0 {
             continue;
         }
@@ -909,14 +901,22 @@ fn add_whole_walk_hits(
     walk_index: &FxHashMap<i32, Vec<WalkOccurrence>>,
     nodes: &[i32],
     reverse_nodes: &mut Vec<i32>,
+    positions_by_candidate: &mut FxHashMap<CandidateKey, Vec<u32>>,
+    vec_pool: &mut Vec<Vec<u32>>,
 ) {
     if nodes.is_empty() {
         return;
     }
-    add_whole_walk_orientation_hits(counts, walk_index, nodes);
+    add_whole_walk_orientation_hits(counts, walk_index, nodes, positions_by_candidate, vec_pool);
     reverse_nodes.clear();
     reverse_nodes.extend(nodes.iter().rev().map(|node| -*node));
-    add_whole_walk_orientation_hits(counts, walk_index, reverse_nodes);
+    add_whole_walk_orientation_hits(
+        counts,
+        walk_index,
+        reverse_nodes,
+        positions_by_candidate,
+        vec_pool,
+    );
 }
 
 fn candidate_mem_overlap_len(
@@ -997,9 +997,10 @@ fn add_mem_hits(
     walk_index: &FxHashMap<i32, Vec<WalkOccurrence>>,
     read_steps: &[syng::SyngWalkStep],
     mems: &[syng::SyngGbwtMem],
+    best_by_candidate: &mut FxHashMap<CandidateKey, u32>,
 ) {
     for mem in mems {
-        let mut best_by_candidate: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+        best_by_candidate.clear();
         for read_idx in mem.step_start..mem.step_end {
             let Some(occurrences) = walk_index.get(&read_steps[read_idx].signed_node) else {
                 continue;
@@ -1021,7 +1022,7 @@ fn add_mem_hits(
                 *entry = (*entry).max(overlap);
             }
         }
-        for (key, anchors) in best_by_candidate {
+        for (&key, &anchors) in best_by_candidate.iter() {
             if anchors > 0 {
                 *counts.entry(key).or_insert(0) += anchors;
             }
@@ -1074,39 +1075,79 @@ fn build_read_walk_evidence(
     let (reader, _) = niffler::get_reader(Box::new(file)).map_err(|e| {
         io::Error::other(format!("failed to open read-walk GAF '{}': {e}", gaf_path))
     })?;
-    let reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
     let mut evidence = ReadWalkEvidence::default();
+    let mut raw_line = String::new();
+    let mut line_no = 0usize;
+    let mut field_bounds: Vec<(usize, usize)> = Vec::with_capacity(16);
     let mut nodes = Vec::new();
     let mut reverse_nodes = Vec::new();
     let mut read_steps = Vec::new();
     let mut reverse_steps = Vec::new();
+    let mut walk_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+    let mut positions_by_candidate: FxHashMap<CandidateKey, Vec<u32>> = FxHashMap::default();
+    let mut vec_pool: Vec<Vec<u32>> = Vec::new();
+    let mut best_by_candidate: FxHashMap<CandidateKey, u32> = FxHashMap::default();
     let syncmer_len = syng_index.syncmer_length_bp() as u64;
 
-    for (line_no, line) in reader.lines().enumerate() {
-        let line = line?;
-        if line.is_empty() || line.starts_with('#') {
+    loop {
+        raw_line.clear();
+        if reader.read_line(&mut raw_line)? == 0 {
+            break;
+        }
+        line_no += 1;
+        if raw_line.ends_with('\n') {
+            raw_line.pop();
+            if raw_line.ends_with('\r') {
+                raw_line.pop();
+            }
+        }
+        if raw_line.is_empty() || raw_line.starts_with('#') {
             continue;
         }
         evidence.records += 1;
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 6 {
+        field_bounds.clear();
+        let bytes = raw_line.as_bytes();
+        let mut start = 0usize;
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b == b'\t' {
+                field_bounds.push((start, idx));
+                start = idx + 1;
+            }
+        }
+        field_bounds.push((start, bytes.len()));
+        if field_bounds.len() < 6 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("GAF line {} has fewer than 6 fields", line_no + 1),
+                format!("GAF line {} has fewer than 6 fields", line_no),
             ));
         }
-        parse_gaf_path_nodes(fields[5], &mut nodes)?;
-        let mut walk_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
-        if let Some(positions) = parse_gaf_query_positions(&fields, nodes.len())? {
-            let query_len = fields[1].parse::<u64>().map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid GAF query length on line {}: {e}", line_no + 1),
-                )
-            })?;
+        parse_gaf_path_nodes(
+            &raw_line[field_bounds[5].0..field_bounds[5].1],
+            &mut nodes,
+        )?;
+        walk_counts.clear();
+        if let Some(positions) =
+            parse_gaf_query_positions(&raw_line, &field_bounds, nodes.len())?
+        {
+            let query_len = raw_line[field_bounds[1].0..field_bounds[1].1]
+                .parse::<u64>()
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid GAF query length on line {}: {e}", line_no),
+                    )
+                })?;
             build_read_walk_steps(&nodes, &positions, &mut read_steps);
             let mems = syng_index.gbwt_mems_for_walk(&read_steps)?;
-            add_mem_hits(&mut walk_counts, call_sets, &walk_index, &read_steps, &mems);
+            add_mem_hits(
+                &mut walk_counts,
+                call_sets,
+                &walk_index,
+                &read_steps,
+                &mems,
+                &mut best_by_candidate,
+            );
             reverse_read_walk_steps(&read_steps, query_len, syncmer_len, &mut reverse_steps);
             let reverse_mems = syng_index.gbwt_mems_for_walk(&reverse_steps)?;
             add_mem_hits(
@@ -1115,11 +1156,19 @@ fn build_read_walk_evidence(
                 &walk_index,
                 &reverse_steps,
                 &reverse_mems,
+                &mut best_by_candidate,
             );
         } else {
-            add_whole_walk_hits(&mut walk_counts, &walk_index, &nodes, &mut reverse_nodes);
+            add_whole_walk_hits(
+                &mut walk_counts,
+                &walk_index,
+                &nodes,
+                &mut reverse_nodes,
+                &mut positions_by_candidate,
+                &mut vec_pool,
+            );
         }
-        let walk_hits_by_call = sorted_candidate_hits(walk_counts, min_read_link_anchors);
+        let walk_hits_by_call = sorted_candidate_hits(&walk_counts, min_read_link_anchors);
         add_candidate_support(&mut evidence, &walk_hits_by_call);
         add_read_links(&mut evidence, &walk_hits_by_call);
     }
@@ -1147,7 +1196,7 @@ fn phase_transition(
         } else {
             prev.start.saturating_sub(curr.end)
         };
-        if gap <= stitch_gap || curr.start <= prev.end {
+        if gap <= stitch_gap {
             return (TransitionKind::Continue, 0.0);
         }
         return (TransitionKind::Uncertain, switch_penalty * 0.5);
@@ -1219,6 +1268,13 @@ fn stitch_mosaic(
     config: &InferConfig<'_>,
     read_evidence: Option<&ReadWalkEvidence>,
 ) -> io::Result<Option<MosaicPath>> {
+    if config.stitch_beam == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--stitch-beam must be greater than 0",
+        ));
+    }
+
     let mut indexed_states: Vec<(usize, Vec<OrderedState>)> = Vec::new();
     for (idx, call_set) in call_sets.iter().enumerate() {
         let states = ordered_states(idx, call_set, config, read_evidence);
@@ -1230,27 +1286,53 @@ fn stitch_mosaic(
         return Ok(None);
     }
 
+    struct BeamArenaNode {
+        parent: Option<usize>,
+        step: MosaicStep,
+    }
+    struct BeamCandidate {
+        score: f64,
+        prev_arena_idx: usize,
+        state_idx: usize,
+        transitions: Vec<PhaseTransitionScore>,
+    }
+
     let (first_idx, first_states) = &indexed_states[0];
-    let mut beam: Vec<MosaicPath> = first_states
+    let mut initial: Vec<(f64, usize)> = first_states
         .iter()
-        .map(|state| MosaicPath {
-            score: state.emission,
-            steps: vec![MosaicStep {
+        .enumerate()
+        .map(|(state_idx, state)| (state.emission, state_idx))
+        .collect();
+    initial.sort_by(|a, b| b.0.total_cmp(&a.0));
+    initial.truncate(config.stitch_beam);
+
+    // Capacity is a hint; cap it
+    let beam_cap = config.stitch_beam.min(1 << 20);
+    let mut arena: Vec<BeamArenaNode> =
+        Vec::with_capacity(indexed_states.len().saturating_mul(beam_cap).min(1 << 20));
+    let mut beam: Vec<(f64, usize)> = Vec::with_capacity(beam_cap);
+    for (score, state_idx) in initial {
+        let state = &first_states[state_idx];
+        let arena_idx = arena.len();
+        arena.push(BeamArenaNode {
+            parent: None,
+            step: MosaicStep {
                 call_idx: *first_idx,
                 state: state.clone(),
                 transitions: vec![start_transition(); state.candidates.len()],
-            }],
-        })
-        .collect();
-    beam.sort_by(|a, b| b.score.total_cmp(&a.score));
-    beam.truncate(config.stitch_beam);
+            },
+        });
+        beam.push((score, arena_idx));
+    }
 
+    let mut next_candidates: Vec<BeamCandidate> = Vec::new();
+    let mut next_beam: Vec<(f64, usize)> = Vec::with_capacity(beam_cap);
     for (call_idx, states) in indexed_states.iter().skip(1) {
-        let mut next = Vec::new();
-        for path in &beam {
-            let prev_step = path.steps.last().expect("beam path has at least one step");
+        next_candidates.clear();
+        for &(prev_score, prev_arena_idx) in &beam {
+            let prev_step = &arena[prev_arena_idx].step;
             let prev_call = &call_sets[prev_step.call_idx];
-            for state in states {
+            for (state_idx, state) in states.iter().enumerate() {
                 let (transitions, transition_cost, read_link_reward) = transition_between(
                     prev_call,
                     prev_step.call_idx,
@@ -1261,22 +1343,65 @@ fn stitch_mosaic(
                     config,
                     read_evidence,
                 );
-                let mut candidate = path.clone();
-                candidate.score += state.emission - transition_cost + read_link_reward;
-                candidate.steps.push(MosaicStep {
-                    call_idx: *call_idx,
-                    state: state.clone(),
+                next_candidates.push(BeamCandidate {
+                    score: prev_score + state.emission - transition_cost + read_link_reward,
+                    prev_arena_idx,
+                    state_idx,
                     transitions,
                 });
-                next.push(candidate);
             }
         }
-        next.sort_by(|a, b| b.score.total_cmp(&a.score));
-        next.truncate(config.stitch_beam);
-        beam = next;
+        next_candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+        next_candidates.truncate(config.stitch_beam);
+
+        next_beam.clear();
+        for cand in next_candidates.drain(..) {
+            let arena_idx = arena.len();
+            arena.push(BeamArenaNode {
+                parent: Some(cand.prev_arena_idx),
+                step: MosaicStep {
+                    call_idx: *call_idx,
+                    state: states[cand.state_idx].clone(),
+                    transitions: cand.transitions,
+                },
+            });
+            next_beam.push((cand.score, arena_idx));
+        }
+        std::mem::swap(&mut beam, &mut next_beam);
     }
 
-    Ok(beam.into_iter().max_by(|a, b| a.score.total_cmp(&b.score)))
+    let Some((best_score, mut cursor)) = beam.into_iter().max_by(|a, b| a.0.total_cmp(&b.0))
+    else {
+        return Ok(None);
+    };
+
+    let mut steps = Vec::with_capacity(indexed_states.len());
+    loop {
+        let node = &mut arena[cursor];
+        let parent = node.parent;
+        steps.push(std::mem::replace(
+            &mut node.step,
+            MosaicStep {
+                call_idx: 0,
+                state: OrderedState {
+                    result_idx: 0,
+                    candidates: Vec::new(),
+                    emission: 0.0,
+                    read_emissions: Vec::new(),
+                },
+                transitions: Vec::new(),
+            },
+        ));
+        match parent {
+            Some(prev) => cursor = prev,
+            None => break,
+        }
+    }
+    steps.reverse();
+    Ok(Some(MosaicPath {
+        score: best_score,
+        steps,
+    }))
 }
 
 fn transition_for_phase(step: &MosaicStep, phase: usize) -> PhaseTransitionScore {
@@ -1361,10 +1486,25 @@ fn fetch_candidate_sequence(
 }
 
 fn write_wrapped_fasta<W: Write>(out: &mut W, name: &str, seq: &[u8]) -> io::Result<()> {
-    writeln!(out, ">{name}")?;
-    for chunk in seq.chunks(80) {
-        out.write_all(chunk)?;
-        out.write_all(b"\n")?;
+    crate::fasta::write_wrapped_fasta(out, name, seq)
+}
+
+fn check_strict_join(
+    strict: bool,
+    kind: TransitionKind,
+    has_prior: bool,
+    partition: &str,
+) -> io::Result<()> {
+    if strict && has_prior && matches!(kind, TransitionKind::Recombine | TransitionKind::Uncertain)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "strict stitch rejected {} join in partition {}",
+                kind.as_str(),
+                partition
+            ),
+        ));
     }
     Ok(())
 }
@@ -1390,16 +1530,7 @@ fn write_mosaic_fasta(
             if matches!(kind, TransitionKind::Recombine | TransitionKind::Uncertain)
                 && !phase_sequences[phase].is_empty()
             {
-                if strict {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "strict stitch rejected {} join in partition {}",
-                            kind.as_str(),
-                            call_set.target.partition
-                        ),
-                    ));
-                }
+                check_strict_join(strict, kind, true, &call_set.target.partition)?;
                 phase_sequences[phase].extend_from_slice(b"NNNNNNNNNN");
             }
             let seq = fetch_candidate_sequence(sequence_index, &output.candidates[candidate_idx])?;
@@ -1433,19 +1564,12 @@ fn write_mosaic_gfa(
         let output = call_set.output.as_ref().expect("mosaic step has output");
         for (phase, &candidate_idx) in step.state.candidates.iter().enumerate() {
             let kind = transition_for_phase(step, phase).kind;
-            if strict
-                && matches!(kind, TransitionKind::Recombine | TransitionKind::Uncertain)
-                && !phase_segments[phase].is_empty()
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "strict stitch rejected {} join in partition {}",
-                        kind.as_str(),
-                        call_set.target.partition
-                    ),
-                ));
-            }
+            check_strict_join(
+                strict,
+                kind,
+                !phase_segments[phase].is_empty(),
+                &call_set.target.partition,
+            )?;
             let candidate = &output.candidates[candidate_idx];
             let segment = format!("phase{phase}_{step_idx}");
             let seq = fetch_candidate_sequence(sequence_index, candidate)?;
@@ -1581,5 +1705,54 @@ mod tests {
         ];
         assert_eq!(spans(20_000), joined);
         assert_eq!(spans(0).len(), 3);
+    }
+
+    #[test]
+    fn phase_transition_treats_large_backward_jump_as_uncertain() {
+        let prev = genotype::HaplotypeCandidate::new_for_test("hap1", 5_000, 6_000, '+');
+        let overlap = genotype::HaplotypeCandidate::new_for_test("hap1", 5_500, 6_500, '+');
+        let backward_far = genotype::HaplotypeCandidate::new_for_test("hap1", 100, 500, '+');
+        assert_eq!(
+            phase_transition(&prev, &overlap, 10.0, 1_000),
+            (TransitionKind::Continue, 0.0)
+        );
+        assert_eq!(
+            phase_transition(&prev, &backward_far, 10.0, 1_000),
+            (TransitionKind::Uncertain, 5.0)
+        );
+    }
+
+    #[test]
+    fn stitch_mosaic_rejects_zero_beam() {
+        let config = InferConfig {
+            syng_prefix: "",
+            pack_path: "",
+            targets: Vec::new(),
+            discovery: None,
+            phase_block_size: 0,
+            candidate_mode: genotype::CandidateMode::Spanning,
+            ploidy: 2,
+            top_n: 5,
+            candidate_top_k: 0,
+            max_combinations: 10_000,
+            syng_padding: 0,
+            syng_extension: 0,
+            min_anchors: 1,
+            min_span_fraction: 0.0,
+            gaf_path: None,
+            min_read_link_anchors: 1,
+            read_link_weight: 0.0,
+            stitch: StitchMode::Beam,
+            switch_penalty: 10.0,
+            stitch_gap: 1_000,
+            stitch_beam: 0,
+            strict_stitch: false,
+            emit_mosaic: None,
+            emit_fasta: None,
+            emit_gfa: None,
+            sequence_index: None,
+        };
+        let err = stitch_mosaic(&[], &config, None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }

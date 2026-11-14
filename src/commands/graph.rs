@@ -795,7 +795,7 @@ fn gfa_path_sequences(gfa: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
                             ));
                         };
                         if reverse {
-                            sequence.extend(reverse_complement_bases(segment));
+                            sequence.extend(crate::graph::reverse_complement(segment));
                         } else {
                             sequence.extend_from_slice(segment);
                         }
@@ -808,24 +808,6 @@ fn gfa_path_sequences(gfa: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
     }
 
     Ok(paths)
-}
-
-fn reverse_complement_bases(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|base| match base {
-            b'A' => b'T',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'T' => b'A',
-            b'a' => b't',
-            b'c' => b'g',
-            b'g' => b'c',
-            b't' => b'a',
-            b'N' | b'n' => *base,
-            other => *other,
-        })
-        .collect()
 }
 
 /// Write every sequence of AGC archives to a temp FASTA in `temp_dir`.
@@ -1350,14 +1332,7 @@ pub fn run_graph_build_partitioned(
     };
 
     // 6. Write output
-    if output == "-" {
-        let stdout = io::stdout();
-        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        out.write_all(final_gfa.as_bytes())?;
-    } else {
-        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output)?);
-        out.write_all(final_gfa.as_bytes())?;
-    }
+    crate::commands::write_text_to_path_or_stdout(output, &final_gfa, false)?;
 
     info!("[partitioned-graph] Done");
     Ok(())
