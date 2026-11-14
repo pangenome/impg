@@ -46,6 +46,24 @@ pub(crate) fn validate_pattern(pattern: &[u64]) -> io::Result<()> {
     Ok(())
 }
 
+#[inline]
+fn rc_node_token(token: u64) -> u64 {
+    let z = (token - 2) / 2;
+    let node = ((z >> 1) as i64) ^ -((z & 1) as i64);
+    let node = -node;
+    2 + 2 * (((node << 1) ^ (node >> 63)) as u64)
+}
+
+#[inline]
+fn canonical_pair(pair: [u64; 3]) -> [u64; 3] {
+    let rc = [rc_node_token(pair[2]), pair[1], rc_node_token(pair[0])];
+    if rc < pair {
+        rc
+    } else {
+        pair
+    }
+}
+
 pub fn reverse_complement(pattern: &[u64]) -> Vec<u64> {
     pattern
         .iter()
@@ -55,10 +73,7 @@ pub fn reverse_complement(pattern: &[u64]) -> Vec<u64> {
             if i % 2 == 1 {
                 token
             } else {
-                let z = (token - 2) / 2;
-                let node = ((z >> 1) as i64) ^ -((z & 1) as i64);
-                let node = -node;
-                2 + 2 * (((node << 1) ^ (node >> 63)) as u64)
+                rc_node_token(token)
             }
         })
         .collect()
@@ -239,9 +254,7 @@ impl WeightedBwt {
                 if weight == 0 {
                     continue;
                 }
-                let key: [u64; 3] = canonical(&pattern)
-                    .try_into()
-                    .expect("canonical pair retains three tokens");
+                let key = canonical_pair(pattern);
                 let total = counts.entry(key).or_default();
                 *total = total
                     .checked_add(weight)
