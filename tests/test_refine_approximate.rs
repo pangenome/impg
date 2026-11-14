@@ -18,19 +18,8 @@ use tempfile::TempDir;
 static FIXTURE_DIR: OnceLock<Option<TempDir>> = OnceLock::new();
 
 fn get_impg_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
-        return PathBuf::from(path);
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        manifest_dir.join("target/release/impg"),
-        manifest_dir.join("target/debug/impg"),
-    ] {
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    PathBuf::from("impg")
+    // The binary cargo built for this test run
+    PathBuf::from(env!("CARGO_BIN_EXE_impg"))
 }
 
 fn run(binary: &Path, dir: &Path, args: &[&str]) -> Output {

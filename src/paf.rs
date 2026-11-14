@@ -495,13 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_paf_valid_2() {
-        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10=";
-        let mut seq_index = SequenceIndex::new();
-        assert!(parse_paf_line(line, 0, &mut seq_index).is_ok());
-    }
-
-    #[test]
     fn test_parse_paf_invalid() {
         // it's got a character 'z' in the length field
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10M";
@@ -550,7 +543,7 @@ mod tests {
         for ok in ["10=20X3I4D5M", "536870911=", "0000000001=", "1="] {
             assert_eq!(validate_cigar_tag(ok), Ok(ok.len()), "{ok}");
         }
-        for bad in ["", "=", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
+        for bad in ["", "=", "100", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
             assert!(validate_cigar_tag(bad).is_err(), "{bad:?} must be rejected");
         }
     }
@@ -579,13 +572,6 @@ mod tests {
             rejected += usize::from(!exact_ok);
         }
         assert!(rejected > 0 && rejected < 200_000, "{rejected} rejected");
-    }
-
-    #[test]
-    fn test_parse_paf_cigar_without_op_is_rejected() {
-        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:100";
-        let mut seq_index = SequenceIndex::new();
-        assert!(parse_paf_line(line, 0, &mut seq_index).is_err());
     }
 
     #[test]

@@ -432,41 +432,6 @@ mod tests {
     use crate::sequence_namespace::{SequenceNamespace, SourceInterval};
 
     #[test]
-    fn translation_binary_roundtrips() {
-        let dir = std::env::temp_dir().join("impg_test_render_translation_roundtrip");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("translation.bin");
-        let mut namespace = SequenceNamespace::new();
-        let source_id = namespace.add_sequence("HG002#1#chr6", 1000);
-        let tables = RenderTranslationTables {
-            namespace,
-            rendered_paths: vec![RenderedPathRecord {
-                rendered_path_id: 0,
-                rendered_name: "HG002#1#chr6:10-100".to_string(),
-                source_interval: SourceInterval::new(source_id, 10, 100, '+').unwrap(),
-                gbwt_path_id: Some(0),
-            }],
-            step_samples: vec![StepTranslationRecord {
-                rendered_path_id: 0,
-                rendered_step: 0,
-                source_bp: 10,
-                feature_id: 42,
-                orientation: '+',
-            }],
-        };
-
-        write_translation_binary(&path, &tables).unwrap();
-        let decoded = read_translation_binary(&path).unwrap();
-
-        assert_eq!(
-            decoded.rendered_paths[0].rendered_name,
-            "HG002#1#chr6:10-100"
-        );
-        assert_eq!(decoded.step_samples[0].feature_id, 42);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn bundle_loader_validates_manifest_and_translation() {
         let dir = std::env::temp_dir().join("impg_test_render_bundle_loader");
         std::fs::remove_dir_all(&dir).ok();
@@ -511,6 +476,7 @@ mod tests {
             "HG002#1#chr6:10-100"
         );
         assert_eq!(loaded.tables.step_samples[0].source_bp, 10);
+        assert_eq!(loaded.tables.step_samples[0].feature_id, 42);
         std::fs::remove_dir_all(&dir).ok();
     }
 

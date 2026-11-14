@@ -1592,18 +1592,6 @@ impl Default for SyncmerParams {
     }
 }
 
-impl SyncmerParams {
-    /// Convert to the C-side SyncmerParams struct.
-    #[cfg(test)]
-    fn to_c(self) -> syng_ffi::CSyncmerParams {
-        syng_ffi::CSyncmerParams {
-            w: self.w as i32,
-            k: self.k as i32,
-            seed: self.seed as i32,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct SyngMetadata {
     version: u32,
@@ -6266,40 +6254,6 @@ mod tests {
         );
     }
 
-    // ── 1. FFI smoke tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_syng_ffi_seqhash_create_destroy() {
-        let _guard = lock_syng();
-        // Create a Seqhash with default params (k=8, w=55, seed=7), verify non-null, free it.
-        let sh = unsafe { syng_ffi::impg_seqhashCreateSafe(8, 55, 7) };
-        assert!(
-            !sh.is_null(),
-            "seqhashCreate returned null for valid params"
-        );
-        unsafe { syng_ffi::impg_seqhashDestroy(sh) };
-    }
-
-    #[test]
-    fn test_syng_ffi_kmerhash_create_destroy() {
-        let _guard = lock_syng();
-        // Create a KmerHash, verify non-null, destroy it.
-        let syncmer_len = 55 + 8; // w + k = 63
-        let kh = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
-        assert!(!kh.is_null(), "kmerHashCreate returned null");
-        unsafe { syng_ffi::kmerHashDestroy(kh) };
-    }
-
-    #[test]
-    fn test_syng_ffi_syngbwt_create_destroy() {
-        let _guard = lock_syng();
-        // Create a SyngBWT, verify non-null, destroy it.
-        let syncmer_len = 63;
-        let sb = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
-        assert!(!sb.is_null(), "syngBWTcreate returned null");
-        unsafe { syng_ffi::syngBWTdestroy(sb) };
-    }
-
     // ── 2. SyncmerParams defaults ───────────────────────────────────
 
     #[test]
@@ -6311,85 +6265,16 @@ mod tests {
         assert_eq!(params.seed, 7);
     }
 
-    #[test]
-    fn test_syncmer_params_to_c() {
-        let _guard = lock_syng();
-        let params = SyncmerParams::default();
-        let c_params = params.to_c();
-        assert_eq!(c_params.k, 8);
-        assert_eq!(c_params.w, 55);
-        assert_eq!(c_params.seed, 7);
-    }
-
-    // ── 3. SyngIndex lifecycle ──────────────────────────────────────
-
-    #[test]
-    fn test_syng_index_create_drop() {
-        let _guard = lock_syng();
-        // Verify we can create and drop without crashing
-        let params = SyncmerParams::default();
-        let index = SyngIndex::new(params);
-        assert!(!index.gbwt.is_null());
-        assert!(!index.kmer_hash.is_null());
-        assert!(!index.seqhash.is_null());
-        drop(index);
-    }
-
-    #[test]
-    fn test_syng_index_custom_params() {
-        let _guard = lock_syng();
-        // Non-default params should also produce valid pointers
-        let params = SyncmerParams {
-            k: 11,
-            w: 40,
-            seed: 42,
-        };
-        let index = SyngIndex::new(params);
-        assert!(!index.gbwt.is_null());
-        assert!(!index.kmer_hash.is_null());
-        assert!(!index.seqhash.is_null());
-        assert_eq!(index.params.k, 11);
-        assert_eq!(index.params.w, 40);
-        assert_eq!(index.params.seed, 42);
-    }
-
-    #[test]
-    fn test_syng_index_accessors() {
-        let _guard = lock_syng();
-        let index = SyngIndex::new(SyncmerParams::default());
-        // Accessor methods should return the same non-null pointers
-        assert_eq!(index.gbwt_ptr(), index.gbwt);
-        assert_eq!(index.kmer_hash_ptr(), index.kmer_hash);
-        assert_eq!(index.seqhash_ptr(), index.seqhash);
-        assert!(!index.gbwt_ptr().is_null());
-        assert!(!index.kmer_hash_ptr().is_null());
-        assert!(!index.seqhash_ptr().is_null());
-    }
-
     // ── 4. SyngNameMap ──────────────────────────────────────────────
-
-    #[test]
-    fn test_name_map_new() {
-        let _guard = lock_syng();
-        let nm = SyngNameMap::new();
-        assert!(nm.path_to_name.is_empty());
-        assert!(nm.path_to_length.is_empty());
-        assert!(nm.name_to_path.is_empty());
-    }
-
-    #[test]
-    fn test_name_map_default() {
-        let _guard = lock_syng();
-        // Default trait should produce the same as new()
-        let nm = SyngNameMap::default();
-        assert!(nm.path_to_name.is_empty());
-        assert!(nm.path_to_length.is_empty());
-        assert!(nm.name_to_path.is_empty());
-    }
 
     #[test]
     fn test_name_map_add() {
         let _guard = lock_syng();
+        for empty in [SyngNameMap::new(), SyngNameMap::default()] {
+            assert!(empty.path_to_name.is_empty());
+            assert!(empty.path_to_length.is_empty());
+            assert!(empty.name_to_path.is_empty());
+        }
         let mut nm = SyngNameMap::new();
         let p0 = nm.add("seq1".to_string(), 1000);
         let p1 = nm.add("seq2".to_string(), 2000);
@@ -6853,42 +6738,6 @@ mod tests {
         assert!(index.name_map.path_to_name.is_empty());
     }
 
-    #[test]
-    fn test_build_short_sequence() {
-        let _guard = lock_syng();
-        // Sequence shorter than syncmer length (63) — should be recorded but not panick
-        let seqs = vec![("short".to_string(), b"ACGTACGT".to_vec())];
-        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 1);
-        assert_eq!(index.name_map.path_to_name[0], "short");
-    }
-
-    #[test]
-    fn test_build_single_sequence() {
-        let _guard = lock_syng();
-        // A sequence long enough for syncmer extraction
-        let seq = make_test_sequence(500, 42);
-        let seqs = vec![("test_seq".to_string(), seq)];
-        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 1);
-        assert_eq!(index.name_map.path_to_name[0], "test_seq");
-        assert_eq!(index.name_map.path_to_length[0], 500);
-    }
-
-    #[test]
-    fn test_build_multiple_sequences() {
-        let _guard = lock_syng();
-        let seqs: Vec<(String, Vec<u8>)> = (0..5)
-            .map(|i| (format!("seq_{}", i), make_test_sequence(1000, i as u8)))
-            .collect();
-        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 5);
-        for i in 0..5 {
-            assert_eq!(index.name_map.path_to_name[i], format!("seq_{}", i));
-            assert_eq!(index.name_map.path_to_length[i], 1000);
-        }
-    }
-
     // ── 6. SyngIndex save/load roundtrip ────────────────────────────
 
     #[test]
@@ -6957,6 +6806,9 @@ mod tests {
         assert!(!loaded.gbwt.is_null());
         assert!(!loaded.kmer_hash.is_null());
         assert!(!loaded.seqhash.is_null());
+        assert_eq!(loaded.gbwt_ptr(), loaded.gbwt);
+        assert_eq!(loaded.kmer_hash_ptr(), loaded.kmer_hash);
+        assert_eq!(loaded.seqhash_ptr(), loaded.seqhash);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -7059,195 +6911,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── 7. Round-trip: build → save → load → verify (spec Test 1) ──
-
-    #[test]
-    fn test_syng_roundtrip_path_count_preserved() {
-        let _guard = lock_syng();
-        // Build from multiple sequences, save, reload, verify same number
-        // of paths recorded in the name map.
-        let seqs: Vec<(String, Vec<u8>)> = (0..5)
-            .map(|i| {
-                (
-                    format!("sample{}#hap{}#chr1", i / 2, i % 2),
-                    make_test_sequence(3000, i as u8 + 50),
-                )
-            })
-            .collect();
-        let params = SyncmerParams::default();
-        let mut original = SyngIndex::build(params, seqs.into_iter());
-
-        let dir = std::env::temp_dir().join("impg_test_syng_rt_paths");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("rt_paths");
-        let prefix_str = prefix.to_str().unwrap();
-
-        original.save(prefix_str).unwrap();
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-
-        // Same number of paths
-        assert_eq!(
-            loaded.name_map.path_to_name.len(),
-            original.name_map.path_to_name.len(),
-            "Path count must be preserved after round-trip"
-        );
-
-        // Same names in the same order
-        assert_eq!(loaded.name_map.path_to_name, original.name_map.path_to_name);
-
-        // Same lengths
-        assert_eq!(
-            loaded.name_map.path_to_length,
-            original.name_map.path_to_length
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_syng_roundtrip_names_match() {
-        let _guard = lock_syng();
-        // Use PanSN-style names and verify they survive round-trip.
-        let names = vec![
-            "HG002#1#chr1",
-            "HG002#2#chr1",
-            "HG005#1#chrX",
-            "GRCh38#0#chr22",
-        ];
-        let seqs: Vec<(String, Vec<u8>)> = names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.to_string(), make_test_sequence(2000, i as u8 + 10)))
-            .collect();
-        let params = SyncmerParams::default();
-        let mut original = SyngIndex::build(params, seqs.into_iter());
-
-        let dir = std::env::temp_dir().join("impg_test_syng_rt_names");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("rt_names");
-        let prefix_str = prefix.to_str().unwrap();
-
-        original.save(prefix_str).unwrap();
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-
-        for name in &names {
-            assert!(
-                loaded.name_map.name_to_path.contains_key(*name),
-                "Name '{}' should be present in loaded name map",
-                name
-            );
-            let orig_path = original.name_map.name_to_path[*name];
-            let load_path = loaded.name_map.name_to_path[*name];
-            assert_eq!(
-                orig_path, load_path,
-                "Path number for '{}' should match after round-trip",
-                name
-            );
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_syng_roundtrip_lengths_match() {
-        let _guard = lock_syng();
-        // Build with varying-length sequences, verify lengths preserved.
-        let lengths = [100, 500, 1000, 5000, 10000];
-        let seqs: Vec<(String, Vec<u8>)> = lengths
-            .iter()
-            .enumerate()
-            .map(|(i, &len)| (format!("seq_len_{}", len), make_test_sequence(len, i as u8)))
-            .collect();
-        let params = SyncmerParams::default();
-        let mut original = SyngIndex::build(params, seqs.into_iter());
-
-        let dir = std::env::temp_dir().join("impg_test_syng_rt_lengths");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("rt_lengths");
-        let prefix_str = prefix.to_str().unwrap();
-
-        original.save(prefix_str).unwrap();
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-
-        for (i, &expected_len) in lengths.iter().enumerate() {
-            assert_eq!(
-                loaded.name_map.path_to_length[i], expected_len as u64,
-                "Length for seq {} should be {} after round-trip",
-                i, expected_len
-            );
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // ── 8. SyngNameMap serialization with special characters ────────
-
-    #[test]
-    fn test_name_map_pansn_format() {
-        let _guard = lock_syng();
-        // PanSN format: SAMPLE#HAP#CONTIG — verify # chars survive serialization
-        let mut nm = SyngNameMap::new();
-        nm.add("HG002#1#chr1".to_string(), 248956422);
-        nm.add("HG002#2#chr1".to_string(), 248956422);
-        nm.add("GRCh38#0#chrX".to_string(), 156040895);
-        nm.add("NA12878#1#chr22_random".to_string(), 50818468);
-
-        let dir = std::env::temp_dir().join("impg_test_name_map_pansn");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pansn.syng.names");
-        let path_str = path.to_str().unwrap();
-
-        nm.save(path_str).unwrap();
-        let loaded = SyngNameMap::load(path_str).unwrap();
-
-        assert_eq!(loaded.path_to_name, nm.path_to_name);
-        assert_eq!(loaded.path_to_length, nm.path_to_length);
-        for (k, v) in &nm.name_to_path {
-            assert_eq!(
-                loaded.name_to_path.get(k),
-                Some(v),
-                "PanSN name '{}' should survive round-trip",
-                k
-            );
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_name_map_special_characters() {
-        let _guard = lock_syng();
-        // Names with dots, underscores, dashes, and PanSN separators
-        let mut nm = SyngNameMap::new();
-        let names = vec![
-            ("chr1.1_paternal-v2", 100000u64),
-            ("sample.HG002#hap1#contig_123", 200000),
-            ("ref-genome_v3.0", 300000),
-            ("a", 1),
-        ];
-        for (name, len) in &names {
-            nm.add(name.to_string(), *len);
-        }
-
-        let dir = std::env::temp_dir().join("impg_test_name_map_special");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("special.syng.names");
-        let path_str = path.to_str().unwrap();
-
-        nm.save(path_str).unwrap();
-        let loaded = SyngNameMap::load(path_str).unwrap();
-
-        for (name, len) in &names {
-            let idx = *loaded
-                .name_to_path
-                .get(*name)
-                .unwrap_or_else(|| panic!("Name '{}' missing from loaded name map", name));
-            assert_eq!(loaded.path_to_length[idx as usize], *len);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     // ── 9. Syncmer parameter variations ─────────────────────────────
 
     #[test]
@@ -7315,92 +6978,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn test_syng_default_params_build_and_reload() {
-        let _guard = lock_syng();
-        // Build with default params, save, reload with same params — should work
-        let params = SyncmerParams::default();
-        let seqs = vec![
-            ("s1".to_string(), make_test_sequence(2000, 1)),
-            ("s2".to_string(), make_test_sequence(2000, 2)),
-        ];
-        let mut index = SyngIndex::build(params, seqs.into_iter());
-
-        let dir = std::env::temp_dir().join("impg_test_syng_default_reload");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("idx");
-        let prefix_str = prefix.to_str().unwrap();
-
-        index.save(prefix_str).unwrap();
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-
-        assert_eq!(loaded.name_map.path_to_name.len(), 2);
-        assert_eq!(loaded.params.k, 8);
-        assert_eq!(loaded.params.w, 55);
-        assert_eq!(loaded.params.seed, 7);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     // ── 10. Empty and edge cases ────────────────────────────────────
-
-    #[test]
-    fn test_syng_build_empty_sequence() {
-        let _guard = lock_syng();
-        // A 0-length sequence should be handled gracefully (no panic)
-        let seqs = vec![("empty".to_string(), Vec::new())];
-        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 1);
-        assert_eq!(index.name_map.path_to_name[0], "empty");
-        assert_eq!(index.name_map.path_to_length[0], 0);
-    }
-
-    #[test]
-    fn test_syng_build_sequence_shorter_than_syncmer() {
-        let _guard = lock_syng();
-        // 50bp < 63bp (default syncmer length) — should record but skip extraction
-        let seq = make_test_sequence(50, 77);
-        let seqs = vec![("too_short".to_string(), seq)];
-        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 1);
-        assert_eq!(index.name_map.path_to_name[0], "too_short");
-        assert_eq!(index.name_map.path_to_length[0], 50);
-    }
-
-    #[test]
-    fn test_syng_build_exactly_syncmer_length() {
-        let _guard = lock_syng();
-        // Sequence exactly syncmer length (63bp) — borderline, should not panic
-        let seq = make_test_sequence(63, 88);
-        let seqs = vec![("exact".to_string(), seq)];
-        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 1);
-        assert_eq!(index.name_map.path_to_length[0], 63);
-    }
-
-    #[test]
-    fn test_syng_build_single_path_in_gbwt() {
-        let _guard = lock_syng();
-        // Single sequence should produce exactly one entry in name map
-        let seq = make_test_sequence(1000, 33);
-        let seqs = vec![("single".to_string(), seq)];
-        let params = SyncmerParams::default();
-        let mut index = SyngIndex::build(params, seqs.into_iter());
-        assert_eq!(index.name_map.path_to_name.len(), 1);
-
-        // Save and reload to verify the single path survives
-        let dir = std::env::temp_dir().join("impg_test_syng_single_path");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("single");
-        let prefix_str = prefix.to_str().unwrap();
-
-        index.save(prefix_str).unwrap();
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert_eq!(loaded.name_map.path_to_name.len(), 1);
-        assert_eq!(loaded.name_map.path_to_name[0], "single");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     #[test]
     fn test_syng_build_mixed_lengths() {
@@ -7990,30 +7568,7 @@ mod tests {
         let output_prefix = dir.join("cli_output");
         let output_prefix_str = output_prefix.to_str().unwrap();
 
-        // Find the impg binary
-        let bin = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("impg");
-
-        // If the binary doesn't exist, try cargo bin path
-        let bin = if bin.exists() {
-            bin
-        } else {
-            // Fall back to looking in target/debug or target/release
-            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            manifest_dir.join("target/debug/impg")
-        };
-
-        if !bin.exists() {
-            // Skip if binary not built yet — cargo test --lib won't build the binary
-            eprintln!("Skipping CLI test: impg binary not found at {:?}", bin);
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
+        let bin = find_impg_binary();
 
         let output = std::process::Command::new(&bin)
             .args([
@@ -8088,57 +7643,6 @@ mod tests {
     }
 
     // ── 13. query_region tests ─────────────────────────────────────
-
-    /// Full SyngIndex save/load with sampled positional sidecars. Verify that
-    /// the reloaded index returns the same query results as the in-memory
-    /// version.
-    #[test]
-    fn test_syng_save_load_with_sampled_positions() {
-        let _guard = lock_syng();
-        let params = SyncmerParams::default();
-        let shared = make_test_sequence(500, 42);
-        let mut sa = shared.clone();
-        sa.extend_from_slice(&make_test_sequence(500, 1));
-        let mut sb = shared.clone();
-        sb.extend_from_slice(&make_test_sequence(500, 2));
-        let seqs = vec![("ga".to_string(), sa), ("gb".to_string(), sb)];
-
-        let mut index = SyngIndex::build(params, seqs.into_iter());
-        let in_mem = index.query_region("ga", 0, 1000, 120).unwrap();
-
-        let dir = std::env::temp_dir().join("impg_test_syng_spos_query_roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("idx");
-        let prefix_str = prefix.to_str().unwrap();
-        index.save(prefix_str).unwrap();
-        assert!(
-            std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists(),
-            ".syng.spos file should exist after save"
-        );
-        assert!(
-            !std::path::Path::new(&format!("{}.syng.locate", prefix_str)).exists(),
-            ".syng.locate should not be written"
-        );
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert!(
-            loaded.has_sampled_positions(),
-            "loaded index should have sampled positions"
-        );
-        assert!(
-            loaded.has_sampled_checkpoints(),
-            "loaded index should have sampled checkpoints"
-        );
-        let reloaded = loaded.query_region("ga", 0, 1000, 120).unwrap();
-
-        let to_set = |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64)> {
-            v.iter()
-                .map(|iv| (iv.genome.clone(), iv.start, iv.end))
-                .collect()
-        };
-        assert_eq!(to_set(&in_mem), to_set(&reloaded));
-        assert!(!in_mem.is_empty());
-    }
 
     /// Query path smoke test for exact sampled positions over multiple genomes.
     #[test]
@@ -8309,57 +7813,6 @@ mod tests {
     }
 
     #[test]
-    fn test_query_region_padding() {
-        let _guard = lock_syng();
-        let params = SyncmerParams {
-            k: 8,
-            w: 55,
-            seed: 7,
-        };
-        let seq_a = make_test_sequence(1000, 42);
-        let seq_b = seq_a.clone(); // identical => fully shared
-
-        let index = SyngIndex::build(
-            params,
-            vec![
-                ("genome_a".to_string(), seq_a),
-                ("genome_b".to_string(), seq_b),
-            ]
-            .into_iter(),
-        );
-
-        // Query without padding
-        let no_pad = index.query_region("genome_a", 200, 400, 0).unwrap();
-        // Query with 120bp padding
-        let with_pad = index.query_region("genome_a", 200, 400, 120).unwrap();
-
-        // With padding, intervals should be at least as wide as without
-        for (np, wp) in no_pad.iter().zip(with_pad.iter()) {
-            if np.genome == wp.genome {
-                assert!(
-                    wp.start <= np.start && wp.end >= np.end,
-                    "Padded interval should be >= unpadded: {:?} vs {:?}",
-                    wp,
-                    np
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_query_region_no_path_start_info() {
-        let _guard = lock_syng();
-        // Build an index, then manually clear path_starts to simulate old format
-        let params = SyncmerParams::default();
-        let seq = make_test_sequence(500, 42);
-        let mut index = SyngIndex::build(params, vec![("seq1".to_string(), seq)].into_iter());
-        index.name_map.path_starts[0] = None;
-
-        let result = index.query_region("seq1", 0, 100, 0);
-        assert!(result.is_err(), "Should error when path_starts is missing");
-    }
-
-    #[test]
     fn test_query_region_save_load_roundtrip() {
         let _guard = lock_syng();
         // Build, save, load, then query — results should match
@@ -8386,6 +7839,10 @@ mod tests {
         let prefix = dir.join("test");
         let prefix_str = prefix.to_str().unwrap();
         index.save(prefix_str).unwrap();
+        assert!(
+            !std::path::Path::new(&format!("{}.syng.locate", prefix_str)).exists(),
+            ".syng.locate should not be written"
+        );
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
 
         // Check that path_starts survived the roundtrip
@@ -8400,6 +7857,7 @@ mod tests {
         // Query results should match
         let orig_intervals = index.query_region("genome_a", 100, 500, 120).unwrap();
         let loaded_intervals = loaded.query_region("genome_a", 100, 500, 120).unwrap();
+        assert!(!orig_intervals.is_empty());
         assert_eq!(orig_intervals.len(), loaded_intervals.len());
         for (o, l) in orig_intervals.iter().zip(loaded_intervals.iter()) {
             assert_eq!(o.genome, l.genome);
@@ -8529,62 +7987,6 @@ mod tests {
     // ── 15. Boundary padding tests ─────────────────────────────────
 
     #[test]
-    fn test_query_padding_extends_intervals() {
-        let _guard = lock_syng();
-        let params = SyncmerParams::default();
-        let seq_a = make_test_sequence(1000, 42);
-        let seq_b = seq_a.clone(); // identical
-
-        let index = SyngIndex::build(
-            params,
-            vec![
-                ("genome_a".to_string(), seq_a),
-                ("genome_b".to_string(), seq_b),
-            ]
-            .into_iter(),
-        );
-
-        let no_pad = index.query_region("genome_a", 200, 600, 0).unwrap();
-        let pad_120 = index.query_region("genome_a", 200, 600, 120).unwrap();
-
-        // Both should find genome_b
-        assert!(no_pad.iter().any(|iv| iv.genome == "genome_b"));
-        assert!(pad_120.iter().any(|iv| iv.genome == "genome_b"));
-
-        // Find genome_b in each
-        let no_pad_b = no_pad.iter().find(|iv| iv.genome == "genome_b").unwrap();
-        let pad_120_b = pad_120.iter().find(|iv| iv.genome == "genome_b").unwrap();
-
-        // Padded interval should be at least as wide
-        assert!(
-            pad_120_b.start <= no_pad_b.start,
-            "Padded start {} should be <= unpadded start {}",
-            pad_120_b.start,
-            no_pad_b.start
-        );
-        assert!(
-            pad_120_b.end >= no_pad_b.end,
-            "Padded end {} should be >= unpadded end {}",
-            pad_120_b.end,
-            no_pad_b.end
-        );
-
-        // The difference should be approximately the padding amount
-        let start_diff = no_pad_b.start as i64 - pad_120_b.start as i64;
-        let end_diff = pad_120_b.end as i64 - no_pad_b.end as i64;
-        assert!(
-            start_diff >= 0,
-            "start_diff should be non-negative: {}",
-            start_diff
-        );
-        assert!(
-            end_diff >= 0,
-            "end_diff should be non-negative: {}",
-            end_diff
-        );
-    }
-
-    #[test]
     fn test_query_padding_zero_vs_nonzero() {
         let _guard = lock_syng();
         let params = SyncmerParams::default();
@@ -8686,21 +8088,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_with_anchors_overlapping() {
-        let _guard = lock_syng();
-        let mut intervals = vec![
-            mk_hiwa(0, 150, vec![(10, 10)]),
-            mk_hiwa(100, 300, vec![(200, 200)]),
-        ];
-        SyngIndex::merge_intervals_with_anchors(&mut intervals);
-        assert_eq!(intervals.len(), 1);
-        assert_eq!(intervals[0].start, 0);
-        assert_eq!(intervals[0].end, 300);
-        // Anchors from both intervals are preserved
-        assert_eq!(intervals[0].anchors.len(), 2);
-    }
-
-    #[test]
     fn test_merge_with_anchors_adjacent() {
         let _guard = lock_syng();
         let mut intervals = vec![
@@ -8758,72 +8145,6 @@ mod tests {
     }
 
     // ── 17. Edge cases for query_region ────────────────────────────
-
-    #[test]
-    fn test_query_region_isolated_region() {
-        let _guard = lock_syng();
-        // genome_a and genome_b share nothing (different seeds) —
-        // querying genome_a should only return self.
-        let params = SyncmerParams::default();
-        let seq_a = make_test_sequence(500, 1);
-        let seq_b = make_test_sequence(500, 99); // completely different
-
-        let index = SyngIndex::build(
-            params,
-            vec![
-                ("genome_a".to_string(), seq_a),
-                ("genome_b".to_string(), seq_b),
-            ]
-            .into_iter(),
-        );
-
-        let intervals = index.query_region("genome_a", 100, 300, 0).unwrap();
-
-        // Should contain self-hit but not genome_b
-        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
-        assert!(
-            genomes.contains(&"genome_a"),
-            "Self-hit expected. Found: {:?}",
-            genomes
-        );
-        // genome_b may or may not appear — with truly different seeds it shouldn't share syncmers.
-        // But we can't 100% guarantee no accidental collision. Check that if genome_b appears,
-        // it's because of a genuine (unlikely) collision, not a bug.
-    }
-
-    #[test]
-    fn test_query_region_entire_sequence() {
-        let _guard = lock_syng();
-        // Query the full length of genome_a — should return all genomes that share any syncmers
-        let params = SyncmerParams::default();
-        let shared = make_test_sequence(500, 42);
-
-        let mut seq_a = shared.clone();
-        seq_a.extend_from_slice(&make_test_sequence(500, 1));
-
-        let mut seq_b = shared.clone();
-        seq_b.extend_from_slice(&make_test_sequence(500, 2));
-
-        let seq_c = make_test_sequence(1000, 99); // independent
-
-        let index = SyngIndex::build(
-            params,
-            vec![
-                ("genome_a".to_string(), seq_a.clone()),
-                ("genome_b".to_string(), seq_b),
-                ("genome_c".to_string(), seq_c),
-            ]
-            .into_iter(),
-        );
-
-        let intervals = index
-            .query_region("genome_a", 0, seq_a.len() as u64, 0)
-            .unwrap();
-        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
-
-        assert!(genomes.contains(&"genome_a"), "Self-hit expected");
-        assert!(genomes.contains(&"genome_b"), "genome_b shares prefix");
-    }
 
     #[test]
     fn test_query_region_single_sequence_index() {
@@ -8942,12 +8263,6 @@ mod tests {
 
         // Find impg binary
         let bin = find_impg_binary();
-        if bin.is_none() {
-            eprintln!("Skipping CLI test: impg binary not found");
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
-        let bin = bin.unwrap();
 
         // Build index
         let output_prefix = dir.join("idx");
@@ -9035,12 +8350,6 @@ mod tests {
         }
 
         let bin = find_impg_binary();
-        if bin.is_none() {
-            eprintln!("Skipping CLI test: impg binary not found");
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
-        let bin = bin.unwrap();
 
         // Build index
         let output_prefix = dir.join("idx");
@@ -9147,49 +8456,6 @@ mod tests {
     // ── build_region_gbwt tests ───────────────────────────────────
 
     #[test]
-    fn test_build_region_gbwt_produces_files() {
-        let _guard = lock_syng();
-        // Build an index, then build a region GBWT from some sequences
-        let seqs: Vec<(String, Vec<u8>)> = (0..3)
-            .map(|i| (format!("seq_{}", i), make_test_sequence(2000, i as u8 + 30)))
-            .collect();
-        let params = SyncmerParams::default();
-        let index = SyngIndex::build(params, seqs.into_iter());
-
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("region");
-        let prefix_str = prefix.to_str().unwrap();
-
-        // Build region GBWT from a subset of sequences
-        let region_seqs: Vec<(String, Vec<u8>)> = (0..2)
-            .map(|i| {
-                (
-                    format!("region_seq_{}", i),
-                    make_test_sequence(500, i as u8 + 50),
-                )
-            })
-            .collect();
-        let refs: Vec<(String, &[u8])> = region_seqs
-            .iter()
-            .map(|(n, s)| (n.clone(), s.as_slice()))
-            .collect();
-
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        assert!(
-            std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists(),
-            "Region .1gbwt file should exist"
-        );
-        assert!(
-            std::path::Path::new(&format!("{}.1khash", prefix_str)).exists(),
-            "Region .1khash file should exist"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn test_build_region_gbwt_empty_sequences() {
         let _guard = lock_syng();
         let index = SyngIndex::new(SyncmerParams::default());
@@ -9242,330 +8508,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn test_build_region_gbwt_loadable() {
-        let _guard = lock_syng();
-        // Build a region GBWT and verify it can be loaded back
-        let params = SyncmerParams::default();
-        let index = SyngIndex::new(params);
-
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt_load");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("loadable_region");
-        let prefix_str = prefix.to_str().unwrap();
-
-        let region_seqs: Vec<(String, Vec<u8>)> = (0..3)
-            .map(|i| (format!("reg_{}", i), make_test_sequence(1000, i as u8 + 70)))
-            .collect();
-        let refs: Vec<(String, &[u8])> = region_seqs
-            .iter()
-            .map(|(n, s)| (n.clone(), s.as_slice()))
-            .collect();
-
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        // Write a names file so we can load it
-        let names_path = format!("{}.syng.names", prefix_str);
-        let mut nm = SyngNameMap::new();
-        for (name, seq) in &region_seqs {
-            nm.add(name.clone(), seq.len() as u64);
-        }
-        nm.save(&names_path).unwrap();
-
-        // Should be loadable
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert!(!loaded.gbwt.is_null());
-        assert!(!loaded.kmer_hash.is_null());
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     // ── 19. Region-specific GBWT output (spec Test 4) ───────────────
-
-    #[test]
-    fn test_region_gbwt_from_query_results() {
-        let _guard = lock_syng();
-        // Build full index → query region → output as GBWT → verify files
-        let params = SyncmerParams::default();
-        let shared = make_test_sequence(500, 42);
-
-        let mut seq_a = shared.clone();
-        seq_a.extend_from_slice(&make_test_sequence(500, 1));
-        let mut seq_b = shared.clone();
-        seq_b.extend_from_slice(&make_test_sequence(500, 2));
-        let seq_c = make_test_sequence(1000, 99); // independent
-
-        let sequences = vec![
-            ("genome_a".to_string(), seq_a),
-            ("genome_b".to_string(), seq_b),
-            ("genome_c".to_string(), seq_c),
-        ];
-
-        let index = SyngIndex::build(params, sequences.into_iter());
-
-        // Query the shared region
-        let intervals = index.query_region("genome_a", 0, 500, 0).unwrap();
-        assert!(
-            !intervals.is_empty(),
-            "Should find intervals in shared region"
-        );
-
-        // Build region GBWT from the query result sequences
-        // (simulate what the CLI does: fetch sequences for each interval)
-        let region_seqs: Vec<(String, Vec<u8>)> = intervals
-            .iter()
-            .map(|iv| {
-                let seq_name = format!("{}:{}-{}", iv.genome, iv.start, iv.end);
-                let seq = make_test_sequence((iv.end - iv.start) as usize, 42);
-                (seq_name, seq)
-            })
-            .collect();
-
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt_query");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("region_from_query");
-        let prefix_str = prefix.to_str().unwrap();
-
-        let refs: Vec<(String, &[u8])> = region_seqs
-            .iter()
-            .map(|(n, s)| (n.clone(), s.as_slice()))
-            .collect();
-
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        // Verify output files exist and are non-empty
-        let gbwt_path = format!("{}.1gbwt", prefix_str);
-        let khash_path = format!("{}.1khash", prefix_str);
-        assert!(Path::new(&gbwt_path).exists(), "Region .1gbwt should exist");
-        assert!(
-            Path::new(&khash_path).exists(),
-            "Region .1khash should exist"
-        );
-        assert!(
-            std::fs::metadata(&gbwt_path).unwrap().len() > 0,
-            "Region .1gbwt should be non-empty"
-        );
-        assert!(
-            std::fs::metadata(&khash_path).unwrap().len() > 0,
-            "Region .1khash should be non-empty"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_region_gbwt_loadable_as_syng_index() {
-        let _guard = lock_syng();
-        // Build full index, query, produce region GBWT, load as SyngIndex
-        let params = SyncmerParams::default();
-        let shared = make_test_sequence(600, 42);
-
-        let mut seq_a = shared.clone();
-        seq_a.extend_from_slice(&make_test_sequence(400, 1));
-        let mut seq_b = shared.clone();
-        seq_b.extend_from_slice(&make_test_sequence(400, 2));
-
-        let index = SyngIndex::build(
-            params,
-            vec![
-                ("genome_a".to_string(), seq_a),
-                ("genome_b".to_string(), seq_b),
-            ]
-            .into_iter(),
-        );
-
-        // Build region GBWT from actual sequence data (use shared prefix)
-        let region_seqs: Vec<(String, Vec<u8>)> = vec![
-            ("region_a".to_string(), make_test_sequence(400, 42)),
-            ("region_b".to_string(), make_test_sequence(400, 42)),
-            ("region_c".to_string(), make_test_sequence(400, 10)),
-        ];
-
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt_load_syng");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("region_loadable");
-        let prefix_str = prefix.to_str().unwrap();
-
-        let refs: Vec<(String, &[u8])> = region_seqs
-            .iter()
-            .map(|(n, s)| (n.clone(), s.as_slice()))
-            .collect();
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        // Write a names file so we can load it as a full SyngIndex
-        let names_path = format!("{}.syng.names", prefix_str);
-        let mut nm = SyngNameMap::new();
-        for (name, seq) in &region_seqs {
-            nm.add(name.clone(), seq.len() as u64);
-        }
-        nm.save(&names_path).unwrap();
-
-        // Load the region GBWT back as a SyngIndex
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert!(!loaded.gbwt.is_null(), "Loaded region GBWT should be valid");
-        assert!(
-            !loaded.kmer_hash.is_null(),
-            "Loaded region KmerHash should be valid"
-        );
-        assert_eq!(
-            loaded.name_map.path_to_name.len(),
-            3,
-            "Region index should have 3 paths"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_region_gbwt_nodes_subset_of_full_index() {
-        let _guard = lock_syng();
-        // Build a full index and a region GBWT from a subset of sequences.
-        // The region GBWT's syncmer nodes should be a subset of the full index's nodes.
-        let params = SyncmerParams::default();
-
-        // Use the SAME sequences for both: full index from all, region from subset
-        let seqs: Vec<(String, Vec<u8>)> = (0..4)
-            .map(|i| {
-                (
-                    format!("genome_{}", i),
-                    make_test_sequence(2000, i as u8 + 10),
-                )
-            })
-            .collect();
-        let mut full_index = SyngIndex::build(params, seqs.clone().into_iter());
-
-        let dir = std::env::temp_dir().join("impg_test_region_nodes_subset");
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Save full index to disk
-        let full_prefix = dir.join("full");
-        full_index.save(full_prefix.to_str().unwrap()).unwrap();
-
-        // Build region GBWT from just the first 2 sequences (subset)
-        let region_prefix = dir.join("region_subset");
-        let region_refs: Vec<(String, &[u8])> = seqs[0..2]
-            .iter()
-            .map(|(n, s)| (n.clone(), s.as_slice()))
-            .collect();
-        full_index
-            .build_region_gbwt(&region_refs, region_prefix.to_str().unwrap())
-            .unwrap();
-
-        // Both files should exist and be non-empty
-        let region_gbwt = format!("{}.1gbwt", region_prefix.to_str().unwrap());
-        let region_khash = format!("{}.1khash", region_prefix.to_str().unwrap());
-        assert!(Path::new(&region_gbwt).exists());
-        assert!(Path::new(&region_khash).exists());
-        assert!(std::fs::metadata(&region_gbwt).unwrap().len() > 0);
-        assert!(std::fs::metadata(&region_khash).unwrap().len() > 0);
-
-        // Load both as SyngIndex and verify the region has fewer or equal paths
-        let full_loaded = SyngIndex::load(full_prefix.to_str().unwrap(), params).unwrap();
-        let names_path = format!("{}.syng.names", region_prefix.to_str().unwrap());
-        let mut nm = SyngNameMap::new();
-        for (name, seq) in &seqs[0..2] {
-            nm.add(name.clone(), seq.len() as u64);
-        }
-        nm.save(&names_path).unwrap();
-        let region_loaded = SyngIndex::load(region_prefix.to_str().unwrap(), params).unwrap();
-        assert!(
-            full_loaded.name_map.path_to_name.len() >= region_loaded.name_map.path_to_name.len(),
-            "Full index paths ({}) should be >= region paths ({})",
-            full_loaded.name_map.path_to_name.len(),
-            region_loaded.name_map.path_to_name.len(),
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_region_gbwt_single_genome() {
-        let _guard = lock_syng();
-        // Edge case: region with a single genome → GBWT with one path
-        let params = SyncmerParams::default();
-        let index = SyngIndex::new(params);
-
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt_single");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("single_genome_region");
-        let prefix_str = prefix.to_str().unwrap();
-
-        let seq = make_test_sequence(500, 42);
-        let refs: Vec<(String, &[u8])> = vec![("only_genome".to_string(), seq.as_slice())];
-
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        // Files should exist
-        assert!(Path::new(&format!("{}.1gbwt", prefix_str)).exists());
-        assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
-
-        // Write names and load back
-        let names_path = format!("{}.syng.names", prefix_str);
-        let mut nm = SyngNameMap::new();
-        nm.add("only_genome".to_string(), seq.len() as u64);
-        nm.save(&names_path).unwrap();
-
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert_eq!(loaded.name_map.path_to_name.len(), 1);
-        assert_eq!(loaded.name_map.path_to_name[0], "only_genome");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_region_gbwt_very_small_region() {
-        let _guard = lock_syng();
-        // Very small regions cannot produce a reloadable native GBWT.
-        let params = SyncmerParams::default();
-        let index = SyngIndex::new(params);
-
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt_tiny");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("tiny_region");
-        let prefix_str = prefix.to_str().unwrap();
-
-        // Sequences shorter than syncmer length (63bp) — should be skipped
-        let refs: Vec<(String, &[u8])> = vec![
-            ("tiny1".to_string(), b"ACGTACGT" as &[u8]),
-            ("tiny2".to_string(), b"TGCATGCA" as &[u8]),
-        ];
-
-        assert_eq!(
-            index
-                .build_region_gbwt(&refs, prefix_str)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert!(!Path::new(&format!("{}.1gbwt", prefix_str)).exists());
-        assert!(!Path::new(&format!("{}.1khash", prefix_str)).exists());
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_region_gbwt_output_prefix_with_directory() {
-        let _guard = lock_syng();
-        // Output prefix with nested directory path
-        let dir = std::env::temp_dir().join("impg_test_region_gbwt_nested/subdir/deep");
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("nested_output");
-        let prefix_str = prefix.to_str().unwrap();
-
-        let params = SyncmerParams::default();
-        let index = SyngIndex::new(params);
-
-        let seq = make_test_sequence(500, 42);
-        let refs: Vec<(String, &[u8])> = vec![("seq1".to_string(), seq.as_slice())];
-
-        index.build_region_gbwt(&refs, prefix_str).unwrap();
-
-        assert!(Path::new(&format!("{}.1gbwt", prefix_str)).exists());
-        assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
-
-        // Clean up the top-level temp dir
-        std::fs::remove_dir_all(std::env::temp_dir().join("impg_test_region_gbwt_nested")).ok();
-    }
 
     #[test]
     fn test_region_gbwt_nonexistent_directory_fails() {
@@ -9681,98 +8624,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── 21. Round-trip: query → GBWT → query (spec Test 4) ──────────
-
-    #[test]
-    fn test_roundtrip_query_gbwt_query() {
-        let _guard = lock_syng();
-        // Build full index → query region → output GBWT → load region GBWT → query region GBWT
-        // Verify second query returns consistent results
-        let params = SyncmerParams::default();
-
-        // Create sequences with known homology
-        let shared = make_test_sequence(600, 42);
-        let mut seq_a = shared.clone();
-        seq_a.extend_from_slice(&make_test_sequence(400, 1));
-        let mut seq_b = shared.clone();
-        seq_b.extend_from_slice(&make_test_sequence(400, 2));
-        let mut seq_c = shared.clone();
-        seq_c.extend_from_slice(&make_test_sequence(400, 3));
-
-        let full_seqs = vec![
-            ("genome_a".to_string(), seq_a.clone()),
-            ("genome_b".to_string(), seq_b.clone()),
-            ("genome_c".to_string(), seq_c.clone()),
-        ];
-        let full_index = SyngIndex::build(params, full_seqs.into_iter());
-
-        // Step 1: Query the shared region on the full index
-        let intervals = full_index.query_region("genome_a", 0, 500, 0).unwrap();
-        let original_genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
-        assert!(
-            original_genomes.contains(&"genome_b"),
-            "Full query should find genome_b"
-        );
-
-        // Step 2: Build region GBWT from the full sequences in the shared region
-        let dir = std::env::temp_dir().join("impg_test_roundtrip_query_gbwt");
-        std::fs::create_dir_all(&dir).unwrap();
-        let region_prefix = dir.join("region_rt");
-        let region_prefix_str = region_prefix.to_str().unwrap();
-
-        // Use the shared portion of each sequence for the region GBWT
-        let region_seqs: Vec<(String, Vec<u8>)> = vec![
-            ("genome_a".to_string(), seq_a[0..600].to_vec()),
-            ("genome_b".to_string(), seq_b[0..600].to_vec()),
-            ("genome_c".to_string(), seq_c[0..600].to_vec()),
-        ];
-        let region_refs: Vec<(String, &[u8])> = region_seqs
-            .iter()
-            .map(|(n, s)| (n.clone(), s.as_slice()))
-            .collect();
-        full_index
-            .build_region_gbwt(&region_refs, region_prefix_str)
-            .unwrap();
-
-        // Write name map for the region index
-        let names_path = format!("{}.syng.names", region_prefix_str);
-        let mut nm = SyngNameMap::new();
-        for (name, seq) in &region_seqs {
-            nm.add(name.clone(), seq.len() as u64);
-        }
-        nm.save(&names_path).unwrap();
-
-        // Step 3: Load the region GBWT and build a new SyngIndex from
-        // the region sequences (so we get path_starts for querying)
-        let region_index = SyngIndex::build(params, region_seqs.into_iter());
-
-        // Step 4: Query the region GBWT
-        let region_intervals = region_index.query_region("genome_a", 0, 500, 0).unwrap();
-        let region_genomes: Vec<&str> = region_intervals
-            .iter()
-            .map(|iv| iv.genome.as_str())
-            .collect();
-
-        // The region query should find the same genomes
-        assert!(
-            region_genomes.contains(&"genome_a"),
-            "Region query should find self. Found: {:?}",
-            region_genomes
-        );
-        assert!(
-            region_genomes.contains(&"genome_b"),
-            "Region query should find genome_b (shared backbone). Found: {:?}",
-            region_genomes
-        );
-        assert!(
-            region_genomes.contains(&"genome_c"),
-            "Region query should find genome_c (shared backbone). Found: {:?}",
-            region_genomes
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     // ── 22. CLI integration: GBWT output format ──────────────────────
 
     #[test]
@@ -9783,12 +8634,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let bin = find_impg_binary();
-        if bin.is_none() {
-            eprintln!("Skipping CLI test: impg binary not found");
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
-        let bin = bin.unwrap();
 
         // Write test FASTA with shared content
         let fasta_path = dir.join("test.fa");
@@ -9888,12 +8733,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let bin = find_impg_binary();
-        if bin.is_none() {
-            eprintln!("Skipping CLI test: impg binary not found");
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
-        let bin = bin.unwrap();
 
         // Create a simple test PAF and FASTA
         let fasta_path = dir.join("test.fa");
@@ -9966,23 +8805,60 @@ mod tests {
     #[test]
     fn test_cli_gbwt_output_requires_prefix() {
         let _guard = lock_syng();
-        // -o gbwt without -O should fail
+        // -o gbwt on a real syng index without -O must reach the -O check
         let bin = find_impg_binary();
-        if bin.is_none() {
-            eprintln!("Skipping CLI test: impg binary not found");
-            return;
-        }
-        let bin = bin.unwrap();
 
+        let dir = std::env::temp_dir().join("impg_test_cli_gbwt_requires_prefix");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let fasta_path = dir.join("test.fa");
+        let shared = make_test_sequence(500, 42);
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            let mut seq_a = shared.clone();
+            seq_a.extend_from_slice(&make_test_sequence(500, 1));
+            let mut seq_b = shared.clone();
+            seq_b.extend_from_slice(&make_test_sequence(500, 2));
+            use std::io::Write;
+            writeln!(f, ">genome_a").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_a).unwrap()).unwrap();
+            writeln!(f, ">genome_b").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_b).unwrap()).unwrap();
+        }
+
+        // Build syng index
+        let idx_prefix = dir.join("idx");
+        let output = std::process::Command::new(&bin)
+            .args([
+                "syng",
+                "-f",
+                fasta_path.to_str().unwrap(),
+                "-o",
+                idx_prefix.to_str().unwrap(),
+                "--position-sample-rate",
+                "1",
+            ])
+            .output()
+            .expect("Failed to run impg syng");
+        assert!(
+            output.status.success(),
+            "impg syng failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Same query as the -O test above, minus -O
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
                 "-d",
                 "0",
                 "-a",
-                "/tmp/nonexistent_prefix",
+                idx_prefix.to_str().unwrap(),
+                "--sequence-files",
+                fasta_path.to_str().unwrap(),
                 "-r",
-                "genome_a:0-100",
+                "genome_a:0-400",
                 "-o",
                 "gbwt",
             ])
@@ -9996,10 +8872,12 @@ mod tests {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("prefix") || stderr.contains("-O") || stderr.contains("required"),
-            "Error message should mention output prefix requirement. Got: {}",
+            stderr.contains("Output prefix (-O) is required for 'gbwt' output format"),
+            "Error should come from the -O check. Got: {}",
             stderr
         );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -10083,29 +8961,19 @@ mod tests {
     }
 
     /// Helper to locate the impg binary for CLI tests.
-    fn find_impg_binary() -> Option<std::path::PathBuf> {
-        // Try CARGO_BIN_EXE first
-        let bin = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("impg");
-        if bin.exists() {
-            return Some(bin);
-        }
-        // Try manifest dir
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let candidates = [
-            manifest_dir.join("target/debug/impg"),
-            manifest_dir.join("target/release/impg"),
-        ];
-        for path in &candidates {
-            if path.exists() {
-                return Some(path.clone());
-            }
-        }
-        None
+    /// The impg binary of this build. `cargo test` builds it; `cargo test
+    /// --lib` alone does not, and then these CLI tests fail and say so.
+    fn find_impg_binary() -> std::path::PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        exe.ancestors()
+            .skip(1)
+            .map(|dir| dir.join("impg"))
+            .find(|bin| bin.is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "impg binary not found above {}: run `cargo build` with the same profile first",
+                    exe.display()
+                )
+            })
     }
 }

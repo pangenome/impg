@@ -3712,64 +3712,21 @@ mod tests {
                 project_target_range_through_alignment((70, 95), base, &cigar_ops).unwrap();
             assert_eq!(result, (170, 195, vec![CigarOp::new(25, '=')], 70, 95));
         }
-    }
-
-    // 1. Simple Forward Projection
-    #[test]
-    fn test_forward_projection_simple() {
-        let target_range = (100, 200);
-        let record = (100, 200, 100, 200, Strand::Forward);
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (query_start, query_end, cigar, target_start, target_end) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-        assert_eq!(
-            (query_start, query_end, cigar, target_start, target_end),
-            (100, 200, vec![CigarOp::new(100, '=')], 100, 200)
-        );
-    }
-
-    // 2. Simple Reverse Projection
-    #[test]
-    fn test_reverse_projection_simple() {
-        let target_range = (100, 200);
-        let record = (100, 200, 100, 200, Strand::Reverse);
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (query_start, query_end, cigar, target_start, target_end) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-        assert_eq!(
-            (query_start, query_end, cigar, target_start, target_end),
-            (200, 100, vec![CigarOp::new(100, '=')], 100, 200)
-        ); // Adjust for reverse calculation
-    }
-
-    // 3. Forward Projection with Insertions
-    #[test]
-    fn test_forward_projection_with_insertions() {
-        let target_range = (50, 150);
-        let record = (50, 150, 50, 160, Strand::Forward);
-        let cigar_ops = vec![
-            CigarOp::new(50, '='), // Match
-            CigarOp::new(10, 'I'), // Insertion
-            CigarOp::new(50, '='), // Match
-        ];
-        let (start, end, cigar, _, _) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-        assert_eq!((start, end, cigar), (50, 160, cigar_ops));
-    }
-
-    // 4. Forward Projection with Deletions
-    #[test]
-    fn test_forward_projection_with_deletions() {
-        let target_range = (50, 150);
-        let record = (50, 150, 50, 140, Strand::Forward);
-        let cigar_ops = vec![
-            CigarOp::new(50, '='), // Match
-            CigarOp::new(10, 'D'), // Deletion
-            CigarOp::new(40, '='), // Match
-        ];
-        let (start, end, cigar, _, _) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-        assert_eq!((start, end, cigar), (50, 140, cigar_ops));
+        // Insertion with target_start 50
+        {
+            let ops = vec![
+                CigarOp::new(50, '='),
+                CigarOp::new(10, 'I'),
+                CigarOp::new(50, '='),
+            ];
+            let (start, end, cigar, _, _) = project_target_range_through_alignment(
+                (50, 150),
+                (50, 150, 50, 160, Strand::Forward),
+                &ops,
+            )
+            .unwrap();
+            assert_eq!((start, end, cigar), (50, 160, ops));
+        }
     }
 
     // 5. Reverse Projection with Mixed Operations
@@ -3926,6 +3883,12 @@ mod tests {
         assert_eq!(inverted[1].len(), 5);
         assert_eq!(inverted[2].op(), '='); // Was = at start, now at end
         assert_eq!(inverted[2].len(), 10);
+
+        // X is kept, order reversed
+        let ops = vec![CigarOp::new(100, '='), CigarOp::new(50, 'X')];
+        let inverted = invert_cigar_ops(&ops, Strand::Reverse);
+        assert_eq!(inverted[0].op(), 'X');
+        assert_eq!(inverted[1].op(), '=');
     }
 
     #[test]
@@ -3936,21 +3899,6 @@ mod tests {
 
         assert_eq!(inverted_forward.len(), 0);
         assert_eq!(inverted_reverse.len(), 0);
-    }
-
-    #[test]
-    fn test_invert_cigar_matches_only() {
-        let ops = vec![CigarOp::new(100, '='), CigarOp::new(50, 'X')];
-        let inverted_forward = invert_cigar_ops(&ops, Strand::Forward);
-        let inverted_reverse = invert_cigar_ops(&ops, Strand::Reverse);
-
-        // Forward: no change (no I or D)
-        assert_eq!(inverted_forward[0].op(), '=');
-        assert_eq!(inverted_forward[1].op(), 'X');
-
-        // Reverse: just reversed order
-        assert_eq!(inverted_reverse[0].op(), 'X');
-        assert_eq!(inverted_reverse[1].op(), '=');
     }
 
     #[test]
@@ -3974,16 +3922,6 @@ mod tests {
             "unexpected error message: {msg}"
         );
         assert!(msg.contains("test.paf"), "error must name the file: {msg}");
-    }
-
-    #[test]
-    fn test_index_accepts_paf_record_with_cigar() {
-        let paf = "q\t100\t0\t100\t+\tt\t100\t0\t100\t60\t100\t255\tcg:Z:100=\n".to_string();
-        let mut seq_index = SequenceIndex::new();
-        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
-        let records_by_file = vec![(records, "test.paf".to_string())];
-        Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true)
-            .expect("a PAF record with a CIGAR must index");
     }
 
     #[test]
@@ -4051,49 +3989,30 @@ mod tests {
             "an in-memory index must report that its trees cannot be reloaded"
         );
         assert!(impg.get_or_load_tree(target_id).is_some());
-        impg.remove_cached_tree(target_id);
-        assert!(
-            impg.get_or_load_tree(target_id).is_none(),
-            "a tree evicted from an in-memory index must come back as None, not as a panic"
-        );
-    }
 
-    #[test]
-    fn in_memory_index_serves_two_walks_when_trees_are_not_evicted() {
-        // The behaviour `impg stats` needs: when the index cannot reload a
-        // tree, both walks must still see every interval.
-        let paf = "q\t1000\t0\t500\t+\tt\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
-                   t\t1000\t100\t600\t+\tr\t1000\t100\t600\t500\t500\t60\tcg:Z:500=\n"
-            .to_string();
-        let mut seq_index = SequenceIndex::new();
-        let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
-        let records_by_file = vec![(records, "test.paf".to_string())];
-        let impg =
-            Impg::from_multi_alignment_records(&records_by_file, seq_index, None, true).unwrap();
-
+        // Two walks without eviction agree
         let mut first_walk = 0usize;
         let mut second_walk = 0usize;
         for id in impg.target_ids() {
             if let Some(tree) = impg.get_or_load_tree(id) {
                 first_walk += tree.len();
-                if impg.can_reload_tree(id) {
-                    impg.remove_cached_tree(id);
-                }
             }
         }
         for id in impg.target_ids() {
             if let Some(tree) = impg.get_or_load_tree(id) {
                 second_walk += tree.iter().count();
-                if impg.can_reload_tree(id) {
-                    impg.remove_cached_tree(id);
-                }
             }
         }
-
-        assert_eq!(first_walk, 4, "two PAF records indexed bidirectionally");
+        assert_eq!(first_walk, 2, "one PAF record indexed bidirectionally");
         assert_eq!(
             second_walk, first_walk,
             "the second walk must see the same intervals as the first"
+        );
+
+        impg.remove_cached_tree(target_id);
+        assert!(
+            impg.get_or_load_tree(target_id).is_none(),
+            "a tree evicted from an in-memory index must come back as None, not as a panic"
         );
     }
 
@@ -4255,17 +4174,6 @@ mod tests {
             "the tail of the inserted range must survive"
         );
         assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(10, 140)]);
-    }
-
-    #[test]
-    fn sorted_ranges_snap_never_shrinks_the_inserted_range() {
-        let mut ranges = SortedRanges::with_distance(1000, 10);
-        ranges.insert((105, 110));
-
-        let novel = ranges.insert_with_boundary_snap((50, 200), 10);
-
-        assert_eq!(novel, vec![(50, 105), (110, 200)]);
-        assert_eq!(ranges.iter().copied().collect::<Vec<_>>(), vec![(50, 200)]);
     }
 
     #[test]

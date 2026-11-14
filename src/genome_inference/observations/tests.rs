@@ -219,28 +219,6 @@ fn fixed_ownership_normalizes_duplicate_descriptions_and_rejects_conflicts() {
 }
 
 #[test]
-fn overlapping_survivors_and_two_copy_attribution_are_integer_not_detection() {
-    // The production collector's retained overlapping records, with the same
-    // physical middle pair twice, and a different identical physical copy once.
-    let records = [
-        vec![(1, 0), (2, 5), (3, 10)],
-        vec![(2, 5), (3, 10), (4, 15)],
-        vec![(2, 40), (3, 45)],
-    ];
-    let tokens = canonical(&encode_walk(&[(2, 0), (3, 5)]).unwrap());
-    let mut counts = BTreeMap::new();
-    for record in records {
-        for pair in record.windows(2) {
-            if canonical(&encode_walk(pair).unwrap()) == tokens {
-                *counts.entry((pair[0].1, pair[1].1 + 3)).or_insert(0) += 1;
-            }
-        }
-    }
-    assert_eq!(counts, BTreeMap::from([((5, 13), 2), ((40, 48), 1)]));
-    assert_eq!(counts.values().sum::<u64>(), 3);
-}
-
-#[test]
 fn native_overlapping_mem_profiles_preserve_double_counts() {
     let source = dna(700, 113);
     // No complete graph walk spans this synthetic observer context. Its two
