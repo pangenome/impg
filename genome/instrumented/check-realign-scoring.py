@@ -1709,6 +1709,12 @@ def main():
                 abs(g_dip - sc["genome_diploid_bp"]) < 1e-6,
                 f"locus {locus}: diploid genome re-derivation differs",
             )
+            # impg computes E at the reads' declared length (#304)
+            check(
+                sc["read_length"] == READ_LENGTH,
+                f"locus {locus}: impg declared read length {sc['read_length']}, "
+                f"this check assumes {READ_LENGTH} bp reads",
+            )
             e_expect = READ_LENGTH * A - math.log(2.0 * (g_dip - READ_LENGTH + 1.0))
             check(
                 abs(e_expect - sc["elsewhere_log_prob"]) < 1e-9,

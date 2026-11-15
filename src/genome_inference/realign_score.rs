@@ -343,7 +343,7 @@ const READ_LENGTH_FRESH: usize = 150;
 
 /// The product model identity (the CLI output manifest of the
 /// per-locus diplotype calls).
-pub const MODEL: &str = "anchor-realign-diplotype-calls-v1";
+pub const MODEL: &str = "anchor-realign-diplotype-calls-v2";
 
 /// The selection convention. `Env` (the instrument default) defers to
 /// the committed environment switches verbatim; the other values pin
