@@ -22,6 +22,8 @@
    "cmake"
    "clang"
    "htslib"
+   "gsl"
+   "jemalloc"
    "glibc:static"
    "libdeflate"
    "zlib"
