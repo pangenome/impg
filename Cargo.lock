@@ -1035,7 +1035,7 @@ dependencies = [
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs?rev=11bda8acd6c7409c4dfd117cf5b5df535d99e5a0#11bda8acd6c7409c4dfd117cf5b5df535d99e5a0"
+source = "git+https://github.com/pangenome/fastga-rs?rev=c44605c8ab8779cabc02cc5df89cdd5066431f55#c44605c8ab8779cabc02cc5df89cdd5066431f55"
 dependencies = [
  "anyhow",
  "cc",
@@ -3084,7 +3084,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=1169dbb9a12f739d19cca6d86780841b550dfe8a#1169dbb9a12f739d19cca6d86780841b550dfe8a"
+source = "git+https://github.com/pangenome/sweepga?rev=61c7dc5fda63e7c444b6fb01067030670771aada#61c7dc5fda63e7c444b6fb01067030670771aada"
 dependencies = [
  "anyhow",
  "byteorder",
