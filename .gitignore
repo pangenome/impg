@@ -32,3 +32,6 @@ perf.data.old
 /*.nohup
 /pid*
 __pycache__/
+
+# local, machine-specific build environment (guix store paths); never commit
+build-env.sh
