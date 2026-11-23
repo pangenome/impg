@@ -533,6 +533,7 @@ fn query_overlaps(
             sequence_index,
             config.approximate_mode,
             config.subset_filter,
+            false, // Refine counts spans: strand does not matter
         )?
     } else if config.use_transitive_dfs {
         impg.query_transitive_dfs(
@@ -549,6 +550,7 @@ fn query_overlaps(
             sequence_index,
             config.approximate_mode,
             config.subset_filter,
+            false, // Refine counts spans: strand does not matter
         )?
     } else {
         impg.query_with_cache(

@@ -888,6 +888,28 @@ where
     })
 }
 
+/// Orientation of a projected interval relative to the queried region.
+///
+/// `frontier_rev` is the orientation of the frontier range the projection came
+/// from; the projected interval is reverse relative to that frontier when
+/// `first > last`. With `compose_strand` the result is re-oriented so that its
+/// strand is relative to the queried region; otherwise it keeps the per-hop
+/// orientation and the frontier orientation stays `false`.
+pub(crate) fn compose_orientation(
+    interval: &mut Interval<u32>,
+    frontier_rev: bool,
+    compose_strand: bool,
+) -> bool {
+    if !compose_strand {
+        return false;
+    }
+    let hop_rev = interval.first > interval.last;
+    if frontier_rev {
+        std::mem::swap(&mut interval.first, &mut interval.last);
+    }
+    frontier_rev ^ hop_rev
+}
+
 pub(crate) fn make_self_interval(
     target_id: u32,
     range_start: i32,
@@ -913,15 +935,21 @@ pub(crate) fn make_self_interval(
     )
 }
 
+/// A frontier range of a transitive query.
+///
+/// The `bool` is the orientation of the range relative to the queried region
+/// (`true` = reverse complement). It is always `false` when strand composition
+/// is off, so the frontier then behaves exactly as an orientation-free range.
 pub(crate) trait QueueRangeItem {
-    fn key_start(&self) -> (u32, i32);
+    /// Sort key: sequence id, orientation, start.
+    fn key_start(&self) -> (u32, bool, i32);
     fn range_end(&self) -> i32;
     fn extend_end(&mut self, new_end: i32);
 }
 
-impl QueueRangeItem for (u32, i32, i32) {
-    fn key_start(&self) -> (u32, i32) {
-        (self.0, self.1)
+impl QueueRangeItem for (u32, i32, i32, bool) {
+    fn key_start(&self) -> (u32, bool, i32) {
+        (self.0, self.3, self.1)
     }
     fn range_end(&self) -> i32 {
         self.2
@@ -931,9 +959,9 @@ impl QueueRangeItem for (u32, i32, i32) {
     }
 }
 
-impl QueueRangeItem for (u32, i32, i32, u16) {
-    fn key_start(&self) -> (u32, i32) {
-        (self.0, self.1)
+impl QueueRangeItem for (u32, i32, i32, u16, bool) {
+    fn key_start(&self) -> (u32, bool, i32) {
+        (self.0, self.4, self.1)
     }
     fn range_end(&self) -> i32 {
         self.2
@@ -943,7 +971,8 @@ impl QueueRangeItem for (u32, i32, i32, u16) {
     }
 }
 
-/// Merge contiguous or overlapping ranges in a slice already sorted by `(id, start)`.
+/// Merge contiguous or overlapping ranges in a slice already sorted by
+/// `(id, orientation, start)`. Ranges of opposite orientation never merge.
 /// Returns the compacted prefix length to pass to `truncate`.
 pub(crate) fn compact_sorted_ranges<T: QueueRangeItem>(items: &mut [T]) -> usize {
     if items.is_empty() {
@@ -951,9 +980,9 @@ pub(crate) fn compact_sorted_ranges<T: QueueRangeItem>(items: &mut [T]) -> usize
     }
     let mut write = 0;
     for read in 1..items.len() {
-        if items[write].key_start().0 == items[read].key_start().0
-            && items[write].range_end() >= items[read].key_start().1
-        {
+        let (write_id, write_rev, _) = items[write].key_start();
+        let (read_id, read_rev, read_start) = items[read].key_start();
+        if write_id == read_id && write_rev == read_rev && items[write].range_end() >= read_start {
             let merged_end = items[write].range_end().max(items[read].range_end());
             items[write].extend_end(merged_end);
         } else {
@@ -2692,6 +2721,7 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&crate::subset_filter::SubsetFilter>,
+        compose_strand: bool,
     ) -> Vec<AdjustedInterval> {
         // Seed from masked regions if given; other sequences are created lazily on
         // first touch (visited_entry) instead of pre-populating one SortedRanges per
@@ -2722,7 +2752,7 @@ impl Impg {
 
             // Add the filtered input range(s) to the stack
             if (filtered_start - filtered_end).abs() >= min_transitive_len {
-                stack.push((target_id, filtered_start, filtered_end, 0u16));
+                stack.push((target_id, filtered_start, filtered_end, 0u16, false));
             }
         }
 
@@ -2731,6 +2761,7 @@ impl Impg {
             current_target_start,
             current_target_end,
             current_depth,
+            current_rev,
         )) = stack.pop()
         {
             // Check if we've reached max depth
@@ -2819,7 +2850,7 @@ impl Impg {
 
                 // Process results sequentially to maintain deterministic behavior
                 for (
-                    query_interval,
+                    mut query_interval,
                     cigar,
                     target_interval,
                     query_id,
@@ -2828,6 +2859,8 @@ impl Impg {
                 ) in processed_results
                 {
                     let length = (query_interval.last - query_interval.first).abs();
+                    let query_rev =
+                        compose_orientation(&mut query_interval, current_rev, compose_strand);
 
                     // Add to results only if it passes min_output_length filter
                     let should_add_to_output = if let Some(min_len) = min_output_length {
@@ -2851,7 +2884,13 @@ impl Impg {
                         // Add non-overlapping portions to stack
                         for (new_start, new_end) in new_ranges {
                             if (new_end - new_start).abs() >= min_transitive_len {
-                                stack.push((query_id, new_start, new_end, current_depth + 1));
+                                stack.push((
+                                    query_id,
+                                    new_start,
+                                    new_end,
+                                    current_depth + 1,
+                                    query_rev,
+                                ));
                             }
                         }
                     }
@@ -2884,6 +2923,7 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&crate::subset_filter::SubsetFilter>,
+        compose_strand: bool,
     ) -> Vec<AdjustedInterval> {
         // Seed from masked regions if given; other sequences are created lazily on
         // first touch (visited_entry) instead of pre-populating one SortedRanges per
@@ -2918,7 +2958,7 @@ impl Impg {
 
         for (filtered_start, filtered_end) in filtered_input_range {
             if (filtered_start - filtered_end).abs() >= min_transitive_len {
-                current_ranges.push((target_id, filtered_start, filtered_end));
+                current_ranges.push((target_id, filtered_start, filtered_end, false));
             }
         }
 
@@ -2931,11 +2971,17 @@ impl Impg {
             // );
 
             // Process current depth ranges in parallel
-            let query_results: Vec<Vec<(u32, i32, i32, Vec<CigarOp>, i32, i32, u32)>> =
+            #[allow(clippy::type_complexity)]
+            let query_results: Vec<Vec<(u32, i32, i32, Vec<CigarOp>, i32, i32, u32, bool)>> =
                 current_ranges
                     .par_iter()
                     .map(
-                        |(current_target_id, current_target_start, current_target_end)| {
+                        |(
+                            current_target_id,
+                            current_target_start,
+                            current_target_end,
+                            current_rev,
+                        )| {
                             let mut local_results = Vec::new();
 
                             // Get or load the tree - if None, no overlaps exist for this target
@@ -3002,6 +3048,7 @@ impl Impg {
                                                     target_interval.first,
                                                     target_interval.last,
                                                     *current_target_id,
+                                                    *current_rev,
                                                 ));
                                             }
                                         }
@@ -3027,9 +3074,17 @@ impl Impg {
                     adjusted_target_start,
                     adjusted_target_end,
                     current_target_id,
+                    current_rev,
                 ) in query_result
                 {
                     let length = (adjusted_query_end - adjusted_query_start).abs();
+                    let mut query_interval = Interval {
+                        first: adjusted_query_start,
+                        last: adjusted_query_end,
+                        metadata: query_id,
+                    };
+                    let query_rev =
+                        compose_orientation(&mut query_interval, current_rev, compose_strand);
 
                     // Add to results only if it passes min_output_length filter
                     let should_add_to_output = if let Some(min_len) = min_output_length {
@@ -3039,11 +3094,7 @@ impl Impg {
                     };
                     if should_add_to_output {
                         results.push((
-                            Interval {
-                                first: adjusted_query_start,
-                                last: adjusted_query_end,
-                                metadata: query_id,
-                            },
+                            query_interval,
                             adjusted_cigar,
                             Interval {
                                 first: adjusted_target_start,
@@ -3065,7 +3116,7 @@ impl Impg {
                         // Add non-overlapping portions to next depth
                         for (new_start, new_end) in new_ranges {
                             if (new_end - new_start).abs() >= min_transitive_len {
-                                next_depth_ranges.push((query_id, new_start, new_end));
+                                next_depth_ranges.push((query_id, new_start, new_end, query_rev));
                             }
                         }
                     }
@@ -3179,6 +3230,7 @@ impl ImpgIndex for Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         Ok(Impg::query_transitive_dfs(
             self,
@@ -3195,6 +3247,7 @@ impl ImpgIndex for Impg {
             sequence_index,
             approximate_mode,
             subset_filter,
+            compose_strand,
         ))
     }
 
@@ -3213,6 +3266,7 @@ impl ImpgIndex for Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         Ok(Impg::query_transitive_bfs(
             self,
@@ -3229,6 +3283,7 @@ impl ImpgIndex for Impg {
             sequence_index,
             approximate_mode,
             subset_filter,
+            compose_strand,
         ))
     }
 

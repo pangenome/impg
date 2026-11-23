@@ -78,6 +78,7 @@ pub trait ImpgIndex: Send + Sync {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Transitive query using breadth-first search.
@@ -96,6 +97,7 @@ pub trait ImpgIndex: Send + Sync {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>>;
 
     /// Get or load an interval tree for a target sequence.
@@ -287,6 +289,7 @@ impl ImpgIndex for ImpgWrapper {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
             ImpgWrapper::Single(impg) => Ok(impg.query_transitive_dfs(
@@ -303,6 +306,7 @@ impl ImpgIndex for ImpgWrapper {
                 sequence_index,
                 approximate_mode,
                 subset_filter,
+                compose_strand,
             )),
             ImpgWrapper::Multi(multi) => ImpgIndex::query_transitive_dfs(
                 multi,
@@ -319,6 +323,7 @@ impl ImpgIndex for ImpgWrapper {
                 sequence_index,
                 approximate_mode,
                 subset_filter,
+                compose_strand,
             ),
         }
     }
@@ -338,6 +343,7 @@ impl ImpgIndex for ImpgWrapper {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         match self {
             ImpgWrapper::Single(impg) => Ok(impg.query_transitive_bfs(
@@ -354,6 +360,7 @@ impl ImpgIndex for ImpgWrapper {
                 sequence_index,
                 approximate_mode,
                 subset_filter,
+                compose_strand,
             )),
             ImpgWrapper::Multi(multi) => ImpgIndex::query_transitive_bfs(
                 multi,
@@ -370,6 +377,7 @@ impl ImpgIndex for ImpgWrapper {
                 sequence_index,
                 approximate_mode,
                 subset_filter,
+                compose_strand,
             ),
         }
     }

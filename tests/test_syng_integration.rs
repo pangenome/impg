@@ -4238,6 +4238,7 @@ fn test_syng_filtered_wrapper_retains_dense_self_and_forward_homologs() {
                 None,
                 false,
                 None,
+                false,
             )
         } else {
             wrapper.query_transitive_bfs(
@@ -4254,6 +4255,7 @@ fn test_syng_filtered_wrapper_retains_dense_self_and_forward_homologs() {
                 None,
                 false,
                 None,
+                false,
             )
         }
         .unwrap();

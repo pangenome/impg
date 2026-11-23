@@ -382,7 +382,8 @@ pub fn partition_alignments(
                     min_identity,
                     sequence_index,
                     approximate_mode,
-                    None, // No subset filter for partition
+                    None,  // No subset filter for partition
+                    false, // Partitions are strand-agnostic: keep per-hop strand
                 )
             } else {
                 impg.query_transitive_bfs(
@@ -398,7 +399,8 @@ pub fn partition_alignments(
                     min_identity,
                     sequence_index,
                     approximate_mode,
-                    None, // No subset filter for partition
+                    None,  // No subset filter for partition
+                    false, // Partitions are strand-agnostic: keep per-hop strand
                 )
             };
             let query_time = query_profile

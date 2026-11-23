@@ -119,6 +119,7 @@ impl ImpgIndex for CountingIndex {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        _compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         self.dispatch(target_id, range_start, range_end, masked_regions)
     }
@@ -137,6 +138,7 @@ impl ImpgIndex for CountingIndex {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        _compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         self.dispatch(target_id, range_start, range_end, masked_regions)
     }

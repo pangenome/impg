@@ -7569,6 +7569,7 @@ fn run() -> io::Result<()> {
                         sequence_index.as_ref(),
                         query.approximate,
                         subset_filter.as_ref(),
+                        output_composes_strand(resolved_output_format),
                     )?;
 
                     // Output results based on the resolved format
@@ -8222,6 +8223,7 @@ fn run() -> io::Result<()> {
                     Some(&sequence_index),
                     query.approximate,
                     subset_filter.as_ref(),
+                    true, // Similarity compares homologs of the region in its orientation
                 )?;
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
@@ -11699,6 +11701,20 @@ fn get_combined_index_filename(alignment_files: &[String], custom_index: Option<
     }
 }
 
+/// Whether an output format reports each result's strand relative to the
+/// queried region (homologs of the region), as opposed to pairwise records whose
+/// strand must stay consistent with the CIGAR of one alignment hop.
+fn output_composes_strand(output_format: &str) -> bool {
+    match output_format {
+        "bed" | "gfa" | "vcf" | "maf" | "fasta" | "fasta-aln" | "gbwt" => true,
+        // Pairwise records: strand is that of the alignment the CIGAR comes from.
+        // `fasta+paf` shares one result set with its PAF, so it stays pairwise.
+        "bedpe" | "paf" | "fasta+paf" => false,
+        // Formats are validated against the list in the query command first.
+        other => unreachable!("output format '{other}' passed validation but has no strand rule"),
+    }
+}
+
 fn perform_query(
     impg: &impl ImpgIndex,
     target_name: &str,
@@ -11712,6 +11728,7 @@ fn perform_query(
     sequence_index: Option<&UnifiedSequenceIndex>,
     approximate_mode: bool,
     subset_filter: Option<&SubsetFilter>,
+    compose_strand: bool,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index().get_id(target_name).ok_or_else(|| {
@@ -11751,6 +11768,7 @@ fn perform_query(
                 sequence_index,
                 approximate_mode,
                 subset_filter,
+                compose_strand,
             )?
         } else {
             impg.query_transitive_bfs(
@@ -11767,6 +11785,7 @@ fn perform_query(
                 sequence_index,
                 approximate_mode,
                 subset_filter,
+                compose_strand,
             )?
         }
     } else {
@@ -12312,6 +12331,7 @@ fn output_results_graph_partitioned(
             Some(sequence_index),
             query.approximate,
             subset_filter,
+            output_composes_strand(output_format),
         )?;
         if !results.is_empty() {
             merge_query_adjusted_intervals(
