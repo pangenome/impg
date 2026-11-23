@@ -192,6 +192,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
+        _: bool,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         Ok(Vec::new())
     }
@@ -211,6 +212,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
+        _: bool,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
         Ok(Vec::new())
     }
@@ -590,7 +592,10 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
+        _: bool,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        // syng finds homologs from the queried range itself, not through
+        // alignment hops, so there is no strand to compose (last argument).
         self.query_via_syng_transitive(target_id, range_start, range_end)
     }
 
@@ -609,7 +614,10 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: bool,
         _: Option<&subset_filter::SubsetFilter>,
+        _: bool,
     ) -> std::io::Result<Vec<impg::AdjustedInterval>> {
+        // syng finds homologs from the queried range itself, not through
+        // alignment hops, so there is no strand to compose (last argument).
         self.query_via_syng_transitive(target_id, range_start, range_end)
     }
 
@@ -1512,7 +1520,7 @@ mod tests {
         // Query the shared backbone region via the ImpgIndex trait
         let results = wrapper
             .query_transitive_dfs(
-                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
 
@@ -1563,7 +1571,7 @@ mod tests {
             let a_id = wrapper.seq_index().get_id("A").unwrap();
             let d_id = wrapper.seq_index().get_id("D").unwrap();
             let results = wrapper
-                .query_transitive_dfs(a_id, 1_000, 19_000, None, 1, 0, 0, None, false, None, None, false, None)
+                .query_transitive_dfs(a_id, 1_000, 19_000, None, 1, 0, 0, None, false, None, None, false, None, false)
                 .unwrap();
             let d_hits: Vec<_> = results.iter().filter(|(iv, _, _)| iv.metadata == d_id).collect();
             assert!(!d_hits.is_empty(), "{min_chain_anchors:?}: no hit on D");
@@ -1584,12 +1592,12 @@ mod tests {
 
         let dfs = wrapper
             .query_transitive_dfs(
-                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
         let bfs = wrapper
             .query_transitive_bfs(
-                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
 
@@ -1611,7 +1619,7 @@ mod tests {
         // Query with an invalid target_id should return empty (not panic)
         let results = wrapper
             .query_transitive_dfs(
-                999, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                999, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
         assert!(results.is_empty());
@@ -1626,7 +1634,7 @@ mod tests {
 
         let err = wrapper
             .query_transitive_dfs(
-                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                target_id, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap_err();
 
@@ -1646,7 +1654,7 @@ mod tests {
 
         let results = wrapper
             .query_transitive_dfs(
-                target_id, 0, 1, None, 1, 0, 0, None, false, None, None, false, None,
+                target_id, 0, 1, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
 
@@ -1667,12 +1675,12 @@ mod tests {
 
         let results_no_pad = no_pad
             .query_transitive_dfs(
-                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
         let results_with_pad = with_pad
             .query_transitive_dfs(
-                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None,
+                target_a, 0, 500, None, 1, 0, 0, None, false, None, None, false, None, false,
             )
             .unwrap();
 

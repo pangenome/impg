@@ -6,8 +6,8 @@
 
 use crate::forest_map::ForestMap;
 use crate::impg::{
-    compact_sorted_ranges, make_self_interval, read_index_header, AdjustedInterval, CigarOp, Impg,
-    QueryMetadata, QueueRangeItem, SortedRanges,
+    compact_sorted_ranges, compose_orientation, make_self_interval, read_index_header,
+    AdjustedInterval, CigarOp, Impg, QueryMetadata, QueueRangeItem, SortedRanges,
 };
 use crate::impg_index::ImpgIndex;
 use crate::seqidx::SequenceIndex;
@@ -680,6 +680,7 @@ impl ImpgIndex for MultiImpg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         // Transitive query implementation using DFS with deterministic ordering
         Ok(self.transitive_query_impl(
@@ -696,6 +697,7 @@ impl ImpgIndex for MultiImpg {
             sequence_index,
             approximate_mode,
             subset_filter,
+            compose_strand,
             true, // use_dfs
         ))
     }
@@ -715,6 +717,7 @@ impl ImpgIndex for MultiImpg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
     ) -> io::Result<Vec<AdjustedInterval>> {
         // Transitive query implementation using BFS with deterministic ordering
         Ok(self.transitive_query_impl(
@@ -731,6 +734,7 @@ impl ImpgIndex for MultiImpg {
             sequence_index,
             approximate_mode,
             subset_filter,
+            compose_strand,
             false, // use_dfs
         ))
     }
@@ -789,6 +793,7 @@ impl MultiImpg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
         subset_filter: Option<&SubsetFilter>,
+        compose_strand: bool,
         use_dfs: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges
@@ -808,7 +813,7 @@ impl MultiImpg {
             .insert((range_start, range_end));
 
         let mut results = Vec::new();
-        let mut stack: VecDeque<(u32, i32, i32, u16)> = VecDeque::new();
+        let mut stack: VecDeque<(u32, i32, i32, u16, bool)> = VecDeque::new();
 
         // Add filtered input ranges
         for (filtered_start, filtered_end) in filtered_input_range {
@@ -820,12 +825,17 @@ impl MultiImpg {
             ));
 
             if (filtered_start - filtered_end).abs() >= min_transitive_len {
-                stack.push_back((target_id, filtered_start, filtered_end, 0));
+                stack.push_back((target_id, filtered_start, filtered_end, 0, false));
             }
         }
 
-        while let Some((current_target_id, current_start, current_end, current_depth)) = if use_dfs
-        {
+        while let Some((
+            current_target_id,
+            current_start,
+            current_end,
+            current_depth,
+            current_rev,
+        )) = if use_dfs {
             stack.pop_back() // DFS: pop from back (LIFO) - O(1)
         } else {
             stack.pop_front() // BFS: pop from front (FIFO) - O(1) with VecDeque
@@ -854,7 +864,7 @@ impl MultiImpg {
             );
 
             // Process results - matches original Impg behavior
-            for result in step_results {
+            for mut result in step_results {
                 let query_id = result.0.metadata;
 
                 // Skip self-referential results
@@ -882,6 +892,7 @@ impl MultiImpg {
                 };
 
                 let length = (result.0.last - result.0.first).abs();
+                let query_rev = compose_orientation(&mut result.0, current_rev, compose_strand);
 
                 // Add to results only if it passes min_output_length filter
                 let should_add_to_output = if let Some(min_len) = min_output_length {
@@ -906,7 +917,13 @@ impl MultiImpg {
                 // Add non-overlapping portions to stack
                 for (new_start, new_end) in new_ranges {
                     if (new_end - new_start).abs() >= min_transitive_len {
-                        stack.push_back((query_id, new_start, new_end, current_depth + 1));
+                        stack.push_back((
+                            query_id,
+                            new_start,
+                            new_end,
+                            current_depth + 1,
+                            query_rev,
+                        ));
                     }
                 }
             }
