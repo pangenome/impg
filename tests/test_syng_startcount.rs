@@ -99,6 +99,94 @@ fn test_one_edge_rskip_side_survives_load() {
     }
 }
 
+/// Adds each sequence of (syncmer, position) as a forward and a reverse-complement path,
+/// as `SyngIndex` does, and returns every path as (node, offset) steps with its start count.
+unsafe fn add_sequences(
+    gbwt: *mut syng_ffi::SyngBWT,
+    seqs: &[&[(i32, u32)]],
+) -> Vec<(Vec<(i32, u32)>, u32)> {
+    let mut paths = Vec::new();
+    for s in seqs {
+        let end = s[s.len() - 1].1;
+        let rev: Vec<(i32, u32)> = s
+            .iter()
+            .rev()
+            .map(|&(node, pos)| (-node, end - pos))
+            .collect();
+        for strand in [s.to_vec(), rev] {
+            let mut last = strand[0].1;
+            let p: Vec<(i32, u32)> = strand
+                .iter()
+                .map(|&(node, pos)| (node, pos - std::mem::replace(&mut last, pos)))
+                .collect();
+            let sbp = syng_ffi::syngBWTpathStartNew(gbwt, p[0].0);
+            let start_count = (*sbp).j_last;
+            for &(node, offset) in &p[1..] {
+                syng_ffi::syngBWTpathAdd(sbp, node, offset);
+            }
+            syng_ffi::syngBWTpathFinish(sbp);
+            paths.push((p, start_count));
+        }
+    }
+    paths
+}
+
+unsafe fn walk_path(
+    gbwt: *mut syng_ffi::SyngBWT,
+    start: i32,
+    count: u32,
+    max: usize,
+) -> Vec<(i32, u32)> {
+    let sbp = syng_ffi::syngBWTpathStartOld(gbwt, start, count);
+    let mut steps = vec![(start, 0)];
+    let (mut node, mut offset) = (0i32, 0u32);
+    while steps.len() <= max && syng_ffi::syngBWTpathNext(sbp, &mut node, &mut offset) {
+        steps.push((node, offset));
+    }
+    syng_ffi::syngBWTpathDestroy(sbp);
+    steps
+}
+
+/// An edge longer than 65535 bp makes an Rskip node side when the node is created. syng gave
+/// that side both a run and a directory count, a phantom path in the other direction that shifted
+/// later ranks. The first case died with "syngBWTadd -ve output retVal -3", the second walked the
+/// wrong nodes. Both are the smallest cases a random search found.
+#[test]
+fn test_long_edge_paths_walk_back_exactly() {
+    let _guard = SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cases: [&[&[(i32, u32)]]; 2] = [
+        &[&[(2, 0), (-1, 20), (2, 70_020), (-1, 70_040)]],
+        &[
+            &[(1, 0), (1, 20), (-2, 70_020)],
+            &[(1, 0), (-2, 70_000), (1, 70_020)],
+        ],
+    ];
+    let dir = tempfile::Builder::new()
+        .prefix("impg_test_syng_long_edge_")
+        .tempdir()
+        .unwrap();
+    for (c, seqs) in cases.iter().enumerate() {
+        unsafe {
+            syng_ffi::impg_syng_suppress_debug();
+            let gbwt = syng_ffi::syngBWTcreate(63, 0);
+            let paths = add_sequences(gbwt, seqs);
+            let loaded = roundtrip_gbwt(gbwt, &dir.path().join(format!("case{c}.1gbwt")));
+            for (g, which) in [(gbwt, "built"), (loaded, "loaded")] {
+                for (p, start_count) in &paths {
+                    let walked = walk_path(g, p[0].0, *start_count, p.len());
+                    assert_eq!(
+                        &walked, p,
+                        "case {c} {which}: path from {} count {start_count}",
+                        p[0].0
+                    );
+                }
+            }
+            syng_ffi::syngBWTdestroy(gbwt);
+            syng_ffi::syngBWTdestroy(loaded);
+        }
+    }
+}
+
 #[test]
 fn test_start_count_increments_on_second_path() {
     let _guard = SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
