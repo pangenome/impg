@@ -237,7 +237,7 @@ impl QueryMetadata {
         )
     }
 
-    fn is_reversed(&self) -> bool {
+    pub(crate) fn is_reversed(&self) -> bool {
         (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
     }
 
@@ -843,11 +843,14 @@ pub(crate) fn validate_alignment_file_list(
     Ok(())
 }
 
+/// One edge of the alignment graph: query id, target start and end, query
+/// start and end, reverse strand.
+pub(crate) type EdgeKey = (u32, i32, i32, i32, i32, bool);
+
 /// Identify one edge of the alignment graph, for deduplication.
 ///
-/// Two entries with the same key project to the same interval pair.
-fn edge_key(interval: &Interval<QueryMetadata>) -> (u32, i32, i32, i32, i32, bool) {
-    let metadata = &interval.metadata;
+/// Two entries with the same key span the same interval pair.
+pub(crate) fn edge_key(metadata: &QueryMetadata) -> EdgeKey {
     (
         metadata.query_id(),
         metadata.target_start,
@@ -2248,18 +2251,29 @@ impl Impg {
 
         // A reciprocal pair (`A -> B` and `B -> A` for the same alignment)
         // reaches the same edge twice: once as the reversed entry of the first
-        // record and once as the forward entry of the second. Both describe the
-        // same projection, and both reached the output, so bedpe and paf
+        // record and once as the forward entry of the second, and bedpe and paf
         // printed the row twice. The released set has 1,483 such pairs.
         //
-        // The key ignores the file index, the byte offset and the reversed
-        // flag: those say which record a projection reads its CIGAR from, not
-        // which edge this is.
+        // Keep the forward entry, the record aligned with this target as its
+        // target, and drop the reversed twin. The choice used to depend on the
+        // order of the records: the key ignores the CIGAR, so two entries with
+        // the same endpoints and different CIGARs projected differently by
+        // line or file order. Two forward entries (or two reversed ones) are two
+        // records, and both stay.
         let trees: TreeMap = intervals
             .into_par_iter()
             .map(|(target_id, mut interval_nodes)| {
-                interval_nodes.sort_unstable_by_key(edge_key);
-                interval_nodes.dedup_by(|a, b| edge_key(a) == edge_key(b));
+                interval_nodes.sort_unstable_by_key(|iv| {
+                    let m = &iv.metadata;
+                    (edge_key(m), m.is_reversed(), m.cigar_cache_key())
+                });
+                // Forward entries sort first in each key: a reversed entry after
+                // a kept forward one is its twin
+                interval_nodes.dedup_by(|a, b| {
+                    a.metadata.is_reversed()
+                        && !b.metadata.is_reversed()
+                        && edge_key(&a.metadata) == edge_key(&b.metadata)
+                });
                 (
                     target_id,
                     Arc::new(BasicCOITree::new(interval_nodes.as_slice())),
@@ -2487,7 +2501,33 @@ impl Impg {
             range_end,
             store_cigar,
         )];
+        self.query_each(
+            target_id,
+            range_start,
+            range_end,
+            store_cigar,
+            min_gap_compressed_identity,
+            sequence_index,
+            approximate_mode,
+            |result, _| results.push(result),
+        );
+        results
+    }
 
+    /// The projections of `query`, without the self interval, each passed to
+    /// `emit` with the tree entry it came from.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn query_each(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
+        mut emit: impl FnMut(AdjustedInterval, &QueryMetadata),
+    ) {
         debug!(
             "Querying region{}: {}:{}-{}, len: {}",
             if approximate_mode {
@@ -2528,12 +2568,10 @@ impl Impg {
 
                 if let Some((query_interval, cigar_ops, target_interval)) = projection {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
-                    results.push((query_interval, cigar_vec, target_interval));
+                    emit((query_interval, cigar_vec, target_interval), metadata);
                 }
             });
         }
-
-        results
     }
 
     pub fn populate_cigar_cache(

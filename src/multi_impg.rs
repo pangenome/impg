@@ -6,7 +6,8 @@
 
 use crate::forest_map::ForestMap;
 use crate::impg::{
-    compact_sorted_ranges, make_self_interval, read_index_header, AdjustedInterval, CigarOp, Impg,
+    compact_sorted_ranges, edge_key, make_self_interval, read_index_header, AdjustedInterval, CigarOp,
+    EdgeKey, Impg,
     QueryMetadata, QueueRangeItem, SortedRanges,
 };
 use crate::impg_index::ImpgIndex;
@@ -500,10 +501,11 @@ impl MultiImpg {
             }
         };
 
-        // Query all relevant sub-indices in parallel
-        let results: Vec<Vec<AdjustedInterval>> = locations
+        // Query all relevant sub-indices in parallel, keeping the edge key (in
+        // unified ids) and the reversed flag of the entry behind each result
+        let results: Vec<Vec<(AdjustedInterval, EdgeKey, bool)>> = locations
             .par_iter()
-            .filter_map(|loc| {
+            .map(|loc| {
                 // A missing sub-index would drop homologs from the output
                 let impg = self.get_sub_index(loc.index_idx).unwrap_or_else(|e| {
                     panic!(
@@ -511,9 +513,9 @@ impl MultiImpg {
                         self.index_paths[loc.index_idx]
                     )
                 });
-
-                // Query using local target ID
-                let local_results = impg.query(
+                let l2u = &self.local_to_unified[loc.index_idx];
+                let mut tagged = Vec::new();
+                impg.query_each(
                     loc.local_target_id,
                     range_start,
                     range_end,
@@ -521,68 +523,53 @@ impl MultiImpg {
                     min_gap_compressed_identity,
                     sequence_index,
                     approximate_mode,
+                    |result, metadata| {
+                        if let Some(result) = self.translate_to_unified(result, loc.index_idx) {
+                            let mut key = edge_key(metadata);
+                            key.0 = l2u[key.0 as usize];
+                            tagged.push((result, key, metadata.is_reversed()));
+                        }
+                    },
                 );
-
-                // Translate results to unified IDs
-                let unified_results: Vec<AdjustedInterval> = local_results
-                    .into_iter()
-                    .filter_map(|r| self.translate_to_unified(r, loc.index_idx))
-                    .collect();
-
-                Some(unified_results)
+                tagged
             })
             .collect();
 
-        // Merge all results, but only include ONE self-interval. A reciprocal
-        // pair split across two files (A->B in one, B->A in another) gives the
-        // same edge from two sub-indices; keep it once, as one index does.
-        let mut final_results = Vec::new();
-        let mut seen_self = false;
-        let mut seen_edges = rustc_hash::FxHashSet::default();
-
-        for result_set in results {
-            for result in result_set {
-                // Check if this is a self-interval (query == target == input)
-                let is_self = result.0.metadata == unified_target_id
-                    && result.2.metadata == unified_target_id
-                    && result.0.first == range_start
-                    && result.0.last == range_end;
-
-                if is_self {
-                    if !seen_self {
-                        final_results.push(result);
-                        seen_self = true;
-                    }
-                    // Skip duplicate self-intervals
-                } else if seen_edges.insert((
-                    result.0.metadata,
-                    result.0.first,
-                    result.0.last,
-                    result.2.metadata,
-                    result.2.first,
-                    result.2.last,
-                )) {
-                    final_results.push(result);
-                }
-            }
-        }
-
-        // If we never saw a self-interval, add one
-        if !seen_self {
-            final_results.insert(
-                0,
-                self.make_self_interval(unified_target_id, range_start, range_end, store_cigar),
-            );
-        }
+        // A reciprocal pair split across two files (A->B in one, B->A in
+        // another) gives the same edge from two sub-indices: keep the forward
+        // entry and drop its reversed twin, as one index does. The first file
+        // used to win, so the file order chose the CIGAR.
+        let forward: rustc_hash::FxHashSet<EdgeKey> = results
+            .iter()
+            .flatten()
+            .filter(|(_, _, reversed)| !reversed)
+            .map(|(_, key, _)| *key)
+            .collect();
+        let mut final_results = vec![self.make_self_interval(
+            unified_target_id,
+            range_start,
+            range_end,
+            store_cigar,
+        )];
+        final_results.extend(
+            results
+                .into_iter()
+                .flatten()
+                .filter(|(_, key, reversed)| !reversed || !forward.contains(key))
+                .map(|(result, _, _)| result),
+        );
 
         // Sort results for deterministic ordering (excluding the self-interval which should stay first)
         // Sort by: query_id, query_start, query_end, target_start, target_end
         if final_results.len() > 1 {
             let self_interval = final_results.remove(0);
+            // The CIGAR breaks ties, so two records with the same endpoints
+            // print in the same order whatever the file order
             final_results.sort_by(|a, b| {
                 let a_key = (a.0.metadata, a.0.first, a.0.last, a.2.first, a.2.last);
                 let b_key = (b.0.metadata, b.0.first, b.0.last, b.2.first, b.2.last);
-                a_key.cmp(&b_key)
+                let ops = |c: &[CigarOp]| c.iter().map(|op| (op.len(), op.op())).collect::<Vec<_>>();
+                a_key.cmp(&b_key).then_with(|| ops(&a.1).cmp(&ops(&b.1)))
             });
             final_results.insert(0, self_interval);
         }

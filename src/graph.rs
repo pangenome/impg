@@ -858,16 +858,33 @@ pub fn write_intervals_fasta(
     Ok(())
 }
 
+/// Uppercase complement of each byte: the IUPAC codes complement to their
+/// pair (R = A/G to Y = C/T), S, W and N to themselves; any other byte stays.
+const COMPLEMENT: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = i as u8;
+        i += 1;
+    }
+    let pairs = b"ATCGRYKMBVDHSSWWNN";
+    let mut p = 0;
+    while p < pairs.len() {
+        let (a, b) = (pairs[p], pairs[p + 1]);
+        table[a as usize] = b;
+        table[b as usize] = a;
+        table[a.to_ascii_lowercase() as usize] = b;
+        table[b.to_ascii_lowercase() as usize] = a;
+        p += 2;
+    }
+    table
+};
+
+/// Complement one base. R, Y, K, M, B, V, D and H used to stay unchanged, so
+/// the reverse complement of ACGTRYSWKM was MKWSYRACGT instead of KMWSRYACGT.
 #[inline]
 pub(crate) fn complement_base(base: u8) -> u8 {
-    match base {
-        b'A' | b'a' => b'T',
-        b'T' | b't' => b'A',
-        b'C' | b'c' => b'G',
-        b'G' | b'g' => b'C',
-        b'N' | b'n' => b'N',
-        _ => base,
-    }
+    COMPLEMENT[base as usize]
 }
 
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
@@ -1198,6 +1215,14 @@ pub fn generate_gfa_seqwish_from_intervals(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reverse_complement_maps_iupac_codes_to_their_pairs() {
+        assert_eq!(reverse_complement(b"ACGTRYSWKM"), b"KMWSRYACGT".to_vec());
+        assert_eq!(reverse_complement(b"BDHVN"), b"NBDHV".to_vec());
+        assert_eq!(reverse_complement(b"acgtry-"), b"-RYACGT".to_vec());
+    }
+
     use super::*;
 
     #[test]

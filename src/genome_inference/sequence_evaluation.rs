@@ -13,27 +13,9 @@ use std::{
 pub const MODEL: &str = "greedy-one-to-one-sequence-evaluation-v1";
 pub type Fasta = BTreeMap<String, Vec<u8>>;
 
+/// The input is IUPAC DNA (`read_fasta` refuses anything else).
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|b| match b.to_ascii_uppercase() {
-            b'A' => b'T',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'T' => b'A',
-            b'R' => b'Y',
-            b'Y' => b'R',
-            b'S' => b'S',
-            b'W' => b'W',
-            b'K' => b'M',
-            b'M' => b'K',
-            b'B' => b'V',
-            b'V' => b'B',
-            b'D' => b'H',
-            b'H' => b'D',
-            _ => b'N',
-        })
-        .collect()
+    crate::graph::reverse_complement(seq)
 }
 /// Empty FASTA is a valid no-call result; empty records, duplicate names and
 /// non-IUPAC DNA are errors. No header normalization or truth trimming.
