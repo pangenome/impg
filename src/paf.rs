@@ -111,31 +111,42 @@ pub fn read_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
     }
 }
 
-/// Validate the payload of a `cg:Z` tag and return its byte length.
+/// Validate the payload of a `cg:Z` tag and return the query and target bases
+/// it spans and whether it uses `M`, in one pass over its bytes.
 ///
 /// impg re-reads the CIGAR out of the file on every query. Without this check a
 /// malformed CIGAR was only discovered inside a rayon worker, where
 /// `CigarOp::new` panics on an unknown operation and the run dies without
-/// naming the offending file or record.
-fn validate_cigar_tag(cigar: &str) -> Result<usize, String> {
-    let b = cigar.as_bytes();
-    let digit = |c: u8| c.wrapping_sub(b'0') < 10;
-    let op = |c: u8| matches!(c, b'=' | b'X' | b'I' | b'D' | b'M');
-    // Independent per-byte checks, no early exit, so they vectorize
-    let bad = b.iter().fold(false, |acc, &c| acc | !(digit(c) | op(c)));
-    let op_after_op = b.windows(2).fold(false, |acc, w| acc | (!digit(w[0]) & !digit(w[1])));
-    // 9+ digits may not fit the 29 packed bits: check exactly below
-    let long = b
-        .windows(9)
-        .fold(false, |acc, w| acc | w.iter().fold(true, |all, &c| all & digit(c)));
-    let ends_ok = b.first().is_some_and(|&c| digit(c)) && b.last().is_some_and(|&c| op(c));
-    if bad | op_after_op | long | !ends_ok {
-        let reason = describe_cigar_error(b);
-        if !reason.is_empty() {
-            return Err(reason);
+/// naming the offending file or record. The spans let the parser refuse a
+/// CIGAR that does not cover the record coordinates; a separate pass for them
+/// cost 12.6% of the instructions of `impg index` on 400,000 records.
+fn cigar_tag_spans(cigar: &str) -> Result<(u64, u64, bool), String> {
+    // `CigarOp` packs the length into 29 bits
+    const MAX_OP_LEN: u64 = 1 << 29;
+    let (mut q, mut t, mut len, mut has_len, mut has_m) = (0u64, 0u64, 0u64, false, false);
+    let mut ok = !cigar.is_empty();
+    for &c in cigar.as_bytes() {
+        let d = c.wrapping_sub(b'0');
+        if d < 10 {
+            len = len.saturating_mul(10).saturating_add(u64::from(d));
+            has_len = true;
+            continue;
         }
+        ok &= has_len & (len < MAX_OP_LEN);
+        match c {
+            b'=' | b'X' => (q, t) = (q + len, t + len),
+            b'M' => (q, t, has_m) = (q + len, t + len, true),
+            b'I' => q += len,
+            b'D' => t += len,
+            _ => ok = false,
+        }
+        (len, has_len) = (0, false);
     }
-    Ok(cigar.len())
+    if ok & !has_len {
+        Ok((q, t, has_m))
+    } else {
+        Err(describe_cigar_error(cigar.as_bytes()))
+    }
 }
 
 /// Reason a CIGAR fails, or an empty string when it is valid.
@@ -170,26 +181,6 @@ fn describe_cigar_error(bytes: &[u8]) -> String {
         return "it ends with a length and no operation".to_string();
     }
     String::new()
-}
-
-/// Query and target bases a validated CIGAR spans, and whether it uses `M`.
-fn cigar_spans(cigar: &str) -> (u64, u64, bool) {
-    let (mut q, mut t, mut len, mut has_m) = (0u64, 0u64, 0u64, false);
-    for &c in cigar.as_bytes() {
-        match c {
-            b'0'..=b'9' => {
-                len = len * 10 + u64::from(c - b'0');
-                continue;
-            }
-            b'=' | b'X' => (q, t) = (q + len, t + len),
-            b'M' => (q, t, has_m) = (q + len, t + len, true),
-            b'I' => q += len,
-            b'D' => t += len,
-            _ => unreachable!("validate_cigar_tag accepts only digits and =XIDM"),
-        }
-        len = 0;
-    }
-    (q, t, has_m)
 }
 
 /// Parse a single PAF line into an AlignmentRecord
@@ -276,14 +267,14 @@ fn parse_paf_line(
     for tag_str in fields {
         if let Some(cigar) = tag_str.strip_prefix("cg:Z:") {
             cigar_offset += 5;
-            cigar_bytes = validate_cigar_tag(cigar).map_err(|reason| {
+            let (q_span, t_span, has_m) = cigar_tag_spans(cigar).map_err(|reason| {
                 ParseErr::InvalidFormat(format!(
                     "invalid cg:Z CIGAR in record {query_name}:{query_start}-{query_end} -> \
                      {target_name}:{target_start}-{target_end}: {reason}"
                 ))
             })?;
+            cigar_bytes = cigar.len();
             // A CIGAR shorter than the coordinates lost the projection of the last bases
-            let (q_span, t_span, has_m) = cigar_spans(cigar);
             let (q_len, t_len) = (query_end - query_start, target_end - target_start);
             if q_span != q_len as u64 || t_span != t_len as u64 {
                 return Err(ParseErr::InvalidFormat(format!(
@@ -607,20 +598,25 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cigar_tag_edges() {
-        for ok in ["10=20X3I4D5M", "536870911=", "0000000001=", "1="] {
-            assert_eq!(validate_cigar_tag(ok), Ok(ok.len()), "{ok}");
+    fn test_cigar_tag_spans_edges() {
+        for (ok, spans) in [
+            ("10=20X3I4D5M", (38, 39, true)),
+            ("536870911=", (536870911, 536870911, false)),
+            ("0000000001=", (1, 1, false)),
+            ("1=", (1, 1, false)),
+        ] {
+            assert_eq!(cigar_tag_spans(ok), Ok(spans), "{ok}");
         }
         for bad in ["", "=", "100", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
-            assert!(validate_cigar_tag(bad).is_err(), "{bad:?} must be rejected");
+            assert!(cigar_tag_spans(bad).is_err(), "{bad:?} must be rejected");
         }
     }
 
     #[test]
-    fn test_validate_cigar_tag_fast_path_agrees_with_the_exact_check() {
-        // The fast path only decides when to run `describe_cigar_error`; a
-        // CIGAR it lets through unchecked must be valid. 200,000 random
-        // strings over digits and ops, lengths 0-14, many near the 29-bit limit
+    fn test_cigar_tag_spans_agrees_with_the_exact_check() {
+        // The one-pass check and `describe_cigar_error` (its error messages)
+        // must agree. 200,000 random strings over digits and ops, lengths
+        // 0-14, many near the 29-bit limit
         let alphabet = b"0123456789=XIDMSN";
         let mut x: u64 = 0x2545F4914F6CDD1D;
         let mut next = || {
@@ -636,7 +632,7 @@ mod tests {
                 .map(|_| alphabet[(next() % alphabet.len() as u64) as usize] as char)
                 .collect();
             let exact_ok = describe_cigar_error(s.as_bytes()).is_empty();
-            assert_eq!(validate_cigar_tag(&s).is_ok(), exact_ok, "{s:?}");
+            assert_eq!(cigar_tag_spans(&s).is_ok(), exact_ok, "{s:?}");
             rejected += usize::from(!exact_ok);
         }
         assert!(rejected > 0 && rejected < 200_000, "{rejected} rejected");
