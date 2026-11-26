@@ -13153,24 +13153,22 @@ fn print_stats(impg: &impl ImpgIndex) {
     let target_ids: Vec<u32> = impg.target_ids();
 
     // Process trees in parallel, computing stats without keeping them in memory
-    // when the index can load them back. A tree is evicted only when the index
-    // can reload it: `stats` walks every tree twice, and an in-memory tree that
-    // is evicted is gone.
-    let results: Vec<(u32, usize)> = target_ids
+    // when the index can load them back. One walk collects the count and the
+    // distinct query ids: a second walk for the bridge statistics loaded every
+    // evicted tree from disk again.
+    let results: Vec<(u32, usize, Vec<u32>)> = target_ids
         .par_iter()
-        .map(|&target_id| {
-            // Get tree and count, removing it from memory for efficiency
-            let count = if let Some(tree) = impg.get_or_load_tree(target_id) {
-                let len = tree.len();
+        .map(|&target_id| match impg.get_or_load_tree(target_id) {
+            Some(tree) => {
+                let mut ids: Vec<u32> = tree.iter().map(|iv| iv.metadata.query_id()).collect();
+                ids.sort_unstable();
+                ids.dedup();
                 if impg.can_reload_tree(target_id) {
                     impg.remove_cached_tree(target_id);
                 }
-                len
-            } else {
-                0
-            };
-
-            (target_id, count)
+                (target_id, tree.len(), ids)
+            }
+            None => (target_id, 0, Vec::new()),
         })
         .collect();
 
@@ -13178,9 +13176,11 @@ fn print_stats(impg: &impl ImpgIndex) {
     let mut num_overlaps = 0;
     let mut overlaps_per_seq = FxHashMap::default();
 
-    for (target_id, count) in results {
+    let mut query_ids_set = std::collections::HashSet::new();
+    for (target_id, count, ids) in results {
         num_overlaps += count;
         overlaps_per_seq.insert(target_id, count);
+        query_ids_set.extend(ids);
     }
 
     info!(
@@ -13225,26 +13225,6 @@ fn print_stats(impg: &impl ImpgIndex) {
 
     use std::collections::HashSet;
     let target_ids_set: HashSet<u32> = impg.target_ids().into_iter().collect();
-
-    // Collect query IDs from all trees
-    let query_ids_set: HashSet<u32> = impg
-        .target_ids()
-        .par_iter()
-        .flat_map(|&target_id| {
-            if let Some(tree) = impg.get_or_load_tree(target_id) {
-                let ids: Vec<u32> = tree
-                    .iter()
-                    .map(|interval| interval.metadata.query_id())
-                    .collect();
-                if impg.can_reload_tree(target_id) {
-                    impg.remove_cached_tree(target_id);
-                }
-                ids
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
 
     let bridges: HashSet<u32> = target_ids_set
         .intersection(&query_ids_set)
