@@ -74,17 +74,6 @@ where
     })
 }
 
-fn complement_base(base: u8) -> u8 {
-    match base.to_ascii_uppercase() {
-        b'A' => b'T',
-        b'C' => b'G',
-        b'G' => b'C',
-        b'T' => b'A',
-        b'U' => b'A',
-        other => other,
-    }
-}
-
 fn bases_equal_for_seqwish(query: u8, target: u8) -> bool {
     let query = query.to_ascii_uppercase();
     let target = target.to_ascii_uppercase();
@@ -173,7 +162,7 @@ fn paf_line_max_exact_match_run(
                     }
                     let mut query_base = qseq[q_pos as usize];
                     if query_is_rev {
-                        query_base = complement_base(query_base);
+                        query_base = crate::graph::complement_base(query_base);
                     }
                     let target_base = tseq[t_pos];
                     if bases_equal_for_seqwish(query_base, target_base) {

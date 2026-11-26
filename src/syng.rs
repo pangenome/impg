@@ -2154,16 +2154,7 @@ fn matched_syncmers_in_sequence_impl(
 fn reverse_complement_into(seq: &[u8], out: &mut Vec<u8>) {
     out.clear();
     out.reserve(seq.len());
-    for &base in seq.iter().rev() {
-        out.push(match base {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'N' | b'n' => b'N',
-            _ => base,
-        });
-    }
+    out.extend(seq.iter().rev().map(|&base| crate::graph::complement_base(base)));
 }
 
 fn orient_reverse_query_syncmers(

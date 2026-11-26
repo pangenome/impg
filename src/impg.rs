@@ -13,7 +13,7 @@ use crate::subset_filter::SubsetFilter;
 use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
 use coitrees::{BasicCOITree, GenericInterval, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use onecode::OneFile;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -237,7 +237,7 @@ impl QueryMetadata {
         )
     }
 
-    fn is_reversed(&self) -> bool {
+    pub(crate) fn is_reversed(&self) -> bool {
         (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
     }
 
@@ -843,11 +843,19 @@ pub(crate) fn validate_alignment_file_list(
     Ok(())
 }
 
+/// One edge of the alignment graph: query id, target start and end, query
+/// start and end, reverse strand.
+pub(crate) type EdgeKey = (u32, i32, i32, i32, i32, bool);
+
+/// Rank of an entry among the entries of one edge, lowest first: the edit
+/// count, then a key whose first difference marks the earliest difference
+/// along the alignment.
+pub(crate) type CollisionRank = (u64, Vec<(u8, u8, i64)>);
+
 /// Identify one edge of the alignment graph, for deduplication.
 ///
-/// Two entries with the same key project to the same interval pair.
-fn edge_key(interval: &Interval<QueryMetadata>) -> (u32, i32, i32, i32, i32, bool) {
-    let metadata = &interval.metadata;
+/// Two entries with the same key span the same interval pair.
+pub(crate) fn edge_key(metadata: &QueryMetadata) -> EdgeKey {
     (
         metadata.query_id(),
         metadata.target_start,
@@ -1292,6 +1300,66 @@ impl Impg {
     }
 
     /// Get tracepoint alignment from either .1aln or .tpa file
+    /// Rank one of several entries of the same edge (`edge_key`) in tree
+    /// `tree_id`. Two records with the same endpoints can carry different
+    /// CIGARs (an indel in a homopolymer fits at several places), and the first
+    /// entry in input order used to win. The rank reads the record in the frame
+    /// where the sequence with the smaller name is the target, so both trees of
+    /// a reciprocal pair choose the same record and a projection goes back to
+    /// where it came from.
+    pub(crate) fn collision_rank(&self, metadata: &QueryMetadata, tree_id: u32) -> io::Result<CollisionRank> {
+        let name = |id: u32| {
+            self.seq_index.get_name(id).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("no name for sequence id {id}"))
+            })
+        };
+        // A reversed entry swapped the query and the target of its record
+        let (record_target, record_query) = if metadata.is_reversed() {
+            (metadata.query_id, tree_id)
+        } else {
+            (tree_id, metadata.query_id)
+        };
+        let canonical = name(record_target)? <= name(record_query)?;
+        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+        let invalid = |e: String| io::Error::new(io::ErrorKind::InvalidData, format!("{alignment_file}: {e}"));
+        match QueryMetadata::get_file_type(alignment_file) {
+            FileType::Paf => {
+                let mut buf = vec![0u8; metadata.data_bytes];
+                read_paf_cigar_data(alignment_file, metadata.data_offset(), &mut buf).map_err(invalid)?;
+                let cigar = std::str::from_utf8(&buf).map_err(|e| invalid(e.to_string()))?;
+                let mut ops = parse_cigar_to_delta(cigar).map_err(|e| invalid(format!("{e:?}")))?;
+                if !canonical {
+                    invert_cigar_ops_in_place(&mut ops, metadata.strand());
+                }
+                let edits = ops
+                    .iter()
+                    .filter(|op| matches!(op.op(), 'X' | 'I' | 'D'))
+                    .map(|op| op.len() as u64)
+                    .sum();
+                // At the first operation that differs, a shorter = run (or no
+                // = run) means an earlier difference: 3=1I4= before 6=1I1=
+                let key = ops
+                    .iter()
+                    .map(|op| match op.op() {
+                        '=' => (1, 0, i64::from(op.len())),
+                        o => (0, "XIDM".find(o).unwrap() as u8, i64::from(op.len())),
+                    })
+                    .collect();
+                Ok((edits, key))
+            }
+            FileType::OneAln | FileType::Tpa => {
+                // No CIGAR without the sequences: the stored difference count,
+                // then the record whose target is canonical, then the tracepoints
+                let alignment = self.get_tracepoint_alignment(metadata).map_err(invalid)?;
+                let edits = u64::try_from(alignment.differences)
+                    .map_err(|_| invalid(format!("negative difference count {}", alignment.differences)))?;
+                let mut key = vec![(u8::from(!canonical), 0, 0)];
+                key.extend(alignment.tracepoints.iter().map(|&v| (2, 0, v)));
+                Ok((edits, key))
+            }
+        }
+    }
+
     fn get_tracepoint_alignment(
         &self,
         metadata: &QueryMetadata,
@@ -2246,46 +2314,62 @@ impl Impg {
                 acc
             });
 
-        // A reciprocal pair (`A -> B` and `B -> A` for the same alignment)
-        // reaches the same edge twice: once as the reversed entry of the first
-        // record and once as the forward entry of the second. Both describe the
-        // same projection, and both reached the output, so bedpe and paf
-        // printed the row twice. The released set has 1,483 such pairs.
-        //
-        // The key ignores the file index, the byte offset and the reversed
-        // flag: those say which record a projection reads its CIGAR from, not
-        // which edge this is.
-        let trees: TreeMap = intervals
-            .into_par_iter()
-            .map(|(target_id, mut interval_nodes)| {
-                interval_nodes.sort_unstable_by_key(edge_key);
-                interval_nodes.dedup_by(|a, b| edge_key(a) == edge_key(b));
-                (
-                    target_id,
-                    Arc::new(BasicCOITree::new(interval_nodes.as_slice())),
-                )
-            })
-            .collect();
-
-        // Populate forest map with placeholder offsets for in-memory trees
-        // This allows stats and other operations to work before serialization
-        let mut forest_map = ForestMap::new();
-        for &target_id in trees.keys() {
-            forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
-        }
-
         let num_files = alignment_files.len();
-        Ok(Self {
-            trees: Arc::new(RwLock::new(TreeCache::unbounded(trees))),
+        let mut impg = Self {
+            trees: Arc::new(RwLock::new(TreeCache::unbounded(TreeMap::default()))),
             cache_ns: 0,
             seq_index,
             alignment_files,
             built_bidirectional: bidirectional,
-            forest_map,
+            forest_map: ForestMap::new(),
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             trace_spacing_cache: RwLock::new(vec![None; num_files]),
-        })
+        };
+
+        // Several entries can share one edge. A reciprocal pair (`A -> B` and
+        // `B -> A` for the same alignment) gives the reversed entry of one record
+        // and the forward entry of the other, and bedpe and paf printed the row
+        // twice (1,483 pairs in the released set). Two records of one direction
+        // with the same endpoints do the same. Keep the entry with the lowest
+        // `collision_rank`: the first entry in input order used to win.
+        let ranked: Vec<(u32, Vec<Interval<QueryMetadata>>, usize)> = intervals
+            .into_par_iter()
+            .map(|(target_id, mut interval_nodes)| {
+                interval_nodes.sort_unstable_by_key(|iv| (edge_key(&iv.metadata), iv.metadata.cigar_cache_key()));
+                let mut kept = Vec::with_capacity(interval_nodes.len());
+                let mut dropped = 0usize;
+                for run in interval_nodes.chunk_by(|a, b| edge_key(&a.metadata) == edge_key(&b.metadata)) {
+                    let best = if run.len() == 1 {
+                        0
+                    } else {
+                        let ranks = run
+                            .iter()
+                            .map(|iv| impg.collision_rank(&iv.metadata, target_id))
+                            .collect::<io::Result<Vec<_>>>()?;
+                        dropped += run.len() - 1;
+                        // The first of equal ranks: equal ranks are the same alignment
+                        (0..run.len()).min_by(|&i, &j| ranks[i].cmp(&ranks[j])).unwrap()
+                    };
+                    kept.push(run[best].clone());
+                }
+                Ok((target_id, kept, dropped))
+            })
+            .collect::<io::Result<_>>()?;
+        let dropped: usize = ranked.iter().map(|(_, _, d)| d).sum();
+        info!("Kept one entry per edge: dropped {dropped} entries that shared an edge with a better one");
+        let trees: TreeMap = ranked
+            .into_par_iter()
+            .map(|(target_id, kept, _)| (target_id, Arc::new(BasicCOITree::new(kept.as_slice()))))
+            .collect();
+
+        // Populate forest map with placeholder offsets for in-memory trees
+        // This allows stats and other operations to work before serialization
+        for &target_id in trees.keys() {
+            impg.forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
+        }
+        impg.trees = Arc::new(RwLock::new(TreeCache::unbounded(trees)));
+        Ok(impg)
     }
 
     /// Serialize the IMPG index to a writer with embedded forest map
@@ -2487,7 +2571,33 @@ impl Impg {
             range_end,
             store_cigar,
         )];
+        self.query_each(
+            target_id,
+            range_start,
+            range_end,
+            store_cigar,
+            min_gap_compressed_identity,
+            sequence_index,
+            approximate_mode,
+            |result, _| results.extend(result),
+        );
+        results
+    }
 
+    /// Every tree entry overlapping the range, with its projection (None when
+    /// the range projects to nothing through it), without the self interval.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn query_each(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
+        mut emit: impl FnMut(Option<AdjustedInterval>, &QueryMetadata),
+    ) {
         debug!(
             "Querying region{}: {}:{}-{}, len: {}",
             if approximate_mode {
@@ -2526,14 +2636,13 @@ impl Impg {
                     )
                 };
 
-                if let Some((query_interval, cigar_ops, target_interval)) = projection {
+                let result = projection.map(|(query_interval, cigar_ops, target_interval)| {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
-                    results.push((query_interval, cigar_vec, target_interval));
-                }
+                    (query_interval, cigar_vec, target_interval)
+                });
+                emit(result, metadata);
             });
         }
-
-        results
     }
 
     pub fn populate_cigar_cache(
@@ -4127,11 +4236,13 @@ mod tests {
         let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
                    B\t1000\t0\t500\t+\tA\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n"
             .to_string();
+        // The two entries of the edge are ranked by their CIGARs, read from the file
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("r.paf").to_string_lossy().into_owned();
+        std::fs::write(&path, &paf).unwrap();
         let mut seq_index = SequenceIndex::new();
         let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
-        let impg =
-            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
-                .unwrap();
+        let impg = Impg::from_multi_alignment_records(&[(records, path)], seq_index, None, true).unwrap();
 
         let mut total = 0usize;
         for id in impg.target_ids() {

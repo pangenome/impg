@@ -982,15 +982,9 @@ fn revcomp(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-pub(super) fn complement(base: u8) -> u8 {
-    match base {
-        b'A' => b'T',
-        b'C' => b'G',
-        b'G' => b'C',
-        b'T' => b'A',
-        other => other,
-    }
-}
+// It complemented upper-case ACGT only: lower-case and IUPAC bases on the
+// reverse strand kept their forward-strand letter
+use crate::graph::complement_base as complement;
 
 /// Zero-allocation equality check between `revcomp(window)` and `kmer`.
 #[inline]
