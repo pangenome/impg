@@ -375,15 +375,35 @@ fn write_typed_pack_tsv(
     Ok(sorted.len())
 }
 
-/// Open the read-contributions table and write its header.
-fn create_read_contributions(path: &Path) -> io::Result<BufWriter<File>> {
+/// Open a temporary file next to the read-contributions table `path` and write
+/// the header. A table that would replace an existing file of the run's inputs
+/// is an error.
+fn create_read_contributions(path: &Path, inputs: &[&Path]) -> io::Result<BufWriter<tempfile::NamedTempFile>> {
+    if let Ok(table) = fs::canonicalize(path) {
+        if inputs.iter().any(|input| fs::canonicalize(input).is_ok_and(|i| i == table)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the read-contributions table {} is an input of this run", path.display()),
+            ));
+        }
+    }
     create_parent_dir(path)?;
-    let mut out = BufWriter::new(File::create(path)?);
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let tmp = tempfile::Builder::new().prefix(".read-contributions.").suffix(".tmp").tempfile_in(dir)?;
+    let mut out = BufWriter::new(tmp);
     writeln!(
         out,
         "read_name\tread_ordinal\tstep_index\tsegment_name\torientation\tfeature_id\tsegment_visit_in_read\tcount_delta\texplanation"
     )?;
     Ok(out)
+}
+
+/// Move the finished temporary table to its name.
+fn publish_read_contributions(tmp: Option<tempfile::NamedTempFile>, path: Option<&Path>) -> io::Result<()> {
+    match (tmp, path) {
+        (Some(tmp), Some(path)) => tmp.persist(path).map(drop).map_err(|e| e.error),
+        _ => Ok(()),
+    }
 }
 
 fn write_manifest(path: &Path, manifest: &GfaProjectionManifest) -> io::Result<()> {
@@ -471,23 +491,22 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
         }
         GfaProjectionOutputFormat::PackTsv => config.read_contributions_path.map(Path::to_path_buf),
     };
-    // Rows go to `<path>.tmp`, renamed at the end: a failed run leaves no
-    // file under the final name, as when the rows were written at the end
-    let debug_tmp = debug_path.as_deref().map(|path| {
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        PathBuf::from(tmp)
-    });
-    let mut debug_out = debug_tmp.as_deref().map(create_read_contributions).transpose()?;
+    // Rows go to a new temporary file next to the table, published after the
+    // pack: a failed run leaves no table. A fixed `<path>.tmp` could be the
+    // input GAF itself, truncated before it was read.
+    let inputs = [config.gaf_path, config.gfa_path];
+    let mut debug_out = debug_path
+        .as_deref()
+        .map(|path| create_read_contributions(path, &inputs))
+        .transpose()?;
     let projection = project_gaf_records(
         config.gaf_path,
         &segment_by_name,
         debug_out.as_mut().map(|out| out as &mut dyn Write),
     )?;
-    if let (Some(out), Some(tmp), Some(path)) = (debug_out, &debug_tmp, &debug_path) {
-        out.into_inner().map_err(io::IntoInnerError::into_error)?;
-        fs::rename(tmp, path)?;
-    }
+    let debug_tmp = debug_out
+        .map(|out| out.into_inner().map_err(io::IntoInnerError::into_error))
+        .transpose()?;
     let feature_id_mode = graph.effective_feature_id_mode.as_str().to_string();
     let contribution_model = config.contribution_model.as_str().to_string();
 
@@ -528,6 +547,7 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
                 read_space: "gaf-graph-walk".to_string(),
             };
             write_manifest(&config.output_path.join("manifest.json"), &manifest)?;
+            publish_read_contributions(debug_tmp, debug_path.as_deref())?;
             Ok(GfaProjectionSummary {
                 output_path: config.output_path.to_path_buf(),
                 pack_path,
@@ -550,6 +570,7 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
                 &feature_id_mode,
                 config.contribution_model,
             )?;
+            publish_read_contributions(debug_tmp, debug_path.as_deref())?;
             Ok(GfaProjectionSummary {
                 output_path: config.output_path.to_path_buf(),
                 pack_path: config.output_path.to_path_buf(),
