@@ -1246,7 +1246,7 @@ impl Impg {
 
                 // Read the CIGAR bytes into a per-thread scratch buffer reused across
                 // projections, avoiding a malloc/free of up to tens of KB per call.
-                let ops: Vec<CigarOp> = PAF_CIGAR_BUF.with(|buf_cell| {
+                PAF_CIGAR_BUF.with(|buf_cell| {
                     let mut data_buffer = buf_cell.borrow_mut();
                     data_buffer.resize(metadata.data_bytes, 0);
                     read_paf_cigar_data(alignment_file, metadata.data_offset(), &mut data_buffer)
@@ -1261,9 +1261,7 @@ impl Impg {
                             cigar_str, e
                         )
                     })
-                });
-                self.check_cigar_spans(&ops, metadata, target_id, alignment_file);
-                ops
+                })
             }
             FileType::OneAln | FileType::Tpa => {
                 // For 1aln/TPA files, convert tracepoints to CIGAR
@@ -1285,37 +1283,6 @@ impl Impg {
             invert_cigar_ops_in_place(&mut ops, metadata.strand());
         }
         ops
-    }
-
-    /// Refuse a PAF CIGAR that does not cover its record: 8= on a 10 bp record
-    /// lost the projection of the last 2 bp. The parser only validates the
-    /// syntax: summing spans there cost 2 ns per CIGAR byte, here it is one
-    /// pass over the operations a query parses anyway.
-    fn check_cigar_spans(&self, ops: &[CigarOp], metadata: &QueryMetadata, target_id: u32, file: &str) {
-        let (q_span, t_span) = ops.iter().fold((0i64, 0i64), |(q, t), op| {
-            let len = i64::from(op.len());
-            match op.op() {
-                'I' => (q + len, t),
-                'D' => (q, t + len),
-                _ => (q + len, t + len),
-            }
-        });
-        // A reversed entry swapped the query and the target of its record
-        let (query, target, (qs, qe), (ts, te)) = if metadata.is_reversed() {
-            (target_id, metadata.query_id, (metadata.target_start, metadata.target_end), (metadata.query_start, metadata.query_end))
-        } else {
-            (metadata.query_id, target_id, (metadata.query_start, metadata.query_end), (metadata.target_start, metadata.target_end))
-        };
-        if q_span != i64::from(qe - qs) || t_span != i64::from(te - ts) {
-            let name = |id: u32| self.seq_index.get_name(id).map_or_else(|| format!("sequence id {id}"), str::to_string);
-            panic!(
-                "{file}: record {}:{qs}-{qe} -> {}:{ts}-{te}: the CIGAR spans {q_span} query and {t_span} target bases, the coordinates {} and {}",
-                name(query),
-                name(target),
-                qe - qs,
-                te - ts
-            );
-        }
     }
 
     fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
