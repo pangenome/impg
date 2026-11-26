@@ -859,7 +859,8 @@ pub fn write_intervals_fasta(
 }
 
 /// Uppercase complement of each byte: the IUPAC codes complement to their
-/// pair (R = A/G to Y = C/T), S, W and N to themselves; any other byte stays.
+/// pair (R = A/G to Y = C/T), S, W and N to themselves, U (RNA) to A; any
+/// other byte stays. The one complement of the crate.
 const COMPLEMENT: [u8; 256] = {
     let mut table = [0u8; 256];
     let mut i = 0;
@@ -877,6 +878,8 @@ const COMPLEMENT: [u8; 256] = {
         table[b.to_ascii_lowercase() as usize] = a;
         p += 2;
     }
+    table[b'U' as usize] = b'A';
+    table[b'u' as usize] = b'A';
     table
 };
 
@@ -1221,6 +1224,7 @@ mod tests {
         assert_eq!(reverse_complement(b"ACGTRYSWKM"), b"KMWSRYACGT".to_vec());
         assert_eq!(reverse_complement(b"BDHVN"), b"NBDHV".to_vec());
         assert_eq!(reverse_complement(b"acgtry-"), b"-RYACGT".to_vec());
+        assert_eq!(reverse_complement(b"Uu"), b"AA".to_vec());
     }
 
     use super::*;
