@@ -471,14 +471,22 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
         }
         GfaProjectionOutputFormat::PackTsv => config.read_contributions_path.map(Path::to_path_buf),
     };
-    let mut debug_out = debug_path.as_deref().map(create_read_contributions).transpose()?;
+    // Rows go to `<path>.tmp`, renamed at the end: a failed run leaves no
+    // file under the final name, as when the rows were written at the end
+    let debug_tmp = debug_path.as_deref().map(|path| {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        PathBuf::from(tmp)
+    });
+    let mut debug_out = debug_tmp.as_deref().map(create_read_contributions).transpose()?;
     let projection = project_gaf_records(
         config.gaf_path,
         &segment_by_name,
         debug_out.as_mut().map(|out| out as &mut dyn Write),
     )?;
-    if let Some(mut out) = debug_out {
-        out.flush()?;
+    if let (Some(mut out), Some(tmp), Some(path)) = (debug_out, &debug_tmp, &debug_path) {
+        out.into_inner().map_err(io::IntoInnerError::into_error)?;
+        fs::rename(tmp, path)?;
     }
     let feature_id_mode = graph.effective_feature_id_mode.as_str().to_string();
     let contribution_model = config.contribution_model.as_str().to_string();

@@ -192,3 +192,32 @@ read_h2\t3\t0\t3\t+\t>1>3>4\t3\t0\t3\t3\t3\t60
         "{stdout}"
     );
 }
+
+/// The rows are written as they are made: a failed run must not leave a
+/// truncated table under the final name.
+#[test]
+fn gfa_gaf_projection_failure_leaves_no_read_contributions_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("locus.gfa");
+    let gaf = dir.path().join("reads.gaf");
+    let debug = dir.path().join("contributions.tsv");
+    std::fs::write(&graph, tiny_graph()).unwrap();
+    std::fs::write(
+        &gaf,
+        "read_ok\t3\t0\t3\t+\t>1>2>4\t3\t0\t3\t3\t3\t60\nread_bad\t3\t0\t3\t+\t>1>9>4\t3\t0\t3\t3\t3\t60\n",
+    )
+    .unwrap();
+    let err = project_gaf_to_gfa(&GfaProjectionConfig {
+        gfa_path: &graph,
+        gaf_path: &gaf,
+        output_path: &dir.path().join("pack.tsv"),
+        output_format: GfaProjectionOutputFormat::PackTsv,
+        feature_id_mode: GraphFeatureIdMode::SegmentName,
+        contribution_model: GraphContributionModel::Raw,
+        read_contributions_path: Some(&debug),
+    })
+    .err()
+    .unwrap();
+    assert!(err.to_string().contains("unknown GFA segment '9'"), "{err}");
+    assert!(!debug.exists(), "a failed run left {}", debug.display());
+}
