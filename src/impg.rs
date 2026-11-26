@@ -2579,13 +2579,13 @@ impl Impg {
             min_gap_compressed_identity,
             sequence_index,
             approximate_mode,
-            |result, _| results.push(result),
+            |result, _| results.extend(result),
         );
         results
     }
 
-    /// The projections of `query`, without the self interval, each passed to
-    /// `emit` with the tree entry it came from.
+    /// Every tree entry overlapping the range, with its projection (None when
+    /// the range projects to nothing through it), without the self interval.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn query_each(
         &self,
@@ -2596,7 +2596,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
-        mut emit: impl FnMut(AdjustedInterval, &QueryMetadata),
+        mut emit: impl FnMut(Option<AdjustedInterval>, &QueryMetadata),
     ) {
         debug!(
             "Querying region{}: {}:{}-{}, len: {}",
@@ -2636,10 +2636,11 @@ impl Impg {
                     )
                 };
 
-                if let Some((query_interval, cigar_ops, target_interval)) = projection {
+                let result = projection.map(|(query_interval, cigar_ops, target_interval)| {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
-                    emit((query_interval, cigar_vec, target_interval), metadata);
-                }
+                    (query_interval, cigar_vec, target_interval)
+                });
+                emit(result, metadata);
             });
         }
     }

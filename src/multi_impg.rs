@@ -508,9 +508,10 @@ impl MultiImpg {
             }
         };
 
-        // Query all relevant sub-indices in parallel, keeping the edge key (in
-        // unified ids), the sub-index and the entry behind each result
-        let tagged: Vec<(AdjustedInterval, EdgeKey, usize, QueryMetadata, u32)> = locations
+        // Query all relevant sub-indices in parallel: every overlapping entry,
+        // with its projection (None when it projects to nothing), its edge key
+        // in unified ids and its sub-index
+        let tagged: Vec<(Option<AdjustedInterval>, EdgeKey, usize, QueryMetadata, u32)> = locations
             .par_iter()
             .map(|loc| {
                 let mut tagged = Vec::new();
@@ -524,11 +525,10 @@ impl MultiImpg {
                     sequence_index,
                     approximate_mode,
                     |result, metadata| {
-                        if let Some(result) = self.translate_to_unified(result, loc.index_idx) {
-                            let mut key = edge_key(metadata);
-                            key.0 = l2u[key.0 as usize];
-                            tagged.push((result, key, loc.index_idx, metadata.clone(), loc.local_target_id));
-                        }
+                        let result = result.and_then(|r| self.translate_to_unified(r, loc.index_idx));
+                        let mut key = edge_key(metadata);
+                        key.0 = l2u[key.0 as usize];
+                        tagged.push((result, key, loc.index_idx, metadata.clone(), loc.local_target_id));
                     },
                 );
                 tagged
@@ -538,8 +538,9 @@ impl MultiImpg {
 
         // An edge reached from two sub-indices (a reciprocal pair split across
         // two files, or one record in two files): keep the entry with the
-        // lowest rank, as one index does. The first file used to win, so the
-        // file order chose the CIGAR.
+        // lowest rank, as one index does when it builds its trees. The rank
+        // covers the entries that project to nothing too: choosing among the
+        // projections only found a homolog that one index does not.
         let mut by_edge: FxHashMap<EdgeKey, Vec<usize>> = FxHashMap::default();
         for (i, (_, key, _, _, _)) in tagged.iter().enumerate() {
             by_edge.entry(*key).or_default().push(i);
@@ -570,8 +571,7 @@ impl MultiImpg {
             tagged
                 .into_iter()
                 .zip(keep)
-                .filter(|(_, keep)| *keep)
-                .map(|((result, _, _, _, _), _)| result),
+                .filter_map(|((result, _, _, _, _), keep)| result.filter(|_| keep)),
         );
 
         // Sort results for deterministic ordering (excluding the self-interval which should stay first)

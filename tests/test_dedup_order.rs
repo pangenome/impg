@@ -84,3 +84,14 @@ fn same_direction_records_keep_the_one_with_fewer_edits() {
     let rows = same_in_every_order([one, two], &["t:0-200"]);
     assert!(rows[0].contains("cg:Z:200=") && rows[0].lines().count() == 1, "{}", rows[0]);
 }
+
+#[test]
+fn per_file_mode_ranks_entries_that_project_to_nothing_too() {
+    // 4=1I1=1D4= wins (2 edits against 10) and t:5 is its deleted base: no
+    // homolog. Per-file mode used to rank only the entries with a projection,
+    // so it kept 10X and found one.
+    let indel = "q\t100\t0\t10\t+\tt\t100\t0\t10\t8\t10\t60\tcg:Z:4=1I1=1D4=";
+    let mismatch = "q\t100\t0\t10\t+\tt\t100\t0\t10\t0\t10\t60\tcg:Z:10X";
+    let rows = same_in_every_order([indel, mismatch], &["t:5-6"]);
+    assert!(!rows[0].lines().any(|l| l.starts_with("q\t")), "t:5-6 has no homolog: {}", rows[0]);
+}
