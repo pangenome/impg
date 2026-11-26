@@ -11336,6 +11336,10 @@ fn load_or_build_per_file_index(
         }
     }
 
+    index_paths
+        .par_iter()
+        .try_for_each(|path| check_index_direction(&path.to_string_lossy(), bidirectional))?;
+
     // Load MultiImpg from all per-file indices
     let multi = if let Some(list_path) = alignment_list {
         // Use cache when alignment list file is available
@@ -11453,6 +11457,7 @@ fn load_or_build_single_index(
 
     // Load existing index
     info!("Reading IMPG index from {index_file}");
+    check_index_direction(&index_file, bidirectional)?;
 
     // Check if all alignment files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
@@ -11477,6 +11482,25 @@ fn load_or_build_single_index(
     let reader = BufReader::new(file);
 
     Impg::load_from_file(reader, alignment_files, index_file, sequence_files)
+}
+
+/// Refuse an index built in the other direction than the one this run asks for:
+/// an existing bidirectional index answered `--unidirectional` with reverse edges.
+fn check_index_direction(index_file: &str, bidirectional: bool) -> io::Result<()> {
+    let built = impg::impg::index_built_bidirectional(index_file)?;
+    if built == bidirectional {
+        return Ok(());
+    }
+    let name = |b: bool| if b { "bidirectional" } else { "unidirectional" };
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "The index '{index_file}' is {}, but this run asks for a {} index. \
+             Rebuild it with --force-reindex, or run with the direction it was built in.",
+            name(built),
+            name(bidirectional)
+        ),
+    ))
 }
 
 fn build_single_index(
@@ -11611,10 +11635,22 @@ fn build_single_index(
 
     // Build a temporary union of all sequence names and lengths from local indices
     let mut tmp_union_index = SequenceIndex::new();
-    for (_, _, local_idx) in &records_by_file_with_local_index {
+    for (_, aln_file, local_idx) in &records_by_file_with_local_index {
         for (name, id) in &local_idx.name_to_id {
-            let length = local_idx.get_len_from_id(*id).unwrap_or(0);
-            tmp_union_index.get_or_insert_id(name, Some(length));
+            let length = local_idx.get_len_from_id(*id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{aln_file}: sequence '{name}' has no length"),
+                )
+            })?;
+            tmp_union_index
+                .get_or_insert_id_checked(name, length)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{aln_file} and an earlier alignment file disagree: {e}"),
+                    )
+                })?;
         }
     }
 
@@ -12963,10 +12999,17 @@ fn merge_consecutive_cigar_ops(cigar: &mut Vec<CigarOp>) {
 
     let mut write_idx = 0;
     for read_idx in 1..cigar.len() {
-        if cigar[write_idx].op() == cigar[read_idx].op() {
-            // Same operation type - merge by adding lengths
-            let combined_len = cigar[write_idx].len() + cigar[read_idx].len();
-            cigar[write_idx] = CigarOp::new(combined_len, cigar[write_idx].op());
+        let op = cigar[read_idx].op();
+        let room = CigarOp::MAX_LEN - cigar[write_idx].len();
+        if cigar[write_idx].op() == op && room > 0 {
+            // Same operation type: add lengths up to the packed maximum, and
+            // start a new operation with the rest
+            let len = cigar[read_idx].len();
+            cigar[write_idx] = CigarOp::new(cigar[write_idx].len() + len.min(room), op);
+            if len > room {
+                write_idx += 1;
+                cigar[write_idx] = CigarOp::new(len - room, op);
+            }
         } else {
             // Different operation types - keep separate
             write_idx += 1;
@@ -13277,6 +13320,27 @@ fn print_stats(impg: &impl ImpgIndex) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_merge_consecutive_cigar_ops_splits_at_the_packed_maximum() {
+        // Two contiguous 300,000,000= blocks overflowed the 29 length bits into 63,129,088X
+        let mut cigar = vec![
+            CigarOp::new(300_000_000, '='),
+            CigarOp::new(300_000_000, '='),
+            CigarOp::new(5, 'X'),
+            CigarOp::new(7, 'X'),
+        ];
+        merge_consecutive_cigar_ops(&mut cigar);
+        let got: Vec<(i32, char)> = cigar.iter().map(|op| (op.len(), op.op())).collect();
+        let rest = 600_000_000 - CigarOp::MAX_LEN;
+        assert_eq!(got, vec![(CigarOp::MAX_LEN, '='), (rest, '='), (12, 'X')]);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside")]
+    fn test_cigar_op_refuses_a_length_beyond_the_packed_bits() {
+        CigarOp::new(CigarOp::MAX_LEN + 1, '=');
+    }
 
     #[test]
     fn test_parse_subsequence_coordinates() {

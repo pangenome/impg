@@ -6315,6 +6315,27 @@ pub fn path_sequences(gfa: &str) -> io::Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// Bench helper for `benches/crush.rs`: parse a blunt GFA, return the segment
+/// and path counts.
+#[doc(hidden)]
+pub fn bench_parse_gfa(gfa: &str) -> io::Result<(usize, usize)> {
+    let graph = parse_gfa(gfa)?;
+    Ok((graph.segments.len(), graph.paths.len()))
+}
+
+/// Bench helper: parse a blunt GFA and render it again, with no resolution.
+#[doc(hidden)]
+pub fn bench_parse_render_gfa(gfa: &str) -> io::Result<String> {
+    Ok(render_graph(&parse_gfa(gfa)?))
+}
+
+/// Bench helper: the path-sequence check crush runs after each round, on two
+/// parses of the same GFA.
+#[doc(hidden)]
+pub fn bench_validate_self(gfa: &str) -> io::Result<bool> {
+    path_sequences_equal(&parse_gfa(gfa)?, &parse_gfa(gfa)?)
+}
+
 fn parse_gfa(gfa: &str) -> io::Result<Graph> {
     let mut segments = Vec::new();
     let mut id_to_idx: FxHashMap<String, usize> = FxHashMap::default();

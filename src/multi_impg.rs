@@ -166,19 +166,26 @@ impl MultiImpg {
         let mut unified_seq_index = SequenceIndex::new();
         let mut local_to_unified: Vec<Vec<u32>> = Vec::with_capacity(num_indices);
 
-        for header in &headers {
+        for (header, path) in headers.iter().zip(index_paths) {
             // Pre-allocate Vec with capacity for all local IDs
             let mut l2u = Vec::with_capacity(header.seq_index.len());
 
             for local_id in 0..header.seq_index.len() as u32 {
-                if let Some(name) = header.seq_index.get_name(local_id) {
-                    let len = header.seq_index.get_len_from_id(local_id);
-                    let unified_id = unified_seq_index.get_or_insert_id(name, len);
-                    l2u.push(unified_id);
-                } else {
-                    // Should not happen for valid indices, but handle gracefully
-                    l2u.push(u32::MAX);
-                }
+                let invalid = |msg: String| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path:?}: {msg}"))
+                };
+                let name = header
+                    .seq_index
+                    .get_name(local_id)
+                    .ok_or_else(|| invalid(format!("no name for sequence id {local_id}")))?;
+                let len = header
+                    .seq_index
+                    .get_len_from_id(local_id)
+                    .ok_or_else(|| invalid(format!("sequence '{name}' has no length")))?;
+                let unified_id = unified_seq_index
+                    .get_or_insert_id_checked(name, len)
+                    .map_err(|e| invalid(format!("disagrees with an earlier index: {e}")))?;
+                l2u.push(unified_id);
             }
 
             local_to_unified.push(l2u);

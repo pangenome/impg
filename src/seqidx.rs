@@ -34,6 +34,18 @@ impl SequenceIndex {
         id
     }
 
+    /// `get_or_insert_id` with a known length: a name seen before with another
+    /// length is an error, not a silent keep-the-first.
+    pub fn get_or_insert_id_checked(&mut self, name: &str, length: usize) -> Result<u32, String> {
+        let id = self.get_or_insert_id(name, Some(length));
+        match self.id_to_len.get(&id) {
+            Some(&known) if known != length => Err(format!(
+                "sequence '{name}' has length {known} in one record and {length} in another"
+            )),
+            _ => Ok(id),
+        }
+    }
+
     pub fn get_id(&self, name: &str) -> Option<u32> {
         self.name_to_id.get(name).copied()
     }

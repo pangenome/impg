@@ -104,7 +104,16 @@ pub struct CigarOp {
 }
 
 impl CigarOp {
+    /// Longest operation the 29 packed length bits hold.
+    pub const MAX_LEN: i32 = (1 << 29) - 1;
+
     pub fn new(len: i32, op: char) -> Self {
+        // A longer length spills into the operation bits: 600,000,000= became 63,129,088X
+        assert!(
+            (0..=Self::MAX_LEN).contains(&len),
+            "CIGAR operation length {len} is outside 0..={}",
+            Self::MAX_LEN
+        );
         let val = match op {
             '=' => 0,
             'X' => 1,
@@ -161,7 +170,7 @@ impl CigarOp {
     }
 
     fn adjust_len(&mut self, length_delta: i32) {
-        self.val = (self.val & (7 << 29)) | ((self.len() + length_delta) as u32);
+        *self = Self::new(self.len() + length_delta, self.op());
     }
 }
 
@@ -970,6 +979,44 @@ pub(crate) struct LoadedIndexHeader {
     pub(crate) built_bidirectional: bool,
 }
 
+const MAGIC_V1: &[u8] = b"IMPGIDX1";
+const MAGIC_V2: &[u8] = b"IMPGIDX2";
+const MAGIC_V4: &[u8] = b"IMPGIDX4";
+
+/// Read the direction an `.impg` index was built in, from its magic and header
+/// only, without the sequence index and the forest map.
+pub fn index_built_bidirectional(index_file_path: &str) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut reader = BufReader::new(File::open(index_file_path)?);
+    let mut magic_buf = [0u8; 8];
+    reader.read_exact(&mut magic_buf)?;
+    if magic_buf == MAGIC_V1 {
+        Ok(false)
+    } else if magic_buf == MAGIC_V2 {
+        Ok(true)
+    } else if magic_buf == MAGIC_V4 {
+        reader.seek(SeekFrom::Current(8))?; // forest map offset
+        let header: IndexHeaderInfo =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to load index header from '{index_file_path}': {e}"),
+                    )
+                })?;
+        Ok(header.bidirectional)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Invalid magic bytes - not a valid IMPG index file '{}' (got {:?})",
+                index_file_path,
+                String::from_utf8_lossy(&magic_buf)
+            ),
+        ))
+    }
+}
+
 /// Read magic bytes, optional V4 header (validating the alignment file list),
 /// sequence index, and forest map from an `.impg` index stream.
 pub(crate) fn read_index_header<R: std::io::Read + std::io::Seek>(
@@ -978,10 +1025,6 @@ pub(crate) fn read_index_header<R: std::io::Read + std::io::Seek>(
     index_file_path: &str,
     warn_on_legacy: bool,
 ) -> std::io::Result<LoadedIndexHeader> {
-    const MAGIC_V1: &[u8] = b"IMPGIDX1";
-    const MAGIC_V2: &[u8] = b"IMPGIDX2";
-    const MAGIC_V4: &[u8] = b"IMPGIDX4";
-
     let mut magic_buf = [0u8; 8];
     reader.read_exact(&mut magic_buf)?;
     if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
@@ -2293,7 +2336,7 @@ impl Impg {
         &self,
         mut writer: W,
     ) -> std::io::Result<()> {
-        const MAGIC: &[u8] = b"IMPGIDX4";
+        const MAGIC: &[u8] = MAGIC_V4;
         let mut forest_map = ForestMap::new();
 
         // Write magic bytes
@@ -3436,7 +3479,7 @@ fn read_paf_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     // CIGAR is pure ASCII; iterate bytes to skip UTF-8 decoding of every char.
-    const MAX_CIGAR_OP_LEN: i32 = (1 << 29) - 1;
+    const MAX_CIGAR_OP_LEN: i32 = CigarOp::MAX_LEN;
     let mut ops = Vec::new();
     let mut len: i32 = 0;
     let mut has_len = false;

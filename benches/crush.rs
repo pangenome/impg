@@ -18,40 +18,23 @@ use std::time::Duration;
 
 const DEFAULT_BENCH_GFA: &str = "data/c4_crush_eval_20260523T140141Z/C4A.blunt.gfa";
 
-fn bench_gfa_path() -> PathBuf {
-    if let Ok(env) = std::env::var("CRUSH_BENCH_GFA") {
-        return PathBuf::from(env);
-    }
-    // Fall back to absolute path if relative is not present (the workspace's
-    // data/ dir lives in the parent worktree and is .gitignore'd).
-    let rel = PathBuf::from(DEFAULT_BENCH_GFA);
-    if rel.exists() {
-        return rel;
-    }
-    let abs = PathBuf::from("/home/erikg/impg").join(DEFAULT_BENCH_GFA);
-    abs
-}
-
-fn load_input() -> Option<(PathBuf, String)> {
-    let path = bench_gfa_path();
-    match fs::read_to_string(&path) {
-        Ok(text) => Some((path, text)),
-        Err(err) => {
-            eprintln!(
-                "crush bench: skipping (input GFA not found at {}: {}). \
-                 Set CRUSH_BENCH_GFA=/path/to/blunt.gfa to override.",
-                path.display(),
-                err
-            );
-            None
-        }
-    }
+fn load_input() -> (PathBuf, String) {
+    let path = PathBuf::from(
+        std::env::var("CRUSH_BENCH_GFA").unwrap_or_else(|_| DEFAULT_BENCH_GFA.to_string()),
+    );
+    // A missing input used to skip every bench and still exit 0
+    let text = fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "crush bench: cannot read the input GFA {}: {err}. \
+             Set CRUSH_BENCH_GFA=/path/to/blunt.gfa.",
+            path.display()
+        )
+    });
+    (path, text)
 }
 
 fn bench_crush(c: &mut Criterion) {
-    let Some((path, gfa_text)) = load_input() else {
-        return;
-    };
+    let (path, gfa_text) = load_input();
     let bytes = gfa_text.len() as u64;
     eprintln!(
         "crush bench input: {} ({:.1} MiB)",
@@ -88,10 +71,10 @@ fn bench_crush(c: &mut Criterion) {
     );
 
     group.bench_function(
-        BenchmarkId::new("validate_streaming_self", "C4A.blunt"),
+        BenchmarkId::new("validate_self", "C4A.blunt"),
         |b| {
             b.iter(|| {
-                impg::resolution::bench_validate_streaming_self(&gfa_text)
+                impg::resolution::bench_validate_self(&gfa_text)
                     .expect("validate must succeed in bench")
             })
         },
