@@ -110,23 +110,9 @@ struct GafWalkStep {
     orientation: char,
 }
 
-#[derive(Debug, Clone)]
-struct ReadContribution {
-    read_name: String,
-    read_ordinal: u64,
-    step_index: usize,
-    segment_name: String,
-    orientation: char,
-    feature_id: u32,
-    segment_visit_in_read: u64,
-    count_delta: u64,
-    explanation: String,
-}
-
 #[derive(Debug, Default)]
 struct ProjectionCounts {
     counts: FxHashMap<u32, u64>,
-    contributions: Vec<ReadContribution>,
     total_records: u64,
     retained_records: u64,
     contributed_steps: u64,
@@ -211,9 +197,13 @@ fn parse_gaf_walk(path_field: &str, line_no: usize) -> io::Result<Vec<GafWalkSte
     ))
 }
 
+/// Count the GFA segments each GAF record walks. The per-step contribution rows
+/// go to `contributions` when asked for: they used to be kept in memory for
+/// every step even when no file was written (226 MiB for 1,000,000 records).
 fn project_gaf_records(
     gaf_path: &Path,
     segment_by_name: &FxHashMap<String, SegmentInfo>,
+    mut contributions: Option<&mut dyn Write>,
 ) -> io::Result<ProjectionCounts> {
     let file = File::open(gaf_path).map_err(|e| {
         io::Error::new(
@@ -316,25 +306,22 @@ fn project_gaf_records(
             *projection.counts.entry(segment.feature_id).or_insert(0) += 1;
             let visit = segment_visits.entry(segment.feature_id).or_insert(0);
             *visit += 1;
-            let explanation = if *visit == 1 {
-                "first visit to segment in read; counted".to_string()
-            } else {
-                format!(
-                    "repeated visit {} to segment in read; counted again",
+            if let Some(out) = contributions.as_mut() {
+                write!(
+                    out,
+                    "{read_name}\t{read_ordinal}\t{}\t{}\t{}\t{}\t{}\t1\t",
+                    step_offset + 1,
+                    step.segment_name,
+                    step.orientation,
+                    segment.feature_id,
                     *visit
-                )
-            };
-            projection.contributions.push(ReadContribution {
-                read_name: read_name.to_string(),
-                read_ordinal,
-                step_index: step_offset + 1,
-                segment_name: step.segment_name.clone(),
-                orientation: step.orientation,
-                feature_id: segment.feature_id,
-                segment_visit_in_read: *visit,
-                count_delta: 1,
-                explanation,
-            });
+                )?;
+                if *visit == 1 {
+                    writeln!(out, "first visit to segment in read; counted")?;
+                } else {
+                    writeln!(out, "repeated visit {} to segment in read; counted again", *visit)?;
+                }
+            }
         }
 
         if path_end > cursor {
@@ -388,29 +375,35 @@ fn write_typed_pack_tsv(
     Ok(sorted.len())
 }
 
-fn write_read_contributions(path: &Path, rows: &[ReadContribution]) -> io::Result<()> {
+/// Open a temporary file next to the read-contributions table `path` and write
+/// the header. A table that would replace an existing file of the run's inputs
+/// is an error.
+fn create_read_contributions(path: &Path, inputs: &[&Path]) -> io::Result<BufWriter<tempfile::NamedTempFile>> {
+    if let Ok(table) = fs::canonicalize(path) {
+        if inputs.iter().any(|input| fs::canonicalize(input).is_ok_and(|i| i == table)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the read-contributions table {} is an input of this run", path.display()),
+            ));
+        }
+    }
     create_parent_dir(path)?;
-    let mut out = BufWriter::new(File::create(path)?);
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let tmp = tempfile::Builder::new().prefix(".read-contributions.").suffix(".tmp").tempfile_in(dir)?;
+    let mut out = BufWriter::new(tmp);
     writeln!(
         out,
         "read_name\tread_ordinal\tstep_index\tsegment_name\torientation\tfeature_id\tsegment_visit_in_read\tcount_delta\texplanation"
     )?;
-    for row in rows {
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            row.read_name,
-            row.read_ordinal,
-            row.step_index,
-            row.segment_name,
-            row.orientation,
-            row.feature_id,
-            row.segment_visit_in_read,
-            row.count_delta,
-            row.explanation
-        )?;
+    Ok(out)
+}
+
+/// Move the finished temporary table to its name.
+fn publish_read_contributions(tmp: Option<tempfile::NamedTempFile>, path: Option<&Path>) -> io::Result<()> {
+    match (tmp, path) {
+        (Some(tmp), Some(path)) => tmp.persist(path).map(drop).map_err(|e| e.error),
+        _ => Ok(()),
     }
-    out.flush()
 }
 
 fn write_manifest(path: &Path, manifest: &GfaProjectionManifest) -> io::Result<()> {
@@ -491,15 +484,35 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
         );
     }
 
-    let projection = project_gaf_records(config.gaf_path, &segment_by_name)?;
+    let debug_path = match config.output_format {
+        GfaProjectionOutputFormat::ProjectionBundle => {
+            fs::create_dir_all(config.output_path)?;
+            Some(config.output_path.join(DEFAULT_READ_CONTRIBUTIONS_NAME))
+        }
+        GfaProjectionOutputFormat::PackTsv => config.read_contributions_path.map(Path::to_path_buf),
+    };
+    // Rows go to a new temporary file next to the table, published after the
+    // pack: a failed run leaves no table. A fixed `<path>.tmp` could be the
+    // input GAF itself, truncated before it was read.
+    let inputs = [config.gaf_path, config.gfa_path];
+    let mut debug_out = debug_path
+        .as_deref()
+        .map(|path| create_read_contributions(path, &inputs))
+        .transpose()?;
+    let projection = project_gaf_records(
+        config.gaf_path,
+        &segment_by_name,
+        debug_out.as_mut().map(|out| out as &mut dyn Write),
+    )?;
+    let debug_tmp = debug_out
+        .map(|out| out.into_inner().map_err(io::IntoInnerError::into_error))
+        .transpose()?;
     let feature_id_mode = graph.effective_feature_id_mode.as_str().to_string();
     let contribution_model = config.contribution_model.as_str().to_string();
 
     match config.output_format {
         GfaProjectionOutputFormat::ProjectionBundle => {
-            fs::create_dir_all(config.output_path)?;
             let pack_path = config.output_path.join(DEFAULT_PACK_NAME);
-            let debug_path = config.output_path.join(DEFAULT_READ_CONTRIBUTIONS_NAME);
             let gaf_copy_path = config.output_path.join(DEFAULT_GAF_NAME);
             let nonzero_features = write_typed_pack_tsv(
                 &pack_path,
@@ -508,7 +521,6 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
                 &feature_id_mode,
                 config.contribution_model,
             )?;
-            write_read_contributions(&debug_path, &projection.contributions)?;
             fs::copy(config.gaf_path, &gaf_copy_path).map_err(|e| {
                 io::Error::new(
                     e.kind(),
@@ -535,10 +547,11 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
                 read_space: "gaf-graph-walk".to_string(),
             };
             write_manifest(&config.output_path.join("manifest.json"), &manifest)?;
+            publish_read_contributions(debug_tmp, debug_path.as_deref())?;
             Ok(GfaProjectionSummary {
                 output_path: config.output_path.to_path_buf(),
                 pack_path,
-                read_contributions_path: Some(debug_path),
+                read_contributions_path: debug_path,
                 feature_space: FeatureSpace::GfaSegment.as_str().to_string(),
                 graph_id: graph.graph_id,
                 feature_id_mode,
@@ -557,12 +570,7 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
                 &feature_id_mode,
                 config.contribution_model,
             )?;
-            let debug_path = if let Some(path) = config.read_contributions_path {
-                write_read_contributions(path, &projection.contributions)?;
-                Some(path.to_path_buf())
-            } else {
-                None
-            };
+            publish_read_contributions(debug_tmp, debug_path.as_deref())?;
             Ok(GfaProjectionSummary {
                 output_path: config.output_path.to_path_buf(),
                 pack_path: config.output_path.to_path_buf(),
