@@ -394,10 +394,10 @@ fn read_paf_blocks<R: Read>(
                     // Strip the terminator, but advance by the raw byte count: the
                     // CIGAR offsets are absolute file positions, also with CRLF
                     let trimmed = text.trim_end_matches(['\n', '\r']);
-                    // A blank line is no record (the BGZF reader without .gzi skipped it)
-                    if !trimmed.is_empty() {
-                        out.push(parse_paf_line(trimmed, pos, &mut local, &mut m)?);
+                    if trimmed.is_empty() {
+                        return Err(ParseErr::InvalidFormat(format!("the line at byte {pos} is blank")));
                     }
+                    out.push(parse_paf_line(trimmed, pos, &mut local, &mut m)?);
                     pos += line.len() as u64;
                 }
                 Ok((out, local, m))
@@ -634,6 +634,15 @@ mod tests {
         let (_dir, _, records) = parse_bgzf("seq1\t100\t0\t50\t+\tseq2\t100\t0\t50\t50\t50\t60\tcg:Z:50=\r\n");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].data_bytes, 3, "the CIGAR is `50=` without the `\\r`");
+        // A blank line is an error here too (the reader without .gzi skipped it)
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("blank.paf.gz").to_string_lossy().into_owned();
+        let mut writer = noodles::bgzf::io::Writer::new(File::create(&path).unwrap());
+        std::io::Write::write_all(&mut writer, b"seq1\t100\t0\t50\t+\tseq2\t100\t0\t50\t50\t50\t60\tcg:Z:50=\n\n").unwrap();
+        writer.finish().unwrap();
+        let one = NonZeroUsize::new(1).unwrap();
+        let err = parse_paf_file(&path, File::open(&path).unwrap(), one, &mut SequenceIndex::new()).unwrap_err();
+        assert!(err.to_string().contains("is blank"), "{err}");
     }
 
     #[test]
@@ -766,11 +775,12 @@ q\t100\t20\t30\t+\tt\t100\t20\t31\t10\t11\t60\tcg:Z:4M1D6=\n";
         let bad = format!("{paf}q0\t1000\t0\t10\t+\tt7\t2000\t0\t10\t8\t10\t60\tcg:Z:8=\nq0\t5\t0\t10\t+\tt7\t2000\t0\t10\t10\t10\t60\tcg:Z:10=\n");
         let err = read_paf_blocks(bad.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64, 4).unwrap_err();
         assert!(err.to_string().contains("the CIGAR spans 8 query"), "{err}");
-        // Blank lines are skipped and the offsets stay absolute
-        let blank = format!("\n\r\n{}\n\n", paf.lines().next().unwrap());
-        let records = read_paf_blocks(blank.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64, 4).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].data_offset(), blank.find("cg:Z:").unwrap() as u64 + 5);
+        // A blank line, LF or CRLF, is an error
+        for blank in ["\n", "\r\n"] {
+            let text = format!("{}\n{blank}", paf.lines().next().unwrap());
+            let err = read_paf_blocks(text.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64, 4).unwrap_err();
+            assert!(err.to_string().contains("is blank"), "{err}");
+        }
     }
 
     #[test]
