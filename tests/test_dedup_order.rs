@@ -71,9 +71,10 @@ fn equal_edits_keep_the_earliest_difference_in_both_directions() {
     let ab = "A\t8\t0\t8\t+\tB\t7\t0\t7\t7\t8\t60\tcg:Z:3=1I4=";
     let ba = "B\t7\t0\t7\t+\tA\t8\t0\t8\t7\t8\t60\tcg:Z:6=1D1=";
     let rows = same_in_every_order([ab, ba], &["B:3-4", "A:4-5"]);
-    // 3=1I4= puts B:3 on A:4, and A:4 back on B:3
-    assert!(rows[0].starts_with("A\t8\t4\t5\t") && rows[0].lines().count() == 1, "B:3-4: {}", rows[0]);
-    assert!(rows[1].starts_with("B\t7\t3\t4\t") && rows[1].lines().count() == 1, "A:4-5: {}", rows[1]);
+    // 3=1I4= puts B:3 on A:4, with the inserted A:3 at its left edge (6=1I1=
+    // would give A:3-4, 1=), and A:4 back on B:3 (6=1D1= would give B:4-5)
+    assert!(rows[0].starts_with("A\t8\t3\t5\t") && rows[0].contains("cg:Z:1I1=") && rows[0].lines().count() == 1, "B:3-4: {}", rows[0]);
+    assert!(rows[1].starts_with("B\t7\t3\t4\t") && rows[1].contains("cg:Z:1=") && rows[1].lines().count() == 1, "A:4-5: {}", rows[1]);
 }
 
 #[test]

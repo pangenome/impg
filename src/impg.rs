@@ -4235,11 +4235,13 @@ mod tests {
         let paf = "A\t1000\t0\t500\t+\tB\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n\
                    B\t1000\t0\t500\t+\tA\t1000\t0\t500\t500\t500\t60\tcg:Z:500=\n"
             .to_string();
+        // The two entries of the edge are ranked by their CIGARs, read from the file
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("r.paf").to_string_lossy().into_owned();
+        std::fs::write(&path, &paf).unwrap();
         let mut seq_index = SequenceIndex::new();
         let records = parse_paf(BufReader::new(paf.as_bytes()), &mut seq_index).unwrap();
-        let impg =
-            Impg::from_multi_alignment_records(&[(records, "r.paf".to_string())], seq_index, None, true)
-                .unwrap();
+        let impg = Impg::from_multi_alignment_records(&[(records, path)], seq_index, None, true).unwrap();
 
         let mut total = 0usize;
         for id in impg.target_ids() {
