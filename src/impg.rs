@@ -1856,7 +1856,7 @@ impl Impg {
 
             // Check identity threshold if specified
             if let Some(threshold) = min_gap_compressed_identity {
-                if calculate_gap_compressed_identity(&cigar_ops) < threshold {
+                if !reaches_identity(&cigar_ops, threshold) {
                     return None;
                 }
             }
@@ -1937,7 +1937,7 @@ impl Impg {
         )) = projection
         {
             if let Some(threshold) = min_gap_compressed_identity {
-                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                if !reaches_identity(&adjusted_cigar, threshold) {
                     return None;
                 }
             }
@@ -2680,7 +2680,7 @@ impl Impg {
                 )) = result
                 {
                     if let Some(threshold) = min_gap_compressed_identity {
-                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                        if !reaches_identity(&adjusted_cigar, threshold) {
                             return;
                         }
                     }
@@ -3578,6 +3578,24 @@ pub fn cigar_counts(cigar_ops: &[CigarOp]) -> CigarCounts {
         previous = kind;
     }
     c
+}
+
+/// Whether a projected CIGAR reaches `--min-result-identity`. impg counts every
+/// `M` base as a match, so the filter can keep a record below the threshold:
+/// the first `M` warns, also on an index built earlier (the parser warns only
+/// while it indexes).
+fn reaches_identity(cigar_ops: &[CigarOp], threshold: f64) -> bool {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if cigar_ops.iter().any(|op| op.op() == 'M') {
+        WARNED.call_once(|| {
+            warn!(
+                "--min-result-identity on CIGARs with 'M' operations: impg counts every M base as a \
+                 match, so their identity is overestimated and records below the threshold can pass. \
+                 Use =/X CIGARs (wfmash, or minimap2 --eqx)."
+            )
+        });
+    }
+    calculate_gap_compressed_identity(cigar_ops) >= threshold
 }
 
 fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
