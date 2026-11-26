@@ -104,7 +104,16 @@ pub struct CigarOp {
 }
 
 impl CigarOp {
+    /// Longest operation the 29 packed length bits hold.
+    pub const MAX_LEN: i32 = (1 << 29) - 1;
+
     pub fn new(len: i32, op: char) -> Self {
+        // A longer length spills into the operation bits: 600,000,000= became 63,129,088X
+        assert!(
+            (0..=Self::MAX_LEN).contains(&len),
+            "CIGAR operation length {len} is outside 0..={}",
+            Self::MAX_LEN
+        );
         let val = match op {
             '=' => 0,
             'X' => 1,
@@ -161,7 +170,18 @@ impl CigarOp {
     }
 
     fn adjust_len(&mut self, length_delta: i32) {
-        self.val = (self.val & (7 << 29)) | ((self.len() + length_delta) as u32);
+        *self = Self::new(self.len() + length_delta, self.op());
+    }
+}
+
+/// Append `len` bases of `op`, split into operations the packed length holds:
+/// a 600 Mb self interval was one `=` past the 29 length bits.
+pub fn push_cigar_run(cigar: &mut Vec<CigarOp>, len: i64, op: char) {
+    let mut rest = len;
+    while rest > 0 {
+        let n = rest.min(i64::from(CigarOp::MAX_LEN));
+        cigar.push(CigarOp::new(n as i32, op));
+        rest -= n;
     }
 }
 
@@ -908,10 +928,12 @@ pub(crate) fn make_self_interval(
             last: range_end,
             metadata: target_id,
         },
-        if store_cigar {
-            vec![CigarOp::new(range_end - range_start, '=')]
-        } else {
-            Vec::new()
+        {
+            let mut cigar = Vec::new();
+            if store_cigar {
+                push_cigar_run(&mut cigar, i64::from(range_end - range_start), '=');
+            }
+            cigar
         },
         Interval {
             first: range_start,
@@ -978,6 +1000,44 @@ pub(crate) struct LoadedIndexHeader {
     pub(crate) built_bidirectional: bool,
 }
 
+const MAGIC_V1: &[u8] = b"IMPGIDX1";
+const MAGIC_V2: &[u8] = b"IMPGIDX2";
+const MAGIC_V4: &[u8] = b"IMPGIDX4";
+
+/// Read the direction an `.impg` index was built in, from its magic and header
+/// only, without the sequence index and the forest map.
+pub fn index_built_bidirectional(index_file_path: &str) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut reader = BufReader::new(File::open(index_file_path)?);
+    let mut magic_buf = [0u8; 8];
+    reader.read_exact(&mut magic_buf)?;
+    if magic_buf == MAGIC_V1 {
+        Ok(false)
+    } else if magic_buf == MAGIC_V2 {
+        Ok(true)
+    } else if magic_buf == MAGIC_V4 {
+        reader.seek(SeekFrom::Current(8))?; // forest map offset
+        let header: IndexHeaderInfo =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to load index header from '{index_file_path}': {e}"),
+                    )
+                })?;
+        Ok(header.bidirectional)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Invalid magic bytes - not a valid IMPG index file '{}' (got {:?})",
+                index_file_path,
+                String::from_utf8_lossy(&magic_buf)
+            ),
+        ))
+    }
+}
+
 /// Read magic bytes, optional V4 header (validating the alignment file list),
 /// sequence index, and forest map from an `.impg` index stream.
 pub(crate) fn read_index_header<R: std::io::Read + std::io::Seek>(
@@ -986,10 +1046,6 @@ pub(crate) fn read_index_header<R: std::io::Read + std::io::Seek>(
     index_file_path: &str,
     warn_on_legacy: bool,
 ) -> std::io::Result<LoadedIndexHeader> {
-    const MAGIC_V1: &[u8] = b"IMPGIDX1";
-    const MAGIC_V2: &[u8] = b"IMPGIDX2";
-    const MAGIC_V4: &[u8] = b"IMPGIDX4";
-
     let mut magic_buf = [0u8; 8];
     reader.read_exact(&mut magic_buf)?;
     if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 && magic_buf != MAGIC_V4 {
@@ -1868,7 +1924,7 @@ impl Impg {
 
             // Check identity threshold if specified
             if let Some(threshold) = min_gap_compressed_identity {
-                if calculate_gap_compressed_identity(&cigar_ops) < threshold {
+                if !reaches_identity(&cigar_ops, threshold) {
                     return None;
                 }
             }
@@ -1949,7 +2005,7 @@ impl Impg {
         )) = projection
         {
             if let Some(threshold) = min_gap_compressed_identity {
-                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                if !reaches_identity(&adjusted_cigar, threshold) {
                     return None;
                 }
             }
@@ -2166,12 +2222,8 @@ impl Impg {
 
         // Create approximate CIGAR from accumulated statistics (for identity calculation only)
         let mut approx_cigar = Vec::new();
-        if subset.total_matches > 0.0 {
-            approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
-        }
-        if subset.total_mismatches > 0.0 {
-            approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
-        }
+        push_cigar_run(&mut approx_cigar, subset.total_matches.round() as i64, '=');
+        push_cigar_run(&mut approx_cigar, subset.total_mismatches.round() as i64, 'X');
 
         // Check identity threshold if specified
         if let Some(threshold) = min_gap_compressed_identity {
@@ -2377,7 +2429,7 @@ impl Impg {
         &self,
         mut writer: W,
     ) -> std::io::Result<()> {
-        const MAGIC: &[u8] = b"IMPGIDX4";
+        const MAGIC: &[u8] = MAGIC_V4;
         let mut forest_map = ForestMap::new();
 
         // Write magic bytes
@@ -2737,7 +2789,7 @@ impl Impg {
                 )) = result
                 {
                     if let Some(threshold) = min_gap_compressed_identity {
-                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                        if !reaches_identity(&adjusted_cigar, threshold) {
                             return;
                         }
                     }
@@ -3545,7 +3597,7 @@ fn read_paf_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     // CIGAR is pure ASCII; iterate bytes to skip UTF-8 decoding of every char.
-    const MAX_CIGAR_OP_LEN: i32 = (1 << 29) - 1;
+    const MAX_CIGAR_OP_LEN: i32 = CigarOp::MAX_LEN;
     let mut ops = Vec::new();
     let mut len: i32 = 0;
     let mut has_len = false;
@@ -3602,26 +3654,66 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     Ok(ops)
 }
 
-fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
-    let (matches, mismatches, insertions, deletions) =
-        cigar_ops
-            .iter()
-            .fold((0i64, 0i64, 0i64, 0i64), |(m, mm, i, d), op| {
-                let len = op.len() as i64;
-                match op.op() {
-                    'M' | '=' => (m + len, mm, i, d), // Assume 'M' represents matches
-                    'X' => (m, mm + len, i, d),
-                    'I' => (m, mm, i + 1, d),
-                    'D' => (m, mm, i, d + 1),
-                    _ => (m, mm, i, d),
-                }
-            });
+/// Bases and gap events of a CIGAR for its identities.
+#[derive(Debug, Default, PartialEq)]
+pub struct CigarCounts {
+    /// `=` and `M` bases: impg counts every `M` base as a match
+    pub matches: i64,
+    pub mismatches: i64,
+    pub insertions: i64,
+    pub inserted_bp: i64,
+    pub deletions: i64,
+    pub deleted_bp: i64,
+    pub block_len: i64,
+}
 
-    let total = matches + mismatches + insertions + deletions;
+/// Count a CIGAR for its identities. Adjacent operations of one gap type are
+/// one event: a gap split at the 29-bit length limit counted twice, and 2= and
+/// a 600 Mb insertion gave gi 0.5 instead of 0.666667.
+pub fn cigar_counts(cigar_ops: &[CigarOp]) -> CigarCounts {
+    let mut c = CigarCounts::default();
+    let mut previous = ' ';
+    for op in cigar_ops {
+        let len = i64::from(op.len());
+        let kind = op.op();
+        match kind {
+            'M' | '=' => c.matches += len,
+            'X' => c.mismatches += len,
+            'I' => (c.insertions, c.inserted_bp) = (c.insertions + i64::from(previous != 'I'), c.inserted_bp + len),
+            'D' => (c.deletions, c.deleted_bp) = (c.deletions + i64::from(previous != 'D'), c.deleted_bp + len),
+            _ => {}
+        }
+        c.block_len += len;
+        previous = kind;
+    }
+    c
+}
+
+/// Whether a projected CIGAR reaches `--min-result-identity`. impg counts every
+/// `M` base as a match, so the filter can keep a record below the threshold:
+/// the first `M` warns, also on an index built earlier (the parser warns only
+/// while it indexes).
+fn reaches_identity(cigar_ops: &[CigarOp], threshold: f64) -> bool {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if cigar_ops.iter().any(|op| op.op() == 'M') {
+        WARNED.call_once(|| {
+            warn!(
+                "--min-result-identity on CIGARs with 'M' operations: impg counts every M base as a \
+                 match, so their identity is overestimated and records below the threshold can pass. \
+                 Use =/X CIGARs (wfmash, or minimap2 --eqx)."
+            )
+        });
+    }
+    calculate_gap_compressed_identity(cigar_ops) >= threshold
+}
+
+fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
+    let c = cigar_counts(cigar_ops);
+    let total = c.matches + c.mismatches + c.insertions + c.deletions;
     if total == 0 {
         0.0
     } else {
-        (matches as f64) / (total as f64)
+        (c.matches as f64) / (total as f64)
     }
 }
 

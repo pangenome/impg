@@ -46,7 +46,7 @@ fn write_fixture(dir: &Path) -> PathBuf {
     .unwrap();
     writeln!(
         file,
-        "top\t1000\t2000\t2500\t-\tbot\t1000\t100\t600\t500\t500\t60\tcg:Z:500="
+        "top\t3000\t2000\t2500\t-\tbot\t1000\t100\t600\t500\t500\t60\tcg:Z:500="
     )
     .unwrap();
     paf

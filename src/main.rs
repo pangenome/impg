@@ -8,7 +8,7 @@ use impg::commands::{
     ensure_parent_dir, genotype, graph, infer, lace, partition, read_text_from_path_or_stdin,
     refine, render, similarity, write_text_to_path_or_stdout,
 };
-use impg::impg::{AdjustedInterval, CigarOp, Impg};
+use impg::impg::{push_cigar_run, AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
 use impg::onealn::OneAlnParser;
@@ -11288,6 +11288,10 @@ fn load_or_build_per_file_index(
         };
 
         let completed = AtomicUsize::new(0);
+        // Indices build at once: each gets its share of the threads, so the
+        // PAF text held stays about 1 MiB per thread in total
+        let index_threads = NonZeroUsize::new(threads.get() / indices_to_build.len().clamp(1, threads.get()))
+            .expect("threads >= indices in parallel");
 
         // Build indices in parallel
         let build_results: Vec<io::Result<()>> = indices_to_build
@@ -11302,7 +11306,7 @@ fn load_or_build_per_file_index(
                 let single_file = vec![aln_file.clone()];
                 let impg = build_single_index(
                     &single_file,
-                    threads,
+                    index_threads,
                     Some(index_path.to_string_lossy().as_ref()),
                     sequence_files,
                     false,
@@ -11335,6 +11339,10 @@ fn load_or_build_per_file_index(
             result?;
         }
     }
+
+    index_paths
+        .par_iter()
+        .try_for_each(|path| check_index_direction(&path.to_string_lossy(), bidirectional))?;
 
     // Load MultiImpg from all per-file indices
     let multi = if let Some(list_path) = alignment_list {
@@ -11453,6 +11461,7 @@ fn load_or_build_single_index(
 
     // Load existing index
     info!("Reading IMPG index from {index_file}");
+    check_index_direction(&index_file, bidirectional)?;
 
     // Check if all alignment files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
@@ -11477,6 +11486,25 @@ fn load_or_build_single_index(
     let reader = BufReader::new(file);
 
     Impg::load_from_file(reader, alignment_files, index_file, sequence_files)
+}
+
+/// Refuse an index built in the other direction than the one this run asks for:
+/// an existing bidirectional index answered `--unidirectional` with reverse edges.
+fn check_index_direction(index_file: &str, bidirectional: bool) -> io::Result<()> {
+    let built = impg::impg::index_built_bidirectional(index_file)?;
+    if built == bidirectional {
+        return Ok(());
+    }
+    let name = |b: bool| if b { "bidirectional" } else { "unidirectional" };
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "The index '{index_file}' is {}, but this run asks for a {} index. \
+             Rebuild it with --force-reindex, or run with the direction it was built in.",
+            name(built),
+            name(bidirectional)
+        ),
+    ))
 }
 
 fn build_single_index(
@@ -11517,6 +11545,10 @@ fn build_single_index(
         None
     };
 
+    // Files parse at once: each gets its share of the threads (PAF parse
+    // blocks, BGZF workers), so the total stays about one per thread
+    let file_threads = NonZeroUsize::new(threads.get() / num_alignment_files.clamp(1, threads.get()))
+        .expect("threads >= files in parallel");
     // Process alignment files in parallel, using a per-file local SequenceIndex to avoid global locking
     // We will merge names after parsing and remap IDs in a parallel pass.
     let mut records_by_file_with_local_index: Vec<(Vec<AlignmentRecord>, String, SequenceIndex)> =
@@ -11550,7 +11582,7 @@ fn build_single_index(
                                     format!("Failed to open PAF file: {}", e),
                                 )
                             })?;
-                            impg::paf::parse_paf_file(aln_file, file, threads, &mut local_seq_index)
+                            impg::paf::parse_paf_file(aln_file, file, file_threads, &mut local_seq_index)
                                 .map_err(|e| {
                                     io::Error::new(
                                         io::ErrorKind::InvalidData,
@@ -11611,10 +11643,22 @@ fn build_single_index(
 
     // Build a temporary union of all sequence names and lengths from local indices
     let mut tmp_union_index = SequenceIndex::new();
-    for (_, _, local_idx) in &records_by_file_with_local_index {
+    for (_, aln_file, local_idx) in &records_by_file_with_local_index {
         for (name, id) in &local_idx.name_to_id {
-            let length = local_idx.get_len_from_id(*id).unwrap_or(0);
-            tmp_union_index.get_or_insert_id(name, Some(length));
+            let length = local_idx.get_len_from_id(*id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{aln_file}: sequence '{name}' has no length"),
+                )
+            })?;
+            tmp_union_index
+                .get_or_insert_id_checked(name, length)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{aln_file} and an earlier alignment file disagree: {e}"),
+                    )
+                })?;
         }
     }
 
@@ -12043,21 +12087,8 @@ fn output_results_bedpe(
             );
 
         // Calculate gap-compressed-identity and block-identity from CIGAR
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _block_len) =
-            cigar.iter().fold(
-                (0, 0, 0, 0, 0, 0, 0),
-                |(m, mm, i, i_bp, d, d_bp, bl), op| {
-                    let len = op.len();
-                    match op.op() {
-                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
-                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
-                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
-                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
-                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
-                        _ => (m, mm, i, i_bp, d, d_bp, bl),
-                    }
-                },
-            );
+        let impg::impg::CigarCounts { matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, .. } =
+            impg::impg::cigar_counts(cigar);
         let gap_compressed_identity =
             (matches as f32) / (matches + mismatches + insertions + deletions) as f32;
 
@@ -12152,21 +12183,8 @@ fn output_results_paf(
                 .unwrap()
         };
 
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) =
-            cigar.iter().fold(
-                (0, 0, 0, 0, 0, 0, 0),
-                |(m, mm, i, i_bp, d, d_bp, bl), op| {
-                    let len = op.len();
-                    match op.op() {
-                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
-                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
-                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
-                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
-                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
-                        _ => (m, mm, i, i_bp, d, d_bp, bl),
-                    }
-                },
-            );
+        let impg::impg::CigarCounts { matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len } =
+            impg::impg::cigar_counts(cigar);
         let gap_compressed_identity =
             (matches as f32) / (matches + mismatches + insertions + deletions) as f32;
 
@@ -12697,12 +12715,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         // Create gap-filling CIGAR operations
                         let mut gap_cigar = Vec::new();
 
-                        if query_gap > 0 {
-                            gap_cigar.push(CigarOp::new(query_gap, 'I'));
-                        }
-                        if target_gap > 0 {
-                            gap_cigar.push(CigarOp::new(target_gap, 'D'));
-                        }
+                        push_cigar_run(&mut gap_cigar, i64::from(query_gap), 'I');
+                        push_cigar_run(&mut gap_cigar, i64::from(target_gap), 'D');
 
                         // Merge intervals and CIGAR
                         if query_forward {
@@ -12918,10 +12932,17 @@ fn merge_consecutive_cigar_ops(cigar: &mut Vec<CigarOp>) {
 
     let mut write_idx = 0;
     for read_idx in 1..cigar.len() {
-        if cigar[write_idx].op() == cigar[read_idx].op() {
-            // Same operation type - merge by adding lengths
-            let combined_len = cigar[write_idx].len() + cigar[read_idx].len();
-            cigar[write_idx] = CigarOp::new(combined_len, cigar[write_idx].op());
+        let op = cigar[read_idx].op();
+        let room = CigarOp::MAX_LEN - cigar[write_idx].len();
+        if cigar[write_idx].op() == op && room > 0 {
+            // Same operation type: add lengths up to the packed maximum, and
+            // start a new operation with the rest
+            let len = cigar[read_idx].len();
+            cigar[write_idx] = CigarOp::new(cigar[write_idx].len() + len.min(room), op);
+            if len > room {
+                write_idx += 1;
+                cigar[write_idx] = CigarOp::new(len - room, op);
+            }
         } else {
             // Different operation types - keep separate
             write_idx += 1;
@@ -13185,6 +13206,47 @@ mod tests {
             (50, 250, &[(200, '=')], 50, 250),
         ]);
         assert_eq!(indels.len(), 2, "{indels:?}");
+    }
+
+    #[test]
+    fn test_merge_consecutive_cigar_ops_splits_at_the_packed_maximum() {
+        // Two contiguous 300,000,000= blocks overflowed the 29 length bits into 63,129,088X
+        let mut cigar = vec![
+            CigarOp::new(300_000_000, '='),
+            CigarOp::new(300_000_000, '='),
+            CigarOp::new(5, 'X'),
+            CigarOp::new(7, 'X'),
+        ];
+        merge_consecutive_cigar_ops(&mut cigar);
+        let got: Vec<(i32, char)> = cigar.iter().map(|op| (op.len(), op.op())).collect();
+        let rest = 600_000_000 - CigarOp::MAX_LEN;
+        assert_eq!(got, vec![(CigarOp::MAX_LEN, '='), (rest, '='), (12, 'X')]);
+    }
+
+    #[test]
+    fn test_a_split_gap_counts_as_one_gap_event() {
+        // 2= and one 600 Mb insertion, split at the packed limit: gi 2/3, not 2/4
+        let mut cigar = vec![CigarOp::new(2, '=')];
+        push_cigar_run(&mut cigar, 600_000_000, 'I');
+        let counts = impg::impg::cigar_counts(&cigar);
+        assert_eq!((counts.matches, counts.insertions, counts.inserted_bp), (2, 1, 600_000_000));
+        let gi = counts.matches as f64 / (counts.matches + counts.mismatches + counts.insertions + counts.deletions) as f64;
+        assert_eq!(format!("{gi:.6}"), "0.666667");
+    }
+
+    #[test]
+    fn test_push_cigar_run_splits_long_runs() {
+        let mut cigar = Vec::new();
+        push_cigar_run(&mut cigar, 600_000_000, '=');
+        push_cigar_run(&mut cigar, 0, 'I');
+        let got: Vec<(i32, char)> = cigar.iter().map(|op| (op.len(), op.op())).collect();
+        assert_eq!(got, vec![(CigarOp::MAX_LEN, '='), (600_000_000 - CigarOp::MAX_LEN, '=')]);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside")]
+    fn test_cigar_op_refuses_a_length_beyond_the_packed_bits() {
+        CigarOp::new(CigarOp::MAX_LEN + 1, '=');
     }
 
     #[test]

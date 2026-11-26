@@ -197,3 +197,34 @@ fn test_index_refuses_swapped_files_of_equal_name_and_size() {
         "the error must say the list changed"
     );
 }
+
+/// An index built in one direction must not answer a run that asks for the
+/// other: an existing bidirectional index kept returning the reverse edge
+/// under --unidirectional, in both index modes.
+#[test]
+fn test_index_refuses_the_other_direction() {
+    let binary = get_impg_binary();
+    for mode in ["single", "per-file"] {
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path();
+        write_fixtures(work_dir);
+        let query = |extra: &[&str]| {
+            let mut args = vec!["query", "-a", "one.paf", "--index-mode", mode, "-r", "t1:0-1000", "-d", "0", "-o", "bed"];
+            args.extend_from_slice(extra);
+            run(&binary, work_dir, &args)
+        };
+        let built = query(&[]);
+        assert!(built.status.success(), "{mode}: {}", String::from_utf8_lossy(&built.stderr));
+
+        let refused = query(&["--unidirectional"]);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "{mode}: --unidirectional must refuse a bidirectional index");
+        assert!(stderr.contains("is bidirectional, but this run asks for a unidirectional"), "{mode}: {stderr}");
+
+        let rebuilt = query(&["--unidirectional", "--force-reindex"]);
+        assert!(rebuilt.status.success(), "{mode}: {}", String::from_utf8_lossy(&rebuilt.stderr));
+        let refused = query(&[]);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("is unidirectional, but this run asks for a bidirectional"), "{mode}: {stderr}");
+    }
+}

@@ -1470,7 +1470,7 @@ pub(super) fn spine_reference_local_losses(
                 ensure(
                     !reverse,
                     "spine reference decomposition met a reverse piece (unsupported)"
-                );
+                )?;
                 let sequence = sources.fetch(source, start, end)?;
                 let piece_profile = geometric_piece_profile(
                     panel,
@@ -4507,7 +4507,7 @@ pub(super) fn run_local_first_spine(
     let (backbone_chain, backbone_cumulative) = backbone
         .ok_or_else(|| invalid("spine native backbone chain is broken"))?;
     let incumbent = *backbone_cumulative.last().expect("backbone total");
-    ensure(incumbent.is_finite(), "nonfinite spine incumbent");
+    ensure(incumbent.is_finite(), "nonfinite spine incumbent")?;
     eprintln!("[spine] native backbone incumbent {incumbent:.2}");
 
     // Exhaustive per-locus sweeps (sequential over loci; STEP-3: the

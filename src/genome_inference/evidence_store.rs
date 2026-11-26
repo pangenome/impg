@@ -157,14 +157,23 @@ impl EvidenceStore {
         let u64_at = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
         let width_bp = u64_at(8);
         let n_buckets = u64_at(16) as usize;
-        let mut table = Vec::with_capacity(n_buckets);
-        for i in 0..n_buckets {
-            let base = 40 + i * 24; // magic(8) + width, n_buckets, n_reads, rewind (4 x u64)
-            if base + 24 > head.len() {
-                break;
-            }
-            table.push((u64_at(base), u64_at(base + 8), u64_at(base + 16)));
+        // magic(8) + width, n_buckets, n_reads, rewind (4 x u64), then 24 bytes
+        // per bucket. A truncated table used to load its first buckets only.
+        let expected = n_buckets.checked_mul(24).and_then(|b| b.checked_add(40));
+        if expected != Some(head.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{idx_path}: {} bytes, but the header announces {n_buckets} buckets ({} bytes)",
+                    head.len(),
+                    expected.map_or("too many".to_string(), |b| b.to_string())
+                ),
+            ));
         }
+        let table = (0..n_buckets)
+            .map(|i| 40 + i * 24)
+            .map(|base| (u64_at(base), u64_at(base + 8), u64_at(base + 16)))
+            .collect();
         let payload = File::open(format!("{prefix}.evd"))?;
         Ok(EvidenceStore {
             payload,
@@ -258,12 +267,25 @@ impl EvidenceStore {
                 &buf[..]
             };
             let mut p = 0usize;
-            while p + 8 <= raw.len() {
+            while p < raw.len() {
+                // A cut packet used to end the bucket early, dropping its reads
+                let truncated = || {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "evidence bucket {key}: packet at byte {p} runs past the bucket end ({} bytes)",
+                            raw.len()
+                        ),
+                    )
+                };
+                if p + 8 > raw.len() {
+                    return Err(truncated());
+                }
                 let ordinal = u32::from_le_bytes(raw[p..p + 4].try_into().unwrap());
                 let plen = u32::from_le_bytes(raw[p + 4..p + 8].try_into().unwrap()) as usize;
                 let end = p + 8 + plen;
                 if end > raw.len() {
-                    break;
+                    return Err(truncated());
                 }
                 if seen.insert(ordinal) {
                     filter.records += 1;
@@ -304,4 +326,44 @@ pub fn read_shard_packets(path: &Path) -> io::Result<Vec<Vec<u8>>> {
         packets.push(packet);
     }
     Ok(packets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One raw bucket (key 7) with two packets; `idx_trim` and `payload_trim`
+    /// cut bytes off the end of the two files.
+    fn write_store(dir: &Path, idx_trim: usize, payload_trim: usize) -> String {
+        let prefix = dir.join("s").to_string_lossy().into_owned();
+        let mut payload = Vec::new();
+        for (ordinal, body) in [(0u32, &b"abc"[..]), (1, &b"defg"[..])] {
+            payload.extend(ordinal.to_le_bytes());
+            payload.extend((body.len() as u32).to_le_bytes());
+            payload.extend(body);
+        }
+        payload.truncate(payload.len() - payload_trim);
+        let mut idx = MAGIC_RAW.to_vec();
+        for v in [1000u64, 1, 2, 0, 7, 0, payload.len() as u64] {
+            idx.extend(v.to_le_bytes());
+        }
+        idx.truncate(idx.len() - idx_trim);
+        std::fs::write(format!("{prefix}.evd.idx"), idx).unwrap();
+        std::fs::write(format!("{prefix}.evd"), payload).unwrap();
+        prefix
+    }
+
+    #[test]
+    fn evidence_store_refuses_truncated_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = EvidenceStore::open(&write_store(dir.path(), 0, 0)).unwrap();
+        assert_eq!(store.packets_for_buckets(&[7]).unwrap().len(), 2);
+
+        let err = EvidenceStore::open(&write_store(dir.path(), 8, 0)).err().unwrap();
+        assert!(err.to_string().contains("announces 1 buckets"), "{err}");
+
+        let mut store = EvidenceStore::open(&write_store(dir.path(), 0, 2)).unwrap();
+        let err = store.packets_for_buckets(&[7]).unwrap_err();
+        assert!(err.to_string().contains("runs past the bucket end"), "{err}");
+    }
 }
