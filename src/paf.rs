@@ -314,8 +314,11 @@ pub fn parse_paf<R: BufRead>(
     read_paf(reader, seq_index, &mut 0)
 }
 
-/// Bytes of PAF lines one parallel task parses.
-const PAF_BLOCK_BYTES: usize = 4 << 20;
+/// Bytes of PAF lines one parallel task parses, and blocks read per round: a
+/// file holds at most 16 MiB of text, whatever the thread count. A buffer of
+/// 8 MiB per thread grew with threads squared when files parse in parallel.
+const PAF_BLOCK_BYTES: usize = 1 << 20;
+const PAF_BLOCKS_PER_ROUND: usize = 16;
 
 fn read_paf<R: Read>(
     reader: R,
@@ -337,7 +340,7 @@ fn read_paf_blocks<R: Read>(
     m_records: &mut u64,
     block_bytes: usize,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-    let batch = block_bytes * 2 * rayon::current_num_threads().max(1);
+    let batch = block_bytes * PAF_BLOCKS_PER_ROUND;
     let mut records = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
     let mut base = 0u64; // file offset of buf[0]
