@@ -404,6 +404,13 @@ impl MultiImpg {
         })
     }
 
+    /// A loaded sub-index: a missing sub-index would drop homologs from the output.
+    fn sub_index(&self, index_idx: usize) -> Arc<Impg> {
+        self.get_sub_index(index_idx).unwrap_or_else(|e| {
+            panic!("Failed to load sub-index {:?}: {e}", self.index_paths[index_idx])
+        })
+    }
+
     /// Get or load a sub-index.
     fn get_sub_index(&self, index_idx: usize) -> std::io::Result<Arc<Impg>> {
         // Fast path: check if already loaded
@@ -502,20 +509,13 @@ impl MultiImpg {
         };
 
         // Query all relevant sub-indices in parallel, keeping the edge key (in
-        // unified ids) and the reversed flag of the entry behind each result
-        let results: Vec<Vec<(AdjustedInterval, EdgeKey, bool)>> = locations
+        // unified ids), the sub-index and the entry behind each result
+        let tagged: Vec<(AdjustedInterval, EdgeKey, usize, QueryMetadata, u32)> = locations
             .par_iter()
             .map(|loc| {
-                // A missing sub-index would drop homologs from the output
-                let impg = self.get_sub_index(loc.index_idx).unwrap_or_else(|e| {
-                    panic!(
-                        "Failed to load sub-index {:?}: {e}",
-                        self.index_paths[loc.index_idx]
-                    )
-                });
-                let l2u = &self.local_to_unified[loc.index_idx];
                 let mut tagged = Vec::new();
-                impg.query_each(
+                let l2u = &self.local_to_unified[loc.index_idx];
+                self.sub_index(loc.index_idx).query_each(
                     loc.local_target_id,
                     range_start,
                     range_end,
@@ -527,24 +527,39 @@ impl MultiImpg {
                         if let Some(result) = self.translate_to_unified(result, loc.index_idx) {
                             let mut key = edge_key(metadata);
                             key.0 = l2u[key.0 as usize];
-                            tagged.push((result, key, metadata.is_reversed()));
+                            tagged.push((result, key, loc.index_idx, metadata.clone(), loc.local_target_id));
                         }
                     },
                 );
                 tagged
             })
+            .flatten()
             .collect();
 
-        // A reciprocal pair split across two files (A->B in one, B->A in
-        // another) gives the same edge from two sub-indices: keep the forward
-        // entry and drop its reversed twin, as one index does. The first file
-        // used to win, so the file order chose the CIGAR.
-        let forward: rustc_hash::FxHashSet<EdgeKey> = results
-            .iter()
-            .flatten()
-            .filter(|(_, _, reversed)| !reversed)
-            .map(|(_, key, _)| *key)
-            .collect();
+        // An edge reached from two sub-indices (a reciprocal pair split across
+        // two files, or one record in two files): keep the entry with the
+        // lowest rank, as one index does. The first file used to win, so the
+        // file order chose the CIGAR.
+        let mut by_edge: FxHashMap<EdgeKey, Vec<usize>> = FxHashMap::default();
+        for (i, (_, key, _, _, _)) in tagged.iter().enumerate() {
+            by_edge.entry(*key).or_default().push(i);
+        }
+        let mut keep = vec![true; tagged.len()];
+        for entries in by_edge.values().filter(|entries| entries.len() > 1) {
+            let ranks: Vec<_> = entries
+                .iter()
+                .map(|&i| {
+                    let (_, _, index_idx, metadata, tree_id) = &tagged[i];
+                    self.sub_index(*index_idx)
+                        .collision_rank(metadata, *tree_id)
+                        .unwrap_or_else(|e| panic!("Failed to rank an alignment entry: {e}"))
+                })
+                .collect();
+            let best = (0..entries.len()).min_by(|&a, &b| ranks[a].cmp(&ranks[b])).unwrap();
+            for (j, &i) in entries.iter().enumerate() {
+                keep[i] = j == best;
+            }
+        }
         let mut final_results = vec![self.make_self_interval(
             unified_target_id,
             range_start,
@@ -552,11 +567,11 @@ impl MultiImpg {
             store_cigar,
         )];
         final_results.extend(
-            results
+            tagged
                 .into_iter()
-                .flatten()
-                .filter(|(_, key, reversed)| !reversed || !forward.contains(key))
-                .map(|(result, _, _)| result),
+                .zip(keep)
+                .filter(|(_, keep)| *keep)
+                .map(|((result, _, _, _, _), _)| result),
         );
 
         // Sort results for deterministic ordering (excluding the self-interval which should stay first)
