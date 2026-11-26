@@ -279,3 +279,31 @@ fn test_reciprocal_records_do_not_duplicate_rows() {
         );
     }
 }
+
+/// A CIGAR that does not cover its record: 8= on a 10 bp record lost the
+/// projection of the last 2 bp with exit code 0. A query that reads it, from
+/// either side, must fail and name the record.
+#[test]
+fn test_query_refuses_a_cigar_shorter_than_its_record() {
+    let temp_dir = TempDir::new().unwrap();
+    let work_dir = temp_dir.path();
+    let binary = get_impg_binary();
+    std::fs::write(
+        work_dir.join("span.paf"),
+        "q\t100\t0\t10\t+\tt\t100\t0\t10\t8\t10\t60\tcg:Z:8=\n",
+    )
+    .unwrap();
+    for region in ["t:0-10", "q:0-10"] {
+        let out = run(
+            &binary,
+            work_dir,
+            &["query", "-a", "span.paf", "-r", region, "-d", "0", "-o", "bed", "--min-transitive-len", "1"],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{region}: the query must fail");
+        assert!(
+            stderr.contains("record q:0-10 -> t:0-10: the CIGAR spans 8 query and 8 target bases, the coordinates 10 and 10"),
+            "{region}: {stderr}"
+        );
+    }
+}
