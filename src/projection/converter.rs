@@ -484,7 +484,7 @@ pub fn project_gaf_to_gfa(config: &GfaProjectionConfig<'_>) -> io::Result<GfaPro
         &segment_by_name,
         debug_out.as_mut().map(|out| out as &mut dyn Write),
     )?;
-    if let (Some(mut out), Some(tmp), Some(path)) = (debug_out, &debug_tmp, &debug_path) {
+    if let (Some(out), Some(tmp), Some(path)) = (debug_out, &debug_tmp, &debug_path) {
         out.into_inner().map_err(io::IntoInnerError::into_error)?;
         fs::rename(tmp, path)?;
     }
