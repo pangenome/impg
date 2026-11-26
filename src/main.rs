@@ -8,7 +8,7 @@ use impg::commands::{
     ensure_parent_dir, genotype, graph, infer, lace, partition, read_text_from_path_or_stdin,
     refine, render, similarity, write_text_to_path_or_stdout,
 };
-use impg::impg::{AdjustedInterval, CigarOp, Impg};
+use impg::impg::{push_cigar_run, AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
 use impg::onealn::OneAlnParser;
@@ -12778,12 +12778,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         // Create gap-filling CIGAR operations
                         let mut gap_cigar = Vec::new();
 
-                        if query_gap > 0 {
-                            gap_cigar.push(CigarOp::new(query_gap, 'I'));
-                        }
-                        if target_gap > 0 {
-                            gap_cigar.push(CigarOp::new(target_gap, 'D'));
-                        }
+                        push_cigar_run(&mut gap_cigar, i64::from(query_gap), 'I');
+                        push_cigar_run(&mut gap_cigar, i64::from(target_gap), 'D');
 
                         // Merge intervals and CIGAR
                         if query_forward {
@@ -13334,6 +13330,15 @@ mod tests {
         let got: Vec<(i32, char)> = cigar.iter().map(|op| (op.len(), op.op())).collect();
         let rest = 600_000_000 - CigarOp::MAX_LEN;
         assert_eq!(got, vec![(CigarOp::MAX_LEN, '='), (rest, '='), (12, 'X')]);
+    }
+
+    #[test]
+    fn test_push_cigar_run_splits_long_runs() {
+        let mut cigar = Vec::new();
+        push_cigar_run(&mut cigar, 600_000_000, '=');
+        push_cigar_run(&mut cigar, 0, 'I');
+        let got: Vec<(i32, char)> = cigar.iter().map(|op| (op.len(), op.op())).collect();
+        assert_eq!(got, vec![(CigarOp::MAX_LEN, '='), (600_000_000 - CigarOp::MAX_LEN, '=')]);
     }
 
     #[test]

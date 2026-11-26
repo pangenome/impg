@@ -524,7 +524,7 @@ pub fn parse_paf_file(
     if m_records > 0 {
         warn!(
             "{paf_file}: {m_records} of {} records use 'M' CIGAR operations. impg counts every M base \
-             as a match, so their identity (gi:f, --min-aln-identity) is overestimated. \
+             as a match, so their identity (gi:f, --min-result-identity) is overestimated. \
              Use =/X CIGARs (wfmash, or minimap2 --eqx).",
             records.len()
         );

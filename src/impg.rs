@@ -174,6 +174,17 @@ impl CigarOp {
     }
 }
 
+/// Append `len` bases of `op`, split into operations the packed length holds:
+/// a 600 Mb self interval was one `=` past the 29 length bits.
+pub fn push_cigar_run(cigar: &mut Vec<CigarOp>, len: i64, op: char) {
+    let mut rest = len;
+    while rest > 0 {
+        let n = rest.min(i64::from(CigarOp::MAX_LEN));
+        cigar.push(CigarOp::new(n as i32, op));
+        rest -= n;
+    }
+}
+
 /// Invert CIGAR ops for bidirectional interpretation: swap I<->D, keep =/X/M,
 /// and reverse the array on the reverse strand.
 fn invert_cigar_ops_in_place(ops: &mut [CigarOp], strand: Strand) {
@@ -909,10 +920,12 @@ pub(crate) fn make_self_interval(
             last: range_end,
             metadata: target_id,
         },
-        if store_cigar {
-            vec![CigarOp::new(range_end - range_start, '=')]
-        } else {
-            Vec::new()
+        {
+            let mut cigar = Vec::new();
+            if store_cigar {
+                push_cigar_run(&mut cigar, i64::from(range_end - range_start), '=');
+            }
+            cigar
         },
         Interval {
             first: range_start,
@@ -2141,12 +2154,8 @@ impl Impg {
 
         // Create approximate CIGAR from accumulated statistics (for identity calculation only)
         let mut approx_cigar = Vec::new();
-        if subset.total_matches > 0.0 {
-            approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
-        }
-        if subset.total_mismatches > 0.0 {
-            approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
-        }
+        push_cigar_run(&mut approx_cigar, subset.total_matches.round() as i64, '=');
+        push_cigar_run(&mut approx_cigar, subset.total_mismatches.round() as i64, 'X');
 
         // Check identity threshold if specified
         if let Some(threshold) = min_gap_compressed_identity {
