@@ -133,7 +133,10 @@ fn cigar_tag_spans(cigar: &str) -> Result<(u64, u64, bool), String> {
             has_len = true;
             continue;
         }
-        ok &= has_len & (len < MAX_OP_LEN);
+        // A length out of range would overflow the span sums
+        if !has_len || len >= MAX_OP_LEN {
+            return Err(describe_cigar_error(cigar.as_bytes()));
+        }
         match c {
             b'=' | b'X' => (q, t) = (q + len, t + len),
             b'M' => (q, t, has_m) = (q + len, t + len, true),
@@ -391,7 +394,10 @@ fn read_paf_blocks<R: Read>(
                     // Strip the terminator, but advance by the raw byte count: the
                     // CIGAR offsets are absolute file positions, also with CRLF
                     let trimmed = text.trim_end_matches(['\n', '\r']);
-                    out.push(parse_paf_line(trimmed, pos, &mut local, &mut m)?);
+                    // A blank line is no record (the BGZF reader without .gzi skipped it)
+                    if !trimmed.is_empty() {
+                        out.push(parse_paf_line(trimmed, pos, &mut local, &mut m)?);
+                    }
                     pos += line.len() as u64;
                 }
                 Ok((out, local, m))
@@ -691,7 +697,7 @@ mod tests {
         ] {
             assert_eq!(cigar_tag_spans(ok), Ok(spans), "{ok}");
         }
-        for bad in ["", "=", "100", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P"] {
+        for bad in ["", "=", "100", "10=5", "536870912=", "99999999999X", "10=X", "5N", "3P", "18446744073709551615=1="] {
             assert!(cigar_tag_spans(bad).is_err(), "{bad:?} must be rejected");
         }
     }
@@ -796,6 +802,11 @@ seq1\t100\t50\t100\t+\tseq2\t100\t50\t100\t50\t50\t60\ttp:A:P";
         let bad = format!("{paf}q0\t1000\t0\t10\t+\tt7\t2000\t0\t10\t8\t10\t60\tcg:Z:8=\nq0\t5\t0\t10\t+\tt7\t2000\t0\t10\t10\t10\t60\tcg:Z:10=\n");
         let err = read_paf_blocks(bad.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64, 4).unwrap_err();
         assert!(err.to_string().contains("the CIGAR spans 8 query"), "{err}");
+        // Blank lines are skipped and the offsets stay absolute
+        let blank = format!("\n\r\n{}\n\n", paf.lines().next().unwrap());
+        let records = read_paf_blocks(blank.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64, 4).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data_offset(), blank.find("cg:Z:").unwrap() as u64 + 5);
     }
 
     #[test]

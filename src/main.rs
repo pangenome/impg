@@ -11288,6 +11288,10 @@ fn load_or_build_per_file_index(
         };
 
         let completed = AtomicUsize::new(0);
+        // Indices build at once: each gets its share of the threads, so the
+        // PAF text held stays about 1 MiB per thread in total
+        let index_threads = NonZeroUsize::new(threads.get() / indices_to_build.len().clamp(1, threads.get()))
+            .expect("threads >= indices in parallel");
 
         // Build indices in parallel
         let build_results: Vec<io::Result<()>> = indices_to_build
@@ -11302,7 +11306,7 @@ fn load_or_build_per_file_index(
                 let single_file = vec![aln_file.clone()];
                 let impg = build_single_index(
                     &single_file,
-                    threads,
+                    index_threads,
                     Some(index_path.to_string_lossy().as_ref()),
                     sequence_files,
                     false,
@@ -12083,21 +12087,8 @@ fn output_results_bedpe(
             );
 
         // Calculate gap-compressed-identity and block-identity from CIGAR
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _block_len) =
-            cigar.iter().fold(
-                (0, 0, 0, 0, 0, 0, 0),
-                |(m, mm, i, i_bp, d, d_bp, bl), op| {
-                    let len = op.len();
-                    match op.op() {
-                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
-                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
-                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
-                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
-                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
-                        _ => (m, mm, i, i_bp, d, d_bp, bl),
-                    }
-                },
-            );
+        let impg::impg::CigarCounts { matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, .. } =
+            impg::impg::cigar_counts(cigar);
         let gap_compressed_identity =
             (matches as f32) / (matches + mismatches + insertions + deletions) as f32;
 
@@ -12192,21 +12183,8 @@ fn output_results_paf(
                 .unwrap()
         };
 
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) =
-            cigar.iter().fold(
-                (0, 0, 0, 0, 0, 0, 0),
-                |(m, mm, i, i_bp, d, d_bp, bl), op| {
-                    let len = op.len();
-                    match op.op() {
-                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
-                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
-                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
-                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
-                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
-                        _ => (m, mm, i, i_bp, d, d_bp, bl),
-                    }
-                },
-            );
+        let impg::impg::CigarCounts { matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len } =
+            impg::impg::cigar_counts(cigar);
         let gap_compressed_identity =
             (matches as f32) / (matches + mismatches + insertions + deletions) as f32;
 
@@ -13334,6 +13312,17 @@ mod tests {
         let got: Vec<(i32, char)> = cigar.iter().map(|op| (op.len(), op.op())).collect();
         let rest = 600_000_000 - CigarOp::MAX_LEN;
         assert_eq!(got, vec![(CigarOp::MAX_LEN, '='), (rest, '='), (12, 'X')]);
+    }
+
+    #[test]
+    fn test_a_split_gap_counts_as_one_gap_event() {
+        // 2= and one 600 Mb insertion, split at the packed limit: gi 2/3, not 2/4
+        let mut cigar = vec![CigarOp::new(2, '=')];
+        push_cigar_run(&mut cigar, 600_000_000, 'I');
+        let counts = impg::impg::cigar_counts(&cigar);
+        assert_eq!((counts.matches, counts.insertions, counts.inserted_bp), (2, 1, 600_000_000));
+        let gi = counts.matches as f64 / (counts.matches + counts.mismatches + counts.insertions + counts.deletions) as f64;
+        assert_eq!(format!("{gi:.6}"), "0.666667");
     }
 
     #[test]

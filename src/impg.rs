@@ -3545,26 +3545,48 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     Ok(ops)
 }
 
-fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
-    let (matches, mismatches, insertions, deletions) =
-        cigar_ops
-            .iter()
-            .fold((0i64, 0i64, 0i64, 0i64), |(m, mm, i, d), op| {
-                let len = op.len() as i64;
-                match op.op() {
-                    'M' | '=' => (m + len, mm, i, d), // Assume 'M' represents matches
-                    'X' => (m, mm + len, i, d),
-                    'I' => (m, mm, i + 1, d),
-                    'D' => (m, mm, i, d + 1),
-                    _ => (m, mm, i, d),
-                }
-            });
+/// Bases and gap events of a CIGAR for its identities.
+#[derive(Debug, Default, PartialEq)]
+pub struct CigarCounts {
+    /// `=` and `M` bases: impg counts every `M` base as a match
+    pub matches: i64,
+    pub mismatches: i64,
+    pub insertions: i64,
+    pub inserted_bp: i64,
+    pub deletions: i64,
+    pub deleted_bp: i64,
+    pub block_len: i64,
+}
 
-    let total = matches + mismatches + insertions + deletions;
+/// Count a CIGAR for its identities. Adjacent operations of one gap type are
+/// one event: a gap split at the 29-bit length limit counted twice, and 2= and
+/// a 600 Mb insertion gave gi 0.5 instead of 0.666667.
+pub fn cigar_counts(cigar_ops: &[CigarOp]) -> CigarCounts {
+    let mut c = CigarCounts::default();
+    let mut previous = ' ';
+    for op in cigar_ops {
+        let len = i64::from(op.len());
+        let kind = op.op();
+        match kind {
+            'M' | '=' => c.matches += len,
+            'X' => c.mismatches += len,
+            'I' => (c.insertions, c.inserted_bp) = (c.insertions + i64::from(previous != 'I'), c.inserted_bp + len),
+            'D' => (c.deletions, c.deleted_bp) = (c.deletions + i64::from(previous != 'D'), c.deleted_bp + len),
+            _ => {}
+        }
+        c.block_len += len;
+        previous = kind;
+    }
+    c
+}
+
+fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
+    let c = cigar_counts(cigar_ops);
+    let total = c.matches + c.mismatches + c.insertions + c.deletions;
     if total == 0 {
         0.0
     } else {
-        (matches as f64) / (total as f64)
+        (c.matches as f64) / (total as f64)
     }
 }
 
