@@ -311,21 +311,23 @@ pub fn parse_paf<R: BufRead>(
     reader: R,
     seq_index: &mut SequenceIndex,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-    read_paf(reader, seq_index, &mut 0)
+    read_paf(reader, seq_index, &mut 0, rayon::current_num_threads())
 }
 
-/// Bytes of PAF lines one parallel task parses, and blocks read per round: a
-/// file holds at most 16 MiB of text, whatever the thread count. A buffer of
-/// 8 MiB per thread grew with threads squared when files parse in parallel.
+/// Bytes of PAF lines one parallel task parses.
 const PAF_BLOCK_BYTES: usize = 1 << 20;
-const PAF_BLOCKS_PER_ROUND: usize = 16;
 
+/// Parse PAF with `threads` blocks of 1 MiB per round. The caller gives each of
+/// the files it parses at once its share of the threads, so the text held is
+/// about 1 MiB per thread in total: 16 MiB per file grew to 336 MB against
+/// 155 MB for 16 files at -t 16.
 fn read_paf<R: Read>(
     reader: R,
     seq_index: &mut SequenceIndex,
     m_records: &mut u64,
+    threads: usize,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-    read_paf_blocks(reader, seq_index, m_records, PAF_BLOCK_BYTES)
+    read_paf_blocks(reader, seq_index, m_records, PAF_BLOCK_BYTES, threads.max(1))
 }
 
 /// Parse PAF lines in blocks of about `block_bytes`, one rayon task per block.
@@ -339,8 +341,9 @@ fn read_paf_blocks<R: Read>(
     seq_index: &mut SequenceIndex,
     m_records: &mut u64,
     block_bytes: usize,
+    blocks_per_round: usize,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-    let batch = block_bytes * PAF_BLOCKS_PER_ROUND;
+    let batch = block_bytes * blocks_per_round;
     let mut records = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
     let mut base = 0u64; // file offset of buf[0]
@@ -517,10 +520,11 @@ pub fn parse_paf_bgzf_with_gzi<R: std::io::Read>(
     gzi_index: noodles::bgzf::gzi::Index,
     seq_index: &mut SequenceIndex,
     m_records: &mut u64,
+    threads: usize,
 ) -> Result<Vec<AlignmentRecord>, ParseErr> {
     // First pass: parse with uncompressed byte offsets
     let reader = std::io::BufReader::new(reader);
-    let mut records = read_paf(reader, seq_index, m_records)?;
+    let mut records = read_paf(reader, seq_index, m_records, threads)?;
 
     // Second pass: convert uncompressed offsets to virtual positions using GZI
     for record in &mut records {
@@ -577,14 +581,14 @@ pub fn parse_paf_file(
             })?;
             let mt_reader =
                 noodles::bgzf::io::MultithreadedReader::with_worker_count(threads, file);
-            parse_paf_bgzf_with_gzi(mt_reader, gzi_index, seq_index, &mut m_records)
+            parse_paf_bgzf_with_gzi(mt_reader, gzi_index, seq_index, &mut m_records, threads.get())
         } else {
             debug!("No GZI index for {}, using BGZF reader", paf_file);
             let bgzf_reader = noodles::bgzf::io::Reader::new(file);
             parse_paf_bgzf(bgzf_reader, seq_index, &mut m_records)
         }
     } else {
-        read_paf(BufReader::new(file), seq_index, &mut m_records)
+        read_paf(BufReader::new(file), seq_index, &mut m_records, threads.get())
     }
     .map_err(|e| {
         std::io::Error::new(
@@ -748,7 +752,7 @@ q\t100\t10\t20\t+\tt\t100\t10\t20\t10\t10\t60\tcg:Z:10=\n\
 q\t100\t20\t30\t+\tt\t100\t20\t31\t10\t11\t60\tcg:Z:4M1D6=\n";
         let mut m_records = 0;
         let records =
-            read_paf(BufReader::new(paf.as_bytes()), &mut SequenceIndex::new(), &mut m_records)
+            read_paf(BufReader::new(paf.as_bytes()), &mut SequenceIndex::new(), &mut m_records, 1)
                 .unwrap();
         assert_eq!((records.len(), m_records), (3, 2));
     }
@@ -782,15 +786,15 @@ seq1\t100\t50\t100\t+\tseq2\t100\t50\t100\t50\t50\t60\ttp:A:P";
         }
         let (mut one, mut many) = (SequenceIndex::new(), SequenceIndex::new());
         let (mut m_one, mut m_many) = (0, 0);
-        let whole = read_paf_blocks(paf.as_bytes(), &mut one, &mut m_one, 1 << 30).unwrap();
-        let blocks = read_paf_blocks(paf.as_bytes(), &mut many, &mut m_many, 64).unwrap();
+        let whole = read_paf_blocks(paf.as_bytes(), &mut one, &mut m_one, 1 << 30, 1).unwrap();
+        let blocks = read_paf_blocks(paf.as_bytes(), &mut many, &mut m_many, 64, 4).unwrap();
         assert_eq!(whole, blocks);
         let names = |idx: &SequenceIndex| (0..idx.len() as u32).map(|id| (idx.get_name(id).unwrap().to_string(), idx.get_len_from_id(id))).collect::<Vec<_>>();
         assert_eq!(names(&one), names(&many));
         assert_eq!(whole[299].data_offset(), paf.rfind("cg:Z:").unwrap() as u64 + 5);
         // The first error in file order wins, as in a sequential read
         let bad = format!("{paf}q0\t1000\t0\t10\t+\tt7\t2000\t0\t10\t8\t10\t60\tcg:Z:8=\nq0\t5\t0\t10\t+\tt7\t2000\t0\t10\t10\t10\t60\tcg:Z:10=\n");
-        let err = read_paf_blocks(bad.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64).unwrap_err();
+        let err = read_paf_blocks(bad.as_bytes(), &mut SequenceIndex::new(), &mut 0, 64, 4).unwrap_err();
         assert!(err.to_string().contains("the CIGAR spans 8 query"), "{err}");
     }
 

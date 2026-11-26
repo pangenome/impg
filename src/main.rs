@@ -11541,6 +11541,10 @@ fn build_single_index(
         None
     };
 
+    // Files parse at once: each gets its share of the threads (PAF parse
+    // blocks, BGZF workers), so the total stays about one per thread
+    let file_threads = NonZeroUsize::new(threads.get() / num_alignment_files.clamp(1, threads.get()))
+        .expect("threads >= files in parallel");
     // Process alignment files in parallel, using a per-file local SequenceIndex to avoid global locking
     // We will merge names after parsing and remap IDs in a parallel pass.
     let mut records_by_file_with_local_index: Vec<(Vec<AlignmentRecord>, String, SequenceIndex)> =
@@ -11574,7 +11578,7 @@ fn build_single_index(
                                     format!("Failed to open PAF file: {}", e),
                                 )
                             })?;
-                            impg::paf::parse_paf_file(aln_file, file, threads, &mut local_seq_index)
+                            impg::paf::parse_paf_file(aln_file, file, file_threads, &mut local_seq_index)
                                 .map_err(|e| {
                                     io::Error::new(
                                         io::ErrorKind::InvalidData,
