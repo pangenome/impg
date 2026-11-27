@@ -3,7 +3,7 @@
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
-use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
+use impg::alignment_record::{AlignmentFormat, AlignmentRecord};
 use impg::commands::{
     ensure_parent_dir, genotype, graph, infer, lace, partition, read_text_from_path_or_stdin,
     refine, render, similarity, write_text_to_path_or_stdout,
