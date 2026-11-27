@@ -1526,6 +1526,7 @@ name = "impg"
 version = "0.5.0"
 dependencies = [
  "ahash",
+ "aho-corasick",
  "allwave",
  "bincode 2.0.1",
  "bitvec",
@@ -1564,6 +1565,7 @@ dependencies = [
  "seqwish",
  "serde",
  "serde_json",
+ "sha2",
  "spoa_rs",
  "sweepga",
  "tempfile",

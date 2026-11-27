@@ -3204,6 +3204,11 @@ impl SyngIndex {
         unsafe { (*self.kmer_hash).max as usize }
     }
 
+    /// On-disk seed-policy metadata version; reading a legacy index never upgrades it.
+    pub fn metadata_version(&self) -> u32 {
+        self.metadata_version
+    }
+
     /// Syncmer node length in bp (= `w + k`).
     pub fn syncmer_length_bp(&self) -> usize {
         unsafe { (*self.kmer_hash).len as usize }
