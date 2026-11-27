@@ -3,6 +3,7 @@ pub mod genome_infer;
 pub mod genotype;
 pub mod graph;
 pub mod infer;
+pub mod junction_query;
 pub mod lace;
 pub mod partition;
 pub mod refine;

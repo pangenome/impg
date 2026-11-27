@@ -5907,6 +5907,29 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
+    /// Audit exact junction words and longer same-path placements on assembled SYNG panel paths
+    JunctionQuery {
+        /// Immutable SYNG prefix; coordinate authority only (no patient inference)
+        #[arg(short = 'a', long)]
+        index: String,
+        /// Source AGC with the same named paths and lengths
+        #[arg(long)]
+        assemblies: String,
+        /// JSONL: id, end1/end2 [PanSN path, interbase cut, L/R], insert (null if unknown), coupled cut pairs
+        #[arg(long)]
+        models: String,
+        /// Private output directory; hash-bound, resumable haplotype checkpoints
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Limit to complete PanSN sample#haplotype groups. Default: all groups in the index
+        #[arg(long, value_delimiter = ',')]
+        sets: Vec<String>,
+        /// Maximum displayed same-path examples per model (never limits search or counts)
+        #[arg(long, default_value_t = 4)]
+        examples: usize,
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
     /// (experimental) Map sequences to a syng index using exact shared syncmers
     Map {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
@@ -9463,6 +9486,11 @@ fn run() -> io::Result<()> {
             };
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;
+        }
+        Args::JunctionQuery { index, assemblies, models, out, sets, examples, common } => {
+            initialize_threads_and_log(&common);
+            let prefix = detect_syng_prefix(&index).unwrap_or(index);
+            impg::commands::junction_query::run(&prefix, &assemblies, &models, &out, &sets, examples)?;
         }
         Args::Map {
             index,
